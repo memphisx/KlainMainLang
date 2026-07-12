@@ -491,6 +491,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	}
 	var fields []ast.AnnotField
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		doc := p.takeDoc()
 		fieldTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
@@ -503,6 +504,15 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		ft, err := p.parseTypeAnnotation("ts")
 		if err != nil {
 			return nil, err
+		}
+		// JSDoc overrides the TS annotation — same convention parseVarDecl
+		// already uses for variable declarations, e.g. a field declared only
+		// `number` can be pinned to `float64`/`int32`/etc. via a preceding
+		// `/** @type {float64} */` comment.
+		if doc != nil {
+			if t := doc.GetType(); t != "" {
+				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
+			}
 		}
 		fields = append(fields, ast.AnnotField{Name: fieldTok.Literal, Type: ft})
 		p.match(lexer.SEMICOLON, lexer.COMMA)

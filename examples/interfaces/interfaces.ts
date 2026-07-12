@@ -38,3 +38,19 @@ const p2: Point = { x: 0, y: 0 }
 p2.x = 5
 p2.y = 12
 console.log(distance(p2))    // 13
+
+// Interface fields default to i64 for `number` — a JSDoc @type comment
+// overrides that per field, the same convention variable declarations
+// already use (see jsdoc/ for the parser).
+interface Measurement {
+  label: string;
+  /** @type {float64} */
+  score: number;
+}
+const m: Measurement = { label: 'test', score: 9.5 }
+console.log(m.score)               // 9.5
+console.log(JSON.stringify(m))     // {"label":"test","score":9.5}
+
+const parsed: Measurement = JSON.parse('{"label":"parsed","score":3.25}')
+console.log(parsed.label)          // parsed
+console.log(parsed.score)          // 3.25

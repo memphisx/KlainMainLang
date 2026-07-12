@@ -637,6 +637,32 @@ console.log(JSON.stringify(u))
 `, "Alice\n{\"name\":\"Alice\",\"age\":30}")
 }
 
+func TestE2EInterfaceFloatField(t *testing.T) {
+	assertOutput(t, `
+interface Point {
+  x: number;
+  /** @type {float64} */
+  score: number;
+}
+const p: Point = { x: 1, score: 9.5 }
+console.log(p.score)
+console.log(JSON.stringify(p))
+`, "9.5\n{\"x\":1,\"score\":9.5}")
+}
+
+func TestE2EInterfaceFloatFieldJSONParse(t *testing.T) {
+	assertOutput(t, `
+interface Point {
+  x: number;
+  /** @type {float64} */
+  score: number;
+}
+const p: Point = JSON.parse('{"x":1,"score":9.5}')
+console.log(p.x)
+console.log(p.score)
+`, "1\n9.5")
+}
+
 func TestE2EInterfaceReturnType(t *testing.T) {
 	assertOutput(t, `
 interface Point { x: number; y: number }

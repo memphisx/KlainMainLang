@@ -71,3 +71,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00037](ADR-00037.md) | Fix parenthesized function-type return annotations | Completed |
 | [00038](ADR-00038.md) | Fix new Date(aStringLiteral) crashing instead of parsing | Completed |
 | [00039](ADR-00039.md) | Implement the multi-argument new Date(year, month, ...) constructor | Completed |
+| [00040](ADR-00040.md) | Support JSDoc @type overrides on interface fields | Completed |
