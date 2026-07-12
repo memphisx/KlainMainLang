@@ -693,10 +693,13 @@ func NewNewErrorExpression(msg Expression, pos Pos) *NewErrorExpression {
 	return &NewErrorExpression{Message: msg, pos: pos}
 }
 
-// NewDateExpression is `new Date()` (current time) or `new Date(ms)`
-// (from an explicit milliseconds-since-epoch timestamp).
+// NewDateExpression is `new Date()` (current time), `new Date(ms)` (an
+// explicit timestamp or an ISO string), or the multi-argument calendar form
+// `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` — month is
+// 0-indexed, matching real JS's convention (and getMonth()'s).
 type NewDateExpression struct {
-	Millis Expression // nil for the no-arg (current time) form
+	Millis Expression   // nil for the no-arg (current time) form and the multi-arg form
+	Args   []Expression // non-nil only for the 2+ argument calendar form
 	pos    Pos
 }
 
@@ -706,6 +709,10 @@ func (n *NewDateExpression) GetPos() Pos { return n.pos }
 
 func NewNewDateExpression(millis Expression, pos Pos) *NewDateExpression {
 	return &NewDateExpression{Millis: millis, pos: pos}
+}
+
+func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
+	return &NewDateExpression{Args: args, pos: pos}
 }
 
 // InterfaceDeclaration — `interface Name { field: type; ... }`

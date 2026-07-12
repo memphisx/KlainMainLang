@@ -73,6 +73,9 @@ func isDateSetterName(name string) bool {
 // emitNewDate implements `new Date()` (current time) and `new Date(ms)`
 // (from an explicit milliseconds-since-epoch timestamp).
 func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
+	if n.Args != nil {
+		return e.emitNewDateMulti(n.Args)
+	}
 	if n.Millis == nil {
 		e.ensureDateNow()
 		r := e.freshReg()
@@ -98,6 +101,39 @@ func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
 		return Value{Ref: parsed.Ref, Ty: TypeDate}, nil
 	}
 	return Value{Ref: e.coerce(val, TypeI64).Ref, Ty: TypeDate}, nil
+}
+
+// emitNewDateMulti implements the multi-argument calendar form
+// new Date(year, month, day?, hours?, minutes?, seconds?, ms?). Real JS
+// defaults an omitted day to 1 and every other omitted trailing field to 0;
+// month is 0-indexed here (matching real JS/getMonth()), but
+// __kml_date_compose expects a 1-indexed month (matching ISO date strings),
+// so 1 is added before the call — the same adjustment emitDateToISOString
+// already makes in the other direction. Deliberately does not replicate real
+// JS's "two-digit year (0-99) means 1900+year" historical quirk — not called
+// out anywhere this bug was tracked, and a surprising special case not worth
+// adding speculatively.
+func (e *Emitter) emitNewDateMulti(args []ast.Expression) (Value, error) {
+	defaults := [7]int64{0, 0, 1, 0, 0, 0, 0} // year, month, day, hour, min, sec, ms
+	vals := make([]string, 7)
+	for i := range vals {
+		if i < len(args) {
+			v, err := e.emitExpr(args[i])
+			if err != nil {
+				return Value{}, err
+			}
+			vals[i] = e.coerce(v, TypeI64).Ref
+		} else {
+			vals[i] = fmt.Sprintf("%d", defaults[i])
+		}
+	}
+	month := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", month, vals[1]))
+	e.ensureDateCompose()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_compose(i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
+		r, vals[0], month, vals[2], vals[3], vals[4], vals[5], vals[6]))
+	return Value{Ref: r, Ty: TypeDate}, nil
 }
 
 // emitDateNow implements the static Date.now().

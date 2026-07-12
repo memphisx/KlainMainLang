@@ -70,6 +70,25 @@ console.log(fromString.toISOString())    // 2023-11-14T00:00:00.000Z
 const invalidFromString: Date = new Date('not a date')
 console.log(invalidFromString.getTime()) // -1 (same unparseable sentinel as Date.parse)
 
+// ── new Date(year, month, day?, hours?, minutes?, seconds?, ms?) ───────────
+// Multi-argument calendar form. month is 0-indexed (0 = January), matching
+// real JS's convention (and getMonth()'s) — NOT the 1-indexed month ISO date
+// strings use. Fields are treated as UTC directly here, same as every other
+// Date operation in this compiler (a deliberate, documented deviation from
+// real JS, where this specific constructor form interprets its fields as
+// local time — see docs/adr/ADR-00014.md).
+const fromFields: Date = new Date(2023, 10, 14)
+console.log(fromFields.toISOString())   // 2023-11-14T00:00:00.000Z
+console.log(fromFields.getMonth())      // 10 (round-trips the 0-indexed value back)
+
+const fromFieldsFull: Date = new Date(2023, 10, 14, 22, 13, 20, 500)
+console.log(fromFieldsFull.toISOString())  // 2023-11-14T22:13:20.500Z
+
+// Omitted trailing fields default like real JS: day defaults to 1, every
+// field after that defaults to 0.
+const fromFieldsPartial: Date = new Date(2023, 0)
+console.log(fromFieldsPartial.toISOString())  // 2023-01-01T00:00:00.000Z
+
 // ── Date.parse(string) — with a "+HH:MM" / "-HH:MM" timezone offset ────────
 // The offset is converted to UTC (subtracted for "+", added for "-"), with
 // or without milliseconds present.

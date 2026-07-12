@@ -2178,6 +2178,30 @@ console.log(d.getTime())
 `, "-1")
 }
 
+func TestE2EDateMultiArgConstructor(t *testing.T) {
+	assertOutput(t, `
+const d: Date = new Date(2023, 10, 14)
+console.log(d.toISOString())
+console.log(d.getFullYear())
+console.log(d.getMonth())
+console.log(d.getDate())
+`, "2023-11-14T00:00:00.000Z\n2023\n10\n14")
+}
+
+func TestE2EDateMultiArgConstructorFullFields(t *testing.T) {
+	assertOutput(t, `
+const d: Date = new Date(2023, 10, 14, 22, 13, 20, 500)
+console.log(d.toISOString())
+`, "2023-11-14T22:13:20.500Z")
+}
+
+func TestE2EDateMultiArgConstructorDefaultsDay(t *testing.T) {
+	assertOutput(t, `
+const d: Date = new Date(2023, 0)
+console.log(d.toISOString())
+`, "2023-01-01T00:00:00.000Z")
+}
+
 func TestE2EDateNow(t *testing.T) {
 	assertOutput(t, `
 const now: number = Date.now()

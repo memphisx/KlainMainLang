@@ -1580,18 +1580,30 @@ func (p *Parser) parseNewDateBody(pos ast.Pos) (*ast.NewDateExpression, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
-	var millis ast.Expression
-	if !p.check(lexer.RPAREN) {
-		var err error
-		millis, err = p.parseAssignment()
+	var args []ast.Expression
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		arg, err := p.parseAssignment()
 		if err != nil {
 			return nil, err
+		}
+		args = append(args, arg)
+		if !p.match(lexer.COMMA) {
+			break
 		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewDateExpression(millis, pos), nil
+	switch {
+	case len(args) == 0:
+		return ast.NewNewDateExpression(nil, pos), nil
+	case len(args) == 1:
+		return ast.NewNewDateExpression(args[0], pos), nil
+	case len(args) > 7:
+		return nil, fmt.Errorf("%d:%d: new Date(...) accepts at most 7 arguments (year, month, day, hours, minutes, seconds, milliseconds)", pos.Line, pos.Col)
+	default:
+		return ast.NewNewDateExpressionMulti(args, pos), nil
+	}
 }
 
 func (p *Parser) parseNewErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
