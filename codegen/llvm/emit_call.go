@@ -985,29 +985,7 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return Value{}, err
 	}
 
-	if val.Ty.IsObject {
-		return e.emitJSONStringifyObject(val)
-	}
-
-	switch val.Ty.IR {
-	case "i1":
-		trueStr := e.internString("true")
-		falseStr := e.internString("false")
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, val.Ref, trueStr, falseStr))
-		return Value{Ref: r, Ty: TypePtr}, nil
-	case "ptr":
-		e.ensureJSONStringifyStr()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, val.Ref))
-		return Value{Ref: r, Ty: TypePtr}, nil
-	default:
-		e.ensureJSONStringifyNum()
-		coerced := e.coerce(val, TypeI64)
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_num(i64 %s)", r, coerced.Ref))
-		return Value{Ref: r, Ty: TypePtr}, nil
-	}
+	return e.emitJSONStringifyValue(val)
 }
 
 // emitJSONStringifyObject builds {"k1":v1,"k2":v2,...} inline by walking the
@@ -1068,6 +1046,12 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	default:
+		if val.Ty.Float {
+			// Coercing a float to i64 below would truncate (9.5 -> 9) instead
+			// of formatting it; emitValueToString already does correct %g
+			// formatting for floats, so reuse it instead of a separate helper.
+			return e.emitValueToString(val)
+		}
 		e.ensureJSONStringifyNum()
 		coerced := e.coerce(val, TypeI64)
 		r := e.freshReg()

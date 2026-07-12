@@ -34,5 +34,7 @@ jobs:
           fetch-depth: 0 # go-semantic-release needs full tag history, not a shallow clone
 
       - uses: go-semantic-release/action@v1
+        with:
+          allow-initial-development-versions: 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

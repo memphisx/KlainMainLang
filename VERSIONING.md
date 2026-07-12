@@ -38,3 +38,9 @@ Not met yet. Treat this list as living, not final:
 The very first commit is tagged `v0.1.0` by hand — a one-time manual step, since there's no prior tag for any tool to compute a delta from. From the second release-worthy commit onward, `.github/workflows/release.yml` runs [go-semantic-release](https://github.com/go-semantic-release/semantic-release) on every push to `main`: it reads commit messages since the last tag, computes the next version per the rules above, and creates the git tag + GitHub Release automatically. No manual `git tag` / `gh release create` needed again after that first bootstrap tag.
 
 go-semantic-release (not the original JS `semantic-release`) was chosen specifically to keep the release pipeline Go-only — no Node.js/npm needed anywhere in CI, consistent with this project's own reason for being written in Go rather than a C/C++-toolchain language in the first place.
+
+### Gotcha: `allow-initial-development-versions`
+
+By default, go-semantic-release forces a MAJOR bump to `1.0.0` on the very next release once any tag exists, regardless of commit type — its `applyChange` logic explicitly does `if !allowInitialDevelopmentVersions && version.Major() == 0 { change.Major = true }`. `.github/workflows/release.yml` sets `allow-initial-development-versions: 'true'` on the `go-semantic-release/action@v1` step specifically to suppress this and stay on normal PATCH/MINOR bumps below `1.0.0`.
+
+**This flag is itself ignored if a release tag with major version ≥ 1 already exists in the repo** (the tool's own documented behavior) — so if a premature `1.0.0` ever gets created again, setting this flag alone won't undo it; the offending tag/release has to actually be deleted first.

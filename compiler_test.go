@@ -822,6 +822,19 @@ console.log(JSON.stringify(point))
 `, `{"x":10,"y":20}`)
 }
 
+func TestE2EJSONStringifyObjectFloat(t *testing.T) {
+	assertOutput(t, `
+const result = { score: 9.5 }
+console.log(JSON.stringify(result))
+`, `{"score":9.5}`)
+}
+
+func TestE2EJSONStringifyFloatDirect(t *testing.T) {
+	assertOutput(t, `
+console.log(JSON.stringify(9.5))
+`, `9.5`)
+}
+
 func TestE2EJSONStringifyNestedObject(t *testing.T) {
 	assertOutput(t, `
 const person = { name: 'Alexandros', address: { city: 'Thessaloniki', zip: 10001 } }

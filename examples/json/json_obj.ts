@@ -16,3 +16,12 @@ console.log(JSON.stringify(flag))
 const person = { name: 'Alexandros', address: { city: 'Thessaloniki', zip: 10001 } }
 console.log(JSON.stringify(person))
 // {"name":"Alexandros","address":{"city":"Thessaloniki","zip":10001}}
+
+// float-typed fields (literal-inferred, not via an interface — see STATUS.md's
+// Known Limitations for the separate interface-float-field gap)
+const result = { score: 9.5 }
+console.log(JSON.stringify(result))
+// {"score":9.5}
+
+console.log(JSON.stringify(9.5))
+// 9.5
