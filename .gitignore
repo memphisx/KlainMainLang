@@ -1,0 +1,11 @@
+# IDE
+.idea/
+*.iml
+
+# Main binary (go build)
+/KlainMainLang
+
+# Compiled example artifacts — keep only source (.ts) and subdirectories
+examples/**
+!examples/*/
+!examples/**/*.ts

@@ -1,0 +1,79 @@
+# Test build investigating ADR-00032's open caveat: does --static still
+# work once fetch (and therefore libcurl, and *its* transitive deps —
+# OpenSSL, zlib, c-ares, nghttp2, libidn2, libpsl, zstd, brotli,
+# libunistring) is in the picture? Two targets:
+#
+#   docker build -f docker/Dockerfile.fetch-test --target dynamic-fetch-demo -t kml-fetch-dynamic .
+#   docker run --rm kml-fetch-dynamic
+#     — baseline: fetch compiled the normal (dynamic) way on Alpine/musl.
+#
+#   docker build -f docker/Dockerfile.fetch-test --target static-fetch-demo -t kml-fetch-static .
+#   docker run --rm kml-fetch-static
+#     — the real test: --static with libcurl involved.
+
+# ---- Stage 1: build the KlainMainLang compiler (same as docker/Dockerfile) ----
+FROM golang:1.26-alpine AS compiler-builder
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+COPY ast/ ast/
+COPY codegen/ codegen/
+COPY jsdoc/ jsdoc/
+COPY lexer/ lexer/
+COPY parser/ parser/
+COPY resolver/ resolver/
+RUN go build -o /out/KlainMainLang .
+
+# ---- dynamic-fetch: baseline sanity check ----
+FROM alpine:3.21 AS dynamic-fetch-builder
+RUN apk add --no-cache clang curl-dev
+COPY --from=compiler-builder /out/KlainMainLang /usr/local/bin/KlainMainLang
+COPY docker/fetch-demo.ts /src/fetch-demo.ts
+WORKDIR /src
+RUN KlainMainLang -o /src/fetch-demo fetch-demo.ts
+
+FROM alpine:3.21 AS dynamic-fetch-demo
+RUN apk add --no-cache libcurl ca-certificates
+COPY --from=dynamic-fetch-builder /src/fetch-demo /fetch-demo
+ENTRYPOINT ["/fetch-demo"]
+
+# ---- static-fetch: the real test ----
+# A plain `KlainMainLang --static` (a single clang invocation for both
+# compiling and linking) does NOT work once libcurl's full dependency chain
+# is involved: clang's linker can't process the LTO-format bitcode inside
+# Alpine's libpsl-static/brotli-static archives ("plugin needed to handle
+# lto object") — those were built with GCC's LTO, which clang/lld can't
+# consume. Worked around empirically: compile the LLVM IR to a plain object
+# file with `clang -c` (no LTO/linking involved at that step), then link
+# that object file with `gcc` instead of clang, passing curl's entire
+# transitive dependency chain explicitly (static archives don't auto-pull
+# their own deps the way shared libraries do) — GCC's own linker driver
+# knows how to invoke the LTO plugin its own toolchain produced those
+# archives with. See docs/adr/ADR-00033.md for the full investigation.
+FROM alpine:3.21 AS static-fetch-builder
+RUN apk add --no-cache clang musl-dev gcc curl-static curl-dev \
+    openssl-libs-static openssl-dev nghttp2-static nghttp2-dev \
+    zlib-static zlib-dev libidn2-static libidn2-dev \
+    libpsl-static libpsl-dev zstd-static zstd-dev \
+    brotli-static brotli-dev libunistring-static libunistring-dev \
+    c-ares-dev ca-certificates
+COPY --from=compiler-builder /out/KlainMainLang /usr/local/bin/KlainMainLang
+COPY docker/fetch-demo.ts /src/fetch-demo.ts
+WORKDIR /src
+RUN KlainMainLang --emit-llvm fetch-demo.ts > fetch-demo.ll && \
+    clang -O2 -c fetch-demo.ll -o fetch-demo.o && \
+    gcc -O2 fetch-demo.o -o /src/fetch-demo -static \
+        -lcurl -lnghttp2 -lidn2 -lssl -lcrypto -lzstd \
+        -lbrotlidec -lbrotlicommon -lunistring -lpsl -lz -lcares
+
+FROM scratch AS static-fetch-demo
+# Alpine's OpenSSL/curl looks for the CA bundle at /etc/ssl/cert.pem by
+# default (a symlink to certs/ca-certificates.crt on a normal Alpine
+# install) — scratch has no /etc at all and no symlink support worth
+# relying on, so the bundle has to be copied to that exact flattened path,
+# or TLS verification fails for a reason that has nothing to do with static
+# linking itself ("Problem with the SSL CA cert" — found by hitting this
+# directly, not assumed).
+COPY --from=static-fetch-builder /etc/ssl/cert.pem /etc/ssl/cert.pem
+COPY --from=static-fetch-builder /src/fetch-demo /fetch-demo
+ENTRYPOINT ["/fetch-demo"]

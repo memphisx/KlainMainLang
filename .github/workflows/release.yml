@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install clang + libcurl (fetch examples link against it)
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev
+
+      - run: go build .
+      - run: go vet ./...
+      - run: go test ./...
+      - run: make examples
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # go-semantic-release needs full tag history, not a shallow clone
+
+      - uses: go-semantic-release/action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

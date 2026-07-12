@@ -1,0 +1,9 @@
+# Only the Go source + go.mod are needed to build the KlainMainLang
+# compiler itself (stage 1) — none of this is needed in the build context.
+.git
+.idea
+*.iml
+examples/
+docs/
+*.ll
+KlainMainLang
