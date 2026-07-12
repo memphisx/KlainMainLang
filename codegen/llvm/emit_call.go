@@ -1046,6 +1046,20 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	default:
+		if val.Ty.IsDate {
+			// Real JS calls Date.prototype.toJSON() (== toISOString()) during
+			// stringification instead of serializing the raw ms timestamp;
+			// reuse the existing formatter and JSON-quote its result like any
+			// other string.
+			iso, err := e.emitDateToISOString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureJSONStringifyStr()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, iso.Ref))
+			return Value{Ref: r, Ty: TypePtr}, nil
+		}
 		if val.Ty.Float {
 			// Coercing a float to i64 below would truncate (9.5 -> 9) instead
 			// of formatting it; emitValueToString already does correct %g

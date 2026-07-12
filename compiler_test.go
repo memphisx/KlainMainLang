@@ -835,6 +835,20 @@ console.log(JSON.stringify(9.5))
 `, `9.5`)
 }
 
+func TestE2EJSONStringifyObjectDateField(t *testing.T) {
+	assertOutput(t, `
+const d = new Date(0)
+console.log(JSON.stringify({ when: d }))
+`, `{"when":"1970-01-01T00:00:00.000Z"}`)
+}
+
+func TestE2EJSONStringifyDateDirect(t *testing.T) {
+	assertOutput(t, `
+const d = new Date(0)
+console.log(JSON.stringify(d))
+`, `"1970-01-01T00:00:00.000Z"`)
+}
+
 func TestE2EJSONStringifyNestedObject(t *testing.T) {
 	assertOutput(t, `
 const person = { name: 'Alexandros', address: { city: 'Thessaloniki', zip: 10001 } }

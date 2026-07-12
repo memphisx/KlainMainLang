@@ -25,3 +25,12 @@ console.log(JSON.stringify(result))
 
 console.log(JSON.stringify(9.5))
 // 9.5
+
+// Date fields serialize as an ISO string (toJSON()/toISOString()), not the
+// raw millisecond timestamp
+const epoch = new Date(0)
+console.log(JSON.stringify({ when: epoch }))
+// {"when":"1970-01-01T00:00:00.000Z"}
+
+console.log(JSON.stringify(epoch))
+// "1970-01-01T00:00:00.000Z"
