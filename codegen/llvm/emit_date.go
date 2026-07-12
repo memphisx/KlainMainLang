@@ -83,6 +83,20 @@ func (e *Emitter) emitNewDate(n *ast.NewDateExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	if val.Ty.IR == "ptr" {
+		// A string argument (e.g. new Date("2023-11-14T00:00:00.000Z")) needs
+		// actual parsing, like real JS's constructor does for a string —
+		// coerce() has no ptr->i64 conversion and previously returned the raw
+		// string pointer unchanged, silently mistyped as a Date's i64, which
+		// produced invalid IR (a global string reference used where an i64
+		// was expected) and crashed at the clang stage instead of failing (or
+		// working) cleanly.
+		parsed, err := e.emitDateParseValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: parsed.Ref, Ty: TypeDate}, nil
+	}
 	return Value{Ref: e.coerce(val, TypeI64).Ref, Ty: TypeDate}, nil
 }
 
@@ -219,6 +233,14 @@ func (e *Emitter) emitDateParse(args []ast.Expression, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitDateParseValue(strVal)
+}
+
+// emitDateParseValue is emitDateParse's core, factored out so an
+// already-evaluated string Value can be parsed directly — used by
+// emitNewDate for the new Date(aStringLiteral) constructor form, which
+// already has the argument evaluated and nothing left to re-evaluate.
+func (e *Emitter) emitDateParseValue(strVal Value) (Value, error) {
 	e.ensureDateParse()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_parse(ptr %s)", r, strVal.Ref))

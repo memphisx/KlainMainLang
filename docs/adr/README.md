@@ -69,3 +69,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00035](ADR-00035.md) | Fix JSON.stringify truncating float-typed values to integers | Completed |
 | [00036](ADR-00036.md) | Fix JSON.stringify serializing Date fields as raw ms numbers | Completed |
 | [00037](ADR-00037.md) | Fix parenthesized function-type return annotations | Completed |
+| [00038](ADR-00038.md) | Fix new Date(aStringLiteral) crashing instead of parsing | Completed |

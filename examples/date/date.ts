@@ -62,6 +62,14 @@ console.log(Date.parse('not a date'))                 // -1 (unparseable: real J
 const parsed: Date = new Date(Date.parse('2023-11-14T22:13:20.000Z'))
 console.log(parsed.toISOString())      // 2023-11-14T22:13:20.000Z
 
+// ── new Date(aStringLiteral) — parses the string directly, no Date.parse() needed ──
+const fromString: Date = new Date('2023-11-14T00:00:00.000Z')
+console.log(fromString.getTime())        // 1699920000000
+console.log(fromString.toISOString())    // 2023-11-14T00:00:00.000Z
+
+const invalidFromString: Date = new Date('not a date')
+console.log(invalidFromString.getTime()) // -1 (same unparseable sentinel as Date.parse)
+
 // ── Date.parse(string) — with a "+HH:MM" / "-HH:MM" timezone offset ────────
 // The offset is converted to UTC (subtracted for "+", added for "-"), with
 // or without milliseconds present.

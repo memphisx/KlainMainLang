@@ -2163,6 +2163,21 @@ console.log(d.getDate())
 `, "2023-11-14T22:13:20.000Z\n2023\n10\n14")
 }
 
+func TestE2EDateFromStringLiteral(t *testing.T) {
+	assertOutput(t, `
+const d: Date = new Date("2023-11-14T00:00:00.000Z")
+console.log(d.getTime())
+console.log(d.toISOString())
+`, "1699920000000\n2023-11-14T00:00:00.000Z")
+}
+
+func TestE2EDateFromInvalidStringLiteral(t *testing.T) {
+	assertOutput(t, `
+const d: Date = new Date("not a date")
+console.log(d.getTime())
+`, "-1")
+}
+
 func TestE2EDateNow(t *testing.T) {
 	assertOutput(t, `
 const now: number = Date.now()
