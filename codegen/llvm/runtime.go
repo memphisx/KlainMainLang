@@ -1334,6 +1334,10 @@ func (e *Emitter) ensureMathFuncs() {
 		return
 	}
 	e.usedMathFuncs = true
+	// On Linux these symbols live in libm, linked separately from libc — omitted
+	// on macOS too since libSystem folds libm in and -lm is still accepted there
+	// as a standard no-op flag, so this doesn't need a runtime.GOOS branch.
+	e.requireLink("m")
 	e.emitGlobal("declare double @floor(double noundef)")
 	e.emitGlobal("declare double @ceil(double noundef)")
 	e.emitGlobal("declare double @round(double noundef)")

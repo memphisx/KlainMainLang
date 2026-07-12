@@ -65,3 +65,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00031](ADR-00031.md) | Implement setTimeout/clearTimeout/setInterval/clearInterval | Completed |
 | [00032](ADR-00032.md) | Add a --static CLI flag for statically-linked binaries (Linux only) | Completed |
 | [00033](ADR-00033.md) | Verify --static with fetch/libcurl on Alpine/musl | Completed |
+| [00034](ADR-00034.md) | Fix missing -lm link flag for Math builtins on Linux | Completed |
