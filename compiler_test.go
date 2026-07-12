@@ -403,6 +403,18 @@ console.log(c())
 `, "1\n2\n3")
 }
 
+func TestE2EParenthesizedFunctionTypeReturnAnnotation(t *testing.T) {
+	assertOutput(t, `
+function makeCounter(): (() => number) {
+    let count: number = 0
+    return (): number => { count++; return count; }
+}
+const c = makeCounter()
+console.log(c())
+console.log(c())
+`, "1\n2")
+}
+
 func TestE2EClosureMutatesOuterScope(t *testing.T) {
 	assertOutput(t, `
 let sum: number = 0

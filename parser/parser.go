@@ -320,11 +320,13 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	if tok.Type == lexer.LPAREN {
 		p.advance() // consume '('
 		var funcParams []ast.TypeAnnotation
+		singleUnnamed := true
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 			// Optional param name (for documentation only)
 			if p.check(lexer.IDENT) && p.peekNth(1).Type == lexer.COLON {
 				p.advance() // name
 				p.advance() // colon
+				singleUnnamed = false
 			}
 			pt, err := p.parseTypeAnnotation(source)
 			if err != nil {
@@ -336,14 +338,34 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
 		}
-		if _, err := p.expect(lexer.ARROW); err != nil {
+		// `(SomeFuncType)` used purely to group/disambiguate a function type
+		// (e.g. as a return-type annotation: `(): (() => void) => { ... }`)
+		// parses identically up to here as a real one-parameter curried
+		// function type `(SomeFuncType) => retType` — the two are only
+		// distinguishable by whether an actual type follows the '=>', since
+		// a real curried return type can never be a statement block. Try the
+		// curried-function-type reading first; if it doesn't pan out and
+		// there was exactly one unnamed parameter, treat the parens as pure
+		// grouping instead, backtracking to just before the '=>' so it's
+		// left for whatever follows (e.g. an enclosing arrow function's own
+		// body arrow) to consume.
+		if p.check(lexer.ARROW) {
+			beforeArrow := p.pos
+			p.advance() // consume '=>' tentatively
+			retType, err := p.parseTypeAnnotation(source)
+			if err == nil {
+				return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType}, nil
+			}
+			if len(funcParams) == 1 && singleUnnamed {
+				p.pos = beforeArrow
+				return &funcParams[0], nil
+			}
 			return nil, err
 		}
-		retType, err := p.parseTypeAnnotation(source)
-		if err != nil {
-			return nil, err
+		if len(funcParams) == 1 && singleUnnamed {
+			return &funcParams[0], nil
 		}
-		return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType}, nil
+		return nil, fmt.Errorf("%d:%d: expected =>, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 	}
 
 	// Object type annotation: { field: type; field: type }

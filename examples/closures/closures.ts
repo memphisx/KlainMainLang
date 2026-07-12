@@ -89,3 +89,16 @@ let add10 = makeAdder(10)
 console.log(add5(3))   // 8
 console.log(add10(3))  // 13
 console.log(add5(7))   // 12
+
+// --- Return type wrapped in extra disambiguating parens: (() => number) ---
+function makeCounter2(): (() => number) {
+    let count = 0
+    let inc = (): number => {
+        count = count + 1
+        return count
+    }
+    return inc
+}
+let c3 = makeCounter2()
+console.log(c3())  // 1
+console.log(c3())  // 2

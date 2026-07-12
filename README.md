@@ -2,13 +2,13 @@
 
 A TypeScript-to-native compiler, written in Go, that emits LLVM IR and hands it to `clang`. You write `.ts`, it writes `.ll`, `clang` writes a real executable, your operating system is none the wiser.
 
-Why does this exist? Because "how would I even build a compiler" is a much more fun rabbit hole than whatever I was supposed to be doing that day. It has since grown a garbage collector's worth of features (well — minus the garbage collector; see below) and a small mountain of design-decision paperwork in `docs/adr/`.
+Why does this exist? Not because TypeScript-to-native compilation needed solving — Microsoft's own research arm already tried this properly, with an actual team, an actual budget, and an actual production use case ([Static TypeScript](https://www.microsoft.com/en-us/research/publication/static-typescript/), compiling a restricted TypeScript subset to native code for microcontrollers), and this project has none of the above going for it. It exists because "how would I even build a compiler" is a much more fun rabbit hole than whatever I was supposed to be doing that day. The name is the actual mission statement: Κλάιν Μάιν (Klain Main) is Greek slang for "I don't care" — build it anyway, for no better reason than that you can. It has since grown a garbage collector's worth of features (well — minus the garbage collector; see below) and a small mountain of design-decision paperwork in `docs/adr/`.
 
-> **⚠️ Personal / experimental project.** One person, building this for fun, learning how compilers actually work by making all the mistakes personally. Not audited, not hardened, no stability guarantees between commits, and never destined for a production pipeline near you. It leaks memory on purpose (see below) and is enthusiastically fine with that. Perfect for tinkering, small CLI toys, and impressing exactly one (1) person at a dinner party. Bring your own garbage collector.
+> **⚠️ Personal / experimental project.** One person, building this for fun, learning how compilers actually work by making all the mistakes smarter people already made — and already fixed, in better languages, ages ago. Not audited, not hardened, no stability guarantees between commits, and never destined for a production pipeline near you. It leaks memory on purpose (see below) and is enthusiastically fine with that. Perfect for tinkering, small CLI toys, and impressing exactly one (1) person at a dinner party. Bring your own garbage collector.
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)** — a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **74% of core TypeScript language features**, **~88% of Node.js-style APIs** (`fs`, `process`, and friends), and a much scrappier **~21% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` exists; `setTimeout` doesn't — priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)** — a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **74% of core TypeScript language features**, **~88% of Node.js-style APIs** (`fs`, `process`, and friends), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist; `WebSocket` doesn't — priorities are a journey, not a destination).
 
 Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)** — a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy.
 
@@ -18,7 +18,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.26+ (see `go.mod` for the exact pinned version)
 - `clang` (LLVM 15+ — needs opaque-pointer support)
 - `libcurl` — only if the program you're compiling actually calls `fetch`; every other program stays plain-libc, no extra install needed
 
@@ -127,8 +127,13 @@ codegen/
     emit_async.go     async/await, Promise<T> (synchronous V1 — no event loop yet)
     emit_fetch.go     fetch(url) and Response, backed by libcurl (GET only)
     emit_fs.go        fs.readFileSync/writeFileSync/appendFileSync/existsSync/unlinkSync/mkdirSync/rmdirSync/renameSync/copyFileSync/readdirSync
+    emit_timers.go    setTimeout/clearTimeout/setInterval/clearInterval
+    emit_memory.go    Memory.free(x) — manual heap release (Stage 1 of the memory-management plan)
 docs/
   adr/              Architecture Decision Records — one per feature/bugfix, numbered, never renumbered
+docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image
+.github/
+  workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
 examples/           Sample .ts files — each compiles to a native binary, all wired into `make examples`
 jsdoc/              JSDoc comment parser (@type annotations for the cases TS types can't express)
 lexer/              Tokeniser
@@ -137,6 +142,7 @@ resolver/           Module resolver — parses the entry file's transitive impor
 main.go             CLI entry point
 compiler_test.go    End-to-end tests (parse → IR → clang → run → assert on stdout)
 STATUS.md           The actual, current, itemized feature matrix — trust this over any prose
+VERSIONING.md       SemVer policy + the automated release mechanism
 Makefile            Build, test, and example targets
 ```
 
@@ -154,7 +160,7 @@ Makefile            Build, test, and example targets
 
 ## Things this compiler will cheerfully never do
 
-- Collect garbage. Almost every heap allocation is `malloc`'d and never `free`d (the one principled exception: a `Promise`'s slot gets freed the moment `await` reads it — everything else just... accumulates). Your program's memory footprint is a monotonically increasing function of its runtime — this is a *feature* for short-lived CLI tools and a *life choice* for anything long-running.
+- Collect garbage, automatically. Almost every heap allocation is `malloc`'d and never `free`d on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it). There's now an escape hatch if you want one — `Memory.free(x)` (see `STATUS.md`'s Memory Management section) frees a value's own allocation by hand, C-style footguns and all — but nobody's holding a gun to your head. Left alone, your program's memory footprint is a monotonically increasing function of its runtime — a *feature* for short-lived CLI tools and a *life choice* for anything long-running.
 - Let an imported file run side-effecting top-level code, or give two unrelated files their own private scope. `import`/`export` exist, but only for sharing declarations — everything still boils down to one merged AST and one `main()` behind the scenes.
 - Judge you for using `var`. (It'll just quietly treat it like `let`. We've all been there.)
 
