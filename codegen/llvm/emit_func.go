@@ -35,10 +35,13 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 	e.coroRetLabel = ""
 	e.pushScope()
 
-	retType := TypeVoid
-	if decl.ReturnType != nil {
-		retType = e.resolveType(decl.ReturnType)
-	}
+	// registerFunctions already resolved this (explicit annotation, or a
+	// best-effort inference from the function's own first return statement
+	// when unannotated — see inferUnannotatedReturnType) before any function
+	// body was emitted; reuse it rather than recomputing, so this function's
+	// own emitted signature always matches what every caller already
+	// expects it to be.
+	retType := e.funcs[decl.Name].RetType
 	if retType.IsDynamic || containsDynamicElement(retType) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
@@ -527,6 +530,101 @@ func stmtHasReturn(stmt ast.Statement) bool {
 	}
 }
 
+// firstReturnExprInBlock finds the first reachable return statement's value
+// expression in the block (same recursion shape as blockHasReturn/
+// stmtHasReturn — nested control-flow bodies, not nested function/arrow
+// literals), skipping bare `return;` statements (nothing to infer from) in
+// favor of a later one that has a value. Used to give an unannotated
+// function/arrow function a real return type instead of defaulting to
+// void/i64 regardless of what it actually returns.
+func firstReturnExprInBlock(block *ast.BlockStatement) ast.Expression {
+	if block == nil {
+		return nil
+	}
+	for _, stmt := range block.Body {
+		if e := firstReturnExprInStmt(stmt); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func firstReturnExprInStmt(stmt ast.Statement) ast.Expression {
+	switch s := stmt.(type) {
+	case *ast.ReturnStatement:
+		return s.Value
+	case *ast.BlockStatement:
+		return firstReturnExprInBlock(s)
+	case *ast.IfStatement:
+		if e := firstReturnExprInBlock(s.Consequent); e != nil {
+			return e
+		}
+		if s.Alternate != nil {
+			return firstReturnExprInStmt(s.Alternate)
+		}
+	case *ast.ForStatement:
+		return firstReturnExprInBlock(s.Body)
+	case *ast.ForOfStatement:
+		return firstReturnExprInBlock(s.Body)
+	case *ast.ForInStatement:
+		return firstReturnExprInBlock(s.Body)
+	case *ast.WhileStatement:
+		return firstReturnExprInBlock(s.Body)
+	case *ast.DoWhileStatement:
+		return firstReturnExprInBlock(s.Body)
+	case *ast.SwitchStatement:
+		for _, c := range s.Cases {
+			for _, cs := range c.Body {
+				if e := firstReturnExprInStmt(cs); e != nil {
+					return e
+				}
+			}
+		}
+	case *ast.TryStatement:
+		if e := firstReturnExprInBlock(s.Body); e != nil {
+			return e
+		}
+		if s.Catch != nil {
+			if e := firstReturnExprInBlock(s.Catch.Body); e != nil {
+				return e
+			}
+		}
+		if s.Finally != nil {
+			return firstReturnExprInBlock(s.Finally)
+		}
+	}
+	return nil
+}
+
+// inferUnannotatedReturnType is the shared best-effort inference used by both
+// registerFunctions (top-level function declarations) and
+// emitArrowFunctionWithHints/inferExprType's *ast.ArrowFunction case
+// (block-bodied arrow functions) when no explicit return-type annotation is
+// present: push the function's own parameters into a temporary scope
+// (inferExprType and its helpers never emit IR or mint registers, so this is
+// safe to call before the real function body exists), then infer the first
+// reachable return statement's expression type and use it as-is — including
+// plain scalars, not just object/array/closure/Date. Returning ok=false (no
+// reachable return has a value at all) leaves the caller's own default
+// (void, or a scalar placeholder) untouched. A function with multiple
+// returns of different shapes still only considers the first one; not
+// attempted here — this compiler has no general union-type support beyond
+// `T | null` (see CLAUDE.md), so a function that legitimately returns
+// different types on different paths was never a designed-for case.
+func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNames []string, paramTypes []Type) (Type, bool) {
+	retExpr := firstReturnExprInBlock(block)
+	if retExpr == nil {
+		return Type{}, false
+	}
+	e.pushScope()
+	for i, name := range paramNames {
+		e.define(name, Symbol{Ty: paramTypes[i]})
+	}
+	inferred := e.inferExprType(retExpr)
+	e.popScope()
+	return inferred, true
+}
+
 // emitArrowFunctionWithHints is like emitArrowFunction but fills in types for
 // parameters that have no annotation, using hints[i] when available. This lets
 // HOF callers propagate the element type into untyped lambda parameters.
@@ -563,7 +661,15 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		retTy = e.inferExprType(af.Body)
 		e.popScope()
 	} else if blockHasReturn(af.Block) {
-		retTy = TypeI64 // block body: default, caller may override via annotation
+		paramNames := make([]string, len(af.Params))
+		for i, p := range af.Params {
+			paramNames[i] = p.Name
+		}
+		if inferred, ok := e.inferUnannotatedReturnType(af.Block, paramNames, paramTypes); ok {
+			retTy = inferred
+		} else {
+			retTy = TypeI64 // block body: scalar default, caller may override via annotation
+		}
 	} else {
 		retTy = TypeVoid // block body with no reachable return (e.g. forEach callback)
 	}

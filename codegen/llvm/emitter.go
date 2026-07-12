@@ -523,6 +523,28 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 		if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {
 			sig.HasRest = true
 		}
+		// An unannotated function defaulted to TypeVoid above regardless of
+		// what it actually returns — every caller trusted this registered
+		// signature, so this broke both field access/calls on an
+		// object/array/closure result AND (found while verifying this fix)
+		// even a plain scalar return: emitFunctionDecl used to compute its
+		// own, separately-defaulted-to-void return type independently of
+		// this signature, so `function addOne(n) { return n + 1 }` emitted
+		// a function whose LLVM signature said void while its body still
+		// tried to `ret i64` the real value — a hard clang-stage type
+		// mismatch, not just a silently-wrong result. Best-effort inference
+		// from the function's own first return statement (see
+		// inferUnannotatedReturnType) fixes both; a function with no
+		// reachable return value at all keeps the void default.
+		if fd.ReturnType == nil {
+			paramNames := make([]string, len(fd.Params))
+			for i, p := range fd.Params {
+				paramNames[i] = p.Name
+			}
+			if inferred, ok := e.inferUnannotatedReturnType(fd.Body, paramNames, sig.ParamTypes); ok {
+				sig.RetType = inferred
+			}
+		}
 		e.funcs[fd.Name] = sig
 	}
 }

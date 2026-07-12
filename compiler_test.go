@@ -673,6 +673,53 @@ console.log(p.y)
 `, "0\n0")
 }
 
+func TestE2EUnannotatedFunctionReturnsObjectLiteral(t *testing.T) {
+	assertOutput(t, `
+function makePoint(x, y) { return { x: x, y: y } }
+const p = makePoint(3, 4)
+console.log(p.x)
+console.log(p.y)
+`, "3\n4")
+}
+
+func TestE2EUnannotatedArrowFunctionReturnsObjectLiteral(t *testing.T) {
+	assertOutput(t, `
+const makePoint = (x, y) => { return { x: x, y: y } }
+const p = makePoint(5, 6)
+console.log(p.x)
+console.log(p.y)
+`, "5\n6")
+}
+
+func TestE2EArrowFunctionReturnedClosureCallable(t *testing.T) {
+	assertOutput(t, `
+const middle = (): (() => void) => {
+  let n = 0
+  return () => { n = n + 1; console.log(n) }
+}
+const inner = middle()
+inner()
+inner()
+`, "1\n2")
+}
+
+func TestE2EUnannotatedFunctionReturnsScalar(t *testing.T) {
+	assertOutput(t, `
+function addOne(n) { return n + 1 }
+console.log(addOne(5))
+`, "6")
+}
+
+func TestE2EUnannotatedRecursiveFunctionReturnsScalar(t *testing.T) {
+	assertOutput(t, `
+function factorial(n) {
+  if (n <= 1) { return 1 }
+  return n * factorial(n - 1)
+}
+console.log(factorial(5))
+`, "120")
+}
+
 func TestE2EObjectShorthandProps(t *testing.T) {
 	assertOutput(t, `
 const x: number = 1

@@ -1294,6 +1294,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if sig, found := e.funcs[id.Name]; found {
 				return sig.RetType
 			}
+			// Calling a closure-typed variable (e.g. a const-bound arrow
+			// function) — same fallback resolveCallback (emit_func.go)
+			// already uses, so a call's result is correctly typed regardless
+			// of whether the callee is a named declaration or a value.
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
+				return *sym.Ty.FuncRetType
+			}
 			switch id.Name {
 			case "parseInt":
 				return TypeI64
@@ -1550,8 +1557,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			ret = e.resolveType(ex.RetType)
 		} else if ex.Body != nil {
 			ret = e.inferExprType(ex.Body)
+		} else if blockHasReturn(ex.Block) {
+			// Same best-effort inference emitArrowFunctionWithHints uses when
+			// actually emitting this closure — this duplicate exists because
+			// inferExprType has to answer "what type is this arrow function"
+			// before any closure value exists yet (e.g. right when a `const`
+			// binding to it is being declared). The two computations used to
+			// disagree (this one unconditionally defaulted to TypeI64
+			// regardless of what was returned), which silently mistyped the
+			// variable itself even though the actual closure body was
+			// correctly built to return an object/array/Date — a real bug,
+			// not just a missed optimization, since callers trust this type.
+			paramNames := make([]string, len(ex.Params))
+			for i, p := range ex.Params {
+				paramNames[i] = p.Name
+			}
+			if inferred, ok := e.inferUnannotatedReturnType(ex.Block, paramNames, params); ok {
+				ret = inferred
+			} else {
+				ret = TypeI64
+			}
 		} else {
-			ret = TypeI64 // block body default
+			ret = TypeVoid
 		}
 		return FuncType(params, ret)
 	}
@@ -1714,6 +1741,14 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				default:
 					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate) {
 						ty = sig.RetType
+					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
+						// Calling a closure-typed variable (e.g. a const-bound
+						// arrow function) rather than a named declaration —
+						// same fallback as inferExprType's CallExpression case.
+						retTy := *sym.Ty.FuncRetType
+						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate {
+							ty = retTy
+						}
 					}
 				}
 			}

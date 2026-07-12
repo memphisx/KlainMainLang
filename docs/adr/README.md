@@ -43,7 +43,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00009](ADR-00009.md) | Implement Math.asin/acos/atan/atan2, sinh/cosh/tanh, cbrt/expm1/log1p | Completed |
 | [00010](ADR-00010.md) | Implement labeled break/continue | Completed |
 | [00011](ADR-00011.md) | Implement for...of over Map and Set | Completed |
-| [00012](ADR-00012.md) | Implement shorthand object properties { x } | Completed |
+| [00012](ADR-00012.md) | Implement shorthand object properties { x } | Completed — extended by ADR-00041 |
 | [00013](ADR-00013.md) | Implement object spread { ...obj, key: val } | Completed |
 | [00014](ADR-00014.md) | Implement Date (UTC-only) | Completed |
 | [00015](ADR-00015.md) | Implement Date.parse(string) | Completed — extended by ADR-00017 |
@@ -68,7 +68,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00034](ADR-00034.md) | Fix missing -lm link flag for Math builtins on Linux | Completed |
 | [00035](ADR-00035.md) | Fix JSON.stringify truncating float-typed values to integers | Completed |
 | [00036](ADR-00036.md) | Fix JSON.stringify serializing Date fields as raw ms numbers | Completed |
-| [00037](ADR-00037.md) | Fix parenthesized function-type return annotations | Completed |
+| [00037](ADR-00037.md) | Fix parenthesized function-type return annotations | Completed — extended by ADR-00041 |
 | [00038](ADR-00038.md) | Fix new Date(aStringLiteral) crashing instead of parsing | Completed |
 | [00039](ADR-00039.md) | Implement the multi-argument new Date(year, month, ...) constructor | Completed |
 | [00040](ADR-00040.md) | Support JSDoc @type overrides on interface fields | Completed |
+| [00041](ADR-00041.md) | Infer return types for unannotated functions and arrow functions | Completed |
