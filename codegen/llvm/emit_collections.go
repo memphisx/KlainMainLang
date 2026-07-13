@@ -20,7 +20,7 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty})
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	mapPtr := e.freshReg()
 	if isStringTy(keyTy) {
@@ -44,7 +44,7 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty})
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	setPtr := e.freshReg()
 	if isStringTy(elemTy) {

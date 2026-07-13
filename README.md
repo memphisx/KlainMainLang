@@ -141,7 +141,7 @@ lexer/              Tokeniser
 parser/             Recursive-descent parser with Pratt precedence climbing
 resolver/           Module resolver: parses the entry file's transitive imports, merges into one AST
 main.go             CLI entry point
-compiler_test.go    End-to-end tests (parse → IR → clang → run → assert on stdout)
+tests/              End-to-end tests (parse → IR → clang → run → assert on stdout), split by feature area; shared harness in tests/compiler_test.go
 STATUS.md           The actual, current, itemized feature matrix; trust this over any prose
 VERSIONING.md       SemVer policy + the automated release mechanism
 Makefile            Build, test, and example targets

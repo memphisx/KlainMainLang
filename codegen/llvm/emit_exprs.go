@@ -301,24 +301,52 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		ri := e.coerce(right, TypeI64)
 		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %s", reg, li.Ref, ri.Ref))
 		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "<<":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = shl i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case ">>":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = ashr i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case ">>>":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = lshr i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
+	case "<<", ">>", ">>>":
+		return e.emitBitShift(ex.Op, left, right)
 	}
 
 	return Value{}, fmt.Errorf("unknown binary operator '%s'", ex.Op)
+}
+
+// emitBitShift implements JS's shift-operator semantics (<<, >>, >>>), which
+// operate on 32-bit integers, not this compiler's native 64-bit `number`:
+// both operands are truncated to i32 (matching ToInt32/ToUint32's mod-2^32
+// wraparound — trunc keeps exactly the low 32 bits regardless of sign), the
+// shift count is masked to 0-31 (ToUint32(right) & 0x1F, which trunc+and
+// gives directly since masking only depends on the low 5 bits), and the i32
+// shift result is extended back to i64: sign-extended for << and >> (JS
+// results are Int32, e.g. 1 << 31 === -2147483648), zero-extended for >>>
+// (JS results are always a non-negative Uint32, e.g. -1 >>> 0 === 4294967295).
+func (e *Emitter) emitBitShift(op string, left, right Value) (Value, error) {
+	li := e.coerce(left, TypeI64)
+	ri := e.coerce(right, TypeI64)
+
+	l32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", l32, li.Ref))
+	r32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", r32, ri.Ref))
+	shiftAmt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i32 %s, 31", shiftAmt, r32))
+
+	res32 := e.freshReg()
+	switch op {
+	case "<<":
+		e.emitInstr(fmt.Sprintf("%s = shl i32 %s, %s", res32, l32, shiftAmt))
+	case ">>":
+		e.emitInstr(fmt.Sprintf("%s = ashr i32 %s, %s", res32, l32, shiftAmt))
+	case ">>>":
+		e.emitInstr(fmt.Sprintf("%s = lshr i32 %s, %s", res32, l32, shiftAmt))
+	default:
+		return Value{}, fmt.Errorf("unknown shift operator '%s'", op)
+	}
+
+	result := e.freshReg()
+	if op == ">>>" {
+		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", result, res32))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", result, res32))
+	}
+	return Value{Ref: result, Ty: TypeI64}, nil
 }
 
 // typeofString maps a compiled type to its TypeScript typeof string.
@@ -503,6 +531,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		return Value{}, fmt.Errorf("undefined variable '%s'", ident.Name)
 	}
 
+	if sym.IsConst {
+		return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
+	}
+
 	if sym.Ty.IsDynamic && ex.Op != "=" {
 		return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 	}
@@ -608,21 +640,8 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type) (Value, error
 		ri := e.coerce(right, TypeI64)
 		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %s", reg, li.Ref, ri.Ref))
 		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "<<":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = shl i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case ">>":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = ashr i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case ">>>":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = lshr i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
+	case "<<", ">>", ">>>":
+		return e.emitBitShift(op, left, right)
 	default:
 		return Value{}, fmt.Errorf("unknown arithmetic operator '%s'", op)
 	}
@@ -811,9 +830,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 
 // emitIndexPtr computes and returns the GEP register pointing to arr[index].
 // The array object may be a named variable (Symbol path) or any expression
-// that returns a {ptr, i64} aggregate (extractvalue path).
+// that returns a {ptr, i64} aggregate (extractvalue path). Emits a runtime
+// bounds check that throws a catchable Error on out-of-range access (index
+// treated as unsigned so a negative index and index >= length are caught by
+// a single comparison).
 func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy Type, err error) {
 	var dataPtrReg string
+	var lenReg string
 
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		sym, ok := e.lookup(id.Name)
@@ -826,6 +849,8 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 		elemTy = *sym.Ty.ElemType
 		dataPtrReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, sym.Ptr))
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
 	} else {
 		// Expression producing a {ptr, i64} aggregate (e.g. arr.slice(1), Object.keys(obj)).
 		arrVal, evalErr := e.emitExpr(ex.Object)
@@ -838,6 +863,8 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 		elemTy = *arrVal.Ty.ElemType
 		dataPtrReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, arrVal.Ref))
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, arrVal.Ref))
 	}
 
 	idxVal, err := e.emitExpr(ex.Index)
@@ -846,6 +873,22 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 	}
 	idxVal = e.coerce(idxVal, TypeI64)
 
+	oobReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxVal.Ref, lenReg))
+	oobL := e.freshLabel("arr.oob")
+	okL := e.freshLabel("arr.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", oobReg, oobL, okL))
+
+	e.emitLabel(oobL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Array index out of bounds")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
 	gepReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtrReg, idxVal.Ref))
 	return gepReg, elemTy, nil
@@ -1821,7 +1864,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, ty.IR, ty.Align()))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty})
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	if v.Init != nil {
 		// JSON.parse needs the target type to choose number vs string deserialization.

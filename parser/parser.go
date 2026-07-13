@@ -313,6 +313,20 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (*ast.VarDeclaration, error) {
 	return ast.NewVarDeclaration(tok.Literal, nameTok.Literal, ta, init, pos), nil
 }
 
+// parseTrailingArrayBrackets consumes zero or more trailing `[]` after a
+// parenthesized function type or an object type ({...}[]), wrapping ta in a
+// nested array TypeAnnotation for each pair found.
+func parseTrailingArrayBrackets(p *Parser, source string, ta *ast.TypeAnnotation) (*ast.TypeAnnotation, error) {
+	for p.check(lexer.LBRACKET) {
+		p.advance()
+		if _, err := p.expect(lexer.RBRACKET); err != nil {
+			return nil, fmt.Errorf("expected ] in array type annotation")
+		}
+		ta = &ast.TypeAnnotation{Source: source, ElemType: ta}
+	}
+	return ta, nil
+}
+
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
 	tok := p.peek()
 
@@ -354,7 +368,8 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 			p.advance() // consume '=>' tentatively
 			retType, err := p.parseTypeAnnotation(source)
 			if err == nil {
-				return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType}, nil
+				ta := &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType}
+				return parseTrailingArrayBrackets(p, source, ta)
 			}
 			if len(funcParams) == 1 && singleUnnamed {
 				p.pos = beforeArrow
@@ -363,7 +378,7 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 			return nil, err
 		}
 		if len(funcParams) == 1 && singleUnnamed {
-			return &funcParams[0], nil
+			return parseTrailingArrayBrackets(p, source, &funcParams[0])
 		}
 		return nil, fmt.Errorf("%d:%d: expected =>, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 	}
@@ -391,15 +406,7 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 			return nil, err
 		}
 		ta := &ast.TypeAnnotation{Source: source, Fields: fields}
-		// Support { ... }[] array-of-object type annotations.
-		for p.check(lexer.LBRACKET) {
-			p.advance()
-			if _, err := p.expect(lexer.RBRACKET); err != nil {
-				return nil, fmt.Errorf("expected ] in array type annotation")
-			}
-			ta = &ast.TypeAnnotation{Source: source, ElemType: ta}
-		}
-		return ta, nil
+		return parseTrailingArrayBrackets(p, source, ta)
 	}
 
 	// Accept identifier OR keyword-as-type (void, null, undefined, …)

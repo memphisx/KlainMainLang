@@ -317,6 +317,28 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitSetCall(sym, mem.Property, ex.Args, ex.GetPos())
 			}
 		}
+		// Calling a function-typed object field: obj.callback(...), none of
+		// the hardcoded built-in method names above matched, so treat mem as
+		// a plain value expression and call it as a closure if its static
+		// type says it is one.
+		if e.inferExprType(mem).IsFunc {
+			memVal, err := e.emitExpr(mem)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitClosureCallByPtr(memVal.Ref, memVal.Ty, ex.Args, ex.GetPos())
+		}
+	}
+
+	// Calling a function value stored in an array element: arr[i](...).
+	if idxEx, ok := ex.Callee.(*ast.IndexExpression); ok {
+		if e.inferExprType(idxEx).IsFunc {
+			idxVal, err := e.emitExpr(idxEx)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitClosureCallByPtr(idxVal.Ref, idxVal.Ty, ex.Args, ex.GetPos())
+		}
 	}
 
 	// Global built-in functions.

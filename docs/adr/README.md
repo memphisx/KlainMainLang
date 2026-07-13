@@ -78,3 +78,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00041](ADR-00041.md) | Infer return types for unannotated functions and arrow functions | Extends ADR-00012, ADR-00037 |
 | [00042](ADR-00042.md) | Reject non-numeric arguments to unannotated parameters at call sites | Implements TDD-00005 |
 | [00043](ADR-00043.md) | Fix forEach/HOF callbacks with console.log bodies or non-numeric elements | |
+| [00044](ADR-00044.md) | Fix array index out-of-bounds reads/writes with a runtime bounds check | |
+| [00045](ADR-00045.md) | Reject const reassignment with a Symbol.IsConst check in emitAssign | |
+| [00046](ADR-00046.md) | Fix (FuncType)[] parser gap and enable calling closures stored in arrays/object fields | |
+| [00047](ADR-00047.md) | Fix bitwise shift operators to use JS's 32-bit semantics | |

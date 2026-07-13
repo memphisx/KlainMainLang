@@ -72,7 +72,7 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty})
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))

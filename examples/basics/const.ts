@@ -1,5 +1,7 @@
-// const works like let but communicates that a variable is not reassigned.
-// The compiler treats const and let identically at the IR level.
+// const works like let, except the compiler rejects reassigning the binding
+// itself (arr = ... / obj = ... / x = ...). Mutating array elements or object
+// fields through a const-bound reference is still allowed — only rebinding
+// the variable itself is rejected.
 
 // --- Basic scalar consts ---
 const MAX: number = 100

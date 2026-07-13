@@ -26,3 +26,11 @@ console.log(x)  // 6
 const neg: number = -8
 const shifted: number = neg >>> 1
 console.log(shifted > 0)  // true
+
+// Shift operators follow JS's 32-bit semantics, not this compiler's native
+// 64-bit `number`: operands wrap to Int32/Uint32, and the shift count is
+// masked to 0-31 (a shift count >= 32 wraps around instead of zeroing out).
+console.log(1 << 31)          // -2147483648 (Int32 overflow into a negative number)
+console.log(-1 >>> 0)         // 4294967295  (Uint32 view of -1)
+console.log(1 << 32)          // 1           (shift count 32 masks to 0)
+console.log(1 << 33)          // 2           (shift count 33 masks to 1)

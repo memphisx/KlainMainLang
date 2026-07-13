@@ -14,7 +14,7 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
-	e.define(v.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: ty})
+	e.define(v.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: ty, IsConst: v.Kind == "const"})
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))

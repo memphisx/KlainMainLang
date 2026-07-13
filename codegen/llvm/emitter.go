@@ -16,10 +16,11 @@ type Value struct {
 
 // Symbol represents a local variable in the symbol table.
 type Symbol struct {
-	Ptr    string // alloca for the value (scalars) or the data pointer (arrays)
-	LenPtr string // alloca for the array length; empty for scalars
-	Ty     Type
-	Boxed  bool // true once Ptr points to a heap cell shared with closures that capture it
+	Ptr     string // alloca for the value (scalars) or the data pointer (arrays)
+	LenPtr  string // alloca for the array length; empty for scalars
+	Ty      Type
+	Boxed   bool // true once Ptr points to a heap cell shared with closures that capture it
+	IsConst bool // true for a `const`-declared binding; checked by emitAssign to reject plain `=` reassignment
 }
 
 type scope struct {

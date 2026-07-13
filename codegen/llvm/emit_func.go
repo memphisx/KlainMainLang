@@ -419,7 +419,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
 			cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
-			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true})
+			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
 		}
 	}
 
@@ -715,7 +715,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 					curVal, cap.Ty.IR, cap.Sym.Ptr, cap.Ty.Align()))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
 					cap.Ty.IR, curVal, newCell, cap.Ty.Align()))
-				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true})
+				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
 				cellPtr = newCell
 			}
 			slotReg := e.freshReg()
