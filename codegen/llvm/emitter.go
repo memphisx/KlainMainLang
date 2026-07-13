@@ -83,6 +83,7 @@ type Emitter struct {
 	usedDateCompose        bool
 	usedDateNameTables     bool
 	usedFetch              bool
+	usedFetchAsync         bool
 	usedFopen              bool
 	usedFclose             bool
 	usedFwrite             bool
@@ -123,6 +124,7 @@ type Emitter struct {
 	usedTimers             bool
 	usedHTTP               bool
 	usedHTTPThrow          bool
+	usedFiber              bool
 	usedMathFuncs          bool
 	usedArc4Random         bool
 	usedStrtoll            bool

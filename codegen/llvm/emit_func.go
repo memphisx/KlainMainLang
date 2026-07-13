@@ -3,9 +3,9 @@
 package llvm
 
 import (
+	"KlainMainLang/ast"
 	"fmt"
 	"strings"
-	"KlainMainLang/ast"
 )
 
 // emitFunctionDecl emits one user-defined function into e.functions.
@@ -232,7 +232,7 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		if x.Block != nil {
 			scanStmtsFV(x.Block.Body, innerBound, result)
 		}
-	// NumberLiteral, StringLiteral, BooleanLiteral: no identifiers
+		// NumberLiteral, StringLiteral, BooleanLiteral: no identifiers
 	}
 }
 
@@ -387,6 +387,10 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	savedScopes := e.scopes
 	savedRetType := e.currentRetType
 	savedBlockDone := e.blockDone
+	savedIsAsync := e.isAsync
+	savedCoroHdl := e.coroHdl
+	savedPromiseTy := e.currentPromiseTy
+	savedCoroRetLabel := e.coroRetLabel
 
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -395,7 +399,33 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.scopes = nil
 	e.blockDone = false
 	e.currentRetType = retTy
+	e.isAsync = af.IsAsync
+	e.coroHdl = ""
+	e.currentPromiseTy = TypeVoid
+	e.coroRetLabel = ""
 	e.pushScope()
+
+	// Async arrow function: same treatment emitFunctionDecl already gives a
+	// named async function — an `await` inside a closure body was already
+	// mechanically handled by emitAwait regardless of this flag, but
+	// `return`/the implicit expression-body result was silently taking the
+	// plain (non-async) path with nothing ever setting e.isAsync for a
+	// closure, so it returned the raw value directly instead of wrapping it
+	// in the malloc'd Promise slot every caller (including
+	// emit_http.go's async-handler unwrap) expects. Found while wiring
+	// http.listen's own async-handler support (ADR-00050) — a real,
+	// pre-existing gap, not new: async arrow functions containing `await`
+	// were unreachable in any previously-tested shape (named top-level
+	// functions can't be passed by reference either — a separate, already-
+	// tracked limitation — so an async arrow function used to be the only
+	// way to get an async *callback*, and nothing exercised it before now).
+	if af.IsAsync {
+		if retTy.IsPromise && retTy.PromiseType != nil {
+			e.currentPromiseTy = *retTy.PromiseType
+		}
+		e.coroRetLabel = e.freshLabel("coro.ret")
+		e.emitAsyncPrologue()
+	}
 
 	// Build the LLVM parameter list string and alloca+store each regular param.
 	paramStr := "ptr %env"
@@ -430,7 +460,14 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				return err
 			}
 		}
-		if retTy.IR == "void" {
+		if af.IsAsync {
+			// Fallthrough (no explicit `return`) resolves to the malloc'd
+			// slot's zero-initialized-by-malloc contents — matching a plain
+			// async function falling off the end. Every explicit `return`
+			// inside the block already branched to coroRetLabel itself
+			// (emitReturn's async-aware path).
+			e.emitAsyncEpilogue()
+		} else if retTy.IR == "void" {
 			e.emitTerminator("ret void")
 		} else {
 			e.emitTerminator("unreachable")
@@ -440,7 +477,15 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		if err != nil {
 			return err
 		}
-		if retTy.IR == "void" {
+		if af.IsAsync {
+			if e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
+				val = e.coerce(val, e.currentPromiseTy)
+				align := e.currentPromiseTy.Align()
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
+					e.currentPromiseTy.IR, val.Ref, e.coroHdl, align))
+			}
+			e.emitAsyncEpilogue()
+		} else if retTy.IR == "void" {
 			e.emitTerminator("ret void")
 		} else {
 			val = e.coerce(val, retTy)
@@ -463,6 +508,10 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.scopes = savedScopes
 	e.currentRetType = savedRetType
 	e.blockDone = savedBlockDone
+	e.isAsync = savedIsAsync
+	e.coroHdl = savedCoroHdl
+	e.currentPromiseTy = savedPromiseTy
+	e.coroRetLabel = savedCoroRetLabel
 	return nil
 }
 

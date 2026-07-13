@@ -40,10 +40,24 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	if len(handlerVal.Ty.FuncParams) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must take exactly one parameter (req: Request)", pos.Line, pos.Col)
 	}
-	if handlerVal.Ty.FuncRetType == nil || !handlerVal.Ty.FuncRetType.IsObject {
-		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must return an object type with status/body fields", pos.Line, pos.Col)
+	if handlerVal.Ty.FuncRetType == nil || (!handlerVal.Ty.FuncRetType.IsObject && !handlerVal.Ty.FuncRetType.IsPromise) {
+		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must return an object type (or Promise of one, for an async handler) with status/body fields", pos.Line, pos.Col)
 	}
+	// An async handler (needed for `await fetch(...)` inside it, the main
+	// reason to want one) declares itself as returning Promise<T>; the
+	// dispatcher calls it exactly like a sync handler (the call doesn't
+	// return until the handler's body has actually finished — any internal
+	// await yields the *connection's own fiber* via swapcontext, transparent
+	// to this call) and then unwraps T from the returned promise slot, the
+	// same load+free shape emitAwait's own generic (non-fetch) unwrap uses.
+	isAsyncHandler := handlerVal.Ty.FuncRetType.IsPromise
 	retTy := *handlerVal.Ty.FuncRetType
+	if isAsyncHandler {
+		if retTy.PromiseType == nil {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's async handler must return Promise<T> where T has status/body fields", pos.Line, pos.Col)
+		}
+		retTy = *retTy.PromiseType
+	}
 	if _, _, ok := retTy.FieldIndex("status"); !ok {
 		return Value{}, fmt.Errorf("%d:%d: http.listen's handler return type must have a 'status: number' field", pos.Line, pos.Col)
 	}
@@ -59,7 +73,7 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	listenfd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s)", listenfd, port32))
 
-	if err := e.buildHTTPDispatcher(paramTy, retTy); err != nil {
+	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler); err != nil {
 		return Value{}, err
 	}
 
@@ -93,8 +107,11 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 // an arbitrary user-declared return type needs Go-side knowledge of its
 // field offsets. A fixed name is safe: only one http.listen call site is
 // ever reachable in V1, since the first one never returns (any second call
-// in the same program is dead code).
-func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
+// in the same program is dead code). isAsyncHandler is true when the
+// handler itself is `async` (needed to `await fetch(...)` inside it, the
+// main reason to want one) — retTy is already unwrapped from Promise<T> to
+// T by the caller (emitHTTPListen) either way.
+func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
 	savedRegCtr := e.regCtr
@@ -117,11 +134,11 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
 	connData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
 	selfSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
 	fdPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
 	ctxPtrSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
 	e.ensureMalloc()
 	buf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8192)", buf))
@@ -203,9 +220,24 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
 	ep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
 
-	respReg := e.freshReg()
+	callReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s (ptr, %s) %s(ptr %s, %s %s)",
-		respReg, retTy.LLVMRetType(), paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref))
+		callReg, retTy.LLVMRetType(), paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref))
+
+	// An async handler's call above doesn't return until its body has fully
+	// run (any internal `await` yields this same connection fiber via
+	// swapcontext, transparent to this call) — callReg is then a Promise<T>
+	// slot pointer, not T directly, needing one more unwrap (matching
+	// emitAwait's own generic, non-fetch unwrap: load then free the slot).
+	// Promise<T> and a plain object T share IR="ptr", so the call syntax
+	// above is identical either way — only this extra indirection differs.
+	respReg := callReg
+	if isAsyncHandler {
+		respReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", respReg, callReg))
+		e.ensureFree()
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", callReg))
+	}
 
 	statusIdx, statusTy, _ := retTy.FieldIndex("status")
 	statusGep := e.freshReg()

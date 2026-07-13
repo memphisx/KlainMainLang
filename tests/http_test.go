@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"testing"
 	"time"
@@ -248,4 +249,100 @@ http.listen(8950, (req: Request): Res => {
 
 	// Clean up the slow connection by finally sending its request.
 	_, _ = slowConn.Write([]byte("GET /slow HTTP/1.1\r\n\r\n"))
+}
+
+// newDelayedUpstreamServer is an httptest server standing in for a real
+// upstream API: /slow sleeps before responding, everything else responds
+// immediately — used to prove ADR-00050's actual point, that two
+// http.listen connections independently awaiting fetch(...) against this
+// upstream run concurrently rather than one blocking the other.
+func newDelayedUpstreamServer(t *testing.T, slowDelay time.Duration) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			time.Sleep(slowDelay)
+		}
+		fmt.Fprintf(w, "upstream %s", r.URL.Path)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestE2EHTTPListenAsyncHandlerAwaitFetch(t *testing.T) {
+	upstream := newDelayedUpstreamServer(t, 0)
+	src := fmt.Sprintf(`
+interface Res { status: number; body: string }
+http.listen(8951, async (req: Request): Promise<Res> => {
+  const r: Response = await fetch("%s" + req.path)
+  return { status: 200, body: r.text() }
+})
+`, upstream.URL)
+	startHTTPServer(t, src, 8951)
+
+	resp, err := http.Get("http://127.0.0.1:8951/hello")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "upstream /hello" {
+		t.Errorf("body: got %q, want %q", string(body), "upstream /hello")
+	}
+}
+
+// TestE2EHTTPListenConcurrentAwaitFetch is the decisive test for
+// ADR-00050: two connections whose handlers each await fetch(...) against
+// the same upstream, one hitting a slow path and one hitting a fast path,
+// must not serialize — the fast one must complete well before the slow
+// upstream's own delay elapses. Before ADR-00050, fetch() was a blocking
+// libcurl call, so the slow connection's handler would have frozen the
+// entire single-threaded process (every fiber, not just its own) for the
+// full delay, and the fast request would have had to wait behind it.
+func TestE2EHTTPListenConcurrentAwaitFetch(t *testing.T) {
+	const slowDelay = 1200 * time.Millisecond
+	upstream := newDelayedUpstreamServer(t, slowDelay)
+	src := fmt.Sprintf(`
+interface Res { status: number; body: string }
+http.listen(8952, async (req: Request): Promise<Res> => {
+  const r: Response = await fetch("%s" + req.path)
+  return { status: 200, body: r.text() }
+})
+`, upstream.URL)
+	startHTTPServer(t, src, 8952)
+
+	slowDone := make(chan struct{})
+	go func() {
+		defer close(slowDone)
+		resp, err := http.Get("http://127.0.0.1:8952/slow")
+		if err != nil {
+			t.Errorf("slow GET: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "upstream /slow" {
+			t.Errorf("slow GET body: got %q, want %q", string(body), "upstream /slow")
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond) // let the slow request's fetch start first
+
+	fastStart := time.Now()
+	resp, err := http.Get("http://127.0.0.1:8952/fast")
+	if err != nil {
+		t.Fatalf("fast GET: %v", err)
+	}
+	defer resp.Body.Close()
+	fastElapsed := time.Since(fastStart)
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "upstream /fast" {
+		t.Errorf("fast GET body: got %q, want %q", string(body), "upstream /fast")
+	}
+	if fastElapsed >= slowDelay/2 {
+		t.Errorf("fast request took %v — expected it to complete quickly despite the slow request's %v upstream fetch still being in flight (concurrency is broken)", fastElapsed, slowDelay)
+	}
+
+	<-slowDone
 }

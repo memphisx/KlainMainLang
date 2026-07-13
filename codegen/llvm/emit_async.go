@@ -5,8 +5,8 @@
 package llvm
 
 import (
-	"fmt"
 	"KlainMainLang/ast"
+	"fmt"
 )
 
 // ── free declaration ──────────────────────────────────────────────────────────
@@ -80,6 +80,50 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		// Promise<void>: just free the 1-byte slot.
 		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
 		return Value{Ty: TypeVoid}, nil
+	}
+
+	if promiseTy.IsResponse {
+		// fetch()'s Promise<Response>: the slot holds a still-pending fetch
+		// handle (see emit_fetch.go's emitFetch), not a Response yet.
+		// __kml_await_fetch does the actual wait (yielding if on a
+		// connection fiber, busy-spinning otherwise — see
+		// ensureFetchAsync's doc comment) and returns the final
+		// status/body once the transfer completes, throwing on a
+		// transfer-level failure exactly like the old blocking fetch did.
+		e.ensureFetchAsync()
+		pendingPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, hdlVal.Ref))
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
+		status := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr } %s, 0", status, raw))
+		body := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr } %s, 1", body, raw))
+
+		ok := e.freshReg()
+		okHigh := e.freshReg()
+		okLow := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 200", okLow, status))
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 300", okHigh, status))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ok, okLow, okHigh))
+
+		respTy := promiseTy
+		e.ensureMalloc()
+		respReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", respReg, respTy.StructSize()))
+		structIR := respTy.StructIR()
+		storeField := func(name, ir, ref string, align int) {
+			idx, _, _ := respTy.FieldIndex(name)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, respReg, idx))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, ref, gep, align))
+		}
+		storeField("status", "i64", status, 8)
+		storeField("ok", "i1", ok, 1)
+		storeField("body", "ptr", body, 8)
+
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
+		return Value{Ref: respReg, Ty: respTy}, nil
 	}
 
 	// Load the promised value then free the slot.

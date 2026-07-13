@@ -35,6 +35,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00003](TDD-00003.md) | Alternative fetch Backend: a Go helper instead of libcurl | Not Started |
 | [00004](TDD-00004.md) | HTTP Server | Implemented (ADR-00048) |
 | [00005](TDD-00005.md) | Unannotated parameter typing | Partially Implemented (ADR-00042) |
-| [00006](TDD-00006.md) | Event Loop | Partially Implemented (ADR-00048) |
+| [00006](TDD-00006.md) | Event Loop | Partially Implemented (ADR-00048, ADR-00049, ADR-00050) |
 | [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Not Started |
 | [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented (ADR-00047) |
