@@ -1,6 +1,6 @@
 # ADR-NNNNN: <Short title>
 
-- **Status**: Proposed | Completed | Completed — extended by ADR-NNNNN | Superseded by ADR-NNNNN
+- **Relations** (omit entirely if there are none): `Extends`/`Extended by ADR-NNNNN`, `Supersedes`/`Superseded by ADR-NNNNN`, `Implements TDD-NNNNN` — combine as needed, e.g. `Extends ADR-00012, ADR-00037`
 - **Date**: YYYY-MM-DD
 
 ## Context

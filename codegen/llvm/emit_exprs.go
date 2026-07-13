@@ -1317,6 +1317,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "console" {
+				// Every console.* method returns void (emitConsolePrint and
+				// everything that delegates to it, e.g. emitConsoleDir, all
+				// return Value{Ty: TypeVoid}) — without this case, an
+				// expression-bodied arrow whose only statement is e.g.
+				// console.log(...) (a common HOF-callback shape, like
+				// arr.forEach((n) => console.log(n))) fell through to this
+				// function's blind TypeI64 fallback below, so the closure
+				// got built expecting to return a number that emitExpr's
+				// real (correctly void) evaluation never produces — a hard
+				// clang-stage type mismatch. See docs/adr/ADR-00043.md.
+				return TypeVoid
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "String" {
 				switch mem.Property {
 				case "fromCharCode", "fromCodePoint":
@@ -1550,7 +1563,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	case *ast.ArrowFunction:
 		params := make([]Type, len(ex.Params))
 		for i, p := range ex.Params {
-			params[i] = e.resolveType(p.Type)
+			if p.Type == nil {
+				params[i] = TypeI64
+				params[i].Inferred = true // no annotation — see docs/adr/ADR-00042.md
+			} else {
+				params[i] = e.resolveType(p.Type)
+			}
 		}
 		var ret Type
 		if ex.RetType != nil {

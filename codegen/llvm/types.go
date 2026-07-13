@@ -56,6 +56,13 @@ type Type struct {
 	// object machinery) with two extra dispatched methods, text()/json().
 	// See emit_fetch.go.
 	IsResponse bool
+	// Inferred marks a parameter type that defaulted to TypeI64 because no
+	// explicit annotation was given, as opposed to a real `number`/`int32`/
+	// etc. annotation that happens to also resolve to i64. Call sites use
+	// this to reject a non-numeric argument against an unannotated
+	// parameter at compile time, instead of silently bit-reinterpreting it
+	// as an i64 (see docs/adr/ADR-00042.md).
+	Inferred bool
 }
 
 // ArrayOf returns an array type whose elements are of the given type.
@@ -170,6 +177,17 @@ func (t Type) Align() int {
 // IsInteger returns true for integer (non-float) types.
 func (t Type) IsInteger() bool { return !t.Float && t.IR != "ptr" && t.IR != "void" }
 
+// isSafeNumericArg reports whether v can be safely passed to an inferred
+// (unannotated, defaulted-to-i64) parameter without silently corrupting
+// data — see docs/adr/ADR-00042.md. IsInteger()/Float already exclude
+// ptr-backed types (string/object/array/closure/Promise all use IR "ptr"),
+// but a boxed any/unknown value's IR is a distinct aggregate ("{ i8, i64 }")
+// that's neither ptr nor float, so IsDynamic needs its own explicit check —
+// otherwise it would slip through as if it were already a plain number.
+func isSafeNumericArg(t Type) bool {
+	return (t.IsInteger() || t.Float) && !t.IsDynamic
+}
+
 // LLVMRetType returns the LLVM IR type string used in function definitions and
 // call instructions. Arrays are returned as an aggregate {ptr, i64}.
 func (t Type) LLVMRetType() string {
@@ -227,6 +245,7 @@ var (
 // FuncSig holds the signature of a user-defined function.
 type FuncSig struct {
 	ParamTypes []Type
+	ParamNames []string // for error messages only (e.g. an inferred-parameter type mismatch)
 	RetType    Type
 	HasRest    bool          // last param is a rest (variadic) parameter
 	Defaults   []ast.Expression // per-param default expression; nil entry means no default

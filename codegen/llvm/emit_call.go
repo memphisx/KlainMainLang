@@ -415,6 +415,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 						if err != nil {
 							return Value{}, err
 						}
+						if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
+							name := id.Name
+							paramName := fmt.Sprintf("%d", i+1)
+							if i < len(sig.ParamNames) {
+								paramName = "'" + sig.ParamNames[i] + "'"
+							}
+							return Value{}, fmt.Errorf("%d:%d: parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, paramName, name)
+						}
 						if paramTy.IR != "" {
 							val = e.coerce(val, paramTy)
 						}

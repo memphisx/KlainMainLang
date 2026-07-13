@@ -483,6 +483,73 @@ nums.forEach((n: number, i: number) => {
 `, "6\n1\n102\n203")
 }
 
+func TestE2EArrayForEachConsoleLogCallback(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["a", "b", "c"]
+names.forEach((n) => console.log(n))
+`, "a\nb\nc")
+}
+
+func TestE2EArrayForEachUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["a", "bb", "ccc"]
+let total: number = 0
+names.forEach((n) => { total += n.length })
+console.log(total)
+`, "6")
+}
+
+func TestE2EArrayMapUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["a", "bb", "ccc"]
+const lengths = names.map((n) => n.length)
+console.log(lengths[0])
+console.log(lengths[1])
+console.log(lengths[2])
+`, "1\n2\n3")
+}
+
+func TestE2EArrayFilterUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["apple", "bob", "cat"]
+const shortOnes = names.filter((n) => n.length === 3)
+console.log(shortOnes[0])
+console.log(shortOnes[1])
+`, "bob\ncat")
+}
+
+func TestE2EArrayFindUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["apple", "bob", "cat"]
+console.log(names.find((n) => n.length === 3))
+`, "bob")
+}
+
+func TestE2EArraySomeEveryUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["apple", "bob", "cat"]
+console.log(names.some((n) => n.length === 3))
+console.log(names.every((n) => n.length <= 5))
+`, "1\n1")
+}
+
+func TestE2EArrayFindIndexUnannotatedStringParam(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["apple", "bob", "cat"]
+console.log(names.findIndex((n) => n.length === 3))
+`, "1")
+}
+
+func TestE2EArrayReduceUnannotatedStringAccumulatorAndElement(t *testing.T) {
+	assertOutput(t, `
+const names: string[] = ["a", "bb", "ccc"]
+const totalLen = names.reduce((acc, n) => acc + n.length, 0)
+console.log(totalLen)
+const joined = names.reduce((acc, n) => acc + n, "")
+console.log(joined)
+`, "6\nabbccc")
+}
+
 func TestE2EArraySort(t *testing.T) {
 	assertOutput(t, `
 const nums: number[] = [3, 1, 4, 1, 5, 9, 2, 6]
@@ -2158,6 +2225,47 @@ console.log(x + 1)
 	if err == nil {
 		t.Fatal("expected a compile error for arithmetic on an any-typed value, got none")
 	}
+}
+
+func TestE2EUnannotatedParamNonNumericArgRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function log(msg) { console.log(msg) }
+log("hello")
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-numeric argument to an unannotated parameter, got none")
+	}
+}
+
+func TestE2EUnannotatedArrowParamNonNumericArgRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const log = (msg) => { console.log(msg) }
+log("hello")
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-numeric argument to an unannotated arrow function parameter, got none")
+	}
+}
+
+func TestE2EUnannotatedParamNumericArgStillWorks(t *testing.T) {
+	assertOutput(t, `
+function addOne(n) { return n + 1 }
+console.log(addOne(5))
+`, "6")
+}
+
+func TestE2EUnannotatedArrowParamNumericArgStillWorks(t *testing.T) {
+	assertOutput(t, `
+const addOne = (n) => n + 1
+console.log(addOne(5))
+`, "6")
+}
+
+func TestE2EAnnotatedParamNonNumericArgStillWorks(t *testing.T) {
+	assertOutput(t, `
+function log(msg: string) { console.log(msg) }
+log("hello")
+`, "hello")
 }
 
 func TestE2EAnyAsFunctionParamRejected(t *testing.T) {

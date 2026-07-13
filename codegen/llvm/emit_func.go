@@ -35,13 +35,14 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 	e.coroRetLabel = ""
 	e.pushScope()
 
-	// registerFunctions already resolved this (explicit annotation, or a
-	// best-effort inference from the function's own first return statement
-	// when unannotated — see inferUnannotatedReturnType) before any function
-	// body was emitted; reuse it rather than recomputing, so this function's
-	// own emitted signature always matches what every caller already
-	// expects it to be.
-	retType := e.funcs[decl.Name].RetType
+	// registerFunctions already resolved the signature (explicit annotations,
+	// or best-effort inference for an unannotated return type — see
+	// inferUnannotatedReturnType) before any function body was emitted;
+	// reuse it rather than recomputing param/return types independently
+	// here, so this function's own emitted signature always matches what
+	// every caller already expects it to be.
+	sig := e.funcs[decl.Name]
+	retType := sig.RetType
 	if retType.IsDynamic || containsDynamicElement(retType) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
@@ -61,17 +62,16 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 		e.currentRetType = retType
 	}
 
-	// Build LLVM parameter list and alloca each parameter.
+	// Build LLVM parameter list and alloca each parameter. Param types come
+	// from the already-registered signature (registerFunctions), not
+	// recomputed here — same reasoning as retType above: one authoritative
+	// computation, reused everywhere, rather than a second copy that could
+	// silently drift from it.
 	// Array parameters expand to two LLVM params: (ptr, i64 length).
 	// Object and scalar parameters are each one ptr/scalar LLVM param.
 	var llvmParams []string
-	for _, p := range decl.Params {
-		pty := TypeI64
-		if p.Type != nil {
-			pty = e.resolveType(p.Type)
-		} else if p.Rest {
-			pty = ArrayOf(TypeI64)
-		}
+	for i, p := range decl.Params {
+		pty := sig.ParamTypes[i]
 		if pty.IsDynamic || containsDynamicElement(pty) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", decl.GetPos().Line, decl.GetPos().Col)
 		}
@@ -639,6 +639,9 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	for i, p := range af.Params {
 		if p.Type == nil && i < len(hints) {
 			paramTypes[i] = hints[i]
+		} else if p.Type == nil {
+			paramTypes[i] = TypeI64
+			paramTypes[i].Inferred = true // no annotation, no hint — see docs/adr/ADR-00042.md
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
@@ -760,7 +763,11 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			return Value{}, err
 		}
 		if i < len(ty.FuncParams) {
-			val = e.coerce(val, ty.FuncParams[i])
+			paramTy := ty.FuncParams[i]
+			if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
+				return Value{}, fmt.Errorf("%d:%d: parameter %d has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, i+1)
+			}
+			val = e.coerce(val, paramTy)
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}

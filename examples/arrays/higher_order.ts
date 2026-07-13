@@ -57,3 +57,32 @@ nums2.forEach(x => {
   total += x
 })
 console.log(total)  // 6
+
+// ── Unannotated callback parameters over a non-numeric (string[]) array ───────
+// Every HOF method propagates the array's element type as a hint to an
+// unannotated callback parameter — without this, `n` below would silently
+// default to `number`, and `n.length` would fail since a number has no
+// `.length`. Also covers an expression-bodied callback whose only statement
+// is a void-returning call like console.log (a common forEach shape).
+const names: string[] = ['apple', 'bob', 'cat']
+
+names.forEach(n => console.log(n))  // apple, bob, cat
+
+const lengths = names.map(n => n.length)
+console.log(lengths[0])  // 5
+console.log(lengths[2])  // 3
+
+const shortOnes = names.filter(n => n.length === 3)
+console.log(shortOnes[0])  // bob
+console.log(shortOnes[1])  // cat
+
+console.log(names.find(n => n.length === 3))       // bob
+console.log(names.some(n => n.length === 3))        // 1
+console.log(names.every(n => n.length <= 5))        // 1
+console.log(names.findIndex(n => n.length === 3))   // 1
+
+const totalLen = names.reduce((acc, n) => acc + n.length, 0)
+console.log(totalLen)  // 11
+
+const joined2 = names.reduce((acc, n) => acc + n, '')
+console.log(joined2)  // applebobcat

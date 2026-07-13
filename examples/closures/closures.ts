@@ -137,3 +137,17 @@ function factorial(n) {
     return n * factorial(n - 1)
 }
 console.log(factorial(5))  // 120
+
+// --- Unannotated parameters only accept numeric arguments safely ---
+// An unannotated parameter defaults to `number`. Calling it with a numeric
+// argument (as above) works exactly like an explicitly-typed `number`
+// parameter would. Calling it with a non-numeric argument (a string, object,
+// array, or closure) is rejected at compile time instead of silently
+// corrupting data — e.g. `logUnannotated("hello")` below would fail with
+// "parameter 'msg' has no type annotation (defaults to number) but was
+// called with a non-numeric argument here". Give the parameter an explicit
+// type instead:
+function logAnnotated(msg: string): void {
+    console.log(msg)
+}
+logAnnotated("hello")  // hello

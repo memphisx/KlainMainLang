@@ -511,13 +511,17 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 		}
 		sig := FuncSig{RetType: retType}
 		for _, p := range fd.Params {
-			pty := TypeI64
+			var pty Type
 			if p.Type != nil {
 				pty = e.resolveType(p.Type)
 			} else if p.Rest {
 				pty = ArrayOf(TypeI64) // default rest element type: number
+			} else {
+				pty = TypeI64
+				pty.Inferred = true // no annotation given — see docs/adr/ADR-00042.md
 			}
 			sig.ParamTypes = append(sig.ParamTypes, pty)
+			sig.ParamNames = append(sig.ParamNames, p.Name)
 			sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
 		}
 		if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {

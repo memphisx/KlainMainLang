@@ -576,7 +576,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -648,7 +648,7 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -702,7 +702,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -788,7 +788,13 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	// accTy's hint comes from a pure static inference of the initial-value
+	// expression (not evaluating it early), so the callback's accumulator
+	// parameter gets the right type while still evaluating args in their
+	// original left-to-right order (callback resolved first, matching
+	// real JS's argument evaluation order, exactly as before).
+	accTyHint := e.inferExprType(args[1])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy})
 	if err != nil {
 		return Value{}, err
 	}
@@ -854,7 +860,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -923,7 +929,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -987,7 +993,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
@@ -1413,7 +1419,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallback(args[0])
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
 	}
