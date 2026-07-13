@@ -72,15 +72,28 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 }
 
 // buildHTTPDispatcher emits @__kml_http_dispatch, a void() top-level function
-// registered with the event loop (called each time the listening socket is
-// ready): accepts one connection, parses its request line, builds a Request
-// object, calls the handler closure (read from @__kml_listen_handler),
-// extracts status/body off whatever it returns (paramTy/retTy are captured
-// from the call site — this is why the dispatcher is built per call site
-// rather than being one fully generic hand-written IR helper like the timer
-// trampoline), and writes the response. A fixed name is safe: only one
-// http.listen call site is ever reachable in V1, since the first one never
-// returns (any second call in the same program is dead code).
+// that becomes each accepted connection's own fiber entry point (via
+// makecontext, in runtime.go's __kml_http_append_conn) — not a single
+// shared dispatcher called once per event-loop wakeup the way V1 originally
+// worked, but a per-connection fiber body that can yield (swapcontext back
+// to the scheduler) and be resumed later, exactly where it left off, when
+// its socket has no data yet. Finds "which connection is this" via
+// @__kml_current_conn_idx (set by the scheduler immediately before
+// resuming a fiber — safe since fibers are cooperative, never preempted).
+//
+// Only the read path is fiber-aware (non-blocking read + yield-on-EAGAIN):
+// write() is kept as a single blocking call in __kml_http_send_response,
+// a deliberate V1 simplification — local socket writes essentially never
+// block for responses this small, so making them fiber-aware too would add
+// real complexity for a case that doesn't come up in practice at this scope.
+//
+// paramTy/retTy are captured from the call site — this is why the
+// dispatcher is built per call site rather than being one fully generic
+// hand-written IR helper like the timer trampoline: reading status/body off
+// an arbitrary user-declared return type needs Go-side knowledge of its
+// field offsets. A fixed name is safe: only one http.listen call site is
+// ever reachable in V1, since the first one never returns (any second call
+// in the same program is dead code).
 func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -99,26 +112,73 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
 	e.currentRetType = TypeVoid
 	e.pushScope()
 
-	lfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i32, ptr @__kml_listen_fd, align 4", lfd))
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i32, ptr, ptr } @__kml_http_accept_and_read(i32 %s)", raw, lfd))
-	connfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i32, ptr, ptr } %s, 0", connfd, raw))
-	methodPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i32, ptr, ptr } %s, 1", methodPtr, raw))
-	pathPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i32, ptr, ptr } %s, 2", pathPtr, raw))
-
-	okReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", okReg, connfd))
-	handleL := e.freshLabel("http.handle")
-	skipL := e.freshLabel("http.skip")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", okReg, handleL, skipL))
-
-	e.emitLabel(handleL)
-	reqTy := RequestType()
+	selfIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", selfIdx))
+	connData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
+	selfSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
+	fdPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
+	ctxPtrSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
 	e.ensureMalloc()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8192)", buf))
+
+	readLoopL := e.freshLabel("http.readloop")
+	checkErrL := e.freshLabel("http.checkerr")
+	checkEagainL := e.freshLabel("http.checkeagain")
+	doYieldL := e.freshLabel("http.doyield")
+	parseL := e.freshLabel("http.parse")
+	noReqL := e.freshLabel("http.noreq")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+
+	e.emitLabel(readLoopL)
+	fd64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, fdPtr))
+	fd32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
+	nReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @read(i32 %s, ptr %s, i64 8191)", nReg, fd32, buf))
+	gotData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gotData, parseL, checkErrL))
+
+	e.emitLabel(checkErrL)
+	isZero := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isZero, nReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isZero, noReqL, checkEagainL))
+
+	e.emitLabel(checkEagainL)
+	e.ensureErrnoAccessor()
+	errnoPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", errnoPtr, errnoAccessor()))
+	errnoVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errnoVal, errnoPtr))
+	isEagain := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %d", isEagain, errnoVal, httpEagainErrno()))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEagain, doYieldL, noReqL))
+
+	e.emitLabel(doYieldL)
+	ctxPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ctxPtr, ctxPtrSlot))
+	e.emitInstr(fmt.Sprintf("call i32 @swapcontext(ptr %s, ptr @__kml_main_ctx)", ctxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+
+	e.emitLabel(parseL)
+	termPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termPtr, buf, nReg))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termPtr))
+	e.ensureSscanf()
+	methodPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", methodPtr))
+	pathPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 2048)", pathPtr))
+	scanFmt := e.internString("%15s %2047s")
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sscanf(ptr %s, ptr %s, ptr %s, ptr %s)", buf, scanFmt, methodPtr, pathPtr))
+
+	reqTy := RequestType()
 	reqReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reqReg, reqTy.StructSize()))
 	reqStructIR := reqTy.StructIR()
@@ -160,10 +220,13 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type) error {
 	bodyReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", bodyReg, bodyTy.IR, bodyGep, bodyTy.Align()))
 
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s)", connfd, statusVal.Ref, bodyReg))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyReg))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+	e.emitTerminator("ret void")
 
-	e.emitLabel(skipL)
+	e.emitLabel(noReqL)
+	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	e.emitTerminator("ret void")
 
 	e.functions.WriteString("\ndefine void @__kml_http_dispatch() {\nentry:\n")

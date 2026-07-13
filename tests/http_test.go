@@ -196,3 +196,56 @@ http.listen(8949, (req: Request): Res => { return { status: 200 } })
 		t.Fatal("expected a compile error for a handler return type missing a body field, got none")
 	}
 }
+
+// TestE2EHTTPListenConcurrentConnections is the decisive test for
+// ADR-00049's fiber-based scheduler (TDD-00006 Part 2): a connection that
+// sits open without sending its request line for longer than this test's
+// own timeout must not block a second, immediately-answered connection —
+// proving the server genuinely services connections concurrently rather
+// than one at a time. Before ADR-00049, this would have deadlocked (the
+// slow connection's blocking read() never returns, so accept() for the
+// fast connection never even runs).
+func TestE2EHTTPListenConcurrentConnections(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8950, (req: Request): Res => {
+  return { status: 200, body: req.path }
+})
+`
+	startHTTPServer(t, src, 8950)
+
+	slowConn, err := net.Dial("tcp", "127.0.0.1:8950")
+	if err != nil {
+		t.Fatalf("slow connection dial: %v", err)
+	}
+	defer slowConn.Close()
+	// Deliberately don't send anything on slowConn yet.
+
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := http.Get("http://127.0.0.1:8950/fast")
+		if err != nil {
+			t.Errorf("fast GET: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "/fast" {
+			t.Errorf("fast GET body: got %q, want %q", string(body), "/fast")
+		}
+	}()
+
+	select {
+	case <-done:
+		// Good: the fast request completed without waiting for the slow
+		// connection to send anything.
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast request was blocked by the still-pending slow connection — concurrency is broken")
+	}
+
+	// Clean up the slow connection by finally sending its request.
+	_, _ = slowConn.Write([]byte("GET /slow HTTP/1.1\r\n\r\n"))
+}

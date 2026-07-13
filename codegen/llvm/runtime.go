@@ -4173,6 +4173,33 @@ func httpSockaddrFamilyBytes() (byte0, byte1 int) {
 	return 2, 0 // sin_family=AF_INET as a little-endian i16
 }
 
+// httpNonblockFlag returns O_NONBLOCK's numeric value — another genuine
+// platform difference (Darwin: 0x4, Linux: 0x800 on both x86-64 and arm64,
+// the two architectures this project targets), verified on this machine via
+// a throwaway C probe (`printf("%x", O_NONBLOCK)`) rather than trusted from
+// memory, matching every other libc constant this project hardcodes. Used
+// by the event loop's accept path to make a freshly-accepted connection's
+// fd non-blocking before handing it to its own fiber.
+func httpNonblockFlag() int {
+	if runtime.GOOS == "darwin" {
+		return 0x4
+	}
+	return 0x800
+}
+
+// httpEagainErrno returns EAGAIN/EWOULDBLOCK's numeric value (35 on Darwin;
+// 11 on Linux, where EAGAIN and EWOULDBLOCK are the same value — both
+// verified the same way as httpNonblockFlag). A per-connection fiber's read
+// loop checks the current errno against this after a failed non-blocking
+// read to distinguish "no data yet, yield and retry later" from a real
+// error.
+func httpEagainErrno() int {
+	if runtime.GOOS == "darwin" {
+		return 35
+	}
+	return 11
+}
+
 // ensureHTTPThrow declares __kml_http_throw: builds "<opdesc>: <reason>"
 // from the current errno via strerror() and throws it as a catchable Error
 // — same shape as ensureFsThrow, just without a path argument (a bind/listen
@@ -4267,6 +4294,8 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.ensureStrlen()
 	e.ensureHTTPThrow()
 
+	e.ensureErrnoAccessor()
+
 	e.emitGlobal("declare i32 @socket(i32 noundef, i32 noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @setsockopt(i32 noundef, i32 noundef, i32 noundef, ptr noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @bind(i32 noundef, ptr noundef, i32 noundef)")
@@ -4277,10 +4306,19 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.emitGlobal("declare i32 @close(i32 noundef)")
 	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i16 @htons(i16 noundef)")
+	e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
+	e.emitGlobal("declare void @getcontext(ptr noundef)")
+	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
+	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
 
 	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
 	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_main_ctx = internal global [880 x i8] zeroinitializer, align 16")
+	e.emitGlobal("@__kml_conn_data = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_conn_len = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_conn_cap = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_current_conn_idx = internal global i64 -1, align 8")
 
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()
@@ -4331,46 +4369,67 @@ failnofd:
 		e.internString("http.listen: failed to bind or listen"),
 		e.internString("http.listen: failed to create socket")))
 
-	scanFmt := e.internString("%15s %2047s")
-	e.emitGlobal(fmt.Sprintf(`
-define { i32, ptr, ptr } @__kml_http_accept_and_read(i32 %%listenfd) {
+	// __kml_http_append_conn: appends a new { i64 fd, ptr ctx, ptr stack }
+	// entry (growable, realloc-doubling, same shape as the timer queue) for a
+	// freshly-accepted connection, builds its fiber (a fresh ucontext_t + a
+	// 64KB stack, uc_link back to the main/scheduler context so the fiber
+	// function returning normally resumes the scheduler automatically), and
+	// immediately swaps into it once — the same "launch it now" step
+	// confirmed working in this feature's prototyping spike. The fiber
+	// entry point is always @__kml_listen_dispatch's stored pointer (the
+	// per-call-site-specialized dispatcher built by emit_http.go).
+	e.emitGlobal(`
+define void @__kml_http_append_conn(i32 %fd) {
 entry:
-  %%connfd = call i32 @accept(i32 %%listenfd, ptr null, ptr null)
-  %%acceptok = icmp sge i32 %%connfd, 0
-  br i1 %%acceptok, label %%doread, label %%failed
+  %len = load i64, ptr @__kml_conn_len, align 8
+  %cap = load i64, ptr @__kml_conn_cap, align 8
+  %data = load ptr, ptr @__kml_conn_data, align 8
+  %neededp1 = add i64 %len, 1
+  %needgrow = icmp sgt i64 %neededp1, %cap
+  br i1 %needgrow, label %grow, label %doappend
 
-doread:
-  %%buf = call ptr @malloc(i64 8192)
-  %%n = call i64 @read(i32 %%connfd, ptr %%buf, i64 8191)
-  %%hasdata = icmp sgt i64 %%n, 0
-  br i1 %%hasdata, label %%parse, label %%noreq
+grow:
+  %cap2 = mul i64 %cap, 2
+  %atleast8 = icmp sgt i64 %cap2, 8
+  %newcap = select i1 %atleast8, i64 %cap2, i64 8
+  %newcapbytes = mul i64 %newcap, 24
+  %newdata = call ptr @realloc(ptr %data, i64 %newcapbytes)
+  store ptr %newdata, ptr @__kml_conn_data, align 8
+  store i64 %newcap, ptr @__kml_conn_cap, align 8
+  br label %doappend
 
-parse:
-  %%termp = getelementptr i8, ptr %%buf, i64 %%n
-  store i8 0, ptr %%termp, align 1
-  %%methodbuf = call ptr @malloc(i64 16)
-  %%pathbuf = call ptr @malloc(i64 2048)
-  call i32 (ptr, ptr, ...) @sscanf(ptr %%buf, ptr %s, ptr %%methodbuf, ptr %%pathbuf)
-  call void @free(ptr %%buf)
-  %%r1 = insertvalue { i32, ptr, ptr } undef, i32 %%connfd, 0
-  %%r2 = insertvalue { i32, ptr, ptr } %%r1, ptr %%methodbuf, 1
-  %%r3 = insertvalue { i32, ptr, ptr } %%r2, ptr %%pathbuf, 2
-  ret { i32, ptr, ptr } %%r3
+doappend:
+  %dataNow = load ptr, ptr @__kml_conn_data, align 8
+  %slot = getelementptr { i64, ptr, ptr }, ptr %dataNow, i64 %len
 
-noreq:
-  call void @free(ptr %%buf)
-  call i32 @close(i32 %%connfd)
-  %%r4 = insertvalue { i32, ptr, ptr } undef, i32 -1, 0
-  %%r5 = insertvalue { i32, ptr, ptr } %%r4, ptr null, 1
-  %%r6 = insertvalue { i32, ptr, ptr } %%r5, ptr null, 2
-  ret { i32, ptr, ptr } %%r6
+  %fd64 = sext i32 %fd to i64
+  %fd_p = getelementptr { i64, ptr, ptr }, ptr %slot, i32 0, i32 0
+  store i64 %fd64, ptr %fd_p, align 8
 
-failed:
-  %%r7 = insertvalue { i32, ptr, ptr } undef, i32 -1, 0
-  %%r8 = insertvalue { i32, ptr, ptr } %%r7, ptr null, 1
-  %%r9 = insertvalue { i32, ptr, ptr } %%r8, ptr null, 2
-  ret { i32, ptr, ptr } %%r9
-}`, scanFmt))
+  %ctx = call ptr @malloc(i64 880)
+  %stack = call ptr @malloc(i64 65536)
+  call void @getcontext(ptr %ctx)
+  %ss_sp_p = getelementptr i8, ptr %ctx, i64 8
+  store ptr %stack, ptr %ss_sp_p, align 8
+  %ss_size_p = getelementptr i8, ptr %ctx, i64 16
+  store i64 65536, ptr %ss_size_p, align 8
+  %uc_link_p = getelementptr i8, ptr %ctx, i64 32
+  store ptr @__kml_main_ctx, ptr %uc_link_p, align 8
+  %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
+  call void (ptr, ptr, i32, ...) @makecontext(ptr %ctx, ptr %dfp, i32 0)
+
+  %ctx_p = getelementptr { i64, ptr, ptr }, ptr %slot, i32 0, i32 1
+  store ptr %ctx, ptr %ctx_p, align 8
+  %stack_p = getelementptr { i64, ptr, ptr }, ptr %slot, i32 0, i32 2
+  store ptr %stack, ptr %stack_p, align 8
+
+  %newlen = add i64 %len, 1
+  store i64 %newlen, ptr @__kml_conn_len, align 8
+
+  store i64 %len, ptr @__kml_current_conn_idx, align 8
+  %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)
+  ret void
+}`)
 
 	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n%s")
 	e.emitGlobal(fmt.Sprintf(`
@@ -4448,6 +4507,8 @@ scandone:
 dowork:
   %fdset = alloca [128 x i8], align 8
   call ptr @memset(ptr %fdset, i32 0, i64 128)
+  %maxfd = alloca i32, align 4
+  store i32 -1, ptr %maxfd, align 4
   br i1 %haslistener, label %setfd, label %skipsetfd
 
 setfd:
@@ -4460,11 +4521,56 @@ setfd:
   %oldbyte = load i8, ptr %byteptr, align 1
   %newbyte = or i8 %oldbyte, %bitmask
   store i8 %newbyte, ptr %byteptr, align 1
+  store i32 %listenfd, ptr %maxfd, align 4
   br label %skipsetfd
 
 skipsetfd:
-  %nfdscand = add i32 %listenfd, 1
-  %nfds = select i1 %haslistener, i32 %nfdscand, i32 0
+  ; Add every still-active (fd >= 0) connection's fd into the same fd_set,
+  ; tracking the overall highest fd for select()'s nfds argument.
+  %clen = load i64, ptr @__kml_conn_len, align 8
+  %cdata = load ptr, ptr @__kml_conn_data, align 8
+  %fsi = alloca i64, align 8
+  store i64 0, ptr %fsi, align 8
+  br label %fsetloop
+
+fsetloop:
+  %fi = load i64, ptr %fsi, align 8
+  %finb = icmp slt i64 %fi, %clen
+  br i1 %finb, label %fsetbody, label %fsetdone
+
+fsetbody:
+  %fslot0 = getelementptr { i64, ptr, ptr }, ptr %cdata, i64 %fi
+  %ffd_p = getelementptr { i64, ptr, ptr }, ptr %fslot0, i32 0, i32 0
+  %ffdv = load i64, ptr %ffd_p, align 8
+  %factive = icmp sge i64 %ffdv, 0
+  br i1 %factive, label %fsetbit, label %fsetnext
+
+fsetbit:
+  %ffdiv8 = sdiv i64 %ffdv, 8
+  %ffmod8 = srem i64 %ffdv, 8
+  %ffbyteptr = getelementptr i8, ptr %fdset, i64 %ffdiv8
+  %ffmod8_8 = trunc i64 %ffmod8 to i8
+  %ffmask = shl i8 1, %ffmod8_8
+  %ffoldbyte = load i8, ptr %ffbyteptr, align 1
+  %ffnewbyte = or i8 %ffoldbyte, %ffmask
+  store i8 %ffnewbyte, ptr %ffbyteptr, align 1
+  %ffdv32 = trunc i64 %ffdv to i32
+  %fcurmax = load i32, ptr %maxfd, align 4
+  %fisbigger = icmp sgt i32 %ffdv32, %fcurmax
+  br i1 %fisbigger, label %fupdatemax, label %fsetnext
+
+fupdatemax:
+  store i32 %ffdv32, ptr %maxfd, align 4
+  br label %fsetnext
+
+fsetnext:
+  %finext = add i64 %fi, 1
+  store i64 %finext, ptr %fsi, align 8
+  br label %fsetloop
+
+fsetdone:
+  %maxfdv = load i32, ptr %maxfd, align 4
+  %nfds = add i32 %maxfdv, 1
 
   br i1 %havetimer, label %timeoutpath, label %notimeoutpath
 
@@ -4490,7 +4596,7 @@ notimeoutpath:
   br label %afterselect
 
 afterselect:
-  br i1 %haslistener, label %checkisset, label %checktimerfire
+  br i1 %haslistener, label %checkisset, label %scanconn
 
 checkisset:
   %fddiv8b = sdiv i32 %listenfd, 8
@@ -4502,12 +4608,65 @@ checkisset:
   %bytevalb = load i8, ptr %byteptrb, align 1
   %maskedb = and i8 %bytevalb, %bitmaskb
   %ready = icmp ne i8 %maskedb, 0
-  br i1 %ready, label %dodispatch, label %checktimerfire
+  br i1 %ready, label %doaccept, label %scanconn
 
-dodispatch:
-  %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
-  call void %dfp()
-  br label %checktimerfire
+doaccept:
+  %newfd = call i32 @accept(i32 %listenfd, ptr null, ptr null)
+  %acceptok = icmp sge i32 %newfd, 0
+  br i1 %acceptok, label %setnonblock, label %scanconn
+
+setnonblock:
+  %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
+  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
+  call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
+  call void @__kml_http_append_conn(i32 %newfd)
+  br label %scanconn
+
+scanconn:
+  ; Resume every connection fiber whose fd came back ready in the fd_set
+  ; select() just populated (a fiber that finished sets its own entry's fd
+  ; to -1 right before returning, so "still >= 0 after resume" means it
+  ; genuinely yielded again and should keep being watched next iteration).
+  %rsi = alloca i64, align 8
+  store i64 0, ptr %rsi, align 8
+  br label %rscanloop
+
+rscanloop:
+  %ri = load i64, ptr %rsi, align 8
+  %rclen = load i64, ptr @__kml_conn_len, align 8
+  %rinb = icmp slt i64 %ri, %rclen
+  br i1 %rinb, label %rscanbody, label %checktimerfire
+
+rscanbody:
+  %rcdata = load ptr, ptr @__kml_conn_data, align 8
+  %rslot = getelementptr { i64, ptr, ptr }, ptr %rcdata, i64 %ri
+  %rfd_p = getelementptr { i64, ptr, ptr }, ptr %rslot, i32 0, i32 0
+  %rfdv = load i64, ptr %rfd_p, align 8
+  %ractive = icmp sge i64 %rfdv, 0
+  br i1 %ractive, label %rcheckready, label %rscannext
+
+rcheckready:
+  %rdiv8 = sdiv i64 %rfdv, 8
+  %rmod8 = srem i64 %rfdv, 8
+  %rbyteptr = getelementptr i8, ptr %fdset, i64 %rdiv8
+  %rmod8_8 = trunc i64 %rmod8 to i8
+  %rmask = shl i8 1, %rmod8_8
+  %rbyteval = load i8, ptr %rbyteptr, align 1
+  %rmasked = and i8 %rbyteval, %rmask
+  %rready = icmp ne i8 %rmasked, 0
+  br i1 %rready, label %rresume, label %rscannext
+
+rresume:
+  store i64 %ri, ptr @__kml_current_conn_idx, align 8
+  %rctx_p = getelementptr { i64, ptr, ptr }, ptr %rslot, i32 0, i32 1
+  %rctxptr = load ptr, ptr %rctx_p, align 8
+  call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)
+  br label %rscannext
+
+rscannext:
+  %rinext = add i64 %ri, 1
+  store i64 %rinext, ptr %rsi, align 8
+  br label %rscanloop
 
 checktimerfire:
   br i1 %havetimer, label %checkdue, label %outerloop
