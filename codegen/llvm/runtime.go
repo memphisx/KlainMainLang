@@ -3921,14 +3921,16 @@ ok:
 // Verified, not guessed: the Darwin offset (21) was confirmed directly by
 // compiling and running a real C program on this project's own dev machine
 // (offsetof(struct dirent, d_name) against Xcode's actual <dirent.h>). The
-// Linux offset (19) comes from glibc's own current source
+// Linux offset (19) originally came from reading glibc's own source
 // (sysdeps/unix/sysv/linux/bits/dirent.h: __ino64_t d_ino (8) + __off64_t
 // d_off (8) + unsigned short d_reclen (2) + unsigned char d_type (1), no
-// padding before d_name since it's 1-byte-aligned char data) — read
-// directly from glibc's upstream repository rather than recalled from
-// memory, though not independently compiled on a real Linux machine in this
-// sandbox (unlike the Darwin number). Both numbers assume a 64-bit build,
-// which is this project's only target per its own stated scope.
+// padding before d_name since it's 1-byte-aligned char data), and was later
+// independently confirmed by actually compiling and running the same
+// offsetof probe inside a real x86-64 Linux container (`docker run
+// --platform linux/amd64 ubuntu:24.04`) while investigating ADR-00051's
+// ucontext_t bug — this number was correct all along, unlike that one.
+// Both numbers assume a 64-bit build, which is this project's only target
+// per its own stated scope.
 func direntNameOffset() int {
 	if runtime.GOOS == "darwin" {
 		return 21
@@ -4456,6 +4458,40 @@ func httpEagainErrno() int {
 	return 11
 }
 
+// ucontextLayout returns sizeof(ucontext_t) and the byte offsets of
+// uc_stack.ss_sp / uc_stack.ss_size / uc_link needed to hand-build one (see
+// ensureFiberRuntime) — a real, confirmed platform difference found the
+// hard way: this project's own CI (GitHub Actions' ubuntu-latest, x86-64)
+// hung/reset connections under the fiber-based event loop until this was
+// fixed, because the original implementation only ever verified these
+// numbers on this dev machine (arm64 Darwin, sizeof 880) and assumed they'd
+// carry over. They do not: Linux's glibc ucontext_t is a completely
+// different struct, and even differs *between Linux architectures*
+// (x86-64: 968 bytes; arm64: 4560 bytes — verified directly via a
+// throwaway sizeof/offsetof C probe compiled and run in Docker containers
+// for each target, `docker run --platform linux/amd64|linux/arm64
+// ubuntu:24.04`, the same "never trust from memory" standard every other
+// platform constant in this codebase already follows), while the four
+// offsets happen to be identical across both Linux architectures (only the
+// struct's total size differs, presumably due to a differently-sized
+// register/FPU save area later in the struct) but are still completely
+// different from Darwin's. Undersizing this buffer on Linux meant
+// getcontext/makecontext/swapcontext wrote past the end of a too-small
+// malloc'd (or, for @__kml_main_ctx, global) buffer — silent heap/global
+// corruption, manifesting unpredictably depending on what happened to be
+// laid out next in memory (which is exactly what the observed symptoms —
+// connection resets, hangs — looked like).
+func ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
+	if runtime.GOOS == "darwin" {
+		return 880, 8, 16, 32
+	}
+	// Linux (glibc): offsets are identical across architectures; size isn't.
+	if runtime.GOARCH == "arm64" {
+		return 4560, 16, 32, 8
+	}
+	return 968, 16, 32, 8 // amd64 and other 64-bit Linux targets
+}
+
 // ensureHTTPThrow declares __kml_http_throw: builds "<opdesc>: <reason>"
 // from the current errno via strerror() and throws it as a catchable Error
 // — same shape as ensureFsThrow, just without a path argument (a bind/listen
@@ -4559,7 +4595,8 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("declare void @getcontext(ptr noundef)")
 	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
-	e.emitGlobal("@__kml_main_ctx = internal global [880 x i8] zeroinitializer, align 16")
+	ctxSize, _, _, _ := ucontextLayout()
+	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal global [%d x i8] zeroinitializer, align 16", ctxSize))
 	e.emitGlobal("@__kml_conn_data = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_conn_len = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_conn_cap = internal global i64 0, align 8")
@@ -4671,6 +4708,10 @@ failnofd:
 	// @__kml_listen_dispatch's stored pointer (the per-call-site-specialized
 	// dispatcher built by emit_http.go). pendingFetch starts null (normal
 	// fd-readiness-based waiting) — see ensureFiberRuntime's doc comment.
+	// ctxSize/ssSpOff/ssSizeOff/ucLinkOff: see ucontextLayout's doc comment
+	// — sizeof(ucontext_t) and its field offsets are NOT portable across
+	// platforms (a real bug found via a failing Linux CI run, fixed here).
+	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
 	e.emitGlobal(`
 define void @__kml_http_append_conn(i32 %fd) {
 entry:
@@ -4699,14 +4740,14 @@ doappend:
   %fd_p = getelementptr { i64, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
   store i64 %fd64, ptr %fd_p, align 8
 
-  %ctx = call ptr @malloc(i64 880)
+  %ctx = call ptr @malloc(i64 ` + fmt.Sprintf("%d", ctxSize) + `)
   %stack = call ptr @malloc(i64 65536)
   call void @getcontext(ptr %ctx)
-  %ss_sp_p = getelementptr i8, ptr %ctx, i64 8
+  %ss_sp_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSpOff) + `
   store ptr %stack, ptr %ss_sp_p, align 8
-  %ss_size_p = getelementptr i8, ptr %ctx, i64 16
+  %ss_size_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSizeOff) + `
   store i64 65536, ptr %ss_size_p, align 8
-  %uc_link_p = getelementptr i8, ptr %ctx, i64 32
+  %uc_link_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ucLinkOff) + `
   store ptr @__kml_main_ctx, ptr %uc_link_p, align 8
   %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
   call void (ptr, ptr, i32, ...) @makecontext(ptr %ctx, ptr %dfp, i32 0)

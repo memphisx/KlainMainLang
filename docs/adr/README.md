@@ -85,3 +85,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00048](ADR-00048.md) | select()-based event loop (TDD-00006 Part 1) and a minimal HTTP server (TDD-00004 V1) | Implements TDD-00004, TDD-00006 |
 | [00049](ADR-00049.md) | Concurrent HTTP connection handling via fibers (TDD-00006 Part 2, first real slice) | Extends ADR-00048. Implements TDD-00006 |
 | [00050](ADR-00050.md) | Non-blocking await fetch(...) via libcurl's multi-interface (TDD-00006 Part 2, second real slice) | Extends ADR-00049. Implements TDD-00006 |
+| [00051](ADR-00051.md) | Fix ucontext_t's size/layout being hardcoded to this dev machine's platform | Extends ADR-00049, ADR-00050 |
