@@ -78,6 +78,13 @@ func (e *Emitter) ensureMemcpy() {
 	}
 }
 
+func (e *Emitter) ensureMemset() {
+	if !e.usedMemset {
+		e.emitGlobal("declare ptr @memset(ptr noundef, i32 noundef, i64 noundef)")
+		e.usedMemset = true
+	}
+}
+
 func (e *Emitter) ensureStrcmp() {
 	if !e.usedStrcmp {
 		e.emitGlobal("declare i32 @strcmp(ptr noundef, ptr noundef)")
@@ -3883,28 +3890,28 @@ skipenv:
 // malloc'd header struct, since there's only ever one timer queue per
 // program), and four functions:
 //
-//   __kml_timer_schedule(ptr closure, i64 delayMs, i64 intervalMs) -> i64
-//     Appends a new entry (growing the queue via the same realloc-doubling
-//     shape __kml_fetch/__kml_exec_file_sync/__kml_fs_readdir all already
-//     use, just holding fixed-size 32-byte structs this time instead of
-//     bytes or ptrs) and returns its id. intervalMs is 0 for a one-shot
-//     setTimeout, or the repeat cadence for setInterval.
-//   __kml_timer_clear(i64 id)
-//     Linear scan by id; sets that entry's intervalMs to -1 (the sentinel
-//     for "cancelled / already fired and done, never consider again" —
-//     chosen over physically removing the entry so the queue never needs
-//     compaction, and over a separate cancelled flag so every field stays
-//     a plain i64/ptr with no padding ambiguity to reason about).
-//   __kml_timer_drain()
-//     Runs after the program's own top-level code finishes (see
-//     EmitProgram). Repeatedly: linear-scan for the pending (intervalMs !=
-//     -1) entry with the smallest fire time; if none, return (queue
-//     exhausted, main() can finally end); otherwise sleep via nanosleep()
-//     until it's due, call its closure, then — since the callback may
-//     itself have scheduled/cleared timers and grown/reallocated the queue
-//     — reload the queue pointer and this entry fresh before deciding
-//     whether to reschedule (intervalMs > 0, matching JS's own repeat
-//     behavior) or mark it done (intervalMs = -1).
+//	__kml_timer_schedule(ptr closure, i64 delayMs, i64 intervalMs) -> i64
+//	  Appends a new entry (growing the queue via the same realloc-doubling
+//	  shape __kml_fetch/__kml_exec_file_sync/__kml_fs_readdir all already
+//	  use, just holding fixed-size 32-byte structs this time instead of
+//	  bytes or ptrs) and returns its id. intervalMs is 0 for a one-shot
+//	  setTimeout, or the repeat cadence for setInterval.
+//	__kml_timer_clear(i64 id)
+//	  Linear scan by id; sets that entry's intervalMs to -1 (the sentinel
+//	  for "cancelled / already fired and done, never consider again" —
+//	  chosen over physically removing the entry so the queue never needs
+//	  compaction, and over a separate cancelled flag so every field stays
+//	  a plain i64/ptr with no padding ambiguity to reason about).
+//	__kml_timer_drain()
+//	  Runs after the program's own top-level code finishes (see
+//	  EmitProgram). Repeatedly: linear-scan for the pending (intervalMs !=
+//	  -1) entry with the smallest fire time; if none, return (queue
+//	  exhausted, main() can finally end); otherwise sleep via nanosleep()
+//	  until it's due, call its closure, then — since the callback may
+//	  itself have scheduled/cleared timers and grown/reallocated the queue
+//	  — reload the queue pointer and this entry fresh before deciding
+//	  whether to reschedule (intervalMs > 0, matching JS's own repeat
+//	  behavior) or mark it done (intervalMs = -1).
 //
 // Entry layout ({ i64 id, i64 fireAtNs, i64 intervalMs, ptr closureHdr },
 // 32 bytes, no padding): every field is i64 or ptr, both naturally 8-byte
@@ -4118,6 +4125,422 @@ reschedule:
   %now2 = call i64 @__kml_monotonic_ns()
   %intervalns = mul i64 %finterval, 1000000
   %newfire = add i64 %now2, %intervalns
+  %ffire_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 1
+  store i64 %newfire, ptr %ffire_p, align 8
+  br label %outerloop
+
+maybemarkdone:
+  %alreadycancelled = icmp eq i64 %finterval, -1
+  br i1 %alreadycancelled, label %outerloop, label %markdone
+
+markdone:
+  store i64 -1, ptr %finterval_p, align 8
+  br label %outerloop
+
+alldone:
+  ret void
+}`)
+}
+
+// httpSockConstants returns the platform-specific setsockopt() level/option
+// values for SOL_SOCKET/SO_REUSEADDR — unlike AF_INET (2) and SOCK_STREAM
+// (1), which are the same numeric value on every POSIX target this project
+// builds for, these two genuinely differ: Linux defines SOL_SOCKET=1,
+// SO_REUSEADDR=2, while Darwin/BSD define SOL_SOCKET=0xffff, SO_REUSEADDR=4.
+// Same Go-side-runtime.GOOS-branch approach as monotonicClockID()/
+// errnoAccessor() above — this compiler always builds and runs on the same
+// host, so a compile-time Go-side branch is sufficient, no IR-level
+// conditional needed.
+func httpSockConstants() (solSocket, soReuseAddr int) {
+	if runtime.GOOS == "darwin" {
+		return 0xffff, 4
+	}
+	return 1, 2
+}
+
+// httpSockaddrFamilyBytes returns the first two bytes of a struct
+// sockaddr_in, which differ by platform even though the struct's total
+// size (16 bytes) and every field after it are identical: Linux packs
+// sin_family as a plain 2-byte field (family=2 for AF_INET, low byte
+// first on this project's little-endian targets); Darwin/BSD instead
+// split those same two bytes into sin_len (=16, the struct's own total
+// size) followed by a 1-byte sin_family. Port and address fields (offset
+// 2 and 4) are identical on both, so only these two bytes need branching.
+func httpSockaddrFamilyBytes() (byte0, byte1 int) {
+	if runtime.GOOS == "darwin" {
+		return 16, 2 // sin_len=16, sin_family=AF_INET
+	}
+	return 2, 0 // sin_family=AF_INET as a little-endian i16
+}
+
+// ensureHTTPThrow declares __kml_http_throw: builds "<opdesc>: <reason>"
+// from the current errno via strerror() and throws it as a catchable Error
+// — same shape as ensureFsThrow, just without a path argument (a bind/listen
+// failure has no associated file path to report).
+func (e *Emitter) ensureHTTPThrow() {
+	if e.usedHTTPThrow {
+		return
+	}
+	e.usedHTTPThrow = true
+	e.ensureMalloc()
+	e.ensureStrlen()
+	e.ensureSprintf()
+	e.ensureExceptionHelpers()
+	e.ensureErrnoAccessor()
+	e.ensureStrerror()
+	fmtPtr := e.internString("%s: %s")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_throw(ptr %%opdesc) {
+entry:
+  %%errno_ptr = call ptr @%s()
+  %%errno_val = load i32, ptr %%errno_ptr, align 4
+  %%errmsg = call ptr @strerror(i32 %%errno_val)
+  %%len_op = call i64 @strlen(ptr %%opdesc)
+  %%len_err = call i64 @strlen(ptr %%errmsg)
+  %%sum = add i64 %%len_op, %%len_err
+  %%bufsize = add i64 %%sum, 8
+  %%buf = call ptr @malloc(i64 %%bufsize)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%errmsg)
+  %%errobj = call ptr @malloc(i64 8)
+  store ptr %%buf, ptr %%errobj, align 8
+  call void @__kml_throw(ptr %%errobj)
+  ret void
+}`, errnoAccessor(), fmtPtr))
+}
+
+// ensureHTTPRuntime declares everything http.listen needs: raw POSIX socket
+// primitives, a bind-and-listen helper that throws a catchable Error on
+// failure, an accept-and-parse-request-line helper, a send-response-and-close
+// helper, and the generalized event loop (TDD-00006 Part 1) that lets the
+// listening socket's readiness and the existing timer queue (ensureTimerRuntime)
+// share one select() wait instead of two competing loops.
+//
+// V1 scope (TDD-00004): single listener (no user-facing "close" — the two
+// globals below hold at most one registered listener at a time, matching
+// "V1 has no need for multiple servers"), single connection handled fully
+// synchronously per accept (no concurrent request handling — TDD-00006's
+// Part 2, real async suspension, is what real concurrency would need), GET
+// request line only (method + path via sscanf's %s, headers/body ignored).
+//
+//	__kml_http_bind_and_listen(i32 port) -> i32
+//	  socket()+setsockopt(SO_REUSEADDR)+bind()+listen(); throws a catchable
+//	  Error (via __kml_http_throw) on any failure instead of returning -1,
+//	  so the Go-emitted call site never needs its own error check.
+//	__kml_http_accept_and_read(i32 listenfd) -> { i32 connfd, ptr method, ptr path }
+//	  Blocking accept(), then a single blocking read() into a fixed 8KB
+//	  buffer, then sscanf("%15s %2047s", ...) to pull the method and path
+//	  out of the request line — headers/body deliberately ignored, same
+//	  scope narrowing fetch() itself started with. connfd is -1 (method/path
+//	  null) if accept() or the read came back empty — caller should just
+//	  skip this dispatch turn.
+//	__kml_http_send_response(i32 connfd, i64 status, ptr body)
+//	  Formats a minimal HTTP/1.1 response (fixed "OK" reason phrase
+//	  regardless of status — real clients determine success/failure from
+//	  the numeric code, not the phrase) with Content-Length/Connection:
+//	  close, writes it, closes the connection.
+//	__kml_event_loop_run()
+//	  The generalized drain loop: each iteration, scans the timer queue for
+//	  the earliest-due entry exactly like __kml_timer_drain, builds an
+//	  fd_set containing the registered listener (if any, via
+//	  @__kml_listen_fd), and calls select() with a timeout computed from
+//	  that earliest-due timer (blocking indefinitely if a listener is
+//	  registered but no timer is pending, since select() alone can't return
+//	  "nothing to wait for" the way an empty queue could return instantly).
+//	  On wake: dispatches through @__kml_listen_dispatch if the listener is
+//	  ready, then fires/reschedules/retires the due timer exactly like
+//	  __kml_timer_drain. Loops forever once a listener is registered
+//	  (matching http.listen's own "never returns" contract — no user code
+//	  ever unregisters it in V1); with no listener registered it behaves
+//	  identically to plain nanosleep-based timer draining, just implemented
+//	  via a zero-timeout-capable select() instead.
+func (e *Emitter) ensureHTTPRuntime() {
+	if e.usedHTTP {
+		return
+	}
+	e.usedHTTP = true
+	e.ensureTimerRuntime()
+	e.ensureMalloc()
+	e.ensureMemset()
+	e.ensureFree()
+	e.ensureSscanf()
+	e.ensureSprintf()
+	e.ensureStrlen()
+	e.ensureHTTPThrow()
+
+	e.emitGlobal("declare i32 @socket(i32 noundef, i32 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @setsockopt(i32 noundef, i32 noundef, i32 noundef, ptr noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @bind(i32 noundef, ptr noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @listen(i32 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @accept(i32 noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i32 @close(i32 noundef)")
+	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i16 @htons(i16 noundef)")
+
+	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
+	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_handler = internal global ptr null, align 8")
+
+	solSocket, soReuseAddr := httpSockConstants()
+	fam0, fam1 := httpSockaddrFamilyBytes()
+
+	e.emitGlobal(fmt.Sprintf(`
+define i32 @__kml_http_bind_and_listen(i32 %%port) {
+entry:
+  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
+  %%fdok = icmp sge i32 %%fd, 0
+  br i1 %%fdok, label %%setopt, label %%failnofd
+
+setopt:
+  %%one = alloca i32, align 4
+  store i32 1, ptr %%one, align 4
+  call i32 @setsockopt(i32 %%fd, i32 %d, i32 %d, ptr %%one, i32 4)
+
+  %%addr = alloca [16 x i8], align 4
+  call ptr @memset(ptr %%addr, i32 0, i64 16)
+  store i8 %d, ptr %%addr, align 1
+  %%b1p = getelementptr i8, ptr %%addr, i64 1
+  store i8 %d, ptr %%b1p, align 1
+  %%portu16 = trunc i32 %%port to i16
+  %%portn = call i16 @htons(i16 %%portu16)
+  %%portp = getelementptr i8, ptr %%addr, i64 2
+  store i16 %%portn, ptr %%portp, align 1
+
+  %%bindrc = call i32 @bind(i32 %%fd, ptr %%addr, i32 16)
+  %%bindok = icmp eq i32 %%bindrc, 0
+  br i1 %%bindok, label %%dolisten, label %%failwithfd
+
+dolisten:
+  %%listenrc = call i32 @listen(i32 %%fd, i32 128)
+  %%listenok = icmp eq i32 %%listenrc, 0
+  br i1 %%listenok, label %%success, label %%failwithfd
+
+success:
+  ret i32 %%fd
+
+failwithfd:
+  call i32 @close(i32 %%fd)
+  call void @__kml_http_throw(ptr %s)
+  unreachable
+
+failnofd:
+  call void @__kml_http_throw(ptr %s)
+  unreachable
+}`, solSocket, soReuseAddr, fam0, fam1,
+		e.internString("http.listen: failed to bind or listen"),
+		e.internString("http.listen: failed to create socket")))
+
+	scanFmt := e.internString("%15s %2047s")
+	e.emitGlobal(fmt.Sprintf(`
+define { i32, ptr, ptr } @__kml_http_accept_and_read(i32 %%listenfd) {
+entry:
+  %%connfd = call i32 @accept(i32 %%listenfd, ptr null, ptr null)
+  %%acceptok = icmp sge i32 %%connfd, 0
+  br i1 %%acceptok, label %%doread, label %%failed
+
+doread:
+  %%buf = call ptr @malloc(i64 8192)
+  %%n = call i64 @read(i32 %%connfd, ptr %%buf, i64 8191)
+  %%hasdata = icmp sgt i64 %%n, 0
+  br i1 %%hasdata, label %%parse, label %%noreq
+
+parse:
+  %%termp = getelementptr i8, ptr %%buf, i64 %%n
+  store i8 0, ptr %%termp, align 1
+  %%methodbuf = call ptr @malloc(i64 16)
+  %%pathbuf = call ptr @malloc(i64 2048)
+  call i32 (ptr, ptr, ...) @sscanf(ptr %%buf, ptr %s, ptr %%methodbuf, ptr %%pathbuf)
+  call void @free(ptr %%buf)
+  %%r1 = insertvalue { i32, ptr, ptr } undef, i32 %%connfd, 0
+  %%r2 = insertvalue { i32, ptr, ptr } %%r1, ptr %%methodbuf, 1
+  %%r3 = insertvalue { i32, ptr, ptr } %%r2, ptr %%pathbuf, 2
+  ret { i32, ptr, ptr } %%r3
+
+noreq:
+  call void @free(ptr %%buf)
+  call i32 @close(i32 %%connfd)
+  %%r4 = insertvalue { i32, ptr, ptr } undef, i32 -1, 0
+  %%r5 = insertvalue { i32, ptr, ptr } %%r4, ptr null, 1
+  %%r6 = insertvalue { i32, ptr, ptr } %%r5, ptr null, 2
+  ret { i32, ptr, ptr } %%r6
+
+failed:
+  %%r7 = insertvalue { i32, ptr, ptr } undef, i32 -1, 0
+  %%r8 = insertvalue { i32, ptr, ptr } %%r7, ptr null, 1
+  %%r9 = insertvalue { i32, ptr, ptr } %%r8, ptr null, 2
+  ret { i32, ptr, ptr } %%r9
+}`, scanFmt))
+
+	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n%s")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body) {
+entry:
+  %%bodylen = call i64 @strlen(ptr %%body)
+  %%bufsize1 = add i64 %%bodylen, 128
+  %%respbuf = call ptr @malloc(i64 %%bufsize1)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%body)
+  %%n64 = sext i32 %%n to i64
+  call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
+  call void @free(ptr %%respbuf)
+  call i32 @close(i32 %%connfd)
+  ret void
+}`, respFmt))
+
+	e.emitGlobal(`
+define void @__kml_event_loop_run() {
+entry:
+  br label %outerloop
+
+outerloop:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  %besti = alloca i64, align 8
+  store i64 -1, ptr %besti, align 8
+  %bestfire = alloca i64, align 8
+  store i64 0, ptr %bestfire, align 8
+  %scani = alloca i64, align 8
+  store i64 0, ptr %scani, align 8
+  br label %scanloop
+
+scanloop:
+  %si = load i64, ptr %scani, align 8
+  %sinbounds = icmp slt i64 %si, %len
+  br i1 %sinbounds, label %scanbody, label %scandone
+
+scanbody:
+  %sslot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %si
+  %sinterval_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 2
+  %sinterval = load i64, ptr %sinterval_p, align 8
+  %sdone = icmp eq i64 %sinterval, -1
+  br i1 %sdone, label %scannext, label %scanconsider
+
+scanconsider:
+  %sfire_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 1
+  %sfire = load i64, ptr %sfire_p, align 8
+  %curbesti = load i64, ptr %besti, align 8
+  %noneyet = icmp eq i64 %curbesti, -1
+  br i1 %noneyet, label %scantakebest, label %scancompare
+
+scancompare:
+  %curbestfire = load i64, ptr %bestfire, align 8
+  %better = icmp slt i64 %sfire, %curbestfire
+  br i1 %better, label %scantakebest, label %scannext
+
+scantakebest:
+  store i64 %si, ptr %besti, align 8
+  store i64 %sfire, ptr %bestfire, align 8
+  br label %scannext
+
+scannext:
+  %sinext = add i64 %si, 1
+  store i64 %sinext, ptr %scani, align 8
+  br label %scanloop
+
+scandone:
+  %foundbest = load i64, ptr %besti, align 8
+  %havetimer = icmp ne i64 %foundbest, -1
+  %listenfd = load i32, ptr @__kml_listen_fd, align 4
+  %haslistener = icmp sge i32 %listenfd, 0
+  %anywork = or i1 %havetimer, %haslistener
+  br i1 %anywork, label %dowork, label %alldone
+
+dowork:
+  %fdset = alloca [128 x i8], align 8
+  call ptr @memset(ptr %fdset, i32 0, i64 128)
+  br i1 %haslistener, label %setfd, label %skipsetfd
+
+setfd:
+  %fddiv8 = sdiv i32 %listenfd, 8
+  %fdmod8 = srem i32 %listenfd, 8
+  %fddiv8_64 = sext i32 %fddiv8 to i64
+  %byteptr = getelementptr i8, ptr %fdset, i64 %fddiv8_64
+  %bitpos8 = trunc i32 %fdmod8 to i8
+  %bitmask = shl i8 1, %bitpos8
+  %oldbyte = load i8, ptr %byteptr, align 1
+  %newbyte = or i8 %oldbyte, %bitmask
+  store i8 %newbyte, ptr %byteptr, align 1
+  br label %skipsetfd
+
+skipsetfd:
+  %nfdscand = add i32 %listenfd, 1
+  %nfds = select i1 %haslistener, i32 %nfdscand, i32 0
+
+  br i1 %havetimer, label %timeoutpath, label %notimeoutpath
+
+timeoutpath:
+  %targetfire = load i64, ptr %bestfire, align 8
+  %now1 = call i64 @__kml_monotonic_ns()
+  %rawwait = sub i64 %targetfire, %now1
+  %negwait = icmp slt i64 %rawwait, 0
+  %waitns = select i1 %negwait, i64 0, i64 %rawwait
+  %waitsec = sdiv i64 %waitns, 1000000000
+  %waitnsrem = srem i64 %waitns, 1000000000
+  %waitusec = sdiv i64 %waitnsrem, 1000
+  %tv = alloca { i64, i64 }, align 8
+  %tv_sec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 0
+  %tv_usec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 1
+  store i64 %waitsec, ptr %tv_sec, align 8
+  store i64 %waitusec, ptr %tv_usec, align 8
+  %selrc1 = call i32 @select(i32 %nfds, ptr %fdset, ptr null, ptr null, ptr %tv)
+  br label %afterselect
+
+notimeoutpath:
+  %selrc2 = call i32 @select(i32 %nfds, ptr %fdset, ptr null, ptr null, ptr null)
+  br label %afterselect
+
+afterselect:
+  br i1 %haslistener, label %checkisset, label %checktimerfire
+
+checkisset:
+  %fddiv8b = sdiv i32 %listenfd, 8
+  %fdmod8b = srem i32 %listenfd, 8
+  %fddiv8b_64 = sext i32 %fddiv8b to i64
+  %byteptrb = getelementptr i8, ptr %fdset, i64 %fddiv8b_64
+  %bitpos8b = trunc i32 %fdmod8b to i8
+  %bitmaskb = shl i8 1, %bitpos8b
+  %bytevalb = load i8, ptr %byteptrb, align 1
+  %maskedb = and i8 %bytevalb, %bitmaskb
+  %ready = icmp ne i8 %maskedb, 0
+  br i1 %ready, label %dodispatch, label %checktimerfire
+
+dodispatch:
+  %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
+  call void %dfp()
+  br label %checktimerfire
+
+checktimerfire:
+  br i1 %havetimer, label %checkdue, label %outerloop
+
+checkdue:
+  %targetfire2 = load i64, ptr %bestfire, align 8
+  %now2 = call i64 @__kml_monotonic_ns()
+  %isdue = icmp sge i64 %now2, %targetfire2
+  br i1 %isdue, label %dofire, label %outerloop
+
+dofire:
+  %data2 = load ptr, ptr @__kml_timer_data, align 8
+  %fireidx = load i64, ptr %besti, align 8
+  %fslot = getelementptr { i64, i64, i64, ptr }, ptr %data2, i64 %fireidx
+  %fclosure_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 3
+  %fclosure = load ptr, ptr %fclosure_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+
+  %data3 = load ptr, ptr @__kml_timer_data, align 8
+  %fslot2 = getelementptr { i64, i64, i64, ptr }, ptr %data3, i64 %fireidx
+  %finterval_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 2
+  %finterval = load i64, ptr %finterval_p, align 8
+  %stillrepeating = icmp sgt i64 %finterval, 0
+  br i1 %stillrepeating, label %reschedule, label %maybemarkdone
+
+reschedule:
+  %now3 = call i64 @__kml_monotonic_ns()
+  %intervalns = mul i64 %finterval, 1000000
+  %newfire = add i64 %now3, %intervalns
   %ffire_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 1
   store i64 %newfire, ptr %ffire_p, align 8
   br label %outerloop

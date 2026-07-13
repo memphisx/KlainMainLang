@@ -514,7 +514,7 @@ What CLI tools and containerized services actually need day-to-day (argument par
 
 | API | Status | Notes |
 |---|---|---|
-| `http.listen(port, handler)` | ❌ | Not started — scoped but not implemented. See [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md) for the full design, prerequisites, and open decisions. |
+| `http.listen(port, handler)` | ✅ | Single-threaded, one connection accepted-and-handled-fully-synchronously at a time — V1 scope, exactly as designed in [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md). GET-only request line (method + path); no headers, query-string, or request body yet; no `.close()`. Built on the generalized `select()`-based event loop ([`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md) Part 1), so a running server's listening socket and any pending `setTimeout`/`setInterval` timers share one wait instead of two competing loops. See `docs/adr/ADR-00048.md`. |
 
 ---
 
@@ -586,9 +586,9 @@ Anything big enough to need a design pass before implementation gets scoped out 
 - **[Memory Management](docs/tdd/TDD-00001.md)** — no garbage collector yet. Stage 1 of the manual-release plan (`Memory.free(x)`) is done (`ADR-00030`); the GC path and Stages 2/3 of the manual plan are still design-only.
 - **[Timers](docs/tdd/TDD-00002.md)** — done (`ADR-00031`); kept as a TDD since the design writeup (why it *doesn't* need the general event loop) is still useful context.
 - **[Alternative fetch Backend](docs/tdd/TDD-00003.md)** — a Go helper instead of libcurl. Scoped, not started, low priority.
-- **[HTTP Server](docs/tdd/TDD-00004.md)** — the piece that unlocks this project's microservice direction. Scoped, not started.
+- **[HTTP Server](docs/tdd/TDD-00004.md)** — the piece that unlocks this project's microservice direction. V1 done (`ADR-00048`).
 - **[Unannotated Parameter Typing](docs/tdd/TDD-00005.md)** — clean rejection at call sites is done (`ADR-00042`); the two further options (call-site inference, real `any` semantics) are scoped, not started.
-- **[Event Loop](docs/tdd/TDD-00006.md)** — this project's single biggest structural gap. Scoped, not started.
+- **[Event Loop](docs/tdd/TDD-00006.md)** — this project's single biggest structural gap. Part 1 (the `select()`-based wait loop) done (`ADR-00048`); Part 2 (real `async`/`await` suspension) still scoped, not started.
 - **[Object Literal Field Coercion](docs/tdd/TDD-00007.md)** — object literals never coerce field values against a declared type, only their own literal-inferred type; silent bit-reinterpretation corruption, not a clean rejection. Scoped, not started.
 - **[External Conformance Suites (TypeScript + Test262) as a Test-Coverage Benchmark](docs/tdd/TDD-00008.md)** — the TypeScript suite tests the type checker's output, not runtime behavior, so it can't be used directly; Test262 turned out to be execution-based and often directly portable instead, at least for spec-mandated value semantics this compiler intends to match. First real ports (shift-operator categories) landed alongside `docs/adr/ADR-00047.md`'s shift-semantics fix. Tracked in [`docs/testing/CONFORMANCE-COVERAGE.md`](docs/testing/CONFORMANCE-COVERAGE.md). Partially Implemented.
 
@@ -644,8 +644,8 @@ Node-specific runtime globals with no browser equivalent — see the [Node.js AP
 |---|---|---|---|
 | File System (fs) | 10 | 12 | ~83% |
 | Process / CLI I/O | 11 | 11 | 100% |
-| HTTP Server | 0 | 1 | 0% |
-| **Node.js total** | **21** | **24** | **~88%** |
+| HTTP Server | 1 | 1 | 100% |
+| **Node.js total** | **22** | **24** | **~92%** |
 
 ---
 
@@ -665,9 +665,9 @@ Pulled from [Known Limitations & Bugs](#known-limitations--bugs) above: the ones
 
 The three biggest cross-cutting gaps — each affects multiple features rather than being one self-contained item, and each already has its own detailed writeup above:
 
-1. **Memory management — no garbage collector** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md)). Decision already made (Boehm GC: swap `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc`, link `-lgc`); not started. A non-issue for today's short-lived CLI programs, but a hard blocker for anything long-running — concretely, for the HTTP server below.
-2. **Event loop** (see [`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md) — written up in full, splitting it into two differently-sized pieces). Needed for real non-blocking `fetch`, `Promise.all`/`.race`, and concurrent HTTP request handling. Currently 0% — the single biggest structural gap relative to this project's stated microservice direction, and Part 2 (real async suspension) specifically is the single largest piece of unbuilt work this project has documented anywhere. Timers (`setTimeout`/`setInterval`) turned out *not* to need this — see [`docs/tdd/TDD-00002.md`](docs/tdd/TDD-00002.md) — and are already done as a result.
-3. **HTTP server** (see [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md)). Scoped in detail, not started. The concrete feature that unlocks the "microservice" half of this project's long-term direction; its own prerequisites table already flags memory management as the thing worth landing first.
+1. **Memory management — no garbage collector** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md)). Decision already made (Boehm GC: swap `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc`, link `-lgc`); not started. A non-issue for today's short-lived CLI programs, but a real limitation now that the HTTP server below actually exists — every request currently leaks its `Request` object and any allocations the handler itself makes, fine for a demo, not for a genuinely long-running service.
+2. **Event loop — Part 1 done, Part 2 not started** (see [`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md)). Part 1 (a `select()`-based wait loop merging with the existing timer queue) shipped alongside the HTTP server below — see `docs/adr/ADR-00048.md`. Part 2 (real `async`/`await` suspension, needed for concurrent request handling, non-blocking `fetch`, and `Promise.all`/`.race`) is still fully synchronous under the hood and remains the single largest piece of unbuilt work this project has documented anywhere — three candidate mechanisms sketched in the TDD, no decision made, a prototyping spike recommended before picking one.
+3. **HTTP server** (see [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md)) — V1 done (`docs/adr/ADR-00048.md`): single-threaded, one connection handled synchronously at a time, GET-only request line. Concurrent request handling needs Event Loop Part 2 above; headers/query-string/request-body parsing and graceful shutdown are tracked, separable V2 follow-ups.
 
 Prefer picking up work that advances REST API interaction / file I/O / process interaction over other equal-effort items — these three items are exactly that category, alongside the `fs`/`process` work already done.
 

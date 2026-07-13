@@ -1,11 +1,11 @@
 package llvm
 
 import (
+	"KlainMainLang/ast"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"KlainMainLang/ast"
 )
 
 // Value is an LLVM value reference: either a register (%t0) or an inline constant (42).
@@ -29,123 +29,126 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals   strings.Builder // global declarations (string constants, printf decl, …)
-	functions strings.Builder // emitted user-defined function bodies
-	allocas   strings.Builder // alloca instructions for the current function
-	body      strings.Builder // body instructions for the current function
-	scopes    []scope
-	regCtr    int
-	labelCtr  int
-	strConsts  map[string]string // Go string value → @.s<n> name
-	strIdx     int
-	linkLibs   map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	usedPrintf  bool
-	usedDprintf bool
-	usedMalloc  bool
-	usedCalloc  bool
-	usedRealloc bool
-	usedMemmove bool
-	funcs          map[string]FuncSig         // registered function signatures
-	interfaces     map[string]Type            // named interface and type alias registry
-	enums          map[string]map[string]Value // enum name → member name → constant value
-	currentRetType Type               // return type of the function being emitted
-	blockDone      bool               // true after a terminator (ret/br) in the current block
-	closureCtr     int                // monotonically increasing counter for unique closure names
-	usedStrlen     bool
-	usedMemcpy     bool
-	usedStrcmp     bool
-	usedSprintf    bool
-	usedStrstr     bool
-	usedStrncmp          bool
-	usedStringTrim       bool
-	usedStringTrimStart  bool
-	usedStringTrimEnd    bool
-	usedStringToUpper    bool
-	usedStringToLower    bool
-	usedStringReplace    bool
-	usedStringReplaceAll bool
-	usedStringSplit         bool
-	usedAtoll               bool
-	usedJSONStringifyNum    bool
-	usedJSONStringifyStr    bool
-	usedJSONParseStr        bool
-	usedJSONFindValue       bool
-	usedJSONParseFieldStr   bool
-	usedAnyEq               bool
-	usedClockGettime        bool
-	usedDateNow             bool
-	usedPerformanceNow      bool
-	usedDateDecompose       bool
-	usedSscanf              bool
-	usedDaysFromCivil       bool
-	usedDateParse           bool
-	usedDateCompose         bool
-	usedDateNameTables      bool
-	usedFetch               bool
-	usedFopen               bool
-	usedFclose              bool
-	usedFwrite              bool
-	usedFsThrow             bool
-	usedFsReadFile          bool
-	usedFsWriteFile         bool
-	usedFsAppendFile        bool
-	usedFsExists            bool
-	usedFsUnlink            bool
-	usedBase64Encode        bool
-	usedBase64Decode        bool
-	usedHexDigits           bool
-	usedHexDecodeTable      bool
-	usedEncodeURIComponent  bool
-	usedEncodeURI           bool
-	usedDecodeURIComponent  bool
-	usedDecodeURI           bool
-	usedCryptoRandomBytes   bool
-	usedCryptoFillNumArray  bool
-	usedCryptoRandomUUID    bool
-	usedReadLineSync        bool
-	usedExecFileSync        bool
-	usedProcessCwd          bool
-	usedProcessChdir        bool
-	usedGetpid              bool
-	usedProcessKill         bool
-	usedErrnoAccessor       bool
-	usedStrerror            bool
-	usedFsMkdir             bool
-	usedFsRmdir             bool
-	usedFsRename            bool
-	usedFsReaddir           bool
-	usedConsoleGroupDepth   bool
-	usedConsoleTimer        bool
-	usedConsoleCountMap     bool
-	usedMapFree             bool
-	usedClosureFree         bool
-	usedTimers              bool
-	usedMathFuncs           bool
-	usedArc4Random          bool
-	usedStrtoll             bool
-	usedStrtod              bool
-	usedGroupMapHelpers     bool
-	usedQsort               bool
-	usedSortCmpI64          bool
-	usedSortCmpF64          bool
-	usedSortCmpStr          bool
-	usedSortTrampolineI64   bool
-	usedSortTrampolineF64   bool
-	usedSortTrampolineStr   bool
-	usedSortClosGlobal      bool
-	usedMapStrHelpers       bool
-	usedMapNumHelpers       bool
-	usedExceptionHelpers    bool
-	breakStack    []string // end labels for enclosing loops / switch
-	continueStack []string // continue-target labels for enclosing loops
+	globals                strings.Builder // global declarations (string constants, printf decl, …)
+	functions              strings.Builder // emitted user-defined function bodies
+	allocas                strings.Builder // alloca instructions for the current function
+	body                   strings.Builder // body instructions for the current function
+	scopes                 []scope
+	regCtr                 int
+	labelCtr               int
+	strConsts              map[string]string // Go string value → @.s<n> name
+	strIdx                 int
+	linkLibs               map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	usedPrintf             bool
+	usedDprintf            bool
+	usedMalloc             bool
+	usedCalloc             bool
+	usedRealloc            bool
+	usedMemmove            bool
+	funcs                  map[string]FuncSig          // registered function signatures
+	interfaces             map[string]Type             // named interface and type alias registry
+	enums                  map[string]map[string]Value // enum name → member name → constant value
+	currentRetType         Type                        // return type of the function being emitted
+	blockDone              bool                        // true after a terminator (ret/br) in the current block
+	closureCtr             int                         // monotonically increasing counter for unique closure names
+	usedStrlen             bool
+	usedMemcpy             bool
+	usedMemset             bool
+	usedStrcmp             bool
+	usedSprintf            bool
+	usedStrstr             bool
+	usedStrncmp            bool
+	usedStringTrim         bool
+	usedStringTrimStart    bool
+	usedStringTrimEnd      bool
+	usedStringToUpper      bool
+	usedStringToLower      bool
+	usedStringReplace      bool
+	usedStringReplaceAll   bool
+	usedStringSplit        bool
+	usedAtoll              bool
+	usedJSONStringifyNum   bool
+	usedJSONStringifyStr   bool
+	usedJSONParseStr       bool
+	usedJSONFindValue      bool
+	usedJSONParseFieldStr  bool
+	usedAnyEq              bool
+	usedClockGettime       bool
+	usedDateNow            bool
+	usedPerformanceNow     bool
+	usedDateDecompose      bool
+	usedSscanf             bool
+	usedDaysFromCivil      bool
+	usedDateParse          bool
+	usedDateCompose        bool
+	usedDateNameTables     bool
+	usedFetch              bool
+	usedFopen              bool
+	usedFclose             bool
+	usedFwrite             bool
+	usedFsThrow            bool
+	usedFsReadFile         bool
+	usedFsWriteFile        bool
+	usedFsAppendFile       bool
+	usedFsExists           bool
+	usedFsUnlink           bool
+	usedBase64Encode       bool
+	usedBase64Decode       bool
+	usedHexDigits          bool
+	usedHexDecodeTable     bool
+	usedEncodeURIComponent bool
+	usedEncodeURI          bool
+	usedDecodeURIComponent bool
+	usedDecodeURI          bool
+	usedCryptoRandomBytes  bool
+	usedCryptoFillNumArray bool
+	usedCryptoRandomUUID   bool
+	usedReadLineSync       bool
+	usedExecFileSync       bool
+	usedProcessCwd         bool
+	usedProcessChdir       bool
+	usedGetpid             bool
+	usedProcessKill        bool
+	usedErrnoAccessor      bool
+	usedStrerror           bool
+	usedFsMkdir            bool
+	usedFsRmdir            bool
+	usedFsRename           bool
+	usedFsReaddir          bool
+	usedConsoleGroupDepth  bool
+	usedConsoleTimer       bool
+	usedConsoleCountMap    bool
+	usedMapFree            bool
+	usedClosureFree        bool
+	usedTimers             bool
+	usedHTTP               bool
+	usedHTTPThrow          bool
+	usedMathFuncs          bool
+	usedArc4Random         bool
+	usedStrtoll            bool
+	usedStrtod             bool
+	usedGroupMapHelpers    bool
+	usedQsort              bool
+	usedSortCmpI64         bool
+	usedSortCmpF64         bool
+	usedSortCmpStr         bool
+	usedSortTrampolineI64  bool
+	usedSortTrampolineF64  bool
+	usedSortTrampolineStr  bool
+	usedSortClosGlobal     bool
+	usedMapStrHelpers      bool
+	usedMapNumHelpers      bool
+	usedExceptionHelpers   bool
+	breakStack             []string // end labels for enclosing loops / switch
+	continueStack          []string // continue-target labels for enclosing loops
 	// pendingLabel is set by a LabeledStatement just before emitting its body;
 	// the next loop to start consumes it via pushPendingLabel. Non-loop bodies
 	// leave it unconsumed, so the label is simply never registered.
 	pendingLabel    string
 	namedLabelStack []namedLabel // labeled break/continue targets, innermost last
-	usedFree bool
-	usedExit   bool
-	usedGetenv bool
+	usedFree        bool
+	usedExit        bool
+	usedGetenv      bool
 	// Async function state (reset per function, like currentRetType).
 	isAsync          bool
 	coroHdl          string // register holding the malloc'd promise slot

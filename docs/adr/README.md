@@ -82,3 +82,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00045](ADR-00045.md) | Reject const reassignment with a Symbol.IsConst check in emitAssign | |
 | [00046](ADR-00046.md) | Fix (FuncType)[] parser gap and enable calling closures stored in arrays/object fields | |
 | [00047](ADR-00047.md) | Fix bitwise shift operators to use JS's 32-bit semantics | |
+| [00048](ADR-00048.md) | select()-based event loop (TDD-00006 Part 1) and a minimal HTTP server (TDD-00004 V1) | Implements TDD-00004, TDD-00006 |

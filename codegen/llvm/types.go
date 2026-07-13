@@ -1,8 +1,8 @@
 package llvm
 
 import (
-	"strings"
 	"KlainMainLang/ast"
+	"strings"
 )
 
 // Field is one field in an object type.
@@ -17,7 +17,7 @@ type Type struct {
 	Signed   bool
 	Float    bool
 	IsArray  bool
-	ElemType *Type  // non-nil when IsArray
+	ElemType *Type // non-nil when IsArray
 	IsObject bool
 	Fields   []Field // non-nil when IsObject
 	// Function/closure type: all closures are passed as ptr.
@@ -30,10 +30,10 @@ type Type struct {
 	IsGroupMap bool
 	// IsMap / IsSet mark Map<K,V> and Set<T> heap objects.
 	// MapKey holds the key type; MapVal holds the value type (nil for Set).
-	IsMap   bool
-	IsSet   bool
-	MapKey  *Type
-	MapVal  *Type
+	IsMap  bool
+	IsSet  bool
+	MapKey *Type
+	MapVal *Type
 	// IsNull marks the null/undefined literal sentinel type (ptr null at IR level).
 	// IsUndefined distinguishes `undefined` from `null` for string rendering.
 	// Nullable marks T | null / T | undefined type annotations.
@@ -107,6 +107,16 @@ func ResponseType() Type {
 	})
 	ty.IsResponse = true
 	return ty
+}
+
+// RequestType returns http.listen()'s Request object type: a plain heap
+// object with method/path fields (readable via the ordinary object
+// field-access path — no dispatched methods in V1). See emit_http.go.
+func RequestType() Type {
+	return ObjectType([]Field{
+		{Name: "method", Ty: TypePtr},
+		{Name: "path", Ty: TypePtr},
+	})
 }
 
 // FuncType returns a closure/function type. All closures are represented as ptr
@@ -219,18 +229,18 @@ func (t Type) PrintfFmt() string {
 }
 
 var (
-	TypeVoid   = Type{IR: "void"}
-	TypeBool   = Type{IR: "i1", Signed: false}
-	TypeI8     = Type{IR: "i8", Signed: true}
-	TypeI16    = Type{IR: "i16", Signed: true}
-	TypeI32    = Type{IR: "i32", Signed: true}
-	TypeI64    = Type{IR: "i64", Signed: true}
-	TypeU8     = Type{IR: "i8", Signed: false}
-	TypeU16    = Type{IR: "i16", Signed: false}
-	TypeU32    = Type{IR: "i32", Signed: false}
-	TypeU64    = Type{IR: "i64", Signed: false}
-	TypeF32    = Type{IR: "float", Float: true}
-	TypeF64    = Type{IR: "double", Float: true}
+	TypeVoid      = Type{IR: "void"}
+	TypeBool      = Type{IR: "i1", Signed: false}
+	TypeI8        = Type{IR: "i8", Signed: true}
+	TypeI16       = Type{IR: "i16", Signed: true}
+	TypeI32       = Type{IR: "i32", Signed: true}
+	TypeI64       = Type{IR: "i64", Signed: true}
+	TypeU8        = Type{IR: "i8", Signed: false}
+	TypeU16       = Type{IR: "i16", Signed: false}
+	TypeU32       = Type{IR: "i32", Signed: false}
+	TypeU64       = Type{IR: "i64", Signed: false}
+	TypeF32       = Type{IR: "float", Float: true}
+	TypeF64       = Type{IR: "double", Float: true}
 	TypePtr       = Type{IR: "ptr"}
 	TypeNull      = Type{IR: "ptr", IsNull: true}
 	TypeUndefined = Type{IR: "ptr", IsNull: true, IsUndefined: true}
@@ -247,7 +257,7 @@ type FuncSig struct {
 	ParamTypes []Type
 	ParamNames []string // for error messages only (e.g. an inferred-parameter type mismatch)
 	RetType    Type
-	HasRest    bool          // last param is a rest (variadic) parameter
+	HasRest    bool             // last param is a rest (variadic) parameter
 	Defaults   []ast.Expression // per-param default expression; nil entry means no default
 }
 
@@ -278,6 +288,8 @@ func ResolveTypeName(name string) Type {
 		return TypeDate
 	case "Response":
 		return ResponseType()
+	case "Request":
+		return RequestType()
 	case "int8":
 		return TypeI8
 	case "int16":

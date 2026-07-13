@@ -1,10 +1,10 @@
 package llvm
 
 import (
+	"KlainMainLang/ast"
 	"fmt"
 	"runtime"
 	"strings"
-	"KlainMainLang/ast"
 )
 
 // Call dispatch (emitCall router) and all built-in call implementations:
@@ -139,6 +139,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Memory" && mem.Property == "free" {
 			return e.emitMemoryFree(ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http" && mem.Property == "listen" {
+			return e.emitHTTPListen(ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" {
 			switch mem.Property {
@@ -890,8 +893,8 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	cond = e.toBool(cond)
 
-	failL  := e.freshLabel("assert.fail")
-	passL  := e.freshLabel("assert.pass")
+	failL := e.freshLabel("assert.fail")
+	passL := e.freshLabel("assert.pass")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, passL, failL))
 
 	e.emitLabel(failL)
@@ -913,7 +916,6 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitLabel(passL)
 	return Value{Ty: TypeVoid}, nil
 }
-
 
 // emitJSONStringifyArray builds a JSON array "[e1,e2,...]" from any element
 // type by looping at runtime and delegating each element to
@@ -1468,7 +1470,6 @@ func (e *Emitter) emitMathClamp(args []ast.Expression, pos ast.Pos) (Value, erro
 	return Value{Ref: r, Ty: vVal.Ty}, nil
 }
 
-
 func (e *Emitter) emitNumberStaticCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	switch property {
 	case "isInteger":
@@ -1679,4 +1680,3 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr null)", r, strVal.Ref))
 	return Value{Ref: r, Ty: TypeF64}, nil
 }
-
