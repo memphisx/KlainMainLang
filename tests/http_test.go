@@ -251,6 +251,41 @@ http.listen(8950, (req: Request): Res => {
 	_, _ = slowConn.Write([]byte("GET /slow HTTP/1.1\r\n\r\n"))
 }
 
+// Regression test for a real stack-overflow crash (SIGSEGV, "connection
+// reset by peer" from the client's point of view): __kml_event_loop_run's
+// main select()-based dispatch loop had several `alloca`s (fd_sets, scratch
+// counters) placed in loop-body blocks instead of its entry block, so every
+// single select() wake — i.e. every request — leaked a fixed chunk of stack
+// that was never freed until the process exited (which, for an http.listen
+// server, is never). A manual repro with Apache Bench reliably crashed a
+// pre-fix binary after ~20,000-21,000 requests (matching the ~16KB/iteration
+// leak rate against an 8MB default stack); this test sends enough requests
+// to cross that threshold and confirms the server is still alive and
+// answering correctly afterward.
+func TestE2EHTTPListenManyRequestsDoesNotLeakStack(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8951, (req: Request): Res => {
+  return { status: 200, body: "ok" }
+})
+`
+	startHTTPServer(t, src, 8951)
+
+	client := &http.Client{}
+	const n = 30000
+	for i := 1; i <= n; i++ {
+		resp, err := client.Get("http://127.0.0.1:8951/")
+		if err != nil {
+			t.Fatalf("GET #%d (of %d): %v", i, n, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != "ok" {
+			t.Fatalf("GET #%d: body got %q, want %q", i, string(body), "ok")
+		}
+	}
+}
+
 // newDelayedUpstreamServer is an httptest server standing in for a real
 // upstream API: /slow sleeps before responding, everything else responds
 // immediately — used to prove ADR-00050's actual point, that two

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- fetch / Response ---
@@ -35,6 +36,10 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/large", func(w http.ResponseWriter, r *http.Request) {
 		body := strings.Repeat("x", 40000)
 		fmt.Fprint(w, body)
+	})
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, "done")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -149,6 +154,26 @@ async function main2(): Promise<void> {
 main2()
 `
 	assertOutput(t, src, "caught")
+}
+
+// Regression test for a real stack-overflow crash (SIGSEGV, exit 139): a
+// top-level `await fetch(...)` — outside any http.listen connection fiber,
+// so __kml_await_fetch takes its "busyspin" path (curl_multi_perform in a
+// tight loop, no delay) rather than yielding via swapcontext — used to hit
+// an `alloca` placed inside the loop body instead of the function's entry
+// block. Each spin iteration allocated fresh, never-freed stack space, so
+// any fetch slow enough to need more than a couple of iterations overflowed
+// the stack. A near-instant local response never iterated the loop enough
+// to show it, which is why this needed a deliberately slow handler (300ms)
+// rather than the other fetch tests' near-instant ones.
+func TestE2EFetchTopLevelBusySpinDoesNotOverflowStack(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+const r = await fetch("%s/slow")
+console.log(r.status)
+console.log(r.text())
+`, srv.URL)
+	assertOutput(t, src, "200\ndone")
 }
 
 func TestE2EFetchWrongArgCountRejected(t *testing.T) {

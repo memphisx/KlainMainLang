@@ -2438,10 +2438,12 @@ havemulti:
 define void @__kml_curl_drain_messages() {
 entry:
   %multi = load ptr, ptr @__kml_curl_multi, align 8
+  %msgsleft = alloca i32, align 4
+  %privslot = alloca ptr, align 8
+  %statusslot = alloca i64, align 8
   br label %drainloop
 
 drainloop:
-  %msgsleft = alloca i32, align 4
   %msg = call ptr @curl_multi_info_read(ptr %multi, ptr %msgsleft)
   %isnull = icmp eq ptr %msg, null
   br i1 %isnull, label %done, label %havemsg
@@ -2459,11 +2461,9 @@ handledone:
   %result32 = load i32, ptr %result_p, align 4
   %result64 = sext i32 %result32 to i64
 
-  %privslot = alloca ptr, align 8
   call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easyh, i32 1048597, ptr %privslot)
   %pending = load ptr, ptr %privslot, align 8
 
-  %statusslot = alloca i64, align 8
   store i64 0, ptr %statusslot, align 8
   call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easyh, i32 2097154, ptr %statusslot)
   %status = load i64, ptr %statusslot, align 8
@@ -2488,6 +2488,7 @@ done:
 	e.emitGlobal(`
 define { i64, ptr } @__kml_await_fetch(ptr %pending) {
 entry:
+  %runningp = alloca i32, align 4
   br label %checkloop
 
 checkloop:
@@ -2514,7 +2515,6 @@ doyield:
 
 busyspin:
   %multi = load ptr, ptr @__kml_curl_multi, align 8
-  %runningp = alloca i32, align 4
   call i32 @curl_multi_perform(ptr %multi, ptr %runningp)
   call void @__kml_curl_drain_messages()
   br label %checkloop
@@ -4290,16 +4290,17 @@ done:
 	e.emitGlobal(`
 define void @__kml_timer_drain() {
 entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  %ts = alloca { i64, i64 }, align 8
   br label %outerloop
 
 outerloop:
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
-  %besti = alloca i64, align 8
   store i64 -1, ptr %besti, align 8
-  %bestfire = alloca i64, align 8
   store i64 0, ptr %bestfire, align 8
-  %scani = alloca i64, align 8
   store i64 0, ptr %scani, align 8
   br label %scanloop
 
@@ -4352,7 +4353,6 @@ dosleep:
   %waitns = sub i64 %targetfire, %now1
   %waitsec = sdiv i64 %waitns, 1000000000
   %waitnsrem = srem i64 %waitns, 1000000000
-  %ts = alloca { i64, i64 }, align 8
   %ts_sec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
   %ts_nsec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 1
   store i64 %waitsec, ptr %ts_sec, align 8
@@ -4785,16 +4785,25 @@ entry:
 	e.emitGlobal(`
 define void @__kml_event_loop_run() {
 entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  %fdset = alloca [128 x i8], align 8
+  %wfdset = alloca [128 x i8], align 8
+  %efdset = alloca [128 x i8], align 8
+  %maxfd = alloca i32, align 4
+  %fsi = alloca i64, align 8
+  %curlmaxfd = alloca i32, align 4
+  %tv = alloca { i64, i64 }, align 8
+  %runningp2 = alloca i32, align 4
+  %rsi = alloca i64, align 8
   br label %outerloop
 
 outerloop:
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
-  %besti = alloca i64, align 8
   store i64 -1, ptr %besti, align 8
-  %bestfire = alloca i64, align 8
   store i64 0, ptr %bestfire, align 8
-  %scani = alloca i64, align 8
   store i64 0, ptr %scani, align 8
   br label %scanloop
 
@@ -4841,13 +4850,9 @@ scandone:
   br i1 %anywork, label %dowork, label %alldone
 
 dowork:
-  %fdset = alloca [128 x i8], align 8
   call ptr @memset(ptr %fdset, i32 0, i64 128)
-  %wfdset = alloca [128 x i8], align 8
   call ptr @memset(ptr %wfdset, i32 0, i64 128)
-  %efdset = alloca [128 x i8], align 8
   call ptr @memset(ptr %efdset, i32 0, i64 128)
-  %maxfd = alloca i32, align 4
   store i32 -1, ptr %maxfd, align 4
   br i1 %haslistener, label %setfd, label %skipsetfd
 
@@ -4869,7 +4874,6 @@ skipsetfd:
   ; tracking the overall highest fd for select()'s nfds argument.
   %clen = load i64, ptr @__kml_conn_len, align 8
   %cdata = load ptr, ptr @__kml_conn_data, align 8
-  %fsi = alloca i64, align 8
   store i64 0, ptr %fsi, align 8
   br label %fsetloop
 
@@ -4919,7 +4923,6 @@ fsetdone:
   br i1 %hascurl, label %mergecurlfds, label %skipmergecurlfds
 
 mergecurlfds:
-  %curlmaxfd = alloca i32, align 4
   store i32 -1, ptr %curlmaxfd, align 4
   call i32 @curl_multi_fdset(ptr %curlmulti, ptr %fdset, ptr %wfdset, ptr %efdset, ptr %curlmaxfd)
   %curlmaxfdv = load i32, ptr %curlmaxfd, align 4
@@ -4946,7 +4949,6 @@ timeoutpath:
   %waitsec = sdiv i64 %waitns, 1000000000
   %waitnsrem = srem i64 %waitns, 1000000000
   %waitusec = sdiv i64 %waitnsrem, 1000
-  %tv = alloca { i64, i64 }, align 8
   %tv_sec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 0
   %tv_usec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 1
   store i64 %waitsec, ptr %tv_sec, align 8
@@ -4962,7 +4964,6 @@ afterselect:
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:
-  %runningp2 = alloca i32, align 4
   call i32 @curl_multi_perform(ptr %curlmulti, ptr %runningp2)
   call void @__kml_curl_drain_messages()
   br label %checklistener
@@ -4999,7 +5000,6 @@ scanconn:
   ; select() just populated (a fiber that finished sets its own entry's fd
   ; to -1 right before returning, so "still >= 0 after resume" means it
   ; genuinely yielded again and should keep being watched next iteration).
-  %rsi = alloca i64, align 8
   store i64 0, ptr %rsi, align 8
   br label %rscanloop
 
