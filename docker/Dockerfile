@@ -22,7 +22,7 @@ COPY jsdoc/ jsdoc/
 COPY lexer/ lexer/
 COPY parser/ parser/
 COPY resolver/ resolver/
-RUN go build -o /out/KlainMainLang .
+RUN go build -o /out/klainmain .
 
 # ---- Stage 2: statically compile docker/hello.ts with that compiler ----
 # Alpine/musl, not glibc: musl's static linking has none of glibc's
@@ -30,10 +30,10 @@ RUN go build -o /out/KlainMainLang .
 # anyway (so libcurl's own static-linking requirements don't come up here).
 FROM alpine:3.21 AS program-builder
 RUN apk add --no-cache clang musl-dev
-COPY --from=compiler-builder /out/KlainMainLang /usr/local/bin/KlainMainLang
+COPY --from=compiler-builder /out/klainmain /usr/local/bin/klainmain
 COPY docker/hello.ts /src/hello.ts
 WORKDIR /src
-RUN KlainMainLang --static -o /src/hello hello.ts
+RUN klainmain --static -o /src/hello hello.ts
 
 # ---- Stage 3: nothing but the static binary ----
 FROM scratch

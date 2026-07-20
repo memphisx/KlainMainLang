@@ -22,15 +22,15 @@ COPY jsdoc/ jsdoc/
 COPY lexer/ lexer/
 COPY parser/ parser/
 COPY resolver/ resolver/
-RUN go build -o /out/KlainMainLang .
+RUN go build -o /out/klainmain .
 
 # ---- dynamic-fetch: baseline sanity check ----
 FROM alpine:3.21 AS dynamic-fetch-builder
 RUN apk add --no-cache clang curl-dev
-COPY --from=compiler-builder /out/KlainMainLang /usr/local/bin/KlainMainLang
+COPY --from=compiler-builder /out/klainmain /usr/local/bin/klainmain
 COPY docker/fetch-demo.ts /src/fetch-demo.ts
 WORKDIR /src
-RUN KlainMainLang -o /src/fetch-demo fetch-demo.ts
+RUN klainmain -o /src/fetch-demo fetch-demo.ts
 
 FROM alpine:3.21 AS dynamic-fetch-demo
 RUN apk add --no-cache libcurl ca-certificates
@@ -38,7 +38,7 @@ COPY --from=dynamic-fetch-builder /src/fetch-demo /fetch-demo
 ENTRYPOINT ["/fetch-demo"]
 
 # ---- static-fetch: the real test ----
-# A plain `KlainMainLang --static` (a single clang invocation for both
+# A plain `klainmain --static` (a single clang invocation for both
 # compiling and linking) does NOT work once libcurl's full dependency chain
 # is involved: clang's linker can't process the LTO-format bitcode inside
 # Alpine's libpsl-static/brotli-static archives ("plugin needed to handle
@@ -57,10 +57,10 @@ RUN apk add --no-cache clang musl-dev gcc curl-static curl-dev \
     libpsl-static libpsl-dev zstd-static zstd-dev \
     brotli-static brotli-dev libunistring-static libunistring-dev \
     c-ares-dev ca-certificates
-COPY --from=compiler-builder /out/KlainMainLang /usr/local/bin/KlainMainLang
+COPY --from=compiler-builder /out/klainmain /usr/local/bin/klainmain
 COPY docker/fetch-demo.ts /src/fetch-demo.ts
 WORKDIR /src
-RUN KlainMainLang --emit-llvm fetch-demo.ts > fetch-demo.ll && \
+RUN klainmain --emit-llvm fetch-demo.ts > fetch-demo.ll && \
     clang -O2 -c fetch-demo.ll -o fetch-demo.o && \
     gcc -O2 fetch-demo.o -o /src/fetch-demo -static \
         -lcurl -lnghttp2 -lidn2 -lssl -lcrypto -lzstd \

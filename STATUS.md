@@ -118,7 +118,7 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `unknown` | ✅ (same Staged V1 scope as `any` — see above) | |
 | `symbol` | ❌ | |
 | `bigint` | ❌ | |
-| Generics on user functions/interfaces | ❌ | Only built-in generics (`T[]`, `Promise<T>`) |
+| Generics on user functions/interfaces | ❌ | Only built-in generics (`T[]`, `Promise<T>`, `Array<T>`, `Map<K,V>`, `Set<T>`) — staged design for user-defined generics in [`docs/tdd/TDD-00010.md`](docs/tdd/TDD-00010.md). A real bug found while researching that TDD — `Array<T>`/`Map<K,V>`/`Set<T>` used as a plain type annotation (not `new X<T>()`) silently defaulting to `i64` — is fixed; see `docs/adr/ADR-00058.md`. |
 
 ### String Methods
 
@@ -165,7 +165,7 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `.pop()` | ✅ |
 | `.shift()` | ✅ |
 | `.unshift(...items)` | ✅ |
-| `.splice(start, delete?, ...items)` | ✅ |
+| `.splice(start, delete?, ...items)` | ✅ (`delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS — an over-large `delete` used to read past the backing allocation and corrupt the array's own length to negative, a real memory-safety bug, not just a wrong-answer one; `...items` insertion wasn't implemented at all despite the row already claiming it. Both fixed together. See `docs/adr/ADR-00056.md`.) |
 | `.slice(start, end?)` | ✅ |
 | `.at(i)` | ✅ |
 | `.indexOf(item)` | ✅ |
@@ -183,16 +183,16 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `.reverse()` | ✅ |
 | `.fill(val, start?, end?)` | ✅ |
 | `.concat(...arrays)` | ✅ |
-| `.flat(depth?)` | ❌ |
-| `.flatMap(fn)` | ❌ |
-| `.findLast(fn)` / `.findLastIndex(fn)` | ❌ |
-| `.toSorted()` / `.toReversed()` / `.toSpliced()` | ❌ |
-| `.with(i, val)` | ❌ |
-| `.keys()` / `.values()` / `.entries()` | ❌ |
-| `.copyWithin()` | ❌ |
+| `.flat(depth?)` | ❌ (blocked on nested-array support — `number[][]`-style literals aren't reliably representable yet: `[[1,2],[3,4]]` fails to compile with "array literal must be used in a variable declaration" for the nested literal. See `docs/adr/ADR-00057.md` for where this was found.) |
+| `.flatMap(fn)` | ❌ (same nested-array blocker as `.flat()`) |
+| `.findLast(fn)` / `.findLastIndex(fn)` | ✅ (genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's own reverse call order, observable via side effects. See `docs/adr/ADR-00057.md`.) |
+| `.toSorted()` / `.toReversed()` / `.toSpliced()` | ✅ (non-mutating counterparts of `.sort()`/`.reverse()`/`.splice()` — sort/reverse a fresh copy, or build a fresh spliced result, leaving the original array untouched. See `docs/adr/ADR-00057.md`.) |
+| `.with(i, val)` | ✅ (returns a fresh copy with the element at `i` replaced; negative indices count from the end like `.at()`; an index still out of range after normalization throws a catchable Error, matching real JS's `RangeError`. See `docs/adr/ADR-00057.md`.) |
+| `.keys()` / `.values()` / `.entries()` | ✅ (all return materialized arrays, not lazy iterators — this compiler has no general iterator protocol, the same convention `Map`/`Set`'s own `.keys()`/`.values()`/`Map.entries()` already use. `.entries()` returns `{index: number, value: T}[]`, not a real `[index, value]` tuple, for the same no-tuple-type reason `Map.entries()`/`Object.entries()` already document. See `docs/adr/ADR-00057.md`.) |
+| `.copyWithin(target, start?, end?)` | ✅ (in-place, overlap-safe via `memmove` — copying `arr.copyWithin(0, 3)` on a 5-element array is a self-overlapping copy, the same overlap concern `.shift()`/`.unshift()`/`.splice()`'s own tail shifts already handle. See `docs/adr/ADR-00057.md`.) |
 | `Array.isArray(x)` | ✅ |
-| `Array.from(iterable)` | ❌ |
-| `Array.of(...items)` | ❌ |
+| `Array.from(iterable)` | ❌ (needs a general iterable protocol this compiler doesn't have — only arrays and the specially-cased `Map`/`Set`/for-in-over-object-keys are directly iterable today, not a user-extensible interface) |
+| `Array.of(...items)` | ✅ (unlike an array literal `[...]`, which can currently only appear in variable-declaration position, `Array.of(...)` is a plain call expression usable anywhere — element type inferred from the first argument, same rule `[...]` literals already use. See `docs/adr/ADR-00057.md`.) |
 
 ### Number / Math
 
@@ -245,9 +245,10 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `Object.values(obj)` | ✅ |
 | `Object.entries(obj)` | ✅ |
 | `Object.groupBy(arr, fn)` | ✅ |
-| `Object.assign()` | ❌ |
+| `Object.assign(target, ...src)` | ✅ (mutates and returns `target`; every field a source contributes must already exist on `target`'s own struct type — this compiler's objects are fixed-shape heap structs, not a dynamic property bag, so a source field target's type doesn't have is a clean compile error, not silently dropped or grafted on. See `docs/adr/ADR-00054.md`.) |
 | `Object.create()` | ❌ |
-| `Object.freeze()` / `.seal()` | ❌ |
+| `Object.freeze(obj)` | ✅ (real runtime enforcement, not a no-op — tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter, not just through the variable that called `freeze`. See `docs/adr/ADR-00055.md`.) |
+| `Object.seal(obj)` | ✅ (a genuine no-op, not a scope-narrowed approximation of one — seal's real guarantee is "no new/deleted fields," which this compiler's fixed-shape objects already can't do at all, frozen or not, so there's nothing further to enforce. See `docs/adr/ADR-00055.md`.) |
 | `Object.hasOwn()` / `.hasOwnProperty()` | ❌ |
 | `Object.fromEntries()` | ❌ |
 | Object spread `{ ...obj, key: val }` | ✅ |
@@ -255,12 +256,13 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | Shorthand property `{ x }` | ✅ |
 | `Map.set/get/has/delete/keys/values` | ✅ |
 | `Map.size` | ✅ |
-| `Map.entries()` / `.forEach()` | ❌ |
-| `Map.clear()` | ❌ |
+| `Map.entries()` | ✅ (`{key: K, value: V}[]`, not a real `[key, value]` tuple — this compiler has no tuple type. Same convention `Object.entries()` already uses; iterate with `for (const e of m.entries())` then read `e.key`/`e.value`. See `docs/adr/ADR-00053.md`.) |
+| `Map.forEach()` | ✅ (calls `fn(value, key)`, matching real JS's argument order — the 3rd `map` argument real JS also passes is dropped, the same simplification `Array.forEach`'s `(elem, index)` already makes. See `docs/adr/ADR-00053.md`.) |
+| `Map.clear()` | ✅ (resets size to 0 in place — doesn't free/reallocate the backing arrays, matching this compiler's "leak by design" memory model; the map is immediately reusable afterward. See `docs/adr/ADR-00053.md`.) |
 | `Set.add/has/delete/values` | ✅ |
 | `Set.size` | ✅ |
-| `Set.forEach()` | ❌ |
-| `Set.clear()` | ❌ |
+| `Set.forEach()` | ✅ (calls `fn(element[, element])` — real JS's own `Set.prototype.forEach` passes the value twice, `(value, value, set)`, for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter. See `docs/adr/ADR-00053.md`.) |
+| `Set.clear()` | ✅ (same in-place reset as `Map.clear()`. See `docs/adr/ADR-00053.md`.) |
 | `WeakMap` / `WeakSet` / `WeakRef` | ❌ |
 
 ### JSON
@@ -526,25 +528,20 @@ These are the most natural next steps — each is self-contained and commonly us
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| `Map.clear()` / `Set.clear()` | Low | Free + reinit |
-| `Map.entries()` | Low | Pair of parallel arrays |
-| `Set.forEach()` / `Map.forEach()` | Low | Loop over values/entries |
-| `Object.assign(target, ...src)` | Medium | Field-by-field copy |
 | Computed property keys `{ [k]: v }` | Medium | Dynamic key; needs hash map backing |
 
 ### Medium priority / medium complexity
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| `Array.flat(depth?)` | Medium | Recursive flatten with dynamic realloc |
-| `Array.flatMap(fn)` | Medium | `map` then `flat(1)` |
-| `Array.from(iterable)` | Medium | Only the array-like overload is needed initially |
-| `Array.keys()` / `.values()` / `.entries()` | Medium | Index iterators |
+| `Array.flat(depth?)` | Medium | Blocked on nested-array support, not just the flatten logic itself — `number[][]`-style literals aren't reliably representable yet (found while scoping this: `[[1,2],[3,4]]` fails to compile). Real work is fixing that first. |
+| `Array.flatMap(fn)` | Medium | `map` then `flat(1)` — same nested-array blocker |
+| `Array.from(iterable)` | Medium | Needs a general iterable protocol — only arrays and the specially-cased `Map`/`Set` are directly iterable today, not a user-extensible interface. Only the array-like overload is needed initially. |
 | `String.prototype.matchAll()` | Medium-High | Needs regex engine or `strstr` loop |
 | `Number.prototype.toString(radix)` | Medium | `sprintf` + radix conversion |
 | `instanceof` | Medium | Needs type tag stored on heap objects |
 | `in` operator | Medium | Object key presence check |
-| User-defined generic functions | High | Full generic instantiation pass |
+| User-defined generic functions | High | Full generic instantiation pass — or type erasure via the existing `any`/`unknown` machinery, a real, cheaper alternative not yet decided between. Staged design in [`docs/tdd/TDD-00010.md`](docs/tdd/TDD-00010.md). |
 | Intersection types `A & B` | Medium | Merge struct fields |
 | Tuple types `[number, string]` | Medium | Fixed-size struct |
 
@@ -552,8 +549,8 @@ These are the most natural next steps — each is self-contained and commonly us
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| `class` (methods, constructors) | High | VTable or static dispatch |
-| `class` inheritance / `extends` | High | Needs virtual dispatch or monomorphization |
+| `class` (methods, constructors) | High | VTable or static dispatch. Staged design scoped in [`docs/tdd/TDD-00009.md`](docs/tdd/TDD-00009.md): methods+constructors (no inheritance) first, since it's cheap to build on top of this compiler's existing object/closure machinery and closes real gaps on its own (`instanceof`, a genuine `for...of`/iterable protocol, `Date`'s named-variable-only method-call restriction) without needing inheritance at all. |
+| `class` inheritance / `extends` | High | Needs virtual dispatch or monomorphization. Last stage in [`docs/tdd/TDD-00009.md`](docs/tdd/TDD-00009.md) — the only piece of the class design that actually needs new runtime dispatch machinery; the earlier stages stand on their own. |
 | ~~`import` / `export` (multi-file)~~ | ~~High~~ | ✅ done (named imports/exports, whole-program compile) — see `docs/adr/ADR-00022.md` and the Modules section above. Still open: real per-file module scope (mangled names), `export default`/namespace imports/re-exports, and side-effecting imported files |
 | Nested function declarations | Medium | Separate from closures; mostly a scoping change |
 | `RegExp` | High | Needs PCRE or similar C library |
@@ -563,6 +560,7 @@ These are the most natural next steps — each is self-contained and commonly us
 | Generator functions / iterators | High | Suspend/resume; requires coroutine machinery |
 | Decorators | Very high | Requires metadata reflection |
 | `Proxy` / `Reflect` | Very high | Dynamic property intercept; likely impractical |
+| Opt-in dynamic property add/delete on objects | Speculative, not scoped | This compiler's objects are fixed-shape heap structs (an interface's field list is fixed at compile time) — real JS lets any object gain/lose properties at runtime, which `Object.freeze`/`.seal` (`docs/adr/ADR-00055.md`) currently don't need to enforce since it's already structurally impossible for *any* object, frozen or not. Noted here as a real gap from 100% JS compatibility, not because it's next in line — surfaced while scoping freeze/seal, not researched or designed. If picked up, likely shaped as an explicit compiler flag/opt-in (a genuine dynamic property bag is a different, heavier object representation than the fixed-struct one everything else here assumes) rather than the default. |
 
 ---
 
@@ -588,9 +586,11 @@ Anything big enough to need a design pass before implementation gets scoped out 
 - **[Alternative fetch Backend](docs/tdd/TDD-00003.md)** — a Go helper instead of libcurl. Scoped, not started, low priority.
 - **[HTTP Server](docs/tdd/TDD-00004.md)** — the piece that unlocks this project's microservice direction. V1 done (`ADR-00048`).
 - **[Unannotated Parameter Typing](docs/tdd/TDD-00005.md)** — clean rejection at call sites is done (`ADR-00042`); the two further options (call-site inference, real `any` semantics) are scoped, not started.
-- **[Event Loop](docs/tdd/TDD-00006.md)** — this project's single biggest structural gap, now substantially closed. Part 1 (the `select()`-based wait loop) done (`ADR-00048`); Part 2's fiber-based scheduler is real, shipped for HTTP connection concurrency (`ADR-00049`) and for real non-blocking `await fetch(...)` (`ADR-00050`, via libcurl's multi-interface merged into the same loop). Remaining gap: `Promise.all`/`.race`/`.allSettled` (awaiting multiple promises concurrently from a single call site) aren't implemented yet — today's concurrency comes from multiple independent connection handlers each awaiting their own fetch, not from one handler awaiting several at once.
+- **[Event Loop](docs/tdd/TDD-00006.md)** — this project's single biggest structural gap, now substantially closed. Part 1 (the `select()`-based wait loop) done (`ADR-00048`); Part 2's fiber-based scheduler is real, shipped for HTTP connection concurrency (`ADR-00049`) and for real non-blocking `await fetch(...)` (`ADR-00050`, via libcurl's multi-interface merged into the same loop). Two real bugs turned up after shipping and are both fixed: `ucontext_t`'s size/layout was hardcoded from a macOS-only probe and silently corrupted memory on Linux (`ADR-00051`, found via CI failing on `ubuntu-latest` but never locally); and several hand-written IR functions had `alloca`s placed inside loop bodies rather than their entry block, leaking a fixed chunk of stack on every iteration — the worst instance crashed a running `http.listen` server after ~20,000 requests (`ADR-00052`, found while chasing down an unrelated flaky example). Remaining gap: `Promise.all`/`.race`/`.allSettled` (awaiting multiple promises concurrently from a single call site) aren't implemented yet — today's concurrency comes from multiple independent connection handlers each awaiting their own fetch, not from one handler awaiting several at once.
 - **[Object Literal Field Coercion](docs/tdd/TDD-00007.md)** — object literals never coerce field values against a declared type, only their own literal-inferred type; silent bit-reinterpretation corruption, not a clean rejection. Scoped, not started.
 - **[External Conformance Suites (TypeScript + Test262) as a Test-Coverage Benchmark](docs/tdd/TDD-00008.md)** — the TypeScript suite tests the type checker's output, not runtime behavior, so it can't be used directly; Test262 turned out to be execution-based and often directly portable instead, at least for spec-mandated value semantics this compiler intends to match. First real ports (shift-operator categories) landed alongside `docs/adr/ADR-00047.md`'s shift-semantics fix. Tracked in [`docs/testing/CONFORMANCE-COVERAGE.md`](docs/testing/CONFORMANCE-COVERAGE.md). Partially Implemented.
+- **[Classes / OOP](docs/tdd/TDD-00009.md)** — staged: methods + constructors with no inheritance (cheap, reuses this compiler's existing object/closure machinery, closes `instanceof`/a real iterable protocol/`Date`'s method-call restriction on its own), then runtime type tags, then inheritance/vtables last (the only stage that actually needs new dynamic-dispatch machinery). Scoped, not started.
+- **[Generics on user-defined functions/interfaces](docs/tdd/TDD-00010.md)** — two real options, not yet decided between: monomorphization (generalizing the same approach the built-in generics — `Array<T>`, `Map<K,V>`, `Promise<T>` — already use by hand) vs. type erasure via the existing `any`/`unknown` boxed-value machinery (cheaper to build, arguably more faithful to how real TypeScript's own generics behave, but hits the same "no arithmetic on a dynamic value" ceiling `any`/`unknown` already has). Also surfaced a real, unrelated bug in the existing built-in generics along the way — see `STATUS.md`'s Known Limitations. Scoped, not started.
 
 ---
 
@@ -607,16 +607,16 @@ Anything big enough to need a design pass before implementation gets scoped out 
 | Type primitives | 8 | 14 | ~57% |
 | Async / Promise | 3 | 9 | ~33% |
 | String methods | 26 | 33 | ~79% |
-| Array methods | 22 | 34 | ~65% |
+| Array methods | 37 | 40 | ~93% |
 | Number / Math | 32 | 35 | ~91% |
-| Object & collections | 15 | 24 | ~63% |
+| Object & collections | 23 | 24 | ~96% |
 | JSON | 9 | 9 | 100% |
 | console | 11 | 12 | ~92% |
 | Global functions & constants | 13 | 17 | ~76% |
 | Type system features | 15 | 23 | ~65% |
 | Classes / OOP | 0 | 8 | 0% |
 | Modules | 4 | 11 | ~36% |
-| **Core language total** | **213** | **289** | **~74%** |
+| **Core language total** | **236** | **295** | **~80%** |
 
 ### Web Platform APIs
 
@@ -660,42 +660,49 @@ Pulled from [Known Limitations & Bugs](#known-limitations--bugs) above: the ones
 | Fix | Effort | Notes |
 |---|---|---|
 | `fetch`/`fs` bodies containing embedded null bytes silently truncate | Deferred | Root cause is this compiler having no `ArrayBuffer`/TypedArrays yet (0% implemented) — not fixable in isolation; tracked as a consequence of that gap in the Web Platform & Node.js APIs backlog below |
+| Object literal field values aren't coerced against a declared type, silently corrupting mismatched int/float fields | Medium | Scoped, not started — see [`docs/tdd/TDD-00007.md`](docs/tdd/TDD-00007.md). Same failure shape `docs/adr/ADR-00042.md` already fixed for unannotated function-call arguments; this is the same fix applied to a different, never-audited code path (object-literal construction) |
 
 ### Structural priorities
 
-The three biggest cross-cutting gaps — each affects multiple features rather than being one self-contained item, and each already has its own detailed writeup above:
+The three biggest cross-cutting gaps — each affects multiple features rather than being one self-contained item, and each already has its own detailed writeup above. Listed in the order they were originally scoped, not current priority — see item 1's note on why memory management now reads as the most pressing of the three:
 
-1. **Memory management — no garbage collector** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md)). Decision already made (Boehm GC: swap `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc`, link `-lgc`); not started. A non-issue for today's short-lived CLI programs, but a real limitation now that the HTTP server below actually exists — every request currently leaks its `Request` object and any allocations the handler itself makes, fine for a demo, not for a genuinely long-running service.
-2. **Event loop — Part 1 and Part 2 both have real, shipped slices now** (see [`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md)). Part 1 (a `select()`-based wait loop merging with the existing timer queue) shipped alongside the HTTP server below — see `docs/adr/ADR-00048.md`. Part 2 (real suspension) was scoped around three candidate mechanisms; a direct prototyping spike ruled out LLVM coroutine intrinsics (confirmed incompatible with this compiler's `setjmp`/`longjmp` exception model — a `try`/`catch` spanning a suspend point segfaults) and confirmed hand-rolled fibers (`ucontext.h`, no custom assembly needed) work correctly instead. `docs/adr/ADR-00049.md` used that mechanism to make `http.listen` handle connections concurrently; `docs/adr/ADR-00050.md` extended it to make `await fetch(...)` genuinely non-blocking (libcurl's multi-interface, merged into the same event loop) — confirmed directly, not just by unit test, that two concurrent connections each awaiting a different-latency upstream complete independently rather than serializing. Still missing: `Promise.all`/`.race`/`.allSettled` (concurrently awaiting several promises from one call site, rather than relying on separate connection handlers each awaiting their own).
+1. **Memory management — no garbage collector** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md)). Decision already made (Boehm GC: swap `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc`, link `-lgc`); not started. A non-issue for today's short-lived CLI programs, but a real limitation now that the HTTP server below actually exists — every request currently leaks its `Request` object and any allocations the handler itself makes, fine for a demo, not for a genuinely long-running service. This has arguably become the more urgent of the three items below now: the stack-safety bugs that used to crash a running `http.listen` server outright after ~20,000 requests are fixed (`docs/adr/ADR-00052.md`), and a 100,000-request load test confirmed the server survives that scale without issue — but every one of those requests still permanently grows the heap, so a long enough run (hours/days of uptime, not a fixed request count) hits a wall from the other direction instead. Worth treating as the next structural item to pick up, not just one of three roughly-equal ones.
+2. **Event loop — Part 1 and Part 2 both have real, shipped slices now** (see [`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md)). Part 1 (a `select()`-based wait loop merging with the existing timer queue) shipped alongside the HTTP server below — see `docs/adr/ADR-00048.md`. Part 2 (real suspension) was scoped around three candidate mechanisms; a direct prototyping spike ruled out LLVM coroutine intrinsics (confirmed incompatible with this compiler's `setjmp`/`longjmp` exception model — a `try`/`catch` spanning a suspend point segfaults) and confirmed hand-rolled fibers (`ucontext.h`, no custom assembly needed) work correctly instead. `docs/adr/ADR-00049.md` used that mechanism to make `http.listen` handle connections concurrently; `docs/adr/ADR-00050.md` extended it to make `await fetch(...)` genuinely non-blocking (libcurl's multi-interface, merged into the same event loop) — confirmed directly, not just by unit test, that two concurrent connections each awaiting a different-latency upstream complete independently rather than serializing. Two stability bugs surfaced after those shipped, both fixed and directly reproduced before/after: `docs/adr/ADR-00051.md` (the fiber mechanism's `ucontext_t` buffer size was hardcoded from a macOS-only probe, corrupting memory on Linux) and `docs/adr/ADR-00052.md` (several hand-written IR loops leaked a fixed amount of stack on every iteration — the main `http.listen` dispatch loop crashed a running server after ~20,000 requests under load-testing with Apache Bench). Still missing: `Promise.all`/`.race`/`.allSettled` (concurrently awaiting several promises from one call site, rather than relying on separate connection handlers each awaiting their own).
 3. **HTTP server** (see [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md)) — V1 done (`docs/adr/ADR-00048.md`), concurrent connection handling done on top of it (`docs/adr/ADR-00049.md`, using Event Loop Part 2's fiber mechanism), GET-only request line. Remaining: headers/query-string/request-body parsing and graceful shutdown, tracked as separable V2 follow-ups.
 
 Prefer picking up work that advances REST API interaction / file I/O / process interaction over other equal-effort items — these three items are exactly that category, alongside the `fs`/`process` work already done.
+
+### Later — a differentiator feature, deliberately deprioritized
+
+**IndexedDB-compatible storage API** (see [`docs/tdd/TDD-00011.md`](docs/tdd/TDD-00011.md)) — not started, and deliberately scoped to be picked up only after the structural priorities above (and most of the rest of this roadmap) are further along. The idea: expose the real `indexedDB` global/`IDBDatabase`/`IDBObjectStore` API shape (not a bespoke KV API, and not a SQL surface) so hand-written app code using that idiom — and, longer-term, existing npm `IndexedDB` client packages like Dexie.js/localForage, though that specifically also needs `class` support (`TDD-00009`) first — has somewhere to run. Four backend directions compared (lowest to highest effort/risk): a hand-rolled RESP client proxying to an external Redis (no new dependency at all — just one missing socket primitive, outbound `connect()`); an embedded SQLite (same C-linking pattern `fetch`/libcurl already uses); a from-scratch native storage engine (zero dependency, matching this project's usual ethos, but real crash-safety engineering); or embedding a mature pure-Go engine (BBolt recommended over BadgerDB/Pebble/BuntDB/go-memdb) via a `cgo`-built static archive linked into the compiled output — gated on a direct prototype confirming the Go runtime's own background threading/signal handling coexists safely with this compiler's fiber scheduler, not yet verified either way.
 
 ### Web Platform & Node.js APIs backlog
 
 Not-yet-implemented items from the [Web Platform APIs](#web-platform-apis) and [Node.js APIs](#nodejs-apis) sections above, grouped by effort. Within a tier, the same tiebreaker applies — prefer whichever unlocks REST API interaction / file I/O / process interaction.
 
-**Low effort (C stdlib or a simple wrapper, no event loop needed):**
+The event loop existing now (`docs/tdd/TDD-00006.md`) changes the shape of this backlog: several items below used to be tiered partly by "needs the event loop to exist first," which is no longer a real blocker for any of them. Tiers are re-evaluated against what actually remains, not against that now-satisfied prerequisite.
+
+**Low effort (C stdlib or a simple wrapper):**
 - `TextEncoder` / `TextDecoder` — UTF-8 is the only required encoding; hand-roll or use `iconv`
 - `URL` / `URLSearchParams` — C string parsing, no external dependency needed
 - `performance.mark(name)` / `performance.measure(...)` — named timing marks on top of the existing `performance.now()`
 - `structuredClone(obj)` — recursive deep-copy of heap objects
+- `setImmediate` / `clearImmediate` — moved down from Medium: its stated prerequisite ("Timers' core mechanism") shipped as part of the unified event loop (`docs/adr/ADR-00048.md`); this is now a small, unblocked follow-on, not waiting on anything
 
-**Medium effort (new dependency, subsystem, or an event-loop prerequisite):**
+**Medium effort (new dependency or subsystem):**
 - `ArrayBuffer` + TypedArrays — new IR representation (a contiguous memory block with typed views); also the prerequisite for actually fixing the `fetch`/`fs` null-byte-truncation bug above, and for `crypto.subtle` below
 - `fetch`'s `Request`/`Headers` objects, custom method/headers/request body — extends the existing GET-only V1
 - `CompressionStream` / `DecompressionStream` — link `zlib`
-- `EventTarget` / `Event` / `CustomEvent` — generic event bus; prerequisite for `AbortController` and others
-- `AbortController` / `AbortSignal` — cancellation token; straightforward once `EventTarget` exists
-- `setImmediate` / `clearImmediate` — a separate, smaller follow-on once Timers' core mechanism exists
-- `WebSocket` — TCP + HTTP upgrade; hand-roll on POSIX sockets or use `libwebsockets`
+- `EventTarget` / `Event` / `CustomEvent` — generic event bus; prerequisite for a general-purpose `AbortController` and others
+- `AbortController` / `AbortSignal` — a *fetch-specific* cancellation token is now lower effort than the general version implies: the multi-interface machinery `docs/adr/ADR-00050.md` built already tracks each in-flight transfer via its own easy handle, and `curl_multi_remove_handle` + `curl_easy_cleanup` is a real, already-available way to cancel one mid-transfer. A general, `EventTarget`-based signal usable by other consumers (timers, streams) is still gated on `EventTarget` existing first.
+- `WebSocket` — TCP + HTTP upgrade. Originally scoped as hand-rolled POSIX sockets or `libwebsockets` before any event loop existed; now that `http.listen`'s per-connection fiber scheduler is real and load-tested at 100,000 requests (`docs/adr/ADR-00049.md`, `docs/adr/ADR-00052.md`), a `WebSocket` server could plausibly reuse the same accept-a-connection-onto-its-own-fiber pattern instead of building new concurrency machinery from scratch — likely meaningfully less effort than originally scoped, though the HTTP Upgrade handshake and frame parsing/masking are still real, new work.
+- `EventSource` (SSE) — moved down from High: both stated prerequisites (`fetch`'s non-blocking transfers, the event loop) now exist (`docs/adr/ADR-00050.md`). The remaining work is narrower than originally scoped but still real: SSE needs incremental delivery as chunks arrive (firing a callback per event), whereas today's `fetch` buffers the whole body until the transfer completes — the write callback and await-path both need a genuinely different, streaming-shaped design, not a copy of `fetch`'s buffer-then-return one.
 
-**High effort (needs the event loop + a concurrency model, or a new external dependency):**
-- `Worker` (Web Workers) — threads via `pthreads`; requires `SharedArrayBuffer` + `Atomics` too
+**High effort (needs a concurrency model beyond the event loop's single-fiber cooperative scheduling, or a new external dependency):**
+- `Worker` (Web Workers) — threads via `pthreads`; requires `SharedArrayBuffer` + `Atomics` too. The shipped event loop is cooperative, one-fiber-at-a-time concurrency (`docs/tdd/TDD-00006.md`), not preemptive multi-threading — a genuinely separate mechanism, not an extension of it.
 - `crypto.subtle` (digest, encrypt, sign) — delegate to OpenSSL or Apple CommonCrypto
 - `ReadableStream` / `WritableStream` / `TransformStream` — full streaming pipeline; complex backpressure model
-- `EventSource` (SSE) — depends on `fetch` + the event loop
 
 ---
 
-*Last updated: 2026-07-12. Update this file whenever a new feature is added or removed.*
+*Last updated: 2026-07-14. Update this file whenever a new feature is added or removed.*

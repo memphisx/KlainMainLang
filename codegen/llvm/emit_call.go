@@ -60,7 +60,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" {
-			if mem.Property == "isArray" {
+			switch mem.Property {
+			case "isArray":
 				if len(ex.Args) != 1 {
 					return Value{}, fmt.Errorf("%d:%d: Array.isArray takes exactly 1 argument", ex.GetPos().Line, ex.GetPos().Col)
 				}
@@ -69,6 +70,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					return Value{Ref: "true", Ty: TypeBool}, nil
 				}
 				return Value{Ref: "false", Ty: TypeBool}, nil
+			case "of":
+				return e.emitArrayOf(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" {
@@ -81,6 +84,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitObjectValues(ex.Args, ex.GetPos())
 			case "entries":
 				return e.emitObjectEntries(ex.Args, ex.GetPos())
+			case "assign":
+				return e.emitObjectAssign(ex.Args, ex.GetPos())
+			case "freeze":
+				return e.emitObjectFreeze(ex.Args, ex.GetPos())
+			case "seal":
+				return e.emitObjectSeal(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" {
@@ -221,8 +230,29 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "findIndex" {
 			return e.emitArrayFindIndex(mem, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "findLast" {
+			return e.emitArrayFindLast(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "findLastIndex" {
+			return e.emitArrayFindLastIndex(mem, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "reverse" {
 			return e.emitArrayReverse(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toReversed" {
+			return e.emitArrayToReversed(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toSorted" {
+			return e.emitArrayToSorted(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toSpliced" {
+			return e.emitArrayToSpliced(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "with" {
+			return e.emitArrayWith(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "copyWithin" {
+			return e.emitArrayCopyWithin(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "fill" {
 			return e.emitArrayFill(mem, ex.Args, ex.GetPos())
@@ -308,17 +338,40 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "sort" {
 			return e.emitArraySort(mem, ex.Args, ex.GetPos())
 		}
+		// Map<K,V> and Set<T> method dispatch. Checked before the generic
+		// "forEach" name below, since both Array and Map/Set have a
+		// forEach — the array codegen must not run for a Map/Set receiver.
+		// Not limited to a plain named variable (`m.get(...)`) — a cheap
+		// inferExprType pre-check (no side effects, same idiom "slice"/
+		// "indexOf"/"at" already use to disambiguate array vs. string) also
+		// catches a Map/Set-typed field access, array index, or call result
+		// (e.g. `c.scores.get(...)` where `scores: Map<K,V>`), which
+		// resolveMapOrSetForCall then evaluates for real.
+		if objTy := e.inferExprType(mem.Object); objTy.IsMap || objTy.IsSet {
+			ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if ty.IsMap {
+				return e.emitMapCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
+			}
+			return e.emitSetCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "forEach" {
 			return e.emitArrayForEach(mem, ex.Args, ex.GetPos())
 		}
-		// Map<K,V> and Set<T> method dispatch.
-		if id, ok := mem.Object.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsMap {
-				return e.emitMapCall(sym, mem.Property, ex.Args, ex.GetPos())
-			}
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsSet {
-				return e.emitSetCall(sym, mem.Property, ex.Args, ex.GetPos())
-			}
+		// arr.keys()/.values()/.entries() — same names Map/Set already use
+		// above (handled there for Map/Set receivers), so guard on IsArray
+		// the same way "slice"/"indexOf"/"at" already disambiguate against
+		// their string-method namesakes.
+		if mem.Property == "keys" && e.inferExprType(mem.Object).IsArray {
+			return e.emitArrayKeys(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "values" && e.inferExprType(mem.Object).IsArray {
+			return e.emitArrayValues(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "entries" && e.inferExprType(mem.Object).IsArray {
+			return e.emitArrayEntries(mem, ex.Args, ex.GetPos())
 		}
 		// Calling a function-typed object field: obj.callback(...), none of
 		// the hardcoded built-in method names above matched, so treat mem as

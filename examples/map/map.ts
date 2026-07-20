@@ -36,3 +36,27 @@ for (const k of scores.keys()) {
 }
 // alice
 // carol
+
+// ── .forEach(fn): calls fn(value, key) for each entry ───────────────────────
+scores.forEach((v, k) => {
+  console.log(k + " -> " + v);
+});
+// alice -> 95
+// carol -> 92
+
+// ── .entries(): {key, value}[] — this compiler has no tuple type, so a real ─
+// [key, value] pair isn't representable; iterate and read .key/.value ───────
+for (const e of lookup.entries()) {
+  console.log(e.key + " = " + e.value);
+}
+// 1 = 100
+// 2 = 200
+// 3 = 300
+
+// ── .clear(): removes every entry, size drops to 0, map stays usable ────────
+console.log(scores.size); // 2
+scores.clear();
+console.log(scores.size); // 0
+console.log(scores.has("alice")); // 0
+scores.set("dave", 100);
+console.log(scores.size); // 1

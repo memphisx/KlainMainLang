@@ -1,4 +1,4 @@
-BINARY   := KlainMainLang
+BINARY   := klainmain
 GO       := go
 CLANG    := clang
 EXAMPLES := $(shell find examples -name '*.ts' | sort)
@@ -8,7 +8,7 @@ EXAMPLES := $(shell find examples -name '*.ts' | sort)
 ## all: build the compiler
 all: build
 
-## build: compile KlainMainLang to ./KlainMainLang
+## build: compile KlainMainLang to ./klainmain
 build:
 	$(GO) build -o $(BINARY) .
 

@@ -38,3 +38,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00006](TDD-00006.md) | Event Loop | Partially Implemented (ADR-00048, ADR-00049, ADR-00050) |
 | [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Not Started |
 | [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented (ADR-00047) |
+| [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Not Started |
+| [00010](TDD-00010.md) | Generics on user-defined functions and interfaces | Not Started |
+| [00011](TDD-00011.md) | IndexedDB-Compatible Storage API (pluggable embedded/proxy backends) | Not Started |

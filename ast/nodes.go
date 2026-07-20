@@ -803,13 +803,16 @@ type AnnotField struct {
 
 // TypeAnnotation holds the resolved type name from TS syntax or JSDoc.
 // Fields is non-empty for object type annotations like { x: number; y: number }.
-// ElemType is non-nil for structural array types like { x: number }[].
+// ElemType is non-nil for structural array types like { x: number }[], and
+// also for the single type parameter of Promise<T>/Array<T>/Set<T>.
+// KeyType is non-nil only for Map<K,V> — its key type; ElemType holds the value type.
 // IsFuncType is true for function type annotations like (x: number) => number.
 type TypeAnnotation struct {
 	Name        string // e.g. "number", "string", "int32", "uint8", "float64"
 	Source      string // "ts" or "jsdoc"
 	Fields      []AnnotField
-	ElemType    *TypeAnnotation // non-nil for { ... }[] — the element type
+	ElemType    *TypeAnnotation // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
+	KeyType     *TypeAnnotation // non-nil only for Map<K,V> — the key type K
 	IsFuncType  bool
 	FuncParams  []TypeAnnotation // param types for function type annotations
 	FuncRetType *TypeAnnotation  // return type for function type annotations

@@ -115,6 +115,23 @@ for (const key in obj) {
 }
 `, "x")
 }
+
+// Regression test: for...in used to only recognize a plain named variable
+// (`for (const k in obj)`) — a field access like `c.point` fell through to
+// "for...in requires a named object variable" even though iterating it only
+// ever needs the field's static type (its field-name list), never its
+// runtime value. See ADR-00060.
+func TestE2EForInFieldAccess(t *testing.T) {
+	assertOutput(t, `
+interface Container {
+    point: { x: number; y: number }
+}
+const c: Container = { point: { x: 1, y: 2 } }
+for (const k in c.point) {
+    console.log(k)
+}
+`, "x\ny")
+}
 func TestE2ELabeledBreak(t *testing.T) {
 	assertOutput(t, `
 outer: for (let i = 0; i < 3; i++) {

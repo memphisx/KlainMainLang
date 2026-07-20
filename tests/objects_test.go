@@ -205,6 +205,165 @@ for (const e of entries) {
 `, "host=localhost\nport=8080")
 }
 
+func TestE2EObjectAssign(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number; label: string }
+const target: Point = { x: 1, y: 2, label: 'a' }
+const source: Point = { x: 10, y: 20, label: 'b' }
+const merged = Object.assign(target, source)
+console.log(merged.x)
+console.log(merged.y)
+console.log(merged.label)
+console.log(target.x)
+`, "10\n20\nb\n10")
+}
+
+func TestE2EObjectAssignPartialFields(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const target: Point = { x: 1, y: 2 }
+interface XOnly { x: number }
+const patch: XOnly = { x: 99 }
+Object.assign(target, patch)
+console.log(target.x)
+console.log(target.y)
+`, "99\n2")
+}
+
+func TestE2EObjectAssignMultipleSourcesLastWriteWins(t *testing.T) {
+	assertOutput(t, `
+interface Full { x: number; label: string }
+const target: Full = { x: 0, label: '' }
+const s1: Full = { x: 1, label: 'first' }
+const s2: Full = { x: 2, label: 'second' }
+Object.assign(target, s1, s2)
+console.log(target.x)
+console.log(target.label)
+`, "2\nsecond")
+}
+
+func TestE2EObjectFreezeBlocksFieldWrite(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+Object.freeze(p)
+try {
+    p.x = 99
+} catch (e) {
+    console.log('caught')
+}
+console.log(p.x)
+`, "caught\n1")
+}
+
+func TestE2EObjectFreezeBlocksCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+Object.freeze(p)
+try {
+    p.y += 5
+} catch (e) {
+    console.log('caught')
+}
+console.log(p.y)
+`, "caught\n2")
+}
+
+func TestE2EObjectFreezeTracksByValueThroughAlias(t *testing.T) {
+	// Object.freeze tracks the object's own heap pointer, not the variable
+	// that froze it — a mutation attempted through a function parameter
+	// aliasing the same object must be caught too.
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function mutate(pt: Point): void {
+    pt.x = 1000
+}
+const p: Point = { x: 1, y: 2 }
+Object.freeze(p)
+try {
+    mutate(p)
+} catch (e) {
+    console.log('caught')
+}
+console.log(p.x)
+`, "caught\n1")
+}
+
+func TestE2EObjectFreezeDoesNotAffectOtherObjects(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const frozen: Point = { x: 1, y: 2 }
+const plain: Point = { x: 5, y: 6 }
+Object.freeze(frozen)
+plain.x = 50
+console.log(plain.x)
+`, "50")
+}
+
+func TestE2EObjectFreezeReturnsSameObject(t *testing.T) {
+	// Object.freeze returns the exact same reference it was given (not a
+	// copy) — confirmed by reading a field through the returned value
+	// before freezing actually blocks anything further.
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 7, y: 8 }
+const same = Object.freeze(p)
+console.log(same.x)
+console.log(same === p)
+`, "7\n1")
+}
+
+func TestE2EObjectSealAllowsFieldMutation(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+Object.seal(p)
+p.x = 70
+console.log(p.x)
+`, "70")
+}
+
+func TestE2EObjectAssignOnFrozenTargetThrows(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const target: Point = { x: 1, y: 2 }
+const source: Point = { x: 5, y: 6 }
+Object.freeze(target)
+try {
+    Object.assign(target, source)
+} catch (e) {
+    console.log('caught')
+}
+console.log(target.x)
+`, "caught\n1")
+}
+
+func TestE2EObjectFreezeWithNoSourcesDoesNotThrow(t *testing.T) {
+	// Object.assign(frozenObj) with no sources never attempts a write, so
+	// it must not throw, matching real JS.
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+Object.freeze(p)
+const same = Object.assign(p)
+console.log(same.x)
+`, "1")
+}
+
+func TestE2EObjectAssignUnknownFieldRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface A { x: number }
+interface B { x: number; z: number }
+const a: A = { x: 1 }
+const b: B = { x: 2, z: 3 }
+Object.assign(a, b)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for Object.assign with a source field not present on target's type, got none")
+	}
+}
+
 // --- enum ---
 
 func TestE2EEnumNumeric(t *testing.T) {
@@ -293,4 +452,86 @@ const obj = { x: 1, y: 2, z: 3 }
 console.log(Object.keys(obj)[0])
 console.log(Object.keys(obj)[2])
 `, "x\nz")
+}
+
+// --- Array-typed interface/object fields (ADR-00061) ---
+
+func TestE2EArrayTypedFieldLengthAndIndex(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[] }
+const items: number[] = [10, 20, 30]
+const c: Container = { items: items }
+console.log(c.items.length)
+console.log(c.items[1])
+`, "3\n20")
+}
+
+func TestE2EArrayTypedFieldForOf(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[] }
+const items: number[] = [10, 20, 30]
+const c: Container = { items: items }
+for (const x of c.items) { console.log(x) }
+`, "10\n20\n30")
+}
+
+func TestE2EArrayTypedFieldSpread(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[]; label: string }
+const items: number[] = [10, 20, 30]
+const c: Container = { items: items, label: "orig" }
+const c2 = { ...c, label: "copy" }
+console.log(c2.items.length)
+console.log(c2.items[2])
+`, "3\n30")
+}
+
+func TestE2EArrayTypedFieldDestructuring(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[] }
+const items: number[] = [10, 20, 30]
+const c: Container = { items: items }
+const { items: destructured } = c
+console.log(destructured.length)
+destructured.push(40)
+console.log(destructured.length)
+console.log(c.items.length)
+`, "3\n4\n3")
+}
+
+func TestE2EArrayTypedFieldObjectAssign(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[]; label: string }
+const items: number[] = [1, 2]
+const newItems: number[] = [9, 8, 7, 6]
+const c: Container = { items: items, label: "x" }
+Object.assign(c, { items: newItems, label: "y" })
+console.log(c.items.length)
+`, "4")
+}
+
+func TestE2EArrayTypedFieldOptionalChaining(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[] }
+function printLen(cc: Container | null): void {
+  console.log(cc?.items.length)
+}
+const items: number[] = [1, 2, 3]
+const c: Container = { items: items }
+printLen(c)
+printLen(null)
+`, "3\n0")
+}
+
+func TestE2EArrayTypedFieldReturnedFromFunction(t *testing.T) {
+	assertOutput(t, `
+interface Container { items: number[] }
+function getItems(cc: Container): number[] {
+  return cc.items
+}
+const items: number[] = [1, 2, 3]
+const c: Container = { items: items }
+const returned = getItems(c)
+console.log(returned.length)
+`, "3")
 }

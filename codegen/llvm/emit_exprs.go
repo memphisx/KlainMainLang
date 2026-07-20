@@ -104,6 +104,28 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
+	if sym.Ty.IsArray {
+		// A named array variable is stored as two separate allocas
+		// (Ptr/LenPtr — see emitArrayVarDecl/emitFunctionDecl's parameter
+		// handling), not the single {ptr, i64} aggregate every other
+		// context that evaluates an array as a plain value expects (return
+		// values, .slice()/HOF results, struct field storage). A plain
+		// `load sym.Ty.IR from sym.Ptr` — the path every other (non-array)
+		// symbol takes below — would silently recover only the data
+		// pointer and drop the length entirely. Rebuild the aggregate here
+		// instead, once, so every caller of emitExpr on a bare array
+		// identifier gets the same correctly-shaped Value a HOF result or
+		// a return statement already would. See docs/adr/ADR-00061.md.
+		ptrReg := e.freshReg()
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+		return Value{Ref: r1, Ty: sym.Ty}, nil
+	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 	return Value{Ref: reg, Ty: sym.Ty}, nil
@@ -491,6 +513,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if !ok {
 			return Value{}, fmt.Errorf("no field '%s'", memEx.Property)
 		}
+		e.emitFrozenCheck(objVal.Ref)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		var rhs Value
@@ -501,7 +524,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		} else {
 			curReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, fieldTy.IR, gepReg, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 			cur := Value{Ref: curReg, Ty: fieldTy}
 			rhsVal, err := e.emitExpr(ex.Right)
 			if err != nil {
@@ -517,7 +540,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 		rhs = e.coerce(rhs, fieldTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, rhs.Ref, gepReg, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), rhs.Ref, gepReg, fieldTy.Align()))
 		return rhs, nil
 	}
 
@@ -783,8 +806,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			ex.GetPos().Line, ex.GetPos().Col, ex.Property, objVal.Ty.IR)
 	}
 
+	// Array-typed results need the same {ptr, i64} aggregate slot struct
+	// fields do (resultTy.IR alone is just "ptr", with nowhere for the
+	// length to go) — see StructFieldIR's doc comment and docs/adr/ADR-00061.md.
+	resIR := StructFieldIR(resultTy)
+
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resultTy.IR, resultTy.Align()))
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, resultTy.Align()))
 
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, objVal.Ref))
@@ -795,9 +823,20 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, noNullL))
 
-	// null branch: store zero value
+	// null branch: store zero value (a zero-length {null, 0} array for an
+	// array-typed result, matching real JS's own "nullish arrayField reads
+	// as an empty-shaped zero value" intuition — not a special case, just
+	// what an array's own zero value actually looks like).
 	e.emitLabel(nullL)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resultTy.IR, zeroRef(resultTy), resPtr, resultTy.Align()))
+	if resultTy.IsArray {
+		z0 := e.freshReg()
+		z1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
+		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, resultTy.Align()))
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(resultTy), resPtr, resultTy.Align()))
+	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	// non-null branch: perform the property access on objVal
@@ -815,16 +854,16 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 			gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-			loadReg, fieldTy.IR, gepReg, fieldTy.Align()))
+			loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 		propVal = Value{Ref: loadReg, Ty: fieldTy}
 	}
 	propVal = e.coerce(propVal, resultTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resultTy.IR, propVal.Ref, resPtr, resultTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, propVal.Ref, resPtr, resultTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resultTy.IR, resPtr, resultTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resPtr, resultTy.Align()))
 	return Value{Ref: result, Ty: resultTy}, nil
 }
 
@@ -987,6 +1026,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, mapPtr))
 				return Value{Ref: result, Ty: TypeI64}, nil
 			}
+		} else if objTy := e.inferExprType(ex.Object); objTy.IsMap || objTy.IsSet {
+			// Not a named variable — a field access, array index, or call
+			// result (e.g. `c.scores.size` where `scores: Map<K,V>`).
+			// Evaluating it already yields the map/set's heap pointer
+			// directly, no separate alloca indirection to unwrap first.
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			result := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, objVal.Ref))
+			return Value{Ref: result, Ty: TypeI64}, nil
 		}
 	}
 	if ex.Property == "length" {
@@ -1043,7 +1094,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	gepReg := e.freshReg()
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, fieldTy.IR, gepReg, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 	return Value{Ref: result, Ty: fieldTy}, nil
 }
 
@@ -1292,6 +1343,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
 					return TypeI64
 				}
+			} else if objTy := e.inferExprType(ex.Object); objTy.IsMap || objTy.IsSet {
+				// Not a named variable — e.g. c.scores.size where scores: Map<K,V>.
+				return TypeI64
 			}
 		}
 		if id, ok := ex.Object.(*ast.Identifier); ok {
@@ -1449,6 +1503,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Array" {
+				switch mem.Property {
+				case "of":
+					if len(ex.Args) > 0 {
+						return ArrayOf(e.inferExprType(ex.Args[0]))
+					}
+					return ArrayOf(TypeI64)
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Object" {
 				switch mem.Property {
 				case "groupBy":
@@ -1465,6 +1528,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "entries":
 					entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
 					return ArrayOf(entryTy)
+				case "assign", "freeze", "seal":
+					if len(ex.Args) >= 1 {
+						return e.inferExprType(ex.Args[0])
+					}
 				}
 			}
 		}
@@ -1486,6 +1553,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 						if sym.Ty.MapVal != nil {
 							return ArrayOf(*sym.Ty.MapVal)
 						}
+					case "entries":
+						keyTy, valTy := TypePtr, TypeI64
+						if sym.Ty.MapKey != nil {
+							keyTy = *sym.Ty.MapKey
+						}
+						if sym.Ty.MapVal != nil {
+							valTy = *sym.Ty.MapVal
+						}
+						entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+						return ArrayOf(entryTy)
 					case "set":
 						return sym.Ty
 					}
@@ -1534,22 +1611,33 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
-			case "indexOf", "charCodeAt", "findIndex", "codePointAt", "search", "localeCompare":
+			case "indexOf", "charCodeAt", "findIndex", "findLastIndex", "codePointAt", "search", "localeCompare":
 				return TypeI64
 			case "includes", "startsWith", "endsWith", "some", "every":
 				return TypeBool
 			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt":
 				return TypePtr
-			case "at":
+			case "at", "findLast":
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray && objTy.ElemType != nil {
 					return *objTy.ElemType
 				}
 				return TypePtr // string.at returns a char string
-			case "concat", "reverse", "fill":
+			case "concat", "reverse", "fill", "toReversed", "toSorted", "toSpliced", "with", "copyWithin", "values":
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray {
 					return objTy
+				}
+			case "keys":
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray {
+					return ArrayOf(TypeI64)
+				}
+			case "entries":
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray && objTy.ElemType != nil {
+					entryTy := ObjectType([]Field{{Name: "index", Ty: TypeI64}, {Name: "value", Ty: *objTy.ElemType}})
+					return ArrayOf(entryTy)
 				}
 			case "slice":
 				objTy := e.inferExprType(mem.Object)
@@ -1800,14 +1888,14 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				case "btoa", "atob", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI":
 					ty = TypePtr
 				default:
-					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate) {
+					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet) {
 						ty = sig.RetType
 					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 						// Calling a closure-typed variable (e.g. a const-bound
 						// arrow function) rather than a named declaration —
 						// same fallback as inferExprType's CallExpression case.
 						retTy := *sym.Ty.FuncRetType
-						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate {
+						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate || retTy.IsMap || retTy.IsSet {
 							ty = retTy
 						}
 					}

@@ -32,7 +32,7 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 		val = e.coerce(val, fieldTy)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, val.Ref, gepReg, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
 		return nil
 	}
 
@@ -51,7 +51,7 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 				srcGep := e.freshReg()
 				loadReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, f.Ty.IR, srcGep, f.Ty.Align()))
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
 				if err := storeField(f.Name, Value{Ref: loadReg, Ty: f.Ty}); err != nil {
 					return Value{}, err
 				}
@@ -161,6 +161,28 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
+		if fieldTy.IsArray {
+			// A destructured array-typed field needs a real, named array
+			// Symbol (two allocas — Ptr/LenPtr) like any other array local
+			// variable, not a single alloca of the {ptr,i64} storage slot
+			// itself — otherwise later uses of this binding (e.g. .push(),
+			// which needs LenPtr to write a resized length back to) would
+			// find no LenPtr at all. See docs/adr/ADR-00061.md.
+			aggReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, gepReg))
+			dataPtrReg := e.freshReg()
+			lenValReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, aggReg))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenValReg, aggReg))
+			ptrAlloca := e.freshReg()
+			lenAlloca := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
+			e.define(prop.Local, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: fieldTy})
+			continue
+		}
 		valReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
 		localPtr := e.freshReg()
@@ -212,7 +234,7 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 			val = e.coerce(val, fieldTy)
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, val.Ref, gepReg, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
 		}
 		return dataReg, ty, nil
 	}
@@ -421,7 +443,7 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, i))
 		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, f.Ty.IR, gepReg, f.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
 		strVal, err := e.emitValueToString(Value{Ref: rawReg, Ty: f.Ty})
 		if err != nil {
 			return Value{}, fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
@@ -439,6 +461,157 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
 	return Value{Ref: r1, Ty: ArrayOf(entryTy)}, nil
+}
+
+// emitObjectAssign implements Object.assign(target, ...sources): copies each
+// source's fields into target, in argument order, later sources overwriting
+// earlier ones on a shared field name — real JS's own last-write-wins
+// semantics. Mutates target in place (same heap struct, no new allocation)
+// and returns it, matching real JS returning the (mutated) target.
+//
+// Every source field copied must already exist, by name, in target's own
+// struct type — this compiler's objects are fixed-shape heap structs (an
+// interface's field list is fixed at compile time), not a dynamic property
+// bag, so a source contributing a field target's type doesn't have can't be
+// grafted on the way real JS would. Fails cleanly with a compile error
+// instead, the same posture spread-in-object-literal and JSON.parse→object
+// already take for shapes outside what a fixed struct can represent.
+func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: Object.assign requires at least 1 argument", pos.Line, pos.Col)
+	}
+	targetVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !targetVal.Ty.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: Object.assign's target must be an object", pos.Line, pos.Col)
+	}
+	if len(args) > 1 {
+		// Only a real write attempt (at least one source) needs the check —
+		// Object.assign(frozenObj) with no sources never writes anything,
+		// matching real JS not throwing for that case either.
+		e.emitFrozenCheck(targetVal.Ref)
+	}
+	targetStructIR := targetVal.Ty.StructIR()
+
+	for _, srcArg := range args[1:] {
+		srcVal, err := e.emitExpr(srcArg)
+		if err != nil {
+			return Value{}, err
+		}
+		if !srcVal.Ty.IsObject {
+			return Value{}, fmt.Errorf("%d:%d: Object.assign's sources must be objects", pos.Line, pos.Col)
+		}
+		srcStructIR := srcVal.Ty.StructIR()
+		for _, f := range srcVal.Ty.Fields {
+			dstIdx, dstTy, ok := targetVal.Ty.FieldIndex(f.Name)
+			if !ok {
+				return Value{}, fmt.Errorf("%d:%d: Object.assign: source has field '%s' not present on target's type", pos.Line, pos.Col, f.Name)
+			}
+			srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
+			srcGep := e.freshReg()
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
+			val := e.coerce(Value{Ref: loadReg, Ty: f.Ty}, dstTy)
+			dstGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dstGep, targetStructIR, targetVal.Ref, dstIdx))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(dstTy), val.Ref, dstGep, dstTy.Align()))
+		}
+	}
+	return targetVal, nil
+}
+
+// emitObjectFreeze implements Object.freeze(obj): marks obj's heap pointer
+// in the global frozen-object set (ensureFrozenSet, runtime.go) and returns
+// obj unchanged. Tracked by pointer, not by the variable/symbol that called
+// freeze — matches real JS's per-value (not per-binding) semantics, so a
+// write to the same object through a different alias or a function
+// parameter is caught too, not just a write through the original variable.
+//
+// This compiler's objects are fixed-shape heap structs — no dynamic
+// property add/delete exists at the language level at all yet, for any
+// object, frozen or not — so freeze's "no new/no deleted fields" guarantee
+// already holds structurally. The only thing freeze adds here is blocking
+// writes to *existing* fields, enforced by emitFrozenCheck at every
+// object-field write site (emitAssign's object-field-assignment branch,
+// emitObjectAssign's target). A real dynamic property bag (add/delete at
+// runtime) is a possible future direction — not designed or started here,
+// tracked only as a note in STATUS.md — and wouldn't change this function
+// itself, only what "no dynamic add/delete" needs to actively enforce once
+// it exists.
+func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Object.freeze takes 1 argument", pos.Line, pos.Col)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !val.Ty.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: Object.freeze requires an object", pos.Line, pos.Col)
+	}
+	e.ensureFrozenSet()
+	setPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_frozen_set_get()", setPtr))
+	ptrAsInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", ptrAsInt, val.Ref))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 1)", setPtr, ptrAsInt))
+	return val, nil
+}
+
+// emitObjectSeal implements Object.seal(obj). Real JS's seal blocks adding
+// or deleting properties but still allows mutating existing ones — this
+// compiler's objects already can't gain or lose fields dynamically (see
+// emitObjectFreeze's doc comment), so seal's entire guarantee already holds
+// unconditionally for every object, sealed or not. A genuine no-op, not a
+// scope-narrowed approximation of one: there is currently nothing for seal
+// to additionally enforce.
+func (e *Emitter) emitObjectSeal(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Object.seal takes 1 argument", pos.Line, pos.Col)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !val.Ty.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: Object.seal requires an object", pos.Line, pos.Col)
+	}
+	return val, nil
+}
+
+// emitFrozenCheck emits a runtime guard in front of a write to ptrRef (an
+// object's own heap pointer): if ptrRef is in the frozen set, throws a
+// catchable Error via the existing __kml_throw mechanism instead of letting
+// the write proceed. Shared by every object-field write site — emitAssign's
+// object-field-assignment branch (emit_exprs.go) and emitObjectAssign's
+// target (this file) — so Object.freeze's guarantee holds no matter which
+// write path a mutation goes through, not just plain `obj.field = val`.
+func (e *Emitter) emitFrozenCheck(ptrRef string) {
+	e.ensureFrozenSet()
+	setPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_frozen_set_get()", setPtr))
+	ptrAsInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", ptrAsInt, ptrRef))
+	isFrozen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_has(ptr %s, i64 %s)", isFrozen, setPtr, ptrAsInt))
+
+	frozenL := e.freshLabel("frozen.reject")
+	okL := e.freshLabel("frozen.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFrozen, frozenL, okL))
+
+	e.emitLabel(frozenL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Cannot assign to read only property of a frozen object")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
 }
 
 // emitGroupMapIndex handles groupResult["stringKey"] → sub-array.

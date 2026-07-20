@@ -27,3 +27,18 @@ for (const id of ids) {
 }
 // 10
 // 20
+
+// ── .forEach(fn): calls fn(element) for each element ────────────────────────
+ids.forEach((id) => {
+  console.log("id " + id);
+});
+// id 10
+// id 20
+
+// ── .clear(): removes every element, size drops to 0, set stays usable ──────
+console.log(seen.size); // 1
+seen.clear();
+console.log(seen.size); // 0
+console.log(seen.has("apple")); // 0
+seen.add("date");
+console.log(seen.size); // 1

@@ -2101,6 +2101,45 @@ entry:
 }`)
 }
 
+// ensureFrozenSet declares the global frozen-object tracker Object.freeze(obj)
+// uses: a Set<number>-shaped structure (the same __kml_map_num_* helpers
+// Set<T> itself is built on, keyed on ptrtoint(obj)) rather than a new
+// hand-rolled hash set, since the existing map helpers already do exactly
+// what's needed (membership add + O(n) lookup) and this project's Map/Set
+// are themselves the same underlying representation.
+//
+// __kml_frozen_set_get() lazily creates the one global set on first use and
+// returns it — called both by Object.freeze (to add) and by every
+// object-field write site (to check), so a program that never calls
+// Object.freeze never pays for the lazy-init branch beyond one null check,
+// but any object mutation still pays one O(n) lookup against the (possibly
+// empty) frozen set — an unconditional correctness cost, not a per-feature
+// opt-in, the same trade-off ADR-00044's array bounds check already made.
+func (e *Emitter) ensureFrozenSet() {
+	if e.usedFrozenSet {
+		return
+	}
+	e.usedFrozenSet = true
+	e.ensureMapNumHelpers()
+	e.emitGlobal(`@__kml_frozen_set = internal global ptr null, align 8`)
+	e.emitGlobal(`
+define ptr @__kml_frozen_set_get() {
+entry:
+  %cur = load ptr, ptr @__kml_frozen_set, align 8
+  %isnull = icmp eq ptr %cur, null
+  br i1 %isnull, label %init, label %have
+
+init:
+  %new = call ptr @__kml_map_num_create()
+  store ptr %new, ptr @__kml_frozen_set, align 8
+  br label %have
+
+have:
+  %final = load ptr, ptr @__kml_frozen_set, align 8
+  ret ptr %final
+}`)
+}
+
 func (e *Emitter) ensureExceptionHelpers() {
 	if e.usedExceptionHelpers {
 		return

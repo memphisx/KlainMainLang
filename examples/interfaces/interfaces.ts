@@ -54,3 +54,30 @@ console.log(JSON.stringify(m))     // {"label":"test","score":9.5}
 const parsed: Measurement = JSON.parse('{"label":"parsed","score":3.25}')
 console.log(parsed.label)          // parsed
 console.log(parsed.score)          // 3.25
+
+// Array-typed fields carry their own length alongside the data, same as
+// any other array value — .length, indexing, and for...of all just work.
+interface Container {
+  items: number[];
+  label: string;
+}
+const initial: number[] = [10, 20, 30]
+const c: Container = { items: initial, label: 'orig' }
+console.log(c.items.length)        // 3
+console.log(c.items[1])            // 20
+for (const x of c.items) {
+  console.log(x)                   // 10, 20, 30
+}
+
+const c2 = { ...c, label: 'copy' }
+console.log(c2.items.length)       // 3
+
+const { items: destructured } = c
+destructured.push(40)
+console.log(destructured.length)   // 4
+console.log(c.items.length)        // 3 — destructuring copies, not aliases
+
+function firstItems(cc: Container): number[] {
+  return cc.items
+}
+console.log(firstItems(c).length)  // 3

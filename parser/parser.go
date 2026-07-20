@@ -422,20 +422,42 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	nameTok := p.advance()
 	name := nameTok.Literal
 
-	// Promise<T>: parse the type parameter instead of skipping.
-	if name == "Promise" && p.check(lexer.LT) {
+	// Promise<T> / Array<T> / Set<T>: single type parameter — parse it for
+	// real instead of skipping, same as the T[] / new Array<T>() forms.
+	if (name == "Promise" || name == "Array" || name == "Set") && p.check(lexer.LT) {
 		p.advance() // consume '<'
 		inner, err := p.parseTypeAnnotation(source)
 		if err != nil {
 			return nil, err
 		}
 		if _, err := p.expect(lexer.GT); err != nil {
-			return nil, fmt.Errorf("expected '>' to close Promise<T>")
+			return nil, fmt.Errorf("expected '>' to close %s<T>", name)
 		}
-		return &ast.TypeAnnotation{Name: "Promise", ElemType: inner, Source: source}, nil
+		return &ast.TypeAnnotation{Name: name, ElemType: inner, Source: source}, nil
 	}
 
-	// Skip other generics like Array<number>, Map<K,V>, etc.
+	// Map<K,V>: two type parameters.
+	if name == "Map" && p.check(lexer.LT) {
+		p.advance() // consume '<'
+		keyTy, err := p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.COMMA); err != nil {
+			return nil, fmt.Errorf("expected ',' in Map<K,V>")
+		}
+		valTy, err := p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, fmt.Errorf("expected '>' to close Map<K,V>")
+		}
+		return &ast.TypeAnnotation{Name: "Map", KeyType: keyTy, ElemType: valTy, Source: source}, nil
+	}
+
+	// Skip any other/unrecognized generic (a genuinely unsupported one —
+	// user-defined generics aren't implemented yet, see docs/tdd/TDD-00010.md).
 	if p.check(lexer.LT) {
 		depth := 0
 		for !p.check(lexer.EOF) {

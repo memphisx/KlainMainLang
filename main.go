@@ -15,16 +15,16 @@ import (
 func main() {
 	emitLLVM := flag.Bool("emit-llvm", false, "emit LLVM IR and stop")
 	output := flag.String("o", "", "output binary name (default: input name without extension)")
-	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run KlainMainLang itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
+	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: KlainMainLang [flags] <file.ts>")
+		fmt.Fprintln(os.Stderr, "usage: klainmain [flags] <file.ts>")
 		os.Exit(1)
 	}
 
 	if *static && runtime.GOOS != "linux" {
-		fatal("--static is only supported when compiling on Linux (this run is on %s). This is not a missing-package issue: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. To produce a statically-linked binary for a scratch/distroless Docker image, run KlainMainLang itself on Linux — e.g. a Linux build stage in a multi-stage Dockerfile (build the compiler and your program there, then copy just the resulting static binary into a scratch final stage).", runtime.GOOS)
+		fatal("--static is only supported when compiling on Linux (this run is on %s). This is not a missing-package issue: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. To produce a statically-linked binary for a scratch/distroless Docker image, run klainmain itself on Linux — e.g. a Linux build stage in a multi-stage Dockerfile (build the compiler and your program there, then copy just the resulting static binary into a scratch final stage).", runtime.GOOS)
 	}
 
 	inFile := flag.Arg(0)
@@ -73,6 +73,6 @@ func main() {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "KlainMainLang: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "klainmain: "+format+"\n", args...)
 	os.Exit(1)
 }

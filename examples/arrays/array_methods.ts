@@ -167,3 +167,99 @@ let chunk: number[] = typed.splice(1, 2)
 console.log(chunk[0])        // 200
 console.log(chunk[1])        // 300
 console.log(typed.length)    // 2
+
+// splice can also insert items in place of the deleted ones
+let ins = [1, 2, 3, 4, 5]
+let insRemoved = ins.splice(1, 2, 100, 200, 300)
+console.log(ins.length)      // 6
+console.log(ins[1])          // 100
+console.log(ins[2])          // 200
+console.log(ins[3])          // 300
+console.log(ins[4])          // 4
+console.log(insRemoved[0])   // 2
+console.log(insRemoved[1])   // 3
+
+// a 0 deleteCount inserts without removing anything
+let insOnly = [1, 2, 3]
+insOnly.splice(1, 0, 99)
+console.log(insOnly.length)  // 4
+console.log(insOnly[1])      // 99
+
+// omitting deleteCount deletes everything from start to the end
+let toEnd = [1, 2, 3, 4, 5]
+let tail2 = toEnd.splice(2)
+console.log(tail2.length)    // 3
+console.log(toEnd.length)    // 2
+
+// =============================================================================
+// findLast / findLastIndex
+// =============================================================================
+
+let repeated = [1, 2, 3, 4, 5, 4, 3]
+console.log(repeated.findLast((n) => n === 4))       // 4 (the later one, at index 5)
+console.log(repeated.findLastIndex((n) => n === 4))   // 5
+
+// =============================================================================
+// toSorted / toReversed / with — non-mutating counterparts of
+// sort / reverse / direct index assignment
+// =============================================================================
+
+let original = [3, 1, 2]
+let sortedCopy = original.toSorted()
+console.log(sortedCopy[0])   // 1
+console.log(original[0])     // 3 (untouched)
+
+let reversedCopy = original.toReversed()
+console.log(reversedCopy[0]) // 2
+console.log(original[0])     // 3 (still untouched)
+
+let withCopy = original.with(0, 99)
+console.log(withCopy[0])     // 99
+console.log(original[0])     // 3 (still untouched)
+
+// =============================================================================
+// toSpliced — non-mutating splice
+// =============================================================================
+
+let spliceSrc = [1, 2, 3, 4, 5]
+let splicedCopy = spliceSrc.toSpliced(1, 2, 100, 200)
+console.log(splicedCopy.length) // 5
+console.log(splicedCopy[1])     // 100
+console.log(spliceSrc.length)   // 5 (untouched)
+console.log(spliceSrc[1])       // 2
+
+// =============================================================================
+// keys / values / entries
+// =============================================================================
+
+let letters = ['a', 'b', 'c']
+for (const k of letters.keys()) {
+    console.log(k)             // 0, 1, 2
+}
+for (const v of letters.values()) {
+    console.log(v)             // a, b, c
+}
+// entries() returns {index, value}[] — this compiler has no tuple type, so
+// a real JS [index, value] pair isn't representable.
+for (const e of letters.entries()) {
+    console.log(e.index + ':' + e.value)   // 0:a, 1:b, 2:c
+}
+
+// =============================================================================
+// copyWithin
+// =============================================================================
+
+let cw = [1, 2, 3, 4, 5]
+cw.copyWithin(0, 3)          // copies [4,5] (indices 3-4) to position 0
+console.log(cw[0])           // 4
+console.log(cw[1])           // 5
+console.log(cw[2])           // 3 (untouched — copy length was clamped)
+
+// =============================================================================
+// Array.of — build directly from arguments, unlike a literal, usable as a
+// plain expression anywhere (not just in a variable declaration)
+// =============================================================================
+
+let built = Array.of(10, 20, 30)
+console.log(built.length)    // 3
+console.log(built[1])        // 20

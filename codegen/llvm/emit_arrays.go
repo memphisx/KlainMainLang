@@ -305,11 +305,18 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	return Value{Ref: result, Ty: elemTy}, nil
 }
 
-// emitSplice implements arr.splice(start, deleteCount): removes deleteCount
-// elements at start, returns them as a new array, shifts the tail left.
+// emitSplice implements arr.splice(start, deleteCount?, ...items): removes
+// deleteCount elements at start, inserts items in their place, and returns
+// the removed elements as a new array. start is normalized the same way
+// .at()/.slice() already do (negative counts from the end, clamped to
+// [0, len]); deleteCount is clamped to [0, len - start] — real JS clamps
+// deleteCount the same way, and this compiler used to skip that clamp
+// entirely (see ADR-00056: a deleteCount larger than the remaining tail
+// read past the backing allocation and corrupted the array's own length to
+// negative, a real memory-safety bug, not just a wrong-answer one).
 func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: splice takes exactly two arguments (start, deleteCount)", pos.Line, pos.Col)
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: splice takes at least 1 argument (start)", pos.Line, pos.Col)
 	}
 	id, ok := mem.Object.(*ast.Identifier)
 	if !ok {
@@ -324,59 +331,235 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	}
 	elemTy := *sym.Ty.ElemType
 
-	startVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	startVal = e.coerce(startVal, TypeI64)
-
-	delCount, err := e.emitExpr(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	delCount = e.coerce(delCount, TypeI64)
-
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
 
-	// Allocate result array and copy the removed slice into it.
-	e.ensureCalloc()
+	startRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, curLen)
+
+	// deleteCount defaults to "everything from start to the end", matching
+	// real JS when the argument is omitted; when given, clamp to what's
+	// actually left from start so a too-large value can never read/shift
+	// past the buffer.
+	avail := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, curLen, startN))
+	delCount := avail
+	if len(args) >= 2 {
+		delRaw, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		delRaw = e.coerce(delRaw, TypeI64)
+		negClamped := e.freshReg()
+		isNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, delRaw.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", negClamped, isNeg, delRaw.Ref))
+		tooBig := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooBig, negClamped, avail))
+		clamped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", clamped, tooBig, avail, negClamped))
+		delCount = clamped
+	}
+
+	var items []ast.Expression
+	if len(args) > 2 {
+		items = args[2:]
+	}
+	numInserted := int64(len(items))
+
+	// Copy the removed slice into the result array before anything shifts —
+	// once the tail shift below happens, this region no longer holds the
+	// original values.
+	e.ensureMalloc()
+	e.ensureMemmove()
 	resultPtr := e.freshReg()
 	copyBytes := e.freshReg()
-	srcPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", resultPtr, delCount.Ref, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcPtr, elemTy.IR, curPtr, startVal.Ref))
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, delCount.Ref, elemTy.Align()))
-	e.ensureMemmove()
-	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", resultPtr, srcPtr, copyBytes))
+	removedSrc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, delCount, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", resultPtr, copyBytes))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", removedSrc, elemTy.IR, curPtr, startN))
+	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", resultPtr, removedSrc, copyBytes))
 
-	// Shift the tail left: memmove(ptr+start, ptr+start+deleteCount, remaining*elemSize).
+	// newLen = curLen - deleteCount + numInserted. Grow the backing buffer
+	// first if needed — the tail shift below must land in valid memory.
+	// Both phi predecessors below are labels this function just created and
+	// branched from directly (checkL, growL) — never assume the name of
+	// whatever block was active before this point, since emitSplice can run
+	// mid-function from an arbitrarily-named caller block.
+	newLen := e.freshReg()
+	tmpLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tmpLen, curLen, delCount))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, tmpLen, numInserted))
+
+	checkL := e.freshLabel("splice.checkgrow")
+	growL := e.freshLabel("splice.grow")
+	afterGrowL := e.freshLabel("splice.aftergrow")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", checkL))
+
+	e.emitLabel(checkL)
+	growing := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", growing, newLen, curLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", growing, growL, afterGrowL))
+
+	e.emitLabel(growL)
+	e.ensureRealloc()
+	newBytes := e.freshReg()
+	reallocedPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", reallocedPtr, curPtr, newBytes))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterGrowL))
+
+	e.emitLabel(afterGrowL)
+	workPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", workPtr, reallocedPtr, growL, curPtr, checkL))
+
+	// Shift the tail (arr[start+deleteCount : curLen], using the ORIGINAL
+	// length) to its new home at start+numInserted. memmove handles both
+	// directions correctly regardless of whether items are being inserted
+	// (tail moves right) or net-removed (tail moves left).
 	startPlusDel := e.freshReg()
+	startPlusIns := e.freshReg()
 	tailSrc := e.freshReg()
 	tailDst := e.freshReg()
-	remaining := e.freshReg()
+	tailCount := e.freshReg()
 	shiftBytes := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", startPlusDel, startVal.Ref, delCount.Ref))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailSrc, elemTy.IR, curPtr, startPlusDel))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailDst, elemTy.IR, curPtr, startVal.Ref))
-	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", remaining, curLen, startPlusDel))
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", shiftBytes, remaining, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", startPlusDel, startN, delCount))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", startPlusIns, startN, numInserted))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailSrc, elemTy.IR, workPtr, startPlusDel))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailDst, elemTy.IR, workPtr, startPlusIns))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailCount, curLen, startPlusDel))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", shiftBytes, tailCount, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", tailDst, tailSrc, shiftBytes))
 
-	// Update length.
-	newLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", newLen, curLen, delCount.Ref))
+	// Write the inserted items into [start, start+numInserted).
+	for i, itemExpr := range items {
+		itemVal, err := e.emitExpr(itemExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		itemVal = e.coerce(itemVal, elemTy)
+		slotIdx := e.freshReg()
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, workPtr, slotIdx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, itemVal.Ref, slot, elemTy.Align()))
+	}
+
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", workPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
 
-	// Pack result into {ptr, i64} aggregate.
+	// Pack the removed elements into a {ptr, i64} aggregate.
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, resultPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, delCount.Ref))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, delCount))
 
 	return Value{Ref: r1, Ty: sym.Ty}, nil
+}
+
+// emitArrayToSpliced implements arr.toSpliced(start, deleteCount?, ...items):
+// the same start/deleteCount normalization and clamping as the fixed
+// emitSplice, but builds and returns a brand-new array — [0, start) + items
+// + [start+deleteCount, len) — instead of mutating arr in place. Since
+// there's no existing buffer to preserve or shift, this is a straight
+// three-segment concatenation into one freshly sized allocation, simpler
+// than splice's in-place grow/shift logic.
+func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: toSpliced takes at least 1 argument (start)", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+
+	startRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+	avail := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, lenReg, startN))
+	delCount := avail
+	if len(args) >= 2 {
+		delRaw0, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		delRaw := e.coerce(delRaw0, TypeI64)
+		negClamped := e.freshReg()
+		isNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, delRaw.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", negClamped, isNeg, delRaw.Ref))
+		tooBig := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooBig, negClamped, avail))
+		clamped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", clamped, tooBig, avail, negClamped))
+		delCount = clamped
+	}
+
+	var items []ast.Expression
+	if len(args) > 2 {
+		items = args[2:]
+	}
+	numInserted := int64(len(items))
+
+	newLen := e.freshReg()
+	tmpLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tmpLen, lenReg, delCount))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, tmpLen, numInserted))
+
+	e.ensureMalloc()
+	e.ensureMemmove()
+	newBytes := e.freshReg()
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, newBytes))
+
+	// Segment 1: [0, start) copied as-is.
+	headBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", headBytes, startN, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg, headBytes))
+
+	// Segment 2: the inserted items, written at [start, start+numInserted).
+	for i, itemExpr := range items {
+		itemVal, err := e.emitExpr(itemExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		itemVal = e.coerce(itemVal, elemTy)
+		slotIdx := e.freshReg()
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, slotIdx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, itemVal.Ref, slot, elemTy.Align()))
+	}
+
+	// Segment 3: [start+deleteCount, len) copied to [start+numInserted, newLen).
+	tailStart := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", tailStart, startN, delCount))
+	tailCount := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailCount, lenReg, tailStart))
+	tailBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", tailBytes, tailCount, elemTy.Align()))
+	tailSrc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailSrc, elemTy.IR, ptrReg, tailStart))
+	startPlusIns := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", startPlusIns, startN, numInserted))
+	tailDst := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailDst, elemTy.IR, newPtr, startPlusIns))
+	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", tailDst, tailSrc, tailBytes))
+
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
 // emitShift implements arr.shift(): save ptr[0], memmove left, decrement len.
@@ -1148,6 +1331,24 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 		return Value{}, err
 	}
 
+	if err := e.emitQsortCall(ptrReg, lenReg, elemTy, args, pos); err != nil {
+		return Value{}, err
+	}
+
+	// Return the array as an aggregate (same ptr+len as input)
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	retTy := ArrayOf(elemTy)
+	return Value{Ref: r1, Ty: retTy}, nil
+}
+
+// emitQsortCall resolves a sort comparator (default or custom) and issues the
+// qsort() call against ptrReg[0:lenReg] in place — shared by emitArraySort
+// (sorts the caller's own array) and emitArrayToSorted (sorts a fresh copy,
+// leaving the original untouched).
+func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.Expression, pos ast.Pos) error {
 	e.ensureQsort()
 
 	var cmpFnRef string
@@ -1169,10 +1370,10 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 		// Custom comparator: resolve closure and store in global, use trampoline
 		cb, err2 := e.resolveCallbackWithHints(args[0], []Type{elemTy, elemTy})
 		if err2 != nil {
-			return Value{}, err2
+			return err2
 		}
 		if cb.kind != cbClosure {
-			return Value{}, fmt.Errorf("%d:%d: sort comparator must be an arrow function or closure", pos.Line, pos.Col)
+			return fmt.Errorf("%d:%d: sort comparator must be an arrow function or closure", pos.Line, pos.Col)
 		}
 
 		e.ensureSortClosGlobal()
@@ -1203,14 +1404,43 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 	}
 
 	e.emitInstr(fmt.Sprintf("call void @qsort(ptr %s, i64 %s, i64 %d, ptr %s)", ptrReg, lenReg, elemSize, cmpFnRef))
+	return nil
+}
 
-	// Return the array as an aggregate (same ptr+len as input)
+// emitArrayToSorted implements arr.toSorted(cmp?): same comparator logic as
+// .sort(), but sorts a fresh copy and leaves arr untouched.
+func (e *Emitter) emitArrayToSorted(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: toSorted takes 0 or 1 arguments", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
+	if err := e.emitQsortCall(newPtr, lenReg, elemTy, args, pos); err != nil {
+		return Value{}, err
+	}
 	r0 := e.freshReg()
 	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	retTy := ArrayOf(elemTy)
-	return Value{Ref: r1, Ty: retTy}, nil
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitArrayCopy mallocs a new buffer sized for lenReg elements of elemTy and
+// memcpy's ptrReg[0:lenReg] into it, returning the new data pointer register.
+// Shared by every array method that needs to return a mutated copy without
+// touching the original (toSorted, toReversed, with, values, toSpliced).
+func (e *Emitter) emitArrayCopy(ptrReg, lenReg string, elemTy Type) string {
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	byteCount := e.freshReg()
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, lenReg, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg, byteCount))
+	return newPtr
 }
 
 // emitArraySlice implements arr.slice(start[, end]): returns a new array
@@ -1477,6 +1707,153 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	return Value{Ref: result, Ty: TypeI64}, nil
 }
 
+// emitArrayFindLast implements arr.findLast(pred): same as .find(), but
+// scans from the last element backward — a genuine reverse loop, not a
+// forward scan keeping the last match, since real JS invokes pred in reverse
+// order too (observable if pred has side effects, e.g. a console.log).
+func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: findLast takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	if err != nil {
+		return Value{}, err
+	}
+
+	zeroVal := "0"
+	if elemTy.IR == "ptr" {
+		zeroVal = "null"
+	}
+	foundAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, foundAlloca, elemTy.Align()))
+
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	startIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
+
+	condL := e.freshLabel("findlast.cond")
+	bodyL := e.freshLabel("findlast.body")
+	matchL := e.freshLabel("findlast.match")
+	decL := e.freshLabel("findlast.dec")
+	doneL := e.freshLabel("findlast.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	loopDone := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", loopDone, idxVal))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", loopDone, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	gep := e.freshReg()
+	elem := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
+	cbArgs := []Value{{Ref: elem, Ty: elemTy}}
+	if cb.arity() >= 2 {
+		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
+	}
+	predVal, err := e.emitCBCall(cb, cbArgs)
+	if err != nil {
+		return Value{}, err
+	}
+	boolVal := e.emitToBool(predVal)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, matchL, decL))
+
+	e.emitLabel(matchL)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elem, foundAlloca, elemTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(decL)
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
+	return Value{Ref: result, Ty: elemTy}, nil
+}
+
+// emitArrayFindLastIndex implements arr.findLastIndex(pred): same reverse
+// scan as findLast, returning the matched index (or -1) instead of the value.
+func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: findLastIndex takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	if err != nil {
+		return Value{}, err
+	}
+
+	resultAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resultAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", resultAlloca))
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	startIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
+
+	condL := e.freshLabel("fidxlast.cond")
+	bodyL := e.freshLabel("fidxlast.body")
+	matchL := e.freshLabel("fidxlast.match")
+	decL := e.freshLabel("fidxlast.dec")
+	doneL := e.freshLabel("fidxlast.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	loopDone := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", loopDone, idxVal))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", loopDone, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	gep := e.freshReg()
+	elem := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
+	cbArgs := []Value{{Ref: elem, Ty: elemTy}}
+	if cb.arity() >= 2 {
+		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
+	}
+	predVal, err := e.emitCBCall(cb, cbArgs)
+	if err != nil {
+		return Value{}, err
+	}
+	boolVal := e.emitToBool(predVal)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, matchL, decL))
+
+	e.emitLabel(matchL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, resultAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(decL)
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resultAlloca))
+	return Value{Ref: result, Ty: TypeI64}, nil
+}
+
 // emitArrayConcat implements arr.concat(other): returns a new array containing
 // all elements of arr followed by all elements of other.
 func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -1528,7 +1905,18 @@ func (e *Emitter) emitArrayReverse(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
+	e.emitReverseInPlace(ptrReg, lenReg, elemTy)
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
 
+// emitReverseInPlace reverses ptrReg[0:lenReg] via a swap loop over the first
+// half — shared by emitArrayReverse (reverses the caller's own array) and
+// emitArrayToReversed (reverses a fresh copy, leaving the original untouched).
+func (e *Emitter) emitReverseInPlace(ptrReg, lenReg string, elemTy Type) {
 	halfLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = udiv i64 %s, 2", halfLen, lenReg))
 	idxAlloca := e.freshReg()
@@ -1568,9 +1956,23 @@ func (e *Emitter) emitArrayReverse(mem *ast.MemberExpression, args []ast.Express
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
+}
+
+// emitArrayToReversed implements arr.toReversed(): reverses a fresh copy,
+// leaving arr untouched.
+func (e *Emitter) emitArrayToReversed(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: toReversed takes no arguments", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
+	e.emitReverseInPlace(newPtr, lenReg, elemTy)
 	r0 := e.freshReg()
 	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
@@ -1687,4 +2089,301 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, resultAlloca, elemTy.Align()))
 	return Value{Ref: result, Ty: elemTy}, nil
+}
+
+// emitArrayWith implements arr.with(index, val): returns a fresh copy of arr
+// with the element at index replaced by val — arr itself is untouched.
+// Negative indices count from the end (same normalization as .at()); an
+// index still out of range after normalization throws a catchable Error,
+// matching real JS's RangeError (the same "index out of range" failure this
+// compiler already treats as a real, catchable exception, e.g. array
+// index-out-of-bounds reads — see docs/adr/ADR-00044.md).
+func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: with takes exactly 2 arguments (index, value)", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	idxRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	normIdx := e.emitNormalizeSliceIdx(e.coerce(idxRaw, TypeI64).Ref, lenReg)
+
+	valRaw, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	val := e.coerce(valRaw, elemTy)
+
+	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inBounds, normIdx, lenReg))
+	oobL := e.freshLabel("with.oob")
+	okL := e.freshLabel("with.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+
+	e.emitLabel(oobL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Array index out of range")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
+	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, normIdx))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, slot, elemTy.Align()))
+
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitArrayKeys implements arr.keys(): returns a materialized number[] of
+// indices [0, len) — the same "return a materialized array, not a lazy
+// iterator" convention Map.keys()/Set.values() already use, since this
+// compiler has no general iterator protocol.
+func (e *Emitter) emitArrayKeys(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: keys takes no arguments", pos.Line, pos.Col)
+	}
+	_, lenReg, _, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureMalloc()
+	byteCount := e.freshReg()
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+
+	condL := e.freshLabel("keys.cond")
+	bodyL := e.freshLabel("keys.body")
+	doneL := e.freshLabel("keys.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	done := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, newPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, slot))
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(TypeI64)}, nil
+}
+
+// emitArrayValues implements arr.values(): returns a fresh copy of arr's
+// elements — same materialized-array convention as emitArrayKeys.
+func (e *Emitter) emitArrayValues(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: values takes no arguments", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitArrayEntries implements arr.entries() → {index: number, value: T}[] —
+// this compiler has no tuple type, so a real JS [index, value] pair isn't
+// representable; the same heap-allocated-entry-object convention
+// Map.entries()/Object.entries() already use. Iterate with
+// `for (const e of arr.entries())` then read `e.index`/`e.value`.
+func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: entries takes no arguments", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+
+	entryTy := ObjectType([]Field{{Name: "index", Ty: TypeI64}, {Name: "value", Ty: elemTy}})
+	entrySize := entryTy.StructSize()
+
+	e.ensureMalloc()
+	outBytes := e.freshReg()
+	outPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", outBytes, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outPtr, outBytes))
+
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+
+	condL := e.freshLabel("entries.cond")
+	bodyL := e.freshLabel("entries.body")
+	doneL := e.freshLabel("entries.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	done := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	elemGep, elemVal := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elemVal, elemTy.IR, elemGep, elemTy.Align()))
+
+	entryReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", entryReg, entrySize))
+	idxSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", idxSlot, entryTy.StructIR(), entryReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, idxSlot))
+	valSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemVal, valSlot, elemTy.Align()))
+
+	slotReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, outPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", entryReg, slotReg))
+
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	r0, r1 := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(entryTy)}, nil
+}
+
+// emitArrayOf implements Array.of(...items): builds a fresh array directly
+// from the given argument expressions — unlike an array literal `[...]`
+// (which currently can only appear in variable-declaration position),
+// Array.of is a plain call expression usable anywhere. Element type is
+// inferred from the first argument, mirroring inferArrayType's own
+// first-element rule for `[...]` literals; an empty call defaults to
+// number[], same as an empty literal.
+func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error) {
+	elemTy := TypeI64
+	if len(args) > 0 {
+		elemTy = e.inferExprType(args[0])
+	}
+	n := int64(len(args))
+	e.ensureMalloc()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+	for i, argExpr := range args {
+		val, err := e.emitExpr(argExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		val = e.coerce(val, elemTy)
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slot, elemTy.IR, dataReg, i))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, slot, elemTy.Align()))
+	}
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitArrayCopyWithin implements arr.copyWithin(target, start?, end?):
+// copies the sequence [start, end) to position target, in place, within the
+// same backing buffer — arr's length never changes. Negative indices count
+// from the end (same normalization as .at()/.slice()). Source and
+// destination ranges can overlap (e.g. copyWithin(0, 2) on a 5-element
+// array), so this uses memmove, not memcpy — the same overlap-safety
+// already relied on by shift()/unshift()/splice()'s own tail shifts.
+func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: copyWithin takes 1–3 arguments", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+
+	targetRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	targetN := e.emitNormalizeSliceIdx(e.coerce(targetRaw, TypeI64).Ref, lenReg)
+
+	startN := "0"
+	if len(args) >= 2 {
+		startRaw, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+	}
+
+	endN := lenReg
+	if len(args) == 3 {
+		endRaw, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, lenReg)
+	}
+
+	// count = min(max(end - start, 0), len - target) — never reads past
+	// [start, end) and never writes past the array's own end.
+	rawCount := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rawCount, endN, startN))
+	negCount := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", negCount, rawCount))
+	clampedCount := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", clampedCount, negCount, rawCount))
+	avail := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, lenReg, targetN))
+	tooBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooBig, clampedCount, avail))
+	count := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", count, tooBig, avail, clampedCount))
+
+	srcGep := e.freshReg()
+	dstGep := e.freshReg()
+	byteCount := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, elemTy.IR, ptrReg, startN))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstGep, elemTy.IR, ptrReg, targetN))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, count, elemTy.Align()))
+	e.ensureMemmove()
+	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", dstGep, srcGep, byteCount))
+
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }

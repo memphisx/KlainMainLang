@@ -126,30 +126,64 @@ func FuncType(params []Type, ret Type) Type {
 	return Type{IR: "ptr", IsFunc: true, FuncParams: params, FuncRetType: &retCopy}
 }
 
+// StructFieldIR returns the LLVM type string used for a field's own storage
+// slot inside a struct GEP/load/store — normally the same as ty.IR, except
+// an array-typed field, which needs its length stored alongside the data
+// pointer (ty.IR alone is just "ptr", 8 bytes, with nowhere for the length
+// to go). Array fields instead use the same {ptr, i64} aggregate shape
+// arrays already carry in every other context that evaluates one as a
+// plain value — function returns (see LLVMRetType), .slice()/HOF results,
+// Object.keys()-shaped helpers — so once a field is stored/loaded this way,
+// every downstream consumer (indexing, .length, for...of, return) already
+// knows exactly what to do with it; only the storage slot itself needed
+// fixing, not how an array Value is represented once you have one.
+// See docs/adr/ADR-00061.md.
+func StructFieldIR(ty Type) string {
+	if ty.IsArray {
+		return "{ptr, i64}"
+	}
+	return ty.IR
+}
+
+// StructFieldSize mirrors StructFieldIR's reasoning for struct-layout
+// purposes: an array field needs a 16-byte slot (ptr + i64), not the 8 bytes
+// ty.Align() alone would suggest for every other field type, where
+// size == align already holds.
+func StructFieldSize(ty Type) int64 {
+	if ty.IsArray {
+		return 16
+	}
+	return int64(ty.Align())
+}
+
 // StructIR returns the LLVM struct type string, e.g. "{ i64, i32 }".
 func (t Type) StructIR() string {
 	parts := make([]string, len(t.Fields))
 	for i, f := range t.Fields {
-		parts[i] = f.Ty.IR
+		parts[i] = StructFieldIR(f.Ty)
 	}
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
 // StructSize returns the byte size of the struct following natural alignment rules
 // (same rules LLVM applies for the same field sequence).
-// Assumes size == align for all primitive types (holds for i8..i64, float, double, ptr).
+// Assumes size == align for every field type except IsArray (see
+// StructFieldSize) — holds for i8..i64, float, double, ptr, and every
+// object/Map/Set/closure/Promise field, all of which are a single ptr-sized
+// slot regardless of what they point to.
 func (t Type) StructSize() int64 {
 	offset := int64(0)
 	maxAlign := int64(1)
 	for _, f := range t.Fields {
 		fa := int64(f.Ty.Align())
+		fsize := StructFieldSize(f.Ty)
 		if fa > maxAlign {
 			maxAlign = fa
 		}
 		if offset%fa != 0 {
 			offset = (offset/fa + 1) * fa
 		}
-		offset += fa
+		offset += fsize
 	}
 	// round up to struct alignment
 	if offset%maxAlign != 0 {

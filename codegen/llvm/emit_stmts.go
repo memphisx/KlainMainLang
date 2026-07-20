@@ -128,27 +128,40 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	}
 
 	if e.currentRetType.IsArray {
-		// Return an array variable as the aggregate {ptr, i64}.
-		id, ok := r.Value.(*ast.Identifier)
-		if !ok {
-			return fmt.Errorf("%d:%d: can only return a named array variable from a function", r.Value.GetPos().Line, r.Value.GetPos().Col)
+		// Return an array as the aggregate {ptr, i64}. A named variable
+		// reuses its existing Ptr/LenPtr allocas; any other expression
+		// (arr.slice(1), an object's array-typed field, another function's
+		// result) already evaluates to the same {ptr, i64} aggregate shape
+		// this function needs to return, so it's just returned directly —
+		// same "named variable vs. arbitrary expression" split
+		// resolveArrayForHOF/resolveMapOrSetForCall already use elsewhere.
+		if id, ok := r.Value.(*ast.Identifier); ok {
+			sym, ok := e.lookup(id.Name)
+			if !ok {
+				return fmt.Errorf("%d:%d: undefined variable '%s'", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
+			}
+			if !sym.Ty.IsArray {
+				return fmt.Errorf("%d:%d: '%s' is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
+			}
+			ptrReg := e.freshReg()
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+			r0 := e.freshReg()
+			r1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+			e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
+			return nil
 		}
-		sym, ok := e.lookup(id.Name)
-		if !ok {
-			return fmt.Errorf("%d:%d: undefined variable '%s'", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
+		arrVal, err := e.emitExpr(r.Value)
+		if err != nil {
+			return err
 		}
-		if !sym.Ty.IsArray {
-			return fmt.Errorf("%d:%d: '%s' is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
+		if !arrVal.Ty.IsArray {
+			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
-		ptrReg := e.freshReg()
-		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
-		r0 := e.freshReg()
-		r1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-		e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
+		e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
 		return nil
 	}
 
@@ -337,7 +350,9 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		case found && (iterSym.Ty.IsMap || iterSym.Ty.IsSet):
 			// A Set iterates its elements; a Map iterates its values (not
 			// [key,value] entries — see mapOrSetValuesArray).
-			valsVal, err := e.mapOrSetValuesArray(iterSym)
+			mapPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, iterSym.Ptr))
+			valsVal, err := e.mapOrSetValuesArray(iterSym.Ty, mapPtr)
 			if err != nil {
 				return err
 			}
@@ -351,11 +366,23 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		if err != nil {
 			return err
 		}
-		if !arrVal.Ty.IsArray || arrVal.Ty.ElemType == nil {
+		switch {
+		case arrVal.Ty.IsArray && arrVal.Ty.ElemType != nil:
+			elemTy = *arrVal.Ty.ElemType
+			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
+		case arrVal.Ty.IsMap || arrVal.Ty.IsSet:
+			// Same non-named-variable case emitMapCall/emitSetCall/.size
+			// already handle — a Map/Set-typed field access, array index,
+			// or call result (e.g. `for (const t of c.tags)`).
+			valsVal, err := e.mapOrSetValuesArray(arrVal.Ty, arrVal.Ref)
+			if err != nil {
+				return err
+			}
+			elemTy = *valsVal.Ty.ElemType
+			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
+		default:
 			return fmt.Errorf("%d:%d: for...of requires an array, Map, or Set value", s.GetPos().Line, s.GetPos().Col)
 		}
-		elemTy = *arrVal.Ty.ElemType
-		dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
 	}
 
 	// Internal index counter (not user-visible).
@@ -607,18 +634,18 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
 	defer e.pushPendingLabel(endL, incL)()
 
-	// Resolve the object being iterated.
-	objId, ok := s.Object.(*ast.Identifier)
-	if !ok {
-		return fmt.Errorf("%d:%d: for...in requires a named object variable", s.GetPos().Line, s.GetPos().Col)
+	// Resolve the object being iterated. for...in only ever needs the
+	// object's static field-name list (a compile-time constant), never its
+	// runtime value/pointer, so this works for any object-typed expression,
+	// not just a named variable — e.g. `for (const k in c.point)`.
+	objTy := e.inferExprType(s.Object)
+	if !objTy.IsObject || len(objTy.Fields) == 0 {
+		return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
 	}
-	sym, found := e.lookup(objId.Name)
-	if !found || !sym.Ty.IsObject || len(sym.Ty.Fields) == 0 {
-		return fmt.Errorf("%d:%d: '%s' is not an object with known fields", s.GetPos().Line, s.GetPos().Col, objId.Name)
-	}
+	fields := objTy.Fields
 
 	// Build a compile-time string[] of field names and materialise it at runtime.
-	keysVal, err := e.emitObjectFieldNames(sym.Ty.Fields, s.GetPos())
+	keysVal, err := e.emitObjectFieldNames(fields, s.GetPos())
 	if err != nil {
 		return err
 	}

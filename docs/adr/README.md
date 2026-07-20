@@ -87,3 +87,12 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00050](ADR-00050.md) | Non-blocking await fetch(...) via libcurl's multi-interface (TDD-00006 Part 2, second real slice) | Extends ADR-00049. Implements TDD-00006 |
 | [00051](ADR-00051.md) | Fix ucontext_t's size/layout being hardcoded to this dev machine's platform | Extends ADR-00049, ADR-00050 |
 | [00052](ADR-00052.md) | Fix alloca's inside loop bodies causing unbounded stack growth | Extends ADR-00049, ADR-00050 |
+| [00053](ADR-00053.md) | Implement Map.entries()/.forEach()/.clear() and Set.forEach()/.clear() | |
+| [00054](ADR-00054.md) | Implement Object.assign(target, ...src) | |
+| [00055](ADR-00055.md) | Implement Object.freeze(obj) / Object.seal(obj) | |
+| [00056](ADR-00056.md) | Fix Array.prototype.splice's out-of-bounds read and missing insert-item support | |
+| [00057](ADR-00057.md) | Implement findLast/findLastIndex, toSorted/toReversed/toSpliced, with, keys/values/entries, copyWithin, and Array.of | Extends ADR-00056 |
+| [00058](ADR-00058.md) | Fix Array\<T\>/Map\<K,V\>/Set\<T\> silently resolving to i64 as a plain type annotation | |
+| [00059](ADR-00059.md) | Fix Map/Set method calls, .size, and for...of only recognizing a plain named variable | Extends ADR-00058 |
+| [00060](ADR-00060.md) | Fix for...in and return-of-an-array only recognizing a plain named variable | Extends ADR-00059 |
+| [00061](ADR-00061.md) | Fix array-typed object/interface fields losing their length entirely | Extends ADR-00060 |

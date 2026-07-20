@@ -8,9 +8,9 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **74% of core TypeScript language features**, **~88% of Node.js-style APIs** (`fs`, `process`, and friends), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **80% of core TypeScript language features**, **~92% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and friends), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
 
-Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger, not-yet-built features (an event loop, a real HTTP server, …) get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists, linked from `STATUS.md` rather than bloating it inline.
+Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` (`docs/tdd/TDD-00006.md`), and the HTTP server itself (`docs/tdd/TDD-00004.md`) — while others, like garbage collection (`docs/tdd/TDD-00001.md`), are still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
 
 Want to see it in action instead of reading about it? Every language feature has a runnable example under **[`examples/`](examples/)**: no README code snippets to go stale, just `.ts` files that actually compile and run (verified by `make examples`, every time).
 
@@ -20,23 +20,23 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 
 - Go 1.26+ (see `go.mod` for the exact pinned version)
 - `clang` (LLVM 15+, needs opaque-pointer support)
-- `libcurl`, only if the program you're compiling actually calls `fetch`; every other program stays plain-libc, no extra install needed
+- `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
 
 ## Quick start
 
 ```sh
 # Build the compiler
-make build          # produces ./KlainMainLang
+make build          # produces ./klainmain
 
 # Compile a TypeScript file to a native binary (does NOT run it)
-./KlainMainLang examples/basics/basics.ts
+./klainmain examples/basics/basics.ts
 # → produces examples/basics/basics
 
 # Run the binary yourself
 ./examples/basics/basics
 
 # Specify a custom output name
-./KlainMainLang -o myapp examples/basics/basics.ts
+./klainmain -o myapp examples/basics/basics.ts
 ./myapp
 
 # Compile and run in one step
@@ -50,7 +50,7 @@ make ir FILE=examples/basics/basics.ts
 
 | Target | Description |
 |---|---|
-| `make build` | Compile the KlainMainLang compiler to `./KlainMainLang` |
+| `make build` | Compile the KlainMainLang compiler to `./klainmain` |
 | `make install` | Install to `$GOPATH/bin` |
 | `make test` | Run Go unit tests |
 | `make examples` | Compile and run every example file (the closest thing this project has to a regression suite you can read) |
@@ -66,21 +66,22 @@ make ir FILE=examples/basics/basics.ts
 ## CLI flags
 
 ```sh
-KlainMainLang [flags] <file.ts>
+klainmain [flags] <file.ts>
 
   --emit-llvm   Emit LLVM IR to stdout and stop (do not compile)
   -o <name>     Output binary name (default: input path without .ts)
   --static      Statically link the output binary, for a scratch/distroless
                 Docker image with nothing else in it. Linux only: run
-                KlainMainLang itself on Linux to use this. macOS's linker has
+                klainmain itself on Linux to use this. macOS's linker has
                 no static-libc support at all (Apple ships no static
-                libSystem/crt0.o, by design), so KlainMainLang refuses --static
+                libSystem/crt0.o, by design), so klainmain refuses --static
                 immediately with an explanation rather than surfacing a
                 confusing linker error.
 ```
 
 Every other compiled binary here is dynamically linked (against libSystem on
-macOS, glibc on Linux, plus `libcurl` if the program calls `fetch`), closer
+macOS, glibc on Linux, plus `libcurl` if the program calls `fetch` or
+`http.listen`), closer
 to typical C/C++ toolchain output than a normal Go binary's usual
 self-contained default. `--static` closes that gap on Linux, verified
 end-to-end against real Docker builds: see `docker/Dockerfile` for a plain
@@ -111,7 +112,7 @@ codegen/
   llvm/             LLVM IR emitter, split by concern:
     emitter.go        core struct, scope stack, EmitProgram, pre-passes
     types.go          type system (IR types, FuncSig, StructIR)
-    runtime.go        ensure* C-runtime declarations (malloc, printf, sscanf, …)
+    runtime.go        ensure* C-runtime declarations (malloc, printf, sscanf, …), plus the hand-written select()-based event loop and ucontext.h fiber scheduler backing http.listen and non-blocking fetch
     emit_stmts.go     statements: for/while/do-while/if/switch/try/labeled break…
     emit_exprs.go     expressions, type inference, var declarations
     emit_strings.go   string operations (concat, methods, template literals)
@@ -124,14 +125,16 @@ codegen/
     emit_process.go   process.argv/env/exit/readLineSync/execFileSync/cwd/chdir/pid/platform/kill
     emit_date.go      Date: construction, getters/setters, parse, arithmetic, formatting
     emit_dynamic.go   any/unknown as a runtime-tagged {tag, payload} value
-    emit_async.go     async/await, Promise<T> (synchronous V1, no event loop yet)
-    emit_fetch.go     fetch(url) and Response, backed by libcurl (GET only)
+    emit_async.go     async/await, Promise<T> — real non-blocking await on fetch()'s Promise<Response> since the event loop landed (yields via a fiber inside an http.listen handler, busy-spins the same libcurl calls otherwise); every other Promise<T> is still a resolved-slot read
+    emit_fetch.go     fetch(url) and Response, backed by libcurl's multi-interface (GET only) — non-blocking, driven by the same select()-based event loop as http.listen
     emit_fs.go        fs.readFileSync/writeFileSync/appendFileSync/existsSync/unlinkSync/mkdirSync/rmdirSync/renameSync/copyFileSync/readdirSync
+    emit_http.go      http.listen(port, handler): request dispatch, Request/Response struct wiring on top of the select()-based event loop and fiber scheduler (both defined in runtime.go)
     emit_timers.go    setTimeout/clearTimeout/setInterval/clearInterval
     emit_memory.go    Memory.free(x): manual heap release (Stage 1 of the memory-management plan)
 docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
-  tdd/              Technical Design Documents: scoping/design work for not-yet-built features, referenced from STATUS.md
+  tdd/              Technical Design Documents: scoping/design work for big features, referenced from STATUS.md
+  testing/          Conformance-suite coverage tracking (Test262 ports run alongside the regular test suite)
 docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image
 .github/
   workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
@@ -157,6 +160,7 @@ Makefile            Build, test, and example targets
    - A scope stack for symbol resolution, plus a two-pass setup so functions can forward-reference each other.
    - Arrays are `{ptr, i64}` aggregates; objects are heap-allocated structs reached via GEP; closures are heap-allocated `{funcPtr, envPtr}` pairs; exceptions are `setjmp`/`longjmp` with a 64-slot jump-buffer stack; `any`/`unknown` are a boxed `{tag, payload}` pair with runtime-dispatched `typeof`/print/equality.
    - `ensure*()` pattern: every C stdlib dependency (`malloc`, `sscanf`, `gmtime`, you name it) gets declared exactly once, the first time it's actually needed.
+   - Concurrency, such as it is: a `select()`-based event loop merges the listening socket, every open `http.listen` connection, libcurl's own fds (for `fetch`), and the timer queue into one wait. Actual suspension is `ucontext.h` fibers, not LLVM's coroutine intrinsics — a direct prototype proved coroutines segfault the moment a `try`/`catch` spans a suspend point, since this compiler's `setjmp`/`longjmp` exceptions assume a C stack frame that a coroutine's suspend unwinds out from under them. Fibers keep their own OS stack, so they don't have that problem. No thread pool, no preemption: exactly one fiber runs at a time, cooperatively, same as JS's own single-threaded model.
 4. **Compile**: the emitter writes a `.ll` file next to the source, then shells out to `clang -O2` for the actual native codegen. KlainMainLang does the fun 90% and quietly lets a real compiler backend handle the part that would otherwise take a PhD.
 
 ## Things this compiler will cheerfully never do

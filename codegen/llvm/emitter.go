@@ -141,6 +141,7 @@ type Emitter struct {
 	usedMapStrHelpers      bool
 	usedMapNumHelpers      bool
 	usedExceptionHelpers   bool
+	usedFrozenSet          bool
 	breakStack             []string // end labels for enclosing loops / switch
 	continueStack          []string // continue-target labels for enclosing loops
 	// pendingLabel is set by a LabeledStatement just before emitting its body;
@@ -332,13 +333,26 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		return FuncType(params, ret)
 	}
-	// Promise<T> must be checked before ElemType (which is also used for the type param).
+	// Promise<T>/Map<K,V>/Set<T> must be checked before the generic ElemType
+	// fallback below (which treats any non-nil ElemType as a plain array —
+	// correct for T[] and Array<T>, wrong for these three).
 	if ta.Name == "Promise" {
 		if ta.ElemType != nil {
 			inner := e.resolveType(ta.ElemType)
 			return PromiseOf(inner)
 		}
 		return PromiseOf(TypeVoid)
+	}
+	if ta.Name == "Map" && ta.ElemType != nil {
+		keyTy := TypePtr
+		if ta.KeyType != nil {
+			keyTy = e.resolveType(ta.KeyType)
+		}
+		valTy := e.resolveType(ta.ElemType)
+		return MapType(keyTy, valTy)
+	}
+	if ta.Name == "Set" && ta.ElemType != nil {
+		return SetType(e.resolveType(ta.ElemType))
 	}
 	if ta.ElemType != nil {
 		return ArrayOf(e.resolveType(ta.ElemType))
