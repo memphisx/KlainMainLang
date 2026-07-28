@@ -10,7 +10,7 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **80% of core TypeScript language features**, **~92% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and friends), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
 
-Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` (`docs/tdd/TDD-00006.md`), and the HTTP server itself (`docs/tdd/TDD-00004.md`) — while others, like garbage collection (`docs/tdd/TDD-00001.md`), are still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
+Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), and the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)) — while others, like garbage collection ([TDD-00001](docs/tdd/TDD-00001.md)), are still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
 
 Want to see it in action instead of reading about it? Every language feature has a runnable example under **[`examples/`](examples/)**: no README code snippets to go stale, just `.ts` files that actually compile and run (verified by `make examples`, every time).
 
@@ -91,7 +91,7 @@ explicitly at link time (static archives don't auto-pull their own
 dependencies the way shared libraries do), and (on Alpine/musl, at least)
 a two-step `clang`-then-`gcc` link rather than a single `clang` invocation,
 since some of Alpine's static archives are LTO-built in a format clang's
-linker can't consume but gcc's can. See `docs/adr/ADR-00033.md` for the full
+linker can't consume but gcc's can. See [ADR-00033](docs/adr/ADR-00033.md) for the full
 recipe and investigation; this compiler doesn't attempt to automate it
 itself, since the exact package list/workaround is specific to one distro's
 build choices, not a portable fact this compiler could bake in safely.

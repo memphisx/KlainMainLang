@@ -129,21 +129,28 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 		return nil
 
-	case *ast.AwaitExpression:
-		// e.g. `const r: Response = await fetch(url)` — emitExpr already
-		// dispatches AwaitExpression correctly (emitAwait unwraps the Promise
-		// slot and frees it), returning the real object pointer directly; this
-		// case just needed to exist so the switch doesn't fall through to the
-		// default "must be an object literal or function call" error below.
+	default:
+		// Generic fallback: any other expression whose static type is
+		// already known to be an object (emitVarDecl only routes here once
+		// ty.IsObject is true) — a bare identifier holding an object, a
+		// member-expression field read whose field is itself object-typed
+		// (`const n = outer.inner`), an index into an object array
+		// (`const n = arr[0]`), `new ClassName(...)`, `await somePromise`,
+		// a ternary, etc. All of these were previously rejected here with
+		// "must be an object literal or function call" even though the
+		// exact same expression shapes already work fine as a plain
+		// argument or nested sub-expression elsewhere — emitExpr already
+		// evaluates every one of them correctly (proven by emitMember's own
+		// generic `e.emitExpr(ex.Object)` tail relying on exactly this), so
+		// there was nothing left to specially handle beyond letting it
+		// through. Found while building TDD-00009 Stage 1a's linked-list
+		// iterator example; see docs/adr/ADR-00064.md.
 		val, err := e.emitExpr(init)
 		if err != nil {
 			return err
 		}
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 		return nil
-
-	default:
-		return fmt.Errorf("%d:%d: object variable must be initialized with an object literal or function call", v.GetPos().Line, v.GetPos().Col)
 	}
 }
 
@@ -159,6 +166,7 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", s.GetPos().Line, s.GetPos().Col, prop.Key)
 		}
+		fieldTy = e.canonicalizeClassTy(fieldTy)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
 		if fieldTy.IsArray {
@@ -559,6 +567,33 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", ptrAsInt, val.Ref))
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 1)", setPtr, ptrAsInt))
 	return val, nil
+}
+
+// emitHasOwnProperty backs both Object.hasOwn(obj, key) and
+// obj.hasOwnProperty(key). Object shapes are fully structural/static in
+// this compiler (every field a class/interface/object-literal type has is
+// known at compile time), so the key must be a compile-time string literal
+// — the result is then just a FieldIndex lookup, a compile-time-constant
+// true/false, not a runtime property scan. A non-literal (runtime-computed)
+// key is a clean compile error rather than a silent always-false/true, since
+// there's no field-name table at runtime to check it against.
+func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, pos ast.Pos) (Value, error) {
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	if !objVal.Ty.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: hasOwnProperty/Object.hasOwn requires an object", pos.Line, pos.Col)
+	}
+	keyLit, ok := keyExpr.(*ast.StringLiteral)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: hasOwnProperty/Object.hasOwn requires a string literal key (dynamic keys are not supported)", pos.Line, pos.Col)
+	}
+	_, _, found := objVal.Ty.FieldIndex(keyLit.Value)
+	if found {
+		return Value{Ref: "true", Ty: TypeBool}, nil
+	}
+	return Value{Ref: "false", Ty: TypeBool}, nil
 }
 
 // emitObjectSeal implements Object.seal(obj). Real JS's seal blocks adding

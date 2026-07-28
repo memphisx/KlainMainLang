@@ -110,3 +110,11 @@ let w1: Wrapper = { name: 'first', inner: { x: 0, y: 0 } }
 let w2 = { ...w1, name: 'second' }
 w2.inner.x = 99
 console.log(w1.inner.x)   // 99 (same underlying inner object)
+
+// Object.hasOwn / .hasOwnProperty — field presence, resolved at compile
+// time (object shapes are fully static here), so the key must be a string
+// literal, not a runtime-computed one.
+console.log(Object.hasOwn(base, 'x'))     // 1
+console.log(Object.hasOwn(base, 'z'))     // 0
+console.log(base.hasOwnProperty('y'))     // 1
+console.log(base.hasOwnProperty('q'))     // 0

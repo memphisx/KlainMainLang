@@ -376,6 +376,20 @@ func (i *Identifier) GetPos() Pos { return i.pos }
 
 func NewIdentifier(name string, pos Pos) *Identifier { return &Identifier{Name: name, pos: pos} }
 
+// ThisExpression — `this`, valid inside method/constructor bodies. Parses
+// anywhere an expression can (TDD-00009 Stage 1 gives it meaning as the
+// implicit receiver); used elsewhere it reaches codegen's generic
+// "unknown expression type" fallback, same as ClassDeclaration does today.
+type ThisExpression struct {
+	pos Pos
+}
+
+func (*ThisExpression) nodeMarker()  {}
+func (*ThisExpression) exprMarker() {}
+func (t *ThisExpression) GetPos() Pos { return t.pos }
+
+func NewThisExpression(pos Pos) *ThisExpression { return &ThisExpression{pos: pos} }
+
 type BinaryExpression struct {
 	Op          string
 	Left, Right Expression
@@ -715,6 +729,24 @@ func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
 	return &NewDateExpression{Args: args, pos: pos}
 }
 
+// NewExpression — `new ClassName(args)` for a user-defined class. Unlike
+// Array/Map/Set/Error/Date above (each its own hardcoded node, keyed on the
+// literal callee name at parse time), this is the generic fallthrough for
+// any `new <Name>` where Name isn't one of those five builtins.
+type NewExpression struct {
+	ClassName string
+	Args      []Expression
+	pos       Pos
+}
+
+func (*NewExpression) nodeMarker()  {}
+func (*NewExpression) exprMarker() {}
+func (n *NewExpression) GetPos() Pos { return n.pos }
+
+func NewNewExpression(className string, args []Expression, pos Pos) *NewExpression {
+	return &NewExpression{ClassName: className, Args: args, pos: pos}
+}
+
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
 	Name   string
@@ -728,6 +760,29 @@ func (i *InterfaceDeclaration) GetPos() Pos { return i.pos }
 
 func NewInterfaceDeclaration(name string, fields []AnnotField, pos Pos) *InterfaceDeclaration {
 	return &InterfaceDeclaration{Name: name, Fields: fields, pos: pos}
+}
+
+// ClassDeclaration — `class Name { field: type; ...; constructor(...) {...} method(...) {...} }`.
+// Fields carry no initializers — matching real usage, initial values are
+// assigned via `this.field = value` statements in the constructor body.
+// Constructor and each entry in Methods are shaped exactly like a
+// FunctionDeclaration (params/return type/block body); the implicit `this`
+// receiver every one of them has is a codegen-time concern (TDD-00009 Stage
+// 1), not part of this node's shape.
+type ClassDeclaration struct {
+	Name        string
+	Fields      []AnnotField
+	Constructor *FunctionDeclaration // nil if omitted
+	Methods     []*FunctionDeclaration
+	pos         Pos
+}
+
+func (*ClassDeclaration) nodeMarker()  {}
+func (*ClassDeclaration) stmtMarker() {}
+func (c *ClassDeclaration) GetPos() Pos { return c.pos }
+
+func NewClassDeclaration(name string, fields []AnnotField, ctor *FunctionDeclaration, methods []*FunctionDeclaration, pos Pos) *ClassDeclaration {
+	return &ClassDeclaration{Name: name, Fields: fields, Constructor: ctor, Methods: methods, pos: pos}
 }
 
 // TypeAliasDeclaration — `type Name = TypeAnnotation`

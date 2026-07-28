@@ -319,6 +319,97 @@ console.log(Math.log1p(0.0))
 `, "3\n0\n0")
 }
 
+func TestE2EMathClz32Imul(t *testing.T) {
+	assertOutput(t, `
+console.log(Math.clz32(1))
+console.log(Math.clz32(0))
+console.log(Math.imul(3, 4))
+console.log(Math.imul(-5, 12))
+`, "31\n32\n12\n-60")
+}
+
+func TestE2EMathFround(t *testing.T) {
+	// fround narrows to float32 precision then widens back — 5.5 is exactly
+	// representable in float32, so it round-trips unchanged; toFixed(18)
+	// exposes the extra digits a plain double wouldn't otherwise show.
+	assertOutput(t, `
+console.log(Math.fround(5.5))
+console.log(Math.fround(0.1).toFixed(18))
+`, "5.5\n0.100000001490116119")
+}
+
+func TestE2ENumberToPrecision(t *testing.T) {
+	assertOutput(t, `
+console.log((1).toPrecision(4))
+console.log((0.0012345).toPrecision(2))
+console.log((5).toPrecision(1))
+`, "1.000\n0.0012\n5")
+}
+
+func TestE2ENumberToExponential(t *testing.T) {
+	assertOutput(t, `
+console.log((1234).toExponential(2))
+console.log((0.0012345).toExponential(2))
+`, "1.23e+03\n1.23e-03")
+}
+
+func TestE2ENumberToStringRadix(t *testing.T) {
+	assertOutput(t, `
+console.log((255).toString(16))
+console.log((255).toString(2))
+console.log((0).toString(16))
+console.log((-255).toString(16))
+console.log((42).toString())
+console.log((35).toString(36))
+`, "ff\n11111111\n0\n-ff\n42\nz")
+}
+
+func TestE2EObjectHasOwn(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 };
+console.log(Object.hasOwn(p, "x"))
+console.log(Object.hasOwn(p, "z"))
+console.log(p.hasOwnProperty("y"))
+console.log(p.hasOwnProperty("q"))
+`, "1\n0\n1\n0")
+}
+
+func TestE2EObjectHasOwnDynamicKeyIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Point { x: number }
+const p: Point = { x: 1 };
+const k = "x";
+console.log(p.hasOwnProperty(k))
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-literal hasOwnProperty key")
+	}
+}
+
+func TestE2EClassOwnToStringAndHasOwnPropertyWinOverBuiltins(t *testing.T) {
+	// A class-declared toString()/hasOwnProperty() must take priority over
+	// the generic Number/Object built-ins of the same name — dispatch order
+	// regression guard (emitCall must check class methods before these).
+	assertOutput(t, `
+class Foo {
+  x: number;
+  constructor(x: number) {
+    this.x = x;
+  }
+  toString(): string {
+    return "custom-tostring";
+  }
+  hasOwnProperty(k: string): boolean {
+    return false;
+  }
+}
+const f = new Foo(5);
+console.log(f.toString())
+console.log(f.hasOwnProperty("x"))
+`, "custom-tostring\n0")
+}
+
 // --- Near-zero-effort roadmap batch: NaN/Infinity, performance.now,
 // atob/btoa, encodeURI(Component)/decodeURI(Component),
 // crypto.getRandomValues/randomUUID, process.readLineSync ---

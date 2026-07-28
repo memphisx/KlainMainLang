@@ -13,6 +13,16 @@ func isStringTy(ty Type) bool {
 	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc
 }
 
+// isNumberTy returns true for a plain numeric scalar (any int/float width,
+// or bool) — used to gate Number.prototype method dispatch (toString(radix)
+// etc.) to a receiver that's actually a number, not e.g. a string (also
+// IR=="ptr"-free of the object/array/func flags, so not caught by
+// isStringTy's negative check alone) or a Date (IR=="i64" like a plain
+// number, but IsDate-tagged and meant to go through Date's own dispatch).
+func isNumberTy(ty Type) bool {
+	return ty.IR != "ptr" && !ty.IsDate
+}
+
 // emitStringConcat concatenates two string (ptr) values and returns a new heap string.
 func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	e.ensureStrlen()
@@ -926,4 +936,236 @@ func (e *Emitter) emitNumberToFixed(mem *ast.MemberExpression, args []ast.Expres
 	fmtPtr := e.internString("%.*f")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", buf, fmtPtr, digitsI32, dblReg))
 	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// numberToDouble evaluates mem.Object and widens it to a double, the shared
+// first step every Number.prototype numeric-formatting method needs.
+func (e *Emitter) numberToDouble(mem *ast.MemberExpression) (string, error) {
+	numVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return "", err
+	}
+	if numVal.Ty.IR == "double" {
+		return numVal.Ref, nil
+	}
+	dblReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp %s %s to double", dblReg, numVal.Ty.IR, numVal.Ref))
+	return dblReg, nil
+}
+
+// emitNumberToExponential implements Number.prototype.toExponential(digits),
+// via sprintf's own %e conversion. Known deviation from real JS, documented
+// in STATUS.md: the exponent is always rendered with a sign and 2 digits
+// (e.g. "1.23e+03"), whereas real JS always uses the minimum digit count
+// ("1.23e+3") — cosmetic only, the numeric value itself is exact.
+func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: toExponential takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	dblReg, err := e.numberToDouble(mem)
+	if err != nil {
+		return Value{}, err
+	}
+	digitsVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	digitsI32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
+	e.ensureSprintf()
+	e.ensureMalloc()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", buf))
+	fmtPtr := e.internString("%.*e")
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", buf, fmtPtr, digitsI32, dblReg))
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitNumberToPrecision implements Number.prototype.toPrecision(precision),
+// via sprintf's %#g conversion (the '#' flag keeps trailing zeros, matching
+// JS's "always show exactly `precision` significant digits" rule — plain
+// %g strips them). One cleanup %g doesn't do on its own: when the rounded
+// value has no fractional digits left, %#g still emits a bare trailing "."
+// (e.g. "1235.") where JS never would ("1235") — trimmed below by checking
+// the buffer's last byte after formatting. Known, documented (STATUS.md)
+// deviation from real JS for the exponential-notation branch: same 2-digit
+// zero-padded exponent as toExponential, and exact halfway-tie rounding may
+// differ from JS's spec algorithm (glibc uses round-half-to-even; JS does
+// not) — both cosmetic/rare-edge-case, not silent data corruption.
+func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: toPrecision takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	dblReg, err := e.numberToDouble(mem)
+	if err != nil {
+		return Value{}, err
+	}
+	digitsVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	digitsI32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
+	e.ensureSprintf()
+	e.ensureMalloc()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", buf))
+	fmtPtr := e.internString("%#.*g")
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", lenReg, buf, fmtPtr, digitsI32, dblReg))
+
+	// Trim a bare trailing '.' left by the '#' flag when no fractional
+	// digits remain (e.g. "1235." -> "1235").
+	lenI64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", lenI64, lenReg))
+	lastIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, lenI64))
+	lastPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", lastPtr, buf, lastIdx))
+	lastCh := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", lastCh, lastPtr))
+	isDot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 46", isDot, lastCh)) // 46 == '.'
+	trimL := e.freshLabel("toprecision.trim")
+	doneL := e.freshLabel("toprecision.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDot, trimL, doneL))
+	e.emitLabel(trimL)
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", lastPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+// emitNumberToStringRadix implements Number.prototype.toString(radix?) —
+// converts an integer to its digit-string representation in the given base
+// (default 10, matching this compiler's ordinary number->string conversion
+// for that case). Unlike the sprintf-based Number formatters above, no C
+// library conversion exists for an arbitrary base, so this hand-rolls the
+// classic repeated-urem/udiv digit loop, writing digits into a 70-byte
+// buffer from the end backward (enough for a sign + 64 base-2 digits + a
+// null terminator) so the final result can be returned as buf+startIdx with
+// no memmove needed — the pre-set null terminator at the buffer's last byte
+// is already in the right place regardless of how many digits end up
+// written. A non-integer receiver is truncated to its integer part first —
+// real JS's toString(radix) can expand fractional digits in the target
+// base too, which this doesn't attempt (documented in STATUS.md); radix is
+// trusted, not validated (must be 2-36 per spec — an out-of-range radix is
+// undefined behavior here, same trust-the-caller stance other built-ins in
+// this compiler already take for arguments there's no runtime check for).
+func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: toString takes at most 1 argument", pos.Line, pos.Col)
+	}
+	numVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	nVal := e.coerce(numVal, TypeI64)
+
+	radixRef := "10"
+	if len(args) == 1 {
+		radixVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		radixRef = e.coerce(radixVal, TypeI64).Ref
+	}
+
+	e.ensureMalloc()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 70)", buf))
+	nullPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 69", nullPtr, buf))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nullPtr))
+
+	isNeg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, nVal.Ref))
+	negN := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", negN, nVal.Ref))
+	uVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", uVal, isNeg, negN, nVal.Ref))
+
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 69, ptr %s, align 8", idxAlloca))
+	uAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", uAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", uVal, uAlloca))
+
+	zeroL := e.freshLabel("tostr.zero")
+	condL := e.freshLabel("tostr.cond")
+	bodyL := e.freshLabel("tostr.body")
+	negL := e.freshLabel("tostr.neg")
+	mergeL := e.freshLabel("tostr.merge")
+	doneL := e.freshLabel("tostr.done")
+
+	// u == 0 never enters the digit loop below, so it needs its own literal
+	// "0" digit written up front.
+	isZero := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isZero, uVal))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isZero, zeroL, condL))
+
+	e.emitLabel(zeroL)
+	e.writeDigitAndDecrement(buf, idxAlloca, "48") // '0'
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(condL)
+	uC := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", uC, uAlloca))
+	notZero := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", notZero, uC))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notZero, bodyL, doneL))
+
+	e.emitLabel(bodyL)
+	uB := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", uB, uAlloca))
+	digit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = urem i64 %s, %s", digit, uB, radixRef))
+	quotient := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = udiv i64 %s, %s", quotient, uB, radixRef))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", quotient, uAlloca))
+
+	isDecDigit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, 10", isDecDigit, digit))
+	decChar := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", decChar, digit)) // '0'..'9'
+	alphaChar := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 87", alphaChar, digit)) // 'a'..'z' ('a'-10 == 87)
+	charVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", charVal, isDecDigit, decChar, alphaChar))
+	e.writeDigitAndDecrement(buf, idxAlloca, charVal)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNeg, negL, mergeL))
+	e.emitLabel(negL)
+	e.writeDigitAndDecrement(buf, idxAlloca, "45") // '-'
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	finalIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalIdx, idxAlloca))
+	startIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", startIdx, finalIdx))
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", result, buf, startIdx))
+	return Value{Ref: result, Ty: TypePtr}, nil
+}
+
+// writeDigitAndDecrement stores an i64-valued byte (truncated to i8) at
+// buf[*idxAlloca], then decrements *idxAlloca — the shared "write one
+// character going backward" step emitNumberToStringRadix's three digit-
+// producing branches (zero, a real digit, the minus sign) all need.
+func (e *Emitter) writeDigitAndDecrement(buf, idxAlloca, charVal64 string) {
+	idx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx, idxAlloca))
+	pos := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", pos, buf, idx))
+	char8 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", char8, charVal64))
+	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", char8, pos))
+	newIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", newIdx, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxAlloca))
 }

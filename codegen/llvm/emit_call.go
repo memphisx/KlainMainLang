@@ -59,6 +59,35 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}
+		// User-defined class method call: instance.method(args). Checked
+		// before the long unguarded mem.Property == "<name>" chain below
+		// (push/slice/map/join/...), several of which match purely on
+		// property name with no receiver-type guard at all — a class method
+		// sharing a name with one of those built-ins must not be shadowed.
+		// Only fires when the class actually declares a method by that name,
+		// so a field that happens to hold a closure (cb: () => void) still
+		// falls through to the generic IsFunc field-call dispatch below.
+		// Also — crucially — checked before the generic hasOwnProperty/
+		// toString checks right below, since a class instance is IsObject
+		// too: a class that declares its own toString()/hasOwnProperty()
+		// must win over the generic built-in behavior, exactly like real JS
+		// prototype-chain method resolution would.
+		if objTy := e.inferExprType(mem.Object); objTy.IsClass {
+			if info, ok := e.classes[objTy.ClassName]; ok {
+				if _, ok := info.MethodSigs[mem.Property]; ok {
+					return e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos())
+				}
+			}
+		}
+		if mem.Property == "hasOwnProperty" && e.inferExprType(mem.Object).IsObject {
+			if len(ex.Args) != 1 {
+				return Value{}, fmt.Errorf("%d:%d: hasOwnProperty takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			return e.emitHasOwnProperty(mem.Object, ex.Args[0], ex.GetPos())
+		}
+		if mem.Property == "toString" && isNumberTy(e.inferExprType(mem.Object)) {
+			return e.emitNumberToStringRadix(mem, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" {
 			switch mem.Property {
 			case "isArray":
@@ -90,6 +119,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitObjectFreeze(ex.Args, ex.GetPos())
 			case "seal":
 				return e.emitObjectSeal(ex.Args, ex.GetPos())
+			case "hasOwn":
+				if len(ex.Args) != 2 {
+					return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
+				}
+				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" {
@@ -259,6 +293,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "toFixed" {
 			return e.emitNumberToFixed(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toPrecision" {
+			return e.emitNumberToPrecision(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toExponential" {
+			return e.emitNumberToExponential(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "repeat" {
 			return e.emitStringRepeat(mem, ex.Args, ex.GetPos())
@@ -1323,8 +1363,80 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		return e.emitMathRandom(pos)
 	case "clamp":
 		return e.emitMathClamp(args, pos)
+	case "clz32":
+		return e.emitMathClz32(args, pos)
+	case "fround":
+		return e.emitMathFround(args, pos)
+	case "imul":
+		return e.emitMathImul(args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: Math.%s is not supported", pos.Line, pos.Col, property)
+}
+
+// emitMathClz32 counts leading zero bits in the ToUint32 of its argument,
+// via LLVM's own llvm.ctlz.i32 intrinsic (the "is_zero_undef" second operand
+// is false, so clz32(0) correctly returns 32, matching real JS).
+func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Math.clz32 expects 1 argument", pos.Line, pos.Col)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	i64Val := e.coerce(val, TypeI64)
+	trunc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", trunc, i64Val.Ref))
+	e.ensureCtlz32()
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @llvm.ctlz.i32(i32 %s, i1 false)", result, trunc))
+	ext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", ext, result))
+	return Value{Ref: ext, Ty: TypeI64}, nil
+}
+
+// emitMathFround rounds a double to the nearest float32-representable value,
+// returned widened back to double — a plain fptrunc/fpext round-trip.
+func (e *Emitter) emitMathFround(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Math.fround expects 1 argument", pos.Line, pos.Col)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	dblVal := e.coerce(val, TypeF64)
+	narrowed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptrunc double %s to float", narrowed, dblVal.Ref))
+	widened := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", widened, narrowed))
+	return Value{Ref: widened, Ty: TypeF64}, nil
+}
+
+// emitMathImul performs 32-bit integer multiplication with wraparound
+// (real JS semantics — plain `a * b` uses double precision and loses exact
+// integer results past 2^53; imul is exactly the escape hatch for that).
+func (e *Emitter) emitMathImul(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: Math.imul expects 2 arguments", pos.Line, pos.Col)
+	}
+	aVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	bVal, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	a32 := e.freshReg()
+	b32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", a32, e.coerce(aVal, TypeI64).Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", b32, e.coerce(bVal, TypeI64).Ref))
+	prod := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i32 %s, %s", prod, a32, b32))
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", result, prod))
+	return Value{Ref: result, Ty: TypeI64}, nil
 }
 
 func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {

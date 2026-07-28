@@ -91,8 +91,8 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	case *ast.ExpressionStatement:
 		_, err := e.emitExpr(s.Expr)
 		return err
-	case *ast.InterfaceDeclaration, *ast.TypeAliasDeclaration, *ast.EnumDeclaration:
-		return nil // registered in pre-pass; no IR emitted
+	case *ast.InterfaceDeclaration, *ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ClassDeclaration:
+		return nil // registered in pre-pass (classes: also emitted in their own pass); no IR emitted here
 	case *ast.ThrowStatement:
 		return e.emitThrow(s)
 	case *ast.TryStatement:
@@ -333,6 +333,26 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
 	defer e.pushPendingLabel(endL, incL)()
 
+	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
+	// `next(): T | null` method iterates via repeated next() calls rather
+	// than a pre-materialized array — a genuinely different loop shape
+	// (unknown length, one call per iteration) from the array/Map/Set path
+	// below, so it's dispatched first and returns early via its own,
+	// independent loop-emission code.
+	if objTy := e.inferExprType(s.Iterable); objTy.IsClass {
+		if info, ok := e.classes[objTy.ClassName]; ok {
+			if sig, ok := info.MethodSigs["next"]; ok &&
+				len(sig.ParamTypes) == 0 && sig.RetType.Nullable &&
+				!sig.RetType.IsArray && !sig.RetType.IsMap && !sig.RetType.IsSet {
+				recvVal, err := e.emitExpr(s.Iterable)
+				if err != nil {
+					return err
+				}
+				return e.emitForOfClassIterator(s, objTy, sig, recvVal, condL, bodyL, incL, endL)
+			}
+		}
+	}
+
 	// Resolve the iterable to a data-ptr alloca and a len alloca.
 	// For named variables we reuse their existing allocas (no copy).
 	// For any other expression we evaluate it, extract the aggregate fields,
@@ -359,7 +379,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			elemTy = *valsVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
-			return fmt.Errorf("%d:%d: '%s' is not an array, Map, or Set", s.GetPos().Line, s.GetPos().Col, id.Name)
+			return fmt.Errorf("%d:%d: '%s' is not an array, Map, Set, or a class with a next(): T | null method", s.GetPos().Line, s.GetPos().Col, id.Name)
 		}
 	} else {
 		arrVal, err := e.emitExpr(s.Iterable)
@@ -381,7 +401,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			elemTy = *valsVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
-			return fmt.Errorf("%d:%d: for...of requires an array, Map, or Set value", s.GetPos().Line, s.GetPos().Col)
+			return fmt.Errorf("%d:%d: for...of requires an array, Map, Set, or class-with-next() value", s.GetPos().Line, s.GetPos().Col)
 		}
 	}
 

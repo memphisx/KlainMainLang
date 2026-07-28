@@ -56,3 +56,13 @@ function safeMul(a: number, b: number): number {
 }
 console.log(safeMul(1000, 1000))        // 1000000
 console.log(safeMul(100000000, 100000000)) // 9007199254740991 (clamped)
+
+// ── Number.prototype instance methods ─────────────────────────────────────────
+console.log((3.14159).toFixed(2))       // 3.14
+console.log((1).toPrecision(4))         // 1.000
+console.log((0.0012345).toPrecision(2)) // 0.0012
+console.log((1234).toExponential(2))    // 1.23e+03
+console.log((255).toString(16))         // ff
+console.log((255).toString(2))          // 11111111
+console.log((-255).toString(16))        // -ff
+console.log((42).toString())            // 42 (radix defaults to 10)

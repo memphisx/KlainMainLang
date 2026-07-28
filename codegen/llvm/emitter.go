@@ -46,7 +46,8 @@ type Emitter struct {
 	usedRealloc            bool
 	usedMemmove            bool
 	funcs                  map[string]FuncSig          // registered function signatures
-	interfaces             map[string]Type             // named interface and type alias registry
+	interfaces             map[string]Type             // named interface, type alias, and class registry
+	classes                map[string]ClassInfo        // named class registry (fields/ctor/methods) — see emit_classes.go
 	enums                  map[string]map[string]Value // enum name → member name → constant value
 	currentRetType         Type                        // return type of the function being emitted
 	blockDone              bool                        // true after a terminator (ret/br) in the current block
@@ -126,6 +127,7 @@ type Emitter struct {
 	usedHTTPThrow          bool
 	usedFiber              bool
 	usedMathFuncs          bool
+	usedCtlz32             bool
 	usedArc4Random         bool
 	usedStrtoll            bool
 	usedStrtod             bool
@@ -164,6 +166,7 @@ func NewEmitter() *Emitter {
 		strConsts:      make(map[string]string),
 		funcs:          make(map[string]FuncSig),
 		interfaces:     make(map[string]Type),
+		classes:        make(map[string]ClassInfo),
 		enums:          make(map[string]map[string]Value),
 		currentRetType: TypeI32, // main returns i32
 	}
@@ -397,6 +400,14 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// Pass 0: register interfaces and type aliases so they're available to function signatures.
 	e.registerInterfaces(prog)
 
+	// Pass 0.5: register classes (fields/layout + constructor/method
+	// signatures) — after interfaces (a class field/param/return may
+	// reference one) and before functions (a function signature may
+	// reference a class by name).
+	if err := e.registerClasses(prog); err != nil {
+		return "", err
+	}
+
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
 	e.registerFunctions(prog)
 
@@ -404,6 +415,15 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	for _, stmt := range prog.Body {
 		if fd, ok := stmt.(*ast.FunctionDeclaration); ok {
 			if err := e.emitFunctionDecl(fd); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	// Pass 2b: emit each class's constructor and methods.
+	for _, stmt := range prog.Body {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+			if err := e.emitClassDecl(cd); err != nil {
 				return "", err
 			}
 		}

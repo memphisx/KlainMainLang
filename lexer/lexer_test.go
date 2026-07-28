@@ -78,6 +78,8 @@ func TestKeywords(t *testing.T) {
 		{"case", lexer.CASE},
 		{"break", lexer.BREAK},
 		{"continue", lexer.CONTINUE},
+		{"class", lexer.CLASS},
+		{"this", lexer.THIS},
 	}
 	for _, c := range cases {
 		t.Run(c.src, func(t *testing.T) {

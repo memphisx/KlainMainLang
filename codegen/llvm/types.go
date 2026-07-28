@@ -56,6 +56,16 @@ type Type struct {
 	// object machinery) with two extra dispatched methods, text()/json().
 	// See emit_fetch.go.
 	IsResponse bool
+	// IsClass marks a user-defined `class` instance (TDD-00009 Stage 1):
+	// storage-wise it's an ordinary IsObject heap struct (ClassType always
+	// also sets IsObject, so every existing generic object mechanism —
+	// StructIR, FieldIndex, emitMember, Object.* statics, JSON — applies with
+	// no changes). IsClass/ClassName exist purely so method-call dispatch
+	// (which needs a name to look up a method table) and, later,
+	// `instanceof` (Stage 2) can recognize a class instance as distinct from
+	// a plain structural object literal.
+	IsClass   bool
+	ClassName string
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -106,6 +116,17 @@ func ResponseType() Type {
 		{Name: "body", Ty: TypePtr},
 	})
 	ty.IsResponse = true
+	return ty
+}
+
+// ClassType returns a user-defined class's instance type: an ordinary
+// object type (see IsObject's doc comment on why this is enough for field
+// access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
+// method-call dispatch can find the class's registered method table.
+func ClassType(name string, fields []Field) Type {
+	ty := ObjectType(fields)
+	ty.IsClass = true
+	ty.ClassName = name
 	return ty
 }
 

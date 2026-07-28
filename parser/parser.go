@@ -126,6 +126,8 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		return p.parseVarDecl(true)
 	case lexer.FUNCTION:
 		return p.parseFunctionDecl(false)
+	case lexer.CLASS:
+		return p.parseClassDecl()
 	case lexer.IMPORT:
 		return p.parseImportDeclaration()
 	case lexer.EXPORT:
@@ -265,10 +267,10 @@ func (p *Parser) parseExportDeclaration() (*ast.ExportDeclaration, error) {
 	}
 	switch decl.(type) {
 	case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.InterfaceDeclaration,
-		*ast.TypeAliasDeclaration, *ast.EnumDeclaration:
+		*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ClassDeclaration:
 		return ast.NewExportDeclaration(decl, pos), nil
 	default:
-		return nil, fmt.Errorf("%d:%d: 'export' can only precede a function, variable, interface, type alias, or enum declaration", pos.Line, pos.Col)
+		return nil, fmt.Errorf("%d:%d: 'export' can only precede a function, variable, interface, type alias, enum, or class declaration", pos.Line, pos.Col)
 	}
 }
 
@@ -552,6 +554,73 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	return ast.NewInterfaceDeclaration(nameTok.Literal, fields, pos), nil
 }
 
+// parseClassDecl parses `class Name { field: type; ...; constructor(...) {...} method(...) {...} }`.
+// Stage 0 of TDD-00009: no `extends`/`super` and no modifier keywords
+// (private/protected/static/implements/abstract) — all deferred to later
+// stages, so any of those produce a plain parse error here rather than being
+// silently accepted and ignored.
+func (p *Parser) parseClassDecl() (*ast.ClassDeclaration, error) {
+	tok := p.advance() // consume 'class'
+	pos := posOf(tok)
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.LBRACE); err != nil {
+		return nil, err
+	}
+
+	var fields []ast.AnnotField
+	var ctor *ast.FunctionDeclaration
+	var methods []*ast.FunctionDeclaration
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		doc := p.takeDoc()
+		memberTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+
+		// Method or constructor: `name(...) { ... }`.
+		if p.check(lexer.LPAREN) {
+			fn, err := p.parseFunctionRest(memberTok.Literal, false)
+			if err != nil {
+				return nil, err
+			}
+			if memberTok.Literal == "constructor" {
+				if ctor != nil {
+					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, nameTok.Literal)
+				}
+				ctor = fn
+			} else {
+				methods = append(methods, fn)
+			}
+			continue
+		}
+
+		// Otherwise a typed field: `name: type;` (no initializer — see
+		// ast.ClassDeclaration's doc comment).
+		p.match(lexer.QUESTION)
+		if _, err := p.expect(lexer.COLON); err != nil {
+			return nil, err
+		}
+		ft, err := p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			if t := doc.GetType(); t != "" {
+				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
+			}
+		}
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft})
+		p.match(lexer.SEMICOLON, lexer.COMMA)
+	}
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+	return ast.NewClassDeclaration(nameTok.Literal, fields, ctor, methods, pos), nil
+}
+
 func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	tok := p.advance() // consume 'type'
 	pos := posOf(tok)
@@ -651,7 +720,13 @@ func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, erro
 	if err != nil {
 		return nil, err
 	}
+	return p.parseFunctionRest(nameTok.Literal, isAsync)
+}
 
+// parseFunctionRest parses the `(params) : retType? { body }` tail shared by
+// a top-level `function NAME` declaration and a class method/constructor
+// (whose name is already known and consumed by the caller before this runs).
+func (p *Parser) parseFunctionRest(name string, isAsync bool) (*ast.FunctionDeclaration, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -678,7 +753,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, erro
 	}
 
 	return &ast.FunctionDeclaration{
-		Name: nameTok.Literal, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
+		Name: name, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
 	}, nil
 }
 
@@ -1610,8 +1685,33 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	case "Date":
 		return p.parseNewDateBody(pos)
 	default:
-		return nil, fmt.Errorf("%d:%d: 'new %s' is not supported", nameTok.Line, nameTok.Col, nameTok.Literal)
+		return p.parseNewGenericBody(pos)
 	}
+}
+
+// parseNewGenericBody parses `new ClassName(args)` for anything that isn't
+// one of the five hardcoded builtin forms above. Codegen doesn't act on this
+// yet (TDD-00009 Stage 1) — it's front-end groundwork only.
+func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
+	nameTok := p.advance() // consume class name
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var args []ast.Expression
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		arg, err := p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+		if !p.match(lexer.COMMA) {
+			break
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewExpression(nameTok.Literal, args, pos), nil
 }
 
 func (p *Parser) parseNewDateBody(pos ast.Pos) (*ast.NewDateExpression, error) {
@@ -1962,6 +2062,10 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.NEW:
 		return p.parseNew()
+
+	case lexer.THIS:
+		p.advance()
+		return ast.NewThisExpression(posOf(tok)), nil
 	}
 
 	return nil, fmt.Errorf("%d:%d: unexpected token %s in expression", tok.Line, tok.Col, tok.Type)

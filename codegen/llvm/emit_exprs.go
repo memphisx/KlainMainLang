@@ -70,6 +70,10 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return Value{Ref: "null", Ty: TypeNull}, nil
 	case *ast.AwaitExpression:
 		return e.emitAwait(ex)
+	case *ast.ThisExpression:
+		return e.emitThisExpression(ex.GetPos())
+	case *ast.NewExpression:
+		return e.emitNewExpression(ex)
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }
@@ -800,7 +804,7 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		if !ok {
 			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 		}
-		resultTy = fieldTy
+		resultTy = e.canonicalizeClassTy(fieldTy)
 	} else {
 		return Value{}, fmt.Errorf("%d:%d: optional chaining '?.' does not support property '%s' on type %s",
 			ex.GetPos().Line, ex.GetPos().Col, ex.Property, objVal.Ty.IR)
@@ -1091,6 +1095,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 	}
+	fieldTy = e.canonicalizeClassTy(fieldTy)
 	gepReg := e.freshReg()
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
@@ -1382,10 +1387,33 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// ev.when's type before it can resolve getFullYear on it).
 		if objTy := e.inferExprType(ex.Object); objTy.IsObject {
 			if _, fieldTy, ok := objTy.FieldIndex(ex.Property); ok {
-				return fieldTy
+				return e.canonicalizeClassTy(fieldTy)
 			}
 		}
+	case *ast.ThisExpression:
+		if sym, ok := e.lookup("this"); ok {
+			return sym.Ty
+		}
+	case *ast.NewExpression:
+		if info, ok := e.classes[ex.ClassName]; ok {
+			return info.Ty
+		}
 	case *ast.CallExpression:
+		// Class method call: instance.method(args). Checked before every
+		// mem.Property-name-based check below (console/String/Math/... and
+		// the big built-in-name chain further down), since several of those
+		// match purely on property name with no receiver-type guard — a
+		// user-defined method named e.g. "slice" or "push" must not be
+		// shadowed by the array/string built-in of the same name.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if objTy := e.inferExprType(mem.Object); objTy.IsClass {
+				if info, ok := e.classes[objTy.ClassName]; ok {
+					if sig, ok := info.MethodSigs[mem.Property]; ok {
+						return sig.RetType
+					}
+				}
+			}
+		}
 		// If calling a named function, use its registered return type (handles async too).
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
 			if sig, found := e.funcs[id.Name]; found {
@@ -1446,9 +1474,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" {
 				switch mem.Property {
 				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
-					"asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p":
+					"asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p", "fround":
 					return TypeF64
-				case "floor", "ceil", "round", "trunc", "sign":
+				case "floor", "ceil", "round", "trunc", "sign", "clz32", "imul":
 					return TypeI64
 				case "abs":
 					if len(ex.Args) == 1 {
@@ -1528,6 +1556,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "entries":
 					entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
 					return ArrayOf(entryTy)
+				case "hasOwn":
+					return TypeBool
 				case "assign", "freeze", "seal":
 					if len(ex.Args) >= 1 {
 						return e.inferExprType(ex.Args[0])
@@ -1594,6 +1624,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if e.inferExprType(mem.Object).IsDate {
 					return TypePtr
 				}
+			case "hasOwnProperty":
+				if e.inferExprType(mem.Object).IsObject {
+					return TypeBool
+				}
+			case "toString":
+				if isNumberTy(e.inferExprType(mem.Object)) {
+					return TypePtr
+				}
 			case "text":
 				if e.inferExprType(mem.Object).IsResponse {
 					return TypePtr
@@ -1615,7 +1653,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeI64
 			case "includes", "startsWith", "endsWith", "some", "every":
 				return TypeBool
-			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt":
+			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt", "toPrecision", "toExponential":
 				return TypePtr
 			case "at", "findLast":
 				objTy := e.inferExprType(mem.Object)
@@ -1926,6 +1964,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.NewArrayExpression:
 			if init.ElemType != nil {
 				ty = ArrayOf(e.resolveType(init.ElemType))
+			}
+		case *ast.NewExpression:
+			if info, ok := e.classes[init.ClassName]; ok {
+				ty = info.Ty
 			}
 		}
 	}

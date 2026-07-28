@@ -91,3 +91,10 @@ console.log(inRange)  // 1
 const roll = Math.floor(Math.random() * 6.0)
 const rollOk = roll >= 0 && roll < 6
 console.log(rollOk)  // 1
+
+// ── clz32 / imul / fround ──────────────────────────────────────────────────────
+console.log(Math.clz32(1))           // 31
+console.log(Math.clz32(0))           // 32
+console.log(Math.imul(3, 4))         // 12
+console.log(Math.imul(-5, 12))       // -60 (32-bit wraparound multiply)
+console.log(Math.fround(5.5))        // 5.5 (exactly representable in float32)

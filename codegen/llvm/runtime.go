@@ -1371,6 +1371,17 @@ func (e *Emitter) ensureMathFuncs() {
 	e.emitGlobal("declare double @log1p(double noundef)")
 }
 
+// ensureCtlz32 declares LLVM's own count-leading-zeros intrinsic for Math.clz32
+// — a standard IR intrinsic (not a libc/libm call), so unlike ensureMathFuncs
+// this needs no -lm link requirement.
+func (e *Emitter) ensureCtlz32() {
+	if e.usedCtlz32 {
+		return
+	}
+	e.usedCtlz32 = true
+	e.emitGlobal("declare i32 @llvm.ctlz.i32(i32, i1)")
+}
+
 func (e *Emitter) ensureArc4Random() {
 	if !e.usedArc4Random {
 		e.emitGlobal("declare i32 @arc4random()")

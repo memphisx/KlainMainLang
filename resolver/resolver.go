@@ -9,7 +9,7 @@
 //     reachable file is merged into one combined AST before codegen runs.
 //     There is no linker step and no per-file LLVM module boundary.
 //   - Imported (non-entry) files may only contain declarations (function/
-//     const/let/var/interface/type/enum) plus their own imports — no
+//     const/let/var/interface/type/enum/class) plus their own imports — no
 //     executable top-level statements. Only the entry file's own top-level
 //     statements become the program's actual runtime behavior. This is a
 //     deliberate simplification: real ES modules run a file's top-level
@@ -178,10 +178,10 @@ func validateDeclarationsOnly(prog *ast.Program) error {
 		}
 		switch s.(type) {
 		case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.InterfaceDeclaration,
-			*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ImportDeclaration:
+			*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ImportDeclaration, *ast.ClassDeclaration:
 			continue
 		default:
-			return fmt.Errorf("%d:%d: imported files may only contain declarations (function/const/let/var/interface/type/enum) and imports — no executable top-level statements",
+			return fmt.Errorf("%d:%d: imported files may only contain declarations (function/const/let/var/interface/type/enum/class) and imports — no executable top-level statements",
 				stmt.GetPos().Line, stmt.GetPos().Col)
 		}
 	}
@@ -204,6 +204,8 @@ func declNameOf(stmt ast.Statement) (string, bool) {
 	case *ast.TypeAliasDeclaration:
 		return s.Name, true
 	case *ast.EnumDeclaration:
+		return s.Name, true
+	case *ast.ClassDeclaration:
 		return s.Name, true
 	}
 	return "", false

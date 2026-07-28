@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"reflect"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -266,6 +267,104 @@ func TestCompoundAssign(t *testing.T) {
 	}
 }
 
+// --- Classes (TDD-00009 Stage 0) ---
+
+func TestClassDeclaration(t *testing.T) {
+	prog := mustParse(t, `
+		class Point {
+			x: number;
+			y: number;
+			constructor(x: number, y: number) {
+				this.x = x;
+				this.y = y;
+			}
+			length(): number {
+				return this.x;
+			}
+		}
+	`)
+	cls, ok := prog.Body[0].(*ast.ClassDeclaration)
+	if !ok {
+		t.Fatalf("expected ClassDeclaration, got %T", prog.Body[0])
+	}
+	if cls.Name != "Point" {
+		t.Errorf("name = %q", cls.Name)
+	}
+	if len(cls.Fields) != 2 || cls.Fields[0].Name != "x" || cls.Fields[1].Name != "y" {
+		t.Errorf("fields = %+v", cls.Fields)
+	}
+	if cls.Constructor == nil || len(cls.Constructor.Params) != 2 {
+		t.Fatalf("constructor = %+v", cls.Constructor)
+	}
+	if len(cls.Methods) != 1 || cls.Methods[0].Name != "length" {
+		t.Errorf("methods = %+v", cls.Methods)
+	}
+}
+
+func TestClassDeclarationExport(t *testing.T) {
+	prog := mustParse(t, "export class Foo { x: number; }")
+	exp, ok := prog.Body[0].(*ast.ExportDeclaration)
+	if !ok {
+		t.Fatalf("expected ExportDeclaration, got %T", prog.Body[0])
+	}
+	if _, ok := exp.Decl.(*ast.ClassDeclaration); !ok {
+		t.Fatalf("expected exported ClassDeclaration, got %T", exp.Decl)
+	}
+}
+
+func TestNewExpressionGeneric(t *testing.T) {
+	expr := mustParseExpr(t, "new Foo(1, 2);")
+	n, ok := expr.(*ast.NewExpression)
+	if !ok {
+		t.Fatalf("expected NewExpression, got %T", expr)
+	}
+	if n.ClassName != "Foo" || len(n.Args) != 2 {
+		t.Errorf("className=%q args=%d", n.ClassName, len(n.Args))
+	}
+}
+
+// TestNewBuiltinFormsUnaffected guards against the generic `new ClassName(...)`
+// fallback (added for TDD-00009 Stage 0) accidentally swallowing any of the
+// five pre-existing hardcoded `new` forms — each must still parse to its own
+// dedicated node type, not the new generic ast.NewExpression.
+func TestNewBuiltinFormsUnaffected(t *testing.T) {
+	cases := []struct {
+		src  string
+		want any
+	}{
+		{"new Array<number>(3);", &ast.NewArrayExpression{}},
+		{"new Map<string, number>();", &ast.NewMapExpression{}},
+		{"new Set<number>();", &ast.NewSetExpression{}},
+		{`new Error("oops");`, &ast.NewErrorExpression{}},
+		{"new Date();", &ast.NewDateExpression{}},
+	}
+	for _, c := range cases {
+		t.Run(c.src, func(t *testing.T) {
+			expr := mustParseExpr(t, c.src)
+			wantType := reflect.TypeOf(c.want)
+			if reflect.TypeOf(expr) != wantType {
+				t.Errorf("got %T, want %v", expr, wantType)
+			}
+		})
+	}
+}
+
+func TestThisExpression(t *testing.T) {
+	expr := mustParseExpr(t, "this;")
+	if _, ok := expr.(*ast.ThisExpression); !ok {
+		t.Fatalf("expected ThisExpression, got %T", expr)
+	}
+
+	expr = mustParseExpr(t, "this.x;")
+	member, ok := expr.(*ast.MemberExpression)
+	if !ok || member.Property != "x" {
+		t.Fatalf("expected MemberExpression on 'x', got %T", expr)
+	}
+	if _, ok := member.Object.(*ast.ThisExpression); !ok {
+		t.Fatalf("expected ThisExpression receiver, got %T", member.Object)
+	}
+}
+
 // --- Error cases ---
 
 func TestParseError(t *testing.T) {
@@ -273,6 +372,7 @@ func TestParseError(t *testing.T) {
 		"let",          // missing name
 		"const x =",   // missing initialiser
 		"if x { }",    // missing parens
+		"class Foo { constructor() {} constructor() {} }", // duplicate constructor
 	}
 	for _, src := range cases {
 		t.Run(src, func(t *testing.T) {
