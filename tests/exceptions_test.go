@@ -25,6 +25,27 @@ try {
 `, "5\nerr: division by zero")
 }
 
+func TestE2EDivisionByZeroThrows(t *testing.T) {
+	assertOutput(t, `
+try {
+  console.log(10 / 0)
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+try {
+  console.log(10 % 0)
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+let x: number = 10
+try {
+  x /= 0
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+`, "err: Division by zero\nerr: Division by zero\nerr: Division by zero")
+}
+
 func TestE2ETryCatchNoThrow(t *testing.T) {
 	assertOutput(t, `
 try {

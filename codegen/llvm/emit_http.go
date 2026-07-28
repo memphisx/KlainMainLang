@@ -13,10 +13,24 @@ import (
 	"KlainMainLang/ast"
 )
 
+// isPlainStringType reports whether t is a bare string (IR "ptr" with none
+// of the other flags that mark a more specific ptr-shaped type — object,
+// array, Map/Set, closure, Promise, Date, class instance, ...). Used to
+// validate that a http.listen response's optional `headers` field really is
+// Map<string, string>, since (unlike status/body, which just get coerced)
+// treating a wrong-shaped value as a Map and walking its "entries" at
+// runtime would corrupt memory rather than just misbehave.
+func isPlainStringType(t Type) bool {
+	return t.IR == "ptr" && !t.IsArray && !t.IsObject && !t.IsMap && !t.IsSet &&
+		!t.IsFunc && !t.IsDynamic && !t.IsPromise && !t.IsDate && !t.IsResponse &&
+		!t.IsClass && !t.IsGroupMap && !t.IsNull && !t.IsUndefined
+}
+
 // emitHTTPListen validates its two arguments (port: number, handler:
-// (req: Request) => T where T has status/body fields), binds and listens on
-// the given port, builds a dispatcher function specialized to the handler's
-// own closure/return type (since reading status/body off an arbitrary
+// (req: Request) => T where T has status/body fields, and optionally a
+// headers: Map<string,string> field), binds and listens on the given port,
+// builds a dispatcher function specialized to the handler's own
+// closure/return type (since reading status/body/headers off an arbitrary
 // user-declared return type needs Go-side knowledge of its field offsets,
 // unlike the fully generic timer/qsort trampolines), registers that
 // dispatcher with the event loop, and hands control to it.
@@ -64,6 +78,12 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	if _, _, ok := retTy.FieldIndex("body"); !ok {
 		return Value{}, fmt.Errorf("%d:%d: http.listen's handler return type must have a 'body: string' field", pos.Line, pos.Col)
 	}
+	if _, hTy, ok := retTy.FieldIndex("headers"); ok {
+		if !hTy.IsMap || hTy.MapKey == nil || hTy.MapVal == nil ||
+			!isPlainStringType(*hTy.MapKey) || !isPlainStringType(*hTy.MapVal) {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's handler return type's 'headers' field must be Map<string, string>", pos.Line, pos.Col)
+		}
+	}
 	paramTy := handlerVal.Ty.FuncParams[0]
 
 	e.ensureHTTPRuntime()
@@ -85,6 +105,15 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	return Value{Ty: TypeVoid}, nil
 }
 
+// maxHTTPRequestBytes bounds how far buildHTTPDispatcher's read buffer will
+// grow for a single request (headers + body together) — a safety cap
+// against a hostile/malformed Content-Length (or a client that never sends
+// the blank-line header terminator) trying to make this fiber grow its
+// buffer without bound. Hitting the cap aborts the connection the same way
+// any other malformed-request case here does (noReqL: close, no response) —
+// not a proper 413 response yet, a documented V1 limitation.
+const maxHTTPRequestBytes = 10 * 1024 * 1024
+
 // buildHTTPDispatcher emits @__kml_http_dispatch, a void() top-level function
 // that becomes each accepted connection's own fiber entry point (via
 // makecontext, in runtime.go's __kml_http_append_conn) — not a single
@@ -100,6 +129,18 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 // a deliberate V1 simplification — local socket writes essentially never
 // block for responses this small, so making them fiber-aware too would add
 // real complexity for a case that doesn't come up in practice at this scope.
+//
+// The read buffer accumulates across any number of individual read()
+// calls (growing via realloc as needed, up to maxHTTPRequestBytes) rather
+// than assuming one read() call returns an entire request — necessary once
+// a request's headers+body can legitimately exceed one read()'s worth of
+// kernel buffer (ADR-00072). The buffer pointer/capacity/bytes-read-so-far,
+// and header-parsing state, all live as plain allocas in this function's
+// entry block: since this whole function is the fiber's own permanent
+// stack frame (only ever entered once, via makecontext, not re-entered per
+// event-loop tick), those allocas persist naturally across any number of
+// internal swapcontext suspends — exactly like the fd/ctx GEPs below
+// already do.
 //
 // paramTy/retTy are captured from the call site — this is why the
 // dispatcher is built per call site rather than being one fully generic
@@ -139,29 +180,130 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
 	ctxPtrSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
+
 	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8192)", buf))
+	e.ensureRealloc()
+	e.ensureMemcpy()
+	e.ensureStrstr()
+	e.ensureAtoll()
+	e.ensureMapStrHelpers()
+	e.ensureHTTPParseHeaders()
+	e.ensureHTTPParseQuery()
+	e.ensureSplitFirst()
+
+	bufPtrA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", bufPtrA))
+	bufCapA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", bufCapA))
+	totalReadA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", totalReadA))
+	headersParsedA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", headersParsedA))
+	headerEndA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", headerEndA))
+	contentLenA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", contentLenA))
+	headersMapA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", headersMapA))
+
+	initBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8192)", initBuf))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", initBuf, bufPtrA))
+	e.emitInstr(fmt.Sprintf("store i64 8192, ptr %s, align 8", bufCapA))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
+	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", contentLenA))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headersMapA))
 
 	readLoopL := e.freshLabel("http.readloop")
+	growL := e.freshLabel("http.grow")
+	doGrowL := e.freshLabel("http.dogrow")
+	haveCapL := e.freshLabel("http.havecap")
 	checkErrL := e.freshLabel("http.checkerr")
 	checkEagainL := e.freshLabel("http.checkeagain")
 	doYieldL := e.freshLabel("http.doyield")
+	accumulateL := e.freshLabel("http.accumulate")
+	checkCompleteL := e.freshLabel("http.checkcomplete")
+	findHeaderEndL := e.freshLabel("http.findheaderend")
+	gotHeaderEndL := e.freshLabel("http.gotheaderend")
+	haveCLL := e.freshLabel("http.havecl")
+	noCLL := e.freshLabel("http.nocl")
+	mergeCLL := e.freshLabel("http.mergecl")
+	checkBodyCompleteL := e.freshLabel("http.checkbodycomplete")
 	parseL := e.freshLabel("http.parse")
+	haveQueryL := e.freshLabel("http.havequery")
+	noQueryL := e.freshLabel("http.noquery")
+	mergeQueryL := e.freshLabel("http.mergequery")
 	noReqL := e.freshLabel("http.noreq")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
 
+	// readLoopL: is there enough spare capacity to read into? Grow first if
+	// not, then issue the read() at the current end-of-buffer offset.
+	// fd64/fd32 are computed here (not in haveCapL) so they dominate every
+	// path that can reach noReqL, including growL's "too big" abort path,
+	// which never passes through haveCapL at all.
 	e.emitLabel(readLoopL)
 	fd64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, fdPtr))
 	fd32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
+	capNow0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", capNow0, bufCapA))
+	trNow0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trNow0, totalReadA))
+	usedPlus1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", usedPlus1, trNow0))
+	remain := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", remain, capNow0, usedPlus1))
+	needGrow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 4096", needGrow, remain))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", needGrow, growL, haveCapL))
+
+	// growL: double the buffer, aborting instead (closing the connection,
+	// same as any other malformed-request case here) if that would exceed
+	// maxHTTPRequestBytes — see its doc comment.
+	e.emitLabel(growL)
+	curCap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curCap, bufCapA))
+	newCap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 2", newCap, curCap))
+	tooBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", tooBig, newCap, maxHTTPRequestBytes))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooBig, noReqL, doGrowL))
+
+	e.emitLabel(doGrowL)
+	curBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curBuf, bufPtrA))
+	newBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newBuf, curBuf, newCap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newBuf, bufPtrA))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newCap, bufCapA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", haveCapL))
+
+	e.emitLabel(haveCapL)
+	bufForRead := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufForRead, bufPtrA))
+	trForRead := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trForRead, totalReadA))
+	capForRead := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", capForRead, bufCapA))
+	readPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", readPtr, bufForRead, trForRead))
+	readCapMinus1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", readCapMinus1, capForRead, trForRead))
+	readCap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", readCap, readCapMinus1))
 	nReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @read(i32 %s, ptr %s, i64 8191)", nReg, fd32, buf))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @read(i32 %s, ptr %s, i64 %s)", nReg, fd32, readPtr, readCap))
 	gotData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gotData, parseL, checkErrL))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gotData, accumulateL, checkErrL))
 
+	// checkErrL/checkEagainL/doYieldL: unchanged from before this feature —
+	// they only ever reference nReg/fdPtr/ctxPtrSlot, never buf itself, so
+	// doYieldL's own "br label %readLoopL" is already the right resume
+	// point now that readLoopL itself is offset-aware.
 	e.emitLabel(checkErrL)
 	isZero := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isZero, nReg))
@@ -183,17 +325,161 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.emitInstr(fmt.Sprintf("call i32 @swapcontext(ptr %s, ptr @__kml_main_ctx)", ctxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
 
-	e.emitLabel(parseL)
+	// accumulateL: nReg new bytes arrived — extend totalRead and keep the
+	// buffer NUL-terminated at the new end, then check completeness.
+	e.emitLabel(accumulateL)
+	trOld := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trOld, totalReadA))
+	trNew := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", trNew, trOld, nReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", trNew, totalReadA))
+	bufForTerm := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufForTerm, bufPtrA))
 	termPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termPtr, buf, nReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termPtr, bufForTerm, trNew))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", checkCompleteL))
+
+	// checkCompleteL: have we already found the header terminator? If not,
+	// look for it now; if so, skip straight to the body-length check.
+	e.emitLabel(checkCompleteL)
+	hp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", hp, headersParsedA))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hp, checkBodyCompleteL, findHeaderEndL))
+
+	e.emitLabel(findHeaderEndL)
+	bufForFind := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufForFind, bufPtrA))
+	blankLine := e.internString("\r\n\r\n")
+	foundBlank := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", foundBlank, bufForFind, blankLine))
+	blankNotFound := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", blankNotFound, foundBlank))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", blankNotFound, readLoopL, gotHeaderEndL))
+
+	// gotHeaderEndL (reached exactly once per request): record where the
+	// header block ends, parse every header line (skipping the request
+	// line itself — found via the first, always-present "\r\n"), and pull
+	// out Content-Length if present.
+	e.emitLabel(gotHeaderEndL)
+	foundInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", foundInt, foundBlank))
+	bufInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bufInt, bufForFind))
+	headerEndVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", headerEndVal, foundInt, bufInt))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", headerEndVal, headerEndA))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", foundBlank))
+	crlf := e.internString("\r\n")
+	reqLineEnd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", reqLineEnd, bufForFind, crlf))
+	headerBlockStart := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 2", headerBlockStart, reqLineEnd))
+	newMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, headersMapA))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_parse_headers(ptr %s, ptr %s)", headerBlockStart, newMap))
+	clKey := e.internString("content-length")
+	hasCL := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", hasCL, newMap, clKey))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasCL, haveCLL, noCLL))
+
+	e.emitLabel(haveCLL)
+	clInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", clInt, newMap, clKey))
+	clStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", clStr, clInt))
+	clParsed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @atoll(ptr %s)", clParsed, clStr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeCLL))
+
+	e.emitLabel(noCLL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeCLL))
+
+	e.emitLabel(mergeCLL)
+	clFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", clFinal, clParsed, haveCLL, noCLL))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", clFinal, contentLenA))
+	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", headersParsedA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", checkBodyCompleteL))
+
+	// checkBodyCompleteL: do we have Content-Length bytes past the header
+	// block yet? If not, go read more; if so, the request is fully
+	// buffered and parsing can proceed.
+	e.emitLabel(checkBodyCompleteL)
+	headerEndNow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", headerEndNow, headerEndA))
+	contentLenNow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", contentLenNow, contentLenA))
+	trNow1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trNow1, totalReadA))
+	bodyStart0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 4", bodyStart0, headerEndNow))
+	haveBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", haveBytes, trNow1, bodyStart0))
+	bodyComplete := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", bodyComplete, haveBytes, contentLenNow))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bodyComplete, parseL, readLoopL))
+
+	// parseL: the request is now fully buffered — parse the request line,
+	// split the query string out of the path, load the already-parsed
+	// headers map, extract the body, and dispatch to the handler.
+	e.emitLabel(parseL)
+	bufFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufFinal, bufPtrA))
 	e.ensureSscanf()
 	methodPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", methodPtr))
 	pathPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 2048)", pathPtr))
 	scanFmt := e.internString("%15s %2047s")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sscanf(ptr %s, ptr %s, ptr %s, ptr %s)", buf, scanFmt, methodPtr, pathPtr))
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sscanf(ptr %s, ptr %s, ptr %s, ptr %s)", bufFinal, scanFmt, methodPtr, pathPtr))
+
+	qMark := e.internString("?")
+	qSplit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, ptr} @__kml_split_first(ptr %s, ptr %s)", qSplit, pathPtr, qMark))
+	pathOnly := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, ptr} %s, 0", pathOnly, qSplit))
+	queryRaw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, ptr} %s, 1", queryRaw, qSplit))
+	hasQuery := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasQuery, queryRaw))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasQuery, haveQueryL, noQueryL))
+
+	e.emitLabel(haveQueryL)
+	qMap1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", qMap1))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_parse_query(ptr %s, ptr %s)", queryRaw, qMap1))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeQueryL))
+
+	e.emitLabel(noQueryL)
+	qMap2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", qMap2))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeQueryL))
+
+	e.emitLabel(mergeQueryL)
+	queryMapFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", queryMapFinal, qMap1, haveQueryL, qMap2, noQueryL))
+
+	headersMapFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", headersMapFinal, headersMapA))
+
+	headerEndFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", headerEndFinal, headerEndA))
+	contentLenFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", contentLenFinal, contentLenA))
+	bodyStartFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 4", bodyStartFinal, headerEndFinal))
+	bodySrc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", bodySrc, bufFinal, bodyStartFinal))
+	bodyAlloc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bodyAlloc, contentLenFinal))
+	bodyBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", bodyBuf, bodyAlloc))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", bodyBuf, bodySrc, contentLenFinal))
+	bodyTerm := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", bodyTerm, bodyBuf, contentLenFinal))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", bodyTerm))
 
 	reqTy := RequestType()
 	reqReg := e.freshReg()
@@ -206,7 +492,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
 	}
 	storeReqField("method", methodPtr)
-	storeReqField("path", pathPtr)
+	storeReqField("path", pathOnly)
+	storeReqField("query", queryMapFinal)
+	storeReqField("headers", headersMapFinal)
+	storeReqField("body", bodyBuf)
 	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
 
 	handlerPtr := e.freshReg()
@@ -252,7 +541,45 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	bodyReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", bodyReg, bodyTy.IR, bodyGep, bodyTy.Align()))
 
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyReg))
+	// Optional response headers: absent (the common case) needs zero extra
+	// branches — extraHeadersRef is just the interned empty string, so
+	// __kml_http_send_response's output is byte-identical to before this
+	// field existed. Present means load it, and (only then) pull in
+	// ensureHTTPSerializeHeaders — matching this file's existing "only pull
+	// in what's used" discipline.
+	var extraHeadersRef string
+	if hIdx, hTy, ok := retTy.FieldIndex("headers"); ok {
+		hGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", hGep, retTy.StructIR(), respReg, hIdx))
+		hReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", hReg, hTy.IR, hGep, hTy.Align()))
+		hNotNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hNotNull, hReg))
+
+		haveRespHeadersL := e.freshLabel("http.haverespheaders")
+		noRespHeadersL := e.freshLabel("http.norespheaders")
+		mergeRespHeadersL := e.freshLabel("http.mergerespheaders")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hNotNull, haveRespHeadersL, noRespHeadersL))
+
+		e.emitLabel(haveRespHeadersL)
+		e.ensureHTTPSerializeHeaders()
+		serialized := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_http_serialize_headers(ptr %s)", serialized, hReg))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeRespHeadersL))
+
+		e.emitLabel(noRespHeadersL)
+		emptyHdrs := e.internString("")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeRespHeadersL))
+
+		e.emitLabel(mergeRespHeadersL)
+		extraHeadersReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", extraHeadersReg, serialized, haveRespHeadersL, emptyHdrs, noRespHeadersL))
+		extraHeadersRef = extraHeadersReg
+	} else {
+		extraHeadersRef = e.internString("")
+	}
+
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, ptr %s)", fd32, statusVal.Ref, bodyReg, extraHeadersRef))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	e.emitTerminator("ret void")
 

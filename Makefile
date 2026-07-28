@@ -3,7 +3,7 @@ GO       := go
 CLANG    := clang
 EXAMPLES := $(shell find examples -name '*.ts' | sort)
 
-.PHONY: all build install test examples compile compile-o run ir clean fmt vet lint help
+.PHONY: all build install test examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all help
 
 ## all: build the compiler
 all: build
@@ -78,6 +78,21 @@ vet:
 
 ## lint: fmt + vet
 lint: fmt vet
+
+## fuzz: fuzz the lexer and parser for 30s each  (usage: make fuzz [FUZZTIME=30s])
+FUZZTIME := 30s
+fuzz:
+	$(GO) test ./lexer/ -run=^$$ -fuzz=FuzzTokenize -fuzztime=$(FUZZTIME)
+	$(GO) test ./parser/ -run=^$$ -fuzz=FuzzParse -fuzztime=$(FUZZTIME)
+
+## fuzz-codegen: fuzz the full parse->codegen->clang->run pipeline for 30s each (usage: make fuzz-codegen [FUZZTIME=30s])
+## Much slower per-iteration than 'fuzz' (each execution shells out to clang) — see TDD-00014.
+fuzz-codegen:
+	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzArithmeticCorrectness -fuzztime=$(FUZZTIME)
+	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzProgramWellFormed -fuzztime=$(FUZZTIME)
+
+## fuzz-all: run every fuzz target (lexer, parser, and the codegen pipeline)
+fuzz-all: fuzz fuzz-codegen
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

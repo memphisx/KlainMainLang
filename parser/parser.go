@@ -1454,7 +1454,8 @@ func (p *Parser) parseRelational() (ast.Expression, error) {
 		return nil, err
 	}
 	for p.peek().Type == lexer.LT || p.peek().Type == lexer.GT ||
-		p.peek().Type == lexer.LTE || p.peek().Type == lexer.GTE {
+		p.peek().Type == lexer.LTE || p.peek().Type == lexer.GTE ||
+		p.peek().Type == lexer.INSTANCEOF {
 		op := p.advance()
 		right, err := p.parseShift()
 		if err != nil {
@@ -1633,6 +1634,29 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, err
 			}
 			props = append(props, ast.ObjectProperty{Key: "", Value: ast.NewSpreadElement(arg, posOf(spreadTok))})
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
+		if p.check(lexer.LBRACKET) {
+			// Computed property key `{ [expr]: value }`.
+			p.advance() // '['
+			keyExpr, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RBRACKET); err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.COLON); err != nil {
+				return nil, err
+			}
+			val, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			props = append(props, ast.ObjectProperty{KeyExpr: keyExpr, Value: val})
 			if !p.match(lexer.COMMA) {
 				break
 			}

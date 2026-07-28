@@ -2,15 +2,17 @@
 
 A TypeScript-to-native compiler, written in Go, that emits LLVM IR and hands it to `clang`. You write `.ts`, it writes `.ll`, `clang` writes a real executable, your operating system is none the wiser.
 
-Why does this exist? Not because TypeScript-to-native compilation needed solving. Microsoft's own research arm already tried this properly, with an actual team, an actual budget, and an actual production use case ([Static TypeScript](https://www.microsoft.com/en-us/research/publication/static-typescript/), compiling a restricted TypeScript subset to native code for microcontrollers), and this project has none of the above going for it. It exists because "how would I even build a compiler" is a much more fun rabbit hole than whatever I was supposed to be doing that day. The name is the actual mission statement. Κλάιν Μάιν (Klain Main) is Greek slang for "I don't care": build it anyway, for no better reason than "because I can." It has since grown a garbage collector's worth of features (well, minus the garbage collector, see below) and a small mountain of design-decision paperwork in `docs/adr/`.
+Why does this exist? Not because TypeScript-to-native compilation needed solving. Microsoft's own research arm already tried this properly, with an actual team, an actual budget, and an actual production use case ([Static TypeScript](https://www.microsoft.com/en-us/research/publication/static-typescript/), compiling a restricted TypeScript subset to native code for microcontrollers), and this project has none of the above going for it. It exists because "how would I even build a compiler" is a much more fun rabbit hole than whatever I was supposed to be doing that day. The name is the actual mission statement. Κλάιν Μάιν (Klain Main) is Greek slang for "I don't care": build it anyway, for no better reason than "because I can." It has since grown a garbage collector's worth of features (including, as of `-mm=gc`, an actual garbage collector — opt-in, see below) and a small mountain of design-decision paperwork in `docs/adr/`.
 
-> **⚠️ Personal / experimental project.** One person, building this for fun, learning how compilers actually work by making all the mistakes smarter people already made, and already fixed, in better languages, ages ago. Not audited, not hardened, no stability guarantees between commits, and never destined for a production pipeline near you. It leaks memory on purpose (see below) and is enthusiastically fine with that. Perfect for tinkering, small CLI toys, and impressing exactly one (1) person at a dinner party. Bring your own garbage collector.
+> **⚠️ Personal / experimental project.** One person, building this for fun, learning how compilers actually work by making all the mistakes smarter people already made, and already fixed, in better languages, ages ago. Not audited, not hardened, no stability guarantees between commits, and never destined for a production pipeline near you. It leaks memory on purpose by default (see below) and is enthusiastically fine with that. Perfect for tinkering, small CLI toys, and impressing exactly one (1) person at a dinner party. Bring your own garbage collector, or just pass `-mm=gc` and let it bring one for you.
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet. Current scorecard: roughly **80% of core TypeScript language features**, **~92% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and friends), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet — and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **82% of core TypeScript language features**, **~82% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and friends — the request line parses any HTTP verb, and headers/query-string/request-body/response-headers are all parsed now too; only graceful shutdown remains), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
 
-Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), and the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)) — while others, like garbage collection ([TDD-00001](docs/tdd/TDD-00001.md)), are still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
+Classes exist too: fields, constructors, methods, `this`, `new ClassName(args)`, and `instanceof` against user-defined classes are all implemented (no inheritance yet — see [TDD-00009](docs/tdd/TDD-00009.md)). And the compiler now fuzzes itself: `go test -fuzz` lanes cover the lexer, parser, and the full parse-through-binary pipeline (an arithmetic oracle plus a crash-only well-formedness fuzzer — see [TDD-00014](docs/tdd/TDD-00014.md)), runnable via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
+
+Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)), and memory management ([TDD-00001](docs/tdd/TDD-00001.md)) — the `manual` and `gc` modes are both real now, only the `auto` mode (compiler-inserted frees, no runtime collector) is still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
 
 Want to see it in action instead of reading about it? Every language feature has a runnable example under **[`examples/`](examples/)**: no README code snippets to go stale, just `.ts` files that actually compile and run (verified by `make examples`, every time).
 
@@ -21,6 +23,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - Go 1.26+ (see `go.mod` for the exact pinned version)
 - `clang` (LLVM 15+, needs opaque-pointer support)
 - `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
+- `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
 
 ## Quick start
 
@@ -61,6 +64,9 @@ make ir FILE=examples/basics/basics.ts
 | `make fmt` | Format all Go source |
 | `make vet` | Run `go vet` |
 | `make lint` | `fmt` + `vet` |
+| `make fuzz [FUZZTIME=30s]` | Fuzz the lexer and parser |
+| `make fuzz-codegen [FUZZTIME=30s]` | Fuzz the full parse→codegen→clang→run pipeline (slower per-iteration — see [TDD-00014](docs/tdd/TDD-00014.md)) |
+| `make fuzz-all` | Run every fuzz target |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
 ## CLI flags
@@ -77,6 +83,12 @@ klainmain [flags] <file.ts>
                 libSystem/crt0.o, by design), so klainmain refuses --static
                 immediately with an explanation rather than surfacing a
                 confusing linker error.
+  -mm <mode>    Memory management mode: manual (default, Memory.free(x)
+                only — see STATUS.md's Memory Management section) or gc
+                (Boehm GC: every allocation gets collected automatically,
+                needs bdw-gc/libgc installed — see Requirements above and
+                docs/adr/ADR-00071.md). Works identically on Linux and
+                macOS, no special linker flags needed either way.
 ```
 
 Every other compiled binary here is dynamically linked (against libSystem on
@@ -120,6 +132,7 @@ codegen/
     emit_objects.go   objects, Object.keys/values/entries/groupBy, spread
     emit_func.go      functions, closures, callbacks
     emit_call.go      call dispatch: console, JSON, Math, Number, Date statics
+    emit_classes.go   class fields/constructors/methods/this/new, instanceof, class-based for...of
     emit_collections.go  Map<K,V> and Set<T>
     emit_exceptions.go   try/catch/throw (setjmp/longjmp)
     emit_process.go   process.argv/env/exit/readLineSync/execFileSync/cwd/chdir/pid/platform/kill
@@ -131,11 +144,14 @@ codegen/
     emit_http.go      http.listen(port, handler): request dispatch, Request/Response struct wiring on top of the select()-based event loop and fiber scheduler (both defined in runtime.go)
     emit_timers.go    setTimeout/clearTimeout/setInterval/clearInterval
     emit_memory.go    Memory.free(x): manual heap release (Stage 1 of the memory-management plan)
+    gcshim.go         //go:embed of gcsrc/gcshim.c, the -mm=gc allocator shim's source
+    gclocate.go       LocateGC(): portable pkg-config-based Boehm GC discovery for -mm=gc builds
+    gcsrc/gcshim.c    -mm=gc's C shim: malloc/calloc/realloc/free forwarding to GC_malloc/GC_realloc/GC_free (its own subdirectory since a .c file directly in a Go package dir makes `go build` demand cgo)
 docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from STATUS.md
   testing/          Conformance-suite coverage tracking (Test262 ports run alongside the regular test suite)
-docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image
+docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
   workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
 examples/           Sample .ts files: each compiles to a native binary, all wired into `make examples`
@@ -165,7 +181,7 @@ Makefile            Build, test, and example targets
 
 ## Things this compiler will cheerfully never do
 
-- Collect garbage, automatically. Almost every heap allocation is `malloc`'d and never `free`d on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it). There's now an escape hatch if you want one: `Memory.free(x)` (see `STATUS.md`'s Memory Management section) frees a value's own allocation by hand, C-style footguns and all, but nobody's holding a gun to your head. Left alone, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running.
+- Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see `STATUS.md`'s Memory Management section) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
 - Let an imported file run side-effecting top-level code, or give two unrelated files their own private scope. `import`/`export` exist, but only for sharing declarations; everything still boils down to one merged AST and one `main()` behind the scenes.
 - Judge you for using `var`. (It'll just quietly treat it like `let`. We've all been there.)
 

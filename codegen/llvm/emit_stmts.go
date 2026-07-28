@@ -659,10 +659,10 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	// runtime value/pointer, so this works for any object-typed expression,
 	// not just a named variable — e.g. `for (const k in c.point)`.
 	objTy := e.inferExprType(s.Object)
-	if !objTy.IsObject || len(objTy.Fields) == 0 {
+	fields := objTy.VisibleFields()
+	if !objTy.IsObject || (!objTy.IsClass && len(fields) == 0) {
 		return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
 	}
-	fields := objTy.Fields
 
 	// Build a compile-time string[] of field names and materialise it at runtime.
 	keysVal, err := e.emitObjectFieldNames(fields, s.GetPos())

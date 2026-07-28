@@ -535,3 +535,74 @@ const returned = getItems(c)
 console.log(returned.length)
 `, "3")
 }
+
+// --- computed property keys (docs/tdd/TDD-00012.md) ---
+
+func TestE2EComputedPropertyKeyBasic(t *testing.T) {
+	assertOutput(t, `
+const k = "b"
+const obj = { a: 1, [k]: 2 }
+console.log(obj.a)
+console.log(obj[k])
+console.log(obj["a"])
+`, "1\n2\n1")
+}
+
+func TestE2EComputedPropertyKeyWriteAndCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+const k = "b"
+const obj = { a: 1, [k]: 2 }
+obj.a = 10
+obj[k] += 5
+obj["c"] = 99
+console.log(obj.a)
+console.log(obj.b)
+console.log(obj.c)
+`, "10\n7\n99")
+}
+
+func TestE2EComputedPropertyKeyObjectKeysValuesEntries(t *testing.T) {
+	assertOutput(t, `
+const k = "b"
+const obj = { a: 1, [k]: 2, c: 3 }
+for (const key of Object.keys(obj)) {
+  console.log(key)
+}
+for (const v of Object.values(obj)) {
+  console.log(v)
+}
+for (const e of Object.entries(obj)) {
+  console.log(e.key + "=" + e.value)
+}
+`, "a\nb\nc\n1\n2\n3\na=1\nb=2\nc=3")
+}
+
+func TestE2EComputedPropertyKeyStringValues(t *testing.T) {
+	assertOutput(t, `
+const k = "y"
+const obj = { x: "hello", [k]: "world" }
+console.log(obj.x)
+console.log(obj[k])
+`, "hello\nworld")
+}
+
+func TestE2EComputedPropertyKeyNonStringKeyRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const k = 5
+const obj = { [k]: 1 }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-string computed property key, got none")
+	}
+}
+
+func TestE2EComputedPropertyKeySpreadCombinationRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const k = "b"
+const src = { a: 1 }
+const obj = { ...src, [k]: 2 }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for combining object spread with a computed property key, got none")
+	}
+}

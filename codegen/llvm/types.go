@@ -34,6 +34,14 @@ type Type struct {
 	IsSet  bool
 	MapKey *Type
 	MapVal *Type
+	// IsDynamicObject marks an object literal that had at least one computed
+	// property key (`{ [expr]: value }`). Storage-wise it IS a real
+	// Map<string,V> (IsMap is also set, MapKey is TypePtr) — IsDynamicObject
+	// only additionally enables `.field` / `[expr]` dot/bracket sugar over
+	// the existing Map .get()/.set() machinery at emitMember/emitIndex/
+	// emitAssign. Plain Map<K,V> variables never set this flag, so their
+	// behavior is unchanged. See docs/tdd/TDD-00012.md.
+	IsDynamicObject bool
 	// IsNull marks the null/undefined literal sentinel type (ptr null at IR level).
 	// IsUndefined distinguishes `undefined` from `null` for string rendering.
 	// Nullable marks T | null / T | undefined type annotations.
@@ -119,24 +127,65 @@ func ResponseType() Type {
 	return ty
 }
 
+// ClassTagField is the name of the hidden i64 tag every class instance
+// carries at field index 0 (TDD-00009 Stage 2), identifying which class an
+// instance actually is at runtime — needed for instanceof against an
+// any/unknown value, where the static type alone can't tell you. Reserved:
+// a user-declared field with this name is a compile-time error
+// (registerClasses).
+const ClassTagField = "__kml_tag"
+
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
-// method-call dispatch can find the class's registered method table.
+// method-call dispatch can find the class's registered method table. The
+// hidden tag field is always prepended at index 0, ahead of every
+// user-declared field — FieldIndex/StructIR/StructSize all derive from
+// Fields' order generically, so every named field access shifts by +1 for
+// free, with no changes needed at any of those call sites. Callers that
+// enumerate *all* fields for reflection (Object.keys/values/entries, JSON,
+// for...in, spread) must use VisibleFields() instead of Fields directly, or
+// the tag leaks out as a fake user-visible field.
 func ClassType(name string, fields []Field) Type {
-	ty := ObjectType(fields)
+	tagged := append([]Field{{Name: ClassTagField, Ty: TypeI64}}, fields...)
+	ty := ObjectType(tagged)
 	ty.IsClass = true
 	ty.ClassName = name
 	return ty
 }
 
+// VisibleFields returns the fields a user should ever see: identical to
+// Fields for every non-class object type, but with the hidden class tag
+// (always field index 0) stripped for a class instance. Use this instead of
+// Fields directly at any reflection/enumeration call site (Object.keys,
+// Object.values, Object.entries, Object.assign, JSON.stringify, for...in,
+// object-literal/spread field copying) — GEP/field-access code should keep
+// using Fields (via FieldIndex) unchanged, since the tag's presence is what
+// makes those indices correct in the first place.
+func (t Type) VisibleFields() []Field {
+	if t.IsClass && len(t.Fields) > 0 {
+		return t.Fields[1:]
+	}
+	return t.Fields
+}
+
 // RequestType returns http.listen()'s Request object type: a plain heap
-// object with method/path fields (readable via the ordinary object
-// field-access path — no dispatched methods in V1). See emit_http.go.
+// object (readable via the ordinary object field-access path — no
+// dispatched methods) whose fields are built by buildHTTPDispatcher, not by
+// user code. query/headers are Map<string,string> — reading them (.get(),
+// .has(), iteration, ...) needs no HTTP-specific dispatch at all, since
+// resolveMapOrSetForCall's generic arbitrary-expression branch already
+// handles any Map-typed field access. headers' keys are lowercased
+// (case-insensitive HTTP header names); query keys/values are
+// percent-decoded via the same __kml_decode_uri_component decodeURIComponent
+// already uses. See emit_http.go.
 func RequestType() Type {
 	return ObjectType([]Field{
 		{Name: "method", Ty: TypePtr},
 		{Name: "path", Ty: TypePtr},
+		{Name: "query", Ty: MapType(TypePtr, TypePtr)},
+		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
+		{Name: "body", Ty: TypePtr},
 	})
 }
 

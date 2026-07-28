@@ -3,14 +3,14 @@
 > TypeScript → native compiler written in Go. Emits LLVM IR text, compiled with `clang -O2`.
 > Targets whatever architecture the host clang defaults to (arm64 on Apple Silicon, x86-64 on Linux, etc.).
 > Multi-file compilation exists (named `import`/`export` only, V1 scope — see the Modules section below); the entry file's top-level statements still all run in one `main()`, and imported files may only contain declarations.
-> No garbage collector — every heap allocation is `malloc`'d and (almost) never `free`d. See "Memory Management" below.
+> No garbage collector by default — every heap allocation is `malloc`'d and (almost) never `free`d in `manual` mode. `-mm=gc` opts into a real one (Boehm). See "Memory Management" below.
 > Programs are pure libc by default; a program only needs `libcurl` installed on the build machine if it actually calls `fetch` (compiled binaries automatically link `-lcurl` only when used — see [ADR-00020](docs/adr/ADR-00020.md)).
 
 ## Contents
 
 - [What Is Implemented](#what-is-implemented) — core JavaScript/TypeScript language & standard library (works the same in any JS host)
 - [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)
-- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and the scoped-but-not-started HTTP server — Node-specific runtime globals with no browser equivalent
+- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.listen` server — Node-specific runtime globals with no browser equivalent
 - [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity
 - [Known Limitations & Bugs](#known-limitations--bugs)
 - [Design Documents (TDDs)](#design-documents-tdds)
@@ -74,6 +74,7 @@
 | `new Set<T>()` | ✅ | |
 | `class` (fields, constructor, methods, `this`, `new ClassName(args)`) | ✅ | [TDD-00009](docs/tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. A class with fields requires an explicit constructor (no field initializer syntax yet — every field must be set explicitly, same philosophy object literals already enforce). See [ADR-00063](docs/adr/ADR-00063.md). |
 | `class` inheritance (`extends`/`super`) | ❌ | Staged design in [TDD-00009](docs/tdd/TDD-00009.md) — the only remaining stage that needs new dynamic-dispatch machinery |
+| `instanceof` (against user-defined classes) | ✅ | [TDD-00009](docs/tdd/TDD-00009.md) Stage 2 — every instance carries a hidden runtime type tag. Before inheritance exists, a class-typed variable's concrete class is already known statically, so this folds to a compile-time constant except for an `any`/`unknown`-typed value, where the tag is read back at runtime — the one case that does real work. See [ADR-00067](docs/adr/ADR-00067.md) for the built-in-type/unregistered-class compile-error behavior and the `Error` subtypes follow-on in [TDD-00013](docs/tdd/TDD-00013.md). |
 
 ### Modules
 
@@ -215,9 +216,9 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `Number.NEGATIVE_INFINITY` | ✅ |
 | `Number.NaN` | ✅ |
 | `Number.prototype.toFixed(n)` | ✅ |
-| `Number.prototype.toString(radix?)` | ✅ (hand-rolled repeated-urem/udiv digit loop, no `sprintf` base support for an arbitrary radix. Truncates a non-integer receiver to its integer part first — doesn't expand fractional digits in the target base like real JS can. Radix is trusted, not validated (must be 2-36 per spec). See [ADR-00065](docs/adr/ADR-00065.md).) |
-| `Number.prototype.toPrecision(n)` | ✅ (`sprintf("%#.*g", ...)`. Known deviations from real JS, both cosmetic, not silent data corruption: the exponential-notation branch pads the exponent to 2 digits (`e+05` vs real JS's `e+5`); exact halfway-tie rounding may differ, since glibc rounds half-to-even and JS does not. See [ADR-00065](docs/adr/ADR-00065.md).) |
-| `Number.prototype.toExponential(n)` | ✅ (`sprintf("%.*e", ...)`. Same exponent-padding deviation as `toPrecision` above. See [ADR-00065](docs/adr/ADR-00065.md).) |
+| `Number.prototype.toString(radix?)` | ✅ (hand-rolled digit loop; truncates a non-integer receiver to its integer part first; radix trusted, not validated. See [ADR-00065](docs/adr/ADR-00065.md) for this and the two rows below — same ADR, same `sprintf`-based approach, same cosmetic-only deviations from real JS.) |
+| `Number.prototype.toPrecision(n)` | ✅ (`sprintf("%#.*g", ...)`; exponent pads to 2 digits — `e+05` vs real JS's `e+5`.) |
+| `Number.prototype.toExponential(n)` | ✅ (`sprintf("%.*e", ...)`; same exponent-padding deviation.) |
 | `parseInt(s, radix?)` (global) | ✅ |
 | `parseFloat(s)` (global) | ✅ |
 | `isNaN(x)` (global) | ✅ |
@@ -254,7 +255,7 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `Object.hasOwn()` / `.hasOwnProperty()` | ✅ (object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan — the key must be a string literal; a runtime-computed key is a clean compile error, since there's no field-name table at runtime to check it against. See [ADR-00065](docs/adr/ADR-00065.md).) |
 | `Object.fromEntries()` | ❌ |
 | Object spread `{ ...obj, key: val }` | ✅ |
-| Computed property keys | ❌ |
+| Computed property keys `{ [expr]: value }` | ✅ (a *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s own runtime, with `.field`/`[expr]` sugar layered on top; `V` inferred from the first property only. `...spread` combined with a computed key, and a declared-type form (`{ [key: string]: T }`), aren't supported yet. See [TDD-00012](docs/tdd/TDD-00012.md) / [ADR-00066](docs/adr/ADR-00066.md) for full scope.) |
 | Shorthand property `{ x }` | ✅ |
 | `Map.set/get/has/delete/keys/values` | ✅ |
 | `Map.size` | ✅ |
@@ -280,6 +281,8 @@ Whole-program compilation, not separate compilation units: `resolver.ResolveProg
 | `JSON.stringify(object[])` | ✅ |
 | `JSON.parse(s)` → number | ✅ |
 | `JSON.parse(s)` → object | ✅ (flat objects, primitive fields only — nested object fields give a clean compile error; see [ADR-00007](docs/adr/ADR-00007.md)) — a missing *string* field's default was fixed from a crash-causing `null` to an empty string; see [ADR-00024](docs/adr/ADR-00024.md) |
+| `JSON.parse(s)` → object with *nested* object fields | ❌ (clean compile error today, not silent corruption — see [ADR-00007](docs/adr/ADR-00007.md); design scoped in [TDD-00015](docs/tdd/TDD-00015.md)) |
+| `JSON.stringify(mixedTypeArray)` | ❌ (array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against) |
 
 ### console
 
@@ -513,12 +516,21 @@ What CLI tools and containerized services actually need day-to-day (argument par
 | `process.pid` | ✅ | The current process ID, via POSIX `getpid()`. A property read, not a call, matching `process.argv`. See [ADR-00026](docs/adr/ADR-00026.md). |
 | `process.platform` | ✅ | A pure compile-time constant (`"darwin"`/`"linux"`/`"win32"`/...) baked in from the Go compiler's own `runtime.GOOS` — no runtime code at all, since this compiler doesn't cross-compile. See [ADR-00026](docs/adr/ADR-00026.md). |
 | `process.kill(pid, signal?)` | ✅ | Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX "does this process exist" check and never actually delivers a signal. See [ADR-00026](docs/adr/ADR-00026.md). |
+| `process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline) | ❌ | `console.log`/`.error` always append a trailing newline; there's no way to write to stdout/stderr without one (e.g. for a progress indicator or binary-safe output) |
+| Writing/deleting `process.env` (`process.env.KEY = val`, `delete process.env.KEY`) | ❌ | `process.env` is read-only today (backed by `getenv()` only) — no `setenv()`/`unsetenv()` path exists |
+| `process.on('SIGINT'/'SIGTERM', handler)` (signal handlers) | ❌ | No way for a running program (e.g. an `http.listen` server) to intercept a signal and shut down gracefully instead of dying immediately |
 
 ### HTTP Server
 
 | API | Status | Notes |
 |---|---|---|
-| `http.listen(port, handler)` | ✅ | Concurrent connection handling: each accepted connection runs on its own fiber (`ucontext.h`-based, no custom assembly — see [TDD-00006](docs/tdd/TDD-00006.md)'s Part 2 prototype), so a connection that hasn't sent its request yet no longer blocks any other connection from being accepted and answered. GET-only request line (method + path); no headers, query-string, or request body yet; no `.close()`; response writes stay a single blocking call (a deliberate V1 simplification — small responses essentially never block). Built on the generalized `select()`-based event loop ([`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md) Part 1), so the listening socket, every open connection, and any pending `setTimeout`/`setInterval` timers all share one wait. See [ADR-00048](docs/adr/ADR-00048.md) (V1), [ADR-00049](docs/adr/ADR-00049.md) (concurrent connections), and [ADR-00052](docs/adr/ADR-00052.md) (fixed a stack leak in the main dispatch loop that crashed a running server after ~20,000 requests). |
+| `http.listen(port, handler)` — bind, accept, dispatch | ✅ | Concurrent connection handling: each accepted connection runs on its own fiber (`ucontext.h`-based, no custom assembly — see [TDD-00006](docs/tdd/TDD-00006.md)'s Part 2 prototype), so a connection that hasn't sent its request yet no longer blocks any other connection from being accepted and answered. Built on the generalized `select()`-based event loop ([`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md) Part 1), so the listening socket, every open connection, and any pending `setTimeout`/`setInterval` timers all share one wait. See [ADR-00048](docs/adr/ADR-00048.md) (V1), [ADR-00049](docs/adr/ADR-00049.md) (concurrent connections), and [ADR-00052](docs/adr/ADR-00052.md) (fixed a stack leak in the main dispatch loop that crashed a running server after ~20,000 requests). |
+| Request-line parsing (`req.method`, `req.path`) | ✅ | The request line's method token and path token are parsed generically (`sscanf("%15s %2047s", ...)`) — this is **not** GET-only: verified directly by curling `POST`/`PUT`/`DELETE` requests at a running server and confirming `req.method` reports each one correctly. `req.path` no longer includes a trailing `?...` query string (see below) — [ADR-00072](docs/adr/ADR-00072.md) fixed that. |
+| Request headers (`req.headers: Map<string, string>`) | ✅ | Lowercased keys (case-insensitive lookup, matching real HTTP semantics) — [ADR-00072](docs/adr/ADR-00072.md) |
+| Query string (`req.query: Map<string, string>`) | ✅ | Split from `req.path` and parsed (`a=b&c=d`), both keys and values percent-decoded via the same `decodeURIComponent` primitive this compiler already had — [ADR-00072](docs/adr/ADR-00072.md) |
+| Request body (`req.body: string`) | ✅ | `Content-Length`-aware — the read buffer now accumulates across as many `read()` calls as it takes (growing via `realloc`, capped at 10MiB against a hostile/malformed `Content-Length`) rather than assuming one `read()` call returns an entire request — [ADR-00072](docs/adr/ADR-00072.md) |
+| Response headers (optional `headers: Map<string, string>` field) | ✅ | Fully user-controlled, including `Content-Type` if set — omitting the field behaves byte-identically to before this existed — [ADR-00072](docs/adr/ADR-00072.md) |
+| `.close()` / graceful shutdown | ❌ | `http.listen` never returns; the only way to stop a running server today is `process.exit()`. Needs POSIX signal handling (`process.on('SIGINT'/'SIGTERM', ...)`), infrastructure that doesn't exist anywhere in this compiler yet — deliberately deferred, not scoped by [ADR-00072](docs/adr/ADR-00072.md) |
 
 ---
 
@@ -526,11 +538,12 @@ What CLI tools and containerized services actually need day-to-day (argument par
 
 ### High priority / low complexity
 
-These are the most natural next steps — each is self-contained and commonly used:
+These are the most natural next steps — each is self-contained and commonly used. Two items promoted here from Medium priority below, since both turned out lower-effort than originally scoped:
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| Computed property keys `{ [k]: v }` | Medium | Dynamic key; needs hash map backing |
+| `Array.from(iterable)` | Low-Medium | A general iterable protocol now exists (a class implementing `next(): T \| null`, [ADR-00063](docs/adr/ADR-00063.md)) — just needs draining that (and a plain array) into a fresh array. The array-like overload is the only one needed initially. |
+| `in` operator | Medium | Object key presence check — object shapes are already fully structural/static (the same compile-time `FieldIndex` lookup `Object.hasOwn()` already uses), so this is mostly parser/precedence work, not new runtime machinery |
 
 ### Medium priority / medium complexity
 
@@ -538,11 +551,9 @@ These are the most natural next steps — each is self-contained and commonly us
 |---|---|---|
 | `Array.flat(depth?)` | Medium | Blocked on nested-array support, not just the flatten logic itself — `number[][]`-style literals aren't reliably representable yet (found while scoping this: `[[1,2],[3,4]]` fails to compile). Real work is fixing that first. |
 | `Array.flatMap(fn)` | Medium | `map` then `flat(1)` — same nested-array blocker |
-| `Array.from(iterable)` | Low-Medium | A general iterable protocol now exists (a class implementing `next(): T \| null`, [ADR-00063](docs/adr/ADR-00063.md)) — just needs draining that (and a plain array) into a fresh array. The array-like overload is the only one needed initially. |
 | `String.prototype.matchAll()` | Medium-High | Needs regex engine or `strstr` loop |
 | ~~`Number.prototype.toString(radix)`~~ | ~~Medium~~ | ✅ done — see [`docs/adr/ADR-00065.md`](docs/adr/ADR-00065.md) |
-| `instanceof` | Medium | Needs type tag stored on heap objects |
-| `in` operator | Medium | Object key presence check |
+| ~~`instanceof`~~ | ~~Medium~~ | ✅ done (against user-defined classes and `any`/`unknown` values holding one) — see [ADR-00067](docs/adr/ADR-00067.md). `Error`/`Date`/`Response`/other built-ins are not yet taggable — see [TDD-00013](docs/tdd/TDD-00013.md). |
 | User-defined generic functions | High | Full generic instantiation pass — or type erasure via the existing `any`/`unknown` machinery, a real, cheaper alternative not yet decided between. Staged design in [`docs/tdd/TDD-00010.md`](docs/tdd/TDD-00010.md). |
 | Intersection types `A & B` | Medium | Merge struct fields |
 | Tuple types `[number, string]` | Medium | Fixed-size struct |
@@ -551,12 +562,13 @@ These are the most natural next steps — each is self-contained and commonly us
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| ~~`class` (methods, constructors)~~ | ~~High~~ | ✅ done (Stage 1, no inheritance) — see [`docs/adr/ADR-00063.md`](docs/adr/ADR-00063.md) and [`docs/tdd/TDD-00009.md`](docs/tdd/TDD-00009.md). Also closed a real, general iterable protocol for `for...of` (Stage 1a) and a pre-existing bug found along the way — see [`docs/adr/ADR-00064.md`](docs/adr/ADR-00064.md). `instanceof` and `Date`'s named-variable-only method-call restriction are not addressed by this stage. |
+| ~~`class` (methods, constructors)~~ | ~~High~~ | ✅ done (Stage 1, no inheritance) — see [`docs/adr/ADR-00063.md`](docs/adr/ADR-00063.md) and [`docs/tdd/TDD-00009.md`](docs/tdd/TDD-00009.md). Also closed a real, general iterable protocol for `for...of` (Stage 1a) and a pre-existing bug found along the way — see [`docs/adr/ADR-00064.md`](docs/adr/ADR-00064.md). `Date`'s named-variable-only method-call restriction is not addressed by this stage. |
+| ~~Runtime type tags + `instanceof` (class Stage 2)~~ | ~~Medium~~ | ✅ done — see [`docs/adr/ADR-00067.md`](docs/adr/ADR-00067.md). |
 | `class` inheritance / `extends` | High | Needs virtual dispatch or monomorphization. Last stage in [`docs/tdd/TDD-00009.md`](docs/tdd/TDD-00009.md) — the only piece of the class design that actually needs new runtime dispatch machinery; the earlier stages stand on their own. |
 | ~~`import` / `export` (multi-file)~~ | ~~High~~ | ✅ done (named imports/exports, whole-program compile) — see [ADR-00022](docs/adr/ADR-00022.md) and the Modules section above. Still open: real per-file module scope (mangled names), `export default`/namespace imports/re-exports, and side-effecting imported files |
 | Nested function declarations | Medium | Separate from closures; mostly a scoping change |
 | `RegExp` | High | Needs PCRE or similar C library |
-| `Error` subtypes (`TypeError`, etc.) | Medium | Tagged error values |
+| `Error` subtypes (`TypeError`, etc.) | Medium | Tagged error values — scoped (not started) in [TDD-00013](docs/tdd/TDD-00013.md), a follow-on to class Stage 2's runtime type tags ([ADR-00067](docs/adr/ADR-00067.md)) |
 | `Promise.all` / `.race` / `.allSettled` | Medium | Requires awaiting arrays of promises |
 | `Symbol` | High | Unique runtime IDs; affects `for…of`, iterators |
 | Generator functions / iterators | High | Suspend/resume; requires coroutine machinery |
@@ -576,6 +588,8 @@ Deviations from expected behavior: either features marked ✅ above with incorre
 | An unannotated function calling another unannotated function *declared later in the same file*, when the callee returns an object/array/closure/Date | `function makeA() { return makeB() }; function makeB() { return { x: 1 } }` — `makeA`'s own inferred return type is computed once, in source order, before `makeB` has been registered, so `makeA`'s inference sees a not-yet-known callee and falls back to void. Fails cleanly (`field access on non-object`), not silently — a known, accepted boundary of [ADR-00041](docs/adr/ADR-00041.md)'s single-pass, best-effort inference, not a general fixed-point/multi-pass type inference system. Reorder the declarations, or add an explicit return-type annotation to `makeA`, to work around it. |
 | `fetch()` response bodies containing embedded null bytes silently truncate | Confirmed directly: fetching 50,000 bytes of random binary data (`httpbin.org/bytes/50000`) came back as a 383-byte string. Root cause isn't in `fetch` itself — every string in this compiler is a plain null-terminated C string (`.length` is `strlen`-based), so *any* string value with an embedded `\0`, from any source, reads as shorter than it actually is; `fetch` just makes this reachable from live, uncontrolled external data for the first time. Verified the underlying growable-buffer/`realloc` logic itself is correct by re-testing with a large all-text (no embedded nulls) body, which came back complete and exact. Fine for the JSON/text REST API use case `fetch` was built for; a real fix needs `ArrayBuffer`/`TypedArrays` (0% implemented, tracked separately) to represent raw bytes at all. |
 | An object literal's field values are never coerced against a declared interface/expected type, only against their own literal-inferred type | `interface Point { x: number; y: number }; const p: Point = { x: 1, y: 40.6 }; console.log(p.y)` prints `4630910759336725709`, the raw IEEE-754 bit pattern of `40.6` reinterpreted as an `i64` — not a truncation, not a rejection, silent corruption readable through any later field access. Bidirectional (a `@type {float64}`-annotated field given an integer literal corrupts the same way in reverse) and depth-independent (reproduces in a flat, one-level interface; has nothing to do with nesting despite how it was originally reported). Same failure shape as the unannotated-parameter bug [ADR-00042](docs/adr/ADR-00042.md) fixed, just in a different, never-audited code path (object literal construction, not function calls). See [TDD-00007](docs/tdd/TDD-00007.md) for the full design. |
+| Dividing the minimum representable `i64` value by `-1` is still undefined behavior | `codegen/llvm/emit_exprs.go`'s `sdiv`/`srem` codegen guards against a zero divisor ([ADR-00069](docs/adr/ADR-00069.md)), but LLVM documents a *second*, separate UB case for signed division/remainder: dividend exactly `i64`'s minimum value (`-9223372036854775808`) with divisor `-1` (the mathematical result, `2^63`, doesn't fit back in an `i64`). Not fixed here — found by inspection while scoping [TDD-00014](docs/tdd/TDD-00014.md)'s codegen fuzzer's arithmetic oracle, not by an actual repro; reaching this exact value by chance is astronomically unlikely (1-in-2^64), so it wasn't something worth guarding preemptively in this pass. Would need the same zero-check-style guard `emitDivZeroGuard` already uses, extended to also special-case this one input pair. |
+| `JSON.parse` into an array-typed interface field produces invalid LLVM IR (fails to compile) instead of a clean rejection | `interface Bag { tags: string[] }; const b: Bag = JSON.parse('{"tags":["a","b"]}')` — confirmed directly: `emitJSONParseObject`'s upfront rejection loop (`codegen/llvm/emit_call.go`) only checks `f.Ty.IsObject`, not `f.Ty.IsArray`, so an array field falls through to `emitJSONParseFieldValue`'s scalar-only switch, which defaults to `atoll` (`i64`-typed) merged via `phi` against the field's actual `ptr`/aggregate-typed slot — a type mismatch `clang` rejects (`'%tN' defined with type 'i64' but expected 'ptr'`). Not silent corruption (the mismatched IR never produces a runnable binary), but not the clean compile-time error nested-object fields already get either. Found while scoping [TDD-00015](docs/tdd/TDD-00015.md) (nested-object `JSON.parse`); fix is a one-line addition to the existing rejection check, tracked there rather than fixed here since it surfaced mid-design-writeup, not mid-implementation. |
 
 ---
 
@@ -583,16 +597,19 @@ Deviations from expected behavior: either features marked ✅ above with incorre
 
 Anything big enough to need a design pass before implementation gets scoped out in a Technical Design Document under `docs/tdd/` first — full context, options considered, and prerequisites, kept out of this file so it stays scannable. Each of these is a genuinely significant piece of work in its own right, not a quick follow-on:
 
-- **[Memory Management](docs/tdd/TDD-00001.md)** — no garbage collector yet. Stage 1 of the manual-release plan (`Memory.free(x)`) is done ([ADR-00030](docs/adr/ADR-00030.md)); the GC path and Stages 2/3 of the manual plan are still design-only.
+- **[Memory Management](docs/tdd/TDD-00001.md)** — three mutually-exclusive compilation modes, selected by the `-mm` flag: `manual` (default, `Memory.free(x)` — [ADR-00030](docs/adr/ADR-00030.md)) and `gc` (Boehm GC — [ADR-00071](docs/adr/ADR-00071.md)) are both built; `auto` (compiler-inserted frees, no runtime collector) is still design-only.
 - **[Timers](docs/tdd/TDD-00002.md)** — done ([ADR-00031](docs/adr/ADR-00031.md)); kept as a TDD since the design writeup (why it *doesn't* need the general event loop) is still useful context.
 - **[Alternative fetch Backend](docs/tdd/TDD-00003.md)** — a Go helper instead of libcurl. Scoped, not started, low priority.
-- **[HTTP Server](docs/tdd/TDD-00004.md)** — the piece that unlocks this project's microservice direction. V1 done ([ADR-00048](docs/adr/ADR-00048.md)).
+- **[HTTP Server](docs/tdd/TDD-00004.md)** — the piece that unlocks this project's microservice direction. V1 done ([ADR-00048](docs/adr/ADR-00048.md)); concurrent connections ([ADR-00049](docs/adr/ADR-00049.md)); headers/query-string/request-body/response-headers ([ADR-00072](docs/adr/ADR-00072.md)). Only graceful shutdown remains, deliberately deferred (needs signal-handling infrastructure this compiler doesn't have yet).
 - **[Unannotated Parameter Typing](docs/tdd/TDD-00005.md)** — clean rejection at call sites is done ([ADR-00042](docs/adr/ADR-00042.md)); the two further options (call-site inference, real `any` semantics) are scoped, not started.
 - **[Event Loop](docs/tdd/TDD-00006.md)** — this project's single biggest structural gap, now substantially closed. Part 1 (the `select()`-based wait loop) done ([ADR-00048](docs/adr/ADR-00048.md)); Part 2's fiber-based scheduler is real, shipped for HTTP connection concurrency ([ADR-00049](docs/adr/ADR-00049.md)) and for real non-blocking `await fetch(...)` ([ADR-00050](docs/adr/ADR-00050.md), via libcurl's multi-interface merged into the same loop). Two real bugs turned up after shipping and are both fixed: `ucontext_t`'s size/layout was hardcoded from a macOS-only probe and silently corrupted memory on Linux ([ADR-00051](docs/adr/ADR-00051.md), found via CI failing on `ubuntu-latest` but never locally); and several hand-written IR functions had `alloca`s placed inside loop bodies rather than their entry block, leaking a fixed chunk of stack on every iteration — the worst instance crashed a running `http.listen` server after ~20,000 requests ([ADR-00052](docs/adr/ADR-00052.md), found while chasing down an unrelated flaky example). Remaining gap: `Promise.all`/`.race`/`.allSettled` (awaiting multiple promises concurrently from a single call site) aren't implemented yet — today's concurrency comes from multiple independent connection handlers each awaiting their own fetch, not from one handler awaiting several at once.
 - **[Object Literal Field Coercion](docs/tdd/TDD-00007.md)** — object literals never coerce field values against a declared type, only their own literal-inferred type; silent bit-reinterpretation corruption, not a clean rejection. Scoped, not started.
 - **[External Conformance Suites (TypeScript + Test262) as a Test-Coverage Benchmark](docs/tdd/TDD-00008.md)** — the TypeScript suite tests the type checker's output, not runtime behavior, so it can't be used directly; Test262 turned out to be execution-based and often directly portable instead, at least for spec-mandated value semantics this compiler intends to match. First real ports (shift-operator categories) landed alongside [ADR-00047](docs/adr/ADR-00047.md)'s shift-semantics fix. Tracked in [`docs/testing/CONFORMANCE-COVERAGE.md`](docs/testing/CONFORMANCE-COVERAGE.md). Partially Implemented.
-- **[Classes / OOP](docs/tdd/TDD-00009.md)** — staged: methods + constructors with no inheritance (Stage 1, done — see [`docs/adr/ADR-00063.md`](docs/adr/ADR-00063.md) — includes Stage 1a's `for...of` iterable protocol), then runtime type tags/`instanceof` (Stage 2, not started), then inheritance/vtables last (Stage 3, the only stage that actually needs new dynamic-dispatch machinery).
+- **[Classes / OOP](docs/tdd/TDD-00009.md)** — staged: methods + constructors with no inheritance (Stage 1, done — see [`docs/adr/ADR-00063.md`](docs/adr/ADR-00063.md) — includes Stage 1a's `for...of` iterable protocol), then runtime type tags/`instanceof` (Stage 2, done — see [`docs/adr/ADR-00067.md`](docs/adr/ADR-00067.md)), then inheritance/vtables last (Stage 3, the only stage that actually needs new dynamic-dispatch machinery). `Error` subtyping (`instanceof Error`, `TypeError`, etc.) is a separate follow-on, scoped in [TDD-00013](docs/tdd/TDD-00013.md).
 - **[Generics on user-defined functions/interfaces](docs/tdd/TDD-00010.md)** — two real options, not yet decided between: monomorphization (generalizing the same approach the built-in generics — `Array<T>`, `Map<K,V>`, `Promise<T>` — already use by hand) vs. type erasure via the existing `any`/`unknown` boxed-value machinery (cheaper to build, arguably more faithful to how real TypeScript's own generics behave, but hits the same "no arithmetic on a dynamic value" ceiling `any`/`unknown` already has). Also surfaced a real, unrelated bug in the existing built-in generics along the way — see `STATUS.md`'s Known Limitations. Scoped, not started.
+- **[Computed property keys](docs/tdd/TDD-00012.md)** — done ([ADR-00066](docs/adr/ADR-00066.md)): an object literal with a computed key (`{ [expr]: value }`) is a *dynamic object*, storage-wise a real `Map<string,V>` reusing that runtime directly rather than a new hash table, with `.field`/`[expr]` sugar layered on top.
+- **[Error subtypes / tagged errors](docs/tdd/TDD-00013.md)** — real `TypeError`/`RangeError`/etc. and `instanceof Error` support, scoped as a follow-on to class Stage 2's runtime type tags ([ADR-00067](docs/adr/ADR-00067.md)) rather than folded into it. Not started.
+- **[Full-pipeline (codegen-through-binary) fuzz testing](docs/tdd/TDD-00014.md)** — done ([ADR-00070](docs/adr/ADR-00070.md)): two `go test -fuzz` lanes living in `tests/`, an arithmetic-expression correctness oracle (compares the compiled binary's output against the same expression evaluated in Go's native `int64` arithmetic) and a broader template-based well-formedness/crash fuzzer spanning more of the language with no oracle beyond "doesn't crash." Extends the lexer/parser-only fuzzing [ADR-00068](docs/adr/ADR-00068.md) added. Differential testing against a real JS engine (e.g. Node) was scoped and explicitly deferred — see the TDD.
 
 ---
 
@@ -611,14 +628,14 @@ Anything big enough to need a design pass before implementation gets scoped out 
 | String methods | 26 | 33 | ~79% |
 | Array methods | 37 | 40 | ~93% |
 | Number / Math | 35 | 35 | 100% |
-| Object & collections | 24 | 24 | 100% |
-| JSON | 9 | 9 | 100% |
+| Object & collections | 23 | 26 | ~88% |
+| JSON | 9 | 11 | ~82% |
 | console | 11 | 12 | ~92% |
 | Global functions & constants | 13 | 17 | ~76% |
 | Type system features | 15 | 23 | ~65% |
-| Classes / OOP | 5 | 8 | ~63% |
+| Classes / OOP | 6 | 8 | ~75% |
 | Modules | 4 | 11 | ~36% |
-| **Core language total** | **245** | **295** | **~83%** |
+| **Core language total** | **245** | **299** | **~82%** |
 
 ### Web Platform APIs
 
@@ -645,9 +662,9 @@ Node-specific runtime globals with no browser equivalent — see the [Node.js AP
 | Category | Implemented | Total tracked | Coverage |
 |---|---|---|---|
 | File System (fs) | 10 | 12 | ~83% |
-| Process / CLI I/O | 11 | 11 | 100% |
-| HTTP Server | 1 | 1 | 100% |
-| **Node.js total** | **22** | **24** | **~92%** |
+| Process / CLI I/O | 11 | 14 | ~79% |
+| HTTP Server | 6 | 7 | ~86% |
+| **Node.js total** | **27** | **33** | **~82%** |
 
 ---
 
@@ -668,9 +685,9 @@ Pulled from [Known Limitations & Bugs](#known-limitations--bugs) above: the ones
 
 The three biggest cross-cutting gaps — each affects multiple features rather than being one self-contained item, and each already has its own detailed writeup above. Listed in the order they were originally scoped, not current priority — see item 1's note on why memory management now reads as the most pressing of the three:
 
-1. **Memory management — no garbage collector** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md)). Decision already made (Boehm GC: swap `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc`, link `-lgc`); not started. A non-issue for today's short-lived CLI programs, but a real limitation now that the HTTP server below actually exists — every request currently leaks its `Request` object and any allocations the handler itself makes, fine for a demo, not for a genuinely long-running service. This has arguably become the more urgent of the three items below now: the stack-safety bugs that used to crash a running `http.listen` server outright after ~20,000 requests are fixed ([ADR-00052](docs/adr/ADR-00052.md)), and a 100,000-request load test confirmed the server survives that scale without issue — but every one of those requests still permanently grows the heap, so a long enough run (hours/days of uptime, not a fixed request count) hits a wall from the other direction instead. Worth treating as the next structural item to pick up, not just one of three roughly-equal ones.
+1. **Memory management — `-mm=gc` now exists** (see [`docs/tdd/TDD-00001.md`](docs/tdd/TDD-00001.md), [ADR-00071](docs/adr/ADR-00071.md)). Of the three mutually-exclusive compilation modes for the whole binary, `manual` (the default: `Memory.free(x)`) and `gc` (Boehm — an allocator shim, no changes to any existing allocation call site, plus a `GC_stackbottom` fix so `http.listen`'s concurrent fibers collect safely) are both built; `auto` (compiler-inserted frees via static escape/liveness analysis, no runtime collector at all) is still not started, and is a bigger risk to get right than `gc` was — a wrong escape analysis there is a real use-after-free, not just a missed free. `manual` mode is still the default (an unbounded-growth non-issue for today's short-lived CLI programs), but the HTTP server below no longer has to leak every request's allocations forever the way it did before — compiling with `-mm=gc` is a one-flag opt-in fix for exactly that: the stack-safety bugs that used to crash a running `http.listen` server outright after ~20,000 requests are fixed ([ADR-00052](docs/adr/ADR-00052.md)), a 100,000-request load test confirmed the server survives that scale without issue, and `-mm=gc` now closes the remaining "heap only ever grows" gap for genuinely long-running processes.
 2. **Event loop — Part 1 and Part 2 both have real, shipped slices now** (see [`docs/tdd/TDD-00006.md`](docs/tdd/TDD-00006.md)). Part 1 (a `select()`-based wait loop merging with the existing timer queue) shipped alongside the HTTP server below — see [ADR-00048](docs/adr/ADR-00048.md). Part 2 (real suspension) was scoped around three candidate mechanisms; a direct prototyping spike ruled out LLVM coroutine intrinsics (confirmed incompatible with this compiler's `setjmp`/`longjmp` exception model — a `try`/`catch` spanning a suspend point segfaults) and confirmed hand-rolled fibers (`ucontext.h`, no custom assembly needed) work correctly instead. [ADR-00049](docs/adr/ADR-00049.md) used that mechanism to make `http.listen` handle connections concurrently; [ADR-00050](docs/adr/ADR-00050.md) extended it to make `await fetch(...)` genuinely non-blocking (libcurl's multi-interface, merged into the same event loop) — confirmed directly, not just by unit test, that two concurrent connections each awaiting a different-latency upstream complete independently rather than serializing. Two stability bugs surfaced after those shipped, both fixed and directly reproduced before/after: [ADR-00051](docs/adr/ADR-00051.md) (the fiber mechanism's `ucontext_t` buffer size was hardcoded from a macOS-only probe, corrupting memory on Linux) and [ADR-00052](docs/adr/ADR-00052.md) (several hand-written IR loops leaked a fixed amount of stack on every iteration — the main `http.listen` dispatch loop crashed a running server after ~20,000 requests under load-testing with Apache Bench). Still missing: `Promise.all`/`.race`/`.allSettled` (concurrently awaiting several promises from one call site, rather than relying on separate connection handlers each awaiting their own).
-3. **HTTP server** (see [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md)) — V1 done ([ADR-00048](docs/adr/ADR-00048.md)), concurrent connection handling done on top of it ([ADR-00049](docs/adr/ADR-00049.md), using Event Loop Part 2's fiber mechanism), GET-only request line. Remaining: headers/query-string/request-body parsing and graceful shutdown, tracked as separable V2 follow-ups.
+3. **HTTP server** (see [`docs/tdd/TDD-00004.md`](docs/tdd/TDD-00004.md)) — V1 done ([ADR-00048](docs/adr/ADR-00048.md)), concurrent connection handling done on top of it ([ADR-00049](docs/adr/ADR-00049.md), using Event Loop Part 2's fiber mechanism), and request headers/query-string/request-body/response-headers all done now too ([ADR-00072](docs/adr/ADR-00072.md)) — `req.headers`/`req.query` are `Map<string, string>` (headers lowercased, query percent-decoded), `req.body` is read `Content-Length`-aware with the read buffer growing across as many reads as it takes, and a handler's return type can optionally add a `headers: Map<string, string>` field. Only remaining gap: graceful shutdown (`.close()`/`SIGINT`/`SIGTERM`) — deliberately deferred, since it needs POSIX signal handling this compiler has no infrastructure for at all yet, a genuinely separate piece of design work.
 
 Prefer picking up work that advances REST API interaction / file I/O / process interaction over other equal-effort items — these three items are exactly that category, alongside the `fs`/`process` work already done.
 
@@ -707,4 +724,4 @@ The event loop existing now ([TDD-00006](docs/tdd/TDD-00006.md)) changes the sha
 
 ---
 
-*Last updated: 2026-07-14. Update this file whenever a new feature is added or removed.*
+*Last updated: 2026-07-28. Update this file whenever a new feature is added or removed.*

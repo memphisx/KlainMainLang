@@ -1,0 +1,47 @@
+# Verification build for ADR-00071's -mm=gc flag: proves the Boehm GC
+# allocator shim (codegen/llvm/gcsrc/gcshim.c) and the GC_stackbottom fiber
+# fix actually work on Linux/musl, not just on this project's macOS dev
+# machine. Build and run from the repo root:
+#
+#   docker build -f docker/Dockerfile.gc -t klainmainlang-gc-demo .
+#   docker run --rm klainmainlang-gc-demo
+#
+# Three stages, same division of labor as docker/Dockerfile: golang:alpine
+# only ever builds the Go compiler itself (its clang/linker setup isn't
+# usable for compiling *emitted programs* — confirmed directly, a plain
+# manual-mode compile fails there too with "posix_spawn failed", nothing
+# gc-specific about it), so compiling hello_gc.ts happens in a separate
+# plain alpine:3.21 stage instead. Stage 3 is NOT `FROM scratch`, unlike
+# docker/Dockerfile's --static demo: -mm=gc links dynamically against
+# libgc, and Alpine ships no gc-static package (unlike curl's — see
+# docker/Dockerfile.fetch-test), so a scratch/static final stage isn't in
+# scope here. Stage 3 is instead a minimal Alpine image with just libgc's
+# runtime shared library present, mirroring Dockerfile.fetch-test's
+# dynamic-fetch-demo target.
+
+# ---- Stage 1: build the KlainMainLang compiler ----
+FROM golang:1.26-alpine AS compiler-builder
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+COPY ast/ ast/
+COPY codegen/ codegen/
+COPY jsdoc/ jsdoc/
+COPY lexer/ lexer/
+COPY parser/ parser/
+COPY resolver/ resolver/
+RUN go build -o /out/klainmain .
+
+# ---- Stage 2: compile hello_gc.ts with -mm=gc ----
+FROM alpine:3.21 AS program-builder
+RUN apk add --no-cache clang musl-dev gc-dev
+COPY --from=compiler-builder /out/klainmain /usr/local/bin/klainmain
+COPY docker/hello_gc.ts /src/hello_gc.ts
+WORKDIR /src
+RUN klainmain -mm=gc -o /src/hello_gc hello_gc.ts
+
+# ---- Stage 3: nothing but libgc's runtime shared library + the binary ----
+FROM alpine:3.21
+RUN apk add --no-cache gc
+COPY --from=program-builder /src/hello_gc /hello_gc
+ENTRYPOINT ["/hello_gc"]

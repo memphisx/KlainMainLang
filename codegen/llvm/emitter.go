@@ -29,123 +29,128 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals                strings.Builder // global declarations (string constants, printf decl, …)
-	functions              strings.Builder // emitted user-defined function bodies
-	allocas                strings.Builder // alloca instructions for the current function
-	body                   strings.Builder // body instructions for the current function
-	scopes                 []scope
-	regCtr                 int
-	labelCtr               int
-	strConsts              map[string]string // Go string value → @.s<n> name
-	strIdx                 int
-	linkLibs               map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	usedPrintf             bool
-	usedDprintf            bool
-	usedMalloc             bool
-	usedCalloc             bool
-	usedRealloc            bool
-	usedMemmove            bool
-	funcs                  map[string]FuncSig          // registered function signatures
-	interfaces             map[string]Type             // named interface, type alias, and class registry
-	classes                map[string]ClassInfo        // named class registry (fields/ctor/methods) — see emit_classes.go
-	enums                  map[string]map[string]Value // enum name → member name → constant value
-	currentRetType         Type                        // return type of the function being emitted
-	blockDone              bool                        // true after a terminator (ret/br) in the current block
-	closureCtr             int                         // monotonically increasing counter for unique closure names
-	usedStrlen             bool
-	usedMemcpy             bool
-	usedMemset             bool
-	usedStrcmp             bool
-	usedSprintf            bool
-	usedStrstr             bool
-	usedStrncmp            bool
-	usedStringTrim         bool
-	usedStringTrimStart    bool
-	usedStringTrimEnd      bool
-	usedStringToUpper      bool
-	usedStringToLower      bool
-	usedStringReplace      bool
-	usedStringReplaceAll   bool
-	usedStringSplit        bool
-	usedAtoll              bool
-	usedJSONStringifyNum   bool
-	usedJSONStringifyStr   bool
-	usedJSONParseStr       bool
-	usedJSONFindValue      bool
-	usedJSONParseFieldStr  bool
-	usedAnyEq              bool
-	usedClockGettime       bool
-	usedDateNow            bool
-	usedPerformanceNow     bool
-	usedDateDecompose      bool
-	usedSscanf             bool
-	usedDaysFromCivil      bool
-	usedDateParse          bool
-	usedDateCompose        bool
-	usedDateNameTables     bool
-	usedFetch              bool
-	usedFetchAsync         bool
-	usedFopen              bool
-	usedFclose             bool
-	usedFwrite             bool
-	usedFsThrow            bool
-	usedFsReadFile         bool
-	usedFsWriteFile        bool
-	usedFsAppendFile       bool
-	usedFsExists           bool
-	usedFsUnlink           bool
-	usedBase64Encode       bool
-	usedBase64Decode       bool
-	usedHexDigits          bool
-	usedHexDecodeTable     bool
-	usedEncodeURIComponent bool
-	usedEncodeURI          bool
-	usedDecodeURIComponent bool
-	usedDecodeURI          bool
-	usedCryptoRandomBytes  bool
-	usedCryptoFillNumArray bool
-	usedCryptoRandomUUID   bool
-	usedReadLineSync       bool
-	usedExecFileSync       bool
-	usedProcessCwd         bool
-	usedProcessChdir       bool
-	usedGetpid             bool
-	usedProcessKill        bool
-	usedErrnoAccessor      bool
-	usedStrerror           bool
-	usedFsMkdir            bool
-	usedFsRmdir            bool
-	usedFsRename           bool
-	usedFsReaddir          bool
-	usedConsoleGroupDepth  bool
-	usedConsoleTimer       bool
-	usedConsoleCountMap    bool
-	usedMapFree            bool
-	usedClosureFree        bool
-	usedTimers             bool
-	usedHTTP               bool
-	usedHTTPThrow          bool
-	usedFiber              bool
-	usedMathFuncs          bool
-	usedCtlz32             bool
-	usedArc4Random         bool
-	usedStrtoll            bool
-	usedStrtod             bool
-	usedGroupMapHelpers    bool
-	usedQsort              bool
-	usedSortCmpI64         bool
-	usedSortCmpF64         bool
-	usedSortCmpStr         bool
-	usedSortTrampolineI64  bool
-	usedSortTrampolineF64  bool
-	usedSortTrampolineStr  bool
-	usedSortClosGlobal     bool
-	usedMapStrHelpers      bool
-	usedMapNumHelpers      bool
-	usedExceptionHelpers   bool
-	usedFrozenSet          bool
-	breakStack             []string // end labels for enclosing loops / switch
-	continueStack          []string // continue-target labels for enclosing loops
+	globals                  strings.Builder // global declarations (string constants, printf decl, …)
+	functions                strings.Builder // emitted user-defined function bodies
+	allocas                  strings.Builder // alloca instructions for the current function
+	body                     strings.Builder // body instructions for the current function
+	scopes                   []scope
+	regCtr                   int
+	labelCtr                 int
+	strConsts                map[string]string // Go string value → @.s<n> name
+	strIdx                   int
+	linkLibs                 map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	memMode                  string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	usedPrintf               bool
+	usedDprintf              bool
+	usedMalloc               bool
+	usedCalloc               bool
+	usedRealloc              bool
+	usedMemmove              bool
+	funcs                    map[string]FuncSig          // registered function signatures
+	interfaces               map[string]Type             // named interface, type alias, and class registry
+	classes                  map[string]ClassInfo        // named class registry (fields/ctor/methods) — see emit_classes.go
+	enums                    map[string]map[string]Value // enum name → member name → constant value
+	currentRetType           Type                        // return type of the function being emitted
+	blockDone                bool                        // true after a terminator (ret/br) in the current block
+	closureCtr               int                         // monotonically increasing counter for unique closure names
+	usedStrlen               bool
+	usedMemcpy               bool
+	usedMemset               bool
+	usedStrcmp               bool
+	usedSprintf              bool
+	usedStrstr               bool
+	usedStrncmp              bool
+	usedStringTrim           bool
+	usedStringTrimStart      bool
+	usedStringTrimEnd        bool
+	usedStringToUpper        bool
+	usedStringToLower        bool
+	usedStringReplace        bool
+	usedStringReplaceAll     bool
+	usedStringSplit          bool
+	usedAtoll                bool
+	usedJSONStringifyNum     bool
+	usedJSONStringifyStr     bool
+	usedJSONParseStr         bool
+	usedJSONFindValue        bool
+	usedJSONParseFieldStr    bool
+	usedAnyEq                bool
+	usedClockGettime         bool
+	usedDateNow              bool
+	usedPerformanceNow       bool
+	usedDateDecompose        bool
+	usedSscanf               bool
+	usedDaysFromCivil        bool
+	usedDateParse            bool
+	usedDateCompose          bool
+	usedDateNameTables       bool
+	usedFetch                bool
+	usedFetchAsync           bool
+	usedFopen                bool
+	usedFclose               bool
+	usedFwrite               bool
+	usedFsThrow              bool
+	usedFsReadFile           bool
+	usedFsWriteFile          bool
+	usedFsAppendFile         bool
+	usedFsExists             bool
+	usedFsUnlink             bool
+	usedBase64Encode         bool
+	usedBase64Decode         bool
+	usedHexDigits            bool
+	usedHexDecodeTable       bool
+	usedEncodeURIComponent   bool
+	usedEncodeURI            bool
+	usedDecodeURIComponent   bool
+	usedDecodeURI            bool
+	usedCryptoRandomBytes    bool
+	usedCryptoFillNumArray   bool
+	usedCryptoRandomUUID     bool
+	usedReadLineSync         bool
+	usedExecFileSync         bool
+	usedProcessCwd           bool
+	usedProcessChdir         bool
+	usedGetpid               bool
+	usedProcessKill          bool
+	usedErrnoAccessor        bool
+	usedStrerror             bool
+	usedFsMkdir              bool
+	usedFsRmdir              bool
+	usedFsRename             bool
+	usedFsReaddir            bool
+	usedConsoleGroupDepth    bool
+	usedConsoleTimer         bool
+	usedConsoleCountMap      bool
+	usedMapFree              bool
+	usedClosureFree          bool
+	usedTimers               bool
+	usedHTTP                 bool
+	usedHTTPThrow            bool
+	usedSplitFirst           bool
+	usedHTTPParseHeaders     bool
+	usedHTTPParseQuery       bool
+	usedHTTPSerializeHeaders bool
+	usedFiber                bool
+	usedMathFuncs            bool
+	usedCtlz32               bool
+	usedArc4Random           bool
+	usedStrtoll              bool
+	usedStrtod               bool
+	usedGroupMapHelpers      bool
+	usedQsort                bool
+	usedSortCmpI64           bool
+	usedSortCmpF64           bool
+	usedSortCmpStr           bool
+	usedSortTrampolineI64    bool
+	usedSortTrampolineF64    bool
+	usedSortTrampolineStr    bool
+	usedSortClosGlobal       bool
+	usedMapStrHelpers        bool
+	usedMapNumHelpers        bool
+	usedExceptionHelpers     bool
+	usedFrozenSet            bool
+	breakStack               []string // end labels for enclosing loops / switch
+	continueStack            []string // continue-target labels for enclosing loops
 	// pendingLabel is set by a LabeledStatement just before emitting its body;
 	// the next loop to start consumes it via pushPendingLabel. Non-loop bodies
 	// leave it unconsumed, so the label is simply never registered.
@@ -173,6 +178,14 @@ func NewEmitter() *Emitter {
 	e.pushScope()
 	return e
 }
+
+// SetMemMode selects the compile-wide memory-management mode ("manual", the
+// zero-value default, or "gc"). Called by main.go right after NewEmitter()
+// — not a constructor argument, so every existing zero-arg NewEmitter() call
+// site (mainly tests/compiler_test.go) keeps working unchanged.
+func (e *Emitter) SetMemMode(mode string) { e.memMode = mode }
+
+func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
 
 // --- Scope ---
 
@@ -439,6 +452,21 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
 	e.emitInstr(fmt.Sprintf("store ptr %%argv, ptr @__argv_ptr, align 8"))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__argv_len, align 8", argc64))
+
+	// gc mode: snapshot Boehm's GC_stackbottom (the process's real stack
+	// base, already valid here since the gcshim's constructor-attribute
+	// GC_INIT() always runs before main()'s first instruction) so the
+	// swapcontext sites in runtime.go can restore it after temporarily
+	// repointing it at a fiber's own stack while that fiber runs — see
+	// docs/adr/ADR-00071.md for why this is needed.
+	if e.isGCMode() {
+		e.emitGlobal("@GC_stackbottom = external global ptr")
+		e.emitGlobal("@__kml_gc_orig_stackbottom = internal global ptr null, align 8")
+		origReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @GC_stackbottom, align 8", origReg))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_gc_orig_stackbottom, align 8", origReg))
+	}
+
 	for _, stmt := range prog.Body {
 		if _, ok := stmt.(*ast.FunctionDeclaration); ok {
 			continue

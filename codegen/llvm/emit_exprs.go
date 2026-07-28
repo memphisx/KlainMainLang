@@ -28,6 +28,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		if ex.Op == "??" {
 			return e.emitNullCoalesce(ex)
 		}
+		if ex.Op == "instanceof" {
+			return e.emitInstanceOf(ex)
+		}
 		return e.emitBinary(ex)
 	case *ast.UnaryExpression:
 		return e.emitUnary(ex)
@@ -260,19 +263,25 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	case "/":
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
-		} else if ty.Signed {
-			e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			e.emitDivZeroGuard(ty, right)
+			if ty.Signed {
+				e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			} else {
+				e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			}
 		}
 		return Value{Ref: reg, Ty: ty}, nil
 	case "%":
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
-		} else if ty.Signed {
-			e.emitInstr(fmt.Sprintf("%s = srem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitInstr(fmt.Sprintf("%s = urem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			e.emitDivZeroGuard(ty, right)
+			if ty.Signed {
+				e.emitInstr(fmt.Sprintf("%s = srem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			} else {
+				e.emitInstr(fmt.Sprintf("%s = urem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			}
 		}
 		return Value{Ref: reg, Ty: ty}, nil
 
@@ -469,6 +478,24 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 }
 
 func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
+	// Dynamic object bracket assignment: obj[expr] = val (or compound ops) —
+	// a computed-key object literal is a real Map<string,V>, so this must be
+	// checked before emitIndexPtr, which only understands array storage.
+	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		if id, ok := idxEx.Object.(*ast.Identifier); ok {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsDynamicObject {
+				mapPtr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
+				return e.emitDynamicObjectAssign(sym.Ty, mapPtr, idxEx.Index, ex.Op, ex.Right, ex.GetPos())
+			}
+		} else if objTy := e.inferExprType(idxEx.Object); objTy.IsDynamicObject {
+			objVal, err := e.emitExpr(idxEx.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, idxEx.Index, ex.Op, ex.Right, ex.GetPos())
+		}
+	}
 	// Array element assignment: arr[i] = val  or  arr[i] += val
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)
@@ -509,6 +536,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		objVal, err := e.emitExpr(memEx.Object)
 		if err != nil {
 			return Value{}, err
+		}
+		if objVal.Ty.IsDynamicObject {
+			keyExpr := ast.NewStringLiteral(memEx.Property, memEx.GetPos())
+			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, keyExpr, ex.Op, ex.Right, ex.GetPos())
 		}
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("field assignment on non-object")
@@ -647,10 +678,13 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type) (Value, error
 	case "/":
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
-		} else if ty.Signed {
-			e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			e.emitDivZeroGuard(ty, right)
+			if ty.Signed {
+				e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			} else {
+				e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			}
 		}
 	case "&":
 		li := e.coerce(left, TypeI64)
@@ -871,6 +905,38 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	return Value{Ref: result, Ty: resultTy}, nil
 }
 
+// emitDivZeroGuard emits a runtime check that throws a catchable Error when
+// dividing by zero on an integer type. LLVM's sdiv/udiv/srem/urem are
+// undefined behavior on a zero divisor — under -O2 that was observed to
+// silently produce garbage output rather than a defined crash or exception,
+// on top of being genuinely platform-dependent (traps on x86, doesn't on
+// arm64). No-op for float types, where JS's Infinity/NaN semantics already
+// fall out of IEEE-754 fdiv/frem without a guard. Must be called after the
+// divisor's Value is available and before emitting the actual div/rem
+// instruction; leaves the emitter inside a fresh "ok" block, mirroring
+// emitIndexPtr's bounds-check pattern below.
+func (e *Emitter) emitDivZeroGuard(ty Type, right Value) {
+	if ty.Float {
+		return
+	}
+	zeroReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, 0", zeroReg, ty.IR, right.Ref))
+	zeroL := e.freshLabel("div.zero")
+	okL := e.freshLabel("div.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroReg, zeroL, okL))
+
+	e.emitLabel(zeroL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Division by zero")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
+}
+
 // emitIndexPtr computes and returns the GEP register pointing to arr[index].
 // The array object may be a named variable (Symbol path) or any expression
 // that returns a {ptr, i64} aggregate (extractvalue path). Emits a runtime
@@ -947,6 +1013,24 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsGroupMap {
 			return e.emitGroupMapIndex(sym, ex.Index, ex.GetPos())
 		}
+	}
+	// Dynamic object bracket access: obj[key] — a computed-key object literal
+	// is a real Map<string,V> under the hood, see docs/tdd/TDD-00012.md. Must
+	// run before the generic string-indexing check below, since a dynamic
+	// object's Ty is ptr-shaped and isStringTy's ptr-catch-all would
+	// otherwise misclassify it as a string (mirrors GroupMap's own ordering).
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsDynamicObject {
+			mapPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
+			return e.emitDynamicObjectGet(sym.Ty, mapPtr, ex.Index, ex.GetPos())
+		}
+	} else if objTy := e.inferExprType(ex.Object); objTy.IsDynamicObject {
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, ex.Index, ex.GetPos())
 	}
 	// String indexing: s[i] returns a single-character string.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
@@ -1088,6 +1172,10 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
+	if objVal.Ty.IsDynamicObject {
+		keyExpr := ast.NewStringLiteral(ex.Property, ex.GetPos())
+		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, keyExpr, ex.GetPos())
+	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 	}
@@ -1216,6 +1304,9 @@ func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 // object spread semantics, where re-assigning an existing key doesn't change
 // its enumeration order.
 func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
+	if lit.HasComputedKey() {
+		return e.inferDynamicObjectType(lit)
+	}
 	var fields []Field
 	upsert := func(f Field) {
 		for i, existing := range fields {
@@ -1229,7 +1320,7 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 	for _, prop := range lit.Properties {
 		if spread, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" {
 			srcTy := e.inferExprType(spread.Arg)
-			for _, f := range srcTy.Fields {
+			for _, f := range srcTy.VisibleFields() {
 				upsert(f)
 			}
 			continue
@@ -1237,6 +1328,25 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 		upsert(Field{Name: prop.Key, Ty: e.inferExprType(prop.Value)})
 	}
 	return ObjectType(fields)
+}
+
+// inferDynamicObjectType computes the type of an object literal that has at
+// least one computed property key (`{ [expr]: value }`). Storage-wise this is
+// a real Map<string,V> (see docs/tdd/TDD-00012.md) — V is inferred from the
+// first non-spread property's value, the same "first element wins"
+// convention inferArrayType already uses for array literals rather than
+// unifying types across every property.
+func (e *Emitter) inferDynamicObjectType(lit *ast.ObjectLiteral) Type {
+	valTy := TypeI64
+	for _, prop := range lit.Properties {
+		if _, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" {
+			continue
+		}
+		valTy = e.inferExprType(prop.Value)
+		break
+	}
+	keyTy := TypePtr
+	return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
 }
 
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
@@ -1297,7 +1407,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 	case *ast.BinaryExpression:
 		switch ex.Op {
-		case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
+		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof":
 			return TypeBool
 		case "+":
 			lt := e.inferExprType(ex.Left)
@@ -1551,11 +1661,37 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 						}
 					}
 					return Type{IR: "ptr", IsGroupMap: true}
-				case "keys", "values":
+				case "keys", "values", "entries":
+					// A dynamic object (or any string-keyed Map<string,V>) is
+					// Map-backed — Object.keys/values/entries on it delegate
+					// to the Map's own methods (emitObjectKeys/Values/
+					// Entries, docs/tdd/TDD-00012.md) and so return real
+					// typed keys/values, not the fixed-shape-object fallback
+					// below (always string[] / string-keyed-and-valued
+					// entries).
+					if len(ex.Args) >= 1 {
+						if argTy := e.inferExprType(ex.Args[0]); argTy.IsMap && argTy.MapKey != nil {
+							keyTy := *argTy.MapKey
+							valTy := TypeI64
+							if argTy.MapVal != nil {
+								valTy = *argTy.MapVal
+							}
+							switch mem.Property {
+							case "keys":
+								return ArrayOf(keyTy)
+							case "values":
+								return ArrayOf(valTy)
+							case "entries":
+								entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+								return ArrayOf(entryTy)
+							}
+						}
+					}
+					if mem.Property == "entries" {
+						entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
+						return ArrayOf(entryTy)
+					}
 					return ArrayOf(TypePtr)
-				case "entries":
-					entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
-					return ArrayOf(entryTy)
 				case "hasOwn":
 					return TypeBool
 				case "assign", "freeze", "seal":
@@ -1566,47 +1702,62 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			// objTy resolves mem.Object's type — via the identifier/lookup
+			// path when possible (kept as the primary path since a looked-up
+			// Symbol is what every other Map/Set method-call site already
+			// relies on), falling back to inferExprType for anything else
+			// (e.g. req.query.get(...), where mem.Object — req.query — is
+			// itself a MemberExpression, not a bare identifier). Mirrors the
+			// same identifier-or-inferExprType fallback the "size" property
+			// case above already uses.
+			objTy, haveObjTy := Type{}, false
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 {
-				if sym, found := e.lookup(id.Name); found && sym.Ty.IsMap {
-					switch mem.Property {
-					case "get":
-						if sym.Ty.MapVal != nil {
-							return *sym.Ty.MapVal
-						}
-					case "has", "delete":
-						return TypeBool
-					case "keys":
-						if sym.Ty.MapKey != nil {
-							return ArrayOf(*sym.Ty.MapKey)
-						}
-					case "values":
-						if sym.Ty.MapVal != nil {
-							return ArrayOf(*sym.Ty.MapVal)
-						}
-					case "entries":
-						keyTy, valTy := TypePtr, TypeI64
-						if sym.Ty.MapKey != nil {
-							keyTy = *sym.Ty.MapKey
-						}
-						if sym.Ty.MapVal != nil {
-							valTy = *sym.Ty.MapVal
-						}
-						entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
-						return ArrayOf(entryTy)
-					case "set":
-						return sym.Ty
-					}
+				if sym, found := e.lookup(id.Name); found {
+					objTy, haveObjTy = sym.Ty, true
 				}
-				if sym, found := e.lookup(id.Name); found && sym.Ty.IsSet {
-					switch mem.Property {
-					case "has", "delete":
-						return TypeBool
-					case "add":
-						return sym.Ty
-					case "values":
-						if sym.Ty.MapKey != nil {
-							return ArrayOf(*sym.Ty.MapKey)
-						}
+			}
+			if !haveObjTy {
+				objTy, haveObjTy = e.inferExprType(mem.Object), true
+			}
+			if haveObjTy && objTy.IsMap {
+				switch mem.Property {
+				case "get":
+					if objTy.MapVal != nil {
+						return *objTy.MapVal
+					}
+				case "has", "delete":
+					return TypeBool
+				case "keys":
+					if objTy.MapKey != nil {
+						return ArrayOf(*objTy.MapKey)
+					}
+				case "values":
+					if objTy.MapVal != nil {
+						return ArrayOf(*objTy.MapVal)
+					}
+				case "entries":
+					keyTy, valTy := TypePtr, TypeI64
+					if objTy.MapKey != nil {
+						keyTy = *objTy.MapKey
+					}
+					if objTy.MapVal != nil {
+						valTy = *objTy.MapVal
+					}
+					entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+					return ArrayOf(entryTy)
+				case "set":
+					return objTy
+				}
+			}
+			if haveObjTy && objTy.IsSet {
+				switch mem.Property {
+				case "has", "delete":
+					return TypeBool
+				case "add":
+					return objTy
+				case "values":
+					if objTy.MapKey != nil {
+						return ArrayOf(*objTy.MapKey)
 					}
 				}
 			}
@@ -1981,7 +2132,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if ty.IsArray {
 		return e.emitArrayVarDecl(v, ty)
 	}
-	if ty.IsObject {
+	if ty.IsObject || ty.IsDynamicObject {
 		return e.emitObjectVarDecl(v, ty)
 	}
 

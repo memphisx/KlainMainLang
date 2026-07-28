@@ -17,8 +17,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install clang + libcurl (fetch examples link against it)
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev
+      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it)
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev
 
       - run: go build .
       - run: go vet ./...

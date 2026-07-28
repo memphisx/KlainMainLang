@@ -23,6 +23,13 @@ type ClassInfo struct {
 	CtorSig     FuncSig // RetType always TypeVoid; zero value if Constructor == nil
 	Methods     map[string]*ast.FunctionDeclaration
 	MethodSigs  map[string]FuncSig
+	// TagID is this class's compile-time-assigned runtime identity (TDD-00009
+	// Stage 2): a small monotonic integer, one per class in declaration order,
+	// stored into every instance's hidden ClassTagField at construction time
+	// and compared against by instanceof. Assigned in registerClasses's Pass B
+	// — no cross-pass persistence needed, since Pass B already iterates
+	// classes in the same order Pass A does.
+	TagID int64
 }
 
 // canonicalizeClassTy swaps a class-typed Type for the live, fully-resolved
@@ -53,7 +60,15 @@ type ClassInfo struct {
 func (e *Emitter) canonicalizeClassTy(ty Type) Type {
 	if ty.IsClass {
 		if info, ok := e.classes[ty.ClassName]; ok {
-			return info.Ty
+			// Nullable is a property of the field's own annotation (`Node |
+			// null`), not of the class itself — info.Ty is the bare class
+			// registry entry and is never Nullable, so swapping it in
+			// wholesale would silently discard a caller's `| null`
+			// annotation (found via instanceof's null-check reduction for a
+			// nullable class-typed field, TDD-00009 Stage 2).
+			canon := info.Ty
+			canon.Nullable = ty.Nullable
+			return canon
 		}
 	}
 	return ty
@@ -109,6 +124,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		e.interfaces[cd.Name] = ClassType(cd.Name, nil)
 	}
 
+	var nextTagID int64
 	for _, stmt := range prog.Body {
 		cd, ok := stmt.(*ast.ClassDeclaration)
 		if !ok {
@@ -117,6 +133,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 		fields := make([]Field, len(cd.Fields))
 		for i, f := range cd.Fields {
+			if f.Name == ClassTagField {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime type tag", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassTagField)
+			}
 			fields[i] = Field{Name: f.Name, Ty: e.resolveType(f.Type)}
 		}
 		// A class with fields but no constructor would leave every instance's
@@ -137,7 +156,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			Ty:         classTy,
 			Methods:    make(map[string]*ast.FunctionDeclaration),
 			MethodSigs: make(map[string]FuncSig),
+			TagID:      nextTagID,
 		}
+		nextTagID++
 
 		if cd.Constructor != nil {
 			info.Constructor = cd.Constructor
@@ -313,6 +334,10 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, info.Ty.StructSize()))
 
+	tagGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", info.TagID, tagGep))
+
 	if info.Constructor != nil {
 		if len(ex.Args) != len(info.CtorSig.ParamTypes) {
 			return Value{}, fmt.Errorf("%d:%d: %s constructor expects %d argument(s), got %d",
@@ -425,4 +450,86 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// emitInstanceOf implements `x instanceof ClassName` (TDD-00009 Stage 2). The
+// right-hand side is never evaluated as a general expression — it must be a
+// bare identifier naming a registered user-defined class, since this
+// compiler has no runtime constructor values to compare against (Error,
+// Date, Response, and unregistered names are all rejected here with the same
+// error, since none of them carry the class tag this checks).
+//
+// Four cases, ordered cheapest first — before Stage 3 (inheritance) exists,
+// every class-typed variable's concrete class is already known at compile
+// time, so only the any/unknown case ever needs a real runtime check:
+//  1. Left is any/unknown: unbox, confirm the runtime tag is "object", then
+//     compare the pointed-to instance's own hidden class tag against the
+//     target class's TagID. The only genuinely non-trivial case.
+//  2. Left statically IsClass with a matching ClassName: always true, unless
+//     the type is nullable, in which case it reduces to a ptr-vs-null check.
+//  3. Left statically IsClass with a different ClassName: constant false —
+//     no inheritance means two distinct classes can never be related.
+//  4. Any other static type (number, string, bool, array, plain object,
+//     Error, Date, Response, ...): constant false, matching real JS (a
+//     non-object or non-matching-constructor value is never `instanceof`
+//     anything).
+func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
+	rightIdent, ok := ex.Right.(*ast.Identifier)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: right-hand side of instanceof must be a class name", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	info, ok := e.classes[rightIdent.Name]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: instanceof is only supported against user-defined classes; '%s' is not a registered class", ex.GetPos().Line, ex.GetPos().Col, rightIdent.Name)
+	}
+
+	leftVal, err := e.emitExpr(ex.Left)
+	if err != nil {
+		return Value{}, err
+	}
+
+	if leftVal.Ty.IsDynamic {
+		tag, payload := e.emitUnboxTagPayload(leftVal)
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+
+		resultAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultAlloca))
+		objL := e.freshLabel("instanceof.obj")
+		notObjL := e.freshLabel("instanceof.notobj")
+		mergeL := e.freshLabel("instanceof.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, notObjL))
+
+		e.emitLabel(objL)
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
+		tagGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), ptrReg))
+		loadedTag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedTag, tagGep))
+		classMatch := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", classMatch, loadedTag, info.TagID))
+		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", classMatch, resultAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(notObjL)
+		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(mergeL)
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultAlloca))
+		return Value{Ref: result, Ty: TypeBool}, nil
+	}
+
+	if leftVal.Ty.IsClass && leftVal.Ty.ClassName == rightIdent.Name {
+		if leftVal.Ty.Nullable {
+			result := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", result, leftVal.Ref))
+			return Value{Ref: result, Ty: TypeBool}, nil
+		}
+		return Value{Ref: "1", Ty: TypeBool}, nil
+	}
+
+	return Value{Ref: "0", Ty: TypeBool}, nil
 }

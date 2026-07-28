@@ -104,3 +104,10 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00063](ADR-00063.md) | Classes Stage 1 (+1a) — methods, constructors, this, new, class-based for...of iterator protocol | Extends [ADR-00062](ADR-00062.md). Implements [TDD-00009](../tdd/TDD-00009.md) |
 | [00064](ADR-00064.md) | Fix emitObjectVarDecl's narrow initializer whitelist and self-referential class field type staleness | Extends [ADR-00063](ADR-00063.md) |
 | [00065](ADR-00065.md) | Implement Number.toPrecision/toExponential/toString(radix), Math.clz32/fround/imul, Object.hasOwn/hasOwnProperty | |
+| [00066](ADR-00066.md) | Computed property keys (`{ [expr]: value }`) as dynamic objects backed by Map\<string,V\> | Implements [TDD-00012](../tdd/TDD-00012.md) |
+| [00067](ADR-00067.md) | Classes Stage 2 — runtime type tags and instanceof | Extends [ADR-00063](ADR-00063.md), [ADR-00064](ADR-00064.md). Implements [TDD-00009](../tdd/TDD-00009.md) |
+| [00068](ADR-00068.md) | Add native Go fuzz testing for the lexer and parser | |
+| [00069](ADR-00069.md) | Fix division/modulo by zero producing undefined behavior instead of a catchable Error | |
+| [00070](ADR-00070.md) | Full-pipeline (codegen-through-binary) fuzz testing | Extends [ADR-00068](ADR-00068.md). Implements [TDD-00014](../tdd/TDD-00014.md) |
+| [00071](ADR-00071.md) | `-mm=gc` — Boehm GC mode | Implements [TDD-00001](../tdd/TDD-00001.md) |
+| [00072](ADR-00072.md) | `http.listen` — request headers, query string, request body, response headers | Extends [ADR-00048](ADR-00048.md), [ADR-00049](ADR-00049.md) |

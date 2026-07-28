@@ -551,7 +551,11 @@ func NewNewArrayExpression(elemType *TypeAnnotation, size Expression, pos Pos) *
 
 type ObjectProperty struct {
 	Key   string
-	Value Expression
+	// KeyExpr is non-nil for a computed property key `{ [expr]: value }`;
+	// Key is unused in that case. nil means a static key (Key holds the name)
+	// or, when Key == "" and Value is a *SpreadElement, an object spread.
+	KeyExpr Expression
+	Value   Expression
 }
 
 type ObjectLiteral struct {
@@ -565,6 +569,16 @@ func (o *ObjectLiteral) GetPos() Pos { return o.pos }
 
 func NewObjectLiteral(props []ObjectProperty, pos Pos) *ObjectLiteral {
 	return &ObjectLiteral{Properties: props, pos: pos}
+}
+
+// HasComputedKey reports whether any property uses `[expr]: value` syntax.
+func (o *ObjectLiteral) HasComputedKey() bool {
+	for _, p := range o.Properties {
+		if p.KeyExpr != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Arrow functions (closures) ---

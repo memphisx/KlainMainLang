@@ -243,3 +243,149 @@ for (const n of new NodeIter(a)) {
 }
 `, "1\n2\n3")
 }
+
+// --- TDD-00009 Stage 2: runtime type tags + instanceof ---
+
+func TestE2EInstanceOfStaticTrue(t *testing.T) {
+	assertOutput(t, `
+class Point {
+  x: number;
+  constructor(x: number) {
+    this.x = x;
+  }
+}
+const p = new Point(1);
+console.log(p instanceof Point)
+`, "1")
+}
+
+func TestE2EInstanceOfStaticFalseDifferentClass(t *testing.T) {
+	assertOutput(t, `
+class Point {
+  x: number;
+  constructor(x: number) {
+    this.x = x;
+  }
+}
+class Circle {
+  r: number;
+  constructor(r: number) {
+    this.r = r;
+  }
+}
+const c = new Circle(2);
+console.log(c instanceof Point)
+`, "0")
+}
+
+func TestE2EInstanceOfNullableClassReducesToNullCheck(t *testing.T) {
+	assertOutput(t, `
+class Node {
+  value: number;
+  nextNode: Node | null;
+  constructor(value: number, nextNode: Node | null) {
+    this.value = value;
+    this.nextNode = nextNode;
+  }
+}
+const tail = new Node(2, null);
+const head = new Node(1, tail);
+console.log(head.nextNode instanceof Node)
+console.log(tail.nextNode instanceof Node)
+`, "1\n0")
+}
+
+func TestE2EInstanceOfAnyNarrowsBetweenClasses(t *testing.T) {
+	assertOutput(t, `
+class Point {
+  x: number;
+  constructor(x: number) {
+    this.x = x;
+  }
+}
+class Circle {
+  r: number;
+  constructor(r: number) {
+    this.r = r;
+  }
+}
+const p: any = new Point(1);
+const c: any = new Circle(2);
+console.log(p instanceof Point)
+console.log(p instanceof Circle)
+console.log(c instanceof Circle)
+console.log(c instanceof Point)
+`, "1\n0\n1\n0")
+}
+
+func TestE2EInstanceOfReservedFieldNameIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  __kml_tag: number;
+  constructor(__kml_tag: number) {
+    this.__kml_tag = __kml_tag;
+  }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a field named __kml_tag")
+	}
+	if !strings.Contains(err.Error(), "reserved for the compiler's internal runtime type tag") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EInstanceOfUnknownClassIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  x: number;
+  constructor(x: number) {
+    this.x = x;
+  }
+}
+const f = new Foo(1);
+console.log(f instanceof Bar)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for instanceof against an unregistered class")
+	}
+	if !strings.Contains(err.Error(), "not a registered class") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestE2EClassTagDoesNotLeakIntoReflection guards against the hidden
+// instanceof tag field (always struct index 0 on a class instance) leaking
+// out as a fake user-visible field through any of the reflection APIs that
+// enumerate an object's fields — see docs/tdd/TDD-00009.md Stage 2 and the
+// VisibleFields() call sites this depends on.
+func TestE2EClassTagDoesNotLeakIntoReflection(t *testing.T) {
+	assertOutput(t, `
+class Point {
+  x: number;
+  y: number;
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+}
+class Empty {
+  greet(): string { return "hi" }
+}
+const p = new Point(1, 2);
+console.log(Object.keys(p).join(","))
+console.log(Object.values(p).join(","))
+for (const k in p) {
+  console.log(k)
+}
+console.log(JSON.stringify(p))
+const clone = { ...p };
+console.log(Object.keys(clone).join(","))
+const target = { x: 0, y: 0 };
+Object.assign(target, p);
+console.log(target.x)
+console.log(target.y)
+const e = new Empty();
+console.log(Object.keys(e).length)
+`, "x,y\n1,2\nx\ny\n{\"x\":1,\"y\":2}\nx,y\n1\n2\n0")
+}

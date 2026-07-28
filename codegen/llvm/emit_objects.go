@@ -2,6 +2,8 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
+
 	"KlainMainLang/ast"
 )
 
@@ -18,6 +20,9 @@ import (
 // last-write-wins object spread semantics, with no separate merge bookkeeping
 // needed here.
 func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
+	if lit.HasComputedKey() {
+		return e.emitDynamicObjectLiteral(lit)
+	}
 	ty := e.inferObjectType(lit)
 	e.ensureMalloc()
 	dataReg := e.freshReg()
@@ -46,7 +51,7 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: spread in object literal requires an object value", spread.GetPos().Line, spread.GetPos().Col)
 			}
 			srcStructIR := srcVal.Ty.StructIR()
-			for _, f := range srcVal.Ty.Fields {
+			for _, f := range srcVal.Ty.VisibleFields() {
 				srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
 				srcGep := e.freshReg()
 				loadReg := e.freshReg()
@@ -67,6 +72,107 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 		}
 	}
 	return Value{Ref: dataReg, Ty: ty}, nil
+}
+
+// emitDynamicObjectLiteral builds a Map<string,V>-backed value for an object
+// literal that has at least one computed property key (`{ [expr]: value }`).
+// Storage-wise this IS a Map<string,V> (see inferDynamicObjectType and
+// docs/tdd/TDD-00012.md) — construction is just a sequence of the existing
+// Map .set() calls, reusing emitMapCall verbatim rather than hand-rolling new
+// set-emission code. A static key in a mixed literal (`{ x: 1, [k]: 2 }`)
+// becomes an interned string-literal key into the same map.
+func (e *Emitter) emitDynamicObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
+	for _, prop := range lit.Properties {
+		if _, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" {
+			pos := prop.Value.GetPos()
+			return Value{}, fmt.Errorf("%d:%d: object spread cannot be combined with a computed property key yet", pos.Line, pos.Col)
+		}
+	}
+
+	ty := e.inferDynamicObjectType(lit)
+	e.ensureMapStrHelpers()
+	mapPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
+
+	for _, prop := range lit.Properties {
+		keyExpr := prop.KeyExpr
+		if keyExpr == nil {
+			keyExpr = ast.NewStringLiteral(prop.Key, lit.GetPos())
+		} else if !isStringTy(e.inferExprType(keyExpr)) {
+			pos := keyExpr.GetPos()
+			return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+		}
+		if _, err := e.emitMapCall(ty, mapPtr, "set", []ast.Expression{keyExpr, prop.Value}, lit.GetPos()); err != nil {
+			return Value{}, err
+		}
+	}
+	return Value{Ref: mapPtr, Ty: ty}, nil
+}
+
+// emitDynamicObjectGet handles `obj.field` / `obj[expr]` reads when obj is a
+// computed-key object literal — a real Map<string,V> under the hood
+// (docs/tdd/TDD-00012.md). Thin wrapper over emitMapCall's "get" that adds
+// the same clean "must be a string" rejection emitDynamicObjectAssign and
+// emitDynamicObjectLiteral already apply to a computed key, rather than
+// letting a non-string key silently bit-reinterpret via valueToMapKey.
+func (e *Emitter) emitDynamicObjectGet(ty Type, mapPtr string, keyExpr ast.Expression, pos ast.Pos) (Value, error) {
+	if !isStringTy(e.inferExprType(keyExpr)) {
+		return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+	}
+	return e.emitMapCall(ty, mapPtr, "get", []ast.Expression{keyExpr}, pos)
+}
+
+// emitDynamicObjectAssign handles `obj.field = val` / `obj[expr] = val` (plain
+// or compound) when obj is a computed-key object literal — a real
+// Map<string,V> under the hood (docs/tdd/TDD-00012.md). keyExpr and rhsExpr
+// are each evaluated exactly once (mirroring the array-element/object-field
+// assignment branches in emitAssign), so this doesn't reuse emitMapCall
+// directly — it needs the pre-evaluated key ref (for compound ops' get-then-
+// set) and must return the assigned value, not emitMapCall's map-identity
+// return.
+func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Expression, op string, rhsExpr ast.Expression, pos ast.Pos) (Value, error) {
+	valTy := TypeI64
+	if ty.MapVal != nil {
+		valTy = *ty.MapVal
+	}
+	keyVal, err := e.emitExpr(keyExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(keyVal.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+	}
+	kRef := e.valueToMapKey(keyVal, TypePtr)
+
+	var rhs Value
+	if op == "=" {
+		rhs, err = e.emitExpr(rhsExpr)
+		if err != nil {
+			return Value{}, err
+		}
+	} else {
+		e.ensureMapStrHelpers()
+		rawReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", rawReg, mapPtr, kRef))
+		cur := e.mapValFromI64(rawReg, valTy)
+		rhsVal, err := e.emitExpr(rhsExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := dateCompoundAssignGuard(op, valTy.IsDate, rhsVal.Ty.IsDate); err != nil {
+			return Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
+		}
+		rhsVal = e.coerce(rhsVal, valTy)
+		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, valTy)
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	rhs = e.coerce(rhs, valTy)
+	vRef := e.valueToMapVal(rhs, valTy)
+	e.ensureMapStrHelpers()
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, vRef))
+	return rhs, nil
 }
 
 func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
@@ -356,10 +462,22 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_gmap_keys(ptr %s)", retReg, val.Ref))
 		return Value{Ref: retReg, Ty: ArrayOf(TypePtr)}, nil
 	}
-	if !val.Ty.IsObject || len(val.Ty.Fields) == 0 {
+	// A dynamic object (or any string-keyed Map<string,V>) is backed by the
+	// same runtime as Map<K,V> — delegate to its own .keys() rather than
+	// walking a compile-time field list, see docs/tdd/TDD-00012.md.
+	if val.Ty.IsMap {
+		if val.Ty.MapKey == nil || !isStringTy(*val.Ty.MapKey) {
+			return Value{}, fmt.Errorf("%d:%d: Object.keys requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		}
+		return e.emitMapCall(val.Ty, val.Ref, "keys", nil, pos)
+	}
+	// A zero-field class (methods-only) has genuinely known, just-empty
+	// fields — unlike a plain object literal, whose Fields being empty means
+	// "unknown", so only the non-class case treats emptiness as an error.
+	if !val.Ty.IsObject || (!val.Ty.IsClass && len(val.Ty.VisibleFields()) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.keys requires an object with known fields", pos.Line, pos.Col)
 	}
-	return e.emitObjectFieldNames(val.Ty.Fields, pos)
+	return e.emitObjectFieldNames(val.Ty.VisibleFields(), pos)
 }
 
 // emitObjectFieldNames allocates a string[] of compile-time field names.
@@ -391,16 +509,28 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	if !objVal.Ty.IsObject || len(objVal.Ty.Fields) == 0 {
+	// A dynamic object (or any string-keyed Map<string,V>): delegate to its
+	// own .values() — see emitObjectKeys and docs/tdd/TDD-00012.md. Note this
+	// returns real typed values (matching Map.values()'s convention), unlike
+	// the string[] this function returns for fixed-shape objects below.
+	if objVal.Ty.IsMap {
+		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
+			return Value{}, fmt.Errorf("%d:%d: Object.values requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		}
+		return e.emitMapCall(objVal.Ty, objVal.Ref, "values", nil, pos)
+	}
+	visFields := objVal.Ty.VisibleFields()
+	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.values requires an object with known fields", pos.Line, pos.Col)
 	}
-	n := int64(len(objVal.Ty.Fields))
+	n := int64(len(visFields))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*8))
-	for i, f := range objVal.Ty.Fields {
+	for i, f := range visFields {
+		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		rawReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, f.Ty.IR, gepReg, f.Ty.Align()))
 		strVal, err := e.emitValueToString(Value{Ref: rawReg, Ty: f.Ty})
@@ -429,16 +559,29 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	if !objVal.Ty.IsObject || len(objVal.Ty.Fields) == 0 {
+	// A dynamic object (or any string-keyed Map<string,V>): delegate to its
+	// own .entries() — see emitObjectKeys and docs/tdd/TDD-00012.md. Returns
+	// {key: string, value: V}[] with a real typed value, unlike the
+	// {key: string, value: string}[] this function builds for fixed-shape
+	// objects below.
+	if objVal.Ty.IsMap {
+		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
+			return Value{}, fmt.Errorf("%d:%d: Object.entries requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		}
+		return e.emitMapCall(objVal.Ty, objVal.Ref, "entries", nil, pos)
+	}
+	visFields := objVal.Ty.VisibleFields()
+	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.entries requires an object with known fields", pos.Line, pos.Col)
 	}
 	entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
 	entrySize := int64(entryTy.StructSize())
-	n := int64(len(objVal.Ty.Fields))
+	n := int64(len(visFields))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*8))
-	for i, f := range objVal.Ty.Fields {
+	for i, f := range visFields {
+		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
 		// Allocate one {key: string, value: string} entry struct.
 		entryReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", entryReg, entrySize))
@@ -449,7 +592,7 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", keyPtr, keySlot))
 		// Read, stringify, and store the value.
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		rawReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
 		strVal, err := e.emitValueToString(Value{Ref: rawReg, Ty: f.Ty})
@@ -512,7 +655,7 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 			return Value{}, fmt.Errorf("%d:%d: Object.assign's sources must be objects", pos.Line, pos.Col)
 		}
 		srcStructIR := srcVal.Ty.StructIR()
-		for _, f := range srcVal.Ty.Fields {
+		for _, f := range srcVal.Ty.VisibleFields() {
 			dstIdx, dstTy, ok := targetVal.Ty.FieldIndex(f.Name)
 			if !ok {
 				return Value{}, fmt.Errorf("%d:%d: Object.assign: source has field '%s' not present on target's type", pos.Line, pos.Col, f.Name)

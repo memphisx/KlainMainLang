@@ -105,3 +105,27 @@ const head = new Node(1, mid);
 for (const n of new NodeIter(head)) {
   console.log(n.value); // 1 2 3
 }
+
+// Stage 2: runtime type tags + instanceof. Every instance carries a hidden
+// tag identifying its class, so instanceof can tell two classes apart even
+// through an any-typed value — the one case where the check does real work,
+// since a statically class-typed variable's concrete class is already known
+// at compile time before inheritance exists.
+class Circle {
+  r: number;
+  constructor(r: number) {
+    this.r = r;
+  }
+}
+console.log(head instanceof Node);   // 1 (true)
+console.log(head instanceof Circle); // 0 (false)
+console.log(tail.nextNode instanceof Node); // 0 — a null field is never an instance of anything
+
+// The any/unknown case is where instanceof does real runtime work: the
+// concrete class isn't known until the tag is actually read back.
+const shapeA: any = new Circle(5);
+const shapeB: any = head;
+console.log(shapeA instanceof Circle); // 1
+console.log(shapeA instanceof Node);   // 0
+console.log(shapeB instanceof Node);   // 1
+console.log(shapeB instanceof Circle); // 0

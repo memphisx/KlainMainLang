@@ -43,6 +43,7 @@ const (
 	ELLIPSIS
 	CLASS
 	THIS
+	INSTANCEOF
 
 	// Operators
 	PLUS         // +
@@ -123,7 +124,7 @@ var tokenNames = map[TokenType]string{
 	ASYNC: "async", AWAIT: "await",
 	IMPORT: "import", EXPORT: "export",
 	ELLIPSIS: "...",
-	CLASS: "class", THIS: "this",
+	CLASS: "class", THIS: "this", INSTANCEOF: "instanceof",
 	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQ: "==", NEQ: "!=", STRICT_EQ: "===", STRICT_NEQ: "!==",
 	LT: "<", GT: ">", LTE: "<=", GTE: ">=",
@@ -158,7 +159,7 @@ var keywords = map[string]TokenType{
 	"throw": THROW, "try": TRY, "catch": CATCH, "finally": FINALLY, "do": DO,
 	"async": ASYNC, "await": AWAIT,
 	"import": IMPORT, "export": EXPORT,
-	"class": CLASS, "this": THIS,
+	"class": CLASS, "this": THIS, "instanceof": INSTANCEOF,
 }
 
 func LookupIdent(s string) TokenType {

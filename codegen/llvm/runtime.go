@@ -2535,79 +2535,89 @@ done:
   ret void
 }`)
 
-	e.emitGlobal(`
-define { i64, ptr } @__kml_await_fetch(ptr %pending) {
+	// gc mode: restore GC_stackbottom to the real process stack right
+	// before yielding back to the main/scheduler context — see the
+	// analogous comment at ensureFiberRuntime's swapcontext sites and
+	// docs/adr/ADR-00071.md for why this pairing is needed.
+	gcRestoreStackbottom := ""
+	if e.isGCMode() {
+		gcRestoreStackbottom = "  %origbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n" +
+			"  store ptr %origbottom, ptr @GC_stackbottom, align 8\n"
+	}
+
+	e.emitGlobal(fmt.Sprintf(`
+define { i64, ptr } @__kml_await_fetch(ptr %%pending) {
 entry:
-  %runningp = alloca i32, align 4
-  br label %checkloop
+  %%runningp = alloca i32, align 4
+  br label %%checkloop
 
 checkloop:
-  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
-  %done = load i64, ptr %done_p, align 8
-  %isdone = icmp ne i64 %done, 0
-  br i1 %isdone, label %finish, label %maybeyield
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%finish, label %%maybeyield
 
 maybeyield:
-  %curidx = load i64, ptr @__kml_current_conn_idx, align 8
-  %onfiber = icmp sge i64 %curidx, 0
-  br i1 %onfiber, label %doyield, label %busyspin
+  %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%onfiber = icmp sge i64 %%curidx, 0
+  br i1 %%onfiber, label %%doyield, label %%busyspin
 
 doyield:
-  %conndata = load ptr, ptr @__kml_conn_data, align 8
-  %selfslot = getelementptr { i64, ptr, ptr, ptr }, ptr %conndata, i64 %curidx
-  %pf_p = getelementptr { i64, ptr, ptr, ptr }, ptr %selfslot, i32 0, i32 3
-  store ptr %pending, ptr %pf_p, align 8
-  %ctx_p = getelementptr { i64, ptr, ptr, ptr }, ptr %selfslot, i32 0, i32 1
-  %ctxptr = load ptr, ptr %ctx_p, align 8
-  call i32 @swapcontext(ptr %ctxptr, ptr @__kml_main_ctx)
-  store ptr null, ptr %pf_p, align 8
-  br label %checkloop
+  %%conndata = load ptr, ptr @__kml_conn_data, align 8
+  %%selfslot = getelementptr { i64, ptr, ptr, ptr }, ptr %%conndata, i64 %%curidx
+  %%pf_p = getelementptr { i64, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 3
+  store ptr %%pending, ptr %%pf_p, align 8
+  %%ctx_p = getelementptr { i64, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
+  %%ctxptr = load ptr, ptr %%ctx_p, align 8
+%scall i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  store ptr null, ptr %%pf_p, align 8
+  br label %%checkloop
 
 busyspin:
-  %multi = load ptr, ptr @__kml_curl_multi, align 8
-  call i32 @curl_multi_perform(ptr %multi, ptr %runningp)
+  %%multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
   call void @__kml_curl_drain_messages()
-  br label %checkloop
+  br label %%checkloop
 
 finish:
-  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
-  %result = load i64, ptr %result_p, align 8
-  %failed = icmp ne i64 %result, 0
-  br i1 %failed, label %neterror, label %ok
+  %%result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 4
+  %%result = load i64, ptr %%result_p, align 8
+  %%failed = icmp ne i64 %%result, 0
+  br i1 %%failed, label %%neterror, label %%ok
 
 neterror:
-  %result32b = trunc i64 %result to i32
-  %errstr = call ptr @curl_easy_strerror(i32 %result32b)
-  %errobj = call ptr @malloc(i64 8)
-  store ptr %errstr, ptr %errobj, align 8
-  call void @__kml_throw(ptr %errobj)
+  %%result32b = trunc i64 %%result to i32
+  %%errstr = call ptr @curl_easy_strerror(i32 %%result32b)
+  %%errobj = call ptr @malloc(i64 8)
+  store ptr %%errstr, ptr %%errobj, align 8
+  call void @__kml_throw(ptr %%errobj)
   unreachable
 
 ok:
-  %status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
-  %status = load i64, ptr %status_p, align 8
-  %buf_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
-  %buf = load ptr, ptr %buf_p, align 8
-  %bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
-  %bodyptr = load ptr, ptr %bodyptr_p, align 8
+  %%status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 3
+  %%status = load i64, ptr %%status_p, align 8
+  %%buf_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 1
+  %%buf = load ptr, ptr %%buf_p, align 8
+  %%bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %%buf, i32 0, i32 0
+  %%bodyptr = load ptr, ptr %%bodyptr_p, align 8
 
-  %isnullbody = icmp eq ptr %bodyptr, null
-  br i1 %isnullbody, label %emptybody, label %havebody
+  %%isnullbody = icmp eq ptr %%bodyptr, null
+  br i1 %%isnullbody, label %%emptybody, label %%havebody
 
 emptybody:
-  %emptystr = call ptr @malloc(i64 1)
-  store i8 0, ptr %emptystr, align 1
-  br label %retdone
+  %%emptystr = call ptr @malloc(i64 1)
+  store i8 0, ptr %%emptystr, align 1
+  br label %%retdone
 
 havebody:
-  br label %retdone
+  br label %%retdone
 
 retdone:
-  %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %bodyptr, %havebody ]
-  %r1 = insertvalue { i64, ptr } undef, i64 %status, 0
-  %r2 = insertvalue { i64, ptr } %r1, ptr %bodyfinal, 1
-  ret { i64, ptr } %r2
-}`)
+  %%bodyfinal = phi ptr [ %%emptystr, %%emptybody ], [ %%bodyptr, %%havebody ]
+  %%r1 = insertvalue { i64, ptr } undef, i64 %%status, 0
+  %%r2 = insertvalue { i64, ptr } %%r1, ptr %%bodyfinal, 1
+  ret { i64, ptr } %%r2
+}`, gcRestoreStackbottom))
 }
 
 // errnoAccessor returns the C symbol that exposes the current thread's
@@ -4577,6 +4587,245 @@ entry:
 }`, errnoAccessor(), fmtPtr))
 }
 
+// ensureSplitFirst declares __kml_split_first(ptr s, ptr sep) -> {ptr, ptr},
+// splitting on the FIRST occurrence of sep only — unlike ensureStringSplit's
+// @__kml_split (which splits on every occurrence), this is what parsing a
+// single "Key: Value" header line or a "path?query" URL needs, since a
+// header's value or a query string can itself legitimately contain the
+// separator again. `after` aliases into s itself (fine — every call site
+// below keeps s alive at least as long as `after` is used); `before` is a
+// fresh malloc'd+NUL-terminated copy. `after` is null if sep isn't found.
+func (e *Emitter) ensureSplitFirst() {
+	if e.usedSplitFirst {
+		return
+	}
+	e.usedSplitFirst = true
+	e.ensureStrstr()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	e.emitGlobal(`
+define {ptr, ptr} @__kml_split_first(ptr %s, ptr %sep) {
+entry:
+  %found = call ptr @strstr(ptr %s, ptr %sep)
+  %hit = icmp ne ptr %found, null
+  br i1 %hit, label %split, label %nosep
+nosep:
+  %r0 = insertvalue {ptr, ptr} undef, ptr %s, 0
+  %r1 = insertvalue {ptr, ptr} %r0, ptr null, 1
+  ret {ptr, ptr} %r1
+split:
+  %sep_len = call i64 @strlen(ptr %sep)
+  %s_int = ptrtoint ptr %s to i64
+  %f_int = ptrtoint ptr %found to i64
+  %before_len = sub i64 %f_int, %s_int
+  %alloc = add i64 %before_len, 1
+  %before_buf = call ptr @malloc(i64 %alloc)
+  call ptr @memcpy(ptr %before_buf, ptr %s, i64 %before_len)
+  %nullp = getelementptr i8, ptr %before_buf, i64 %before_len
+  store i8 0, ptr %nullp, align 1
+  %after = getelementptr i8, ptr %found, i64 %sep_len
+  %r2 = insertvalue {ptr, ptr} undef, ptr %before_buf, 0
+  %r3 = insertvalue {ptr, ptr} %r2, ptr %after, 1
+  ret {ptr, ptr} %r3
+}`)
+}
+
+// ensureHTTPParseHeaders declares __kml_http_parse_headers(ptr headerBlock,
+// ptr map): splits headerBlock (already NUL-terminated exactly at the end
+// of the header block by the caller — see buildHTTPDispatcher) on "\r\n"
+// into independent per-line copies (safe even after the source read buffer
+// later moves via realloc — ensureStringSplit's @__kml_split always
+// produces fresh copies, never aliases), each line split on the FIRST
+// "': '" via __kml_split_first (a header value can itself legally contain
+// ": "), lowercases the header name (case-insensitive per HTTP semantics)
+// and trims the value, then __kml_map_str_set's it. A line with no "': '"
+// is silently skipped — malformed input, not something to fail the whole
+// request over.
+func (e *Emitter) ensureHTTPParseHeaders() {
+	if e.usedHTTPParseHeaders {
+		return
+	}
+	e.usedHTTPParseHeaders = true
+	e.ensureStringSplit()
+	e.ensureSplitFirst()
+	e.ensureStringToLower()
+	e.ensureStringTrim()
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	crlf := e.internString("\r\n")
+	colonSp := e.internString(": ")
+	e.emitGlobal(`
+define void @__kml_http_parse_headers(ptr %headerBlock, ptr %map) {
+entry:
+  %lines = call {ptr, i64} @__kml_split(ptr %headerBlock, ptr ` + crlf + `)
+  %ldata = extractvalue {ptr, i64} %lines, 0
+  %lcount = extractvalue {ptr, i64} %lines, 1
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %next ]
+  %done = icmp sge i64 %i, %lcount
+  br i1 %done, label %ret, label %body
+body:
+  %lslot = getelementptr ptr, ptr %ldata, i64 %i
+  %line = load ptr, ptr %lslot, align 8
+  %llen = call i64 @strlen(ptr %line)
+  %empty = icmp eq i64 %llen, 0
+  br i1 %empty, label %next, label %split
+split:
+  %kv = call {ptr, ptr} @__kml_split_first(ptr %line, ptr ` + colonSp + `)
+  %val = extractvalue {ptr, ptr} %kv, 1
+  %hasval = icmp ne ptr %val, null
+  br i1 %hasval, label %store, label %next
+store:
+  %key = extractvalue {ptr, ptr} %kv, 0
+  %keylower = call ptr @__kml_tolower(ptr %key)
+  %valtrim = call ptr @__kml_trim(ptr %val)
+  %valint = ptrtoint ptr %valtrim to i64
+  call void @__kml_map_str_set(ptr %map, ptr %keylower, i64 %valint)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}`)
+}
+
+// ensureHTTPParseQuery declares __kml_http_parse_query(ptr q, ptr map):
+// splits q (the raw "a=b&c=d" tail of a request path after "?") on "&"
+// (every occurrence — correct here, since each &-delimited segment is a
+// whole pair), then each pair on the FIRST "=" via __kml_split_first (a
+// value may itself legally contain "="). Both key and value are
+// percent-decoded via the same __kml_decode_uri_component
+// decodeURIComponent itself uses. A bare flag with no "=" (e.g. "?debug")
+// stores an empty string rather than a null value.
+func (e *Emitter) ensureHTTPParseQuery() {
+	if e.usedHTTPParseQuery {
+		return
+	}
+	e.usedHTTPParseQuery = true
+	e.ensureStringSplit()
+	e.ensureSplitFirst()
+	e.ensureDecodeURIComponent()
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	amp := e.internString("&")
+	eq := e.internString("=")
+	e.emitGlobal(`
+define void @__kml_http_parse_query(ptr %q, ptr %map) {
+entry:
+  %pairs = call {ptr, i64} @__kml_split(ptr %q, ptr ` + amp + `)
+  %pdata = extractvalue {ptr, i64} %pairs, 0
+  %pcount = extractvalue {ptr, i64} %pairs, 1
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %next ]
+  %done = icmp sge i64 %i, %pcount
+  br i1 %done, label %ret, label %body
+body:
+  %pslot = getelementptr ptr, ptr %pdata, i64 %i
+  %pair = load ptr, ptr %pslot, align 8
+  %plen = call i64 @strlen(ptr %pair)
+  %empty = icmp eq i64 %plen, 0
+  br i1 %empty, label %next, label %split
+split:
+  %kv = call {ptr, ptr} @__kml_split_first(ptr %pair, ptr ` + eq + `)
+  %keyraw = extractvalue {ptr, ptr} %kv, 0
+  %valraw = extractvalue {ptr, ptr} %kv, 1
+  %hasval = icmp ne ptr %valraw, null
+  br i1 %hasval, label %usereal, label %useempty
+useempty:
+  %eb = call ptr @malloc(i64 1)
+  store i8 0, ptr %eb, align 1
+  br label %store
+usereal:
+  br label %store
+store:
+  %val = phi ptr [ %valraw, %usereal ], [ %eb, %useempty ]
+  %keydec = call ptr @__kml_decode_uri_component(ptr %keyraw)
+  %valdec = call ptr @__kml_decode_uri_component(ptr %val)
+  %valint = ptrtoint ptr %valdec to i64
+  call void @__kml_map_str_set(ptr %map, ptr %keydec, i64 %valint)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}`)
+}
+
+// ensureHTTPSerializeHeaders declares __kml_http_serialize_headers(ptr map)
+// -> ptr: builds a response's optional extra header block ("Key: Value\r\n"
+// per entry, concatenated) from a Map<string,string>, for
+// __kml_http_send_response's extraHeaders parameter. Two-pass
+// (size-then-fill), mirroring __kml_split's own cnt_loop/fill_loop idiom.
+// Only pulled in when a handler's return type actually declares a
+// `headers` field — see emitHTTPListen.
+func (e *Emitter) ensureHTTPSerializeHeaders() {
+	if e.usedHTTPSerializeHeaders {
+		return
+	}
+	e.usedHTTPSerializeHeaders = true
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureSprintf()
+	hdrFmt := e.internString("%s: %s\r\n")
+	e.emitGlobal(`
+define ptr @__kml_http_serialize_headers(ptr %map) {
+entry:
+  %keys = call {ptr, i64} @__kml_map_str_keys(ptr %map)
+  %kdata = extractvalue {ptr, i64} %keys, 0
+  %kcount = extractvalue {ptr, i64} %keys, 1
+  %vals = call {ptr, i64} @__kml_map_str_vals(ptr %map)
+  %vdata = extractvalue {ptr, i64} %vals, 0
+  br label %sizeloop
+sizeloop:
+  %si = phi i64 [ 0, %entry ], [ %si1, %sizebody ]
+  %total = phi i64 [ 0, %entry ], [ %total1, %sizebody ]
+  %sdone = icmp sge i64 %si, %kcount
+  br i1 %sdone, label %alloc, label %sizebody
+sizebody:
+  %kslot = getelementptr ptr, ptr %kdata, i64 %si
+  %kptr = load ptr, ptr %kslot, align 8
+  %klen = call i64 @strlen(ptr %kptr)
+  %vslot = getelementptr i64, ptr %vdata, i64 %si
+  %vint = load i64, ptr %vslot, align 8
+  %vptr = inttoptr i64 %vint to ptr
+  %vlen = call i64 @strlen(ptr %vptr)
+  %line = add i64 %klen, %vlen
+  %line2 = add i64 %line, 4
+  %total1 = add i64 %total, %line2
+  %si1 = add i64 %si, 1
+  br label %sizeloop
+alloc:
+  %bufsz = add i64 %total, 1
+  %buf = call ptr @malloc(i64 %bufsz)
+  br label %fillloop
+fillloop:
+  %fi = phi i64 [ 0, %alloc ], [ %fi1, %fillbody ]
+  %cursor = phi ptr [ %buf, %alloc ], [ %cursor1, %fillbody ]
+  %fdone = icmp sge i64 %fi, %kcount
+  br i1 %fdone, label %ret, label %fillbody
+fillbody:
+  %fkslot = getelementptr ptr, ptr %kdata, i64 %fi
+  %fkptr = load ptr, ptr %fkslot, align 8
+  %fvslot = getelementptr i64, ptr %vdata, i64 %fi
+  %fvint = load i64, ptr %fvslot, align 8
+  %fvptr = inttoptr i64 %fvint to ptr
+  %n = call i32 (ptr, ptr, ...) @sprintf(ptr %cursor, ptr ` + hdrFmt + `, ptr %fkptr, ptr %fvptr)
+  %n64 = sext i32 %n to i64
+  %cursor1 = getelementptr i8, ptr %cursor, i64 %n64
+  %fi1 = add i64 %fi, 1
+  br label %fillloop
+ret:
+  ret ptr %buf
+}`)
+}
+
 // ensureHTTPRuntime declares everything http.listen needs: raw POSIX socket
 // primitives, a bind-and-listen helper that throws a catchable Error on
 // failure, an accept-and-parse-request-line helper, a send-response-and-close
@@ -4586,27 +4835,22 @@ entry:
 //
 // V1 scope (TDD-00004): single listener (no user-facing "close" — the two
 // globals below hold at most one registered listener at a time, matching
-// "V1 has no need for multiple servers"), single connection handled fully
-// synchronously per accept (no concurrent request handling — TDD-00006's
-// Part 2, real async suspension, is what real concurrency would need), GET
-// request line only (method + path via sscanf's %s, headers/body ignored).
+// "V1 has no need for multiple servers"). Concurrent connection handling
+// (TDD-00006 Part 2, ADR-00049) and full request parsing (ADR-00072:
+// headers, query string, request body, response headers beyond
+// status/body — see buildHTTPDispatcher in emit_http.go) are both real now.
 //
 //	__kml_http_bind_and_listen(i32 port) -> i32
 //	  socket()+setsockopt(SO_REUSEADDR)+bind()+listen(); throws a catchable
 //	  Error (via __kml_http_throw) on any failure instead of returning -1,
 //	  so the Go-emitted call site never needs its own error check.
-//	__kml_http_accept_and_read(i32 listenfd) -> { i32 connfd, ptr method, ptr path }
-//	  Blocking accept(), then a single blocking read() into a fixed 8KB
-//	  buffer, then sscanf("%15s %2047s", ...) to pull the method and path
-//	  out of the request line — headers/body deliberately ignored, same
-//	  scope narrowing fetch() itself started with. connfd is -1 (method/path
-//	  null) if accept() or the read came back empty — caller should just
-//	  skip this dispatch turn.
-//	__kml_http_send_response(i32 connfd, i64 status, ptr body)
+//	__kml_http_send_response(i32 connfd, i64 status, ptr body, ptr extraHeaders)
 //	  Formats a minimal HTTP/1.1 response (fixed "OK" reason phrase
 //	  regardless of status — real clients determine success/failure from
 //	  the numeric code, not the phrase) with Content-Length/Connection:
-//	  close, writes it, closes the connection.
+//	  close plus extraHeaders (empty string if the handler's return type
+//	  has no `headers` field — see ensureHTTPSerializeHeaders), writes it,
+//	  closes the connection.
 //	__kml_event_loop_run()
 //	  The generalized drain loop: each iteration, scans the timer queue for
 //	  the earliest-due entry exactly like __kml_timer_drain, builds an
@@ -4673,12 +4917,21 @@ func (e *Emitter) ensureHTTPRuntime() {
 	// its own socket runtime, not just when fetch() is textually present.
 	e.ensureFetchAsync()
 	e.ensureMalloc()
+	e.ensureRealloc()
 	e.ensureMemset()
 	e.ensureFree()
 	e.ensureSscanf()
 	e.ensureSprintf()
 	e.ensureStrlen()
 	e.ensureHTTPThrow()
+	// Every request now parses headers/query/body regardless of whether
+	// the handler reads them — same "always pull in the full machinery"
+	// reasoning as ensureFetchAsync above, not a per-feature opt-in.
+	e.ensureSplitFirst()
+	e.ensureHTTPParseHeaders()
+	e.ensureHTTPParseQuery()
+	e.ensureMapStrHelpers()
+	e.ensureAtoll()
 
 	e.ensureErrnoAccessor()
 
@@ -4762,6 +5015,22 @@ failnofd:
 	// — sizeof(ucontext_t) and its field offsets are NOT portable across
 	// platforms (a real bug found via a failing Linux CI run, fixed here).
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
+
+	// gc mode: repoint Boehm's GC_stackbottom at this fiber's own stack
+	// (stacks grow down, so the high end of the 64KB block is the "bottom"
+	// as far as GC_stackbottom's naming convention is concerned) right
+	// before swapping into it — a collection triggered while this fiber is
+	// running would otherwise have Boehm's root-stack scan walk from the
+	// live SP (now inside this malloc'd block) to the *original* process
+	// stack's address, an unrelated and likely-unmapped range. See
+	// docs/adr/ADR-00071.md.
+	gcSetStackbottom := ""
+	if e.isGCMode() {
+		gcSetStackbottom = `
+  %stackhigh = getelementptr i8, ptr %stack, i64 65536
+  store ptr %stackhigh, ptr @GC_stackbottom, align 8`
+	}
+
 	e.emitGlobal(`
 define void @__kml_http_append_conn(i32 %fd) {
 entry:
@@ -4812,25 +5081,45 @@ doappend:
   %newlen = add i64 %len, 1
   store i64 %newlen, ptr @__kml_conn_len, align 8
 
-  store i64 %len, ptr @__kml_current_conn_idx, align 8
+  store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
   %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)
   ret void
 }`)
 
-	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n%s")
+	// extraHeaders already ends in "\r\n" per entry (or is "" when the
+	// handler's return type has no `headers` field — see
+	// ensureHTTPSerializeHeaders/emitHTTPListen), so this format produces
+	// byte-identical output to before extraHeaders existed when it's empty,
+	// and a correct single blank-line header/body separator either way.
+	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n%s")
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body) {
+define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, ptr %%extraHeaders) {
 entry:
   %%bodylen = call i64 @strlen(ptr %%body)
-  %%bufsize1 = add i64 %%bodylen, 128
+  %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
+  %%bufsize0 = add i64 %%bodylen, %%hdrlen
+  %%bufsize1 = add i64 %%bufsize0, 128
   %%respbuf = call ptr @malloc(i64 %%bufsize1)
-  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%body)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%extraHeaders, ptr %%body)
   %%n64 = sext i32 %%n to i64
   call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
   call void @free(ptr %%respbuf)
   call i32 @close(i32 %%connfd)
   ret void
 }`, respFmt))
+
+	// gc mode: same GC_stackbottom repointing as __kml_http_append_conn's
+	// initial fiber launch, needed here too since this is the *other* place
+	// the event loop swaps into a fiber (a resumed, previously-yielded one
+	// rather than a freshly-created one) — see docs/adr/ADR-00071.md.
+	gcSetRStackbottom := ""
+	if e.isGCMode() {
+		gcSetRStackbottom = `
+  %rstack_p = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 2
+  %rstack = load ptr, ptr %rstack_p, align 8
+  %rstackhigh = getelementptr i8, ptr %rstack, i64 65536
+  store ptr %rstackhigh, ptr @GC_stackbottom, align 8`
+	}
 
 	e.emitGlobal(`
 define void @__kml_event_loop_run() {
@@ -5096,7 +5385,7 @@ rcheckready:
 rresume:
   store i64 %ri, ptr @__kml_current_conn_idx, align 8
   %rctx_p = getelementptr { i64, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 1
-  %rctxptr = load ptr, ptr %rctx_p, align 8
+  %rctxptr = load ptr, ptr %rctx_p, align 8` + gcSetRStackbottom + `
   call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)
   br label %rscannext
 

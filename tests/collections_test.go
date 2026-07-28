@@ -337,6 +337,32 @@ console.log(c.scores.size)
 `, "1\n1\n1")
 }
 
+// TestE2ETernaryOnChainedMapFieldGet is a regression test for a bug found
+// while implementing ADR-00072 (http.listen's req.query/req.headers):
+// inferExprType's CallExpression case only resolved a Map/Set method call's
+// return type when the receiver was a bare identifier looked up via
+// e.lookup — c.scores.get(...) worked, but a ternary using a *chained*
+// member expression as the receiver (c.scores here, not a plain identifier)
+// had no fallback, so emitConditional's `ty := inferExprType(ex.Consequent)`
+// silently picked the wrong (zero-value i64/number) type, producing an IR
+// type mismatch ("defined with type 'ptr' but expected 'i64'") the moment
+// clang tried to verify it — i.e. a compile-time crash for any ternary
+// whose Map-typed branch came from a chained field access.
+func TestE2ETernaryOnChainedMapFieldGet(t *testing.T) {
+	assertOutput(t, `
+interface Container {
+    scores: Map<string, string>
+}
+const m = new Map<string, string>()
+m.set('a', 'present')
+const c: Container = { scores: m }
+const found: string = c.scores.has('a') ? c.scores.get('a') : 'missing'
+const notFound: string = c.scores.has('z') ? c.scores.get('z') : 'missing'
+console.log(found)
+console.log(notFound)
+`, "present\nmissing")
+}
+
 func TestE2ESetFieldAccessMethodCalls(t *testing.T) {
 	assertOutput(t, `
 interface Container {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +20,35 @@ import (
 func startHTTPServer(t *testing.T, src string, port int) {
 	t.Helper()
 	binFile := buildBinary(t, src)
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server never started listening on %s", addr)
+}
+
+// startHTTPServerGC is startHTTPServer's -mm=gc counterpart, for exercising
+// http.listen's concurrent-fiber machinery under the Boehm GC (see
+// docs/adr/ADR-00071.md's GC_stackbottom fix) — skips (via buildBinaryGC)
+// if libgc/bdw-gc isn't installed.
+func startHTTPServerGC(t *testing.T, src string, port int) {
+	t.Helper()
+	binFile := buildBinaryGC(t, src)
 	cmd := exec.Command(binFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -380,4 +410,236 @@ http.listen(8952, async (req: Request): Promise<Res> => {
 	}
 
 	<-slowDone
+}
+
+// --- ADR-00072: request headers, query string, request body, response headers ---
+
+func TestE2EHTTPListenRequestHeadersLowercasedLookup(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8953, (req: Request): Res => {
+  return { status: 200, body: req.headers.get("x-test-header") + "|" + (req.headers.has("nonexistent") ? "1" : "0") }
+})
+`
+	startHTTPServer(t, src, 8953)
+	httpReq, err := http.NewRequest("GET", "http://127.0.0.1:8953/", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	// Sent with mixed case — req.headers.get() uses a lowercased key, so a
+	// lowercase lookup must still find it (case-insensitive per HTTP).
+	httpReq.Header.Set("X-Test-Header", "hello")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello|0" {
+		t.Errorf("body: got %q, want %q", string(body), "hello|0")
+	}
+}
+
+func TestE2EHTTPListenQueryStringParsing(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8954, (req: Request): Res => {
+  return { status: 200, body: req.path + "|" + req.query.get("a") + "|" + req.query.get("b") + "|" + (req.query.has("flag") ? "1" : "0") + "|" + req.query.get("flag") }
+})
+`
+	startHTTPServer(t, src, 8954)
+	// "b"'s value is percent-encoded ("two words" / "&") and "flag" is a
+	// bare flag with no "=" — req.path must NOT include any of this.
+	resp, err := http.Get("http://127.0.0.1:8954/some/path?a=1&b=two%20words&flag")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	want := "/some/path|1|two words|1|"
+	if string(body) != want {
+		t.Errorf("body: got %q, want %q", string(body), want)
+	}
+}
+
+func TestE2EHTTPListenNoQueryStringGivesEmptyMap(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8955, (req: Request): Res => {
+  return { status: 200, body: req.path + "|" + (req.query.has("anything") ? "1" : "0") }
+})
+`
+	startHTTPServer(t, src, 8955)
+	resp, err := http.Get("http://127.0.0.1:8955/plain")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "/plain|0" {
+		t.Errorf("body: got %q, want %q", string(body), "/plain|0")
+	}
+}
+
+func TestE2EHTTPListenRequestBody(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8956, (req: Request): Res => {
+  return { status: 200, body: req.body }
+})
+`
+	startHTTPServer(t, src, 8956)
+	resp, err := http.Post("http://127.0.0.1:8956/", "application/json", strings.NewReader(`{"k":"v"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != `{"k":"v"}` {
+		t.Errorf("body: got %q, want %q", string(body), `{"k":"v"}`)
+	}
+}
+
+func TestE2EHTTPListenNoBodyGivesEmptyString(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8957, (req: Request): Res => {
+  return { status: 200, body: "[" + req.body + "]" }
+})
+`
+	startHTTPServer(t, src, 8957)
+	resp, err := http.Get("http://127.0.0.1:8957/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "[]" {
+		t.Errorf("body: got %q, want %q — req.body should be an empty string, not null, when no body was sent", string(body), "[]")
+	}
+}
+
+// TestE2EHTTPListenLargeBodySpanningMultipleReads is the real point of
+// ADR-00072's read-loop redesign: buildHTTPDispatcher's buffer must
+// accumulate across as many read() calls as it takes (growing via realloc)
+// until Content-Length bytes have actually arrived, rather than assuming
+// one read() call returns an entire request. 200KB comfortably exceeds the
+// original fixed 8KB one-shot buffer this replaced.
+func TestE2EHTTPListenLargeBodySpanningMultipleReads(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8958, (req: Request): Res => {
+  return { status: 200, body: "len=" + req.body.length }
+})
+`
+	startHTTPServer(t, src, 8958)
+	const size = 200_000
+	var b strings.Builder
+	b.Grow(size)
+	for i := 0; i < size; i++ {
+		b.WriteByte(byte('A' + i%26))
+	}
+	largeBody := b.String()
+
+	resp, err := http.Post("http://127.0.0.1:8958/", "text/plain", strings.NewReader(largeBody))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("len=%d", size)
+	if string(respBody) != want {
+		t.Errorf("body: got %q, want %q", string(respBody), want)
+	}
+}
+
+// TestE2EHTTPListenLargeBodyContentIntegrity is the companion check to the
+// size test above: not just that the length comes out right, but that the
+// actual bytes survive the buffer-growth/accumulation path uncorrupted —
+// echoes the full body back and compares it byte-for-byte.
+func TestE2EHTTPListenLargeBodyContentIntegrity(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8959, (req: Request): Res => {
+  return { status: 200, body: req.body }
+})
+`
+	startHTTPServer(t, src, 8959)
+	const size = 100_000
+	var b strings.Builder
+	b.Grow(size)
+	for i := 0; i < size; i++ {
+		b.WriteByte(byte('0' + i%10))
+	}
+	largeBody := b.String()
+
+	resp, err := http.Post("http://127.0.0.1:8959/", "text/plain", strings.NewReader(largeBody))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if string(respBody) != largeBody {
+		t.Errorf("echoed body corrupted: got %d bytes, want %d bytes (content mismatch)", len(respBody), len(largeBody))
+	}
+}
+
+func TestE2EHTTPListenWrongHeadersFieldTypeRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Res { status: number; body: string; headers: string }
+http.listen(8962, (req: Request): Res => { return { status: 200, body: "x", headers: "not a map" } })
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a 'headers' field that isn't Map<string, string>, got none")
+	}
+}
+
+func TestE2EHTTPListenResponseHeaders(t *testing.T) {
+	src := `
+interface Res { status: number; body: string; headers: Map<string, string> }
+http.listen(8960, (req: Request): Res => {
+  let h: Map<string, string> = new Map<string, string>()
+  h.set("X-Custom-Header", "custom-value")
+  h.set("Content-Type", "application/json")
+  return { status: 200, body: "ok", headers: h }
+})
+`
+	startHTTPServer(t, src, 8960)
+	resp, err := http.Get("http://127.0.0.1:8960/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-Custom-Header"); got != "custom-value" {
+		t.Errorf("X-Custom-Header: got %q, want %q", got, "custom-value")
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type: got %q, want %q", got, "application/json")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Errorf("body: got %q, want %q", string(body), "ok")
+	}
+}
+
+func TestE2EHTTPListenNoResponseHeadersUnchanged(t *testing.T) {
+	// A handler with no `headers` field at all must behave byte-identically
+	// to before response headers existed — no extra branches, no stray
+	// blank line or header text.
+	src := `
+interface Res { status: number; body: string }
+http.listen(8961, (req: Request): Res => {
+  return { status: 200, body: "plain" }
+})
+`
+	startHTTPServer(t, src, 8961)
+	resp, err := http.Get("http://127.0.0.1:8961/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "plain" {
+		t.Errorf("body: got %q, want %q", string(body), "plain")
+	}
 }

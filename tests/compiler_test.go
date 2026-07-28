@@ -63,6 +63,64 @@ func buildBinary(t *testing.T, src string) string {
 	return binFile
 }
 
+// buildBinaryGC is buildBinary's gc-mode counterpart: sets the emitter's
+// memory mode to "gc", writes the GC shim alongside the generated IR, and
+// links via llvm.LocateGC() — the same discovery logic main.go uses, so the
+// two clang invocations can't silently drift apart (see ADR-00020's
+// original writeup of exactly that risk for buildBinary/buildBinaryMultiFile
+// vs. main.go). Skips (doesn't fail) if clang or the Boehm GC dev package
+// aren't available, so `go test ./...` stays green on a machine that hasn't
+// installed bdw-gc/libgc-dev.
+func buildBinaryGC(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	em := llvm.NewEmitter()
+	em.SetMemMode("gc")
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	shimFile := filepath.Join(dir, "gcshim.c")
+	binFile := filepath.Join(dir, "prog")
+
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
+		t.Fatalf("write GC shim: %v", err)
+	}
+
+	cflags, libs, err := llvm.LocateGC()
+	if err != nil {
+		t.Skipf("gc mode: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
+			t.Skip("libgc/bdw-gc not installed")
+		}
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
 // writeMultiFile writes each file in files (keyed by relative path, e.g.
 // "math.ts") into a fresh temp directory and returns the directory.
 func writeMultiFile(t *testing.T, files map[string]string) string {

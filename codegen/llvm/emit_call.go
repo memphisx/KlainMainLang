@@ -1117,12 +1117,13 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 // known fields of a statically-typed object. Handles nested objects recursively.
 func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
-	for i, field := range val.Ty.Fields {
+	for i, field := range val.Ty.VisibleFields() {
+		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		// Load the field value via GEP.
 		gepReg := e.freshReg()
 		loadReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
-			gepReg, val.Ty.StructIR(), val.Ref, i))
+			gepReg, val.Ty.StructIR(), val.Ref, idx))
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
 			loadReg, field.Ty.IR, gepReg, field.Ty.Align()))
 		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
@@ -1245,6 +1246,9 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 // matching a same-named key belonging to a later sibling object) — a clean
 // error here instead of silently producing wrong reads for that shape.
 func (e *Emitter) emitJSONParseObject(jsonVal Value, targetTy Type, pos ast.Pos) (Value, error) {
+	if targetTy.IsClass {
+		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
+	}
 	for _, f := range targetTy.Fields {
 		if f.Ty.IsObject {
 			return Value{}, fmt.Errorf("%d:%d: JSON.parse into a nested object field ('%s') is not yet supported", pos.Line, pos.Col, f.Name)
