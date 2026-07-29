@@ -5,12 +5,14 @@
 // service) — `make examples` will report this one as FAILED on a machine
 // with no network access, which is expected, not a bug.
 //
-// Scope (V1): GET requests only — no custom method, headers, or request
-// body yet. fetch() is "async" in the same sense the rest of this compiler's
-// async/await already is (see examples/async/async.ts): a blocking call
-// wrapped in an already-resolved Promise, not real non-blocking I/O — there's
-// no event loop yet, so two fetches issued before either is awaited would
-// run one after another, not concurrently.
+// This file covers plain GET requests only. fetch() is genuinely
+// non-blocking (ADR-00050) — awaited from inside an http.listen handler, it
+// yields to this compiler's event loop instead of blocking the whole
+// process, so two fetches issued before either is awaited really do run
+// concurrently (see examples/http/http_server.ts and
+// tests/http_test.go's TestE2EHTTPListenConcurrentAwaitFetch). Custom
+// method/headers/request body (ADR-00074) are covered separately in
+// examples/fetch/fetch_init.ts.
 
 // ── status, ok, and the raw body text ───────────────────────────────────────
 const r = await fetch('https://httpbin.org/get')

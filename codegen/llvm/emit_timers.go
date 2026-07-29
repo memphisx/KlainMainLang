@@ -3,8 +3,8 @@
 //
 // Needs no general-purpose (I/O-multiplexing) event loop — just a
 // sleep-until-next-due queue, drained once by EmitProgram after the
-// program's own top-level code finishes (see runtime.go's
-// ensureTimerRuntime for the full design). An active setInterval with
+// program's own top-level code finishes (see ensureTimerRuntime below
+// for the full design). An active setInterval with
 // nothing ever calling clearInterval on it means that drain loop never
 // finishes, matching real Node's behavior: the process only exits once
 // every timer has fired-and-not-repeated or been cleared.
@@ -97,4 +97,263 @@ func (e *Emitter) emitClearTimer(args []ast.Expression, fnName string, pos ast.P
 	e.ensureTimerRuntime()
 	e.emitInstr(fmt.Sprintf("call void @__kml_timer_clear(i64 %s)", idVal.Ref))
 	return Value{Ty: TypeVoid}, nil
+}
+
+// ensureTimerRuntime declares everything setTimeout/clearTimeout/
+// setInterval/clearInterval need: the global timer queue (three globals —
+// data pointer, length, capacity — the same "separate globals" shape
+// process.argv already uses for its own ptr+len pair, rather than one
+// malloc'd header struct, since there's only ever one timer queue per
+// program), and four functions:
+//
+//	__kml_timer_schedule(ptr closure, i64 delayMs, i64 intervalMs) -> i64
+//	  Appends a new entry (growing the queue via the same realloc-doubling
+//	  shape __kml_fetch/__kml_exec_file_sync/__kml_fs_readdir all already
+//	  use, just holding fixed-size 32-byte structs this time instead of
+//	  bytes or ptrs) and returns its id. intervalMs is 0 for a one-shot
+//	  setTimeout, or the repeat cadence for setInterval.
+//	__kml_timer_clear(i64 id)
+//	  Linear scan by id; sets that entry's intervalMs to -1 (the sentinel
+//	  for "cancelled / already fired and done, never consider again" —
+//	  chosen over physically removing the entry so the queue never needs
+//	  compaction, and over a separate cancelled flag so every field stays
+//	  a plain i64/ptr with no padding ambiguity to reason about).
+//	__kml_timer_drain()
+//	  Runs after the program's own top-level code finishes (see
+//	  EmitProgram). Repeatedly: linear-scan for the pending (intervalMs !=
+//	  -1) entry with the smallest fire time; if none, return (queue
+//	  exhausted, main() can finally end); otherwise sleep via nanosleep()
+//	  until it's due, call its closure, then — since the callback may
+//	  itself have scheduled/cleared timers and grown/reallocated the queue
+//	  — reload the queue pointer and this entry fresh before deciding
+//	  whether to reschedule (intervalMs > 0, matching JS's own repeat
+//	  behavior) or mark it done (intervalMs = -1).
+//
+// Entry layout ({ i64 id, i64 fireAtNs, i64 intervalMs, ptr closureHdr },
+// 32 bytes, no padding): every field is i64 or ptr, both naturally 8-byte
+// aligned, so the struct's total size and field order are unambiguous
+// without needing LLVM's sizeof-via-GEP idiom.
+func (e *Emitter) ensureTimerRuntime() {
+	if e.usedTimers {
+		return
+	}
+	e.usedTimers = true
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureClockGettime()
+	clockID := monotonicClockID()
+	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
+	e.emitGlobal("@__kml_timer_data = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_timer_len = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_timer_cap = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_timer_next_id = internal global i64 1, align 8")
+
+	e.emitGlobal(fmt.Sprintf(`
+define i64 @__kml_monotonic_ns() {
+entry:
+  %%ts = alloca { i64, i64 }, align 8
+  %%r = call i32 @clock_gettime(i32 %s, ptr %%ts)
+  %%sec_p = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
+  %%nsec_p = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
+  %%sec = load i64, ptr %%sec_p, align 8
+  %%nsec = load i64, ptr %%nsec_p, align 8
+  %%sec_ns = mul i64 %%sec, 1000000000
+  %%total = add i64 %%sec_ns, %%nsec
+  ret i64 %%total
+}`, clockID))
+
+	e.emitGlobal(`
+define i64 @__kml_timer_schedule(ptr %closure, i64 %delayms, i64 %intervalms) {
+entry:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %cap = load i64, ptr @__kml_timer_cap, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  %neededp1 = add i64 %len, 1
+  %needgrow = icmp sgt i64 %neededp1, %cap
+  br i1 %needgrow, label %grow, label %doappend
+
+grow:
+  %cap2 = mul i64 %cap, 2
+  %atleast8 = icmp sgt i64 %cap2, 8
+  %newcap = select i1 %atleast8, i64 %cap2, i64 8
+  %newcapbytes = mul i64 %newcap, 32
+  %newdata = call ptr @realloc(ptr %data, i64 %newcapbytes)
+  store ptr %newdata, ptr @__kml_timer_data, align 8
+  store i64 %newcap, ptr @__kml_timer_cap, align 8
+  br label %doappend
+
+doappend:
+  %dataNow = load ptr, ptr @__kml_timer_data, align 8
+  %slot = getelementptr { i64, i64, i64, ptr }, ptr %dataNow, i64 %len
+
+  %id = load i64, ptr @__kml_timer_next_id, align 8
+  %nextid = add i64 %id, 1
+  store i64 %nextid, ptr @__kml_timer_next_id, align 8
+  %id_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 0
+  store i64 %id, ptr %id_p, align 8
+
+  %now = call i64 @__kml_monotonic_ns()
+  %delayns = mul i64 %delayms, 1000000
+  %fireat = add i64 %now, %delayns
+  %fireat_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 1
+  store i64 %fireat, ptr %fireat_p, align 8
+
+  %interval_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 2
+  store i64 %intervalms, ptr %interval_p, align 8
+
+  %closure_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 3
+  store ptr %closure, ptr %closure_p, align 8
+
+  %newlen = add i64 %len, 1
+  store i64 %newlen, ptr @__kml_timer_len, align 8
+
+  ret i64 %id
+}`)
+
+	e.emitGlobal(`
+define void @__kml_timer_clear(i64 %id) {
+entry:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  %ip = alloca i64, align 8
+  store i64 0, ptr %ip, align 8
+  br label %loop
+
+loop:
+  %i = load i64, ptr %ip, align 8
+  %inbounds = icmp slt i64 %i, %len
+  br i1 %inbounds, label %body, label %done
+
+body:
+  %slot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %i
+  %id_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 0
+  %eid = load i64, ptr %id_p, align 8
+  %match = icmp eq i64 %eid, %id
+  br i1 %match, label %cancelit, label %next
+
+cancelit:
+  %interval_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 2
+  store i64 -1, ptr %interval_p, align 8
+  br label %done
+
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %ip, align 8
+  br label %loop
+
+done:
+  ret void
+}`)
+
+	e.emitGlobal(`
+define void @__kml_timer_drain() {
+entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  %ts = alloca { i64, i64 }, align 8
+  br label %outerloop
+
+outerloop:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  store i64 -1, ptr %besti, align 8
+  store i64 0, ptr %bestfire, align 8
+  store i64 0, ptr %scani, align 8
+  br label %scanloop
+
+scanloop:
+  %si = load i64, ptr %scani, align 8
+  %sinbounds = icmp slt i64 %si, %len
+  br i1 %sinbounds, label %scanbody, label %scandone
+
+scanbody:
+  %sslot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %si
+  %sinterval_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 2
+  %sinterval = load i64, ptr %sinterval_p, align 8
+  %sdone = icmp eq i64 %sinterval, -1
+  br i1 %sdone, label %scannext, label %scanconsider
+
+scanconsider:
+  %sfire_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 1
+  %sfire = load i64, ptr %sfire_p, align 8
+  %curbesti = load i64, ptr %besti, align 8
+  %noneyet = icmp eq i64 %curbesti, -1
+  br i1 %noneyet, label %scantakebest, label %scancompare
+
+scancompare:
+  %curbestfire = load i64, ptr %bestfire, align 8
+  %better = icmp slt i64 %sfire, %curbestfire
+  br i1 %better, label %scantakebest, label %scannext
+
+scantakebest:
+  store i64 %si, ptr %besti, align 8
+  store i64 %sfire, ptr %bestfire, align 8
+  br label %scannext
+
+scannext:
+  %sinext = add i64 %si, 1
+  store i64 %sinext, ptr %scani, align 8
+  br label %scanloop
+
+scandone:
+  %foundbest = load i64, ptr %besti, align 8
+  %nomore = icmp eq i64 %foundbest, -1
+  br i1 %nomore, label %alldone, label %havebest
+
+havebest:
+  %targetfire = load i64, ptr %bestfire, align 8
+  %now1 = call i64 @__kml_monotonic_ns()
+  %needwait = icmp sgt i64 %targetfire, %now1
+  br i1 %needwait, label %dosleep, label %dofire
+
+dosleep:
+  %waitns = sub i64 %targetfire, %now1
+  %waitsec = sdiv i64 %waitns, 1000000000
+  %waitnsrem = srem i64 %waitns, 1000000000
+  %ts_sec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
+  %ts_nsec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 1
+  store i64 %waitsec, ptr %ts_sec, align 8
+  store i64 %waitnsrem, ptr %ts_nsec, align 8
+  call i32 @nanosleep(ptr %ts, ptr null)
+  br label %dofire
+
+dofire:
+  %data2 = load ptr, ptr @__kml_timer_data, align 8
+  %fireidx = load i64, ptr %besti, align 8
+  %fslot = getelementptr { i64, i64, i64, ptr }, ptr %data2, i64 %fireidx
+  %fclosure_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 3
+  %fclosure = load ptr, ptr %fclosure_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+
+  %data3 = load ptr, ptr @__kml_timer_data, align 8
+  %fslot2 = getelementptr { i64, i64, i64, ptr }, ptr %data3, i64 %fireidx
+  %finterval_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 2
+  %finterval = load i64, ptr %finterval_p, align 8
+  %stillrepeating = icmp sgt i64 %finterval, 0
+  br i1 %stillrepeating, label %reschedule, label %maybemarkdone
+
+reschedule:
+  %now2 = call i64 @__kml_monotonic_ns()
+  %intervalns = mul i64 %finterval, 1000000
+  %newfire = add i64 %now2, %intervalns
+  %ffire_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 1
+  store i64 %newfire, ptr %ffire_p, align 8
+  br label %outerloop
+
+maybemarkdone:
+  %alreadycancelled = icmp eq i64 %finterval, -1
+  br i1 %alreadycancelled, label %outerloop, label %markdone
+
+markdone:
+  store i64 -1, ptr %finterval_p, align 8
+  br label %outerloop
+
+alldone:
+  ret void
+}`)
 }

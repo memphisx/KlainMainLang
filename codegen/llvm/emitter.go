@@ -86,6 +86,8 @@ type Emitter struct {
 	usedDateNameTables       bool
 	usedFetch                bool
 	usedFetchAsync           bool
+	usedPromiseCombinators   bool
+	usedCurlSlist            bool
 	usedFopen                bool
 	usedFclose               bool
 	usedFwrite               bool

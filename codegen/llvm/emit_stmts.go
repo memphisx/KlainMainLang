@@ -112,7 +112,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			val = e.coerce(val, e.currentPromiseTy)
 			align := e.currentPromiseTy.Align()
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-				e.currentPromiseTy.IR, val.Ref, e.coroHdl, align))
+				StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", e.coroRetLabel))
 		return nil

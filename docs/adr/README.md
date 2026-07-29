@@ -111,3 +111,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00070](ADR-00070.md) | Full-pipeline (codegen-through-binary) fuzz testing | Extends [ADR-00068](ADR-00068.md). Implements [TDD-00014](../tdd/TDD-00014.md) |
 | [00071](ADR-00071.md) | `-mm=gc` — Boehm GC mode | Implements [TDD-00001](../tdd/TDD-00001.md) |
 | [00072](ADR-00072.md) | `http.listen` — request headers, query string, request body, response headers | Extends [ADR-00048](ADR-00048.md), [ADR-00049](ADR-00049.md) |
+| [00073](ADR-00073.md) | `Promise.all` / `.race` / `.allSettled` | Extends [ADR-00049](ADR-00049.md), [ADR-00050](ADR-00050.md). Implements [TDD-00016](../tdd/TDD-00016.md) |
+| [00074](ADR-00074.md) | `fetch()` client parity — custom method, headers, request body | Extends [ADR-00050](ADR-00050.md). Implements [TDD-00017](../tdd/TDD-00017.md) |
+| [00075](ADR-00075.md) | Split oversized codegen/parser files into domain files | |

@@ -39,7 +39,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00003](TDD-00003.md) | Alternative fetch Backend: a Go helper instead of libcurl | Not Started |
 | [00004](TDD-00004.md) | HTTP Server | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00072](../adr/ADR-00072.md)) |
 | [00005](TDD-00005.md) | Unannotated parameter typing | Partially Implemented ([ADR-00042](../adr/ADR-00042.md)) |
-| [00006](TDD-00006.md) | Event Loop | Partially Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00050](../adr/ADR-00050.md)) |
+| [00006](TDD-00006.md) | Event Loop | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00050](../adr/ADR-00050.md), [ADR-00051](../adr/ADR-00051.md), [ADR-00052](../adr/ADR-00052.md)) |
 | [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Not Started |
 | [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented ([ADR-00047](../adr/ADR-00047.md)) |
 | [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Partially Implemented ([ADR-00062](../adr/ADR-00062.md), [ADR-00063](../adr/ADR-00063.md), [ADR-00064](../adr/ADR-00064.md), [ADR-00067](../adr/ADR-00067.md)) |
@@ -49,3 +49,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00013](TDD-00013.md) | Error subtypes / tagged errors | Not Started |
 | [00014](TDD-00014.md) | Full-pipeline (codegen-through-binary) fuzz testing | Implemented ([ADR-00070](../adr/ADR-00070.md)) |
 | [00015](TDD-00015.md) | `JSON.parse` into nested object fields | Not Started |
+| [00016](TDD-00016.md) | `Promise.all` / `.race` / `.allSettled` | Implemented ([ADR-00073](../adr/ADR-00073.md)) |
+| [00017](TDD-00017.md) | `fetch()` client parity — custom method, headers, request body | Implemented ([ADR-00074](../adr/ADR-00074.md)) |

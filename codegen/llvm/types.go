@@ -52,6 +52,22 @@ type Type struct {
 	// PromiseType is the T in Promise<T>; nil means Promise<void>.
 	IsPromise   bool
 	PromiseType *Type
+	// PromiseResolved marks a Promise<Response> whose slot already holds a
+	// fully-built Response object (emit_promise.go's wrapResolvedPromise,
+	// e.g. Promise.race's Response branch), as opposed to every other
+	// Promise<Response> — a plain fetch() call — whose slot holds a still-
+	// pending fetch handle to be waited on. Both share the exact same static
+	// type (IsResponse=true) and IR ("ptr"), so emitAwait's IsResponse
+	// branch, which always expects the "raw fetch handle" shape, needs this
+	// flag to know when it must NOT re-run __kml_await_fetch on an
+	// already-resolved Response — a real bug found and fixed while adding
+	// Promise.all/.race/.allSettled (ADR-00073): without it, `await
+	// Promise.race(responses)` reinterpreted the finished Response struct's
+	// own bytes as a { ptr, ptr, i64, i64, i64 } pending-fetch struct,
+	// corrupting memory (segfaults / spurious "Unknown error" throws whose
+	// symptom varied run to run, per garbage read from whatever bytes landed
+	// where the pending struct's `result` field would be).
+	PromiseResolved bool
 	// IsDynamic marks any/unknown: a runtime-tagged { i8, i64 } box (tag +
 	// payload) instead of one fixed concrete storage type. See emit_dynamic.go.
 	IsDynamic bool
@@ -125,6 +141,24 @@ func ResponseType() Type {
 	})
 	ty.IsResponse = true
 	return ty
+}
+
+// SettlementType returns Promise.allSettled()'s per-element result shape:
+// { status: string, value: T, reason: Error }. Both value and reason are
+// always allocated regardless of which branch is live (this compiler has no
+// optional/union fields) — codegen must explicitly zero-fill whichever one
+// doesn't apply per element (null ptr, matching errorObjType/most T's own
+// ptr-sized IR) rather than leave it uninitialized, so e.g. a fulfilled
+// entry's .reason reads a defined null instead of garbage. reason reuses
+// emit_exceptions.go's existing errorObjType (same {message: ptr} shape
+// thrown/caught values already use), so a rejected entry's .reason.message
+// is readable exactly like any caught Error's.
+func SettlementType(valueTy Type) Type {
+	return ObjectType([]Field{
+		{Name: "status", Ty: TypePtr},
+		{Name: "value", Ty: valueTy},
+		{Name: "reason", Ty: errorObjType},
+	})
 }
 
 // ClassTagField is the name of the hidden i64 tag every class instance

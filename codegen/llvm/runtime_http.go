@@ -1,0 +1,1021 @@
+package llvm
+
+import (
+	"fmt"
+	"runtime"
+)
+
+// httpSockConstants returns the platform-specific setsockopt() level/option
+// values for SOL_SOCKET/SO_REUSEADDR — unlike AF_INET (2) and SOCK_STREAM
+// (1), which are the same numeric value on every POSIX target this project
+// builds for, these two genuinely differ: Linux defines SOL_SOCKET=1,
+// SO_REUSEADDR=2, while Darwin/BSD define SOL_SOCKET=0xffff, SO_REUSEADDR=4.
+// Same Go-side-runtime.GOOS-branch approach as monotonicClockID()/
+// errnoAccessor() above — this compiler always builds and runs on the same
+// host, so a compile-time Go-side branch is sufficient, no IR-level
+// conditional needed.
+func httpSockConstants() (solSocket, soReuseAddr int) {
+	if runtime.GOOS == "darwin" {
+		return 0xffff, 4
+	}
+	return 1, 2
+}
+
+// httpSockaddrFamilyBytes returns the first two bytes of a struct
+// sockaddr_in, which differ by platform even though the struct's total
+// size (16 bytes) and every field after it are identical: Linux packs
+// sin_family as a plain 2-byte field (family=2 for AF_INET, low byte
+// first on this project's little-endian targets); Darwin/BSD instead
+// split those same two bytes into sin_len (=16, the struct's own total
+// size) followed by a 1-byte sin_family. Port and address fields (offset
+// 2 and 4) are identical on both, so only these two bytes need branching.
+func httpSockaddrFamilyBytes() (byte0, byte1 int) {
+	if runtime.GOOS == "darwin" {
+		return 16, 2 // sin_len=16, sin_family=AF_INET
+	}
+	return 2, 0 // sin_family=AF_INET as a little-endian i16
+}
+
+// httpNonblockFlag returns O_NONBLOCK's numeric value — another genuine
+// platform difference (Darwin: 0x4, Linux: 0x800 on both x86-64 and arm64,
+// the two architectures this project targets), verified on this machine via
+// a throwaway C probe (`printf("%x", O_NONBLOCK)`) rather than trusted from
+// memory, matching every other libc constant this project hardcodes. Used
+// by the event loop's accept path to make a freshly-accepted connection's
+// fd non-blocking before handing it to its own fiber.
+func httpNonblockFlag() int {
+	if runtime.GOOS == "darwin" {
+		return 0x4
+	}
+	return 0x800
+}
+
+// httpEagainErrno returns EAGAIN/EWOULDBLOCK's numeric value (35 on Darwin;
+// 11 on Linux, where EAGAIN and EWOULDBLOCK are the same value — both
+// verified the same way as httpNonblockFlag). A per-connection fiber's read
+// loop checks the current errno against this after a failed non-blocking
+// read to distinguish "no data yet, yield and retry later" from a real
+// error.
+func httpEagainErrno() int {
+	if runtime.GOOS == "darwin" {
+		return 35
+	}
+	return 11
+}
+
+// ucontextLayout returns sizeof(ucontext_t) and the byte offsets of
+// uc_stack.ss_sp / uc_stack.ss_size / uc_link needed to hand-build one (see
+// ensureFiberRuntime) — a real, confirmed platform difference found the
+// hard way: this project's own CI (GitHub Actions' ubuntu-latest, x86-64)
+// hung/reset connections under the fiber-based event loop until this was
+// fixed, because the original implementation only ever verified these
+// numbers on this dev machine (arm64 Darwin, sizeof 880) and assumed they'd
+// carry over. They do not: Linux's glibc ucontext_t is a completely
+// different struct, and even differs *between Linux architectures*
+// (x86-64: 968 bytes; arm64: 4560 bytes — verified directly via a
+// throwaway sizeof/offsetof C probe compiled and run in Docker containers
+// for each target, `docker run --platform linux/amd64|linux/arm64
+// ubuntu:24.04`, the same "never trust from memory" standard every other
+// platform constant in this codebase already follows), while the four
+// offsets happen to be identical across both Linux architectures (only the
+// struct's total size differs, presumably due to a differently-sized
+// register/FPU save area later in the struct) but are still completely
+// different from Darwin's. Undersizing this buffer on Linux meant
+// getcontext/makecontext/swapcontext wrote past the end of a too-small
+// malloc'd (or, for @__kml_main_ctx, global) buffer — silent heap/global
+// corruption, manifesting unpredictably depending on what happened to be
+// laid out next in memory (which is exactly what the observed symptoms —
+// connection resets, hangs — looked like).
+func ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
+	if runtime.GOOS == "darwin" {
+		return 880, 8, 16, 32
+	}
+	// Linux (glibc): offsets are identical across architectures; size isn't.
+	if runtime.GOARCH == "arm64" {
+		return 4560, 16, 32, 8
+	}
+	return 968, 16, 32, 8 // amd64 and other 64-bit Linux targets
+}
+
+// ensureHTTPThrow declares __kml_http_throw: builds "<opdesc>: <reason>"
+// from the current errno via strerror() and throws it as a catchable Error
+// — same shape as ensureFsThrow, just without a path argument (a bind/listen
+// failure has no associated file path to report).
+func (e *Emitter) ensureHTTPThrow() {
+	if e.usedHTTPThrow {
+		return
+	}
+	e.usedHTTPThrow = true
+	e.ensureMalloc()
+	e.ensureStrlen()
+	e.ensureSprintf()
+	e.ensureExceptionHelpers()
+	e.ensureErrnoAccessor()
+	e.ensureStrerror()
+	fmtPtr := e.internString("%s: %s")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_throw(ptr %%opdesc) {
+entry:
+  %%errno_ptr = call ptr @%s()
+  %%errno_val = load i32, ptr %%errno_ptr, align 4
+  %%errmsg = call ptr @strerror(i32 %%errno_val)
+  %%len_op = call i64 @strlen(ptr %%opdesc)
+  %%len_err = call i64 @strlen(ptr %%errmsg)
+  %%sum = add i64 %%len_op, %%len_err
+  %%bufsize = add i64 %%sum, 8
+  %%buf = call ptr @malloc(i64 %%bufsize)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%errmsg)
+  %%errobj = call ptr @malloc(i64 8)
+  store ptr %%buf, ptr %%errobj, align 8
+  call void @__kml_throw(ptr %%errobj)
+  ret void
+}`, errnoAccessor(), fmtPtr))
+}
+
+// ensureSplitFirst declares __kml_split_first(ptr s, ptr sep) -> {ptr, ptr},
+// splitting on the FIRST occurrence of sep only — unlike ensureStringSplit's
+// @__kml_split (which splits on every occurrence), this is what parsing a
+// single "Key: Value" header line or a "path?query" URL needs, since a
+// header's value or a query string can itself legitimately contain the
+// separator again. `after` aliases into s itself (fine — every call site
+// below keeps s alive at least as long as `after` is used); `before` is a
+// fresh malloc'd+NUL-terminated copy. `after` is null if sep isn't found.
+func (e *Emitter) ensureSplitFirst() {
+	if e.usedSplitFirst {
+		return
+	}
+	e.usedSplitFirst = true
+	e.ensureStrstr()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	e.emitGlobal(`
+define {ptr, ptr} @__kml_split_first(ptr %s, ptr %sep) {
+entry:
+  %found = call ptr @strstr(ptr %s, ptr %sep)
+  %hit = icmp ne ptr %found, null
+  br i1 %hit, label %split, label %nosep
+nosep:
+  %r0 = insertvalue {ptr, ptr} undef, ptr %s, 0
+  %r1 = insertvalue {ptr, ptr} %r0, ptr null, 1
+  ret {ptr, ptr} %r1
+split:
+  %sep_len = call i64 @strlen(ptr %sep)
+  %s_int = ptrtoint ptr %s to i64
+  %f_int = ptrtoint ptr %found to i64
+  %before_len = sub i64 %f_int, %s_int
+  %alloc = add i64 %before_len, 1
+  %before_buf = call ptr @malloc(i64 %alloc)
+  call ptr @memcpy(ptr %before_buf, ptr %s, i64 %before_len)
+  %nullp = getelementptr i8, ptr %before_buf, i64 %before_len
+  store i8 0, ptr %nullp, align 1
+  %after = getelementptr i8, ptr %found, i64 %sep_len
+  %r2 = insertvalue {ptr, ptr} undef, ptr %before_buf, 0
+  %r3 = insertvalue {ptr, ptr} %r2, ptr %after, 1
+  ret {ptr, ptr} %r3
+}`)
+}
+
+// ensureHTTPParseHeaders declares __kml_http_parse_headers(ptr headerBlock,
+// ptr map): splits headerBlock (already NUL-terminated exactly at the end
+// of the header block by the caller — see buildHTTPDispatcher) on "\r\n"
+// into independent per-line copies (safe even after the source read buffer
+// later moves via realloc — ensureStringSplit's @__kml_split always
+// produces fresh copies, never aliases), each line split on the FIRST
+// "': '" via __kml_split_first (a header value can itself legally contain
+// ": "), lowercases the header name (case-insensitive per HTTP semantics)
+// and trims the value, then __kml_map_str_set's it. A line with no "': '"
+// is silently skipped — malformed input, not something to fail the whole
+// request over.
+func (e *Emitter) ensureHTTPParseHeaders() {
+	if e.usedHTTPParseHeaders {
+		return
+	}
+	e.usedHTTPParseHeaders = true
+	e.ensureStringSplit()
+	e.ensureSplitFirst()
+	e.ensureStringToLower()
+	e.ensureStringTrim()
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	crlf := e.internString("\r\n")
+	colonSp := e.internString(": ")
+	e.emitGlobal(`
+define void @__kml_http_parse_headers(ptr %headerBlock, ptr %map) {
+entry:
+  %lines = call {ptr, i64} @__kml_split(ptr %headerBlock, ptr ` + crlf + `)
+  %ldata = extractvalue {ptr, i64} %lines, 0
+  %lcount = extractvalue {ptr, i64} %lines, 1
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %next ]
+  %done = icmp sge i64 %i, %lcount
+  br i1 %done, label %ret, label %body
+body:
+  %lslot = getelementptr ptr, ptr %ldata, i64 %i
+  %line = load ptr, ptr %lslot, align 8
+  %llen = call i64 @strlen(ptr %line)
+  %empty = icmp eq i64 %llen, 0
+  br i1 %empty, label %next, label %split
+split:
+  %kv = call {ptr, ptr} @__kml_split_first(ptr %line, ptr ` + colonSp + `)
+  %val = extractvalue {ptr, ptr} %kv, 1
+  %hasval = icmp ne ptr %val, null
+  br i1 %hasval, label %store, label %next
+store:
+  %key = extractvalue {ptr, ptr} %kv, 0
+  %keylower = call ptr @__kml_tolower(ptr %key)
+  %valtrim = call ptr @__kml_trim(ptr %val)
+  %valint = ptrtoint ptr %valtrim to i64
+  call void @__kml_map_str_set(ptr %map, ptr %keylower, i64 %valint)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}`)
+}
+
+// ensureHTTPParseQuery declares __kml_http_parse_query(ptr q, ptr map):
+// splits q (the raw "a=b&c=d" tail of a request path after "?") on "&"
+// (every occurrence — correct here, since each &-delimited segment is a
+// whole pair), then each pair on the FIRST "=" via __kml_split_first (a
+// value may itself legally contain "="). Both key and value are
+// percent-decoded via the same __kml_decode_uri_component
+// decodeURIComponent itself uses. A bare flag with no "=" (e.g. "?debug")
+// stores an empty string rather than a null value.
+func (e *Emitter) ensureHTTPParseQuery() {
+	if e.usedHTTPParseQuery {
+		return
+	}
+	e.usedHTTPParseQuery = true
+	e.ensureStringSplit()
+	e.ensureSplitFirst()
+	e.ensureDecodeURIComponent()
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	amp := e.internString("&")
+	eq := e.internString("=")
+	e.emitGlobal(`
+define void @__kml_http_parse_query(ptr %q, ptr %map) {
+entry:
+  %pairs = call {ptr, i64} @__kml_split(ptr %q, ptr ` + amp + `)
+  %pdata = extractvalue {ptr, i64} %pairs, 0
+  %pcount = extractvalue {ptr, i64} %pairs, 1
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %next ]
+  %done = icmp sge i64 %i, %pcount
+  br i1 %done, label %ret, label %body
+body:
+  %pslot = getelementptr ptr, ptr %pdata, i64 %i
+  %pair = load ptr, ptr %pslot, align 8
+  %plen = call i64 @strlen(ptr %pair)
+  %empty = icmp eq i64 %plen, 0
+  br i1 %empty, label %next, label %split
+split:
+  %kv = call {ptr, ptr} @__kml_split_first(ptr %pair, ptr ` + eq + `)
+  %keyraw = extractvalue {ptr, ptr} %kv, 0
+  %valraw = extractvalue {ptr, ptr} %kv, 1
+  %hasval = icmp ne ptr %valraw, null
+  br i1 %hasval, label %usereal, label %useempty
+useempty:
+  %eb = call ptr @malloc(i64 1)
+  store i8 0, ptr %eb, align 1
+  br label %store
+usereal:
+  br label %store
+store:
+  %val = phi ptr [ %valraw, %usereal ], [ %eb, %useempty ]
+  %keydec = call ptr @__kml_decode_uri_component(ptr %keyraw)
+  %valdec = call ptr @__kml_decode_uri_component(ptr %val)
+  %valint = ptrtoint ptr %valdec to i64
+  call void @__kml_map_str_set(ptr %map, ptr %keydec, i64 %valint)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}`)
+}
+
+// ensureHTTPSerializeHeaders declares __kml_http_serialize_headers(ptr map)
+// -> ptr: builds a response's optional extra header block ("Key: Value\r\n"
+// per entry, concatenated) from a Map<string,string>, for
+// __kml_http_send_response's extraHeaders parameter. Two-pass
+// (size-then-fill), mirroring __kml_split's own cnt_loop/fill_loop idiom.
+// Only pulled in when a handler's return type actually declares a
+// `headers` field — see emitHTTPListen.
+func (e *Emitter) ensureHTTPSerializeHeaders() {
+	if e.usedHTTPSerializeHeaders {
+		return
+	}
+	e.usedHTTPSerializeHeaders = true
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureSprintf()
+	hdrFmt := e.internString("%s: %s\r\n")
+	e.emitGlobal(`
+define ptr @__kml_http_serialize_headers(ptr %map) {
+entry:
+  %keys = call {ptr, i64} @__kml_map_str_keys(ptr %map)
+  %kdata = extractvalue {ptr, i64} %keys, 0
+  %kcount = extractvalue {ptr, i64} %keys, 1
+  %vals = call {ptr, i64} @__kml_map_str_vals(ptr %map)
+  %vdata = extractvalue {ptr, i64} %vals, 0
+  br label %sizeloop
+sizeloop:
+  %si = phi i64 [ 0, %entry ], [ %si1, %sizebody ]
+  %total = phi i64 [ 0, %entry ], [ %total1, %sizebody ]
+  %sdone = icmp sge i64 %si, %kcount
+  br i1 %sdone, label %alloc, label %sizebody
+sizebody:
+  %kslot = getelementptr ptr, ptr %kdata, i64 %si
+  %kptr = load ptr, ptr %kslot, align 8
+  %klen = call i64 @strlen(ptr %kptr)
+  %vslot = getelementptr i64, ptr %vdata, i64 %si
+  %vint = load i64, ptr %vslot, align 8
+  %vptr = inttoptr i64 %vint to ptr
+  %vlen = call i64 @strlen(ptr %vptr)
+  %line = add i64 %klen, %vlen
+  %line2 = add i64 %line, 4
+  %total1 = add i64 %total, %line2
+  %si1 = add i64 %si, 1
+  br label %sizeloop
+alloc:
+  %bufsz = add i64 %total, 1
+  %buf = call ptr @malloc(i64 %bufsz)
+  br label %fillloop
+fillloop:
+  %fi = phi i64 [ 0, %alloc ], [ %fi1, %fillbody ]
+  %cursor = phi ptr [ %buf, %alloc ], [ %cursor1, %fillbody ]
+  %fdone = icmp sge i64 %fi, %kcount
+  br i1 %fdone, label %ret, label %fillbody
+fillbody:
+  %fkslot = getelementptr ptr, ptr %kdata, i64 %fi
+  %fkptr = load ptr, ptr %fkslot, align 8
+  %fvslot = getelementptr i64, ptr %vdata, i64 %fi
+  %fvint = load i64, ptr %fvslot, align 8
+  %fvptr = inttoptr i64 %fvint to ptr
+  %n = call i32 (ptr, ptr, ...) @sprintf(ptr %cursor, ptr ` + hdrFmt + `, ptr %fkptr, ptr %fvptr)
+  %n64 = sext i32 %n to i64
+  %cursor1 = getelementptr i8, ptr %cursor, i64 %n64
+  %fi1 = add i64 %fi, 1
+  br label %fillloop
+ret:
+  ret ptr %buf
+}`)
+}
+
+// ensureHTTPRuntime declares everything http.listen needs: raw POSIX socket
+// primitives, a bind-and-listen helper that throws a catchable Error on
+// failure, an accept-and-parse-request-line helper, a send-response-and-close
+// helper, and the generalized event loop (TDD-00006 Part 1) that lets the
+// listening socket's readiness and the existing timer queue (ensureTimerRuntime)
+// share one select() wait instead of two competing loops.
+//
+// V1 scope (TDD-00004): single listener (no user-facing "close" — the two
+// globals below hold at most one registered listener at a time, matching
+// "V1 has no need for multiple servers"). Concurrent connection handling
+// (TDD-00006 Part 2, ADR-00049) and full request parsing (ADR-00072:
+// headers, query string, request body, response headers beyond
+// status/body — see buildHTTPDispatcher in emit_http.go) are both real now.
+//
+//	__kml_http_bind_and_listen(i32 port) -> i32
+//	  socket()+setsockopt(SO_REUSEADDR)+bind()+listen(); throws a catchable
+//	  Error (via __kml_http_throw) on any failure instead of returning -1,
+//	  so the Go-emitted call site never needs its own error check.
+//	__kml_http_send_response(i32 connfd, i64 status, ptr body, ptr extraHeaders)
+//	  Formats a minimal HTTP/1.1 response (fixed "OK" reason phrase
+//	  regardless of status — real clients determine success/failure from
+//	  the numeric code, not the phrase) with Content-Length/Connection:
+//	  close plus extraHeaders (empty string if the handler's return type
+//	  has no `headers` field — see ensureHTTPSerializeHeaders), writes it,
+//	  closes the connection.
+//	__kml_event_loop_run()
+//	  The generalized drain loop: each iteration, scans the timer queue for
+//	  the earliest-due entry exactly like __kml_timer_drain, builds an
+//	  fd_set containing the registered listener (if any, via
+//	  @__kml_listen_fd), and calls select() with a timeout computed from
+//	  that earliest-due timer (blocking indefinitely if a listener is
+//	  registered but no timer is pending, since select() alone can't return
+//	  "nothing to wait for" the way an empty queue could return instantly).
+//	  On wake: dispatches through @__kml_listen_dispatch if the listener is
+//	  ready, then fires/reschedules/retires the due timer exactly like
+//	  __kml_timer_drain. Loops forever once a listener is registered
+//	  (matching http.listen's own "never returns" contract — no user code
+//	  ever unregisters it in V1); with no listener registered it behaves
+//	  identically to plain nanosleep-based timer draining, just implemented
+//	  via a zero-timeout-capable select() instead.
+//
+// ensureFiberRuntime declares the fiber-context-switching primitive
+// (ucontext.h's getcontext/makecontext/swapcontext, called directly via
+// declare/call — no hand-written assembly, confirmed by direct prototyping
+// during TDD-00006 Part 2) and the connection-fiber array shared by both
+// http.listen (ADR-00049, one entry per accepted connection) and
+// await fetch(...) (ADR-00050, reuses whichever connection fiber is
+// currently running to yield/resume around an in-flight libcurl transfer —
+// there is no separate fiber kind in this compiler, a fetch awaited from
+// inside a connection handler just parks and resumes that same fiber).
+// Entry layout ({ i64 fd, ptr ctx, ptr stack, ptr pendingFetch, ptr
+// pendingGroup }, 40 bytes): pendingFetch is null under normal HTTP-read
+// waiting (resume when fd is readable, the original ADR-00049 behavior) and
+// non-null while this fiber is specifically parked on a still-in-flight
+// fetch (resume when that fetch's own "done" flag is set, regardless of
+// fd_set readiness). pendingGroup (ADR-00073) is the same idea one level up
+// — non-null while this fiber is parked on a Promise.all/.race/.allSettled
+// group-wait (__kml_await_group_wait), resumed when __kml_group_satisfied
+// says the group as a whole is ready. The two fields are independent, not a
+// union — a fiber is only ever parked on at most one of them at a time, but
+// they're kept as separate fields rather than overlaid to avoid any
+// byte-layout coupling between the single-pending and group-wait paths.
+func (e *Emitter) ensureFiberRuntime() {
+	if e.usedFiber {
+		return
+	}
+	e.usedFiber = true
+	e.emitGlobal("declare void @getcontext(ptr noundef)")
+	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
+	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
+	ctxSize, _, _, _ := ucontextLayout()
+	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal global [%d x i8] zeroinitializer, align 16", ctxSize))
+	e.emitGlobal("@__kml_conn_data = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_conn_len = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_conn_cap = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_current_conn_idx = internal global i64 -1, align 8")
+}
+
+func (e *Emitter) ensureHTTPRuntime() {
+	if e.usedHTTP {
+		return
+	}
+	e.usedHTTP = true
+	e.ensureTimerRuntime()
+	e.ensureFiberRuntime()
+	// __kml_event_loop_run below unconditionally references
+	// @__kml_curl_multi/curl_multi_fdset/curl_multi_perform/
+	// __kml_curl_drain_messages (its own "does curl have work to do"
+	// checks are a runtime branch, not something Go-side codegen can
+	// decide in advance — a fetch() call inside this very handler's body
+	// is only discovered by buildHTTPDispatcher, called *after* this
+	// function). Every symbol the loop's IR mentions must still be
+	// declared/defined for the .ll to link, whether or not the program
+	// ever actually calls fetch() — so http.listen always pulls in the
+	// full async-fetch machinery (and, transitively, libcurl) alongside
+	// its own socket runtime, not just when fetch() is textually present.
+	e.ensureFetchAsync()
+	// Same reasoning again (ADR-00073): __kml_event_loop_run's rcheckgroup
+	// block below unconditionally calls @__kml_group_satisfied to check a
+	// fiber's pendingGroup field, whether or not this program ever calls
+	// Promise.all/.race/.allSettled.
+	e.ensurePromiseCombinators()
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureMemset()
+	e.ensureFree()
+	e.ensureSscanf()
+	e.ensureSprintf()
+	e.ensureStrlen()
+	e.ensureHTTPThrow()
+	// Every request now parses headers/query/body regardless of whether
+	// the handler reads them — same "always pull in the full machinery"
+	// reasoning as ensureFetchAsync above, not a per-feature opt-in.
+	e.ensureSplitFirst()
+	e.ensureHTTPParseHeaders()
+	e.ensureHTTPParseQuery()
+	e.ensureMapStrHelpers()
+	e.ensureAtoll()
+
+	e.ensureErrnoAccessor()
+
+	e.emitGlobal("declare i32 @socket(i32 noundef, i32 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @setsockopt(i32 noundef, i32 noundef, i32 noundef, ptr noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @bind(i32 noundef, ptr noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @listen(i32 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @accept(i32 noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i32 @close(i32 noundef)")
+	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i16 @htons(i16 noundef)")
+	e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
+
+	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
+	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_handler = internal global ptr null, align 8")
+
+	solSocket, soReuseAddr := httpSockConstants()
+	fam0, fam1 := httpSockaddrFamilyBytes()
+
+	e.emitGlobal(fmt.Sprintf(`
+define i32 @__kml_http_bind_and_listen(i32 %%port) {
+entry:
+  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
+  %%fdok = icmp sge i32 %%fd, 0
+  br i1 %%fdok, label %%setopt, label %%failnofd
+
+setopt:
+  %%one = alloca i32, align 4
+  store i32 1, ptr %%one, align 4
+  call i32 @setsockopt(i32 %%fd, i32 %d, i32 %d, ptr %%one, i32 4)
+
+  %%addr = alloca [16 x i8], align 4
+  call ptr @memset(ptr %%addr, i32 0, i64 16)
+  store i8 %d, ptr %%addr, align 1
+  %%b1p = getelementptr i8, ptr %%addr, i64 1
+  store i8 %d, ptr %%b1p, align 1
+  %%portu16 = trunc i32 %%port to i16
+  %%portn = call i16 @htons(i16 %%portu16)
+  %%portp = getelementptr i8, ptr %%addr, i64 2
+  store i16 %%portn, ptr %%portp, align 1
+
+  %%bindrc = call i32 @bind(i32 %%fd, ptr %%addr, i32 16)
+  %%bindok = icmp eq i32 %%bindrc, 0
+  br i1 %%bindok, label %%dolisten, label %%failwithfd
+
+dolisten:
+  %%listenrc = call i32 @listen(i32 %%fd, i32 128)
+  %%listenok = icmp eq i32 %%listenrc, 0
+  br i1 %%listenok, label %%success, label %%failwithfd
+
+success:
+  ret i32 %%fd
+
+failwithfd:
+  call i32 @close(i32 %%fd)
+  call void @__kml_http_throw(ptr %s)
+  unreachable
+
+failnofd:
+  call void @__kml_http_throw(ptr %s)
+  unreachable
+}`, solSocket, soReuseAddr, fam0, fam1,
+		e.internString("http.listen: failed to bind or listen"),
+		e.internString("http.listen: failed to create socket")))
+
+	// __kml_http_append_conn: appends a new { i64 fd, ptr ctx, ptr stack,
+	// ptr pendingFetch, ptr pendingGroup } entry (growable, realloc-doubling,
+	// same shape as the timer queue) for a freshly-accepted connection,
+	// builds its fiber (a fresh ucontext_t + a 64KB stack, uc_link back to
+	// the main/scheduler context so the fiber function returning normally
+	// resumes the scheduler automatically), and immediately swaps into it
+	// once — the same "launch it now" step confirmed working in this
+	// feature's prototyping spike. The fiber entry point is always
+	// @__kml_listen_dispatch's stored pointer (the per-call-site-specialized
+	// dispatcher built by emit_http.go). pendingFetch/pendingGroup both
+	// start null (normal fd-readiness-based waiting) — see
+	// ensureFiberRuntime's doc comment.
+	// ctxSize/ssSpOff/ssSizeOff/ucLinkOff: see ucontextLayout's doc comment
+	// — sizeof(ucontext_t) and its field offsets are NOT portable across
+	// platforms (a real bug found via a failing Linux CI run, fixed here).
+	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
+
+	// gc mode: repoint Boehm's GC_stackbottom at this fiber's own stack
+	// (stacks grow down, so the high end of the 64KB block is the "bottom"
+	// as far as GC_stackbottom's naming convention is concerned) right
+	// before swapping into it — a collection triggered while this fiber is
+	// running would otherwise have Boehm's root-stack scan walk from the
+	// live SP (now inside this malloc'd block) to the *original* process
+	// stack's address, an unrelated and likely-unmapped range. See
+	// docs/adr/ADR-00071.md.
+	gcSetStackbottom := ""
+	if e.isGCMode() {
+		gcSetStackbottom = `
+  %stackhigh = getelementptr i8, ptr %stack, i64 65536
+  store ptr %stackhigh, ptr @GC_stackbottom, align 8`
+	}
+
+	e.emitGlobal(`
+define void @__kml_http_append_conn(i32 %fd) {
+entry:
+  %len = load i64, ptr @__kml_conn_len, align 8
+  %cap = load i64, ptr @__kml_conn_cap, align 8
+  %data = load ptr, ptr @__kml_conn_data, align 8
+  %neededp1 = add i64 %len, 1
+  %needgrow = icmp sgt i64 %neededp1, %cap
+  br i1 %needgrow, label %grow, label %doappend
+
+grow:
+  %cap2 = mul i64 %cap, 2
+  %atleast8 = icmp sgt i64 %cap2, 8
+  %newcap = select i1 %atleast8, i64 %cap2, i64 8
+  %newcapbytes = mul i64 %newcap, 40
+  %newdata = call ptr @realloc(ptr %data, i64 %newcapbytes)
+  store ptr %newdata, ptr @__kml_conn_data, align 8
+  store i64 %newcap, ptr @__kml_conn_cap, align 8
+  br label %doappend
+
+doappend:
+  %dataNow = load ptr, ptr @__kml_conn_data, align 8
+  %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %dataNow, i64 %len
+
+  %fd64 = sext i32 %fd to i64
+  %fd_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  store i64 %fd64, ptr %fd_p, align 8
+
+  %ctx = call ptr @malloc(i64 ` + fmt.Sprintf("%d", ctxSize) + `)
+  %stack = call ptr @malloc(i64 65536)
+  call void @getcontext(ptr %ctx)
+  %ss_sp_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSpOff) + `
+  store ptr %stack, ptr %ss_sp_p, align 8
+  %ss_size_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSizeOff) + `
+  store i64 65536, ptr %ss_size_p, align 8
+  %uc_link_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ucLinkOff) + `
+  store ptr @__kml_main_ctx, ptr %uc_link_p, align 8
+  %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
+  call void (ptr, ptr, i32, ...) @makecontext(ptr %ctx, ptr %dfp, i32 0)
+
+  %ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 1
+  store ptr %ctx, ptr %ctx_p, align 8
+  %stack_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 2
+  store ptr %stack, ptr %stack_p, align 8
+  %pf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 3
+  store ptr null, ptr %pf_p, align 8
+  %pg_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 4
+  store ptr null, ptr %pg_p, align 8
+
+  %newlen = add i64 %len, 1
+  store i64 %newlen, ptr @__kml_conn_len, align 8
+
+  store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
+  %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)
+  ret void
+}`)
+
+	// extraHeaders already ends in "\r\n" per entry (or is "" when the
+	// handler's return type has no `headers` field — see
+	// ensureHTTPSerializeHeaders/emitHTTPListen), so this format produces
+	// byte-identical output to before extraHeaders existed when it's empty,
+	// and a correct single blank-line header/body separator either way.
+	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n%s")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, ptr %%extraHeaders) {
+entry:
+  %%bodylen = call i64 @strlen(ptr %%body)
+  %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
+  %%bufsize0 = add i64 %%bodylen, %%hdrlen
+  %%bufsize1 = add i64 %%bufsize0, 128
+  %%respbuf = call ptr @malloc(i64 %%bufsize1)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%extraHeaders, ptr %%body)
+  %%n64 = sext i32 %%n to i64
+  call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
+  call void @free(ptr %%respbuf)
+  call i32 @close(i32 %%connfd)
+  ret void
+}`, respFmt))
+
+	// gc mode: same GC_stackbottom repointing as __kml_http_append_conn's
+	// initial fiber launch, needed here too since this is the *other* place
+	// the event loop swaps into a fiber (a resumed, previously-yielded one
+	// rather than a freshly-created one) — see docs/adr/ADR-00071.md.
+	gcSetRStackbottom := ""
+	if e.isGCMode() {
+		gcSetRStackbottom = `
+  %rstack_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 2
+  %rstack = load ptr, ptr %rstack_p, align 8
+  %rstackhigh = getelementptr i8, ptr %rstack, i64 65536
+  store ptr %rstackhigh, ptr @GC_stackbottom, align 8`
+	}
+
+	e.emitGlobal(`
+define void @__kml_event_loop_run() {
+entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  %fdset = alloca [128 x i8], align 8
+  %wfdset = alloca [128 x i8], align 8
+  %efdset = alloca [128 x i8], align 8
+  %maxfd = alloca i32, align 4
+  %fsi = alloca i64, align 8
+  %curlmaxfd = alloca i32, align 4
+  %tv = alloca { i64, i64 }, align 8
+  %runningp2 = alloca i32, align 4
+  %rsi = alloca i64, align 8
+  br label %outerloop
+
+outerloop:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  store i64 -1, ptr %besti, align 8
+  store i64 0, ptr %bestfire, align 8
+  store i64 0, ptr %scani, align 8
+  br label %scanloop
+
+scanloop:
+  %si = load i64, ptr %scani, align 8
+  %sinbounds = icmp slt i64 %si, %len
+  br i1 %sinbounds, label %scanbody, label %scandone
+
+scanbody:
+  %sslot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %si
+  %sinterval_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 2
+  %sinterval = load i64, ptr %sinterval_p, align 8
+  %sdone = icmp eq i64 %sinterval, -1
+  br i1 %sdone, label %scannext, label %scanconsider
+
+scanconsider:
+  %sfire_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 1
+  %sfire = load i64, ptr %sfire_p, align 8
+  %curbesti = load i64, ptr %besti, align 8
+  %noneyet = icmp eq i64 %curbesti, -1
+  br i1 %noneyet, label %scantakebest, label %scancompare
+
+scancompare:
+  %curbestfire = load i64, ptr %bestfire, align 8
+  %better = icmp slt i64 %sfire, %curbestfire
+  br i1 %better, label %scantakebest, label %scannext
+
+scantakebest:
+  store i64 %si, ptr %besti, align 8
+  store i64 %sfire, ptr %bestfire, align 8
+  br label %scannext
+
+scannext:
+  %sinext = add i64 %si, 1
+  store i64 %sinext, ptr %scani, align 8
+  br label %scanloop
+
+scandone:
+  %foundbest = load i64, ptr %besti, align 8
+  %havetimer = icmp ne i64 %foundbest, -1
+  %listenfd = load i32, ptr @__kml_listen_fd, align 4
+  %haslistener = icmp sge i32 %listenfd, 0
+  %anywork = or i1 %havetimer, %haslistener
+  br i1 %anywork, label %dowork, label %alldone
+
+dowork:
+  call ptr @memset(ptr %fdset, i32 0, i64 128)
+  call ptr @memset(ptr %wfdset, i32 0, i64 128)
+  call ptr @memset(ptr %efdset, i32 0, i64 128)
+  store i32 -1, ptr %maxfd, align 4
+  br i1 %haslistener, label %setfd, label %skipsetfd
+
+setfd:
+  %fddiv8 = sdiv i32 %listenfd, 8
+  %fdmod8 = srem i32 %listenfd, 8
+  %fddiv8_64 = sext i32 %fddiv8 to i64
+  %byteptr = getelementptr i8, ptr %fdset, i64 %fddiv8_64
+  %bitpos8 = trunc i32 %fdmod8 to i8
+  %bitmask = shl i8 1, %bitpos8
+  %oldbyte = load i8, ptr %byteptr, align 1
+  %newbyte = or i8 %oldbyte, %bitmask
+  store i8 %newbyte, ptr %byteptr, align 1
+  store i32 %listenfd, ptr %maxfd, align 4
+  br label %skipsetfd
+
+skipsetfd:
+  ; Add every still-active (fd >= 0) connection's fd into the same fd_set,
+  ; tracking the overall highest fd for select()'s nfds argument.
+  %clen = load i64, ptr @__kml_conn_len, align 8
+  %cdata = load ptr, ptr @__kml_conn_data, align 8
+  store i64 0, ptr %fsi, align 8
+  br label %fsetloop
+
+fsetloop:
+  %fi = load i64, ptr %fsi, align 8
+  %finb = icmp slt i64 %fi, %clen
+  br i1 %finb, label %fsetbody, label %fsetdone
+
+fsetbody:
+  %fslot0 = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %cdata, i64 %fi
+  %ffd_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %fslot0, i32 0, i32 0
+  %ffdv = load i64, ptr %ffd_p, align 8
+  %factive = icmp sge i64 %ffdv, 0
+  br i1 %factive, label %fsetbit, label %fsetnext
+
+fsetbit:
+  %ffdiv8 = sdiv i64 %ffdv, 8
+  %ffmod8 = srem i64 %ffdv, 8
+  %ffbyteptr = getelementptr i8, ptr %fdset, i64 %ffdiv8
+  %ffmod8_8 = trunc i64 %ffmod8 to i8
+  %ffmask = shl i8 1, %ffmod8_8
+  %ffoldbyte = load i8, ptr %ffbyteptr, align 1
+  %ffnewbyte = or i8 %ffoldbyte, %ffmask
+  store i8 %ffnewbyte, ptr %ffbyteptr, align 1
+  %ffdv32 = trunc i64 %ffdv to i32
+  %fcurmax = load i32, ptr %maxfd, align 4
+  %fisbigger = icmp sgt i32 %ffdv32, %fcurmax
+  br i1 %fisbigger, label %fupdatemax, label %fsetnext
+
+fupdatemax:
+  store i32 %ffdv32, ptr %maxfd, align 4
+  br label %fsetnext
+
+fsetnext:
+  %finext = add i64 %fi, 1
+  store i64 %finext, ptr %fsi, align 8
+  br label %fsetloop
+
+fsetdone:
+  ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
+  ; same read/write/exc sets, if any await fetch(...) has ever created the
+  ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
+  ; the sets first, so this is safe to call after our own fds are already
+  ; set. See ensureFetchAsync (emit_async.go's fetch-await path).
+  %curlmulti = load ptr, ptr @__kml_curl_multi, align 8
+  %hascurl = icmp ne ptr %curlmulti, null
+  br i1 %hascurl, label %mergecurlfds, label %skipmergecurlfds
+
+mergecurlfds:
+  store i32 -1, ptr %curlmaxfd, align 4
+  call i32 @curl_multi_fdset(ptr %curlmulti, ptr %fdset, ptr %wfdset, ptr %efdset, ptr %curlmaxfd)
+  %curlmaxfdv = load i32, ptr %curlmaxfd, align 4
+  %curmaxfd1 = load i32, ptr %maxfd, align 4
+  %curlbigger = icmp sgt i32 %curlmaxfdv, %curmaxfd1
+  br i1 %curlbigger, label %takecurlmax, label %skipmergecurlfds
+
+takecurlmax:
+  store i32 %curlmaxfdv, ptr %maxfd, align 4
+  br label %skipmergecurlfds
+
+skipmergecurlfds:
+  %maxfdv = load i32, ptr %maxfd, align 4
+  %nfds = add i32 %maxfdv, 1
+
+  br i1 %havetimer, label %timeoutpath, label %notimeoutpath
+
+timeoutpath:
+  %targetfire = load i64, ptr %bestfire, align 8
+  %now1 = call i64 @__kml_monotonic_ns()
+  %rawwait = sub i64 %targetfire, %now1
+  %negwait = icmp slt i64 %rawwait, 0
+  %waitns = select i1 %negwait, i64 0, i64 %rawwait
+  %waitsec = sdiv i64 %waitns, 1000000000
+  %waitnsrem = srem i64 %waitns, 1000000000
+  %waitusec = sdiv i64 %waitnsrem, 1000
+  %tv_sec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 0
+  %tv_usec = getelementptr { i64, i64 }, ptr %tv, i32 0, i32 1
+  store i64 %waitsec, ptr %tv_sec, align 8
+  store i64 %waitusec, ptr %tv_usec, align 8
+  %selrc1 = call i32 @select(i32 %nfds, ptr %fdset, ptr %wfdset, ptr %efdset, ptr %tv)
+  br label %afterselect
+
+notimeoutpath:
+  %selrc2 = call i32 @select(i32 %nfds, ptr %fdset, ptr %wfdset, ptr %efdset, ptr null)
+  br label %afterselect
+
+afterselect:
+  br i1 %hascurl, label %docurlperform, label %checklistener
+
+docurlperform:
+  call i32 @curl_multi_perform(ptr %curlmulti, ptr %runningp2)
+  call void @__kml_curl_drain_messages()
+  br label %checklistener
+
+checklistener:
+  br i1 %haslistener, label %checkisset, label %scanconn
+
+checkisset:
+  %fddiv8b = sdiv i32 %listenfd, 8
+  %fdmod8b = srem i32 %listenfd, 8
+  %fddiv8b_64 = sext i32 %fddiv8b to i64
+  %byteptrb = getelementptr i8, ptr %fdset, i64 %fddiv8b_64
+  %bitpos8b = trunc i32 %fdmod8b to i8
+  %bitmaskb = shl i8 1, %bitpos8b
+  %bytevalb = load i8, ptr %byteptrb, align 1
+  %maskedb = and i8 %bytevalb, %bitmaskb
+  %ready = icmp ne i8 %maskedb, 0
+  br i1 %ready, label %doaccept, label %scanconn
+
+doaccept:
+  %newfd = call i32 @accept(i32 %listenfd, ptr null, ptr null)
+  %acceptok = icmp sge i32 %newfd, 0
+  br i1 %acceptok, label %setnonblock, label %scanconn
+
+setnonblock:
+  %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
+  %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
+  call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 4, i32 %newflags)
+  call void @__kml_http_append_conn(i32 %newfd)
+  br label %scanconn
+
+scanconn:
+  ; Resume every connection fiber whose fd came back ready in the fd_set
+  ; select() just populated (a fiber that finished sets its own entry's fd
+  ; to -1 right before returning, so "still >= 0 after resume" means it
+  ; genuinely yielded again and should keep being watched next iteration).
+  store i64 0, ptr %rsi, align 8
+  br label %rscanloop
+
+rscanloop:
+  %ri = load i64, ptr %rsi, align 8
+  %rclen = load i64, ptr @__kml_conn_len, align 8
+  %rinb = icmp slt i64 %ri, %rclen
+  br i1 %rinb, label %rscanbody, label %checktimerfire
+
+rscanbody:
+  %rcdata = load ptr, ptr @__kml_conn_data, align 8
+  %rslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rcdata, i64 %ri
+  %rfd_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 0
+  %rfdv = load i64, ptr %rfd_p, align 8
+  %ractive = icmp sge i64 %rfdv, 0
+  br i1 %ractive, label %rcheckpending, label %rscannext
+
+rcheckpending:
+  ; A fiber parked on await fetch(...) (pendingFetch != null) is resumed
+  ; when that specific fetch is done, regardless of fd_set readiness —
+  ; its own connection fd isn't what it's waiting on right now.
+  %rpf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 3
+  %rpf = load ptr, ptr %rpf_p, align 8
+  %rhaspending = icmp ne ptr %rpf, null
+  br i1 %rhaspending, label %rcheckfetchdone, label %rcheckgroup
+
+rcheckfetchdone:
+  %rpf_done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %rpf, i32 0, i32 2
+  %rpf_done = load i64, ptr %rpf_done_p, align 8
+  %rfetchready = icmp ne i64 %rpf_done, 0
+  br i1 %rfetchready, label %rresume, label %rscannext
+
+rcheckgroup:
+  ; A fiber parked on a Promise.all/.race/.allSettled group-wait
+  ; (pendingGroup != null, ADR-00073) is resumed once __kml_group_satisfied
+  ; says the group as a whole is ready — same "not what our own fd is
+  ; waiting on" reasoning as rcheckpending above. __kml_curl_multi_perform +
+  ; drain already ran earlier this iteration (docurlperform, before this
+  ; scan), so every member's done flag is already fresh by the time this
+  ; runs.
+  %rpg_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 4
+  %rpg = load ptr, ptr %rpg_p, align 8
+  %rhasgroup = icmp ne ptr %rpg, null
+  br i1 %rhasgroup, label %rcheckgroupdone, label %rcheckready
+
+rcheckgroupdone:
+  %rgroupsat = call i1 @__kml_group_satisfied(ptr %rpg)
+  br i1 %rgroupsat, label %rresume, label %rscannext
+
+rcheckready:
+  %rdiv8 = sdiv i64 %rfdv, 8
+  %rmod8 = srem i64 %rfdv, 8
+  %rbyteptr = getelementptr i8, ptr %fdset, i64 %rdiv8
+  %rmod8_8 = trunc i64 %rmod8 to i8
+  %rmask = shl i8 1, %rmod8_8
+  %rbyteval = load i8, ptr %rbyteptr, align 1
+  %rmasked = and i8 %rbyteval, %rmask
+  %rready = icmp ne i8 %rmasked, 0
+  br i1 %rready, label %rresume, label %rscannext
+
+rresume:
+  store i64 %ri, ptr @__kml_current_conn_idx, align 8
+  %rctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 1
+  %rctxptr = load ptr, ptr %rctx_p, align 8` + gcSetRStackbottom + `
+  call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)
+  br label %rscannext
+
+rscannext:
+  %rinext = add i64 %ri, 1
+  store i64 %rinext, ptr %rsi, align 8
+  br label %rscanloop
+
+checktimerfire:
+  br i1 %havetimer, label %checkdue, label %outerloop
+
+checkdue:
+  %targetfire2 = load i64, ptr %bestfire, align 8
+  %now2 = call i64 @__kml_monotonic_ns()
+  %isdue = icmp sge i64 %now2, %targetfire2
+  br i1 %isdue, label %dofire, label %outerloop
+
+dofire:
+  %data2 = load ptr, ptr @__kml_timer_data, align 8
+  %fireidx = load i64, ptr %besti, align 8
+  %fslot = getelementptr { i64, i64, i64, ptr }, ptr %data2, i64 %fireidx
+  %fclosure_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 3
+  %fclosure = load ptr, ptr %fclosure_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+
+  %data3 = load ptr, ptr @__kml_timer_data, align 8
+  %fslot2 = getelementptr { i64, i64, i64, ptr }, ptr %data3, i64 %fireidx
+  %finterval_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 2
+  %finterval = load i64, ptr %finterval_p, align 8
+  %stillrepeating = icmp sgt i64 %finterval, 0
+  br i1 %stillrepeating, label %reschedule, label %maybemarkdone
+
+reschedule:
+  %now3 = call i64 @__kml_monotonic_ns()
+  %intervalns = mul i64 %finterval, 1000000
+  %newfire = add i64 %now3, %intervalns
+  %ffire_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 1
+  store i64 %newfire, ptr %ffire_p, align 8
+  br label %outerloop
+
+maybemarkdone:
+  %alreadycancelled = icmp eq i64 %finterval, -1
+  br i1 %alreadycancelled, label %outerloop, label %markdone
+
+markdone:
+  store i64 -1, ptr %finterval_p, align 8
+  br label %outerloop
+
+alldone:
+  ret void
+}`)
+}

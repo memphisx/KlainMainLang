@@ -90,6 +90,8 @@ fuzz:
 fuzz-codegen:
 	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzArithmeticCorrectness -fuzztime=$(FUZZTIME)
 	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzProgramWellFormed -fuzztime=$(FUZZTIME)
+	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzPromiseCombinatorsOrdinary -fuzztime=$(FUZZTIME)
+	$(GO) test ./tests/ -run=^$$ -fuzz=FuzzFetchInitOracle -fuzztime=$(FUZZTIME)
 
 ## fuzz-all: run every fuzz target (lexer, parser, and the codegen pipeline)
 fuzz-all: fuzz fuzz-codegen

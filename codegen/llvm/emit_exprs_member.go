@@ -1,0 +1,383 @@
+package llvm
+
+import (
+	"KlainMainLang/ast"
+	"fmt"
+)
+
+// emitOptionalMember emits `obj?.property`. For ptr-typed objects it emits a
+// null check; a null object yields the zero value for the property's type.
+// Supports: string `.length` → i64; object fields → field type.
+func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
+	objVal, err := e.emitExpr(ex.Object)
+	if err != nil {
+		return Value{}, err
+	}
+
+	// Non-ptr types cannot be null; fall back to a regular (non-optional) access.
+	if objVal.Ty.IR != "ptr" {
+		plain := &ast.MemberExpression{Object: ex.Object, Property: ex.Property}
+		return e.emitMember(plain)
+	}
+
+	// Determine the result type before emitting branches.
+	var resultTy Type
+	if ex.Property == "length" && !objVal.Ty.IsObject {
+		resultTy = TypeI64
+	} else if objVal.Ty.IsObject {
+		_, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+		}
+		resultTy = e.canonicalizeClassTy(fieldTy)
+	} else {
+		return Value{}, fmt.Errorf("%d:%d: optional chaining '?.' does not support property '%s' on type %s",
+			ex.GetPos().Line, ex.GetPos().Col, ex.Property, objVal.Ty.IR)
+	}
+
+	// Array-typed results need the same {ptr, i64} aggregate slot struct
+	// fields do (resultTy.IR alone is just "ptr", with nowhere for the
+	// length to go) — see StructFieldIR's doc comment and docs/adr/ADR-00061.md.
+	resIR := StructFieldIR(resultTy)
+
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, resultTy.Align()))
+
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, objVal.Ref))
+
+	nullL := e.freshLabel("optc.null")
+	noNullL := e.freshLabel("optc.nn")
+	mergeL := e.freshLabel("optc.merge")
+
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, noNullL))
+
+	// null branch: store zero value (a zero-length {null, 0} array for an
+	// array-typed result, matching real JS's own "nullish arrayField reads
+	// as an empty-shaped zero value" intuition — not a special case, just
+	// what an array's own zero value actually looks like).
+	e.emitLabel(nullL)
+	if resultTy.IsArray {
+		z0 := e.freshReg()
+		z1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
+		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, resultTy.Align()))
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(resultTy), resPtr, resultTy.Align()))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	// non-null branch: perform the property access on objVal
+	e.emitLabel(noNullL)
+	var propVal Value
+	if ex.Property == "length" {
+		e.ensureStrlen()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", r, objVal.Ref))
+		propVal = Value{Ref: r, Ty: TypeI64}
+	} else {
+		idx, fieldTy, _ := objVal.Ty.FieldIndex(ex.Property)
+		gepReg := e.freshReg()
+		loadReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
+			gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+			loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+		propVal = Value{Ref: loadReg, Ty: fieldTy}
+	}
+	propVal = e.coerce(propVal, resultTy)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, propVal.Ref, resPtr, resultTy.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resPtr, resultTy.Align()))
+	return Value{Ref: result, Ty: resultTy}, nil
+}
+
+// emitDivZeroGuard emits a runtime check that throws a catchable Error when
+// dividing by zero on an integer type. LLVM's sdiv/udiv/srem/urem are
+// undefined behavior on a zero divisor — under -O2 that was observed to
+// silently produce garbage output rather than a defined crash or exception,
+// on top of being genuinely platform-dependent (traps on x86, doesn't on
+// arm64). No-op for float types, where JS's Infinity/NaN semantics already
+// fall out of IEEE-754 fdiv/frem without a guard. Must be called after the
+// divisor's Value is available and before emitting the actual div/rem
+// instruction; leaves the emitter inside a fresh "ok" block, mirroring
+// emitIndexPtr's bounds-check pattern below.
+func (e *Emitter) emitDivZeroGuard(ty Type, right Value) {
+	if ty.Float {
+		return
+	}
+	zeroReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, 0", zeroReg, ty.IR, right.Ref))
+	zeroL := e.freshLabel("div.zero")
+	okL := e.freshLabel("div.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroReg, zeroL, okL))
+
+	e.emitLabel(zeroL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Division by zero")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
+}
+
+// emitIndexPtr computes and returns the GEP register pointing to arr[index].
+// The array object may be a named variable (Symbol path) or any expression
+// that returns a {ptr, i64} aggregate (extractvalue path). Emits a runtime
+// bounds check that throws a catchable Error on out-of-range access (index
+// treated as unsigned so a negative index and index >= length are caught by
+// a single comparison).
+func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy Type, err error) {
+	var dataPtrReg string
+	var lenReg string
+
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		sym, ok := e.lookup(id.Name)
+		if !ok {
+			return "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
+		}
+		if !sym.Ty.IsArray {
+			return "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
+		}
+		elemTy = *sym.Ty.ElemType
+		dataPtrReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, sym.Ptr))
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+	} else {
+		// Expression producing a {ptr, i64} aggregate (e.g. arr.slice(1), Object.keys(obj)).
+		arrVal, evalErr := e.emitExpr(ex.Object)
+		if evalErr != nil {
+			return "", TypeVoid, evalErr
+		}
+		if !arrVal.Ty.IsArray || arrVal.Ty.ElemType == nil {
+			return "", TypeVoid, fmt.Errorf("%d:%d: cannot index a non-array expression", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		elemTy = *arrVal.Ty.ElemType
+		dataPtrReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, arrVal.Ref))
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, arrVal.Ref))
+	}
+
+	idxVal, err := e.emitExpr(ex.Index)
+	if err != nil {
+		return "", TypeVoid, err
+	}
+	idxVal = e.coerce(idxVal, TypeI64)
+
+	oobReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxVal.Ref, lenReg))
+	oobL := e.freshLabel("arr.oob")
+	okL := e.freshLabel("arr.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", oobReg, oobL, okL))
+
+	e.emitLabel(oobL)
+	e.ensureExceptionHelpers()
+	msgPtr := e.internString("Array index out of bounds")
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+
+	e.emitLabel(okL)
+	gepReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtrReg, idxVal.Ref))
+	return gepReg, elemTy, nil
+}
+
+func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
+	// process.env["KEY"]: dynamic-key environment variable lookup.
+	if isProcessEnvExpr(ex.Object) {
+		return e.emitProcessEnvGetDynamic(ex.Index)
+	}
+	// Group map access: grouped["key"] → sub-array.
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsGroupMap {
+			return e.emitGroupMapIndex(sym, ex.Index, ex.GetPos())
+		}
+	}
+	// Dynamic object bracket access: obj[key] — a computed-key object literal
+	// is a real Map<string,V> under the hood, see docs/tdd/TDD-00012.md. Must
+	// run before the generic string-indexing check below, since a dynamic
+	// object's Ty is ptr-shaped and isStringTy's ptr-catch-all would
+	// otherwise misclassify it as a string (mirrors GroupMap's own ordering).
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsDynamicObject {
+			mapPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
+			return e.emitDynamicObjectGet(sym.Ty, mapPtr, ex.Index, ex.GetPos())
+		}
+	} else if objTy := e.inferExprType(ex.Object); objTy.IsDynamicObject {
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, ex.Index, ex.GetPos())
+	}
+	// String indexing: s[i] returns a single-character string.
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if sym, found := e.lookup(id.Name); found && isStringTy(sym.Ty) {
+			strPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", strPtr, sym.Ptr))
+			return e.emitStringCharAt(strPtr, ex.Index)
+		}
+	}
+	// Array indexing.
+	gepReg, elemTy, err := e.emitIndexPtr(ex)
+	if err != nil {
+		return Value{}, err
+	}
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, elemTy.IR, gepReg, elemTy.Align()))
+	return Value{Ref: reg, Ty: elemTy}, nil
+}
+
+func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	if ex.Optional {
+		return e.emitOptionalMember(ex)
+	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" {
+		switch ex.Property {
+		case "MAX_SAFE_INTEGER":
+			return Value{Ref: "9007199254740991", Ty: TypeI64}, nil
+		case "MIN_SAFE_INTEGER":
+			return Value{Ref: "-9007199254740991", Ty: TypeI64}, nil
+		case "EPSILON":
+			return Value{Ref: "2.220446049250313e-16", Ty: TypeF64}, nil
+		case "MAX_VALUE":
+			return Value{Ref: "1.7976931348623157e+308", Ty: TypeF64}, nil
+		case "MIN_VALUE":
+			return Value{Ref: "5.0e-324", Ty: TypeF64}, nil
+		case "POSITIVE_INFINITY":
+			return Value{Ref: "0x7FF0000000000000", Ty: TypeF64}, nil
+		case "NEGATIVE_INFINITY":
+			return Value{Ref: "0xFFF0000000000000", Ty: TypeF64}, nil
+		case "NaN":
+			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
+		}
+	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Math" {
+		switch ex.Property {
+		case "PI":
+			return Value{Ref: "3.141592653589793e+00", Ty: TypeF64}, nil
+		case "E":
+			return Value{Ref: "2.718281828459045e+00", Ty: TypeF64}, nil
+		case "LN2":
+			return Value{Ref: "6.931471805599453e-01", Ty: TypeF64}, nil
+		case "LN10":
+			return Value{Ref: "2.302585092994046e+00", Ty: TypeF64}, nil
+		case "SQRT2":
+			return Value{Ref: "1.4142135623730951e+00", Ty: TypeF64}, nil
+		case "LOG2E":
+			return Value{Ref: "1.4426950408889634e+00", Ty: TypeF64}, nil
+		case "LOG10E":
+			return Value{Ref: "4.342944819032518e-01", Ty: TypeF64}, nil
+		}
+	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" {
+		switch ex.Property {
+		case "argv":
+			return e.emitProcessArgv()
+		case "pid":
+			return e.emitProcessPid()
+		case "platform":
+			return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
+		}
+	}
+	if isProcessEnvExpr(ex.Object) {
+		return e.emitProcessEnvGetStatic(ex.Property)
+	}
+	if ex.Property == "size" {
+		if id, ok := ex.Object.(*ast.Identifier); ok {
+			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
+				mapPtr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
+				result := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, mapPtr))
+				return Value{Ref: result, Ty: TypeI64}, nil
+			}
+		} else if objTy := e.inferExprType(ex.Object); objTy.IsMap || objTy.IsSet {
+			// Not a named variable — a field access, array index, or call
+			// result (e.g. `c.scores.size` where `scores: Map<K,V>`).
+			// Evaluating it already yields the map/set's heap pointer
+			// directly, no separate alloca indirection to unwrap first.
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			result := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, objVal.Ref))
+			return Value{Ref: result, Ty: TypeI64}, nil
+		}
+	}
+	if ex.Property == "length" {
+		// Named array variable: load length from its LenPtr alloca.
+		if id, ok := ex.Object.(*ast.Identifier); ok {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
+				reg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.LenPtr))
+				return Value{Ref: reg, Ty: TypeI64}, nil
+			}
+		}
+		// Any other expression: evaluate it, then dispatch on the result type.
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		// Array aggregate (e.g. from Object.keys(), arr.slice(), call result): extract field 1.
+		if objVal.Ty.IsArray {
+			reg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", reg, objVal.Ref))
+			return Value{Ref: reg, Ty: TypeI64}, nil
+		}
+		// String: call strlen.
+		if objVal.Ty.IR == "ptr" && !objVal.Ty.IsObject && !objVal.Ty.IsFunc {
+			e.ensureStrlen()
+			reg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", reg, objVal.Ref))
+			return Value{Ref: reg, Ty: TypeI64}, nil
+		}
+		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	// Enum member access: EnumName.MemberName → compile-time constant.
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if members, found := e.enums[id.Name]; found {
+			if val, ok := members[ex.Property]; ok {
+				return val, nil
+			}
+			return Value{}, fmt.Errorf("%d:%d: no member '%s' in enum '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property, id.Name)
+		}
+	}
+
+	// General object field read: evaluate the object expression then GEP into it.
+	objVal, err := e.emitExpr(ex.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if objVal.Ty.IsDynamicObject {
+		keyExpr := ast.NewStringLiteral(ex.Property, ex.GetPos())
+		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, keyExpr, ex.GetPos())
+	}
+	if !objVal.Ty.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+	}
+	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+	}
+	fieldTy = e.canonicalizeClassTy(fieldTy)
+	gepReg := e.freshReg()
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+	return Value{Ref: result, Ty: fieldTy}, nil
+}

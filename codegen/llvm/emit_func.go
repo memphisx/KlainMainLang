@@ -482,7 +482,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				val = e.coerce(val, e.currentPromiseTy)
 				align := e.currentPromiseTy.Align()
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-					e.currentPromiseTy.IR, val.Ref, e.coroHdl, align))
+					StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
 			}
 			e.emitAsyncEpilogue()
 		} else if retTy.IR == "void" {

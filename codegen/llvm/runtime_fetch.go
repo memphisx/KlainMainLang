@@ -1,0 +1,697 @@
+package llvm
+
+import (
+	"fmt"
+)
+
+// ensureFetch declares __kml_fetch: a blocking GET request via libcurl,
+// returning { i64 status, ptr body } (body always a valid, null-terminated,
+// possibly-empty string — never null). Numeric CURLOPT_*/CURLINFO_* values
+// below were verified directly against curl.h rather than trusted from
+// memory (CURLOPT_URL=10002, CURLOPT_WRITEFUNCTION=20011,
+// CURLOPT_WRITEDATA=10001, CURLOPT_FOLLOWLOCATION=52, CURLOPT_TIMEOUT=13,
+// CURLOPT_NOSIGNAL=99, CURLINFO_RESPONSE_CODE=2097154 — curl's own ABI
+// policy freezes these permanently, so hardcoding them here (rather than
+// needing curl.h at KML-compile time) is safe long-term, not just today).
+//
+// A network-level failure (DNS, connection refused, TLS handshake, timeout)
+// throws a KML Error via the existing @__kml_throw mechanism, exactly like a
+// hand-written `throw new Error(...)` would — this is the same distinction
+// real fetch makes: a non-2xx HTTP status still resolves normally (callers
+// check .ok), only a request that never got a response at all throws.
+func (e *Emitter) ensureFetch() {
+	if e.usedFetch {
+		return
+	}
+	e.usedFetch = true
+	e.requireLink("curl")
+	e.ensureMalloc()
+	e.ensureRealloc()
+	e.ensureMemcpy()
+	e.ensureExceptionHelpers()
+
+	e.emitGlobal("declare void @curl_global_init(i64 noundef)")
+	e.emitGlobal("declare ptr @curl_easy_init()")
+	e.emitGlobal("declare i32 @curl_easy_setopt(ptr noundef, i32 noundef, ...)")
+	e.emitGlobal("declare i32 @curl_easy_perform(ptr noundef)")
+	e.emitGlobal("declare i32 @curl_easy_getinfo(ptr noundef, i32 noundef, ...)")
+	e.emitGlobal("declare void @curl_easy_cleanup(ptr noundef)")
+	e.emitGlobal("declare ptr @curl_easy_strerror(i32 noundef)")
+	e.emitGlobal("@__kml_curl_inited = internal global i1 0, align 1")
+
+	// Write callback: libcurl calls this (possibly many times, once per
+	// chunk) as the response body streams in. userdata is a ptr to a
+	// { ptr data, i64 len, i64 cap } growable buffer this function owns —
+	// grown via realloc (doubling, floor 64 bytes), always kept
+	// null-terminated so the final body can be handed around as a plain
+	// KML string with no extra bookkeeping.
+	e.emitGlobal(`
+define i64 @__kml_curl_write_cb(ptr %chunk, i64 %size, i64 %nmemb, ptr %ud) {
+entry:
+  %total = mul i64 %size, %nmemb
+  %data_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 0
+  %len_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 1
+  %cap_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 2
+  %curdata = load ptr, ptr %data_p, align 8
+  %curlen = load i64, ptr %len_p, align 8
+  %curcap = load i64, ptr %cap_p, align 8
+  %needed = add i64 %curlen, %total
+  %neededp1 = add i64 %needed, 1
+  %needgrow = icmp sgt i64 %neededp1, %curcap
+  br i1 %needgrow, label %grow, label %copy
+
+grow:
+  %cap2 = mul i64 %curcap, 2
+  %pick1 = icmp sgt i64 %neededp1, %cap2
+  %newcap_a = select i1 %pick1, i64 %neededp1, i64 %cap2
+  %atleast64 = icmp sgt i64 %newcap_a, 64
+  %newcap = select i1 %atleast64, i64 %newcap_a, i64 64
+  %newdata = call ptr @realloc(ptr %curdata, i64 %newcap)
+  store ptr %newdata, ptr %data_p, align 8
+  store i64 %newcap, ptr %cap_p, align 8
+  br label %copy
+
+copy:
+  %dataNow = load ptr, ptr %data_p, align 8
+  %destptr = getelementptr i8, ptr %dataNow, i64 %curlen
+  call ptr @memcpy(ptr %destptr, ptr %chunk, i64 %total)
+  %newlen = add i64 %curlen, %total
+  store i64 %newlen, ptr %len_p, align 8
+  %termptr = getelementptr i8, ptr %dataNow, i64 %newlen
+  store i8 0, ptr %termptr, align 1
+  ret i64 %total
+}`)
+
+	e.emitGlobal(`
+define { i64, ptr } @__kml_fetch(ptr %url) {
+entry:
+  %inited = load i1, ptr @__kml_curl_inited, align 1
+  br i1 %inited, label %skipinit, label %doinit
+
+doinit:
+  call void @curl_global_init(i64 3)
+  store i1 1, ptr @__kml_curl_inited, align 1
+  br label %skipinit
+
+skipinit:
+  %buf = call ptr @malloc(i64 24)
+  %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
+  %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
+  %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
+  store ptr null, ptr %buf_data_p, align 8
+  store i64 0, ptr %buf_len_p, align 8
+  store i64 0, ptr %buf_cap_p, align 8
+
+  %curl = call ptr @curl_easy_init()
+
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 20011, ptr @__kml_curl_write_cb)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10001, ptr %buf)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 52, i64 1)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 13, i64 30)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 99, i64 1)
+
+  %perfres = call i32 @curl_easy_perform(ptr %curl)
+  %failed = icmp ne i32 %perfres, 0
+  br i1 %failed, label %neterror, label %ok
+
+neterror:
+  %errstr = call ptr @curl_easy_strerror(i32 %perfres)
+  %errobj = call ptr @malloc(i64 8)
+  store ptr %errstr, ptr %errobj, align 8
+  call void @curl_easy_cleanup(ptr %curl)
+  call void @__kml_throw(ptr %errobj)
+  unreachable
+
+ok:
+  %statusslot = alloca i64, align 8
+  store i64 0, ptr %statusslot, align 8
+  call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %curl, i32 2097154, ptr %statusslot)
+  %status = load i64, ptr %statusslot, align 8
+  call void @curl_easy_cleanup(ptr %curl)
+
+  %finaldata = load ptr, ptr %buf_data_p, align 8
+  %isnull = icmp eq ptr %finaldata, null
+  br i1 %isnull, label %emptybody, label %havebody
+
+emptybody:
+  %emptystr = call ptr @malloc(i64 1)
+  store i8 0, ptr %emptystr, align 1
+  br label %done
+
+havebody:
+  br label %done
+
+done:
+  %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %finaldata, %havebody ]
+  %r0 = insertvalue { i64, ptr } undef, i64 %status, 0
+  %r1 = insertvalue { i64, ptr } %r0, ptr %bodyfinal, 1
+  ret { i64, ptr } %r1
+}`)
+}
+
+// ensureFetchAsync declares everything a real, non-blocking `await
+// fetch(...)` needs (ADR-00050, TDD-00006 Part 2's second real slice, on
+// top of ADR-00049's fiber/event-loop mechanism): libcurl's multi
+// interface, driven by the same select() loop http.listen already uses, so
+// a fetch awaited from inside a connection-handler fiber yields instead of
+// blocking the whole process, letting other connections' fibers (and their
+// own concurrent fetches) keep making progress.
+//
+// Numeric CURLOPT_*/CURLINFO_* values not already used by ensureFetch were
+// verified directly against curl.h/multi.h on this machine (both are
+// present locally), the same "never trust from memory" standard the
+// existing blocking fetch's own constants already document:
+// CURLOPT_PRIVATE=10103 (CURLOPTTYPE_OBJECTPOINT=10000 + 103),
+// CURLINFO_PRIVATE=1048597 (CURLINFO_STRING=0x100000 + 21),
+// CURLMSG_DONE=1 (CURLMSG_NONE=0 is the first, unused enum value).
+// ADR-00074/TDD-00017 added three more, verified the same way:
+// CURLOPT_POSTFIELDS=10015 (CURLOPTTYPE_OBJECTPOINT=10000 + 15),
+// CURLOPT_HTTPHEADER=10023 (CURLOPTTYPE_SLISTPOINT=10000 + 23),
+// CURLOPT_CUSTOMREQUEST=10036 (CURLOPTTYPE_STRINGPOINT=10000 + 36).
+//
+// A pending fetch is a malloc'd { ptr easy, ptr buf, i64 done, i64
+// httpStatus, i64 curlResult } (40 bytes, every field ptr/i64 — no padding
+// ambiguity, same convention the timer queue and connection array already
+// follow). buf is the same { ptr, i64, i64 } growable write-buffer
+// ensureFetch's own write callback already fills — reused as-is, no new
+// callback needed.
+//
+//	__kml_fetch_async(ptr url, ptr method, ptr headers, ptr body) -> ptr
+//	  Creates the easy handle (identical setopts to the blocking __kml_fetch:
+//	  URL, write callback/data, follow-location, timeout, nosignal), lazily
+//	  creates the one global CURLM multi handle on first use, attaches the
+//	  pending struct to the easy handle via CURLOPT_PRIVATE (so a later
+//	  curl_multi_info_read can match a completed transfer back to it),
+//	  curl_multi_add_handle()s it, and calls curl_multi_perform() once to
+//	  kick the transfer off. Returns immediately — never blocks. method/
+//	  headers/body (ADR-00074, TDD-00017) are each nullable — a null skips
+//	  the corresponding CURLOPT_CUSTOMREQUEST/CURLOPT_HTTPHEADER/
+//	  CURLOPT_POSTFIELDS setopt entirely, so a plain fetch(url) call site
+//	  (which always passes all three as null) behaves exactly as before.
+//	  headers, when non-null, is a struct curl_slist* built by emit_fetch.go
+//	  from a Map<string,string> via ensureCurlSlist's curl_slist_append.
+//	__kml_curl_drain_messages()
+//	  Drains curl_multi_info_read()'s completed-transfer queue. For each
+//	  CURLMSG_DONE message: retrieves the pending struct via
+//	  CURLINFO_PRIVATE, records the HTTP status and CURLcode result into
+//	  it, removes+cleans up the easy handle, and sets done=1. Shared by the
+//	  event loop (called after every select() wake) and __kml_await_fetch's
+//	  own busy-spin fallback path below.
+//	__kml_await_fetch(ptr pending) -> { i64 status, ptr body }
+//	  Loops until pending->done: if running inside a connection fiber
+//	  (@__kml_current_conn_idx >= 0), parks this specific fiber (stores
+//	  `pending` into its own connection-array entry's pendingFetch field,
+//	  swapcontext back to @__kml_main_ctx — the event loop's resume-scan
+//	  already checks this field, see runtime.go's __kml_event_loop_run) and
+//	  clears pendingFetch back to null once resumed; otherwise (top-level
+//	  code, no event loop/fiber context to yield into) busy-spins by
+//	  calling curl_multi_perform + draining messages directly in a tight
+//	  loop — behaviorally equivalent to a blocking wait (nothing else could
+//	  run concurrently in that case anyway), just implemented via repeated
+//	  small multi-interface calls instead of one call to curl_easy_perform.
+//	  Once done, throws a catchable Error on a transfer-level failure
+//	  (identical shape to __kml_fetch's own neterror path) or returns the
+//	  final status/body.
+func (e *Emitter) ensureFetchAsync() {
+	if e.usedFetchAsync {
+		return
+	}
+	e.usedFetchAsync = true
+	e.ensureFetch()
+	e.ensureFiberRuntime()
+	e.ensureExceptionHelpers()
+
+	e.emitGlobal("declare ptr @curl_multi_init()")
+	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i32 @curl_multi_remove_handle(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i32 @curl_multi_fdset(ptr noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
+	e.emitGlobal("@__kml_curl_multi = internal global ptr null, align 8")
+
+	e.emitGlobal(`
+define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body) {
+entry:
+  %inited = load i1, ptr @__kml_curl_inited, align 1
+  br i1 %inited, label %skipinit, label %doinit
+
+doinit:
+  call void @curl_global_init(i64 3)
+  store i1 1, ptr @__kml_curl_inited, align 1
+  br label %skipinit
+
+skipinit:
+  %multi = load ptr, ptr @__kml_curl_multi, align 8
+  %needmulti = icmp eq ptr %multi, null
+  br i1 %needmulti, label %initmulti, label %havemulti
+
+initmulti:
+  %newmulti = call ptr @curl_multi_init()
+  store ptr %newmulti, ptr @__kml_curl_multi, align 8
+  br label %havemulti
+
+havemulti:
+  %multi2 = load ptr, ptr @__kml_curl_multi, align 8
+
+  %buf = call ptr @malloc(i64 24)
+  %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
+  %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
+  %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
+  store ptr null, ptr %buf_data_p, align 8
+  store i64 0, ptr %buf_len_p, align 8
+  store i64 0, ptr %buf_cap_p, align 8
+
+  %curl = call ptr @curl_easy_init()
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 20011, ptr @__kml_curl_write_cb)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10001, ptr %buf)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 52, i64 1)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 13, i64 30)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 99, i64 1)
+
+  %hasmethod = icmp ne ptr %method, null
+  br i1 %hasmethod, label %setmethod, label %skipmethod
+
+setmethod:
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10036, ptr %method)
+  br label %skipmethod
+
+skipmethod:
+  %hasheaders = icmp ne ptr %headers, null
+  br i1 %hasheaders, label %setheaders, label %skipheaders
+
+setheaders:
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10023, ptr %headers)
+  br label %skipheaders
+
+skipheaders:
+  %hasbody = icmp ne ptr %body, null
+  br i1 %hasbody, label %setbody, label %skipbody
+
+setbody:
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10015, ptr %body)
+  br label %skipbody
+
+skipbody:
+  %pending = call ptr @malloc(i64 40)
+  %p_easy = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
+  store ptr %curl, ptr %p_easy, align 8
+  %p_buf = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  store ptr %buf, ptr %p_buf, align 8
+  %p_done = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
+  store i64 0, ptr %p_done, align 8
+  %p_status = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
+  store i64 0, ptr %p_status, align 8
+  %p_result = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  store i64 0, ptr %p_result, align 8
+
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10103, ptr %pending)
+  call i32 @curl_multi_add_handle(ptr %multi2, ptr %curl)
+  %runningp = alloca i32, align 4
+  call i32 @curl_multi_perform(ptr %multi2, ptr %runningp)
+
+  ret ptr %pending
+}`)
+
+	e.emitGlobal(`
+define void @__kml_curl_drain_messages() {
+entry:
+  %multi = load ptr, ptr @__kml_curl_multi, align 8
+  %msgsleft = alloca i32, align 4
+  %privslot = alloca ptr, align 8
+  %statusslot = alloca i64, align 8
+  br label %drainloop
+
+drainloop:
+  %msg = call ptr @curl_multi_info_read(ptr %multi, ptr %msgsleft)
+  %isnull = icmp eq ptr %msg, null
+  br i1 %isnull, label %done, label %havemsg
+
+havemsg:
+  %msgtype_p = getelementptr i8, ptr %msg, i64 0
+  %msgtype = load i32, ptr %msgtype_p, align 4
+  %isdone = icmp eq i32 %msgtype, 1
+  br i1 %isdone, label %handledone, label %drainloop
+
+handledone:
+  %easyh_p = getelementptr i8, ptr %msg, i64 8
+  %easyh = load ptr, ptr %easyh_p, align 8
+  %result_p = getelementptr i8, ptr %msg, i64 16
+  %result32 = load i32, ptr %result_p, align 4
+  %result64 = sext i32 %result32 to i64
+
+  call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easyh, i32 1048597, ptr %privslot)
+  %pending = load ptr, ptr %privslot, align 8
+
+  store i64 0, ptr %statusslot, align 8
+  call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easyh, i32 2097154, ptr %statusslot)
+  %status = load i64, ptr %statusslot, align 8
+
+  %p_status2 = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
+  store i64 %status, ptr %p_status2, align 8
+  %p_result2 = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  store i64 %result64, ptr %p_result2, align 8
+
+  call i32 @curl_multi_remove_handle(ptr %multi, ptr %easyh)
+  call void @curl_easy_cleanup(ptr %easyh)
+
+  %p_done2 = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
+  store i64 1, ptr %p_done2, align 8
+
+  br label %drainloop
+
+done:
+  ret void
+}`)
+
+	// gc mode: restore GC_stackbottom to the real process stack right
+	// before yielding back to the main/scheduler context — see the
+	// analogous comment at ensureFiberRuntime's swapcontext sites and
+	// docs/adr/ADR-00071.md for why this pairing is needed.
+	gcRestoreStackbottom := ""
+	if e.isGCMode() {
+		gcRestoreStackbottom = "  %origbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n" +
+			"  store ptr %origbottom, ptr @GC_stackbottom, align 8\n"
+	}
+
+	// __kml_pending_finish: a pure extraction of what used to be
+	// __kml_await_fetch's own finish/neterror/ok/emptybody/havebody/retdone
+	// blocks (ADR-00073) — throws a catchable Error on a transfer-level
+	// failure, otherwise returns the final status/body. Behavior-preserving:
+	// __kml_await_fetch below is now just "loop until done, then tail-call
+	// this." Split out so Promise.all/.race (emit_promise.go) can reuse the
+	// exact same finish logic per member of a group of pending fetches,
+	// without duplicating it.
+	e.emitGlobal(`
+define { i64, ptr } @__kml_pending_finish(ptr %pending) {
+entry:
+  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  %result = load i64, ptr %result_p, align 8
+  %failed = icmp ne i64 %result, 0
+  br i1 %failed, label %neterror, label %ok
+
+neterror:
+  %result32b = trunc i64 %result to i32
+  %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %errobj = call ptr @malloc(i64 8)
+  store ptr %errstr, ptr %errobj, align 8
+  call void @__kml_throw(ptr %errobj)
+  unreachable
+
+ok:
+  %status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
+  %status = load i64, ptr %status_p, align 8
+  %buf_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  %buf = load ptr, ptr %buf_p, align 8
+  %bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
+  %bodyptr = load ptr, ptr %bodyptr_p, align 8
+
+  %isnullbody = icmp eq ptr %bodyptr, null
+  br i1 %isnullbody, label %emptybody, label %havebody
+
+emptybody:
+  %emptystr = call ptr @malloc(i64 1)
+  store i8 0, ptr %emptystr, align 1
+  br label %retdone
+
+havebody:
+  br label %retdone
+
+retdone:
+  %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %bodyptr, %havebody ]
+  %r1 = insertvalue { i64, ptr } undef, i64 %status, 0
+  %r2 = insertvalue { i64, ptr } %r1, ptr %bodyfinal, 1
+  ret { i64, ptr } %r2
+}`)
+
+	e.emitGlobal(fmt.Sprintf(`
+define { i64, ptr } @__kml_await_fetch(ptr %%pending) {
+entry:
+  %%runningp = alloca i32, align 4
+  br label %%checkloop
+
+checkloop:
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%finish, label %%maybeyield
+
+maybeyield:
+  %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%onfiber = icmp sge i64 %%curidx, 0
+  br i1 %%onfiber, label %%doyield, label %%busyspin
+
+doyield:
+  %%conndata = load ptr, ptr @__kml_conn_data, align 8
+  %%selfslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%conndata, i64 %%curidx
+  %%pf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 3
+  store ptr %%pending, ptr %%pf_p, align 8
+  %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
+  %%ctxptr = load ptr, ptr %%ctx_p, align 8
+%scall i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  store ptr null, ptr %%pf_p, align 8
+  br label %%checkloop
+
+busyspin:
+  %%multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
+  call void @__kml_curl_drain_messages()
+  br label %%checkloop
+
+finish:
+  %%raw = call { i64, ptr } @__kml_pending_finish(ptr %%pending)
+  ret { i64, ptr } %%raw
+}`, gcRestoreStackbottom))
+}
+
+// ensureCurlSlist declares curl_slist_append (ADR-00074/TDD-00017) —
+// emit_fetch.go's buildFetchHeaderList calls it once per Map<string,string>
+// entry to build the linked list CURLOPT_HTTPHEADER expects. No
+// curl_slist_free_all declared/called: like every other fetch-related
+// allocation (the pending struct, the response buffer, the Response object
+// itself), the built list is never freed in manual mode — consistent with
+// this feature area's already-documented "everything leaks, -mm=gc is the
+// opt-in fix" characteristic (TDD-00001), not a new gap. -mm=gc's Boehm
+// collector couldn't reclaim it anyway: curl_slist_append is libcurl's own
+// internal malloc, not this compiler's GC-instrumented one.
+func (e *Emitter) ensureCurlSlist() {
+	if e.usedCurlSlist {
+		return
+	}
+	e.usedCurlSlist = true
+	e.requireLink("curl")
+	e.emitGlobal("declare ptr @curl_slist_append(ptr noundef, ptr noundef)")
+}
+
+// ensurePromiseCombinators declares the group-wait primitives
+// Promise.all/.race/.allSettled (emit_promise.go, ADR-00073) use to wait on
+// N pending fetches at once, rather than the one-at-a-time
+// __kml_await_fetch above. A "group" is a malloc'd { ptr membersArr, i64
+// count, i64 mode } (24 bytes): membersArr is a malloc'd ptr[count] of
+// individual pending-fetch handles (the exact same 40-byte struct
+// __kml_fetch_async already produces — a group never wraps or duplicates
+// them, just points at the same ones the calling code already dereferenced
+// from each Promise<Response> slot); mode 0 = wait for every member done
+// (.all/.allSettled), 1 = wait for the first (.race). Lazily emitted only
+// when a Promise combinator call over an Array<Promise<Response>> actually
+// needs it — same one-time-emission pattern as ensureFetchAsync itself.
+func (e *Emitter) ensurePromiseCombinators() {
+	if e.usedPromiseCombinators {
+		return
+	}
+	e.usedPromiseCombinators = true
+	e.ensureFetchAsync()
+	e.ensureMalloc()
+
+	// __kml_group_satisfied(ptr group) -> i1: mode 0 (all) is satisfied once
+	// every member's done flag is set; mode 1 (race) is satisfied as soon as
+	// any one member's done flag is set. Called both by
+	// __kml_await_group_wait's own poll loop below and by the event loop's
+	// rcheckgroup resume-scan (__kml_event_loop_run).
+	e.emitGlobal(`
+define i1 @__kml_group_satisfied(ptr %group) {
+entry:
+  %members_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 0
+  %members = load ptr, ptr %members_p, align 8
+  %count_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 1
+  %count = load i64, ptr %count_p, align 8
+  %mode_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 2
+  %mode = load i64, ptr %mode_p, align 8
+  %allmode = icmp eq i64 %mode, 0
+  br label %loop
+
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %reachedend = icmp sge i64 %i, %count
+  br i1 %reachedend, label %loopend, label %body
+
+body:
+  %member_p = getelementptr ptr, ptr %members, i64 %i
+  %member = load ptr, ptr %member_p, align 8
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 2
+  %done = load i64, ptr %done_p, align 8
+  %isdone = icmp ne i64 %done, 0
+  br i1 %allmode, label %checkall, label %checkrace
+
+checkall:
+  br i1 %isdone, label %next, label %notsatisfied
+
+checkrace:
+  br i1 %isdone, label %satisfied, label %next
+
+satisfied:
+  ret i1 1
+
+notsatisfied:
+  ret i1 0
+
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+
+loopend:
+  ret i1 %allmode
+}`)
+
+	// __kml_first_done_index(ptr group) -> i64: only used by .race, after
+	// __kml_await_group_wait (mode=1) has already returned, so at least one
+	// member is guaranteed done. Returns -1 if somehow called without that
+	// precondition holding (defensive, never expected in practice).
+	e.emitGlobal(`
+define i64 @__kml_first_done_index(ptr %group) {
+entry:
+  %members_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 0
+  %members = load ptr, ptr %members_p, align 8
+  %count_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 1
+  %count = load i64, ptr %count_p, align 8
+  br label %loop
+
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %reachedend = icmp sge i64 %i, %count
+  br i1 %reachedend, label %notfound, label %body
+
+body:
+  %member_p = getelementptr ptr, ptr %members, i64 %i
+  %member = load ptr, ptr %member_p, align 8
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 2
+  %done = load i64, ptr %done_p, align 8
+  %isdone = icmp ne i64 %done, 0
+  br i1 %isdone, label %found, label %next
+
+found:
+  ret i64 %i
+
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+
+notfound:
+  ret i64 -1
+}`)
+
+	// __kml_pending_finish_settled(ptr pending) -> {i1 failed, i64 status,
+	// ptr body, ptr reasonMsg}: a non-throwing sibling of
+	// __kml_pending_finish, used only by Promise.allSettled, which by
+	// definition must not abort on an individual member's transport
+	// failure. On failure, reasonMsg is the same curl_easy_strerror() string
+	// __kml_pending_finish's neterror block already throws with — codegen
+	// (emit_promise.go) wraps it into a real Error object itself (matching
+	// emitNewError's own construction), rather than this function returning
+	// an already-built Error, keeping this runtime primitive's own surface
+	// C-ABI-plain.
+	e.emitGlobal(`
+define { i1, i64, ptr, ptr } @__kml_pending_finish_settled(ptr %pending) {
+entry:
+  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  %result = load i64, ptr %result_p, align 8
+  %failed = icmp ne i64 %result, 0
+  br i1 %failed, label %neterror, label %ok
+
+neterror:
+  %result32b = trunc i64 %result to i32
+  %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %rf1 = insertvalue { i1, i64, ptr, ptr } undef, i1 1, 0
+  %rf2 = insertvalue { i1, i64, ptr, ptr } %rf1, i64 0, 1
+  %rf3 = insertvalue { i1, i64, ptr, ptr } %rf2, ptr null, 2
+  %rf4 = insertvalue { i1, i64, ptr, ptr } %rf3, ptr %errstr, 3
+  ret { i1, i64, ptr, ptr } %rf4
+
+ok:
+  %status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
+  %status = load i64, ptr %status_p, align 8
+  %buf_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  %buf = load ptr, ptr %buf_p, align 8
+  %bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
+  %bodyptr = load ptr, ptr %bodyptr_p, align 8
+
+  %isnullbody = icmp eq ptr %bodyptr, null
+  br i1 %isnullbody, label %emptybody, label %havebody
+
+emptybody:
+  %emptystr = call ptr @malloc(i64 1)
+  store i8 0, ptr %emptystr, align 1
+  br label %retdone
+
+havebody:
+  br label %retdone
+
+retdone:
+  %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %bodyptr, %havebody ]
+  %ro1 = insertvalue { i1, i64, ptr, ptr } undef, i1 0, 0
+  %ro2 = insertvalue { i1, i64, ptr, ptr } %ro1, i64 %status, 1
+  %ro3 = insertvalue { i1, i64, ptr, ptr } %ro2, ptr %bodyfinal, 2
+  %ro4 = insertvalue { i1, i64, ptr, ptr } %ro3, ptr null, 3
+  ret { i1, i64, ptr, ptr } %ro4
+}`)
+
+	// __kml_await_group_wait(ptr group) -> void: structural clone of
+	// __kml_await_fetch's checkloop/maybeyield/doyield/busyspin shape above,
+	// just polling __kml_group_satisfied instead of a single pending's own
+	// done flag, and parking on the connection's pendingGroup field (index
+	// 4) instead of pendingFetch (index 3) when yielding. No return value —
+	// the caller already holds %group and re-derives whatever it needs
+	// (winner index via __kml_first_done_index, per-member results via
+	// __kml_pending_finish/__kml_pending_finish_settled) once this returns.
+	gcRestoreStackbottomGroup := ""
+	if e.isGCMode() {
+		gcRestoreStackbottomGroup = "  %origbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n" +
+			"  store ptr %origbottom, ptr @GC_stackbottom, align 8\n"
+	}
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_await_group_wait(ptr %%group) {
+entry:
+  %%runningp = alloca i32, align 4
+  br label %%checkloop
+
+checkloop:
+  %%sat = call i1 @__kml_group_satisfied(ptr %%group)
+  br i1 %%sat, label %%finish, label %%maybeyield
+
+maybeyield:
+  %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%onfiber = icmp sge i64 %%curidx, 0
+  br i1 %%onfiber, label %%doyield, label %%busyspin
+
+doyield:
+  %%conndata = load ptr, ptr @__kml_conn_data, align 8
+  %%selfslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%conndata, i64 %%curidx
+  %%pg_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 4
+  store ptr %%group, ptr %%pg_p, align 8
+  %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
+  %%ctxptr = load ptr, ptr %%ctx_p, align 8
+%scall i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  store ptr null, ptr %%pg_p, align 8
+  br label %%checkloop
+
+busyspin:
+  %%multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
+  call void @__kml_curl_drain_messages()
+  br label %%checkloop
+
+finish:
+  ret void
+}`, gcRestoreStackbottomGroup))
+}

@@ -1,9 +1,12 @@
 package tests
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +43,21 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		fmt.Fprint(w, "done")
+	})
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(struct {
+			Method  string `json:"method"`
+			Body    string `json:"body"`
+			XCustom string `json:"x_custom"`
+			Auth    string `json:"authorization"`
+		}{
+			Method:  r.Method,
+			Body:    string(body),
+			XCustom: r.Header.Get("X-Custom-Header"),
+			Auth:    r.Header.Get("Authorization"),
+		})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -115,6 +133,75 @@ main2()
 	assertOutput(t, src, "hello\n42\n1")
 }
 
+// --- fetch(url, init): custom method, headers, body (ADR-00074, TDD-00017) ---
+
+func TestE2EFetchCustomMethodHeadersAndBody(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface EchoResp { method: string; body: string; x_custom: string; authorization: string }
+
+async function main2(): Promise<void> {
+    const headers: Map<string, string> = new Map<string, string>()
+    headers.set("X-Custom-Header", "hello")
+    headers.set("Authorization", "Bearer abc123")
+    const r: Response = await fetch("%s/echo", { method: "POST", headers: headers, body: "payload-data" })
+    const data: EchoResp = r.json()
+    console.log(data.method)
+    console.log(data.body)
+    console.log(data.x_custom)
+    console.log(data.authorization)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "POST\npayload-data\nhello\nBearer abc123")
+}
+
+func TestE2EFetchCustomMethodOnlyNoBody(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface EchoResp { method: string; body: string }
+
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/echo", { method: "DELETE" })
+    const data: EchoResp = r.json()
+    console.log(data.method)
+    console.log(data.body)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "DELETE\n")
+}
+
+func TestE2EFetchHeadersOnlyDefaultsToGet(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface EchoResp { method: string; x_custom: string }
+
+async function main2(): Promise<void> {
+    const headers: Map<string, string> = new Map<string, string>()
+    headers.set("X-Custom-Header", "just-a-header")
+    const r: Response = await fetch("%s/echo", { headers: headers })
+    const data: EchoResp = r.json()
+    console.log(data.method)
+    console.log(data.x_custom)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "GET\njust-a-header")
+}
+
+func TestE2EFetchPlainCallStillWorksUnchanged(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    console.log(r.status)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "200")
+}
+
 func TestE2EFetchUntypedInference(t *testing.T) {
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
@@ -177,9 +264,30 @@ console.log(r.text())
 }
 
 func TestE2EFetchWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fetch("a", "b")`)
+	_, err := parseAndCompile(`fetch("a", "b", "c")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fetch() with the wrong argument count, got none")
+	}
+}
+
+func TestE2EFetchNonObjectInitRejected(t *testing.T) {
+	_, err := parseAndCompile(`fetch("a", "b")`)
+	if err == nil {
+		t.Fatal("expected a compile error for fetch()'s second argument not being an object, got none")
+	}
+}
+
+func TestE2EFetchInitWrongFieldTypesRejected(t *testing.T) {
+	cases := []string{
+		`fetch("a", { method: 5 })`,
+		`fetch("a", { body: 5 })`,
+		`fetch("a", { headers: 5 })`,
+		`fetch("a", { headers: new Map<string, number>() })`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a compile error for %q, got none", src)
+		}
 	}
 }
 
@@ -190,5 +298,109 @@ console.log(x.status)
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for accessing .status on a non-Response value, got none")
+	}
+}
+
+// --- Promise.all / .race / .allSettled over Array<Promise<Response>> ---
+//
+// This is the real-concurrency branch (ADR-00073, TDD-00016): unlike an
+// array of ordinary async functions' promises (already resolved by
+// construction — covered in tests/async_test.go), fetch()'s Promise<Response>
+// is genuinely pending, so these three combinators wait on N in-flight
+// fetches together via __kml_await_group_wait/the event loop's rcheckgroup
+// scan, rather than one at a time.
+
+func TestE2EPromiseAllFetchesCollectsInOrder(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/flat"))
+    ps.push(fetch("%s/notfound"))
+    const responses = await Promise.all(ps)
+    console.log(responses.length)
+    for (const r of responses) {
+        console.log(r.status)
+    }
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "2\n200\n404")
+}
+
+// TestE2EPromiseRaceFetchesReturnsFirstDone puts the slow member first in
+// array order and the fast member second, so a passing result can only mean
+// a genuine race (whichever settles first wins) — not "always the first
+// array element," which a naive implementation could fake.
+func TestE2EPromiseRaceFetchesReturnsFirstDone(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/slow"))
+    ps.push(fetch("%s/flat"))
+    const winner = await Promise.race(ps)
+    console.log(winner.status)
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "200")
+}
+
+func TestE2EPromiseAllSettledFetchesReportsPerMemberFailure(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/flat"))
+    ps.push(fetch("http://127.0.0.1:1/unreachable"))
+    const settled = await Promise.allSettled(ps)
+    console.log(settled[0].status)
+    console.log(settled[0].value.status)
+    console.log(settled[1].status)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "fulfilled\n200\nrejected")
+}
+
+// TestE2EPromiseAllFetchesRunConcurrently is the decisive test for
+// ADR-00073, mirroring TestE2EHTTPListenConcurrentAwaitFetch's reasoning:
+// two fetches against a 300ms-delayed upstream, waited on together via
+// Promise.all, must finish in well under 2x300ms — proving
+// __kml_await_group_wait genuinely waits on both in-flight transfers at
+// once (via libcurl's multi-interface) rather than looping
+// __kml_pending_finish serially, which would take the full 600ms+. Timed
+// with Date.now() *inside* the compiled program rather than wall-clock
+// around exec.Command: an external measurement was tried first and came
+// back consistently ~200ms higher than the in-program figure for the exact
+// same run — process start/exit overhead in this environment, unrelated to
+// the feature under test — which would have made the threshold below flaky
+// (or falsely failing) for the wrong reason.
+func TestE2EPromiseAllFetchesRunConcurrently(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+const t0 = Date.now()
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/slow"))
+    ps.push(fetch("%s/slow"))
+    const responses = await Promise.all(ps)
+    console.log(responses.length)
+}
+main2()
+console.log(Date.now() - t0)
+`, srv.URL, srv.URL)
+	out := compileAndRun(t, src)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 2 || lines[0] != "2" {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	elapsedMs, err := strconv.Atoi(lines[1])
+	if err != nil {
+		t.Fatalf("parsing elapsed ms from %q: %v", lines[1], err)
+	}
+	if elapsedMs >= 500 {
+		t.Errorf("two concurrent /slow (300ms) fetches via Promise.all took %dms — expected well under 600ms if they ran concurrently rather than serially (concurrency is broken)", elapsedMs)
 	}
 }
