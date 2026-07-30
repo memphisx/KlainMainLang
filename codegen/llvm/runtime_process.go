@@ -127,6 +127,7 @@ func (e *Emitter) ensureExecFileSync() {
 
 	fmtExit := e.internString("Command failed with exit code %d: %s")
 	fmtSig := e.internString("Command was terminated by signal %d: %s")
+	errNamePtr := e.internString("Error")
 
 	part1 := `
 define ptr @__kml_exec_file_sync(ptr %file, ptr %argsdata, i64 %argslen) {
@@ -240,8 +241,13 @@ throwexit:
   call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf1, ptr `
 
 	part2 := `, i32 %exitcode8, ptr %file)
-  %errobj1 = call ptr @malloc(i64 8)
-  store ptr %msgbuf1, ptr %errobj1, align 8
+  %errobj1 = call ptr @malloc(i64 24)
+  %errobj1.kind = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 0
+  store i64 0, ptr %errobj1.kind, align 8
+  %errobj1.msg = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 1
+  store ptr %msgbuf1, ptr %errobj1.msg, align 8
+  %errobj1.name = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 2
+  store ptr ` + errNamePtr + `, ptr %errobj1.name, align 8
   call void @__kml_throw(ptr %errobj1)
   unreachable
 
@@ -253,8 +259,13 @@ signaled:
   call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf2, ptr `
 
 	part3 := `, i32 %sig, ptr %file)
-  %errobj2 = call ptr @malloc(i64 8)
-  store ptr %msgbuf2, ptr %errobj2, align 8
+  %errobj2 = call ptr @malloc(i64 24)
+  %errobj2.kind = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 0
+  store i64 0, ptr %errobj2.kind, align 8
+  %errobj2.msg = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 1
+  store ptr %msgbuf2, ptr %errobj2.msg, align 8
+  %errobj2.name = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 2
+  store ptr ` + errNamePtr + `, ptr %errobj2.name, align 8
   call void @__kml_throw(ptr %errobj2)
   unreachable
 
@@ -379,6 +390,7 @@ func (e *Emitter) ensureProcessKill() {
 	accessor := errnoAccessor()
 	e.emitGlobal("declare i32 @kill(i32 noundef, i32 noundef)")
 	fmtPtr := e.internString("kill(pid=%lld, signal=%lld): %s")
+	killErrNamePtr := e.internString("Error")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_process_kill(i64 %%pid, i64 %%sig) {
 entry:
@@ -396,14 +408,19 @@ fail:
   %%bufsize = add i64 %%errlen, 48
   %%buf = call ptr @malloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%pid, i64 %%sig, ptr %%errmsg)
-  %%errobj = call ptr @malloc(i64 8)
-  store ptr %%buf, ptr %%errobj, align 8
+  %%errobj = call ptr @malloc(i64 24)
+  %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
+  store i64 0, ptr %%errobj.kind, align 8
+  %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
+  store ptr %%buf, ptr %%errobj.msg, align 8
+  %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
+  store ptr %s, ptr %%errobj.name, align 8
   call void @__kml_throw(ptr %%errobj)
   unreachable
 
 ok:
   ret void
-}`, accessor, fmtPtr))
+}`, accessor, fmtPtr, killErrNamePtr))
 }
 
 // ensureSignalHandlerRuntime declares the shared machinery behind

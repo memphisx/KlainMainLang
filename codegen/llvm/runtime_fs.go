@@ -23,6 +23,7 @@ func (e *Emitter) ensureFsThrow() {
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
 	fmtPtr := e.internString("%s '%s': %s")
+	errNamePtr := e.internString("Error")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_fs_throw(ptr %%opdesc, ptr %%path) {
 entry:
@@ -37,11 +38,16 @@ entry:
   %%bufsize = add i64 %%sum2, 32
   %%buf = call ptr @malloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%path, ptr %%errmsg)
-  %%errobj = call ptr @malloc(i64 8)
-  store ptr %%buf, ptr %%errobj, align 8
+  %%errobj = call ptr @malloc(i64 24)
+  %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
+  store i64 0, ptr %%errobj.kind, align 8
+  %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
+  store ptr %%buf, ptr %%errobj.msg, align 8
+  %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
+  store ptr %s, ptr %%errobj.name, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, accessor, fmtPtr))
+}`, accessor, fmtPtr, errNamePtr))
 }
 
 func (e *Emitter) ensureFopen() {

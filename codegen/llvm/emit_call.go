@@ -191,6 +191,26 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsReaddirSync(ex.Args, ex.GetPos())
 			}
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path" {
+			switch mem.Property {
+			case "join":
+				return e.emitPathJoin(ex.Args, ex.GetPos())
+			case "resolve":
+				return e.emitPathResolve(ex.Args, ex.GetPos())
+			case "dirname":
+				return e.emitPathDirname(ex.Args, ex.GetPos())
+			case "basename":
+				return e.emitPathBasename(ex.Args, ex.GetPos())
+			case "extname":
+				return e.emitPathExtname(ex.Args, ex.GetPos())
+			case "isAbsolute":
+				return e.emitPathIsAbsolute(ex.Args, ex.GetPos())
+			case "parse":
+				return e.emitPathParse(ex.Args, ex.GetPos())
+			case "format":
+				return e.emitPathFormat(ex.Args, ex.GetPos())
+			}
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" {
 			switch mem.Property {
 			case "getRandomValues":

@@ -82,6 +82,7 @@ copy:
   ret i64 %total
 }`)
 
+	errNamePtr := e.internString("Error")
 	e.emitGlobal(`
 define { i64, ptr } @__kml_fetch(ptr %url) {
 entry:
@@ -117,8 +118,13 @@ skipinit:
 
 neterror:
   %errstr = call ptr @curl_easy_strerror(i32 %perfres)
-  %errobj = call ptr @malloc(i64 8)
-  store ptr %errstr, ptr %errobj, align 8
+  %errobj = call ptr @malloc(i64 24)
+  %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
+  store i64 0, ptr %errobj.kind, align 8
+  %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
+  store ptr %errstr, ptr %errobj.msg, align 8
+  %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
+  store ptr ` + errNamePtr + `, ptr %errobj.name, align 8
   call void @curl_easy_cleanup(ptr %curl)
   call void @__kml_throw(ptr %errobj)
   unreachable
@@ -221,6 +227,7 @@ func (e *Emitter) ensureFetchAsync() {
 	e.ensureFetch()
 	e.ensureFiberRuntime()
 	e.ensureExceptionHelpers()
+	errNamePtr := e.internString("Error")
 
 	e.emitGlobal("declare ptr @curl_multi_init()")
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
@@ -394,8 +401,13 @@ entry:
 neterror:
   %result32b = trunc i64 %result to i32
   %errstr = call ptr @curl_easy_strerror(i32 %result32b)
-  %errobj = call ptr @malloc(i64 8)
-  store ptr %errstr, ptr %errobj, align 8
+  %errobj = call ptr @malloc(i64 24)
+  %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
+  store i64 0, ptr %errobj.kind, align 8
+  %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
+  store ptr %errstr, ptr %errobj.msg, align 8
+  %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
+  store ptr ` + errNamePtr + `, ptr %errobj.name, align 8
   call void @__kml_throw(ptr %errobj)
   unreachable
 

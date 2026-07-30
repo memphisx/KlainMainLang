@@ -301,6 +301,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "platform":
 					return TypePtr
 				}
+			case "path":
+				switch ex.Property {
+				case "sep", "delimiter":
+					return TypePtr
+				}
 			}
 		}
 		if isProcessEnvExpr(ex.Object) {
@@ -444,6 +449,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "readLineSync", "execFileSync", "cwd":
 					return TypePtr
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "path" {
+				switch mem.Property {
+				case "join", "resolve", "dirname", "basename", "extname", "format":
+					return TypePtr
+				case "isAbsolute":
+					return TypeBool
+				case "parse":
+					return PathParsedType()
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" {

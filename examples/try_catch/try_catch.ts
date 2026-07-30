@@ -18,3 +18,26 @@ try {
 } catch (e) {
   console.log('caught: ' + e.message)
 }
+
+// Built-in Error subtypes (TDD-00013 Option A): a small fixed kind enum
+// (Error, TypeError, RangeError, SyntaxError, EvalError, URIError,
+// ReferenceError) — construct one directly, or narrow a caught value with
+// instanceof, same as real TypeScript/JavaScript.
+function validateAge(age: number): void {
+  if (age < 0) {
+    throw new RangeError('age cannot be negative')
+  }
+  throw new TypeError('age must be a number')
+}
+
+try {
+  validateAge(-5)
+} catch (e) {
+  if (e instanceof RangeError) {
+    console.log('range error: ' + e.message)
+  } else if (e instanceof TypeError) {
+    console.log('type error: ' + e.message)
+  }
+  console.log('e.name = ' + e.name)
+  console.log('instanceof Error: ' + (e instanceof Error))
+}

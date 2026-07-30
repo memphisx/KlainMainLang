@@ -46,10 +46,11 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00010](TDD-00010.md) | Generics on user-defined functions and interfaces | Not Started |
 | [00011](TDD-00011.md) | IndexedDB-Compatible Storage API (pluggable embedded/proxy backends) | Not Started |
 | [00012](TDD-00012.md) | Computed property keys (`{ [expr]: value }`) | Implemented ([ADR-00066](../adr/ADR-00066.md)) |
-| [00013](TDD-00013.md) | Error subtypes / tagged errors | Not Started |
+| [00013](TDD-00013.md) | Error subtypes / tagged errors | Implemented ([ADR-00082](../adr/ADR-00082.md)) |
 | [00014](TDD-00014.md) | Full-pipeline (codegen-through-binary) fuzz testing | Implemented ([ADR-00070](../adr/ADR-00070.md)) |
 | [00015](TDD-00015.md) | `JSON.parse` into nested object fields | Not Started |
 | [00016](TDD-00016.md) | `Promise.all` / `.race` / `.allSettled` | Implemented ([ADR-00073](../adr/ADR-00073.md)) |
 | [00017](TDD-00017.md) | `fetch()` client parity — custom method, headers, request body | Implemented ([ADR-00074](../adr/ADR-00074.md)) |
 | [00018](TDD-00018.md) | `ArrayBuffer` / TypedArrays | Implemented ([ADR-00078](../adr/ADR-00078.md)) |
 | [00019](TDD-00019.md) | POSIX signal handling (`process.on('SIGINT'/'SIGTERM', handler)`) | Implemented ([ADR-00079](../adr/ADR-00079.md)) |
+| [00020](TDD-00020.md) | Windows support | Not Started |

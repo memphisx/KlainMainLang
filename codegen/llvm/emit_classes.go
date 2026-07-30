@@ -478,6 +478,9 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: right-hand side of instanceof must be a class name", ex.GetPos().Line, ex.GetPos().Col)
 	}
+	if kindID, ok := errorKindIDs[rightIdent.Name]; ok {
+		return e.emitErrorInstanceOf(ex, rightIdent.Name, kindID)
+	}
 	info, ok := e.classes[rightIdent.Name]
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: instanceof is only supported against user-defined classes; '%s' is not a registered class", ex.GetPos().Line, ex.GetPos().Col, rightIdent.Name)
@@ -529,6 +532,81 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			return Value{Ref: result, Ty: TypeBool}, nil
 		}
 		return Value{Ref: "1", Ty: TypeBool}, nil
+	}
+
+	return Value{Ref: "0", Ty: TypeBool}, nil
+}
+
+// emitErrorInstanceOf implements `x instanceof Error` and `x instanceof
+// TypeError`/`RangeError`/... (TDD-00013 Option A) — the same shape
+// emitInstanceOf uses for user classes, keyed off errorObjType's hidden
+// kind tag (field 0) instead of ClassTagField. "Error" itself is the base
+// every constructible kind is unconditionally an instance of, so it never
+// needs a runtime tag comparison — any value that is *some* Error (whether
+// known statically or, for a dynamic/any value, merely confirmed to be some
+// object) already qualifies. A specific kind (TypeError, ...) always needs
+// the runtime tag comparison, since every kind shares one Type — the tag is
+// the only thing distinguishing a TypeError instance from a RangeError one.
+//
+// No resolveType path ever produces a statically Error-typed, Nullable
+// value ("Error" isn't a resolvable type-annotation name — see
+// emit_exprs_types.go/types.go's resolveType/ResolveTypeName), so unlike
+// emitInstanceOf's class case there is no null-check branch to handle here.
+func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string, kindID int64) (Value, error) {
+	leftVal, err := e.emitExpr(ex.Left)
+	if err != nil {
+		return Value{}, err
+	}
+
+	if leftVal.Ty.IsDynamic {
+		tag, payload := e.emitUnboxTagPayload(leftVal)
+		isObj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+
+		if kindName == "Error" {
+			return Value{Ref: isObj, Ty: TypeBool}, nil
+		}
+
+		resultAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultAlloca))
+		objL := e.freshLabel("errinstanceof.obj")
+		notObjL := e.freshLabel("errinstanceof.notobj")
+		mergeL := e.freshLabel("errinstanceof.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, notObjL))
+
+		e.emitLabel(objL)
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
+		kindGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), ptrReg))
+		loadedKind := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
+		kindMatch := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", kindMatch, loadedKind, kindID))
+		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", kindMatch, resultAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(notObjL)
+		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(mergeL)
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultAlloca))
+		return Value{Ref: result, Ty: TypeBool}, nil
+	}
+
+	if leftVal.Ty.IsError {
+		if kindName == "Error" {
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		}
+		kindGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
+		loadedKind := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", result, loadedKind, kindID))
+		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 
 	return Value{Ref: "0", Ty: TypeBool}, nil

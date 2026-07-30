@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index. Covers control flow, operators, variable declarations, functions/closures, async/Promise, enums, interfaces, and classes/OOP.
 
-**Coverage**: 50/58 rows on this page, ~86% (see the index's Coverage Summary for the breakdown by sub-category).
+**Coverage**: 51/59 rows on this page, ~86% (see the index's Coverage Summary for the breakdown by sub-category).
 
 **Caveats**: `class` inheritance (`extends`/`super`) is the biggest missing piece — [TDD-00009](../tdd/TDD-00009.md) Stage 3, the only stage that needs new dynamic-dispatch machinery. `class` also has no `static` members, private fields (`#x`), `static {}` blocks, or `implements`/`abstract` — the parser deliberately defers all of these (`parser/parser_classes.go`'s own comment: *"deferred to later"*), not just inheritance. `async`/`await` is a synchronous resolved-slot read for everything except `await fetch(...)`, which is genuinely non-blocking (yields via a fiber inside an `http.listen` handler) — see [TDD-00006](../tdd/TDD-00006.md). A handful of newer-but-common syntax has no tracking anywhere else either: logical assignment (`&&=`/`\|\|=`/`??=`), getters/setters, optional catch binding, tagged templates, numeric separators, and destructured function parameters — all confirmed absent directly against the lexer/parser, not just undocumented.
 
@@ -59,13 +59,14 @@
 | Object literals `{ key: value }` | ✅ | |
 | Getters / setters (`get x() {}` / `set x(v) {}`) on object literals and classes | ❌ | No accessor-property parsing found anywhere in `parser_literals.go` or `parser_classes.go` — `get`/`set` are not recognized as anything other than plain identifiers |
 | `new Error(msg)` | ✅ | |
+| Built-in `Error` subtypes (`new TypeError(msg)`, `RangeError`, `SyntaxError`, `EvalError`, `URIError`, `ReferenceError`) and `instanceof` against them | ✅ | [TDD-00013](../tdd/TDD-00013.md) Option A — a small fixed kind enum (a hidden runtime tag on the same shared `Error` object shape, not a real class hierarchy), plus a real `.name` field. `instanceof Error` matches any kind; `instanceof TypeError` etc. matches only that one. No user-definable `class X extends Error` — that needs [TDD-00009](../tdd/TDD-00009.md) Stage 3 (inheritance), not yet built. See [ADR-00082](../adr/ADR-00082.md). |
 | `new Array<T>(n)` | ✅ | |
 | `new Map<K,V>()` | ✅ | |
 | `new Set<T>()` | ✅ | |
 | `class` (fields, constructor, methods, `this`, `new ClassName(args)`) | ✅ | [TDD-00009](../tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. A class with fields requires an explicit constructor (no field initializer syntax yet — every field must be set explicitly, same philosophy object literals already enforce). See [ADR-00063](../adr/ADR-00063.md). |
 | `class` `static` members, private fields (`#x`), `static {}` blocks, `implements`/`abstract` | ❌ | `parser/parser_classes.go`'s own comment lists these as *"deferred to later"* — none are parsed at all today, not just unimplemented at codegen time |
 | `class` inheritance (`extends`/`super`) | ❌ | Staged design in [TDD-00009](../tdd/TDD-00009.md) — the only remaining stage that needs new dynamic-dispatch machinery |
-| `instanceof` (against user-defined classes) | ✅ | [TDD-00009](../tdd/TDD-00009.md) Stage 2 — every instance carries a hidden runtime type tag. Before inheritance exists, a class-typed variable's concrete class is already known statically, so this folds to a compile-time constant except for an `any`/`unknown`-typed value, where the tag is read back at runtime — the one case that does real work. See [ADR-00067](../adr/ADR-00067.md) for the built-in-type/unregistered-class compile-error behavior and the `Error` subtypes follow-on in [TDD-00013](../tdd/TDD-00013.md). |
+| `instanceof` (against user-defined classes) | ✅ | [TDD-00009](../tdd/TDD-00009.md) Stage 2 — every instance carries a hidden runtime type tag. Before inheritance exists, a class-typed variable's concrete class is already known statically, so this folds to a compile-time constant except for an `any`/`unknown`-typed value, where the tag is read back at runtime — the one case that does real work. See [ADR-00067](../adr/ADR-00067.md) for the built-in-type/unregistered-class compile-error behavior; `instanceof` against `Error`/`TypeError`/etc. is a separate, sibling mechanism keyed off a different hidden tag — see the `Error` subtypes row above and [TDD-00013](../tdd/TDD-00013.md). |
 
 ## Known Limitations
 

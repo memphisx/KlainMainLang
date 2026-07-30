@@ -825,13 +825,7 @@ func (e *Emitter) emitFrozenCheck(ptrRef string) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFrozen, frozenL, okL))
 
 	e.emitLabel(frozenL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("Cannot assign to read only property of a frozen object")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("Cannot assign to read only property of a frozen object"))
 
 	e.emitLabel(okL)
 }

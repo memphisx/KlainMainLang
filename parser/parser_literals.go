@@ -124,7 +124,19 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	case "Set":
 		return p.parseNewSetBody(pos)
 	case "Error":
-		return p.parseNewErrorBody(pos)
+		return p.parseNewErrorBody(pos, "Error")
+	case "TypeError":
+		return p.parseNewErrorBody(pos, "TypeError")
+	case "RangeError":
+		return p.parseNewErrorBody(pos, "RangeError")
+	case "SyntaxError":
+		return p.parseNewErrorBody(pos, "SyntaxError")
+	case "EvalError":
+		return p.parseNewErrorBody(pos, "EvalError")
+	case "URIError":
+		return p.parseNewErrorBody(pos, "URIError")
+	case "ReferenceError":
+		return p.parseNewErrorBody(pos, "ReferenceError")
 	case "Date":
 		return p.parseNewDateBody(pos)
 	case "URL":
@@ -214,8 +226,8 @@ func (p *Parser) parseNewDateBody(pos ast.Pos) (*ast.NewDateExpression, error) {
 	}
 }
 
-func (p *Parser) parseNewErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
-	p.advance() // consume 'Error'
+func (p *Parser) parseNewErrorBody(pos ast.Pos, kind string) (*ast.NewErrorExpression, error) {
+	p.advance() // consume the constructor name ('Error', 'TypeError', ...)
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -230,7 +242,7 @@ func (p *Parser) parseNewErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error)
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewErrorExpression(msg, pos), nil
+	return ast.NewNewErrorExpression(kind, msg, pos), nil
 }
 
 func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {

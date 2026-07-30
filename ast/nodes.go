@@ -707,8 +707,11 @@ type CatchClause struct {
 	Body  *BlockStatement
 }
 
-// NewErrorExpression — `new Error("message")`
+// NewErrorExpression — `new Error("message")`, or one of its built-in
+// subtypes (`new TypeError("message")`, etc. — TDD-00013 Option A). Kind is
+// always one of the registered names in codegen/llvm's errorKinds table.
 type NewErrorExpression struct {
+	Kind    string
 	Message Expression // nil if no argument
 	pos     Pos
 }
@@ -717,8 +720,8 @@ func (*NewErrorExpression) nodeMarker()  {}
 func (*NewErrorExpression) exprMarker() {}
 func (n *NewErrorExpression) GetPos() Pos { return n.pos }
 
-func NewNewErrorExpression(msg Expression, pos Pos) *NewErrorExpression {
-	return &NewErrorExpression{Message: msg, pos: pos}
+func NewNewErrorExpression(kind string, msg Expression, pos Pos) *NewErrorExpression {
+	return &NewErrorExpression{Kind: kind, Message: msg, pos: pos}
 }
 
 // NewDateExpression is `new Date()` (current time), `new Date(ms)` (an

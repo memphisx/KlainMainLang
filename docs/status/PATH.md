@@ -1,18 +1,18 @@
 # path
 
-> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation. Not tracked anywhere until now, despite being directly relevant to this project's own stated CLI-application priority (see [CLAUDE.md](../../CLAUDE.md)'s Project direction) — almost any real file-handling CLI script needs to join/resolve/split paths, and there is currently no way to do that portably at all (a program would have to hand-roll string concatenation with a hardcoded `/`, which breaks on Windows and is exactly the kind of bug this module exists to prevent).
+> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation. Recognized as a pseudo-namespace, like `Math`/`JSON`/`fs`/`process` — not a real importable module.
 
-**Coverage**: 0% (0/8) — not implemented, confirmed zero references anywhere in `codegen/llvm/`.
+**Coverage**: 100% (8/8) — see [ADR-00081](../adr/ADR-00081.md).
 
-**Caveats**: Nothing here exists yet. Given the CLI-priority tiebreaker in [CLAUDE.md](../../CLAUDE.md), `path.join`/`.resolve`/`.dirname`/`.basename`/`.extname` are the highest-value subset — they're pure string/path-segment manipulation (no new C dependency, no event loop involvement), a similar effort profile to the `fs.*` functions already built.
+**Caveats**: POSIX-only (this compiler doesn't cross-compile — `sep`/`delimiter` are compile-time constants, `/` and `:`, never the Windows forms). `join`/`resolve`'s `..`-above-root handling, `basename`'s `ext`-stripping edge cases (an `ext` argument that consumes the *entire* basename is left unstripped, matching real Node's own non-obvious behavior there), and multi-slash collapsing were all verified directly against a real Node install rather than assumed — see the ADR's Verification section.
 
 | API | Status | Notes |
 |---|---|---|
-| `path.join(...segments)` | ❌ | Joins path segments with the platform separator, normalizing `.`/`..` |
-| `path.resolve(...segments)` | ❌ | Resolves to an absolute path, right-to-left, falling back to `process.cwd()` |
-| `path.dirname(p)` | ❌ | Directory portion of a path |
-| `path.basename(p, ext?)` | ❌ | Final path segment, optionally with a suffix stripped |
-| `path.extname(p)` | ❌ | File extension including the leading `.` |
-| `path.parse(p)` / `path.format(obj)` | ❌ | Structured decompose/recompose of a path into `{root, dir, base, ext, name}` |
-| `path.isAbsolute(p)` | ❌ | Platform-aware absolute-path check |
-| `path.sep` / `path.delimiter` | ❌ | Platform-specific separator constants (`/` vs `\`, `:` vs `;`) — this compiler doesn't cross-compile ([process.platform](PROCESS-CLI.md) is already a `runtime.GOOS`-baked compile-time constant, the same approach would apply here) |
+| `path.join(...segments)` | ✅ | Joins with `/`, then normalizes (collapses repeated slashes, drops `.` segments, resolves `..` against segments already seen in the same call) |
+| `path.resolve(...segments)` | ✅ | Absolute-always: starts from `process.cwd()`, walks segments left to right, any segment starting with `/` resets the accumulator (discarding everything before it, including cwd) — equivalent to real Node's right-to-left "stop at the last absolute segment" algorithm |
+| `path.dirname(p)` | ✅ | Directory portion; trailing slashes trimmed first |
+| `path.basename(p, ext?)` | ✅ | Final path segment, optionally with a trailing `ext` stripped — not stripped when doing so would consume the whole segment, unless the *entire* `path` argument equals `ext` (then returns `""`), matching real Node's own asymmetric rule here |
+| `path.extname(p)` | ✅ | Extension of the basename, including the leading `.`; `""` for a dotfile whose only `.` is its first character |
+| `path.parse(p)` / `path.format(obj)` | ✅ | `parse` returns `{root, dir, base, ext, name}`; `format` is the inverse (`base` wins over `name`+`ext`, `dir` falls back to `root`) |
+| `path.isAbsolute(p)` | ✅ | `p[0] === '/'` |
+| `path.sep` / `path.delimiter` | ✅ | Compile-time constants `/` and `:` (no cross-compilation, so no Windows form is ever needed — see [process.platform](PROCESS-CLI.md)) |

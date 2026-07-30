@@ -155,6 +155,10 @@ type Emitter struct {
 	usedMapNumHelpers        bool
 	usedExceptionHelpers     bool
 	usedFrozenSet            bool
+	usedPathNormalize        bool
+	usedPathDirname          bool
+	usedPathBasename         bool
+	usedPathExtname          bool
 	breakStack               []string // end labels for enclosing loops / switch
 	continueStack            []string // continue-target labels for enclosing loops
 	// pendingLabel is set by a LabeledStatement just before emitting its body;

@@ -117,13 +117,7 @@ func (e *Emitter) emitDivZeroGuard(ty Type, right Value) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroReg, zeroL, okL))
 
 	e.emitLabel(zeroL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("Division by zero")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("Division by zero"))
 
 	e.emitLabel(okL)
 }
@@ -180,13 +174,7 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", oobReg, oobL, okL))
 
 	e.emitLabel(oobL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("Array index out of bounds")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("Array index out of bounds"))
 
 	e.emitLabel(okL)
 	gepReg = e.freshReg()
@@ -295,6 +283,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	}
 	if isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetStatic(ex.Property)
+	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path" {
+		switch ex.Property {
+		case "sep":
+			return Value{Ref: e.internString("/"), Ty: TypePtr}, nil
+		case "delimiter":
+			return Value{Ref: e.internString(":"), Ty: TypePtr}, nil
+		}
 	}
 	if ex.Property == "size" {
 		if id, ok := ex.Object.(*ast.Identifier); ok {

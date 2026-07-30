@@ -106,12 +106,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 
 	e.emitLabel(badL)
 	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
-	msgPtr := e.internString("Invalid URL")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("Invalid URL"))
 
 	e.emitLabel(okL)
 

@@ -113,6 +113,7 @@ func (e *Emitter) ensureHTTPThrow() {
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
 	fmtPtr := e.internString("%s: %s")
+	errNamePtr := e.internString("Error")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_throw(ptr %%opdesc) {
 entry:
@@ -125,11 +126,16 @@ entry:
   %%bufsize = add i64 %%sum, 8
   %%buf = call ptr @malloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%errmsg)
-  %%errobj = call ptr @malloc(i64 8)
-  store ptr %%buf, ptr %%errobj, align 8
+  %%errobj = call ptr @malloc(i64 24)
+  %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
+  store i64 0, ptr %%errobj.kind, align 8
+  %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
+  store ptr %%buf, ptr %%errobj.msg, align 8
+  %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
+  store ptr %s, ptr %%errobj.name, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, errnoAccessor(), fmtPtr))
+}`, errnoAccessor(), fmtPtr, errNamePtr))
 }
 
 // ensureSplitFirst declares __kml_split_first(ptr s, ptr sep) -> {ptr, ptr},

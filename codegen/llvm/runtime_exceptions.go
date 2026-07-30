@@ -2,6 +2,13 @@ package llvm
 
 import ()
 
+// ensureExceptionHelpers hand-writes @__kml_throw's uncaught-error path
+// against errorObjType's layout directly ({ i64 kind, ptr message, ptr name
+// } — emit_exceptions.go) rather than through the generic FieldIndex/
+// StructIR machinery, since this is raw IR text, not codegen output. If
+// errorObjType's field order or count ever changes, the `getelementptr { i64,
+// ptr, ptr }, ..., i32 0, i32 1` below must be updated to match, or the
+// uncaught-exception printer silently prints garbage instead of the message.
 func (e *Emitter) ensureExceptionHelpers() {
 	if e.usedExceptionHelpers {
 		return
@@ -45,7 +52,7 @@ entry:
   %iszero = icmp eq i32 %top, 0
   br i1 %iszero, label %uncaught, label %jump
 uncaught:
-  %msgPtr = getelementptr { ptr }, ptr %errObj, i32 0, i32 0
+  %msgPtr = getelementptr { i64, ptr, ptr }, ptr %errObj, i32 0, i32 1
   %msg = load ptr, ptr %msgPtr, align 8
   call i32 (ptr, ...) @printf(ptr @.kml_unc_fmt, ptr %msg)
   call void @exit(i32 1)

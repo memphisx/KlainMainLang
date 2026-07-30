@@ -90,6 +90,14 @@ type Type struct {
 	// a plain structural object literal.
 	IsClass   bool
 	ClassName string
+	// IsError marks Error and its built-in subtypes (TypeError, RangeError,
+	// ...) — TDD-00013 Option A. Storage-wise it's an ordinary IsObject heap
+	// struct with a hidden kind tag at field 0 (same ClassTagField-style
+	// convention IsClass uses, see VisibleFields), then message/name. Every
+	// kind shares this one Type value; only the runtime kind tag (and
+	// message/name's stored contents) differ between e.g. a TypeError and a
+	// RangeError. See emit_exceptions.go's errorKinds/errorKindIDs.
+	IsError bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -260,8 +268,8 @@ func TypedArrayType(elemKind string) Type {
 // doesn't apply per element (null ptr, matching errorObjType/most T's own
 // ptr-sized IR) rather than leave it uninitialized, so e.g. a fulfilled
 // entry's .reason reads a defined null instead of garbage. reason reuses
-// emit_exceptions.go's existing errorObjType (same {message: ptr} shape
-// thrown/caught values already use), so a rejected entry's .reason.message
+// emit_exceptions.go's existing errorObjType (the same shape thrown/caught
+// values already use), so a rejected entry's .reason.message/.reason.name
 // is readable exactly like any caught Error's.
 func SettlementType(valueTy Type) Type {
 	return ObjectType([]Field{
@@ -310,6 +318,9 @@ func (t Type) VisibleFields() []Field {
 	if t.IsClass && len(t.Fields) > 0 {
 		return t.Fields[1:]
 	}
+	if t.IsError && len(t.Fields) > 0 {
+		return t.Fields[1:]
+	}
 	return t.Fields
 }
 
@@ -330,6 +341,20 @@ func RequestType() Type {
 		{Name: "query", Ty: MapType(TypePtr, TypePtr)},
 		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
 		{Name: "body", Ty: TypePtr},
+	})
+}
+
+// PathParsedType returns path.parse(p)'s result type: a plain heap object
+// with root/dir/base/ext/name string fields, recomposed by path.format(obj)
+// — no PATH-specific dispatch needed for field reads, same as Response's
+// status/ok/body.
+func PathParsedType() Type {
+	return ObjectType([]Field{
+		{Name: "root", Ty: TypePtr},
+		{Name: "dir", Ty: TypePtr},
+		{Name: "base", Ty: TypePtr},
+		{Name: "ext", Ty: TypePtr},
+		{Name: "name", Ty: TypePtr},
 	})
 }
 

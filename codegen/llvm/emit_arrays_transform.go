@@ -274,13 +274,7 @@ func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
 
 	e.emitLabel(oobL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("Array index out of range")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("Array index out of range"))
 
 	e.emitLabel(okL)
 	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)

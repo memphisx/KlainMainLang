@@ -154,13 +154,7 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badReg, badL, okL))
 
 	e.emitLabel(badL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("ArrayBuffer length is not a multiple of the element size")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("ArrayBuffer length is not a multiple of the element size"))
 
 	e.emitLabel(okL)
 	elemCountReg := e.freshReg()
@@ -265,13 +259,7 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooBig, badL, okL))
 
 	e.emitLabel(badL)
-	e.ensureExceptionHelpers()
-	msgPtr := e.internString("source is too large for set()'s target, starting at the given offset")
-	errReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, errReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-	e.emitTerminator("unreachable")
+	e.emitInternalThrow(e.internString("source is too large for set()'s target, starting at the given offset"))
 
 	e.emitLabel(okL)
 	idxAlloca := e.freshReg()

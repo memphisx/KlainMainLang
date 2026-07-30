@@ -6,15 +6,91 @@ import (
 	"KlainMainLang/ast"
 )
 
-var errorObjType = ObjectType([]Field{{Name: "message", Ty: TypePtr}})
+// errorKinds is the fixed, built-in Error kind enum (TDD-00013 Option A) —
+// index into this slice is the runtime kind tag stored in every Error
+// object's hidden field 0. "Error" is always kind 0, the base every other
+// kind is unconditionally `instanceof` (see emitErrorInstanceOf).
+var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "EvalError", "URIError", "ReferenceError"}
 
-// emitNewError emits `new Error(msg)` — allocates an 8-byte {ptr} struct and
-// stores the message pointer, returning a ptr Value typed as an Error object.
-func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
+// errorKindIDs maps a kind name to its errorKinds index, built once at
+// package init. Every case in parser_literals.go's parseNew Error-kind
+// switch is guaranteed present here — the parser and this table are kept in
+// sync by hand, same convention typedArrayElemKinds already uses.
+var errorKindIDs = func() map[string]int64 {
+	m := make(map[string]int64, len(errorKinds))
+	for i, k := range errorKinds {
+		m[k] = int64(i)
+	}
+	return m
+}()
+
+// errorObjType is the shared runtime shape of every Error and its built-in
+// subtypes (TypeError, RangeError, ...): a hidden i64 kind tag (field 0,
+// same ClassTagField-style convention TDD-00009 Stage 2 uses for user
+// classes — see VisibleFields), then message, then name. All kinds share
+// this one Type; only the stored kind tag and message/name contents differ
+// between e.g. a TypeError and a RangeError instance.
+var errorObjType = func() Type {
+	ty := ObjectType([]Field{
+		{Name: "kind", Ty: TypeI64},
+		{Name: "message", Ty: TypePtr},
+		{Name: "name", Ty: TypePtr},
+	})
+	ty.IsError = true
+	return ty
+}()
+
+// buildErrorObj mallocs and fills a new errorObjType instance ({i64 kind,
+// ptr message, ptr name}) from already-computed operands, returning the
+// instance's ptr register. The one place that knows how to construct an
+// errorObjType instance — shared by `new Error(...)`/`new TypeError(...)`
+// (emitNewError), a thrown non-object primitive (emitThrow), an internally
+// thrown runtime error (emitInternalThrow — array bounds, division by zero,
+// fs/fetch/exec failures, ...), and Promise.allSettled's rejection reason
+// (emit_promise.go) — deliberately factored out rather than duplicated at
+// each of those call sites, since every one of them must agree on the exact
+// same 3-field layout; a single point of truth is what makes that safe to
+// change later (see ADR-00082's investigation for what happened before this
+// existed: some call sites still building the old 1-field shape).
+func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	e.ensureExceptionHelpers()
 
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", dataReg))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, errorObjType.StructSize()))
+
+	kindGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", kindID, kindGep))
+
+	msgGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, msgGep))
+
+	nameGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", namePtr, nameGep))
+
+	return dataReg
+}
+
+// emitInternalThrow throws a base-Error-shaped errorObjType instance (kind
+// 0) carrying msgPtr as both message and (via the interned "Error" literal)
+// name, then emits `unreachable` — the shared tail every internally
+// generated runtime error (array bounds, division by zero, frozen-object
+// write, fs/fetch/exec failures, ...) uses after building its own message
+// string. Callers are responsible for emitting whatever guard/branch leads
+// into this call; this only covers "build the Error object and throw it."
+func (e *Emitter) emitInternalThrow(msgPtr string) {
+	errReg := e.buildErrorObj(0, msgPtr, e.internString("Error"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+}
+
+// emitNewError emits `new Error(msg)` / `new TypeError(msg)` / etc. —
+// allocates the 24-byte {i64, ptr, ptr} errorObjType struct, storing the
+// kind tag, message, and name, and returns a ptr Value typed as errorObjType.
+func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
+	e.ensureExceptionHelpers()
 
 	var msgPtr string
 	if ne.Message != nil {
@@ -25,9 +101,10 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 		msgVal = e.coerce(msgVal, TypePtr)
 		msgPtr = msgVal.Ref
 	} else {
-		msgPtr = e.internString("Error")
+		msgPtr = e.internString(ne.Kind)
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, dataReg))
+
+	dataReg := e.buildErrorObj(errorKindIDs[ne.Kind], msgPtr, e.internString(ne.Kind))
 	return Value{Ref: dataReg, Ty: errorObjType}, nil
 }
 
@@ -41,18 +118,18 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	}
 
 	var errPtr string
-	if val.Ty.IsObject || val.Ty.IR == "ptr" {
+	if val.Ty.IsObject {
 		errPtr = val.Ref
 	} else {
-		// Wrap the value in an Error struct with a stringified message.
-		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", dataReg))
+		// Wrap the value in a base-Error-shaped errorObjType struct with a
+		// stringified message, so `.message`/`.name`/`instanceof Error`
+		// against the caught value all still work as if `new Error(...)` had
+		// been thrown instead of a bare primitive.
 		strVal, err := e.emitValueToString(val)
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strVal.Ref, dataReg))
-		errPtr = dataReg
+		errPtr = e.buildErrorObj(0, strVal.Ref, e.internString("Error"))
 	}
 
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))

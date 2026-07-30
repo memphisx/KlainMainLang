@@ -379,10 +379,7 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 			e.emitLabel(failL)
-			e.ensureMalloc()
-			errObj := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", errObj))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", reasonMsg, errObj))
+			errObj := e.buildErrorObj(0, reasonMsg, e.internString("Error"))
 			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", errObj)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
