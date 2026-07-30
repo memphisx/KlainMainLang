@@ -807,12 +807,16 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	// Build arg list: env first, then actual args.
 	argParts := []string{"ptr " + epVal}
 	for i, arg := range args {
-		val, err := e.emitExpr(arg)
+		var paramTy Type
+		haveParamTy := i < len(ty.FuncParams)
+		if haveParamTy {
+			paramTy = ty.FuncParams[i]
+		}
+		val, err := e.emitExprWithObjectHint(arg, paramTy)
 		if err != nil {
 			return Value{}, err
 		}
-		if i < len(ty.FuncParams) {
-			paramTy := ty.FuncParams[i]
+		if haveParamTy {
 			if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
 				return Value{}, fmt.Errorf("%d:%d: parameter %d has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, i+1)
 			}

@@ -165,7 +165,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		return nil
 	}
 
-	val, err := e.emitExpr(r.Value)
+	val, err := e.emitExprWithObjectHint(r.Value, e.currentRetType)
 	if err != nil {
 		return err
 	}

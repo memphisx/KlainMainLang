@@ -29,9 +29,9 @@ Not met yet. Treat this list as living, not final:
 
 - [ ] A handful of realistic, non-toy end-to-end programs (a real CLI tool, and — once an event loop + basic HTTP listening exist — a toy microservice) built and kept passing under `make examples`, not just single-feature demos.
 - [ ] An event loop + basic network listening (HTTP server) — the biggest structural gap toward this project's own stated CLI/microservice goals.
-- [ ] Some baseline hardening: no known crash-on-valid-input or silent-wrong-output bug left open in `STATUS.md`'s Known Limitations & Bugs section.
+- [ ] Some baseline hardening: no known crash-on-valid-input or silent-wrong-output bug left open in any `docs/status/` page's Known Limitations section.
 - [ ] A basic performance benchmark harness with numbers tracked release-over-release — doesn't need to be *fast*, needs to be *measured*, so a regression is visible instead of assumed.
-- [ ] Core language coverage in `STATUS.md` above an agreed threshold (currently ~74%).
+- [ ] Core language coverage in [`docs/status/README.md`](docs/status/README.md) above an agreed threshold (currently ~74%).
 
 ## First release, then automation
 

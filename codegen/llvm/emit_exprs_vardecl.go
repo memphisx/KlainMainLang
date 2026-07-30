@@ -51,6 +51,14 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = errorObjType
 		case *ast.NewDateExpression:
 			ty = TypeDate
+		case *ast.NewURLExpression:
+			ty = URLType()
+		case *ast.NewURLSearchParamsExpression:
+			ty = URLSearchParamsType()
+		case *ast.NewArrayBufferExpression:
+			ty = ArrayBufferType()
+		case *ast.NewTypedArrayExpression:
+			ty = TypedArrayType(init.ElemKind)
 		case *ast.AwaitExpression:
 			ty = e.inferExprType(init)
 		case *ast.ArrowFunction:

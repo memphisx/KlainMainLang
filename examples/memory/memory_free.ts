@@ -1,5 +1,5 @@
 // Memory.free(x) — Stage 1 of the staged manual-memory-management plan
-// (see STATUS.md's "Memory Management" section). A raw, unsafe, opt-in
+// (see docs/status/MEMORY-MANAGEMENT.md). A raw, unsafe, opt-in
 // escape hatch: this compiler still never frees anything on its own — this
 // just gives a program a way to explicitly release a value it knows it's
 // done with, exactly as unsafe as C's own free().

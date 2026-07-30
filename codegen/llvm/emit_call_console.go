@@ -357,7 +357,25 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 	case "double":
 		call("double " + val.Ref)
 	case "ptr":
-		call("ptr " + val.Ref)
+		// A ptr value being printed can genuinely be null at runtime even
+		// when its static type doesn't say Nullable — e.g. Map<K,V>.get()
+		// on a missing key (emit_collections.go) returns a bare null V,
+		// with no type-level marker at all that it might be absent (real
+		// JS would return `undefined` there; this compiler doesn't
+		// distinguish that from `null` at the value level). Passing a NULL
+		// pointer to printf's "%s" is undefined behavior — glibc happens to
+		// print "(null)", but Darwin's libSystem printf has no such
+		// special case and segfaults outright. Found via `new
+		// URLSearchParams(...).get()` on a missing key crashing
+		// console.log — confirmed to reproduce identically with a plain
+		// `Map<string,string>.get()` miss, so this guard belongs here
+		// (every ptr value console.log ever prints), not in the
+		// URLSearchParams/Map-specific call sites.
+		safe := e.freshReg()
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), val.Ref))
+		call("ptr " + safe)
 	}
 }
 

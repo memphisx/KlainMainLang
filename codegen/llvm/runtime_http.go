@@ -699,6 +699,50 @@ entry:
   br label %outerloop
 
 outerloop:
+  ; TDD-00019: check for a pending signal before anything else this
+  ; iteration — this single check point, re-entered after every iteration,
+  ; covers both a signal that arrived since the last check (seen before
+  ; computing select()'s timeout below) and a signal that interrupts a
+  ; blocking select() call directly (seen immediately on looping back
+  ; after EINTR — see the afterselect: fix further down).
+  %sigintp = load volatile i8, ptr @__kml_sigint_pending, align 1
+  %sigintset = icmp ne i8 %sigintp, 0
+  br i1 %sigintset, label %sigintfire, label %checksigterm
+
+sigintfire:
+  store volatile i8 0, ptr @__kml_sigint_pending, align 1
+  %sigintclos = load ptr, ptr @__kml_sigint_closure, align 8
+  %hassigint = icmp ne ptr %sigintclos, null
+  br i1 %hassigint, label %sigintcall, label %checksigterm
+
+sigintcall:
+  %sigintfp_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 0
+  %sigintep_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 1
+  %sigintfp = load ptr, ptr %sigintfp_p, align 8
+  %sigintep = load ptr, ptr %sigintep_p, align 8
+  call void %sigintfp(ptr %sigintep)
+  br label %checksigterm
+
+checksigterm:
+  %sigtermp = load volatile i8, ptr @__kml_sigterm_pending, align 1
+  %sigtermset = icmp ne i8 %sigtermp, 0
+  br i1 %sigtermset, label %sigtermfire, label %timerscan
+
+sigtermfire:
+  store volatile i8 0, ptr @__kml_sigterm_pending, align 1
+  %sigtermclos = load ptr, ptr @__kml_sigterm_closure, align 8
+  %hassigterm = icmp ne ptr %sigtermclos, null
+  br i1 %hassigterm, label %sigtermcall, label %timerscan
+
+sigtermcall:
+  %sigtermfp_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 0
+  %sigtermep_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 1
+  %sigtermfp = load ptr, ptr %sigtermfp_p, align 8
+  %sigtermep = load ptr, ptr %sigtermep_p, align 8
+  call void %sigtermfp(ptr %sigtermep)
+  br label %timerscan
+
+timerscan:
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
   store i64 -1, ptr %besti, align 8
@@ -860,6 +904,19 @@ notimeoutpath:
   br label %afterselect
 
 afterselect:
+  ; TDD-00019: select()'s return value must be checked. POSIX leaves the
+  ; fd_sets *unmodified* on an EINTR return (e.g. a signal arriving while
+  ; blocked here) — they'd still hold the watch set this iteration built,
+  ; not real readiness info. Without this check, a spurious accept() on
+  ; the (blocking) listener socket could hang the whole loop indefinitely
+  ; right when a signal was trying to wake it up. On failure, skip
+  ; straight back to outerloop's own pending-signal check instead of
+  ; trusting a fd_set POSIX only guarantees is meaningful on success.
+  %selrc = phi i32 [ %selrc1, %timeoutpath ], [ %selrc2, %notimeoutpath ]
+  %selfailed = icmp slt i32 %selrc, 0
+  br i1 %selfailed, label %outerloop, label %afterselectok
+
+afterselectok:
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:

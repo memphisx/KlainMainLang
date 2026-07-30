@@ -114,3 +114,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00073](ADR-00073.md) | `Promise.all` / `.race` / `.allSettled` | Extends [ADR-00049](ADR-00049.md), [ADR-00050](ADR-00050.md). Implements [TDD-00016](../tdd/TDD-00016.md) |
 | [00074](ADR-00074.md) | `fetch()` client parity — custom method, headers, request body | Extends [ADR-00050](ADR-00050.md). Implements [TDD-00017](../tdd/TDD-00017.md) |
 | [00075](ADR-00075.md) | Split oversized codegen/parser files into domain files | |
+| [00076](ADR-00076.md) | `URL` / `URLSearchParams` | |
+| [00077](ADR-00077.md) | Coerce object literal fields against their declared type | Implements [TDD-00007](../tdd/TDD-00007.md) |
+| [00078](ADR-00078.md) | `ArrayBuffer` / TypedArrays | Implements [TDD-00018](../tdd/TDD-00018.md) |
+| [00079](ADR-00079.md) | POSIX signal handling — `process.on('SIGINT'/'SIGTERM', handler)` | Extends [ADR-00072](ADR-00072.md). Implements [TDD-00019](../tdd/TDD-00019.md) |

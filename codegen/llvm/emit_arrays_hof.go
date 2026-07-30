@@ -21,6 +21,21 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if retElemTy.IR == "void" || retElemTy.IR == "" {
 		return Value{}, fmt.Errorf("%d:%d: map callback must return a value", pos.Line, pos.Col)
 	}
+	// A TypedArray's .map() always returns the same TypedArray kind (real
+	// JS semantics: Uint8Array.prototype.map() always returns a new
+	// Uint8Array), coercing each result into it — not whatever type the
+	// callback expression itself would otherwise naturally produce. An
+	// unannotated arrow callback's own inferred return type can silently
+	// differ from the receiver's narrower element width (e.g. defaulting
+	// to i64 while the receiver is Uint8Array's i8), which would corrupt
+	// every index but the first once the result is read back at the
+	// receiver's own (narrower) element stride — found by direct testing,
+	// not by inspection, while verifying "everything already reused for
+	// free" during TDD-00018's implementation.
+	isTypedArray := e.inferExprType(mem.Object).IsTypedArray
+	if isTypedArray {
+		retElemTy = elemTy
+	}
 
 	e.ensureMalloc()
 	outBytes := e.freshReg()
@@ -58,6 +73,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
+	if isTypedArray {
+		resultVal = e.coerce(resultVal, retElemTy)
+	}
 
 	outGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", outGep, retElemTy.IR, outPtr, idxVal))
@@ -73,7 +91,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	return Value{Ref: r1, Ty: ArrayOf(retElemTy)}, nil
+	resultTy := ArrayOf(retElemTy)
+	resultTy.IsTypedArray = isTypedArray
+	return Value{Ref: r1, Ty: resultTy}, nil
 }
 
 // emitArrayForEach implements arr.forEach(fn): calls fn(elem, index?) for each element, no return value.

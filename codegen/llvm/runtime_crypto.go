@@ -12,7 +12,7 @@ import (
 // (plain C89 rand(), not cryptographically secure) — crypto.* needs a real
 // CSPRNG: arc4random_buf (BSD/macOS, itself a CSPRNG, no seeding needed) or
 // getrandom() (Linux, reads from the kernel's CSPRNG), matching the
-// STATUS.md roadmap note this was scoped from.
+// docs/status/README.md roadmap note this was scoped from.
 func (e *Emitter) ensureCryptoRandomBytes() {
 	if e.usedCryptoRandomBytes {
 		return
@@ -42,9 +42,11 @@ entry:
 // arr, i64 len): fills an existing number[] array's elements with random
 // byte values (0-255 each) — the crypto.getRandomValues(arr) implementation.
 // A deliberate deviation from the real API (which fills a TypedArray in
-// place, byte for byte): this compiler has no ArrayBuffer/TypedArrays yet
-// (0% implemented, tracked separately in STATUS.md), so a plain number[]
-// stands in as the "buffer," one random byte value per i64 element.
+// place, byte for byte): this predates ArrayBuffer/TypedArrays (now
+// implemented, see docs/status/BINARY-DATA-TYPED-ARRAYS.md), so a plain
+// number[] stands in as the "buffer," one random byte value per i64
+// element — migrating to a real Uint8Array is a separate, not-yet-started
+// follow-up.
 func (e *Emitter) ensureCryptoFillNumberArray() {
 	if e.usedCryptoFillNumArray {
 		return

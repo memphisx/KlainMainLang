@@ -405,3 +405,91 @@ ok:
   ret void
 }`, accessor, fmtPtr))
 }
+
+// ensureSignalHandlerRuntime declares the shared machinery behind
+// process.on('SIGINT'/'SIGTERM', handler) — TDD-00019. POSIX signal handlers
+// must be async-signal-safe: they can interrupt the program at literally any
+// instruction, including mid-malloc, mid-longjmp, or mid-swapcontext fiber
+// switch (see TDD-00006 on why coroutine/fiber suspension is already this
+// fragile around this compiler's setjmp/longjmp exception model). So
+// __kml_sig_handler, the only code that ever runs in real signal context,
+// does the absolute minimum: one `store volatile` to a flag, nothing else.
+// The registered TS closure is only ever invoked later, from ordinary
+// control flow at the top of the event loop's own iteration (see
+// __kml_event_loop_run in runtime_http.go and __kml_timer_drain in
+// emit_timers.go) — by construction, never from signal context itself.
+//
+// Both pending flags are `i8`, always accessed `volatile` — required so
+// -O2 can't cache a flag's value across the select() call or eliminate a
+// store as dead, the LLVM-IR equivalent of C's mandatory
+// `volatile sig_atomic_t` for this exact pattern. Both closure globals hold
+// a `ptr` to a {funcPtr, envPtr} closure header (null = unregistered).
+//
+// signal(), not sigaction(): sigaction() needs a hand-laid-out
+// struct sigaction, and that struct's byte layout differs between Darwin
+// and Linux (sa_mask size, presence of sa_restorer) — exactly the class of
+// bug already hit once with ucontext_t (ADR-00051). signal()'s C signature
+// is two scalars, no struct, identical on both platforms this compiler
+// targets. select()/poll() are documented (Linux signal(7), equivalently
+// on BSD/Darwin) to always return EINTR on a signal regardless of
+// SA_RESTART, so signal()'s restart semantics don't matter for this
+// design's correctness.
+func (e *Emitter) ensureSignalHandlerRuntime() {
+	if e.usedSignalHandler {
+		return
+	}
+	e.usedSignalHandler = true
+	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
+	e.emitGlobal("@__kml_sigint_pending = internal global i8 0")
+	e.emitGlobal("@__kml_sigterm_pending = internal global i8 0")
+	e.emitGlobal("@__kml_sigint_closure = internal global ptr null")
+	e.emitGlobal("@__kml_sigterm_closure = internal global ptr null")
+	e.emitGlobal(`
+define void @__kml_sig_handler(i32 %signum) {
+entry:
+  %isint = icmp eq i32 %signum, 2
+  br i1 %isint, label %setint, label %checkterm
+
+setint:
+  store volatile i8 1, ptr @__kml_sigint_pending
+  ret void
+
+checkterm:
+  %isterm = icmp eq i32 %signum, 15
+  br i1 %isterm, label %setterm, label %done
+
+setterm:
+  store volatile i8 1, ptr @__kml_sigterm_pending
+  ret void
+
+done:
+  ret void
+}`)
+}
+
+// ensureSignalRegisteredSigint / ensureSignalRegisteredSigterm each call
+// signal() exactly once per compiled binary (idempotent, matching every
+// other ensure*() in this compiler) to install __kml_sig_handler for that
+// one signal — called from emitProcessOn (emit_process.go) the first time
+// process.on('SIGINT'/'SIGTERM', ...) is compiled for that signal name. A
+// program that never calls process.on for a given signal never calls
+// signal() for it either, so that signal's OS-level disposition stays the
+// untouched default (SIG_DFL — terminates immediately), exactly matching
+// this compiler's pre-existing behavior with zero overhead.
+func (e *Emitter) ensureSignalRegisteredSigint() {
+	if e.usedSignalSigint {
+		return
+	}
+	e.usedSignalSigint = true
+	e.ensureSignalHandlerRuntime()
+	e.emitInstr("call ptr @signal(i32 2, ptr @__kml_sig_handler)")
+}
+
+func (e *Emitter) ensureSignalRegisteredSigterm() {
+	if e.usedSignalSigterm {
+		return
+	}
+	e.usedSignalSigterm = true
+	e.ensureSignalHandlerRuntime()
+	e.emitInstr("call ptr @signal(i32 15, ptr @__kml_sig_handler)")
+}

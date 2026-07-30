@@ -3,8 +3,8 @@
 // Bare global functions, matching real JS (not a namespace). Delays are in
 // milliseconds. No general-purpose event loop needed for these — just a
 // sleep-until-next-due queue that drains after this program's own
-// synchronous top-level code finishes (see STATUS.md's "Timers — Scoping"
-// section for the full design).
+// synchronous top-level code finishes (see docs/tdd/TDD-00002.md for the
+// full design, and docs/status/TIMERS.md for current status).
 //
 // V1 scope: the callback must be an arrow function / closure value —
 // passing a bare reference to a top-level named function (e.g.

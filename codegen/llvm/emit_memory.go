@@ -1,5 +1,5 @@
 // emit_memory.go — Memory.free(x): Stage 1 of the staged manual-memory-
-// management plan in STATUS.md. A raw, unsafe, opt-in escape hatch — not a
+// management plan in docs/status/MEMORY-MANAGEMENT.md. A raw, unsafe, opt-in escape hatch — not a
 // general change to this compiler's "malloc everything, free nothing"
 // default. Recognized as a pseudo-namespace, like Math/JSON/process/fs —
 // not a real importable module.

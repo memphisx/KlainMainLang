@@ -606,3 +606,107 @@ const obj = { ...src, [k]: 2 }
 		t.Fatal("expected a compile error for combining object spread with a computed property key, got none")
 	}
 }
+
+// --- Object literal field coercion against a declared type (TDD-00007) ---
+//
+// Before the fix, each of these silently reinterpreted a float64's raw bit
+// pattern as an i64 (or vice versa) instead of coercing, because the
+// object literal's fields were only ever coerced against its own
+// self-inferred type, never against a separately-declared expected type.
+
+func TestE2EObjectLiteralVarDeclCoercesFloatFieldToInt(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 40.6 }
+console.log(p.y)
+`, "40")
+}
+
+func TestE2EObjectLiteralVarDeclCoercesIntFieldToFloat(t *testing.T) {
+	assertOutput(t, `
+interface Player {
+  name: string
+  /** @type {float64} */
+  score: number
+}
+const pl: Player = { name: "a", score: 5 }
+console.log(pl.score)
+`, "5")
+}
+
+func TestE2EObjectLiteralFunctionArgumentCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function printY(p: Point): void {
+  console.log(p.y)
+}
+printY({ x: 1, y: 40.6 })
+`, "40")
+}
+
+func TestE2EObjectLiteralClosureArgumentCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const printY = (p: Point): void => {
+  console.log(p.y)
+}
+printY({ x: 1, y: 40.6 })
+`, "40")
+}
+
+func TestE2EObjectLiteralDefaultParamCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function printY(p: Point = { x: 1, y: 40.6 }): void {
+  console.log(p.y)
+}
+printY()
+`, "40")
+}
+
+func TestE2EObjectLiteralReturnValueCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function makePoint(): Point {
+  return { x: 1, y: 40.6 }
+}
+console.log(makePoint().y)
+`, "40")
+}
+
+func TestE2EObjectLiteralArrayElementCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const pts: Point[] = [{ x: 1, y: 2.9 }, { x: 3, y: 4.1 }]
+console.log(pts[0].y)
+console.log(pts[1].y)
+`, "2\n4")
+}
+
+func TestE2ENestedObjectLiteralFieldCoercion(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+interface Address { city: string; coords: Point }
+const addr: Address = { city: "Thessaloniki", coords: { x: 1, y: 40.6 } }
+console.log(addr.coords.y)
+`, "40")
+}
+
+func TestE2EObjectSpreadPreservesCoercedSourceField(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 40.6 }
+const q: Point = { ...p, x: 5 }
+console.log(q.x)
+console.log(q.y)
+`, "5\n40")
+}
+
+func TestE2EUntypedObjectLiteralStillInfersOwnFieldType(t *testing.T) {
+	// No declared type anywhere — the literal's own inferred type (float64
+	// for y, since 40.6 has a decimal point) must still apply unchanged.
+	assertOutput(t, `
+const p = { x: 1, y: 40.6 }
+console.log(p.y)
+`, "40.6")
+}

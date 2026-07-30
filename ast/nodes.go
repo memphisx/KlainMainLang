@@ -743,10 +743,84 @@ func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
 	return &NewDateExpression{Args: args, pos: pos}
 }
 
+// NewURLExpression is `new URL(url)` — a single required string argument.
+// No base-URL second argument (V1 scope, matching how fetch's own init
+// object narrows the real Request/Headers API down to a plain struct).
+type NewURLExpression struct {
+	URL Expression
+	pos Pos
+}
+
+func (*NewURLExpression) nodeMarker()  {}
+func (*NewURLExpression) exprMarker() {}
+func (n *NewURLExpression) GetPos() Pos { return n.pos }
+
+func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
+	return &NewURLExpression{URL: url, pos: pos}
+}
+
+// NewURLSearchParamsExpression is `new URLSearchParams()` (empty) or
+// `new URLSearchParams(init)` (parses a query string, with or without a
+// leading '?').
+type NewURLSearchParamsExpression struct {
+	Init Expression // nil for the no-argument form
+	pos  Pos
+}
+
+func (*NewURLSearchParamsExpression) nodeMarker()  {}
+func (*NewURLSearchParamsExpression) exprMarker() {}
+func (n *NewURLSearchParamsExpression) GetPos() Pos { return n.pos }
+
+func NewNewURLSearchParamsExpression(init Expression, pos Pos) *NewURLSearchParamsExpression {
+	return &NewURLSearchParamsExpression{Init: init, pos: pos}
+}
+
+// NewArrayBufferExpression is `new ArrayBuffer(byteLength)` — a fixed-length,
+// zero-initialized raw byte buffer. Unlike Array/Map/Set/TypedArray below,
+// this is a general expression (not restricted to a variable-declaration
+// initializer), matching Date/URL/URLSearchParams.
+type NewArrayBufferExpression struct {
+	ByteLength Expression
+	pos        Pos
+}
+
+func (*NewArrayBufferExpression) nodeMarker()  {}
+func (*NewArrayBufferExpression) exprMarker() {}
+func (n *NewArrayBufferExpression) GetPos() Pos { return n.pos }
+
+func NewNewArrayBufferExpression(byteLength Expression, pos Pos) *NewArrayBufferExpression {
+	return &NewArrayBufferExpression{ByteLength: byteLength, pos: pos}
+}
+
+// NewTypedArrayExpression is `new Int8Array(...)`/`new Uint8Array(...)`/.../
+// `new Float64Array(...)` — ElemKind identifies which of the 8 supported
+// constructor names matched (see docs/tdd/TDD-00018.md), and Arg is the
+// single constructor argument, whose *runtime* type (not knowable at parse
+// time) decides which of three construction forms applies: a plain size
+// (own new buffer), an existing ArrayBuffer (a view sharing its memory), or
+// a number[]/another TypedArray (copy-construct). Like NewArrayExpression/
+// NewMapExpression/NewSetExpression, this is restricted to a variable
+// declaration's initializer — not a general expression.
+type NewTypedArrayExpression struct {
+	ElemKind string
+	Arg      Expression
+	pos      Pos
+}
+
+func (*NewTypedArrayExpression) nodeMarker()  {}
+func (*NewTypedArrayExpression) exprMarker() {}
+func (n *NewTypedArrayExpression) GetPos() Pos { return n.pos }
+
+func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTypedArrayExpression {
+	return &NewTypedArrayExpression{ElemKind: elemKind, Arg: arg, pos: pos}
+}
+
 // NewExpression — `new ClassName(args)` for a user-defined class. Unlike
-// Array/Map/Set/Error/Date above (each its own hardcoded node, keyed on the
-// literal callee name at parse time), this is the generic fallthrough for
-// any `new <Name>` where Name isn't one of those five builtins.
+// Array/Map/Set/Error/Date/URL/URLSearchParams/ArrayBuffer/TypedArray above
+// (each its own hardcoded node, keyed on the literal callee name at parse
+// time), this is the generic fallthrough for any `new <Name>` where Name
+// isn't one of
+// those builtins.
 type NewExpression struct {
 	ClassName string
 	Args      []Expression

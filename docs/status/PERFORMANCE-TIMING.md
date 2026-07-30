@@ -1,0 +1,19 @@
+# Performance & Timing
+
+> Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too.
+
+**Coverage**: ~89% (8/9).
+
+**Caveats**: `performance.mark`/`performance.measure` (named timing marks) aren't implemented. `Date` is UTC-only everywhere (construction, getters, formatting), a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone.
+
+| API | Status | Notes |
+|---|---|---|
+| `performance.now()` | ✅ | `CLOCK_MONOTONIC`-based milliseconds, as a `double` (sub-millisecond precision) — unlike Date.now(), not tied to wall-clock time. No fixed "time origin" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time. See [ADR-00024](../adr/ADR-00024.md). |
+| `performance.mark(name)` / `performance.measure(name, start, end)` | ❌ | Named timing marks |
+| `Date` | ✅ | `new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md)); `getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds`, `getTime`/`valueOf`, `toISOString` — all UTC, not local time, for deterministic output regardless of the machine/CI timezone (a documented deviation from real JS's local-time default — note the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC). See [ADR-00014](../adr/ADR-00014.md). |
+| `Date.now()` | ✅ | Milliseconds since epoch, via `clock_gettime(CLOCK_REALTIME, ...)` |
+| `Date.parse(string)` | ✅ | ISO 8601 strings, with or without milliseconds: `Z` (UTC), a `+HH:MM`/`-HH:MM` timezone offset (converted to UTC), or a bare `YYYY-MM-DD` date. Unparseable input returns `-1` (a documented sentinel — this compiler's Date has no NaN representation). See [ADR-00015](../adr/ADR-00015.md) and [ADR-00017](../adr/ADR-00017.md). |
+| `Date` setters (`setFullYear`, `setMonth`, `setDate`, `setHours`, `setMinutes`, `setSeconds`, `setMilliseconds`, `setTime`) | ✅ | Mutate a named Date variable in place and return the new timestamp, matching real JS. Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise); only the single-argument form of each setter (no `setFullYear(y, m, d)`-style overloads). See [ADR-00016](../adr/ADR-00016.md). |
+| `Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`) | ✅ | `Date - Date` gives the difference in milliseconds (a number), matching real JS. `Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation). `Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time. See [ADR-00018](../adr/ADR-00018.md). |
+| `Date.prototype.toDateString()` | ✅ | Fixed `"Www Mon DD YYYY"` shape (e.g. `"Thu Jan 01 1970"`), matching real JS exactly except always UTC, not local time. See [ADR-00019](../adr/ADR-00019.md). |
+| `Date.prototype.toLocaleDateString()` | ✅ | One fixed `"M/D/YYYY"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support — a documented scope narrowing. See [ADR-00019](../adr/ADR-00019.md). |

@@ -35,6 +35,14 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		return nil
 	}
 
+	// TypedArray construction: new Int8Array(...)/.../new Float64Array(...)
+	// — see docs/tdd/TDD-00018.md. Checked before the generic CallExpression
+	// case below (TypedArray construction is its own AST node, not a call),
+	// mirroring exactly how NewArrayExpression is handled just above.
+	if nta, ok := v.Init.(*ast.NewTypedArrayExpression); ok {
+		return e.emitNewTypedArrayVarDecl(nta, ptrName, lenName, elemTy)
+	}
+
 	// Array variable initialised by a function that returns an array.
 	if call, ok := v.Init.(*ast.CallExpression); ok {
 		val, err := e.emitExpr(call)
@@ -95,7 +103,7 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", n, lenName))
 
 	for i, elem := range lit.Elements {
-		val, err := e.emitExpr(elem)
+		val, err := e.emitExprWithObjectHint(elem, elemTy)
 		if err != nil {
 			return err
 		}
@@ -180,7 +188,7 @@ func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName str
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
 		} else {
 			// Static element.
-			val, err := e.emitExpr(elem)
+			val, err := e.emitExprWithObjectHint(elem, elemTy)
 			if err != nil {
 				return err
 			}

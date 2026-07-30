@@ -90,6 +90,47 @@ type Type struct {
 	// a plain structural object literal.
 	IsClass   bool
 	ClassName string
+	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
+	// protocol, host, hostname, port, pathname, search, hash, origin,
+	// searchParams — all plain field reads via the existing object
+	// machinery, no dispatched methods of its own) built by parsing through
+	// libcurl's URL API. See emit_url.go.
+	IsURL bool
+	// IsURLSearchParams marks `new URLSearchParams(...)` and `URL`'s own
+	// `.searchParams` field: storage-wise it IS a real Map<string,string>
+	// (IsMap is also set, MapKey/MapVal both TypePtr) — get/set/has/delete/
+	// size/keys()/values()/entries()/forEach() all come for free from the
+	// existing Map machinery with no changes. IsURLSearchParams only
+	// additionally enables `.toString()`/`.getAll()` dispatch at emitCall,
+	// which a plain Map<string,string> (e.g. http.listen's `req.query`,
+	// built the same way) does not get. V1 scope narrowing: single value
+	// per key, like `req.query` already has — a repeated query-string key
+	// silently keeps only the last value, so `.getAll()` never returns more
+	// than one element. See emit_url.go.
+	IsURLSearchParams bool
+	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
+	// zero-initialized raw byte buffer. Deliberately not IsObject — the
+	// runtime value is a ptr to a hidden 2-word heap struct ({i64
+	// byteLength, ptr data}), never exposed via the generic FieldIndex/
+	// Object.keys/JSON reflection path (same reasoning Map/Set's own hidden
+	// layout already uses). `.byteLength` gets its own dedicated property
+	// read in emitMember, the same pattern `.size` already uses for
+	// Map/Set. See emit_arraybuffer.go and docs/tdd/TDD-00018.md.
+	IsArrayBuffer bool
+	// IsTypedArray marks a TypedArray (Int8Array/Uint8Array/Int16Array/
+	// Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — no
+	// Uint8ClampedArray/BigInt64Array/BigUint64Array, see the TDD's
+	// "Deliberately out of scope" section). Storage-wise it IS a plain
+	// ArrayOf(elemTy) — IsArray/ElemType are set exactly like a `number[]`
+	// — so indexing, `.length`, `.fill`/`.slice`/`.reverse`/`.at`/
+	// `.indexOf`/`.includes`/`.map`/`.filter`/`.reduce`/`.forEach`/`.some`/
+	// `.every`, for-of, and `.keys()`/`.values()`/`.entries()` all come for
+	// free from the existing array machinery with no changes at all.
+	// IsTypedArray only additionally enables `.set()`/`.subarray()`/
+	// `.byteLength` dispatch at emitCall/emitMember, which a plain
+	// `number[]` does not get. See emit_arraybuffer.go and
+	// docs/tdd/TDD-00018.md.
+	IsTypedArray bool
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -140,6 +181,75 @@ func ResponseType() Type {
 		{Name: "body", Ty: TypePtr},
 	})
 	ty.IsResponse = true
+	return ty
+}
+
+// URLSearchParamsType returns the type behind `new URLSearchParams(...)`
+// and `URL`'s own `.searchParams` field — see IsURLSearchParams's doc
+// comment for why this is just a flagged Map<string,string>.
+func URLSearchParamsType() Type {
+	ty := MapType(TypePtr, TypePtr)
+	ty.IsURLSearchParams = true
+	return ty
+}
+
+// URLType returns `new URL(...)`'s result type: a plain heap object whose
+// fields are all built once at construction time by emit_url.go (via
+// libcurl's URL-parsing API), plus IsURL so nothing else needs to special-
+// case it — field reads go through the ordinary object machinery exactly
+// like Response's status/ok/body already do.
+func URLType() Type {
+	ty := ObjectType([]Field{
+		{Name: "href", Ty: TypePtr},
+		{Name: "protocol", Ty: TypePtr},
+		{Name: "host", Ty: TypePtr},
+		{Name: "hostname", Ty: TypePtr},
+		{Name: "port", Ty: TypePtr},
+		{Name: "pathname", Ty: TypePtr},
+		{Name: "search", Ty: TypePtr},
+		{Name: "hash", Ty: TypePtr},
+		{Name: "origin", Ty: TypePtr},
+		{Name: "searchParams", Ty: URLSearchParamsType()},
+	})
+	ty.IsURL = true
+	return ty
+}
+
+// ArrayBufferType returns `new ArrayBuffer(...)`'s result type — see
+// IsArrayBuffer's doc comment for the hidden-struct representation.
+func ArrayBufferType() Type {
+	return Type{IR: "ptr", IsArrayBuffer: true}
+}
+
+// typedArrayElemKindToType maps the element-kind strings the parser already
+// produces (parser/parser_literals.go's typedArrayElemKinds, and the same
+// names ResolveTypeName below already understands for JSDoc @type
+// annotations) to the concrete numeric Type each TypedArray variant stores.
+var typedArrayElemKindToType = map[string]Type{
+	"int8":    TypeI8,
+	"uint8":   TypeU8,
+	"int16":   TypeI16,
+	"uint16":  TypeU16,
+	"int32":   TypeI32,
+	"uint32":  TypeU32,
+	"float32": TypeF32,
+	"float64": TypeF64,
+}
+
+// TypedArrayType returns the type behind `new Int8Array(...)`/.../
+// `new Float64Array(...)` for the given element kind (e.g. "uint8") — see
+// IsTypedArray's doc comment for why this is just a flagged ArrayOf(elemTy).
+// Panics on an unrecognized kind — callers only ever pass one of the 8
+// strings typedArrayElemKindToType covers, sourced from the parser's own
+// typedArrayElemKinds map, so an unknown kind here would be a compiler bug,
+// not a user-facing error.
+func TypedArrayType(elemKind string) Type {
+	elemTy, ok := typedArrayElemKindToType[elemKind]
+	if !ok {
+		panic("TypedArrayType: unknown element kind " + elemKind)
+	}
+	ty := ArrayOf(elemTy)
+	ty.IsTypedArray = true
 	return ty
 }
 
@@ -428,6 +538,28 @@ func ResolveTypeName(name string) Type {
 		return ResponseType()
 	case "Request":
 		return RequestType()
+	case "URL":
+		return URLType()
+	case "URLSearchParams":
+		return URLSearchParamsType()
+	case "ArrayBuffer":
+		return ArrayBufferType()
+	case "Int8Array":
+		return TypedArrayType("int8")
+	case "Uint8Array":
+		return TypedArrayType("uint8")
+	case "Int16Array":
+		return TypedArrayType("int16")
+	case "Uint16Array":
+		return TypedArrayType("uint16")
+	case "Int32Array":
+		return TypedArrayType("int32")
+	case "Uint32Array":
+		return TypedArrayType("uint32")
+	case "Float32Array":
+		return TypedArrayType("float32")
+	case "Float64Array":
+		return TypedArrayType("float64")
 	case "int8":
 		return TypeI8
 	case "int16":

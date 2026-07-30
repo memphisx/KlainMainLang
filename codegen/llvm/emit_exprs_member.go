@@ -319,6 +319,36 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: result, Ty: TypeI64}, nil
 		}
 	}
+	if ex.Property == "byteLength" {
+		// ArrayBuffer: read word 0 of its hidden header struct — same
+		// named-variable-vs-arbitrary-expression split `.size` uses above.
+		if id, ok := ex.Object.(*ast.Identifier); ok {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsArrayBuffer {
+				bufPtr := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufPtr, sym.Ptr))
+				return e.emitArrayBufferByteLength(Value{Ref: bufPtr, Ty: sym.Ty})
+			}
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsTypedArray {
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+				return e.emitTypedArrayByteLength(lenReg, *sym.Ty.ElemType)
+			}
+		} else if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitArrayBufferByteLength(objVal)
+		} else if objTy.IsTypedArray {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, objVal.Ref))
+			return e.emitTypedArrayByteLength(lenReg, *objTy.ElemType)
+		}
+	}
 	if ex.Property == "length" {
 		// Named array variable: load length from its LenPtr alloca.
 		if id, ok := ex.Object.(*ast.Identifier); ok {

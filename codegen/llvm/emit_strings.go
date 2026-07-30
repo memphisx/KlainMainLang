@@ -955,7 +955,7 @@ func (e *Emitter) numberToDouble(mem *ast.MemberExpression) (string, error) {
 
 // emitNumberToExponential implements Number.prototype.toExponential(digits),
 // via sprintf's own %e conversion. Known deviation from real JS, documented
-// in STATUS.md: the exponent is always rendered with a sign and 2 digits
+// in docs/status/NUMBER-MATH.md: the exponent is always rendered with a sign and 2 digits
 // (e.g. "1.23e+03"), whereas real JS always uses the minimum digit count
 // ("1.23e+3") — cosmetic only, the numeric value itself is exact.
 func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -987,8 +987,8 @@ func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.
 // %g strips them). One cleanup %g doesn't do on its own: when the rounded
 // value has no fractional digits left, %#g still emits a bare trailing "."
 // (e.g. "1235.") where JS never would ("1235") — trimmed below by checking
-// the buffer's last byte after formatting. Known, documented (STATUS.md)
-// deviation from real JS for the exponential-notation branch: same 2-digit
+// the buffer's last byte after formatting. Known, documented
+// (docs/status/NUMBER-MATH.md) deviation from real JS for the exponential-notation branch: same 2-digit
 // zero-padded exponent as toExponential, and exact halfway-tie rounding may
 // differ from JS's spec algorithm (glibc uses round-half-to-even; JS does
 // not) — both cosmetic/rare-edge-case, not silent data corruption.
@@ -1049,7 +1049,7 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 // is already in the right place regardless of how many digits end up
 // written. A non-integer receiver is truncated to its integer part first —
 // real JS's toString(radix) can expand fractional digits in the target
-// base too, which this doesn't attempt (documented in STATUS.md); radix is
+// base too, which this doesn't attempt (documented in docs/status/NUMBER-MATH.md); radix is
 // trusted, not validated (must be 2-36 per spec — an out-of-range radix is
 // undefined behavior here, same trust-the-caller stance other built-ins in
 // this compiler already take for arguments there's no runtime check for).

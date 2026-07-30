@@ -127,13 +127,39 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewErrorBody(pos)
 	case "Date":
 		return p.parseNewDateBody(pos)
+	case "URL":
+		return p.parseNewURLBody(pos)
+	case "URLSearchParams":
+		return p.parseNewURLSearchParamsBody(pos)
+	case "ArrayBuffer":
+		return p.parseNewArrayBufferBody(pos)
 	default:
+		if elemKind, ok := typedArrayElemKinds[nameTok.Literal]; ok {
+			return p.parseNewTypedArrayBody(pos, elemKind)
+		}
 		return p.parseNewGenericBody(pos)
 	}
 }
 
+// typedArrayElemKinds maps each of the 8 supported TypedArray constructor
+// names to the element-kind string codegen resolves into a concrete Type
+// (see docs/tdd/TDD-00018.md) — the same lowercase names ResolveTypeName
+// (codegen/llvm/types.go) already understands for JSDoc @type annotations.
+// Uint8ClampedArray/BigInt64Array/BigUint64Array are deliberately absent —
+// out of scope, see the TDD's "Deliberately out of scope" section.
+var typedArrayElemKinds = map[string]string{
+	"Int8Array":    "int8",
+	"Uint8Array":   "uint8",
+	"Int16Array":   "int16",
+	"Uint16Array":  "uint16",
+	"Int32Array":   "int32",
+	"Uint32Array":  "uint32",
+	"Float32Array": "float32",
+	"Float64Array": "float64",
+}
+
 // parseNewGenericBody parses `new ClassName(args)` for anything that isn't
-// one of the five hardcoded builtin forms above. Codegen doesn't act on this
+// one of the hardcoded builtin forms above. Codegen doesn't act on this
 // yet (TDD-00009 Stage 1) — it's front-end groundwork only.
 func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	nameTok := p.advance() // consume class name
@@ -205,6 +231,75 @@ func (p *Parser) parseNewErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error)
 		return nil, err
 	}
 	return ast.NewNewErrorExpression(msg, pos), nil
+}
+
+func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
+	p.advance() // consume 'URL'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	url, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewURLExpression(url, pos), nil
+}
+
+func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchParamsExpression, error) {
+	p.advance() // consume 'URLSearchParams'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var init ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewURLSearchParamsExpression(init, pos), nil
+}
+
+func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
+	p.advance() // consume 'ArrayBuffer'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	byteLength, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewArrayBufferExpression(byteLength, pos), nil
+}
+
+// parseNewTypedArrayBody parses `new Int8Array(...)`/.../`new
+// Float64Array(...)` — a single argument whose meaning (size / existing
+// ArrayBuffer / array-like to copy) is only knowable at codegen time, once
+// static types are available (see docs/tdd/TDD-00018.md), so the parser
+// just captures the one expression generically.
+func (p *Parser) parseNewTypedArrayBody(pos ast.Pos, elemKind string) (*ast.NewTypedArrayExpression, error) {
+	p.advance() // consume the constructor name (e.g. 'Uint8Array')
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	arg, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewTypedArrayExpression(elemKind, arg, pos), nil
 }
 
 func (p *Parser) parseNewArrayBody(pos ast.Pos) (*ast.NewArrayExpression, error) {

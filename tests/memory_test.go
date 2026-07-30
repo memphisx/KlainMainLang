@@ -6,7 +6,7 @@ import (
 
 // --- Memory.free(x) ---
 //
-// Stage 1 of the staged manual-memory-management plan in STATUS.md: a raw,
+// Stage 1 of the staged manual-memory-management plan in docs/status/MEMORY-MANAGEMENT.md: a raw,
 // unsafe, shallow free. String literals are interned as compile-time global
 // constants, not malloc'd, so every string test here uses a concatenation
 // result (guaranteed heap-allocated) rather than a bare literal.

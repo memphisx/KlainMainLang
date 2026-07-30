@@ -88,6 +88,7 @@ type Emitter struct {
 	usedFetchAsync           bool
 	usedPromiseCombinators   bool
 	usedCurlSlist            bool
+	usedCurlURL              bool
 	usedFopen                bool
 	usedFclose               bool
 	usedFwrite               bool
@@ -114,6 +115,9 @@ type Emitter struct {
 	usedProcessChdir         bool
 	usedGetpid               bool
 	usedProcessKill          bool
+	usedSignalHandler        bool
+	usedSignalSigint         bool
+	usedSignalSigterm        bool
 	usedErrnoAccessor        bool
 	usedStrerror             bool
 	usedFsMkdir              bool

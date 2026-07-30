@@ -8,11 +8,11 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`STATUS.md`](STATUS.md)**: a feature-by-feature matrix with coverage percentages, because vague marketing copy is worse than a spreadsheet — and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **82% of core TypeScript language features**, **~82% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and friends — the request line parses any HTTP verb, and headers/query-string/request-body/response-headers are all parsed now too; only graceful shutdown remains), and a much scrappier **~25% of genuine browser/WHATWG-style Web Platform APIs** (`fetch` and `setTimeout` exist, `WebSocket` doesn't: priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`docs/status/`](docs/status/README.md)**: a feature-by-feature matrix, split one page per feature area, with coverage percentages — because vague marketing copy is worse than a spreadsheet, and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **79% of core TypeScript language features**, **~36% of Node.js-style APIs** (`fs`, `process`, and a real `http.listen` server are all solid, but a 2026-07-30 audit against the actual source found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, and more — none of it implemented yet), and **~38% of genuine browser/WHATWG-style Web Platform APIs** (`fetch`, `setTimeout`, `URL`, and `ArrayBuffer`/TypedArrays exist, `WebSocket` doesn't: priorities are a journey, not a destination).
 
 Classes exist too: fields, constructors, methods, `this`, `new ClassName(args)`, and `instanceof` against user-defined classes are all implemented (no inheritance yet — see [TDD-00009](docs/tdd/TDD-00009.md)). And the compiler now fuzzes itself: `go test -fuzz` lanes cover the lexer, parser, and the full parse-through-binary pipeline (an arithmetic oracle plus a crash-only well-formedness fuzzer — see [TDD-00014](docs/tdd/TDD-00014.md)), runnable via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
 
-Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)), and memory management ([TDD-00001](docs/tdd/TDD-00001.md)) — the `manual` and `gc` modes are both real now, only the `auto` mode (compiler-inserted frees, no runtime collector) is still design-only. TDDs are linked from `STATUS.md` rather than bloating it inline.
+Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)), and memory management ([TDD-00001](docs/tdd/TDD-00001.md)) — the `manual` and `gc` modes are both real now, only the `auto` mode (compiler-inserted frees, no runtime collector) is still design-only. TDDs are linked from `docs/status/` rather than bloating it inline.
 
 Want to see it in action instead of reading about it? Every language feature has a runnable example under **[`examples/`](examples/)**: no README code snippets to go stale, just `.ts` files that actually compile and run (verified by `make examples`, every time).
 
@@ -84,7 +84,7 @@ klainmain [flags] <file.ts>
                 immediately with an explanation rather than surfacing a
                 confusing linker error.
   -mm <mode>    Memory management mode: manual (default, Memory.free(x)
-                only — see STATUS.md's Memory Management section) or gc
+                only — see docs/status/MEMORY-MANAGEMENT.md) or gc
                 (Boehm GC: every allocation gets collected automatically,
                 needs bdw-gc/libgc installed — see Requirements above and
                 docs/adr/ADR-00071.md). Works identically on Linux and
@@ -149,7 +149,8 @@ codegen/
     gcsrc/gcshim.c    -mm=gc's C shim: malloc/calloc/realloc/free forwarding to GC_malloc/GC_realloc/GC_free (its own subdirectory since a .c file directly in a Go package dir makes `go build` demand cgo)
 docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
-  tdd/              Technical Design Documents: scoping/design work for big features, referenced from STATUS.md
+  tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
+  status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail
   testing/          Conformance-suite coverage tracking (Test262 ports run alongside the regular test suite)
 docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
@@ -161,7 +162,6 @@ parser/             Recursive-descent parser with Pratt precedence climbing
 resolver/           Module resolver: parses the entry file's transitive imports, merges into one AST
 main.go             CLI entry point
 tests/              End-to-end tests (parse → IR → clang → run → assert on stdout), split by feature area; shared harness in tests/compiler_test.go
-STATUS.md           The actual, current, itemized feature matrix; trust this over any prose
 VERSIONING.md       SemVer policy + the automated release mechanism
 Makefile            Build, test, and example targets
 ```
@@ -181,8 +181,8 @@ Makefile            Build, test, and example targets
 
 ## Things this compiler will cheerfully never do
 
-- Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see `STATUS.md`'s Memory Management section) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
+- Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see [`docs/status/MEMORY-MANAGEMENT.md`](docs/status/MEMORY-MANAGEMENT.md)) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
 - Let an imported file run side-effecting top-level code, or give two unrelated files their own private scope. `import`/`export` exist, but only for sharing declarations; everything still boils down to one merged AST and one `main()` behind the scenes.
 - Judge you for using `var`. (It'll just quietly treat it like `let`. We've all been there.)
 
-If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, `STATUS.md` has the receipts.
+If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, [`docs/status/`](docs/status/README.md) has the receipts.

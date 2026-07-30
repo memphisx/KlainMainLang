@@ -141,6 +141,13 @@ func (e *Emitter) ensureTimerRuntime() {
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureClockGettime()
+	// __kml_timer_drain below unconditionally checks the pending-signal
+	// flags (TDD-00019) at the top of its loop, whether or not this
+	// program ever calls process.on — same "every symbol the loop's IR
+	// mentions must be declared, regardless of whether the specific
+	// feature is used" reasoning ensureHTTPRuntime already documents for
+	// ensureFetchAsync/ensurePromiseCombinators.
+	e.ensureSignalHandlerRuntime()
 	clockID := monotonicClockID()
 	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
 	e.emitGlobal("@__kml_timer_data = internal global ptr null, align 8")
@@ -255,6 +262,48 @@ entry:
   br label %outerloop
 
 outerloop:
+  ; TDD-00019: identical signal-check block to __kml_event_loop_run's own
+  ; (runtime_http.go) — a signal interrupting nanosleep() below just
+  ; returns early with no fd_set-style staleness concern, so no return-
+  ; value check is needed here the way select() needed one.
+  %sigintp = load volatile i8, ptr @__kml_sigint_pending, align 1
+  %sigintset = icmp ne i8 %sigintp, 0
+  br i1 %sigintset, label %sigintfire, label %checksigterm
+
+sigintfire:
+  store volatile i8 0, ptr @__kml_sigint_pending, align 1
+  %sigintclos = load ptr, ptr @__kml_sigint_closure, align 8
+  %hassigint = icmp ne ptr %sigintclos, null
+  br i1 %hassigint, label %sigintcall, label %checksigterm
+
+sigintcall:
+  %sigintfp_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 0
+  %sigintep_p = getelementptr { ptr, ptr }, ptr %sigintclos, i32 0, i32 1
+  %sigintfp = load ptr, ptr %sigintfp_p, align 8
+  %sigintep = load ptr, ptr %sigintep_p, align 8
+  call void %sigintfp(ptr %sigintep)
+  br label %checksigterm
+
+checksigterm:
+  %sigtermp = load volatile i8, ptr @__kml_sigterm_pending, align 1
+  %sigtermset = icmp ne i8 %sigtermp, 0
+  br i1 %sigtermset, label %sigtermfire, label %timerscan
+
+sigtermfire:
+  store volatile i8 0, ptr @__kml_sigterm_pending, align 1
+  %sigtermclos = load ptr, ptr @__kml_sigterm_closure, align 8
+  %hassigterm = icmp ne ptr %sigtermclos, null
+  br i1 %hassigterm, label %sigtermcall, label %timerscan
+
+sigtermcall:
+  %sigtermfp_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 0
+  %sigtermep_p = getelementptr { ptr, ptr }, ptr %sigtermclos, i32 0, i32 1
+  %sigtermfp = load ptr, ptr %sigtermfp_p, align 8
+  %sigtermep = load ptr, ptr %sigtermep_p, align 8
+  call void %sigtermfp(ptr %sigtermep)
+  br label %timerscan
+
+timerscan:
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
   store i64 -1, ptr %besti, align 8
@@ -315,8 +364,15 @@ dosleep:
   %ts_nsec = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 1
   store i64 %waitsec, ptr %ts_sec, align 8
   store i64 %waitnsrem, ptr %ts_nsec, align 8
-  call i32 @nanosleep(ptr %ts, ptr null)
-  br label %dofire
+  %sleeprc = call i32 @nanosleep(ptr %ts, ptr null)
+  ; TDD-00019: a signal (e.g. a process.on-registered SIGINT/SIGTERM)
+  ; interrupts nanosleep() early, well before the timer is actually due —
+  ; firing it now would be genuinely premature, not just early-by-a-bit.
+  ; Loop back to outerloop instead, which checks the pending-signal flags
+  ; first and, if this wasn't actually a signal we care about, simply
+  ; recomputes the (now-shorter) remaining wait and sleeps again.
+  %sleepinterrupted = icmp ne i32 %sleeprc, 0
+  br i1 %sleepinterrupted, label %outerloop, label %dofire
 
 dofire:
   %data2 = load ptr, ptr @__kml_timer_data, align 8

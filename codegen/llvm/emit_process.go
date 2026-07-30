@@ -148,6 +148,46 @@ func (e *Emitter) emitProcessPid() (Value, error) {
 	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
+// emitProcessOn implements process.on('SIGINT' | 'SIGTERM', handler): TDD-00019.
+// The event name must be a compile-time string literal, exactly "SIGINT" or
+// "SIGTERM" — dynamic/computed event names are a clean compile error, the
+// same precedent Object.hasOwn's dynamic-key rejection already sets
+// (emitHasOwnProperty). handler must be a zero-argument, void-returning
+// closure, validated via timerCallbackPtr — the same shape setTimeout/
+// setInterval's own callback already requires. Only one handler per signal
+// is kept (registering the same signal twice overwrites the previous
+// handler), the same single-slot narrowing console.time() already uses.
+// The handler only ever fires from ordinary control flow at the top of the
+// event loop's own iteration (__kml_event_loop_run/__kml_timer_drain), never
+// from real signal context — see ensureSignalHandlerRuntime's doc comment
+// (runtime_process.go) for why.
+func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: process.on takes exactly 2 arguments (event, handler)", pos.Line, pos.Col)
+	}
+	eventLit, ok := args[0].(*ast.StringLiteral)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: process.on requires a string literal event name (dynamic event names are not supported)", pos.Line, pos.Col)
+	}
+
+	closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
+	if err != nil {
+		return Value{}, err
+	}
+
+	switch eventLit.Value {
+	case "SIGINT":
+		e.ensureSignalRegisteredSigint()
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigint_closure", closurePtr))
+	case "SIGTERM":
+		e.ensureSignalRegisteredSigterm()
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigterm_closure", closurePtr))
+	default:
+		return Value{}, fmt.Errorf("%d:%d: process.on only supports 'SIGINT'/'SIGTERM' (got %q)", pos.Line, pos.Col, eventLit.Value)
+	}
+	return Value{Ty: TypeVoid}, nil
+}
+
 // emitProcessKill implements process.kill(pid, signal?): sends signal (SIGTERM,
 // 15, if omitted — matching real Node's own default) to pid via POSIX kill(),
 // throwing a catchable Error if the target process doesn't exist or the

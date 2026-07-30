@@ -10,20 +10,56 @@ import (
 // Object variable declarations, destructuring, and Object static methods (groupBy, keys).
 
 // emitObjectLiteral allocates a heap struct for an object literal and returns
-// a ptr Value. Field values are emitted recursively, so nested object literals
-// work without any special handling at the call site.
+// a ptr Value, with no externally-declared expected type available (the
+// literal's own self-inferred shape, from inferObjectType, is the only type
+// information there is — e.g. an untyped `const x = {...}`). See
+// emitObjectLiteralWithHint for the case where one is known.
+func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
+	return e.emitObjectLiteralWithHint(lit, nil)
+}
+
+// emitExprWithObjectHint evaluates expr normally, except when expr is an
+// object literal and hint is a known object type: then the literal's fields
+// are coerced against hint's declared field types instead of the literal's
+// own self-inferred ones (see docs/tdd/TDD-00007.md). Every call site that
+// knows an expression's statically-declared expected type (a variable
+// declaration's annotation, a function parameter's declared type, a
+// function's declared return type, an array's declared element type) should
+// go through this instead of a bare e.emitExpr, so `{ x: 1, y: 40.6 }`
+// assigned/passed/returned into a `{ x: number, y: number }`-shaped slot
+// gets `y` coerced to i64 (40) rather than silently reinterpreting its raw
+// float64 bit pattern as an i64 — the exact bug TDD-00007 found.
+func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value, error) {
+	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
+		return e.emitObjectLiteralWithHint(lit, &hint)
+	}
+	return e.emitExpr(expr)
+}
+
+// emitObjectLiteralWithHint is emitObjectLiteral's real implementation. When
+// hint is non-nil and IsObject, the literal is built against hint's declared
+// field layout (types, and therefore struct size/GEP indices) instead of the
+// literal's own self-inferred one — see docs/tdd/TDD-00007.md for why this
+// is the fix (the coercion mechanism, `storeField`'s `e.coerce(val,
+// fieldTy)`, already existed and already worked; it was just never given
+// the declared type to coerce against). A nested object-literal-typed field
+// gets its own field type threaded through as the hint for that nested
+// literal, via emitExprWithObjectHint below, so nesting depth needs no
+// special handling here either.
 //
 // Properties (including spreads) are processed in source order, each storing
 // straight into its field's slot in the final (already fully-merged) struct
-// layout computed by inferObjectType — a later property or spread simply
-// overwrites an earlier store at the same GEP index, which is exactly JS's
-// last-write-wins object spread semantics, with no separate merge bookkeeping
-// needed here.
-func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
+// layout — a later property or spread simply overwrites an earlier store at
+// the same GEP index, which is exactly JS's last-write-wins object spread
+// semantics, with no separate merge bookkeeping needed here.
+func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) (Value, error) {
 	if lit.HasComputedKey() {
 		return e.emitDynamicObjectLiteral(lit)
 	}
 	ty := e.inferObjectType(lit)
+	if hint != nil && hint.IsObject {
+		ty = *hint
+	}
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
@@ -63,7 +99,15 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 			}
 			continue
 		}
-		val, err := e.emitExpr(prop.Value)
+		// Look up the field's declared type (from the hinted/self-inferred
+		// ty, whichever applies) before evaluating the property's value, so
+		// a nested object-literal-typed field can have its own type
+		// threaded through as a hint too.
+		var fieldHint Type
+		if _, fieldTy, ok := ty.FieldIndex(prop.Key); ok {
+			fieldHint = fieldTy
+		}
+		val, err := e.emitExprWithObjectHint(prop.Value, fieldHint)
 		if err != nil {
 			return Value{}, err
 		}
@@ -187,7 +231,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 
 	switch init := v.Init.(type) {
 	case *ast.ObjectLiteral:
-		val, err := e.emitObjectLiteral(init)
+		val, err := e.emitObjectLiteralWithHint(init, &ty)
 		if err != nil {
 			return err
 		}
@@ -689,7 +733,7 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 // object-field write site (emitAssign's object-field-assignment branch,
 // emitObjectAssign's target). A real dynamic property bag (add/delete at
 // runtime) is a possible future direction — not designed or started here,
-// tracked only as a note in STATUS.md — and wouldn't change this function
+// tracked only as a note in docs/status/OBJECT-COLLECTIONS.md — and wouldn't change this function
 // itself, only what "no dynamic add/delete" needs to actively enforce once
 // it exists.
 func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, error) {

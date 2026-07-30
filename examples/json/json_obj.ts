@@ -17,8 +17,8 @@ const person = { name: 'Alexandros', address: { city: 'Thessaloniki', zip: 10001
 console.log(JSON.stringify(person))
 // {"name":"Alexandros","address":{"city":"Thessaloniki","zip":10001}}
 
-// float-typed fields (literal-inferred, not via an interface — see STATUS.md's
-// Known Limitations for the separate interface-float-field gap)
+// float-typed fields (literal-inferred, not via an interface — see
+// docs/status/JSON.md for current JSON.stringify/parse scope and limitations)
 const result = { score: 9.5 }
 console.log(JSON.stringify(result))
 // {"score":9.5}

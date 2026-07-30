@@ -2,7 +2,7 @@
 // typeof (a genuine runtime check for these, unlike every other type), and
 // ===/!== equality. Arithmetic, function parameters/returns, and array/object
 // element types are not yet supported for any/unknown and give a clean
-// compile-time error instead of broken output — see STATUS.md.
+// compile-time error instead of broken output — see docs/status/TYPE-SYSTEM.md.
 
 // --- reassign across underlying types ---
 let x: any = 5

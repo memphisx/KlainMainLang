@@ -163,6 +163,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessChdir(ex.Args, ex.GetPos())
 			case "kill":
 				return e.emitProcessKill(ex.Args, ex.GetPos())
+			case "on":
+				return e.emitProcessOn(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "fs" {
@@ -395,6 +397,35 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "sort" {
 			return e.emitArraySort(mem, ex.Args, ex.GetPos())
 		}
+		// TypedArray-only methods. TypedArray IS a plain array (IsArray/
+		// ElemType — see IsTypedArray's doc comment), so indexing/.length/
+		// .fill/.slice/.reverse/.at/.indexOf/.includes/.map/.filter/
+		// .reduce/.forEach/.some/.every/for-of/.keys()/.values()/.entries()
+		// all already dispatch correctly via the unguarded array-property
+		// checks above and the generic array-HOF checks below with zero
+		// changes; only these two names (no `number[]` equivalent to
+		// collide with) need TypedArray-specific behavior.
+		if objTy := e.inferExprType(mem.Object); objTy.IsTypedArray {
+			switch mem.Property {
+			case "set":
+				return e.emitTypedArraySet(mem, ex.Args, ex.GetPos())
+			case "subarray":
+				return e.emitTypedArraySubarray(mem, ex.Args, ex.GetPos())
+			}
+		}
+		// URLSearchParams-only methods, checked before the generic Map
+		// dispatch right below (URLSearchParams IS a Map<string,string> —
+		// see IsURLSearchParams's doc comment — so get/set/has/delete/etc.
+		// all fall through to that generic path unchanged; only these two
+		// names need URLSearchParams-specific behavior).
+		if objTy := e.inferExprType(mem.Object); objTy.IsURLSearchParams {
+			switch mem.Property {
+			case "toString":
+				return e.emitURLSearchParamsToString(mem.Object, ex.GetPos())
+			case "getAll":
+				return e.emitURLSearchParamsGetAll(mem, ex.Args, ex.GetPos())
+			}
+		}
 		// Map<K,V> and Set<T> method dispatch. Checked before the generic
 		// "forEach" name below, since both Array and Map/Set have a
 		// forEach — the array codegen must not run for a Map/Set receiver.
@@ -546,7 +577,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 							argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 						}
 					} else {
-						val, err := e.emitExpr(arg)
+						val, err := e.emitExprWithObjectHint(arg, paramTy)
 						if err != nil {
 							return Value{}, err
 						}
@@ -565,7 +596,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					}
 				} else if i < len(sig.Defaults) && sig.Defaults[i] != nil {
 					// Evaluate default expression at call site.
-					val, err := e.emitExpr(sig.Defaults[i])
+					val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
 					if err != nil {
 						return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
 					}
@@ -597,7 +628,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					dataReg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
 					for i, arg := range restArgs {
-						val, err := e.emitExpr(arg)
+						val, err := e.emitExprWithObjectHint(arg, elemTy)
 						if err != nil {
 							return Value{}, err
 						}

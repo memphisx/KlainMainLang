@@ -591,6 +591,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayOf(entryTy)
 				case "set":
 					return objTy
+				case "toString":
+					if objTy.IsURLSearchParams {
+						return TypePtr
+					}
+				case "getAll":
+					if objTy.IsURLSearchParams {
+						return ArrayOf(TypePtr)
+					}
 				}
 			}
 			if haveObjTy && objTy.IsSet {
@@ -679,6 +687,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 				return TypePtr // string.slice
 			case "map":
+				// A TypedArray's .map() always returns the same TypedArray
+				// kind as the receiver (matching emitArrayMap's own
+				// behavior, emit_arrays_hof.go) — checked before the
+				// callback-return-type inference below, which would
+				// otherwise disagree with what actually gets emitted for
+				// an unannotated `const x = typedArr.map(...)`.
+				if recvTy := e.inferExprType(mem.Object); recvTy.IsTypedArray {
+					return recvTy
+				}
 				if len(ex.Args) == 1 {
 					if af, ok := ex.Args[0].(*ast.ArrowFunction); ok {
 						var retTy Type
@@ -722,6 +739,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return errorObjType
 	case *ast.NewDateExpression:
 		return TypeDate
+	case *ast.NewURLExpression:
+		return URLType()
+	case *ast.NewURLSearchParamsExpression:
+		return URLSearchParamsType()
+	case *ast.NewArrayBufferExpression:
+		return ArrayBufferType()
 	case *ast.ObjectLiteral:
 		return e.inferObjectType(ex)
 	case *ast.ArrowFunction:
