@@ -118,3 +118,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00077](ADR-00077.md) | Coerce object literal fields against their declared type | Implements [TDD-00007](../tdd/TDD-00007.md) |
 | [00078](ADR-00078.md) | `ArrayBuffer` / TypedArrays | Implements [TDD-00018](../tdd/TDD-00018.md) |
 | [00079](ADR-00079.md) | POSIX signal handling — `process.on('SIGINT'/'SIGTERM', handler)` | Extends [ADR-00072](ADR-00072.md). Implements [TDD-00019](../tdd/TDD-00019.md) |
+| [00080](ADR-00080.md) | Fix `-mm=gc` startup crash on Ubuntu's `libgc-dev` build | Extends [ADR-00071](ADR-00071.md) |
