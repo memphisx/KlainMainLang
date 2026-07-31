@@ -65,8 +65,15 @@ type FunctionDeclaration struct {
 	Name       string
 	Params     []Param
 	ReturnType *TypeAnnotation
-	Body       *BlockStatement
+	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
 	IsAsync    bool
+	// IsStatic/Visibility/IsAbstract are TDD-00009 Stage 4 class-member
+	// modifiers, meaningful only for a class's Constructor/Methods entries
+	// — always zero-value for a plain top-level function, same "harmless
+	// zero-value elsewhere" shape IsAsync already established.
+	IsStatic   bool
+	Visibility string // "private" / "protected" / "" (public, default)
+	IsAbstract bool
 	pos        Pos
 }
 
@@ -840,17 +847,29 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
-	Name   string
-	Fields []AnnotField
-	pos    Pos
+	Name    string
+	Fields  []AnnotField
+	Methods []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
+	pos     Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()  {}
 func (*InterfaceDeclaration) stmtMarker() {}
 func (i *InterfaceDeclaration) GetPos() Pos { return i.pos }
 
-func NewInterfaceDeclaration(name string, fields []AnnotField, pos Pos) *InterfaceDeclaration {
-	return &InterfaceDeclaration{Name: name, Fields: fields, pos: pos}
+func NewInterfaceDeclaration(name string, fields []AnnotField, methods []InterfaceMethodSig, pos Pos) *InterfaceDeclaration {
+	return &InterfaceDeclaration{Name: name, Fields: fields, Methods: methods, pos: pos}
+}
+
+// InterfaceMethodSig is a method signature declared inside an interface
+// body (TDD-00009 Stage 4, for `implements` conformance checking) —
+// signature only, never a body, so it's a distinct lightweight node rather
+// than reusing FunctionDeclaration (which always carries a Body field that
+// would only ever be nil here).
+type InterfaceMethodSig struct {
+	Name       string
+	Params     []Param
+	ReturnType *TypeAnnotation
 }
 
 // ClassDeclaration — `class Name { field: type; ...; constructor(...) {...} method(...) {...} }`.
@@ -862,19 +881,43 @@ func NewInterfaceDeclaration(name string, fields []AnnotField, pos Pos) *Interfa
 // 1), not part of this node's shape.
 type ClassDeclaration struct {
 	Name        string
+	BaseClass   string // "" if no `extends` clause (TDD-00009 Stage 3)
 	Fields      []AnnotField
 	Constructor *FunctionDeclaration // nil if omitted
 	Methods     []*FunctionDeclaration
-	pos         Pos
+	// IsAbstract/Implements/StaticBlocks are TDD-00009 Stage 4.
+	// StaticBlocks are concatenated in declaration order into one
+	// per-class initializer, run once before any top-level statement.
+	IsAbstract   bool
+	Implements   []string
+	StaticBlocks []*BlockStatement
+	pos          Pos
 }
 
 func (*ClassDeclaration) nodeMarker()  {}
 func (*ClassDeclaration) stmtMarker() {}
 func (c *ClassDeclaration) GetPos() Pos { return c.pos }
 
-func NewClassDeclaration(name string, fields []AnnotField, ctor *FunctionDeclaration, methods []*FunctionDeclaration, pos Pos) *ClassDeclaration {
-	return &ClassDeclaration{Name: name, Fields: fields, Constructor: ctor, Methods: methods, pos: pos}
+func NewClassDeclaration(name, baseClass string, isAbstract bool, implements []string, fields []AnnotField, ctor *FunctionDeclaration, methods []*FunctionDeclaration, staticBlocks []*BlockStatement, pos Pos) *ClassDeclaration {
+	return &ClassDeclaration{Name: name, BaseClass: baseClass, IsAbstract: isAbstract, Implements: implements, Fields: fields, Constructor: ctor, Methods: methods, StaticBlocks: staticBlocks, pos: pos}
 }
+
+// SuperExpression — bare `super`, valid inside a derived class's
+// method/constructor body (TDD-00009 Stage 3). Reuses the existing
+// CallExpression/MemberExpression machinery exactly like ThisExpression
+// does: `super(args)` parses as CallExpression{Callee: *SuperExpression},
+// and `super.method(args)` parses as CallExpression{Callee:
+// MemberExpression{Object: *SuperExpression}} — codegen special-cases both
+// shapes rather than needing dedicated AST nodes.
+type SuperExpression struct {
+	pos Pos
+}
+
+func (*SuperExpression) nodeMarker()  {}
+func (*SuperExpression) exprMarker() {}
+func (s *SuperExpression) GetPos() Pos { return s.pos }
+
+func NewSuperExpression(pos Pos) *SuperExpression { return &SuperExpression{pos: pos} }
 
 // TypeAliasDeclaration — `type Name = TypeAnnotation`
 type TypeAliasDeclaration struct {
@@ -945,6 +988,14 @@ func NewImportDeclaration(specs []ImportSpecifier, source string, pos Pos) *Impo
 type AnnotField struct {
 	Name string
 	Type *TypeAnnotation
+	// Static/Visibility are TDD-00009 Stage 4 class-member modifiers,
+	// meaningful only when this AnnotField is one of a ClassDeclaration's
+	// Fields — always zero-value ("", false) for every other reuse of this
+	// shared type (interface fields, plain object-type annotations), same
+	// "harmless zero-value elsewhere" precedent FunctionDeclaration.IsAsync
+	// already established.
+	Static     bool
+	Visibility string // "private" / "protected" / "" (public, default)
 }
 
 // TypeAnnotation holds the resolved type name from TS syntax or JSDoc.

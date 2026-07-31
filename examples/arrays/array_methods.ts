@@ -263,3 +263,37 @@ console.log(cw[2])           // 3 (untouched — copy length was clamped)
 let built = Array.of(10, 20, 30)
 console.log(built.length)    // 3
 console.log(built[1])        // 20
+
+// =============================================================================
+// Array.from — the array-like overload: a plain array (a fresh, independent
+// copy) or a class implementing the Stage 1a iterator protocol
+// (next(): T | null)
+// =============================================================================
+
+let srcArr = [1, 2, 3]
+let copyArr: number[] = Array.from(srcArr)
+console.log(copyArr.length)  // 3
+console.log(copyArr[0])      // 1
+srcArr[0] = 99
+console.log(copyArr[0])      // 1 (independent copy, unaffected by the mutation above)
+
+class CountUp {
+    private current: number
+    private max: number
+    constructor(max: number) {
+        this.current = 1
+        this.max = max
+    }
+    next(): number | null {
+        if (this.current > this.max) {
+            return null
+        }
+        const v = this.current
+        this.current = this.current + 1
+        return v
+    }
+}
+let fromIter: number[] = Array.from(new CountUp(4))
+console.log(fromIter.length) // 4
+console.log(fromIter[0])     // 1
+console.log(fromIter[3])     // 4

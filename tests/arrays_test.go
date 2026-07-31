@@ -680,3 +680,75 @@ console.log(r.length)
 console.log(r[1])
 `, "3\n20")
 }
+
+// --- Array.from ---
+
+func TestE2EArrayFromArray(t *testing.T) {
+	assertOutput(t, `
+const src: number[] = [1, 2, 3]
+const copy: number[] = Array.from(src)
+console.log(copy.length)
+console.log(copy[0])
+console.log(copy[1])
+console.log(copy[2])
+src[0] = 99
+console.log(copy[0])
+console.log(src[0])
+`, "3\n1\n2\n3\n1\n99")
+}
+
+func TestE2EArrayFromStringArray(t *testing.T) {
+	assertOutput(t, `
+const src: string[] = ["a", "b", "c"]
+const copy: string[] = Array.from(src)
+console.log(copy.length)
+console.log(copy.join(","))
+`, "3\na,b,c")
+}
+
+func TestE2EArrayFromClassIterator(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+  private current: number;
+  private max: number;
+  constructor(max: number) {
+    this.current = 1;
+    this.max = max;
+  }
+  next(): number | null {
+    if (this.current > this.max) {
+      return null;
+    }
+    const v = this.current;
+    this.current = this.current + 1;
+    return v;
+  }
+}
+const arr: number[] = Array.from(new Counter(5))
+console.log(arr.length)
+for (const x of arr) {
+  console.log(x)
+}
+`, "5\n1\n2\n3\n4\n5")
+}
+
+func TestE2EArrayFromEmptyClassIterator(t *testing.T) {
+	assertOutput(t, `
+class Empty {
+  next(): number | null {
+    return null;
+  }
+}
+const arr: number[] = Array.from(new Empty())
+console.log(arr.length)
+`, "0")
+}
+
+func TestE2EArrayFromNonIterableIsError(t *testing.T) {
+	if _, err := parseAndCompile(`
+const x: number = 5
+const arr: number[] = Array.from(x)
+`); err == nil {
+		t.Fatal("expected a compile error for Array.from on a non-iterable")
+	}
+}

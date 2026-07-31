@@ -41,3 +41,11 @@ try {
   console.log('e.name = ' + e.name)
   console.log('instanceof Error: ' + (e instanceof Error))
 }
+
+// Optional catch binding: `catch { ... }` with no `(e)` at all — useful when
+// only the fact that something threw matters, not the error value itself.
+try {
+  throw new Error('ignored')
+} catch {
+  console.log('caught, no binding needed')
+}

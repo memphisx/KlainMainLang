@@ -40,9 +40,9 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00004](TDD-00004.md) | HTTP Server | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00072](../adr/ADR-00072.md)) |
 | [00005](TDD-00005.md) | Unannotated parameter typing | Partially Implemented ([ADR-00042](../adr/ADR-00042.md)) |
 | [00006](TDD-00006.md) | Event Loop | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00050](../adr/ADR-00050.md), [ADR-00051](../adr/ADR-00051.md), [ADR-00052](../adr/ADR-00052.md)) |
-| [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Not Started |
+| [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Implemented ([ADR-00077](../adr/ADR-00077.md)) |
 | [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented ([ADR-00047](../adr/ADR-00047.md)) |
-| [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Partially Implemented ([ADR-00062](../adr/ADR-00062.md), [ADR-00063](../adr/ADR-00063.md), [ADR-00064](../adr/ADR-00064.md), [ADR-00067](../adr/ADR-00067.md)) |
+| [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Implemented ([ADR-00062](../adr/ADR-00062.md), [ADR-00063](../adr/ADR-00063.md), [ADR-00064](../adr/ADR-00064.md), [ADR-00067](../adr/ADR-00067.md), [ADR-00083](../adr/ADR-00083.md), [ADR-00084](../adr/ADR-00084.md)) |
 | [00010](TDD-00010.md) | Generics on user-defined functions and interfaces | Not Started |
 | [00011](TDD-00011.md) | IndexedDB-Compatible Storage API (pluggable embedded/proxy backends) | Not Started |
 | [00012](TDD-00012.md) | Computed property keys (`{ [expr]: value }`) | Implemented ([ADR-00066](../adr/ADR-00066.md)) |
@@ -54,3 +54,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00018](TDD-00018.md) | `ArrayBuffer` / TypedArrays | Implemented ([ADR-00078](../adr/ADR-00078.md)) |
 | [00019](TDD-00019.md) | POSIX signal handling (`process.on('SIGINT'/'SIGTERM', handler)`) | Implemented ([ADR-00079](../adr/ADR-00079.md)) |
 | [00020](TDD-00020.md) | Windows support | Not Started |
+| [00021](TDD-00021.md) | `#x` real private fields | Not Started |
+| [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started |

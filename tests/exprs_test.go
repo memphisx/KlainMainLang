@@ -2,6 +2,8 @@ package tests
 
 import (
 	"testing"
+
+	"KlainMainLang/parser"
 )
 
 // --- Single quotes and optional semicolons ---
@@ -150,6 +152,108 @@ console.log(a & b)
 const perms: number = 0o755
 console.log(perms)
 `, "7\n0\n493")
+}
+
+// --- Numeric separators (1_000_000) ---
+
+func TestE2ENumericSeparators(t *testing.T) {
+	assertOutput(t, `
+const million: number = 1_000_000
+console.log(million)
+const hex: number = 0x1_FF
+console.log(hex)
+const bin: number = 0b1010_0101
+console.log(bin)
+const oct: number = 0o7_55
+console.log(oct)
+let pi = 3.14_159
+console.log(pi)
+`, "1000000\n511\n165\n493\n3.14159")
+}
+
+// --- Logical assignment operators (&&=, ||=, ??=) ---
+
+func TestE2ELogicalAndAssign(t *testing.T) {
+	assertOutput(t, `
+let a: number = 5
+a &&= 10
+console.log(a)
+let b: number = 0
+b &&= 10
+console.log(b)
+`, "10\n0")
+}
+
+func TestE2ELogicalOrAssign(t *testing.T) {
+	assertOutput(t, `
+let a: number = 0
+a ||= 7
+console.log(a)
+let b: number = 3
+b ||= 7
+console.log(b)
+`, "7\n3")
+}
+
+func TestE2ENullishAssign(t *testing.T) {
+	assertOutput(t, `
+let a: string | null = null
+a ??= "default"
+console.log(a)
+let b: string | null = "keep"
+b ??= "default"
+console.log(b)
+`, "default\nkeep")
+}
+
+func TestE2ELogicalAssignRHSNotEvaluatedWhenShortCircuited(t *testing.T) {
+	// The right side must never run down the short-circuited branch — not
+	// just "produce the right final value" but genuinely skip the call.
+	assertOutput(t, `
+function sideEffect(): number {
+  console.log('called')
+  return 99
+}
+let a: number = 5
+a &&= sideEffect()
+console.log(a)
+let b: number = 1
+b ||= sideEffect()
+console.log(b)
+`, "called\n99\n1")
+}
+
+func TestE2ELogicalAssignOnFieldsArraysAndStatics(t *testing.T) {
+	assertOutput(t, `
+interface Box { val: number }
+const box: Box = { val: 0 }
+box.val ||= 42
+console.log(box.val)
+
+const arr: number[] = [0, 5]
+arr[0] ||= 99
+arr[1] &&= 3
+console.log(arr[0])
+console.log(arr[1])
+
+class Counter {
+  static count: number;
+  static {
+    Counter.count = 0
+  }
+}
+Counter.count ||= 100
+console.log(Counter.count)
+`, "42\n99\n3\n100")
+}
+
+func TestE2ENumericSeparatorMisplacedIsError(t *testing.T) {
+	if _, err := parser.Parse(`const x: number = 1__000`); err == nil {
+		t.Fatal("expected a compile error for a doubled numeric separator, got none")
+	}
+	if _, err := parser.Parse(`const y: number = 1_`); err == nil {
+		t.Fatal("expected a compile error for a trailing numeric separator, got none")
+	}
 }
 
 // --- Null coalescing ?? ---

@@ -616,6 +616,10 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.THIS:
 		p.advance()
 		return ast.NewThisExpression(posOf(tok)), nil
+
+	case lexer.SUPER:
+		p.advance()
+		return ast.NewSuperExpression(posOf(tok)), nil
 	}
 
 	return nil, fmt.Errorf("%d:%d: unexpected token %s in expression", tok.Line, tok.Col, tok.Type)

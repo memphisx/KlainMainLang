@@ -129,3 +129,166 @@ console.log(shapeA instanceof Circle); // 1
 console.log(shapeA instanceof Node);   // 0
 console.log(shapeB instanceof Node);   // 1
 console.log(shapeB instanceof Circle); // 0
+
+// Stage 3: inheritance (extends/super) + dynamic dispatch. Shape's own
+// area() is overridden by both Rectangle and RightTriangle; describe() —
+// declared once on Shape, never overridden — calls this.area() and must
+// resolve to whichever concrete override actually applies, even when called
+// through a Shape-typed parameter that doesn't statically know which
+// subclass it's holding.
+class Shape {
+  label: string;
+  constructor(label: string) {
+    this.label = label;
+  }
+  area(): number {
+    return 0;
+  }
+  describe(): string {
+    return this.label + " has area " + this.area().toString();
+  }
+}
+
+class Rectangle extends Shape {
+  width: number;
+  height: number;
+  constructor(width: number, height: number) {
+    super("rectangle");
+    this.width = width;
+    this.height = height;
+  }
+  area(): number {
+    return this.width * this.height;
+  }
+}
+
+class RightTriangle extends Shape {
+  base: number;
+  height: number;
+  constructor(base: number, height: number) {
+    super("triangle");
+    this.base = base;
+    this.height = height;
+  }
+  area(): number {
+    return Math.floor((this.base * this.height) / 2);
+  }
+  // super.method(): explicitly extend rather than replace the base's own
+  // behavior — the vtable dispatch describe() itself uses is bypassed here
+  // on purpose, since this call already knows exactly which implementation
+  // it wants.
+  describe(): string {
+    return super.describe() + " (a right triangle)";
+  }
+}
+
+function printShape(s: Shape): void {
+  // s's static type is Shape — area() is only resolved to the right
+  // concrete override at runtime, via each instance's own vtable.
+  console.log(s.describe());
+}
+printShape(new Rectangle(3, 4));      // rectangle has area 12
+printShape(new RightTriangle(6, 5));  // triangle has area 15 (a right triangle)
+
+const rect: Shape = new Rectangle(2, 5);
+console.log(rect instanceof Shape);      // 1 — true through inheritance
+console.log(rect instanceof Rectangle);  // 1
+console.log(rect instanceof RightTriangle); // 0
+
+const anyShape: any = new RightTriangle(3, 4);
+console.log(anyShape instanceof Shape);        // 1
+console.log(anyShape instanceof RightTriangle); // 1
+console.log(anyShape instanceof Rectangle);     // 0
+
+// Stage 4: static members + static {} blocks. A static field/method
+// belongs to the class itself, not an instance — no `this`, accessed only
+// via ClassName.member. static {} runs once, before any top-level
+// statement, the closest thing this compiler has to a field initializer.
+class Registry {
+  static count: number;
+  static {
+    Registry.count = 0;
+  }
+  static register(): number {
+    Registry.count = Registry.count + 1;
+    return Registry.count;
+  }
+}
+console.log(Registry.register()); // 1
+console.log(Registry.register()); // 2
+
+// Stage 4: private/protected — compile-time-only visibility, matching real
+// TypeScript's own erasure (no runtime check ever emitted). A private
+// member is only accessible from inside its own declaring class; protected
+// additionally allows subclasses.
+class BankAccount {
+  private balance: number;
+  protected owner: string;
+  constructor(balance: number, owner: string) {
+    this.balance = balance;
+    this.owner = owner;
+  }
+  private describeBalance(): string {
+    return "balance is " + this.balance.toString();
+  }
+  summary(): string {
+    return this.describeBalance() + " (owner: " + this.owner + ")";
+  }
+}
+class NamedSavingsAccount extends BankAccount {
+  constructor(balance: number, owner: string) {
+    super(balance, owner);
+  }
+  // `owner` is protected on BankAccount — readable from a subclass, unlike
+  // `balance`, which is private and only readable inside BankAccount itself.
+  greetOwner(): string {
+    return "Hello, " + this.owner;
+  }
+}
+const acct = new BankAccount(100, "Alice");
+console.log(acct.summary()); // balance is 100 (owner: Alice)
+const savings = new NamedSavingsAccount(50, "Bob");
+console.log(savings.greetOwner()); // Hello, Bob
+
+// Stage 4: abstract classes/methods — compile-time-only, reusing Stage 3's
+// override machinery: an abstract method behaves exactly like an
+// overridden virtual method the moment any concrete subclass provides a
+// real implementation, with zero new dispatch logic. `new Shape2()` itself
+// would be a compile error (no direct instances of an abstract class), and
+// so would a concrete subclass that forgot to override area().
+abstract class Shape2 {
+  abstract area(): number;
+  describe(): string {
+    return "area is " + this.area().toString();
+  }
+}
+class Square extends Shape2 {
+  side: number;
+  constructor(side: number) {
+    this.side = side;
+  }
+  area(): number {
+    return this.side * this.side;
+  }
+}
+console.log(new Square(4).describe()); // area is 16
+
+// Stage 4: implements — a compile-time-only self-check that a class
+// already has the shape an interface declares (fields and method
+// signatures). Purely declarative: it doesn't make Greeter-typed variables
+// polymorphically dispatch to a class's methods, just validates Dog's own
+// shape against Greeter at declaration time.
+interface Greeter {
+  name: string;
+  greet(): string;
+}
+class Dog implements Greeter {
+  name: string;
+  constructor(name: string) {
+    this.name = name;
+  }
+  greet(): string {
+    return "Woof, I am " + this.name;
+  }
+}
+console.log(new Dog("Rex").greet()); // Woof, I am Rex

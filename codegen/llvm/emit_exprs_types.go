@@ -261,6 +261,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.MemberExpression:
+		// Static field read: ClassName.staticField (TDD-00009 Stage 4).
+		if id, ok := ex.Object.(*ast.Identifier); ok {
+			if info, found := e.classes[id.Name]; found {
+				if fty, ok := info.StaticFieldTypes[ex.Property]; ok {
+					return fty
+				}
+			}
+		}
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if members, found := e.enums[id.Name]; found {
 				if val, ok := members[ex.Property]; ok {
@@ -329,6 +337,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return info.Ty
 		}
 	case *ast.CallExpression:
+		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if id, ok := mem.Object.(*ast.Identifier); ok {
+				if info, found := e.classes[id.Name]; found {
+					if sig, ok := info.StaticMethodSigs[mem.Property]; ok {
+						return sig.RetType
+					}
+				}
+			}
+		}
 		// Class method call: instance.method(args). Checked before every
 		// mem.Property-name-based check below (console/String/Math/... and
 		// the big built-in-name chain further down), since several of those
@@ -476,6 +494,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "of":
 					if len(ex.Args) > 0 {
 						return ArrayOf(e.inferExprType(ex.Args[0]))
+					}
+					return ArrayOf(TypeI64)
+				case "from":
+					if len(ex.Args) == 1 {
+						argTy := e.inferExprType(ex.Args[0])
+						if argTy.IsArray {
+							return ArrayOf(*argTy.ElemType)
+						}
+						if argTy.IsClass {
+							if info, ok3 := e.classes[argTy.ClassName]; ok3 {
+								if sig, ok3 := info.MethodSigs["next"]; ok3 {
+									elemTy := sig.RetType
+									elemTy.Nullable = false
+									return ArrayOf(elemTy)
+								}
+							}
+						}
 					}
 					return ArrayOf(TypeI64)
 				}

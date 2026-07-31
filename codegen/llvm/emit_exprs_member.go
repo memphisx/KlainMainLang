@@ -29,6 +29,11 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		if !ok {
 			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 		}
+		if objVal.Ty.IsClass {
+			if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+		}
 		resultTy = e.canonicalizeClassTy(fieldTy)
 	} else {
 		return Value{}, fmt.Errorf("%d:%d: optional chaining '?.' does not support property '%s' on type %s",
@@ -374,6 +379,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		}
 		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)
 	}
+	// Static field read: ClassName.staticField (TDD-00009 Stage 4) — a bare
+	// class-name identifier is a compile-time namespace, never a real
+	// runtime value, so this must be checked before any attempt to
+	// e.emitExpr(ex.Object) generically (same reasoning Math/JSON/enum
+	// dispatch above already follows).
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if info, found := e.classes[id.Name]; found {
+			return e.emitStaticFieldRead(info, id.Name, ex.Property, ex.GetPos())
+		}
+	}
 	// Enum member access: EnumName.MemberName → compile-time constant.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if members, found := e.enums[id.Name]; found {
@@ -399,6 +414,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+	}
+	if objVal.Ty.IsClass {
+		if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
 	fieldTy = e.canonicalizeClassTy(fieldTy)
 	gepReg := e.freshReg()

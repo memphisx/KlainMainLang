@@ -90,6 +90,14 @@ type Type struct {
 	// a plain structural object literal.
 	IsClass   bool
 	ClassName string
+	// HasVTable marks a class whose instances carry a hidden vtable-pointer
+	// field at index 1 (right after the tag field), for TDD-00009 Stage 3
+	// dynamic dispatch. Only set for a class belonging to an inheritance
+	// tree where at least one method is overridden somewhere in that tree —
+	// see registerClasses' override analysis. A class with no inheritance
+	// relationship at all, or one whose whole tree has zero overrides,
+	// leaves this false and keeps the exact Stage 1/2 single-tag layout.
+	HasVTable bool
 	// IsError marks Error and its built-in subtypes (TypeError, RangeError,
 	// ...) — TDD-00013 Option A. Storage-wise it's an ordinary IsObject heap
 	// struct with a hidden kind tag at field 0 (same ClassTagField-style
@@ -287,36 +295,61 @@ func SettlementType(valueTy Type) Type {
 // (registerClasses).
 const ClassTagField = "__kml_tag"
 
+// ClassVTableField is the name of the hidden vtable-pointer field a class
+// carries at index 1 (right after the tag) when HasVTable is set
+// (TDD-00009 Stage 3) — a plain ptr to that concrete class's own
+// @ClassName_vtable global. Reserved the same way ClassTagField is: a
+// user-declared field with this name is a compile-time error.
+const ClassVTableField = "__kml_vtable"
+
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
-// method-call dispatch can find the class's registered method table. The
-// hidden tag field is always prepended at index 0, ahead of every
-// user-declared field — FieldIndex/StructIR/StructSize all derive from
-// Fields' order generically, so every named field access shifts by +1 for
-// free, with no changes needed at any of those call sites. Callers that
-// enumerate *all* fields for reflection (Object.keys/values/entries, JSON,
-// for...in, spread) must use VisibleFields() instead of Fields directly, or
-// the tag leaks out as a fake user-visible field.
-func ClassType(name string, fields []Field) Type {
-	tagged := append([]Field{{Name: ClassTagField, Ty: TypeI64}}, fields...)
+// method-call dispatch can find the class's registered method table.
+//
+// Field order is: hidden tag (always, index 0) → hidden vtable pointer
+// (only when hasVTable, index 1) → inherited fields (already-flattened,
+// base-first, empty for a root class — TDD-00009 Stage 3) → this class's
+// own newly-declared fields. FieldIndex/StructIR/StructSize all derive
+// from Fields' order generically, so every named field access shifts for
+// free with no changes needed at any of those call sites — this is also
+// exactly what makes base-first layout work: a Derived* struct's prefix is
+// byte-identical to Base*'s own layout, so a Base-typed field access on a
+// Derived instance needs no adjustment. Callers that enumerate *all*
+// fields for reflection (Object.keys/values/entries, JSON, for...in,
+// spread) must use VisibleFields() instead of Fields directly, or the
+// hidden fields leak out as fake user-visible ones.
+func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type {
+	tagged := make([]Field, 0, 2+len(inherited)+len(own))
+	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
+	if hasVTable {
+		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
+	}
+	tagged = append(tagged, inherited...)
+	tagged = append(tagged, own...)
 	ty := ObjectType(tagged)
 	ty.IsClass = true
 	ty.ClassName = name
+	ty.HasVTable = hasVTable
 	return ty
 }
 
 // VisibleFields returns the fields a user should ever see: identical to
-// Fields for every non-class object type, but with the hidden class tag
-// (always field index 0) stripped for a class instance. Use this instead of
-// Fields directly at any reflection/enumeration call site (Object.keys,
-// Object.values, Object.entries, Object.assign, JSON.stringify, for...in,
-// object-literal/spread field copying) — GEP/field-access code should keep
-// using Fields (via FieldIndex) unchanged, since the tag's presence is what
-// makes those indices correct in the first place.
+// Fields for every non-class/non-error object type, but with the hidden
+// leading fields (tag, plus vtable pointer when HasVTable) stripped. Use
+// this instead of Fields directly at any reflection/enumeration call site
+// (Object.keys, Object.values, Object.entries, Object.assign,
+// JSON.stringify, for...in, object-literal/spread field copying) —
+// GEP/field-access code should keep using Fields (via FieldIndex)
+// unchanged, since the hidden fields' presence is what makes those indices
+// correct in the first place.
 func (t Type) VisibleFields() []Field {
 	if t.IsClass && len(t.Fields) > 0 {
-		return t.Fields[1:]
+		skip := 1
+		if t.HasVTable {
+			skip = 2
+		}
+		return t.Fields[skip:]
 	}
 	if t.IsError && len(t.Fields) > 0 {
 		return t.Fields[1:]

@@ -8,7 +8,7 @@ import (
 // --- Expression parsing (precedence climbing) ---
 //
 // Precedence (low → high):
-//   1  assignment  = += -= *= /= &= |= ^= <<= >>= >>>=   (right-assoc)
+//   1  assignment  = += -= *= /= &= |= ^= <<= >>= >>>= &&= ||= ??=   (right-assoc)
 //   2  ||
 //   3  &&
 //   4  |
@@ -36,7 +36,8 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 	case lexer.ASSIGN,
 		lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.SLASH_ASSIGN,
 		lexer.AND_ASSIGN, lexer.OR_ASSIGN, lexer.XOR_ASSIGN,
-		lexer.LSHIFT_ASSIGN, lexer.RSHIFT_ASSIGN, lexer.URSHIFT_ASSIGN:
+		lexer.LSHIFT_ASSIGN, lexer.RSHIFT_ASSIGN, lexer.URSHIFT_ASSIGN,
+		lexer.LOGICAL_AND_ASSIGN, lexer.LOGICAL_OR_ASSIGN, lexer.NULLISH_ASSIGN:
 		opTok := p.advance()
 		right, err := p.parseAssignment() // right-assoc
 		if err != nil {

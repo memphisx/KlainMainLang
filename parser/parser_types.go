@@ -204,7 +204,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		return nil, err
 	}
 	// Skip optional `extends Base` clause.
-	if p.peek().Type == lexer.IDENT && p.peek().Literal == "extends" {
+	if p.peek().Type == lexer.EXTENDS {
 		p.advance() // extends
 		p.advance() // base name
 	}
@@ -212,12 +212,38 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		return nil, err
 	}
 	var fields []ast.AnnotField
+	var methods []ast.InterfaceMethodSig
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
 		fieldTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
+
+		// Method signature (TDD-00009 Stage 4, for `implements` conformance
+		// checking): `name(...): T;` — no body, ever.
+		if p.check(lexer.LPAREN) {
+			p.advance()
+			params, err := p.parseParamList()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+			var retType *ast.TypeAnnotation
+			if p.check(lexer.COLON) {
+				p.advance()
+				retType, err = p.parseTypeAnnotation("ts")
+				if err != nil {
+					return nil, err
+				}
+			}
+			methods = append(methods, ast.InterfaceMethodSig{Name: fieldTok.Literal, Params: params, ReturnType: retType})
+			p.match(lexer.SEMICOLON, lexer.COMMA)
+			continue
+		}
+
 		// Optional marker (name?: type) — accepted but treated as required for codegen.
 		p.match(lexer.QUESTION)
 		if _, err := p.expect(lexer.COLON); err != nil {
@@ -242,7 +268,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewInterfaceDeclaration(nameTok.Literal, fields, pos), nil
+	return ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos), nil
 }
 
 func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {

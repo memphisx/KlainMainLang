@@ -46,13 +46,14 @@ type Emitter struct {
 	usedCalloc               bool
 	usedRealloc              bool
 	usedMemmove              bool
-	funcs                    map[string]FuncSig          // registered function signatures
-	interfaces               map[string]Type             // named interface, type alias, and class registry
-	classes                  map[string]ClassInfo        // named class registry (fields/ctor/methods) — see emit_classes.go
-	enums                    map[string]map[string]Value // enum name → member name → constant value
-	currentRetType           Type                        // return type of the function being emitted
-	blockDone                bool                        // true after a terminator (ret/br) in the current block
-	closureCtr               int                         // monotonically increasing counter for unique closure names
+	funcs                    map[string]FuncSig            // registered function signatures
+	interfaces               map[string]Type               // named interface, type alias, and class registry
+	interfaceMethodSigs      map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
+	classes                  map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
+	enums                    map[string]map[string]Value   // enum name → member name → constant value
+	currentRetType           Type                          // return type of the function being emitted
+	blockDone                bool                          // true after a terminator (ret/br) in the current block
+	closureCtr               int                           // monotonically increasing counter for unique closure names
 	usedStrlen               bool
 	usedMemcpy               bool
 	usedMemset               bool
@@ -178,12 +179,13 @@ type Emitter struct {
 
 func NewEmitter() *Emitter {
 	e := &Emitter{
-		strConsts:      make(map[string]string),
-		funcs:          make(map[string]FuncSig),
-		interfaces:     make(map[string]Type),
-		classes:        make(map[string]ClassInfo),
-		enums:          make(map[string]map[string]Value),
-		currentRetType: TypeI32, // main returns i32
+		strConsts:           make(map[string]string),
+		funcs:               make(map[string]FuncSig),
+		interfaces:          make(map[string]Type),
+		interfaceMethodSigs: make(map[string]map[string]FuncSig),
+		classes:             make(map[string]ClassInfo),
+		enums:               make(map[string]map[string]Value),
+		currentRetType:      TypeI32, // main returns i32
 	}
 	e.pushScope()
 	return e
@@ -452,6 +454,27 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 		}
 	}
 
+	// Pass 2c: emit vtable globals for classes needing dynamic dispatch
+	// (TDD-00009 Stage 3) — a no-op per class outside a HasVTable tree.
+	// Also emit each class's own static field globals (Stage 4) and, for a
+	// class with static {} block(s), its @ClassName_staticinit function —
+	// called once, in declaration order, at the very start of Pass 3 below.
+	var staticInitClasses []string
+	for _, stmt := range prog.Body {
+		cd, ok := stmt.(*ast.ClassDeclaration)
+		if !ok {
+			continue
+		}
+		e.emitClassVTable(cd.Name)
+		e.emitClassStaticFieldGlobals(cd.Name)
+		if len(cd.StaticBlocks) > 0 {
+			if err := e.emitClassStaticInit(cd); err != nil {
+				return "", err
+			}
+			staticInitClasses = append(staticInitClasses, cd.Name)
+		}
+	}
+
 	// Pass 3: emit remaining statements into main().
 	// process.argv is backed by two globals set from main's own argc/argv
 	// parameters, so any expression (top-level code, or any function/closure)
@@ -475,6 +498,14 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 		origReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @GC_stackbottom, align 8", origReg))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_gc_orig_stackbottom, align 8", origReg))
+	}
+
+	// TDD-00009 Stage 4: run every class's static {} block(s) once, in
+	// declaration order, before any of the entry file's own top-level
+	// statements — so top-level code reading a static field always sees
+	// its initialized value.
+	for _, name := range staticInitClasses {
+		e.emitInstr(fmt.Sprintf("call void @%s_staticinit()", name))
 	}
 
 	for _, stmt := range prog.Body {
@@ -569,6 +600,19 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				fields[i] = Field{Name: f.Name, Ty: e.resolveType(f.Type)}
 			}
 			e.interfaces[s.Name] = ObjectType(fields)
+			if len(s.Methods) > 0 {
+				sigs := make(map[string]FuncSig, len(s.Methods))
+				for _, m := range s.Methods {
+					sig := e.buildParamSig(m.Params)
+					if m.ReturnType != nil {
+						sig.RetType = e.resolveType(m.ReturnType)
+					} else {
+						sig.RetType = TypeVoid
+					}
+					sigs[m.Name] = sig
+				}
+				e.interfaceMethodSigs[s.Name] = sigs
+			}
 		case *ast.TypeAliasDeclaration:
 			e.interfaces[s.Name] = e.resolveType(s.Type)
 		}

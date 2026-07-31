@@ -211,6 +211,10 @@ func (l *Lexer) NextToken() (Token, error) {
 	case '&':
 		if l.peek() == '&' {
 			l.advance()
+			if l.peek() == '=' {
+				l.advance()
+				return l.tok(LOGICAL_AND_ASSIGN, "&&=", line, col), nil
+			}
 			return l.tok(AND, "&&", line, col), nil
 		}
 		if l.peek() == '=' {
@@ -221,6 +225,10 @@ func (l *Lexer) NextToken() (Token, error) {
 	case '|':
 		if l.peek() == '|' {
 			l.advance()
+			if l.peek() == '=' {
+				l.advance()
+				return l.tok(LOGICAL_OR_ASSIGN, "||=", line, col), nil
+			}
 			return l.tok(OR, "||", line, col), nil
 		}
 		if l.peek() == '=' {
@@ -275,6 +283,10 @@ func (l *Lexer) NextToken() (Token, error) {
 	case '?':
 		if l.peek() == '?' {
 			l.advance()
+			if l.peek() == '=' {
+				l.advance()
+				return l.tok(NULLISH_ASSIGN, "??=", line, col), nil
+			}
 			return l.tok(NULLISH, "??", line, col), nil
 		}
 		if l.peek() == '.' {
@@ -287,48 +299,82 @@ func (l *Lexer) NextToken() (Token, error) {
 	return Token{}, fmt.Errorf("%d:%d: unexpected character %q", line, col, ch)
 }
 
+// readDigitRun consumes a run of characters matching isDigit into buf,
+// allowing a single '_' numeric separator between two digits (e.g.
+// 1_000_000) — the separator itself is discarded, never written to buf, so
+// downstream parsing/codegen never has to know it existed. A leading,
+// trailing, or doubled separator is a lexer error.
+func (l *Lexer) readDigitRun(buf *strings.Builder, isDigit func(rune) bool, line, col int) error {
+	lastWasDigit := false
+	for l.pos < len(l.src) {
+		c := l.peek()
+		if isDigit(c) {
+			buf.WriteRune(l.advance())
+			lastWasDigit = true
+		} else if c == '_' {
+			if !lastWasDigit || !isDigit(l.peekAt(1)) {
+				return fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+			}
+			l.advance()
+			lastWasDigit = false
+		} else {
+			break
+		}
+	}
+	return nil
+}
+
 func (l *Lexer) readNumber(line, col int) (Token, error) {
 	var buf strings.Builder
+	isHexDigit := func(c rune) bool {
+		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	}
+	isBinDigit := func(c rune) bool { return c == '0' || c == '1' }
+	isOctDigit := func(c rune) bool { return c >= '0' && c <= '7' }
 	// Hex / binary / octal prefixes
 	if l.peek() == '0' {
 		switch l.peekAt(1) {
 		case 'x', 'X':
 			buf.WriteRune(l.advance()) // '0'
 			buf.WriteRune(l.advance()) // 'x'
-			for l.pos < len(l.src) {
-				c := l.peek()
-				if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
-					buf.WriteRune(l.advance())
-				} else {
-					break
-				}
+			if err := l.readDigitRun(&buf, isHexDigit, line, col); err != nil {
+				return Token{}, err
 			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		case 'b', 'B':
 			buf.WriteRune(l.advance()) // '0'
 			buf.WriteRune(l.advance()) // 'b'
-			for l.pos < len(l.src) && (l.peek() == '0' || l.peek() == '1') {
-				buf.WriteRune(l.advance())
+			if err := l.readDigitRun(&buf, isBinDigit, line, col); err != nil {
+				return Token{}, err
 			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		case 'o', 'O':
 			buf.WriteRune(l.advance()) // '0'
 			buf.WriteRune(l.advance()) // 'o'
-			for l.pos < len(l.src) && l.peek() >= '0' && l.peek() <= '7' {
-				buf.WriteRune(l.advance())
+			if err := l.readDigitRun(&buf, isOctDigit, line, col); err != nil {
+				return Token{}, err
 			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		}
 	}
 	// Regular decimal number
 	hasDot := false
+	lastWasDigit := false
 	for l.pos < len(l.src) {
 		c := l.peek()
 		if unicode.IsDigit(c) {
 			buf.WriteRune(l.advance())
+			lastWasDigit = true
 		} else if c == '.' && !hasDot && unicode.IsDigit(l.peekAt(1)) {
 			hasDot = true
 			buf.WriteRune(l.advance())
+			lastWasDigit = false
+		} else if c == '_' {
+			if !lastWasDigit || !unicode.IsDigit(l.peekAt(1)) {
+				return Token{}, fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+			}
+			l.advance()
+			lastWasDigit = false
 		} else {
 			break
 		}

@@ -6,17 +6,41 @@ import (
 	"fmt"
 )
 
-// parseClassDecl parses `class Name { field: type; ...; constructor(...) {...} method(...) {...} }`.
-// Stage 0 of TDD-00009: no `extends`/`super` and no modifier keywords
-// (private/protected/static/implements/abstract) — all deferred to later
-// stages, so any of those produce a plain parse error here rather than being
-// silently accepted and ignored.
-func (p *Parser) parseClassDecl() (*ast.ClassDeclaration, error) {
+// parseClassDecl parses `[abstract] class Name [extends Base] [implements
+// I, ...] { ... }`. A class body member may be prefixed by any of
+// static/private/protected/public/abstract (any order, TDD-00009 Stage 4),
+// then is either a method/constructor (`name(...) { ... }` or, for an
+// abstract method, `name(...): T;` with no body), a `static { ... }`
+// initializer block, or a typed field (`name: type;`).
+func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) {
 	tok := p.advance() // consume 'class'
 	pos := posOf(tok)
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
+	}
+	var baseClass string
+	if p.check(lexer.EXTENDS) {
+		p.advance() // extends
+		baseTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		baseClass = baseTok.Literal
+	}
+	var implementsNames []string
+	if p.check(lexer.IMPLEMENTS) {
+		p.advance() // implements
+		for {
+			ifaceTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			implementsNames = append(implementsNames, ifaceTok.Literal)
+			if !p.match(lexer.COMMA) {
+				break
+			}
+		}
 	}
 	if _, err := p.expect(lexer.LBRACE); err != nil {
 		return nil, err
@@ -25,19 +49,66 @@ func (p *Parser) parseClassDecl() (*ast.ClassDeclaration, error) {
 	var fields []ast.AnnotField
 	var ctor *ast.FunctionDeclaration
 	var methods []*ast.FunctionDeclaration
+	var staticBlocks []*ast.BlockStatement
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
+
+		// `static { ... }` initializer block — distinguished from a
+		// `static`-modified member by checking for `{` immediately after
+		// `static`, before any member name has been consumed.
+		if p.check(lexer.STATIC) && p.peekNth(1).Type == lexer.LBRACE {
+			p.advance() // static
+			block, err := p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+			staticBlocks = append(staticBlocks, block)
+			continue
+		}
+
+		// Zero or more modifiers, any order.
+		var isStatic, isMemberAbstract bool
+		var visibility string
+		for {
+			switch p.peek().Type {
+			case lexer.STATIC:
+				isStatic = true
+				p.advance()
+				continue
+			case lexer.ABSTRACT:
+				isMemberAbstract = true
+				p.advance()
+				continue
+			case lexer.PRIVATE:
+				visibility = "private"
+				p.advance()
+				continue
+			case lexer.PROTECTED:
+				visibility = "protected"
+				p.advance()
+				continue
+			case lexer.PUBLIC:
+				visibility = ""
+				p.advance()
+				continue
+			}
+			break
+		}
+
 		memberTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
 
-		// Method or constructor: `name(...) { ... }`.
+		// Method or constructor: `name(...) { ... }` (or, if isMemberAbstract,
+		// `name(...): T;` with no body).
 		if p.check(lexer.LPAREN) {
-			fn, err := p.parseFunctionRest(memberTok.Literal, false)
+			fn, err := p.parseFunctionRest(memberTok.Literal, false, isMemberAbstract)
 			if err != nil {
 				return nil, err
 			}
+			fn.IsStatic = isStatic
+			fn.Visibility = visibility
 			if memberTok.Literal == "constructor" {
 				if ctor != nil {
 					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, nameTok.Literal)
@@ -64,11 +135,11 @@ func (p *Parser) parseClassDecl() (*ast.ClassDeclaration, error) {
 				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
 			}
 		}
-		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft})
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Static: isStatic, Visibility: visibility})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewClassDeclaration(nameTok.Literal, fields, ctor, methods, pos), nil
+	return ast.NewClassDeclaration(nameTok.Literal, baseClass, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos), nil
 }

@@ -119,3 +119,11 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00078](ADR-00078.md) | `ArrayBuffer` / TypedArrays | Implements [TDD-00018](../tdd/TDD-00018.md) |
 | [00079](ADR-00079.md) | POSIX signal handling — `process.on('SIGINT'/'SIGTERM', handler)` | Extends [ADR-00072](ADR-00072.md). Implements [TDD-00019](../tdd/TDD-00019.md) |
 | [00080](ADR-00080.md) | Fix `-mm=gc` startup crash on Ubuntu's `libgc-dev` build | Extends [ADR-00071](ADR-00071.md) |
+| [00081](ADR-00081.md) | `path` module (join, resolve, dirname, basename, extname, parse, format, isAbsolute, sep, delimiter) | |
+| [00082](ADR-00082.md) | Error subtypes / tagged errors — `TypeError`, `RangeError`, etc. | Implements [TDD-00013](../tdd/TDD-00013.md). Extends [ADR-00067](ADR-00067.md) |
+| [00083](ADR-00083.md) | Classes Stage 3 — inheritance (`extends`, `super`, dynamic dispatch) | Extends [ADR-00062](ADR-00062.md), [ADR-00063](ADR-00063.md), [ADR-00067](ADR-00067.md). Implements [TDD-00009](../tdd/TDD-00009.md) |
+| [00084](ADR-00084.md) | Classes Stage 4 — `static`, `private`/`protected`, `abstract`, `implements` | Extends [ADR-00083](ADR-00083.md). Implements [TDD-00009](../tdd/TDD-00009.md) |
+| [00085](ADR-00085.md) | Numeric separators (`1_000_000`) | |
+| [00086](ADR-00086.md) | Optional catch binding (`catch { ... }`) | |
+| [00087](ADR-00087.md) | Logical assignment operators (`&&=`, `\|\|=`, `??=`) | |
+| [00088](ADR-00088.md) | `Array.from(iterable)` (array-like overload) | Extends [ADR-00063](ADR-00063.md). Implements [TDD-00009](../tdd/TDD-00009.md) |

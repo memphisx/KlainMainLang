@@ -172,6 +172,121 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
+// emitArrayFrom implements Array.from(iterable): the array-like overload
+// only (a plain array, or a class instance implementing the Stage 1a
+// iterator protocol — next(): T | null, TDD-00009/ADR-00063) — real JS's
+// second mapFn/thisArg arguments and iterating a string/Map/Set are not
+// built here, see docs/status/ARRAY-METHODS.md.
+//
+// A plain array is a straight copy into a freshly malloc'd buffer of the
+// same, already-known length (mirroring `.slice()`'s own no-arg shape). A
+// class iterator has no length known upfront, so it's drained by repeated
+// next() calls exactly like emitForOfClassIterator's loop shape, growing the
+// result via the same realloc-per-element append emitPush already uses —
+// realloc(NULL, n) is a valid, ordinary malloc(n) on the first element, so
+// the initial ptr can start as a bare null with no special-cased first step.
+func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Array.from takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	srcTy := e.inferExprType(args[0])
+
+	if srcTy.IsArray {
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureMalloc()
+		e.ensureMemcpy()
+		bytesReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, lenReg, elemTy.Align()))
+		newPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, bytesReg))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg, bytesReg))
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	}
+
+	if srcTy.IsClass {
+		info, ok := e.classes[srcTy.ClassName]
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable", pos.Line, pos.Col)
+		}
+		sig, ok := info.MethodSigs["next"]
+		if !ok || len(sig.ParamTypes) != 0 || !sig.RetType.Nullable ||
+			sig.RetType.IsArray || sig.RetType.IsMap || sig.RetType.IsSet {
+			return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable (class '%s' has no 'next(): T | null' method)", pos.Line, pos.Col, srcTy.ClassName)
+		}
+		elemTy := sig.RetType
+		elemTy.Nullable = false
+
+		recvVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+
+		dataPtr := e.freshReg()
+		lenPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", dataPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenPtr))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataPtr))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenPtr))
+
+		condL := e.freshLabel("arrayfrom.cond")
+		bodyL := e.freshLabel("arrayfrom.body")
+		endL := e.freshLabel("arrayfrom.end")
+
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		nextVal, err := e.emitClassCall(srcTy, recvVal, "next", nil, pos, false)
+		if err != nil {
+			return Value{}, err
+		}
+		doneReg := e.freshReg()
+		zero := "null"
+		if nextVal.Ty.IR != "ptr" {
+			zero = "0"
+		}
+		e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", doneReg, nextVal.Ty.IR, nextVal.Ref, zero))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
+
+		e.emitLabel(bodyL)
+		e.ensureRealloc()
+		curPtr := e.freshReg()
+		curLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+		newLen := e.freshReg()
+		newBytes := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newLen, curLen))
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
+		newPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, curLen))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, nextVal.Ref, slot, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, dataPtr))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+		e.emitLabel(endL)
+		finalPtr := e.freshReg()
+		finalLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", finalPtr, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLen, lenPtr))
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, finalPtr))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, finalLen))
+		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	}
+
+	return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable (must be an array or a class implementing 'next(): T | null')", pos.Line, pos.Col)
+}
+
 // emitArrayCopyWithin implements arr.copyWithin(target, start?, end?):
 // copies the sequence [start, end) to position target, in place, within the
 // same backing buffer — arr's length never changes. Negative indices count

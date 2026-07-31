@@ -18,6 +18,31 @@ import (
 // else to live.
 
 func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
+	// super(args) / super.method(args) (TDD-00009 Stage 3) — checked first,
+	// since a SuperExpression callee/receiver never reaches the generic
+	// mem.Object-based dispatch chain below (inferExprType has no case for
+	// it, and it shouldn't: super is only ever meaningful directly in call
+	// position).
+	if _, ok := ex.Callee.(*ast.SuperExpression); ok {
+		return e.emitSuperCall(ex)
+	}
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if _, ok := mem.Object.(*ast.SuperExpression); ok {
+			return e.emitSuperMethodCall(mem.Property, ex.Args, ex.GetPos())
+		}
+	}
+	// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
+	// 4). Checked before every mem.Property-name-based/inferExprType-based
+	// dispatch below, for the same reason super's own checks above are: a
+	// bare class-name identifier is a compile-time namespace, never a real
+	// runtime value bindable via e.lookup/inferExprType.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if id, ok := mem.Object.(*ast.Identifier); ok {
+			if info, found := e.classes[id.Name]; found {
+				return e.emitStaticMethodCall(info, id.Name, mem.Property, ex.Args, ex.GetPos())
+			}
+		}
+	}
 	// Special-case: console.log(...) and array.push(...)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "String" {
@@ -108,6 +133,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return Value{Ref: "false", Ty: TypeBool}, nil
 			case "of":
 				return e.emitArrayOf(ex.Args, ex.GetPos())
+			case "from":
+				return e.emitArrayFrom(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" {

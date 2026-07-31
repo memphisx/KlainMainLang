@@ -46,6 +46,21 @@ try {
 `, "err: Division by zero\nerr: Division by zero\nerr: Division by zero")
 }
 
+func TestE2EOptionalCatchBinding(t *testing.T) {
+	assertOutput(t, `
+try {
+  throw new Error('boom')
+} catch {
+  console.log('caught, no binding')
+}
+try {
+  console.log(42)
+} catch {
+  console.log('should not reach')
+}
+`, "caught, no binding\n42")
+}
+
 func TestE2ETryCatchNoThrow(t *testing.T) {
 	assertOutput(t, `
 try {

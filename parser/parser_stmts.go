@@ -24,7 +24,12 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 	case lexer.FUNCTION:
 		return p.parseFunctionDecl(false)
 	case lexer.CLASS:
-		return p.parseClassDecl()
+		return p.parseClassDecl(false)
+	case lexer.ABSTRACT:
+		if p.peekNth(1).Type == lexer.CLASS {
+			p.advance() // consume 'abstract'
+			return p.parseClassDecl(true)
+		}
 	case lexer.IMPORT:
 		return p.parseImportDeclaration()
 	case lexer.EXPORT:
@@ -142,13 +147,16 @@ func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, erro
 	if err != nil {
 		return nil, err
 	}
-	return p.parseFunctionRest(nameTok.Literal, isAsync)
+	return p.parseFunctionRest(nameTok.Literal, isAsync, false)
 }
 
 // parseFunctionRest parses the `(params) : retType? { body }` tail shared by
 // a top-level `function NAME` declaration and a class method/constructor
 // (whose name is already known and consumed by the caller before this runs).
-func (p *Parser) parseFunctionRest(name string, isAsync bool) (*ast.FunctionDeclaration, error) {
+// bodyOptional is TDD-00009 Stage 4: an abstract method signature
+// (`abstract foo(): T;`) has no body at all — terminated by `;` instead of
+// a `{...}` block. Never set by a top-level function (always false there).
+func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*ast.FunctionDeclaration, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -167,6 +175,13 @@ func (p *Parser) parseFunctionRest(name string, isAsync bool) (*ast.FunctionDecl
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if bodyOptional && p.check(lexer.SEMICOLON) {
+		p.advance()
+		return &ast.FunctionDeclaration{
+			Name: name, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
+		}, nil
 	}
 
 	body, err := p.parseBlock()
@@ -482,28 +497,31 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 
 	if p.check(lexer.CATCH) {
 		p.advance() // consume 'catch'
-		if _, err := p.expect(lexer.LPAREN); err != nil {
-			return nil, err
-		}
-		paramTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
-		}
-		// Optional type annotation on catch param — skip it.
-		if p.check(lexer.COLON) {
+		var paramName string
+		// Optional catch binding: `catch { ... }` with no `(e)` at all.
+		if p.check(lexer.LPAREN) {
 			p.advance()
-			if _, err := p.parseTypeAnnotation("ts"); err != nil {
+			paramTok, err := p.expect(lexer.IDENT)
+			if err != nil {
 				return nil, err
 			}
-		}
-		if _, err := p.expect(lexer.RPAREN); err != nil {
-			return nil, err
+			paramName = paramTok.Literal
+			// Optional type annotation on catch param — skip it.
+			if p.check(lexer.COLON) {
+				p.advance()
+				if _, err := p.parseTypeAnnotation("ts"); err != nil {
+					return nil, err
+				}
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
 		}
 		cbody, err := p.parseBlock()
 		if err != nil {
 			return nil, err
 		}
-		catch = &ast.CatchClause{Param: paramTok.Literal, Body: cbody}
+		catch = &ast.CatchClause{Param: paramName, Body: cbody}
 	}
 
 	if p.check(lexer.FINALLY) {

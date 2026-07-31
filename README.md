@@ -8,9 +8,9 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`docs/status/`](docs/status/README.md)**: a feature-by-feature matrix, split one page per feature area, with coverage percentages — because vague marketing copy is worse than a spreadsheet, and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **79% of core TypeScript language features**, **~36% of Node.js-style APIs** (`fs`, `process`, and a real `http.listen` server are all solid, but a 2026-07-30 audit against the actual source found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, and more — none of it implemented yet), and **~38% of genuine browser/WHATWG-style Web Platform APIs** (`fetch`, `setTimeout`, `URL`, and `ArrayBuffer`/TypedArrays exist, `WebSocket` doesn't: priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`docs/status/`](docs/status/README.md)**: a feature-by-feature matrix, split one page per feature area, with coverage percentages — because vague marketing copy is worse than a spreadsheet, and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **82% of core TypeScript language features**, **~49% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and the `path` module are all solid; `os`, `EventEmitter`, async `child_process`, and a handful of smaller core modules — a large previously-untracked surface a 2026-07-30 audit against the actual source turned up — are still unimplemented), and **~38% of genuine browser/WHATWG-style Web Platform APIs** (`fetch`, `setTimeout`, `URL`, and `ArrayBuffer`/TypedArrays exist, `WebSocket` doesn't: priorities are a journey, not a destination).
 
-Classes exist too: fields, constructors, methods, `this`, `new ClassName(args)`, and `instanceof` against user-defined classes are all implemented (no inheritance yet — see [TDD-00009](docs/tdd/TDD-00009.md)). And the compiler now fuzzes itself: `go test -fuzz` lanes cover the lexer, parser, and the full parse-through-binary pipeline (an arithmetic oracle plus a crash-only well-formedness fuzzer — see [TDD-00014](docs/tdd/TDD-00014.md)), runnable via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
+Classes are essentially done: fields, constructors, methods, `this`, `new ClassName(args)`, `instanceof`, single inheritance (`extends`/`super`, static dispatch except for provably-overridden methods, which go through a per-tree vtable), `static` members/`static {}` blocks, `private`/`protected` visibility (compile-time-only, matching real TypeScript's own erasure), `abstract` classes/methods, and `implements` (a compile-time structural self-check) are all implemented — see [TDD-00009](docs/tdd/TDD-00009.md), now fully shipped across all five stages. Still open: real JS/TS `#x` runtime-private fields (a different mechanism from the `private` keyword modifier — see [TDD-00021](docs/tdd/TDD-00021.md)) and getters/setters. And the compiler now fuzzes itself: `go test -fuzz` lanes cover the lexer, parser, and the full parse-through-binary pipeline (an arithmetic oracle plus a crash-only well-formedness fuzzer — see [TDD-00014](docs/tdd/TDD-00014.md)), runnable via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
 
 Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)), and memory management ([TDD-00001](docs/tdd/TDD-00001.md)) — the `manual` and `gc` modes are both real now, only the `auto` mode (compiler-inserted frees, no runtime collector) is still design-only. TDDs are linked from `docs/status/` rather than bloating it inline.
 
@@ -121,29 +121,46 @@ Lexer → Parser (recursive descent, Pratt precedence climbing) → Module resol
 ```
 ast/                AST node definitions
 codegen/
-  llvm/             LLVM IR emitter, split by concern:
-    emitter.go        core struct, scope stack, EmitProgram, pre-passes
-    types.go          type system (IR types, FuncSig, StructIR)
-    runtime.go        ensure* C-runtime declarations (malloc, printf, sscanf, …), plus the hand-written select()-based event loop and ucontext.h fiber scheduler backing http.listen and non-blocking fetch
+  llvm/             LLVM IR emitter — split into ~60 small domain files rather
+                     than a handful of huge ones (see docs/adr/ADR-00075.md);
+                     the full file-by-file map lives in CLAUDE.md, condensed
+                     here by domain:
+    emitter.go, types.go   core Emitter struct/scope stack/EmitProgram; the
+                     IR type system (Type, ArrayOf, ObjectOf, StructIR)
     emit_stmts.go     statements: for/while/do-while/if/switch/try/labeled break…
-    emit_exprs.go     expressions, type inference, var declarations
+    emit_exprs*.go    expression dispatch, operators, assignment (incl.
+                     &&=/||=/??=), member/index access, static type
+                     inference, scalar coercion, var declarations
     emit_strings.go   string operations (concat, methods, template literals)
-    emit_arrays.go    array mutations, HOF (map/filter/reduce/sort/…)
+    emit_arrays_*.go  array mutation/HOF/sort/search/transform/iteration
+                     (push/pop/map/filter/reduce/sort/slice/Array.from/…)
     emit_objects.go   objects, Object.keys/values/entries/groupBy, spread
     emit_func.go      functions, closures, callbacks
-    emit_call.go      call dispatch: console, JSON, Math, Number, Date statics
-    emit_classes.go   class fields/constructors/methods/this/new, instanceof, class-based for...of
+    emit_call*.go     call dispatch router + console/JSON/Math/Number/
+                     encoding-crypto statics
+    emit_classes.go   class fields/constructors/methods/this/new/instanceof,
+                     inheritance (extends/super, static+vtable dispatch),
+                     static members, private/protected, abstract, implements,
+                     class-based for...of
     emit_collections.go  Map<K,V> and Set<T>
     emit_exceptions.go   try/catch/throw (setjmp/longjmp)
-    emit_process.go   process.argv/env/exit/readLineSync/execFileSync/cwd/chdir/pid/platform/kill
+    emit_process.go   process.argv/env/exit/readLineSync/execFileSync/cwd/chdir/pid/platform/kill/on(SIGINT/SIGTERM)
     emit_date.go      Date: construction, getters/setters, parse, arithmetic, formatting
     emit_dynamic.go   any/unknown as a runtime-tagged {tag, payload} value
-    emit_async.go     async/await, Promise<T> — real non-blocking await on fetch()'s Promise<Response> since the event loop landed (yields via a fiber inside an http.listen handler, busy-spins the same libcurl calls otherwise); every other Promise<T> is still a resolved-slot read
-    emit_fetch.go     fetch(url) and Response, backed by libcurl's multi-interface (GET only) — non-blocking, driven by the same select()-based event loop as http.listen
+    emit_async.go, emit_promise.go   async/await, Promise<T> (real non-blocking
+                     await on fetch()'s Promise<Response>; every other
+                     Promise<T> is a resolved-slot read), Promise.all/race/allSettled
+    emit_fetch.go     fetch(url[, init]) and Response, backed by libcurl's
+                     multi-interface — non-blocking, driven by the same
+                     select()-based event loop as http.listen
     emit_fs.go        fs.readFileSync/writeFileSync/appendFileSync/existsSync/unlinkSync/mkdirSync/rmdirSync/renameSync/copyFileSync/readdirSync
-    emit_http.go      http.listen(port, handler): request dispatch, Request/Response struct wiring on top of the select()-based event loop and fiber scheduler (both defined in runtime.go)
+    emit_path.go      path.join/resolve/dirname/basename/extname/isAbsolute/parse/format
+    emit_url.go       URL/URLSearchParams (backed by libcurl's URL API)
+    emit_arraybuffer.go  ArrayBuffer + TypedArrays (Int8Array…Float64Array)
+    emit_http.go      http.listen(port, handler): request dispatch, Request/Response wiring on top of the event loop/fiber scheduler
     emit_timers.go    setTimeout/clearTimeout/setInterval/clearInterval
     emit_memory.go    Memory.free(x): manual heap release (Stage 1 of the memory-management plan)
+    runtime_*.go      ensure* C-runtime declarations (malloc, printf, sscanf, …) and the hand-written select()-based event loop + ucontext.h fiber scheduler backing http.listen and non-blocking fetch, split by domain to pair with the emit_*.go file that uses them
     gcshim.go         //go:embed of gcsrc/gcshim.c, the -mm=gc allocator shim's source
     gclocate.go       LocateGC(): portable pkg-config-based Boehm GC discovery for -mm=gc builds
     gcsrc/gcshim.c    -mm=gc's C shim: malloc/calloc/realloc/free forwarding to GC_malloc/GC_realloc/GC_free (its own subdirectory since a .c file directly in a Go package dir makes `go build` demand cgo)

@@ -44,6 +44,14 @@ const (
 	CLASS
 	THIS
 	INSTANCEOF
+	EXTENDS
+	SUPER
+	STATIC
+	PRIVATE
+	PROTECTED
+	PUBLIC
+	ABSTRACT
+	IMPLEMENTS
 
 	// Operators
 	PLUS         // +
@@ -87,6 +95,11 @@ const (
 	RSHIFT_ASSIGN  // >>=
 	URSHIFT_ASSIGN // >>>=
 
+	// Logical compound assignment
+	LOGICAL_AND_ASSIGN // &&=
+	LOGICAL_OR_ASSIGN  // ||=
+	NULLISH_ASSIGN     // ??=
+
 	// Punctuation
 	LPAREN    // (
 	RPAREN    // )
@@ -125,6 +138,9 @@ var tokenNames = map[TokenType]string{
 	IMPORT: "import", EXPORT: "export",
 	ELLIPSIS: "...",
 	CLASS: "class", THIS: "this", INSTANCEOF: "instanceof",
+	EXTENDS: "extends", SUPER: "super",
+	STATIC: "static", PRIVATE: "private", PROTECTED: "protected", PUBLIC: "public",
+	ABSTRACT: "abstract", IMPLEMENTS: "implements",
 	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQ: "==", NEQ: "!=", STRICT_EQ: "===", STRICT_NEQ: "!==",
 	LT: "<", GT: ">", LTE: "<=", GTE: ">=",
@@ -135,6 +151,7 @@ var tokenNames = map[TokenType]string{
 	LSHIFT: "<<", RSHIFT: ">>", URSHIFT: ">>>",
 	AND_ASSIGN: "&=", OR_ASSIGN: "|=", XOR_ASSIGN: "^=",
 	LSHIFT_ASSIGN: "<<=", RSHIFT_ASSIGN: ">>=", URSHIFT_ASSIGN: ">>>=",
+	LOGICAL_AND_ASSIGN: "&&=", LOGICAL_OR_ASSIGN: "||=", NULLISH_ASSIGN: "??=",
 	LPAREN: "(", RPAREN: ")", LBRACE: "{", RBRACE: "}",
 	LBRACKET: "[", RBRACKET: "]",
 	SEMICOLON: ";", COLON: ":", COMMA: ",", DOT: ".", QUESTION: "?", NULLISH: "??", OPTIONAL_DOT: "?.", ARROW: "=>",
@@ -160,6 +177,9 @@ var keywords = map[string]TokenType{
 	"async": ASYNC, "await": AWAIT,
 	"import": IMPORT, "export": EXPORT,
 	"class": CLASS, "this": THIS, "instanceof": INSTANCEOF,
+	"extends": EXTENDS, "super": SUPER,
+	"static": STATIC, "private": PRIVATE, "protected": PROTECTED, "public": PUBLIC,
+	"abstract": ABSTRACT, "implements": IMPLEMENTS,
 }
 
 func LookupIdent(s string) TokenType {

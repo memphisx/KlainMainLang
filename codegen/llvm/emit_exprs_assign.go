@@ -6,7 +6,85 @@ import (
 	"strings"
 )
 
+// isLogicalAssignOp reports whether op is one of the three logical
+// assignment operators (&&=, ||=, ??=) — genuinely short-circuiting, unlike
+// every other compound-assignment operator, so they can't reuse emitArith's
+// eager-evaluate-both-sides shape at all (see emitLogicalCompoundAssign).
+func isLogicalAssignOp(op string) bool {
+	return op == "&&=" || op == "||=" || op == "??="
+}
+
+// emitLogicalCompoundAssign implements &&=/||=/??= against an lvalue whose
+// storage is already resolved to a single ptr+Type pair — the shape shared
+// by every assignable form this compiler has (scalar variable, array
+// element, object field, static field). The right side is only evaluated
+// (and only then stored) down the branch where the operator's own
+// short-circuit rule requires it; the other branch leaves the existing
+// value at ptr untouched. Reloading from ptr at the merge point yields the
+// correct final value either way, so no separate result temporary is
+// needed — unlike emitNullCoalesce/emitConditional, which need one since
+// their two branches produce a value that was never already sitting in a
+// shared memory location. `??=` against a non-ptr-typed location can never
+// trigger (mirrors emitNullCoalesce's own "left can never be null" fast
+// path for non-ptr types) — the right side is never evaluated, exactly like
+// bare `x ?? y`.
+func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast.Expression) (Value, error) {
+	curReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, ty.IR, ptr, ty.Align()))
+	cur := Value{Ref: curReg, Ty: ty}
+
+	if op == "??=" && ty.IR != "ptr" {
+		return cur, nil
+	}
+
+	var cond Value
+	switch op {
+	case "&&=":
+		cond = e.toBool(cur)
+	case "||=":
+		notReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notReg, e.toBool(cur).Ref))
+		cond = Value{Ref: notReg, Ty: TypeBool}
+	case "??=":
+		nullReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", nullReg, cur.Ref))
+		cond = Value{Ref: nullReg, Ty: TypeBool}
+	default:
+		return Value{}, fmt.Errorf("unknown logical assignment operator '%s'", op)
+	}
+
+	storeL := e.freshLabel("logassign.store")
+	mergeL := e.freshLabel("logassign.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, storeL, mergeL))
+
+	e.emitLabel(storeL)
+	rhs, err := e.emitExpr(rhsExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	rhs = e.coerce(rhs, ty)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, rhs.Ref, ptr, ty.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, ptr, ty.Align()))
+	return Value{Ref: result, Ty: ty}, nil
+}
+
 func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
+	// Static field assignment: ClassName.staticField = val (or compound
+	// ops) — TDD-00009 Stage 4. A bare class-name identifier is a
+	// compile-time namespace, never a real runtime value, so this must be
+	// checked before memEx.Object is evaluated generically below (same
+	// reasoning the read-side check in emitMember follows).
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
+		if id, ok := memEx.Object.(*ast.Identifier); ok {
+			if info, found := e.classes[id.Name]; found {
+				return e.emitStaticFieldAssign(info, id.Name, memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
+		}
+	}
 	// Dynamic object bracket assignment: obj[expr] = val (or compound ops) —
 	// a computed-key object literal is a real Map<string,V>, so this must be
 	// checked before emitIndexPtr, which only understands array storage.
@@ -30,6 +108,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)
 		if err != nil {
 			return Value{}, err
+		}
+		if isLogicalAssignOp(ex.Op) {
+			return e.emitLogicalCompoundAssign(ex.Op, gepReg, elemTy, ex.Right)
 		}
 		var rhs Value
 		if ex.Op == "=" {
@@ -77,9 +158,17 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if !ok {
 			return Value{}, fmt.Errorf("no field '%s'", memEx.Property)
 		}
+		if objVal.Ty.IsClass {
+			if err := e.checkFieldVisibility(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+		}
 		e.emitFrozenCheck(objVal.Ref)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+		if isLogicalAssignOp(ex.Op) {
+			return e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right)
+		}
 		var rhs Value
 		if ex.Op == "=" {
 			rhs, err = e.emitExpr(ex.Right)
@@ -124,6 +213,10 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 
 	if sym.Ty.IsDynamic && ex.Op != "=" {
 		return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+	}
+
+	if isLogicalAssignOp(ex.Op) {
+		return e.emitLogicalCompoundAssign(ex.Op, sym.Ptr, sym.Ty, ex.Right)
 	}
 
 	var rhs Value
