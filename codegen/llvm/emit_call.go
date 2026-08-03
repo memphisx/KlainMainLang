@@ -109,13 +109,30 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				if _, ok := info.MethodSigs[mem.Property]; ok {
 					return e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos())
 				}
+				// EventEmitter-embedded dispatch (TDD-00023): a class
+				// extending EventEmitter<T> reaches its on/once/emit/off/...
+				// surface through this hand-written dispatch, never a real
+				// vtable slot (registerClasses already rejects any user
+				// method sharing one of these names, so the MethodSigs check
+				// above never shadows this).
+				if info.HasEventEmitter && isEventEmitterMethodName(mem.Property) {
+					thisVal, err := e.emitExpr(mem.Object)
+					if err != nil {
+						return Value{}, err
+					}
+					eeGep := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", eeGep, info.Ty.StructIR(), thisVal.Ref, classEventEmitterFieldIndex(info.Ty)))
+					listenersPtr := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", listenersPtr, eeGep))
+					return e.emitEventEmitterCall(info.EventEmitterPayload, listenersPtr, mem.Property, ex.Args, ex.GetPos(), thisVal)
+				}
 			}
 		}
 		if mem.Property == "hasOwnProperty" && e.inferExprType(mem.Object).IsObject {
 			if len(ex.Args) != 1 {
 				return Value{}, fmt.Errorf("%d:%d: hasOwnProperty takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
 			}
-			return e.emitHasOwnProperty(mem.Object, ex.Args[0], ex.GetPos())
+			return e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", ex.GetPos())
 		}
 		if mem.Property == "toString" && isNumberTy(e.inferExprType(mem.Object)) {
 			return e.emitNumberToStringRadix(mem, ex.Args, ex.GetPos())
@@ -167,7 +184,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				if len(ex.Args) != 2 {
 					return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
 				}
-				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], ex.GetPos())
+				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" {
@@ -236,6 +253,24 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPathParse(ex.Args, ex.GetPos())
 			case "format":
 				return e.emitPathFormat(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "os" {
+			switch mem.Property {
+			case "platform":
+				return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
+			case "homedir":
+				return e.emitOSHomedir(ex.Args, ex.GetPos())
+			case "tmpdir":
+				return e.emitOSTmpdir(ex.Args, ex.GetPos())
+			case "hostname":
+				return e.emitOSHostname(ex.Args, ex.GetPos())
+			case "totalmem":
+				return e.emitOSTotalmem(ex.Args, ex.GetPos())
+			case "freemem":
+				return e.emitOSFreemem(ex.Args, ex.GetPos())
+			case "cpus":
+				return e.emitOSCpus(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" {
@@ -492,6 +527,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitSetCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
 		}
+		// Standalone EventEmitter<T> method dispatch (TDD-00023) — the
+		// class-embedded case is handled separately, above, since it needs
+		// a GEP off the receiver's hidden field rather than
+		// resolveEventEmitterForCall's named-variable-vs-arbitrary-
+		// expression handling.
+		if objTy := e.inferExprType(mem.Object); objTy.IsEventEmitter {
+			ty, ptr, err := e.resolveEventEmitterForCall(mem.Object, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitEventEmitterCall(*ty.EventEmitterPayload, ptr, mem.Property, ex.Args, ex.GetPos(), Value{Ref: ptr, Ty: ty})
+		}
 		if mem.Property == "forEach" {
 			return e.emitArrayForEach(mem, ex.Args, ex.GetPos())
 		}
@@ -561,10 +608,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitSetTimeout(ex.Args, ex.GetPos())
 		case "setInterval":
 			return e.emitSetInterval(ex.Args, ex.GetPos())
+		case "setImmediate":
+			return e.emitSetImmediate(ex.Args, ex.GetPos())
 		case "clearTimeout":
 			return e.emitClearTimer(ex.Args, "clearTimeout", ex.GetPos())
 		case "clearInterval":
 			return e.emitClearTimer(ex.Args, "clearInterval", ex.GetPos())
+		case "clearImmediate":
+			return e.emitClearTimer(ex.Args, "clearImmediate", ex.GetPos())
 		}
 	}
 

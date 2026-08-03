@@ -14,6 +14,9 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if init, ok := v.Init.(*ast.NewSetExpression); ok {
 		return e.emitSetVarDecl(v, init)
 	}
+	if init, ok := v.Init.(*ast.NewEventEmitterExpression); ok {
+		return e.emitEventEmitterVarDecl(v, init)
+	}
 
 	ty := e.resolveType(v.TypeAnnot)
 

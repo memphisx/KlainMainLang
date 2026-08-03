@@ -37,8 +37,8 @@ type BlockStatement struct {
 	pos  Pos
 }
 
-func (*BlockStatement) nodeMarker()  {}
-func (*BlockStatement) stmtMarker() {}
+func (*BlockStatement) nodeMarker()   {}
+func (*BlockStatement) stmtMarker()   {}
 func (b *BlockStatement) GetPos() Pos { return b.pos }
 
 func NewBlockStatement(body []Statement, pos Pos) *BlockStatement {
@@ -53,8 +53,8 @@ type VarDeclaration struct {
 	pos       Pos
 }
 
-func (*VarDeclaration) nodeMarker()  {}
-func (*VarDeclaration) stmtMarker() {}
+func (*VarDeclaration) nodeMarker()   {}
+func (*VarDeclaration) stmtMarker()   {}
 func (v *VarDeclaration) GetPos() Pos { return v.pos }
 
 func NewVarDeclaration(kind, name string, ta *TypeAnnotation, init Expression, pos Pos) *VarDeclaration {
@@ -77,8 +77,8 @@ type FunctionDeclaration struct {
 	pos        Pos
 }
 
-func (*FunctionDeclaration) nodeMarker()  {}
-func (*FunctionDeclaration) stmtMarker() {}
+func (*FunctionDeclaration) nodeMarker()   {}
+func (*FunctionDeclaration) stmtMarker()   {}
 func (f *FunctionDeclaration) GetPos() Pos { return f.pos }
 
 type Param struct {
@@ -94,8 +94,8 @@ type ReturnStatement struct {
 	pos   Pos
 }
 
-func (*ReturnStatement) nodeMarker()  {}
-func (*ReturnStatement) stmtMarker() {}
+func (*ReturnStatement) nodeMarker()   {}
+func (*ReturnStatement) stmtMarker()   {}
 func (r *ReturnStatement) GetPos() Pos { return r.pos }
 
 func NewReturnStatement(val Expression, pos Pos) *ReturnStatement {
@@ -110,8 +110,8 @@ type ForStatement struct {
 	pos    Pos
 }
 
-func (*ForStatement) nodeMarker()  {}
-func (*ForStatement) stmtMarker() {}
+func (*ForStatement) nodeMarker()   {}
+func (*ForStatement) stmtMarker()   {}
 func (f *ForStatement) GetPos() Pos { return f.pos }
 
 func NewForStatement(init Statement, test, update Expression, body *BlockStatement, pos Pos) *ForStatement {
@@ -126,8 +126,8 @@ type ForOfStatement struct {
 	pos      Pos
 }
 
-func (*ForOfStatement) nodeMarker()  {}
-func (*ForOfStatement) stmtMarker() {}
+func (*ForOfStatement) nodeMarker()   {}
+func (*ForOfStatement) stmtMarker()   {}
 func (f *ForOfStatement) GetPos() Pos { return f.pos }
 
 func NewForOfStatement(kind, varName string, iterable Expression, body *BlockStatement, pos Pos) *ForOfStatement {
@@ -140,8 +140,8 @@ type WhileStatement struct {
 	pos  Pos
 }
 
-func (*WhileStatement) nodeMarker()  {}
-func (*WhileStatement) stmtMarker() {}
+func (*WhileStatement) nodeMarker()   {}
+func (*WhileStatement) stmtMarker()   {}
 func (w *WhileStatement) GetPos() Pos { return w.pos }
 
 func NewWhileStatement(test Expression, body *BlockStatement, pos Pos) *WhileStatement {
@@ -154,8 +154,8 @@ type DoWhileStatement struct {
 	pos  Pos
 }
 
-func (*DoWhileStatement) nodeMarker()  {}
-func (*DoWhileStatement) stmtMarker() {}
+func (*DoWhileStatement) nodeMarker()   {}
+func (*DoWhileStatement) stmtMarker()   {}
 func (d *DoWhileStatement) GetPos() Pos { return d.pos }
 
 func NewDoWhileStatement(body *BlockStatement, test Expression, pos Pos) *DoWhileStatement {
@@ -170,8 +170,8 @@ type ForInStatement struct {
 	pos     Pos
 }
 
-func (*ForInStatement) nodeMarker()  {}
-func (*ForInStatement) stmtMarker() {}
+func (*ForInStatement) nodeMarker()   {}
+func (*ForInStatement) stmtMarker()   {}
 func (f *ForInStatement) GetPos() Pos { return f.pos }
 
 func NewForInStatement(kind, varName string, object Expression, body *BlockStatement, pos Pos) *ForInStatement {
@@ -185,8 +185,8 @@ type IfStatement struct {
 	pos        Pos
 }
 
-func (*IfStatement) nodeMarker()  {}
-func (*IfStatement) stmtMarker() {}
+func (*IfStatement) nodeMarker()   {}
+func (*IfStatement) stmtMarker()   {}
 func (i *IfStatement) GetPos() Pos { return i.pos }
 
 func NewIfStatement(test Expression, cons *BlockStatement, alt Statement, pos Pos) *IfStatement {
@@ -204,8 +204,8 @@ type SwitchStatement struct {
 	pos          Pos
 }
 
-func (*SwitchStatement) nodeMarker()  {}
-func (*SwitchStatement) stmtMarker() {}
+func (*SwitchStatement) nodeMarker()   {}
+func (*SwitchStatement) stmtMarker()   {}
 func (s *SwitchStatement) GetPos() Pos { return s.pos }
 
 func NewSwitchStatement(disc Expression, cases []SwitchCase, pos Pos) *SwitchStatement {
@@ -217,8 +217,8 @@ type BreakStatement struct {
 	pos   Pos
 }
 
-func (*BreakStatement) nodeMarker()  {}
-func (*BreakStatement) stmtMarker() {}
+func (*BreakStatement) nodeMarker()   {}
+func (*BreakStatement) stmtMarker()   {}
 func (b *BreakStatement) GetPos() Pos { return b.pos }
 
 func NewBreakStatement(label string, pos Pos) *BreakStatement {
@@ -230,8 +230,8 @@ type ContinueStatement struct {
 	pos   Pos
 }
 
-func (*ContinueStatement) nodeMarker()  {}
-func (*ContinueStatement) stmtMarker() {}
+func (*ContinueStatement) nodeMarker()   {}
+func (*ContinueStatement) stmtMarker()   {}
 func (c *ContinueStatement) GetPos() Pos { return c.pos }
 
 func NewContinueStatement(label string, pos Pos) *ContinueStatement {
@@ -250,8 +250,8 @@ type LabeledStatement struct {
 	pos   Pos
 }
 
-func (*LabeledStatement) nodeMarker()  {}
-func (*LabeledStatement) stmtMarker() {}
+func (*LabeledStatement) nodeMarker()   {}
+func (*LabeledStatement) stmtMarker()   {}
 func (l *LabeledStatement) GetPos() Pos { return l.pos }
 
 func NewLabeledStatement(label string, body Statement, pos Pos) *LabeledStatement {
@@ -272,8 +272,8 @@ type ArrayDestructuring struct {
 	pos   Pos
 }
 
-func (*ArrayDestructuring) nodeMarker()  {}
-func (*ArrayDestructuring) stmtMarker() {}
+func (*ArrayDestructuring) nodeMarker()   {}
+func (*ArrayDestructuring) stmtMarker()   {}
 func (a *ArrayDestructuring) GetPos() Pos { return a.pos }
 
 func NewArrayDestructuring(kind string, names []string, init Expression, pos Pos) *ArrayDestructuring {
@@ -288,8 +288,8 @@ type ObjectDestructuring struct {
 	pos   Pos
 }
 
-func (*ObjectDestructuring) nodeMarker()  {}
-func (*ObjectDestructuring) stmtMarker() {}
+func (*ObjectDestructuring) nodeMarker()   {}
+func (*ObjectDestructuring) stmtMarker()   {}
 func (o *ObjectDestructuring) GetPos() Pos { return o.pos }
 
 func NewObjectDestructuring(kind string, props []DestructProp, init Expression, pos Pos) *ObjectDestructuring {
@@ -301,8 +301,8 @@ type ExpressionStatement struct {
 	pos  Pos
 }
 
-func (*ExpressionStatement) nodeMarker()  {}
-func (*ExpressionStatement) stmtMarker() {}
+func (*ExpressionStatement) nodeMarker()   {}
+func (*ExpressionStatement) stmtMarker()   {}
 func (e *ExpressionStatement) GetPos() Pos { return e.pos }
 
 func NewExpressionStatement(expr Expression, pos Pos) *ExpressionStatement {
@@ -316,8 +316,8 @@ type NumberLiteral struct {
 	pos   Pos
 }
 
-func (*NumberLiteral) nodeMarker()  {}
-func (*NumberLiteral) exprMarker() {}
+func (*NumberLiteral) nodeMarker()   {}
+func (*NumberLiteral) exprMarker()   {}
 func (n *NumberLiteral) GetPos() Pos { return n.pos }
 
 func NewNumberLiteral(v string, pos Pos) *NumberLiteral { return &NumberLiteral{Value: v, pos: pos} }
@@ -327,8 +327,8 @@ type StringLiteral struct {
 	pos   Pos
 }
 
-func (*StringLiteral) nodeMarker()  {}
-func (*StringLiteral) exprMarker() {}
+func (*StringLiteral) nodeMarker()   {}
+func (*StringLiteral) exprMarker()   {}
 func (s *StringLiteral) GetPos() Pos { return s.pos }
 
 func NewStringLiteral(v string, pos Pos) *StringLiteral { return &StringLiteral{Value: v, pos: pos} }
@@ -338,8 +338,8 @@ type BooleanLiteral struct {
 	pos   Pos
 }
 
-func (*BooleanLiteral) nodeMarker()  {}
-func (*BooleanLiteral) exprMarker() {}
+func (*BooleanLiteral) nodeMarker()   {}
+func (*BooleanLiteral) exprMarker()   {}
 func (b *BooleanLiteral) GetPos() Pos { return b.pos }
 
 func NewBooleanLiteral(v bool, pos Pos) *BooleanLiteral { return &BooleanLiteral{Value: v, pos: pos} }
@@ -350,8 +350,8 @@ type NullLiteral struct {
 	pos         Pos
 }
 
-func (*NullLiteral) nodeMarker()  {}
-func (*NullLiteral) exprMarker() {}
+func (*NullLiteral) nodeMarker()   {}
+func (*NullLiteral) exprMarker()   {}
 func (n *NullLiteral) GetPos() Pos { return n.pos }
 
 func NewNullLiteral(isUndefined bool, pos Pos) *NullLiteral {
@@ -364,8 +364,8 @@ type AwaitExpression struct {
 	pos      Pos
 }
 
-func (*AwaitExpression) nodeMarker()  {}
-func (*AwaitExpression) exprMarker() {}
+func (*AwaitExpression) nodeMarker()   {}
+func (*AwaitExpression) exprMarker()   {}
 func (a *AwaitExpression) GetPos() Pos { return a.pos }
 
 func NewAwaitExpression(arg Expression, pos Pos) *AwaitExpression {
@@ -377,8 +377,8 @@ type Identifier struct {
 	pos  Pos
 }
 
-func (*Identifier) nodeMarker()  {}
-func (*Identifier) exprMarker() {}
+func (*Identifier) nodeMarker()   {}
+func (*Identifier) exprMarker()   {}
 func (i *Identifier) GetPos() Pos { return i.pos }
 
 func NewIdentifier(name string, pos Pos) *Identifier { return &Identifier{Name: name, pos: pos} }
@@ -391,8 +391,8 @@ type ThisExpression struct {
 	pos Pos
 }
 
-func (*ThisExpression) nodeMarker()  {}
-func (*ThisExpression) exprMarker() {}
+func (*ThisExpression) nodeMarker()   {}
+func (*ThisExpression) exprMarker()   {}
 func (t *ThisExpression) GetPos() Pos { return t.pos }
 
 func NewThisExpression(pos Pos) *ThisExpression { return &ThisExpression{pos: pos} }
@@ -403,8 +403,8 @@ type BinaryExpression struct {
 	pos         Pos
 }
 
-func (*BinaryExpression) nodeMarker()  {}
-func (*BinaryExpression) exprMarker() {}
+func (*BinaryExpression) nodeMarker()   {}
+func (*BinaryExpression) exprMarker()   {}
 func (b *BinaryExpression) GetPos() Pos { return b.pos }
 
 func NewBinaryExpression(op string, left, right Expression, pos Pos) *BinaryExpression {
@@ -418,8 +418,8 @@ type ConditionalExpression struct {
 	pos        Pos
 }
 
-func (*ConditionalExpression) nodeMarker()  {}
-func (*ConditionalExpression) exprMarker() {}
+func (*ConditionalExpression) nodeMarker()   {}
+func (*ConditionalExpression) exprMarker()   {}
 func (c *ConditionalExpression) GetPos() Pos { return c.pos }
 
 func NewConditionalExpression(test, consequent, alternate Expression, pos Pos) *ConditionalExpression {
@@ -432,8 +432,8 @@ type SpreadElement struct {
 	pos Pos
 }
 
-func (*SpreadElement) nodeMarker()  {}
-func (*SpreadElement) exprMarker()  {}
+func (*SpreadElement) nodeMarker()   {}
+func (*SpreadElement) exprMarker()   {}
 func (s *SpreadElement) GetPos() Pos { return s.pos }
 
 func NewSpreadElement(arg Expression, pos Pos) *SpreadElement {
@@ -447,8 +447,8 @@ type UnaryExpression struct {
 	pos    Pos
 }
 
-func (*UnaryExpression) nodeMarker()  {}
-func (*UnaryExpression) exprMarker() {}
+func (*UnaryExpression) nodeMarker()   {}
+func (*UnaryExpression) exprMarker()   {}
 func (u *UnaryExpression) GetPos() Pos { return u.pos }
 
 func NewUnaryExpression(op string, prefix bool, arg Expression, pos Pos) *UnaryExpression {
@@ -462,8 +462,8 @@ type UpdateExpression struct {
 	pos    Pos
 }
 
-func (*UpdateExpression) nodeMarker()  {}
-func (*UpdateExpression) exprMarker() {}
+func (*UpdateExpression) nodeMarker()   {}
+func (*UpdateExpression) exprMarker()   {}
 func (u *UpdateExpression) GetPos() Pos { return u.pos }
 
 func NewUpdateExpression(op string, prefix bool, arg Expression, pos Pos) *UpdateExpression {
@@ -476,8 +476,8 @@ type AssignmentExpression struct {
 	pos         Pos
 }
 
-func (*AssignmentExpression) nodeMarker()  {}
-func (*AssignmentExpression) exprMarker() {}
+func (*AssignmentExpression) nodeMarker()   {}
+func (*AssignmentExpression) exprMarker()   {}
 func (a *AssignmentExpression) GetPos() Pos { return a.pos }
 
 func NewAssignmentExpression(op string, left, right Expression, pos Pos) *AssignmentExpression {
@@ -490,8 +490,8 @@ type CallExpression struct {
 	pos    Pos
 }
 
-func (*CallExpression) nodeMarker()  {}
-func (*CallExpression) exprMarker() {}
+func (*CallExpression) nodeMarker()   {}
+func (*CallExpression) exprMarker()   {}
 func (c *CallExpression) GetPos() Pos { return c.pos }
 
 func NewCallExpression(callee Expression, args []Expression, pos Pos) *CallExpression {
@@ -505,8 +505,8 @@ type MemberExpression struct {
 	pos      Pos
 }
 
-func (*MemberExpression) nodeMarker()  {}
-func (*MemberExpression) exprMarker() {}
+func (*MemberExpression) nodeMarker()   {}
+func (*MemberExpression) exprMarker()   {}
 func (m *MemberExpression) GetPos() Pos { return m.pos }
 
 func NewMemberExpression(obj Expression, prop string, pos Pos) *MemberExpression {
@@ -518,8 +518,8 @@ type ArrayLiteral struct {
 	pos      Pos
 }
 
-func (*ArrayLiteral) nodeMarker()  {}
-func (*ArrayLiteral) exprMarker() {}
+func (*ArrayLiteral) nodeMarker()   {}
+func (*ArrayLiteral) exprMarker()   {}
 func (a *ArrayLiteral) GetPos() Pos { return a.pos }
 
 func NewArrayLiteral(elems []Expression, pos Pos) *ArrayLiteral {
@@ -532,8 +532,8 @@ type IndexExpression struct {
 	pos    Pos
 }
 
-func (*IndexExpression) nodeMarker()  {}
-func (*IndexExpression) exprMarker() {}
+func (*IndexExpression) nodeMarker()   {}
+func (*IndexExpression) exprMarker()   {}
 func (i *IndexExpression) GetPos() Pos { return i.pos }
 
 func NewIndexExpression(obj, index Expression, pos Pos) *IndexExpression {
@@ -546,8 +546,8 @@ type NewArrayExpression struct {
 	pos      Pos
 }
 
-func (*NewArrayExpression) nodeMarker()  {}
-func (*NewArrayExpression) exprMarker() {}
+func (*NewArrayExpression) nodeMarker()   {}
+func (*NewArrayExpression) exprMarker()   {}
 func (n *NewArrayExpression) GetPos() Pos { return n.pos }
 
 func NewNewArrayExpression(elemType *TypeAnnotation, size Expression, pos Pos) *NewArrayExpression {
@@ -557,7 +557,7 @@ func NewNewArrayExpression(elemType *TypeAnnotation, size Expression, pos Pos) *
 // --- Object expressions ---
 
 type ObjectProperty struct {
-	Key   string
+	Key string
 	// KeyExpr is non-nil for a computed property key `{ [expr]: value }`;
 	// Key is unused in that case. nil means a static key (Key holds the name)
 	// or, when Key == "" and Value is a *SpreadElement, an object spread.
@@ -570,8 +570,8 @@ type ObjectLiteral struct {
 	pos        Pos
 }
 
-func (*ObjectLiteral) nodeMarker()  {}
-func (*ObjectLiteral) exprMarker() {}
+func (*ObjectLiteral) nodeMarker()   {}
+func (*ObjectLiteral) exprMarker()   {}
 func (o *ObjectLiteral) GetPos() Pos { return o.pos }
 
 func NewObjectLiteral(props []ObjectProperty, pos Pos) *ObjectLiteral {
@@ -602,8 +602,8 @@ type ArrowFunction struct {
 	pos     Pos
 }
 
-func (*ArrowFunction) nodeMarker()  {}
-func (*ArrowFunction) exprMarker() {}
+func (*ArrowFunction) nodeMarker()   {}
+func (*ArrowFunction) exprMarker()   {}
 func (a *ArrowFunction) GetPos() Pos { return a.pos }
 
 func NewArrowFunction(params []Param, retType *TypeAnnotation, body Expression, block *BlockStatement, pos Pos) *ArrowFunction {
@@ -620,8 +620,8 @@ type TemplateLiteral struct {
 	pos    Pos
 }
 
-func (*TemplateLiteral) nodeMarker()  {}
-func (*TemplateLiteral) exprMarker() {}
+func (*TemplateLiteral) nodeMarker()   {}
+func (*TemplateLiteral) exprMarker()   {}
 func (t *TemplateLiteral) GetPos() Pos { return t.pos }
 
 func NewTemplateLiteral(quasis []string, exprs []Expression, pos Pos) *TemplateLiteral {
@@ -635,8 +635,8 @@ type NewMapExpression struct {
 	pos     Pos
 }
 
-func (*NewMapExpression) nodeMarker()  {}
-func (*NewMapExpression) exprMarker() {}
+func (*NewMapExpression) nodeMarker()   {}
+func (*NewMapExpression) exprMarker()   {}
 func (n *NewMapExpression) GetPos() Pos { return n.pos }
 
 func NewNewMapExpression(key, val *TypeAnnotation, pos Pos) *NewMapExpression {
@@ -649,12 +649,28 @@ type NewSetExpression struct {
 	pos      Pos
 }
 
-func (*NewSetExpression) nodeMarker()  {}
-func (*NewSetExpression) exprMarker() {}
+func (*NewSetExpression) nodeMarker()   {}
+func (*NewSetExpression) exprMarker()   {}
 func (n *NewSetExpression) GetPos() Pos { return n.pos }
 
 func NewNewSetExpression(elem *TypeAnnotation, pos Pos) *NewSetExpression {
 	return &NewSetExpression{ElemType: elem, pos: pos}
+}
+
+// NewEventEmitterExpression — `new EventEmitter<T>()` (TDD-00023). Like
+// NewMapExpression/NewSetExpression, restricted to a variable declaration's
+// initializer, not a general expression.
+type NewEventEmitterExpression struct {
+	PayloadType *TypeAnnotation
+	pos         Pos
+}
+
+func (*NewEventEmitterExpression) nodeMarker()   {}
+func (*NewEventEmitterExpression) exprMarker()   {}
+func (n *NewEventEmitterExpression) GetPos() Pos { return n.pos }
+
+func NewNewEventEmitterExpression(payload *TypeAnnotation, pos Pos) *NewEventEmitterExpression {
+	return &NewEventEmitterExpression{PayloadType: payload, pos: pos}
 }
 
 // EnumMember is one member of an enum declaration.
@@ -671,8 +687,8 @@ type EnumDeclaration struct {
 	pos     Pos
 }
 
-func (*EnumDeclaration) nodeMarker()  {}
-func (*EnumDeclaration) stmtMarker() {}
+func (*EnumDeclaration) nodeMarker()   {}
+func (*EnumDeclaration) stmtMarker()   {}
 func (e *EnumDeclaration) GetPos() Pos { return e.pos }
 
 func NewEnumDeclaration(name string, isConst bool, members []EnumMember, pos Pos) *EnumDeclaration {
@@ -685,8 +701,8 @@ type ThrowStatement struct {
 	pos      Pos
 }
 
-func (*ThrowStatement) nodeMarker()  {}
-func (*ThrowStatement) stmtMarker() {}
+func (*ThrowStatement) nodeMarker()   {}
+func (*ThrowStatement) stmtMarker()   {}
 func (t *ThrowStatement) GetPos() Pos { return t.pos }
 
 func NewThrowStatement(arg Expression, pos Pos) *ThrowStatement {
@@ -701,8 +717,8 @@ type TryStatement struct {
 	pos     Pos
 }
 
-func (*TryStatement) nodeMarker()  {}
-func (*TryStatement) stmtMarker() {}
+func (*TryStatement) nodeMarker()   {}
+func (*TryStatement) stmtMarker()   {}
 func (t *TryStatement) GetPos() Pos { return t.pos }
 
 func NewTryStatement(body *BlockStatement, catch *CatchClause, finally *BlockStatement, pos Pos) *TryStatement {
@@ -723,8 +739,8 @@ type NewErrorExpression struct {
 	pos     Pos
 }
 
-func (*NewErrorExpression) nodeMarker()  {}
-func (*NewErrorExpression) exprMarker() {}
+func (*NewErrorExpression) nodeMarker()   {}
+func (*NewErrorExpression) exprMarker()   {}
 func (n *NewErrorExpression) GetPos() Pos { return n.pos }
 
 func NewNewErrorExpression(kind string, msg Expression, pos Pos) *NewErrorExpression {
@@ -741,8 +757,8 @@ type NewDateExpression struct {
 	pos    Pos
 }
 
-func (*NewDateExpression) nodeMarker()  {}
-func (*NewDateExpression) exprMarker() {}
+func (*NewDateExpression) nodeMarker()   {}
+func (*NewDateExpression) exprMarker()   {}
 func (n *NewDateExpression) GetPos() Pos { return n.pos }
 
 func NewNewDateExpression(millis Expression, pos Pos) *NewDateExpression {
@@ -761,8 +777,8 @@ type NewURLExpression struct {
 	pos Pos
 }
 
-func (*NewURLExpression) nodeMarker()  {}
-func (*NewURLExpression) exprMarker() {}
+func (*NewURLExpression) nodeMarker()   {}
+func (*NewURLExpression) exprMarker()   {}
 func (n *NewURLExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
@@ -777,8 +793,8 @@ type NewURLSearchParamsExpression struct {
 	pos  Pos
 }
 
-func (*NewURLSearchParamsExpression) nodeMarker()  {}
-func (*NewURLSearchParamsExpression) exprMarker() {}
+func (*NewURLSearchParamsExpression) nodeMarker()   {}
+func (*NewURLSearchParamsExpression) exprMarker()   {}
 func (n *NewURLSearchParamsExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLSearchParamsExpression(init Expression, pos Pos) *NewURLSearchParamsExpression {
@@ -794,8 +810,8 @@ type NewArrayBufferExpression struct {
 	pos        Pos
 }
 
-func (*NewArrayBufferExpression) nodeMarker()  {}
-func (*NewArrayBufferExpression) exprMarker() {}
+func (*NewArrayBufferExpression) nodeMarker()   {}
+func (*NewArrayBufferExpression) exprMarker()   {}
 func (n *NewArrayBufferExpression) GetPos() Pos { return n.pos }
 
 func NewNewArrayBufferExpression(byteLength Expression, pos Pos) *NewArrayBufferExpression {
@@ -817,8 +833,8 @@ type NewTypedArrayExpression struct {
 	pos      Pos
 }
 
-func (*NewTypedArrayExpression) nodeMarker()  {}
-func (*NewTypedArrayExpression) exprMarker() {}
+func (*NewTypedArrayExpression) nodeMarker()   {}
+func (*NewTypedArrayExpression) exprMarker()   {}
 func (n *NewTypedArrayExpression) GetPos() Pos { return n.pos }
 
 func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTypedArrayExpression {
@@ -837,8 +853,8 @@ type NewExpression struct {
 	pos       Pos
 }
 
-func (*NewExpression) nodeMarker()  {}
-func (*NewExpression) exprMarker() {}
+func (*NewExpression) nodeMarker()   {}
+func (*NewExpression) exprMarker()   {}
 func (n *NewExpression) GetPos() Pos { return n.pos }
 
 func NewNewExpression(className string, args []Expression, pos Pos) *NewExpression {
@@ -853,8 +869,8 @@ type InterfaceDeclaration struct {
 	pos     Pos
 }
 
-func (*InterfaceDeclaration) nodeMarker()  {}
-func (*InterfaceDeclaration) stmtMarker() {}
+func (*InterfaceDeclaration) nodeMarker()   {}
+func (*InterfaceDeclaration) stmtMarker()   {}
 func (i *InterfaceDeclaration) GetPos() Pos { return i.pos }
 
 func NewInterfaceDeclaration(name string, fields []AnnotField, methods []InterfaceMethodSig, pos Pos) *InterfaceDeclaration {
@@ -880,11 +896,14 @@ type InterfaceMethodSig struct {
 // receiver every one of them has is a codegen-time concern (TDD-00009 Stage
 // 1), not part of this node's shape.
 type ClassDeclaration struct {
-	Name        string
-	BaseClass   string // "" if no `extends` clause (TDD-00009 Stage 3)
-	Fields      []AnnotField
-	Constructor *FunctionDeclaration // nil if omitted
-	Methods     []*FunctionDeclaration
+	Name      string
+	BaseClass string // "" if no `extends` clause (TDD-00009 Stage 3)
+	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
+	// — the sole generic `extends` target this compiler currently supports.
+	BaseTypeArgs []*TypeAnnotation
+	Fields       []AnnotField
+	Constructor  *FunctionDeclaration // nil if omitted
+	Methods      []*FunctionDeclaration
 	// IsAbstract/Implements/StaticBlocks are TDD-00009 Stage 4.
 	// StaticBlocks are concatenated in declaration order into one
 	// per-class initializer, run once before any top-level statement.
@@ -894,12 +913,12 @@ type ClassDeclaration struct {
 	pos          Pos
 }
 
-func (*ClassDeclaration) nodeMarker()  {}
-func (*ClassDeclaration) stmtMarker() {}
+func (*ClassDeclaration) nodeMarker()   {}
+func (*ClassDeclaration) stmtMarker()   {}
 func (c *ClassDeclaration) GetPos() Pos { return c.pos }
 
-func NewClassDeclaration(name, baseClass string, isAbstract bool, implements []string, fields []AnnotField, ctor *FunctionDeclaration, methods []*FunctionDeclaration, staticBlocks []*BlockStatement, pos Pos) *ClassDeclaration {
-	return &ClassDeclaration{Name: name, BaseClass: baseClass, IsAbstract: isAbstract, Implements: implements, Fields: fields, Constructor: ctor, Methods: methods, StaticBlocks: staticBlocks, pos: pos}
+func NewClassDeclaration(name, baseClass string, baseTypeArgs []*TypeAnnotation, isAbstract bool, implements []string, fields []AnnotField, ctor *FunctionDeclaration, methods []*FunctionDeclaration, staticBlocks []*BlockStatement, pos Pos) *ClassDeclaration {
+	return &ClassDeclaration{Name: name, BaseClass: baseClass, BaseTypeArgs: baseTypeArgs, IsAbstract: isAbstract, Implements: implements, Fields: fields, Constructor: ctor, Methods: methods, StaticBlocks: staticBlocks, pos: pos}
 }
 
 // SuperExpression — bare `super`, valid inside a derived class's
@@ -913,8 +932,8 @@ type SuperExpression struct {
 	pos Pos
 }
 
-func (*SuperExpression) nodeMarker()  {}
-func (*SuperExpression) exprMarker() {}
+func (*SuperExpression) nodeMarker()   {}
+func (*SuperExpression) exprMarker()   {}
 func (s *SuperExpression) GetPos() Pos { return s.pos }
 
 func NewSuperExpression(pos Pos) *SuperExpression { return &SuperExpression{pos: pos} }
@@ -926,8 +945,8 @@ type TypeAliasDeclaration struct {
 	pos  Pos
 }
 
-func (*TypeAliasDeclaration) nodeMarker()  {}
-func (*TypeAliasDeclaration) stmtMarker() {}
+func (*TypeAliasDeclaration) nodeMarker()   {}
+func (*TypeAliasDeclaration) stmtMarker()   {}
 func (t *TypeAliasDeclaration) GetPos() Pos { return t.pos }
 
 func NewTypeAliasDeclaration(name string, ta *TypeAnnotation, pos Pos) *TypeAliasDeclaration {
@@ -945,8 +964,8 @@ type ExportDeclaration struct {
 	pos  Pos
 }
 
-func (*ExportDeclaration) nodeMarker()  {}
-func (*ExportDeclaration) stmtMarker() {}
+func (*ExportDeclaration) nodeMarker()   {}
+func (*ExportDeclaration) stmtMarker()   {}
 func (e *ExportDeclaration) GetPos() Pos { return e.pos }
 
 func NewExportDeclaration(decl Statement, pos Pos) *ExportDeclaration {
@@ -974,8 +993,8 @@ type ImportDeclaration struct {
 	pos        Pos
 }
 
-func (*ImportDeclaration) nodeMarker()  {}
-func (*ImportDeclaration) stmtMarker() {}
+func (*ImportDeclaration) nodeMarker()   {}
+func (*ImportDeclaration) stmtMarker()   {}
 func (i *ImportDeclaration) GetPos() Pos { return i.pos }
 
 func NewImportDeclaration(specs []ImportSpecifier, source string, pos Pos) *ImportDeclaration {

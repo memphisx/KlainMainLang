@@ -124,6 +124,25 @@ type Type struct {
 	// silently keeps only the last value, so `.getAll()` never returns more
 	// than one element. See emit_url.go.
 	IsURLSearchParams bool
+	// IsEventEmitter marks `new EventEmitter<T>()`'s result (TDD-00023):
+	// storage-wise it's a ptr to a Map<string,ptr> handle (event name →
+	// listener-list heap struct), but deliberately does NOT set IsMap —
+	// unlike IsURLSearchParams, EventEmitter's method surface (on/once/emit/
+	// off/removeListener/removeAllListeners/listenerCount/eventNames) shares
+	// no names with Map's, and letting .get()/.set()/.forEach() leak onto an
+	// EventEmitter value would be a real, silent correctness gap. The
+	// underlying __kml_map_str_* helpers are called directly by name from
+	// emit_eventemitter.go instead. EventEmitterPayload is the T in
+	// EventEmitter<T> — every listener/emit call site needs it to know the
+	// payload's IR shape. See emit_eventemitter.go and docs/tdd/TDD-00023.md.
+	IsEventEmitter      bool
+	EventEmitterPayload *Type
+	// HasEventEmitter marks a class whose instances carry a hidden
+	// listener-map-handle field (TDD-00023) — set for a class that directly
+	// `extends EventEmitter<T>`, and propagated to every descendant the same
+	// way HasVTable propagates across an inheritance tree. See
+	// ClassEventEmitterField and registerClasses.
+	HasEventEmitter bool
 	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
 	// zero-initialized raw byte buffer. Deliberately not IsObject — the
 	// runtime value is a ptr to a hidden 2-word heap struct ({i64
@@ -231,6 +250,15 @@ func URLType() Type {
 	return ty
 }
 
+// EventEmitterType returns `new EventEmitter<T>()`'s result type — see
+// IsEventEmitter's doc comment for why this is a fully independent flag
+// rather than a flavor of Map, despite reusing Map's runtime helpers under
+// the hood. See docs/tdd/TDD-00023.md.
+func EventEmitterType(payload Type) Type {
+	payloadCopy := payload
+	return Type{IR: "ptr", IsEventEmitter: true, EventEmitterPayload: &payloadCopy}
+}
+
 // ArrayBufferType returns `new ArrayBuffer(...)`'s result type — see
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
@@ -302,28 +330,41 @@ const ClassTagField = "__kml_tag"
 // user-declared field with this name is a compile-time error.
 const ClassVTableField = "__kml_vtable"
 
+// ClassEventEmitterField is the name of the hidden ptr field a class carries
+// (TDD-00023) when HasEventEmitter is set — positioned right after the tag
+// (and vtable pointer, if present). Holds a Map<string,ptr> handle (event
+// name → listener-list heap struct). Set for a class that directly `extends
+// EventEmitter<T>`, and every descendant down its inheritance chain.
+// Reserved the same way ClassTagField/ClassVTableField are: a user-declared
+// field with this name is a compile-time error.
+const ClassEventEmitterField = "__kml_ee_listeners"
+
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
 // method-call dispatch can find the class's registered method table.
 //
 // Field order is: hidden tag (always, index 0) → hidden vtable pointer
-// (only when hasVTable, index 1) → inherited fields (already-flattened,
-// base-first, empty for a root class — TDD-00009 Stage 3) → this class's
-// own newly-declared fields. FieldIndex/StructIR/StructSize all derive
-// from Fields' order generically, so every named field access shifts for
-// free with no changes needed at any of those call sites — this is also
-// exactly what makes base-first layout work: a Derived* struct's prefix is
-// byte-identical to Base*'s own layout, so a Base-typed field access on a
-// Derived instance needs no adjustment. Callers that enumerate *all*
-// fields for reflection (Object.keys/values/entries, JSON, for...in,
-// spread) must use VisibleFields() instead of Fields directly, or the
-// hidden fields leak out as fake user-visible ones.
-func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type {
-	tagged := make([]Field, 0, 2+len(inherited)+len(own))
+// (only when hasVTable, index 1) → hidden EventEmitter listener-map handle
+// (only when hasEventEmitter, TDD-00023 — index 1 or 2 depending on
+// hasVTable) → inherited fields (already-flattened, base-first, empty for a
+// root class — TDD-00009 Stage 3) → this class's own newly-declared fields.
+// FieldIndex/StructIR/StructSize all derive from Fields' order generically,
+// so every named field access shifts for free with no changes needed at any
+// of those call sites — this is also exactly what makes base-first layout
+// work: a Derived* struct's prefix is byte-identical to Base*'s own layout,
+// so a Base-typed field access on a Derived instance needs no adjustment.
+// Callers that enumerate *all* fields for reflection (Object.keys/values/
+// entries, JSON, for...in, spread) must use VisibleFields() instead of
+// Fields directly, or the hidden fields leak out as fake user-visible ones.
+func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter bool) Type {
+	tagged := make([]Field, 0, 3+len(inherited)+len(own))
 	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
 	if hasVTable {
 		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
+	}
+	if hasEventEmitter {
+		tagged = append(tagged, Field{Name: ClassEventEmitterField, Ty: TypePtr})
 	}
 	tagged = append(tagged, inherited...)
 	tagged = append(tagged, own...)
@@ -331,23 +372,28 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable bool) Type
 	ty.IsClass = true
 	ty.ClassName = name
 	ty.HasVTable = hasVTable
+	ty.HasEventEmitter = hasEventEmitter
 	return ty
 }
 
 // VisibleFields returns the fields a user should ever see: identical to
 // Fields for every non-class/non-error object type, but with the hidden
-// leading fields (tag, plus vtable pointer when HasVTable) stripped. Use
-// this instead of Fields directly at any reflection/enumeration call site
-// (Object.keys, Object.values, Object.entries, Object.assign,
-// JSON.stringify, for...in, object-literal/spread field copying) —
-// GEP/field-access code should keep using Fields (via FieldIndex)
-// unchanged, since the hidden fields' presence is what makes those indices
-// correct in the first place.
+// leading fields (tag, plus vtable pointer when HasVTable, plus the
+// EventEmitter listener-map handle when HasEventEmitter — TDD-00023)
+// stripped. Use this instead of Fields directly at any reflection/
+// enumeration call site (Object.keys, Object.values, Object.entries,
+// Object.assign, JSON.stringify, for...in, object-literal/spread field
+// copying) — GEP/field-access code should keep using Fields (via
+// FieldIndex) unchanged, since the hidden fields' presence is what makes
+// those indices correct in the first place.
 func (t Type) VisibleFields() []Field {
 	if t.IsClass && len(t.Fields) > 0 {
 		skip := 1
 		if t.HasVTable {
-			skip = 2
+			skip++
+		}
+		if t.HasEventEmitter {
+			skip++
 		}
 		return t.Fields[skip:]
 	}
@@ -388,6 +434,34 @@ func PathParsedType() Type {
 		{Name: "base", Ty: TypePtr},
 		{Name: "ext", Ty: TypePtr},
 		{Name: "name", Ty: TypePtr},
+	})
+}
+
+// CPUTimesType returns os.cpus()'s per-core `times` field: cumulative
+// milliseconds spent in each state since boot, matching real Node's
+// {user, nice, sys, idle, irq} shape (a subset of /proc/stat's own fields —
+// `iowait` is read but not reported, matching libuv's own field selection).
+func CPUTimesType() Type {
+	return ObjectType([]Field{
+		{Name: "user", Ty: TypeI64},
+		{Name: "nice", Ty: TypeI64},
+		{Name: "sys", Ty: TypeI64},
+		{Name: "idle", Ty: TypeI64},
+		{Name: "irq", Ty: TypeI64},
+	})
+}
+
+// CPUInfoType returns os.cpus()'s per-core element type — a plain heap
+// object (readable via the ordinary object field-access path — no
+// dispatched methods), the same "nested object as a field" shape
+// SettlementType's `reason: errorObjType` field already establishes.
+// speed is MHz (0 on Apple Silicon, where there's no fixed clock-speed
+// sysctl — a documented Node.js behavior on M-series Macs too, not a gap).
+func CPUInfoType() Type {
+	return ObjectType([]Field{
+		{Name: "model", Ty: TypePtr},
+		{Name: "speed", Ty: TypeI64},
+		{Name: "times", Ty: CPUTimesType()},
 	})
 }
 

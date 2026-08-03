@@ -52,4 +52,19 @@ const id = setInterval(() => {
     }
 }, 5)
 
+// ── setImmediate/clearImmediate — schedule for "as soon as possible",     ──
+// reusing the exact same timer queue as delay-0 setTimeout. Known scope
+// narrowing: real Node guarantees setImmediate fires before a same-tick
+// setTimeout(fn, 0) when scheduled from inside an I/O callback (distinct
+// event-loop phases); this compiler's single flat fire-time-ordered queue
+// has no phase concept, so the two are genuinely indistinguishable here —
+// see docs/status/TIMERS.md.
+setImmediate(() => {
+    console.log("immediate fired")
+})
+const cancelledImmediateId = setImmediate(() => {
+    console.log("this should never print either")
+})
+clearImmediate(cancelledImmediateId)
+
 console.log("end of synchronous code — timers fire below")

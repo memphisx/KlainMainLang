@@ -115,9 +115,10 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	nameTok := p.advance()
 	name := nameTok.Literal
 
-	// Promise<T> / Array<T> / Set<T>: single type parameter — parse it for
-	// real instead of skipping, same as the T[] / new Array<T>() forms.
-	if (name == "Promise" || name == "Array" || name == "Set") && p.check(lexer.LT) {
+	// Promise<T> / Array<T> / Set<T> / EventEmitter<T>: single type
+	// parameter — parse it for real instead of skipping, same as the
+	// T[] / new Array<T>() forms.
+	if (name == "Promise" || name == "Array" || name == "Set" || name == "EventEmitter") && p.check(lexer.LT) {
 		p.advance() // consume '<'
 		inner, err := p.parseTypeAnnotation(source)
 		if err != nil {

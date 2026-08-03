@@ -35,6 +35,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		if ex.Op == "instanceof" {
 			return e.emitInstanceOf(ex)
 		}
+		if ex.Op == "in" {
+			return e.emitInOperator(ex)
+		}
 		return e.emitBinary(ex)
 	case *ast.UnaryExpression:
 		return e.emitUnary(ex)
@@ -58,6 +61,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: new Map() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.NewSetExpression:
 		return Value{}, fmt.Errorf("%d:%d: new Set() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+	case *ast.NewEventEmitterExpression:
+		return Value{}, fmt.Errorf("%d:%d: new EventEmitter() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.NewErrorExpression:
 		return e.emitNewError(ex)
 	case *ast.NewDateExpression:

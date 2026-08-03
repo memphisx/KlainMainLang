@@ -105,3 +105,53 @@ func TestE2EClearIntervalWrongArgCountRejected(t *testing.T) {
 		t.Fatal("expected a compile error for clearInterval() with no arguments, got none")
 	}
 }
+
+// --- setImmediate/clearImmediate ---
+
+func TestE2ESetImmediateFiresAfterSyncCode(t *testing.T) {
+	assertOutput(t, `
+console.log("sync")
+setImmediate(() => {
+    console.log("immediate")
+})
+console.log("still sync")
+`, "sync\nstill sync\nimmediate")
+}
+
+func TestE2ESetImmediateFiresBeforeLaterTimeout(t *testing.T) {
+	assertOutput(t, `
+setTimeout(() => { console.log("timeout") }, 10)
+setImmediate(() => { console.log("immediate") })
+`, "immediate\ntimeout")
+}
+
+func TestE2EClearImmediateCancelsBeforeFiring(t *testing.T) {
+	assertOutput(t, `
+const id = setImmediate(() => {
+    console.log("should not print")
+})
+clearImmediate(id)
+console.log("cancelled")
+`, "cancelled")
+}
+
+func TestE2ESetImmediateWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`setImmediate()`)
+	if err == nil {
+		t.Fatal("expected a compile error for setImmediate() with no arguments, got none")
+	}
+}
+
+func TestE2ESetImmediateNonFunctionCallbackRejected(t *testing.T) {
+	_, err := parseAndCompile(`setImmediate(5)`)
+	if err == nil {
+		t.Fatal("expected a compile error for setImmediate with a non-function argument, got none")
+	}
+}
+
+func TestE2EClearImmediateWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`clearImmediate()`)
+	if err == nil {
+		t.Fatal("expected a compile error for clearImmediate() with no arguments, got none")
+	}
+}

@@ -222,7 +222,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 	case *ast.BinaryExpression:
 		switch ex.Op {
-		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof":
+		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof", "in":
 			return TypeBool
 		case "+":
 			lt := e.inferExprType(ex.Left)
@@ -314,6 +314,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "sep", "delimiter":
 					return TypePtr
 				}
+			case "os":
+				switch ex.Property {
+				case "EOL":
+					return TypePtr
+				}
 			}
 		}
 		if isProcessEnvExpr(ex.Object) {
@@ -359,6 +364,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if sig, ok := info.MethodSigs[mem.Property]; ok {
 						return sig.RetType
 					}
+					// EventEmitter-embedded chainable methods (TDD-00023)
+					// return the *class* type (not a bare EventEmitterType),
+					// so `x.on(...).on(...)` and `x.on(...).someMethod()`
+					// both type-check correctly after chaining.
+					if info.HasEventEmitter {
+						switch mem.Property {
+						case "on", "once", "off", "removeListener", "removeAllListeners":
+							return objTy
+						case "emit":
+							return TypeBool
+						case "listenerCount":
+							return TypeI64
+						case "eventNames":
+							return ArrayOf(TypePtr)
+						}
+					}
 				}
 			}
 		}
@@ -385,7 +406,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return PromiseOf(ResponseType())
 			case "btoa", "atob", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI":
 				return TypePtr
-			case "setTimeout", "setInterval":
+			case "setTimeout", "setInterval", "setImmediate":
 				return TypeI64
 			}
 		}
@@ -477,6 +498,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeBool
 				case "parse":
 					return PathParsedType()
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "os" {
+				switch mem.Property {
+				case "platform", "homedir", "tmpdir", "hostname":
+					return TypePtr
+				case "totalmem", "freemem":
+					return TypeI64
+				case "cpus":
+					return ArrayOf(CPUInfoType())
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" {
@@ -661,6 +692,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if objTy.MapKey != nil {
 						return ArrayOf(*objTy.MapKey)
 					}
+				}
+			}
+			if haveObjTy && objTy.IsEventEmitter {
+				switch mem.Property {
+				case "on", "once", "off", "removeListener", "removeAllListeners":
+					return objTy
+				case "emit":
+					return TypeBool
+				case "listenerCount":
+					return TypeI64
+				case "eventNames":
+					return ArrayOf(TypePtr)
 				}
 			}
 		}

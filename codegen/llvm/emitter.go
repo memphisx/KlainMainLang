@@ -154,6 +154,14 @@ type Emitter struct {
 	usedSortClosGlobal       bool
 	usedMapStrHelpers        bool
 	usedMapNumHelpers        bool
+	usedEventEmitterRuntime  bool
+	usedOSReadProcFile       bool
+	usedOSCpusLinux          bool
+	usedOSCpusDarwin         bool
+	usedGethostname          bool
+	usedSysconf              bool
+	usedSysctlbyname         bool
+	usedMachVM               bool
 	usedExceptionHelpers     bool
 	usedFrozenSet            bool
 	usedPathNormalize        bool
@@ -381,6 +389,9 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	}
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
+	}
+	if ta.Name == "EventEmitter" && ta.ElemType != nil {
+		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
 	}
 	if ta.ElemType != nil {
 		return ArrayOf(e.resolveType(ta.ElemType))

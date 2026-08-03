@@ -118,3 +118,8 @@ console.log(Object.hasOwn(base, 'x'))     // 1
 console.log(Object.hasOwn(base, 'z'))     // 0
 console.log(base.hasOwnProperty('y'))     // 1
 console.log(base.hasOwnProperty('q'))     // 0
+
+// `in` operator — same compile-time field-presence check as
+// Object.hasOwn/.hasOwnProperty above, just as an operator: `key in obj`.
+console.log('x' in base)     // 1
+console.log('z' in base)     // 0
