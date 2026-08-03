@@ -189,9 +189,17 @@ func (p *Parser) parseRelational() (ast.Expression, error) {
 	if err != nil {
 		return nil, err
 	}
+	// `in` (`key in obj`) sits at the same precedence as instanceof/</>/etc
+	// in real JS grammar too. Deliberately NOT a reserved lexer.IN token —
+	// "in" isn't reserved anywhere else in this compiler either (the for-in
+	// loop already recognizes it the same contextual way, matching a plain
+	// IDENT's literal text — parser_stmts.go's parseFor), so a variable or
+	// field actually named "in" keeps working everywhere outside this one
+	// operator position.
 	for p.peek().Type == lexer.LT || p.peek().Type == lexer.GT ||
 		p.peek().Type == lexer.LTE || p.peek().Type == lexer.GTE ||
-		p.peek().Type == lexer.INSTANCEOF {
+		p.peek().Type == lexer.INSTANCEOF ||
+		(p.peek().Type == lexer.IDENT && p.peek().Literal == "in") {
 		op := p.advance()
 		right, err := p.parseShift()
 		if err != nil {

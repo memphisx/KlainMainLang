@@ -127,3 +127,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00086](ADR-00086.md) | Optional catch binding (`catch { ... }`) | |
 | [00087](ADR-00087.md) | Logical assignment operators (`&&=`, `\|\|=`, `??=`) | |
 | [00088](ADR-00088.md) | `Array.from(iterable)` (array-like overload) | Extends [ADR-00063](ADR-00063.md). Implements [TDD-00009](../tdd/TDD-00009.md) |
+| [00089](ADR-00089.md) | `EventEmitter<T>` (`events` module), including `class X extends EventEmitter<T>` | Extends [ADR-00083](ADR-00083.md). Implements [TDD-00023](../tdd/TDD-00023.md) |
+| [00090](ADR-00090.md) | `os` module (Darwin `freemem()`/`cpus().times` unverified) | Implements [TDD-00024](../tdd/TDD-00024.md) |
+| [00091](ADR-00091.md) | `in` operator (`key in obj`) | |
+| [00092](ADR-00092.md) | `setImmediate(fn)` / `clearImmediate(id)` | Extends [ADR-00031](ADR-00031.md) |

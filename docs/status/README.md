@@ -22,12 +22,12 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 ## TypeScript Core Language
 
-**258 / 314 features, ~82% coverage.**
+**259 / 315 features, ~82% coverage.**
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
 | Control flow statements | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Optional catch binding (`catch {}` without `(e)`) done — see [ADR-00086](../adr/ADR-00086.md) |
-| Operators | 38/41, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | `i64` MIN `/ -1` is still UB (known, unfixed); logical assignment operators (`&&=`, `\|\|=`, `??=`) done — see [ADR-00087](../adr/ADR-00087.md) |
+| Operators | 39/42, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | `i64` MIN `/ -1` is still UB (known, unfixed); logical assignment operators (`&&=`, `\|\|=`, `??=`) done — see [ADR-00087](../adr/ADR-00087.md); `in` operator done — see [ADR-00091](../adr/ADR-00091.md) |
 | Variable declarations | 4/4, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Numeric separators (`1_000_000`) done — see [ADR-00085](../adr/ADR-00085.md) |
 | Functions & closures | 7/11, ~64% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | No nested function declarations; a same-file forward-reference inference gap; no tagged templates; no destructured parameters |
 | Type primitives | 8/14, ~57% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | No `symbol`/`bigint`; no union types beyond `T \| null` |
@@ -47,11 +47,11 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. Not part of the JS *language* itself, but not Node-specific either. Filtered to those that make sense outside a browser context; pure browser-only APIs (DOM, Canvas, WebGL, CSS, Gamepad, etc.) are out of scope — see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md).
 
-**25 / ~65 features, ~38% coverage.**
+**26 / ~65 features, ~40% coverage.**
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
-| Timers | 2/4, 50% | [TIMERS.md](TIMERS.md) | No `setImmediate`/`queueMicrotask` |
+| Timers | 3/4, 75% | [TIMERS.md](TIMERS.md) | `setImmediate`/`clearImmediate` done ([ADR-00092](../adr/ADR-00092.md)); no `queueMicrotask` |
 | Encoding / Text | 0/2, 0% | [ENCODING-TEXT.md](ENCODING-TEXT.md) | `TextEncoder`/`TextDecoder` not started |
 | URL | 2/3, ~67% | [URL.md](URL.md) | `URLSearchParams` keeps only one value per key (known limitation) |
 | Binary data & Typed Arrays | 9/17, ~53% | [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) | No `DataView`/`Blob`/`SharedArrayBuffer`/`Atomics`; no `BigInt64Array`/`BigUint64Array` (needs `bigint`); no Node `Buffer` |
@@ -66,7 +66,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Recognized as pseudo-namespaces (`fs.*`, `process.*`), like `Math`/`JSON` — not real importable modules.
 
-**37 / 75 features, ~49% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md).
+**50 / 75 features, ~67% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md). `EventEmitter` shipped after that — see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md) — unblocking (not yet picked up) Node's own `stream` module, async `child_process`, and interactive `readline`. `os` shipped last — see [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md); its Darwin-specific paths (`freemem()`, `cpus()`'s per-core `times`) are unverified pending real Apple Silicon hardware.
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
@@ -74,8 +74,8 @@ Node.js-specific runtime globals — not part of any Web/browser standard, but e
 | Process / CLI I/O | 12/23, ~52% | [PROCESS-CLI.md](PROCESS-CLI.md) | No raw `process.stdout.write`; `process.env` is read-only; `process.on(...)` now covers `'SIGINT'`/`'SIGTERM'` but not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`; no async `child_process`; no interactive `readline` |
 | HTTP Server | 7/8, ~88% | [HTTP-SERVER.md](HTTP-SERVER.md) | Graceful shutdown now works via `process.on('SIGINT'/'SIGTERM', ...)`; only a formal `.close()` listener-teardown API remains |
 | `path` | 8/8, 100% | [PATH.md](PATH.md) | Done ([ADR-00081](../adr/ADR-00081.md)) — POSIX-only (this compiler doesn't cross-compile) |
-| `os` | 0/7, 0% | [OS.md](OS.md) | Not started |
-| `events` (`EventEmitter`) | 0/6, 0% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | Not started; a real prerequisite for Node's own `stream` module and async `child_process`, both also untracked until now |
+| `os` | 7/7, 100% | [OS.md](OS.md) | Done ([ADR-00090](../adr/ADR-00090.md)) — Darwin's `freemem()`/`cpus().times` are written but unverified on real hardware, see [OS.md](OS.md)'s Known Limitations |
+| `events` (`EventEmitter`) | 6/6, 100% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | Done ([ADR-00089](../adr/ADR-00089.md)) — `EventEmitter<T>`, a compiler-recognized generic built-in; `class X extends EventEmitter<T>` works, integrated with real class inheritance (ADR-00083). Unblocks (not yet picked up) Node's own `stream` module and async `child_process` |
 | Other core modules (`util`, `assert`, `net`/`dgram`/`tls`/`dns`, `zlib`, `vm`, `cluster`, `http2`, `querystring`) | 0/11, 0% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | Not started; grouped together as lower-individual-priority rather than each getting a full page |
 
 ## Cross-Cutting
@@ -97,7 +97,7 @@ These are the most natural next steps — each is self-contained and commonly us
 | Feature | Complexity | Notes |
 |---|---|---|
 | ~~`Array.from(iterable)`~~ | ~~Low-Medium~~ | ✅ done (array-like overload only — a plain array, or a class implementing `next(): T \| null`) — see [ADR-00088](../adr/ADR-00088.md) and [ARRAY-METHODS.md](ARRAY-METHODS.md) |
-| `in` operator | Medium | Object key presence check — object shapes are already fully structural/static (the same compile-time `FieldIndex` lookup `Object.hasOwn()` already uses, see [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md)), so this is mostly parser/precedence work, not new runtime machinery |
+| ~~`in` operator~~ | ~~Medium~~ | ✅ done — `key in obj` reduces to the exact same compile-time `FieldIndex` lookup `Object.hasOwn()`/`.hasOwnProperty()` already use (a shared helper now backs all three), parsed as a contextual keyword (not a reserved token) at the same precedence as `instanceof`, matching how the pre-existing `for...in` loop already recognizes "in". See [ADR-00091](../adr/ADR-00091.md). |
 
 ### Medium priority / medium complexity
 
@@ -141,8 +141,7 @@ Found by checking the actual lexer/parser/codegen source directly rather than re
 | Dynamic `import()` / `import.meta` | See [MODULES.md](MODULES.md) |
 | Node `Buffer` | See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) |
 | Node's own `stream` module (distinct from WHATWG streams) | See [STREAMS.md](STREAMS.md) |
-| `os` module | High relevance to this project's own CLI-priority tiebreaker — see [OS.md](OS.md). (`path`, the other module flagged in this audit, is now ✅ — see [PATH.md](PATH.md) and [ADR-00081](../adr/ADR-00081.md)) |
-| `events`/`EventEmitter`, async `child_process`, interactive `readline` | A real prerequisite cluster — Node's own `stream` module and async `child_process` are both built on `EventEmitter` in real Node. See [EVENT-EMITTER.md](EVENT-EMITTER.md), [PROCESS-CLI.md](PROCESS-CLI.md) |
+| Async `child_process`, interactive `readline` | Both built on `EventEmitter` in real Node, which is now ✅ — see [EVENT-EMITTER.md](EVENT-EMITTER.md) ([ADR-00089](../adr/ADR-00089.md)) and [PROCESS-CLI.md](PROCESS-CLI.md) |
 | `util`, `assert`, `net`/`dgram`/`tls`/`dns`, `zlib` (as a module), `vm`, `cluster`, `http2`, `querystring` | Lower individual priority — see [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |
 
 ---
@@ -168,6 +167,8 @@ Anything big enough to need a design pass before implementation gets scoped out 
 - **[Promise.all / .race / .allSettled](../tdd/TDD-00016.md)** — done ([ADR-00073](../adr/ADR-00073.md)): the event loop's last documented gap. Real concurrency over `Array<Promise<Response>>` (a new group-wait primitive on top of the existing fiber/libcurl-multi-interface mechanism); an honest, order-preserving synchronous read over any other `Array<Promise<T>>`, since every such promise is already resolved by construction in this compiler. Also fixed a real, unrelated parser bug found along the way: nested generics (`Array<Promise<T>>`) failed to parse at all, since the lexer always emits one fused `>>`/`RSHIFT` token for a doubled closing angle bracket and no existing call site un-merged it. A third `go test -fuzz` lane (`FuzzPromiseCombinatorsOrdinary`, `tests/fuzz_codegen_test.go`) was added on top of [TDD-00014](../tdd/TDD-00014.md)'s existing two, chaining random combinator calls (kind, count, and array length all randomized) against a Go-computed oracle — the category of bug this targets (compile-time label/register collisions across multiple textual call sites of the same builtin) is exactly the kind a fixed, hand-written test per combinator can't reliably catch.
 - **[fetch() client parity](../tdd/TDD-00017.md)** — done ([ADR-00074](../adr/ADR-00074.md)): `fetch(url, init)`'s `init` is a plain object with optional `method`/`headers`/`body` fields (`headers` a `Map<string,string>`, reusing this compiler's existing convention rather than new `Request`/`Headers` classes). Confirmed two real, easy-to-misjudge libcurl behaviors directly rather than assuming them: a `body` with no explicit `method` sends as `POST` (`CURLOPT_POSTFIELDS` implies it), but an *explicit* `method: "GET"` alongside a `body` still overrides that and sends a genuine GET-with-body. A fourth fuzz lane, `FuzzFetchInitOracle`, caught both on its first run (before its own oracle was fixed to match) — see the ADR's Investigation. See [NETWORKING.md](NETWORKING.md).
 - **[ArrayBuffer / TypedArrays](../tdd/TDD-00018.md)** — done ([ADR-00078](../adr/ADR-00078.md)): `ArrayBuffer` plus `Int8Array`…`Float64Array`, reusing the existing `number[]` HOF/iteration machinery unchanged. See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md).
+- **[EventEmitter<T>](../tdd/TDD-00023.md)** — done ([ADR-00089](../adr/ADR-00089.md)): a compiler-recognized generic built-in (same monomorphized-per-`T` pattern as `Map<K,V>`/`Set<T>`/`Promise<T>`), with `on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`. `class X extends EventEmitter<T>` is the first generic ever to be a valid `extends` target — a synthetic root, never itself registered as a real class (no vtable slot, no `instanceof`), integrated with ADR-00083's inheritance machinery via a third hidden struct field alongside the existing tag/vtable ones. One concrete payload type per emitter (`(data: T) => void`), not real Node's variadic `...args` — this compiler has no working `any[]`/spread-args/heterogeneous rest params to build that on. See [EVENT-EMITTER.md](EVENT-EMITTER.md).
+- **[os module](../tdd/TDD-00024.md)** — done ([ADR-00090](../adr/ADR-00090.md)): `platform`/`EOL`/`homedir`/`tmpdir`/`hostname`/`totalmem`/`freemem`/`cpus` (real per-core `model`/`speed`/`times`, not placeholders). Platform selection is a Go-side `runtime.GOOS` branch at codegen time (this compiler doesn't cross-compile), same mechanism `process.platform` already uses. Linux is fully verified (including hand-rolled `/proc/cpuinfo`/`/proc/stat` parsing); Darwin's `freemem()`/`cpus().times` (Mach `host_statistics`/`host_processor_info`) are written against documented, stable Mach ABI shapes but unverified on real hardware — deliberately shipped anyway per explicit user direction, pending a later real-Apple-Silicon test pass. See [OS.md](OS.md).
 - **[Windows support](../tdd/TDD-00020.md)** — not started, and explicitly the lowest-priority item anywhere in this project (a curiosity/reference doc, not a queued feature). Surveys which parts of the C runtime are portable as-is (libcurl, Boehm GC, `process.env`/argv, `select()`-based sockets — Windows' `select()` happens to support exactly this compiler's sockets-only usage) vs. needing a real second implementation (the `ucontext.h`-based fiber scheduler backing `http.listen`, and `execFileSync`'s `fork`/`execvp`, both of which have no Windows equivalent at all). Recommends MinGW-w64 cross-compilation from the existing macOS/Linux toolchain over a native Windows build.
 
 ---
@@ -209,7 +210,7 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 - ~~`URL` / `URLSearchParams`~~ — ✅ done, see [URL.md](URL.md) ([ADR-00076](../adr/ADR-00076.md)). Implemented via libcurl's URL API rather than a hand-rolled parser (a new dependency wasn't actually needed — libcurl was already linked for `fetch`); `URLSearchParams` deliberately narrowed to single-value-per-key, matching `http.listen`'s own `req.query`
 - `performance.mark(name)` / `performance.measure(...)` — named timing marks on top of the existing `performance.now()`. See [PERFORMANCE-TIMING.md](PERFORMANCE-TIMING.md).
 - `structuredClone(obj)` — recursive deep-copy of heap objects. See [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md).
-- `setImmediate` / `clearImmediate` — moved down from Medium: its stated prerequisite ("Timers' core mechanism") shipped as part of the unified event loop ([ADR-00048](../adr/ADR-00048.md)); this is now a small, unblocked follow-on, not waiting on anything. See [TIMERS.md](TIMERS.md).
+- ~~`setImmediate` / `clearImmediate`~~ — ✅ done, see [TIMERS.md](TIMERS.md) ([ADR-00092](../adr/ADR-00092.md)). A thin alias over the existing timer queue (delay-0 `setTimeout`); known scope narrowing against real Node's phase-based fire-before-same-tick-`setTimeout(fn,0)` guarantee, which this compiler's single flat timer queue has no phase concept to provide.
 
 **Medium effort (new dependency or subsystem):**
 - ~~`ArrayBuffer` + TypedArrays~~ — ✅ done, see [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) ([ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)). Now unlocks (none done yet, each a separate follow-up): actually fixing the `fetch`/`fs` null-byte-truncation bug (both already compute the real byte count internally before discarding it in favor of a bare string — a small, well-understood fix once callers can consume a real buffer), migrating `crypto.getRandomValues` off its `number[]`-as-a-stand-in workaround ([ADR-00024](../adr/ADR-00024.md)), and `TextEncoder`/`TextDecoder` below (blocked on `Uint8Array` existing as a real return/input type — now does)
@@ -227,4 +228,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-07-31 (numeric separators, optional catch binding, logical assignment operators, `Array.from` added). Update this file (and the linked page for whichever area changed) whenever a feature is added or removed.*
+*Last updated: 2026-08-03 (`setImmediate`/`clearImmediate` added). Update this file (and the linked page for whichever area changed) whenever a feature is added or removed.*

@@ -304,7 +304,6 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	}
 }
 
-
 func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 	objPtr, objTy, err := e.resolveObjectPtr(s.Init, s.GetPos())
 	if err != nil {
@@ -756,31 +755,45 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 	return val, nil
 }
 
-// emitHasOwnProperty backs both Object.hasOwn(obj, key) and
-// obj.hasOwnProperty(key). Object shapes are fully structural/static in
-// this compiler (every field a class/interface/object-literal type has is
-// known at compile time), so the key must be a compile-time string literal
-// — the result is then just a FieldIndex lookup, a compile-time-constant
-// true/false, not a runtime property scan. A non-literal (runtime-computed)
-// key is a clean compile error rather than a silent always-false/true, since
-// there's no field-name table at runtime to check it against.
-func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, pos ast.Pos) (Value, error) {
+// emitHasOwnProperty backs Object.hasOwn(obj, key), obj.hasOwnProperty(key),
+// and the `key in obj` operator (emitInOperator). Object shapes are fully
+// structural/static in this compiler (every field a class/interface/
+// object-literal type has is known at compile time), so the key must be a
+// compile-time string literal — the result is then just a FieldIndex
+// lookup, a compile-time-constant true/false, not a runtime property scan.
+// A non-literal (runtime-computed) key is a clean compile error rather than
+// a silent always-false/true, since there's no field-name table at runtime
+// to check it against. callerName customizes the error text so it reads
+// naturally regardless of which of the three call sites triggered it.
+func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName string, pos ast.Pos) (Value, error) {
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
 	}
 	if !objVal.Ty.IsObject {
-		return Value{}, fmt.Errorf("%d:%d: hasOwnProperty/Object.hasOwn requires an object", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s requires an object", pos.Line, pos.Col, callerName)
 	}
 	keyLit, ok := keyExpr.(*ast.StringLiteral)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: hasOwnProperty/Object.hasOwn requires a string literal key (dynamic keys are not supported)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s requires a string literal key (dynamic keys are not supported)", pos.Line, pos.Col, callerName)
 	}
 	_, _, found := objVal.Ty.FieldIndex(keyLit.Value)
 	if found {
 		return Value{Ref: "true", Ty: TypeBool}, nil
 	}
 	return Value{Ref: "false", Ty: TypeBool}, nil
+}
+
+// emitInOperator implements `key in obj` — real JS's `in` is a runtime
+// property/prototype-chain scan, but this compiler's object shapes are
+// fixed at compile time (no dynamic property add/delete, see
+// OBJECT-COLLECTIONS.md), so it reduces to exactly the same compile-time
+// FieldIndex lookup Object.hasOwn/obj.hasOwnProperty already use — reused
+// directly rather than reimplemented. Note the argument order flip: `in`
+// puts the key on the left and the object on the right, the opposite of
+// hasOwnProperty(obj, key).
+func (e *Emitter) emitInOperator(ex *ast.BinaryExpression) (Value, error) {
+	return e.emitHasOwnProperty(ex.Right, ex.Left, "the 'in' operator", ex.GetPos())
 }
 
 // emitObjectSeal implements Object.seal(obj). Real JS's seal blocks adding
@@ -850,4 +863,3 @@ func (e *Emitter) emitGroupMapIndex(sym Symbol, indexExpr ast.Expression, pos as
 	}
 	return Value{Ref: retReg, Ty: ArrayOf(elemTy)}, nil
 }
-

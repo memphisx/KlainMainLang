@@ -20,6 +20,7 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 		return nil, err
 	}
 	var baseClass string
+	var baseTypeArgs []*ast.TypeAnnotation
 	if p.check(lexer.EXTENDS) {
 		p.advance() // extends
 		baseTok, err := p.expect(lexer.IDENT)
@@ -27,6 +28,23 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 			return nil, err
 		}
 		baseClass = baseTok.Literal
+		// Generic extends (TDD-00023): `extends EventEmitter<T>` is
+		// currently the only base that accepts a type argument — but the
+		// parse itself is generic (any `extends <Ident><T>` shape), with
+		// the "is this base actually generic" check deferred to
+		// registerClasses, matching the existing "extends unknown class"
+		// precedent of validating at registration time, not parse time.
+		if p.check(lexer.LT) {
+			p.advance() // consume '<'
+			arg, err := p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
+			baseTypeArgs = append(baseTypeArgs, arg)
+			if err := p.expectGT(baseClass + "<T>"); err != nil {
+				return nil, err
+			}
+		}
 	}
 	var implementsNames []string
 	if p.check(lexer.IMPLEMENTS) {
@@ -141,5 +159,5 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewClassDeclaration(nameTok.Literal, baseClass, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos), nil
+	return ast.NewClassDeclaration(nameTok.Literal, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos), nil
 }

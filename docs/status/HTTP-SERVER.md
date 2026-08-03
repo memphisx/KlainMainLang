@@ -4,7 +4,7 @@
 
 **Coverage**: ~88% (7/8).
 
-**Caveats**: `http.listen` still has no `.close()` — there's no way for the event loop to stop accepting connections and return control to the rest of a program. What ✅ now means: a `process.on('SIGINT'/'SIGTERM', handler)` handler (see [PROCESS-CLI.md](PROCESS-CLI.md), [TDD-00019](../tdd/TDD-00019.md)) can run cleanup code and call `process.exit()` itself from inside a running server — real graceful shutdown in the sense that matters (cleanup runs before the process dies), just not via a formal listener-teardown API.
+**Caveats**: `http.listen` still has no `.close()` — there's no way for the event loop to stop accepting connections and return control to the rest of a program. What ✅ now means: a `process.on('SIGINT'/'SIGTERM', handler)` handler (see [PROCESS-CLI.md](PROCESS-CLI.md), [TDD-00019](../tdd/TDD-00019.md)) can run cleanup code and call `process.exit()` itself from inside a running server — real graceful shutdown in the sense that matters (cleanup runs before the process dies), just not via a formal listener-teardown API. A single `http.listen()` process is also still single-core — it never runs more than one fiber's code at any instant, matching its cooperative (not preemptive) concurrency model — see [TDD-00025](../tdd/TDD-00025.md) for a scoped-but-not-yet-built multi-process (`fork()`-based, `cluster`-module-style) design to change that.
 
 | API | Status | Notes |
 |---|---|---|

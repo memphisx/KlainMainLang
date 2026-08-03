@@ -56,3 +56,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00020](TDD-00020.md) | Windows support | Not Started |
 | [00021](TDD-00021.md) | `#x` real private fields | Not Started |
 | [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started |
+| [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented ([ADR-00089](../adr/ADR-00089.md)) |
+| [00024](TDD-00024.md) | `os` module | Implemented ([ADR-00090](../adr/ADR-00090.md)) — Darwin paths unverified |
+| [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Not Started |

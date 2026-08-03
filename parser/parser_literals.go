@@ -123,6 +123,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewMapBody(pos)
 	case "Set":
 		return p.parseNewSetBody(pos)
+	case "EventEmitter":
+		return p.parseNewEventEmitterBody(pos)
 	case "Error":
 		return p.parseNewErrorBody(pos, "Error")
 	case "TypeError":
@@ -407,6 +409,35 @@ func (p *Parser) parseNewSetBody(pos ast.Pos) (*ast.NewSetExpression, error) {
 	}
 
 	return ast.NewNewSetExpression(elemType, pos), nil
+}
+
+func (p *Parser) parseNewEventEmitterBody(pos ast.Pos) (*ast.NewEventEmitterExpression, error) {
+	p.advance() // consume 'EventEmitter'
+
+	var payloadType *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		var err error
+		payloadType, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.RPAREN) {
+		return nil, fmt.Errorf("%d:%d: new EventEmitter() does not accept arguments", pos.Line, pos.Col)
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+
+	return ast.NewNewEventEmitterExpression(payloadType, pos), nil
 }
 
 func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {

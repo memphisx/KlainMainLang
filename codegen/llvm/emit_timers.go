@@ -85,6 +85,31 @@ func (e *Emitter) emitSetInterval(args []ast.Expression, pos ast.Pos) (Value, er
 	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
+// emitSetImmediate implements setImmediate(callback): schedules callback to
+// fire via the same timer queue setTimeout/setInterval already use, with
+// delayMs hardcoded to 0 (no delay argument — real Node's setImmediate
+// doesn't take one either). Known scope narrowing, not a bug: real Node
+// guarantees a setImmediate callback fires before a same-tick
+// setTimeout(fn, 0) when both are scheduled from inside an I/O callback,
+// because its event loop has distinct phases (check vs. timers) — this
+// compiler's __kml_timer_drain is a single flat fire-time-ordered queue
+// with no phase concept, so setImmediate(fn) and setTimeout(fn, 0) are
+// genuinely indistinguishable here (both fire at "now"). Documented in
+// docs/status/TIMERS.md rather than silently assumed equivalent.
+func (e *Emitter) emitSetImmediate(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: setImmediate takes exactly 1 argument (callback)", pos.Line, pos.Col)
+	}
+	closurePtr, err := e.timerCallbackPtr(args[0], "setImmediate", pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureTimerRuntime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_timer_schedule(ptr %s, i64 0, i64 0)", r, closurePtr))
+	return Value{Ref: r, Ty: TypeI64}, nil
+}
+
 func (e *Emitter) emitClearTimer(args []ast.Expression, fnName string, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 1 argument (id)", pos.Line, pos.Col, fnName)

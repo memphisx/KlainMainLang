@@ -104,6 +104,14 @@ type ClassInfo struct {
 	HasVTable  bool
 	VTableSize int
 
+	// HasEventEmitter/EventEmitterPayload (TDD-00023) are set for a class
+	// that directly `extends EventEmitter<T>`, and propagate to every
+	// descendant the same way BaseClass-derived fields/HasVTable already do
+	// — see registerClasses' Pass 1. EventEmitterPayload is the T in
+	// EventEmitter<T>, valid only when HasEventEmitter.
+	HasEventEmitter     bool
+	EventEmitterPayload Type
+
 	// --- TDD-00009 Stage 4 ---
 
 	// IsAbstract marks an `abstract class` — cannot be directly
@@ -417,7 +425,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// Placeholder: correct IR/IsObject/IsClass/ClassName, no fields
 			// yet — see canonicalizeClassTy's doc comment for why this must
 			// exist before any field/param/return type is resolved.
-			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false)
+			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
 		}
 	}
 
@@ -435,7 +443,17 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			return nil
 		}
 		visitState[name] = 1
-		if cd.BaseClass != "" {
+		if cd.BaseClass == "EventEmitter" {
+			// A synthetic root (TDD-00023): EventEmitter is never itself a
+			// registered class (no vtable slot, no TagID, not
+			// instanceof-checkable — same as Error/Date/Map), so there is
+			// nothing in classDeclByName to recurse into.
+			if len(cd.BaseTypeArgs) != 1 {
+				return fmt.Errorf("%d:%d: class '%s' extends EventEmitter but supplies %d type argument(s), expected exactly 1 (EventEmitter<T>)", cd.GetPos().Line, cd.GetPos().Col, name, len(cd.BaseTypeArgs))
+			}
+		} else if len(cd.BaseTypeArgs) > 0 {
+			return fmt.Errorf("%d:%d: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
+		} else if cd.BaseClass != "" {
 			if _, ok := classDeclByName[cd.BaseClass]; !ok {
 				return fmt.Errorf("%d:%d: class '%s' extends unknown class '%s'", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
 			}
@@ -461,9 +479,24 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		cd := classDeclByName[name]
 
 		var baseInfo ClassInfo
-		haveBase := cd.BaseClass != ""
+		// A class directly `extends EventEmitter<T>` (TDD-00023) has
+		// haveBase=false — EventEmitter is a synthetic root, never a real
+		// registered class (see Pass 0 above), so it contributes no fields/
+		// constructor to flatten/forward, and this class flows through
+		// exactly the same "root class" rules below as one with no base at
+		// all.
+		isEEDirect := cd.BaseClass == "EventEmitter"
+		haveBase := cd.BaseClass != "" && !isEEDirect
 		if haveBase {
 			baseInfo = e.classes[cd.BaseClass]
+		}
+		hasEventEmitter := isEEDirect || (haveBase && baseInfo.HasEventEmitter)
+		var eePayload Type
+		switch {
+		case isEEDirect:
+			eePayload = e.resolveEventEmitterPayloadType(cd.BaseTypeArgs[0])
+		case haveBase && baseInfo.HasEventEmitter:
+			eePayload = baseInfo.EventEmitterPayload
 		}
 
 		// Flatten inherited visible fields ahead of this class's own new
@@ -499,6 +532,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if f.Name == ClassVTableField {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime vtable pointer", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassVTableField)
 			}
+			if f.Name == ClassEventEmitterField {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal EventEmitter listener map", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassEventEmitterField)
+			}
 			if f.Static {
 				fty := e.resolveType(f.Type)
 				staticFieldTypes[f.Name] = fty
@@ -523,7 +559,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// (irrelevant to field name/type lookup by name, only affects a
 		// hidden field's presence); Pass 3 rebuilds the real Ty once
 		// HasVTable is known and publishes it into e.interfaces/info.Ty.
-		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false)
+		// hasEventEmitter, unlike HasVTable, is already fully known by this
+		// point (computed above, not deferred to a later pass), so it's
+		// threaded through here too.
+		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false, hasEventEmitter)
 		e.interfaces[cd.Name] = provisionalTy
 
 		ancestorChain := append([]string{}, baseInfo.AncestorChain...)
@@ -557,6 +596,8 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			StaticMethodSigs:          make(map[string]FuncSig),
 			StaticMethodImplementor:   make(map[string]string),
 			OwnStaticMethodVisibility: make(map[string]string),
+			HasEventEmitter:           hasEventEmitter,
+			EventEmitterPayload:       eePayload,
 		}
 		nextTagID++
 
@@ -577,6 +618,15 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		ownDeclared := make(map[string]bool, len(cd.Methods))
 		ownStaticDeclared := make(map[string]bool, len(cd.Methods))
 		for _, m := range cd.Methods {
+			// Reserved-method-name collision (TDD-00023): a class in an
+			// EventEmitter-rooted tree cannot declare any of EventEmitter's
+			// own method names — those are hand-written codegen dispatched
+			// by name (emit_call.go), never real AST-driven class methods,
+			// so there is no vtable slot for them to occupy and no
+			// "override an EventEmitter method" interaction to support.
+			if !m.IsStatic && hasEventEmitter && isEventEmitterMethodName(m.Name) {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by EventEmitter<T>", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+			}
 			sig := e.buildParamSig(m.Params)
 			if m.ReturnType != nil {
 				sig.RetType = e.resolveType(m.ReturnType)
@@ -697,6 +747,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				if haveBase {
 					return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but base class '%s' has no constructor", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
 				}
+				if isEEDirect {
+					return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but EventEmitter has no constructor to call", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name)
+				}
 				return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but the class has no base class", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name)
 			}
 			info.Constructor = cd.Constructor
@@ -806,7 +859,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 	// site (unchanged since before Stage 3) sees the final shape.
 	for _, name := range topoOrder {
 		info := e.classes[name]
-		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable)
+		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable, info.HasEventEmitter)
 		e.classes[name] = info
 		e.interfaces[name] = info.Ty
 	}
@@ -1107,6 +1160,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		vtGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vtGep, info.Ty.StructIR(), dataReg))
 		e.emitInstr(fmt.Sprintf("store ptr @%s_vtable, ptr %s, align 8", ex.ClassName, vtGep))
+	}
+
+	if info.Ty.HasEventEmitter {
+		e.ensureMapStrHelpers()
+		listenersPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersPtr))
+		eeGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", eeGep, info.Ty.StructIR(), dataReg, classEventEmitterFieldIndex(info.Ty)))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", listenersPtr, eeGep))
 	}
 
 	if info.Constructor != nil {

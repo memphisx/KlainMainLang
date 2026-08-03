@@ -710,3 +710,70 @@ const p = { x: 1, y: 40.6 }
 console.log(p.y)
 `, "40.6")
 }
+
+// --- `in` operator ---
+
+func TestE2EInOperatorObjectLiteral(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+console.log("x" in p)
+console.log("z" in p)
+`, "1\n0")
+}
+
+func TestE2EInOperatorClassInstance(t *testing.T) {
+	assertOutput(t, `
+class Foo {
+  a: number;
+  constructor() { this.a = 1 }
+}
+const f = new Foo()
+console.log("a" in f)
+console.log("b" in f)
+`, "1\n0")
+}
+
+func TestE2EInOperatorInIfCondition(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+if ("x" in p) {
+  console.log("has x")
+} else {
+  console.log("no x")
+}
+`, "has x")
+}
+
+func TestE2EInOperatorForInStillWorks(t *testing.T) {
+	// Regression check: `in` becoming a binary operator (contextual keyword,
+	// not a reserved token) must not break the pre-existing for...in loop,
+	// which recognizes "in" the same contextual way.
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+for (const k in p) {
+  console.log(k)
+}
+`, "x\ny")
+}
+
+func TestE2EInOperatorNonObjectIsError(t *testing.T) {
+	_, err := parseAndCompile(`console.log("x" in 5)`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'in' against a non-object")
+	}
+}
+
+func TestE2EInOperatorDynamicKeyIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2 }
+const k = "x"
+console.log(k in p)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-literal 'in' key")
+	}
+}

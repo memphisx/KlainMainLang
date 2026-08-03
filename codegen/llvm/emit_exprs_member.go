@@ -297,6 +297,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(":"), Ty: TypePtr}, nil
 		}
 	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os" {
+		switch ex.Property {
+		case "EOL":
+			// Always "\n" — this compiler is POSIX-only (no Windows target,
+			// TDD-00020 not started), so there's no real "\r\n" case.
+			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
+		}
+	}
 	if ex.Property == "size" {
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {
