@@ -5,6 +5,9 @@
 # Main binary (go build)
 /klainmain
 
+# make examples' local httpbin-lite fixture server binary
+/.httpbin-lite
+
 # Compiled example artifacts — keep only source (.ts) and subdirectories
 examples/**
 !examples/*/

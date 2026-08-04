@@ -9,8 +9,10 @@
 // 2. Array<Promise<Response>> (fetch()'s own Promise type): real
 //    concurrency — N in-flight HTTP requests waited on together via this
 //    compiler's event loop (docs/tdd/TDD-00006.md), not one at a time.
-//    Like examples/fetch/fetch.ts, this half needs real network access and
-//    is expected to FAIL under `make examples` without it.
+//    Like examples/fetch/fetch.ts, this half talks to a local fixture
+//    server (tools/httpbin-lite/, started by `make examples` — see
+//    ADR-00096) instead of a real external website, so it needs no real
+//    network access and gives deterministic results.
 //
 // Note: like a plain `await`, each combinator call consumes (frees) every
 // element's own Promise slot — the same array variable can't be fed to a
@@ -51,8 +53,8 @@ for (const s of settled) {
 
 // ── real concurrency: N in-flight fetches waited on together ───────────────
 const forFetchAll: Array<Promise<Response>> = []
-forFetchAll.push(fetch('https://httpbin.org/get'))
-forFetchAll.push(fetch('https://httpbin.org/status/404'))
+forFetchAll.push(fetch('http://127.0.0.1:8765/get'))
+forFetchAll.push(fetch('http://127.0.0.1:8765/status/404'))
 const responses = await Promise.all(forFetchAll)
 console.log(responses[0].status)    // 200
 console.log(responses[1].status)    // 404
@@ -61,8 +63,8 @@ console.log(responses[1].status)    // 404
 // slow one is listed first in the array, so a passing result here can only
 // mean a real race, not "always the first array element."
 const forFetchRace: Array<Promise<Response>> = []
-forFetchRace.push(fetch('https://httpbin.org/delay/3'))
-forFetchRace.push(fetch('https://httpbin.org/get'))
+forFetchRace.push(fetch('http://127.0.0.1:8765/delay/1'))
+forFetchRace.push(fetch('http://127.0.0.1:8765/get'))
 const fastest = await Promise.race(forFetchRace)
 console.log(fastest.status)         // 200 — the fast one wins
 
@@ -70,7 +72,7 @@ console.log(fastest.status)         // 200 — the fast one wins
 // failure — an unreachable host settles "rejected" instead of aborting the
 // whole combinator.
 const forFetchSettled: Array<Promise<Response>> = []
-forFetchSettled.push(fetch('https://httpbin.org/get'))
+forFetchSettled.push(fetch('http://127.0.0.1:8765/get'))
 forFetchSettled.push(fetch('https://this-domain-absolutely-does-not-exist-12345.invalid/'))
 const fetchSettled = await Promise.allSettled(forFetchSettled)
 console.log(fetchSettled[0].status) // fulfilled
