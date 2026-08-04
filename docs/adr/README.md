@@ -132,3 +132,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00091](ADR-00091.md) | `in` operator (`key in obj`) | |
 | [00092](ADR-00092.md) | `setImmediate(fn)` / `clearImmediate(id)` | Extends [ADR-00031](ADR-00031.md) |
 | [00093](ADR-00093.md) | Fix missing `GC_stackbottom` restore on `http.listen`'s read-loop yield (4th swapcontext site ADR-00071 missed) | Extends [ADR-00071](ADR-00071.md) |
+| [00094](ADR-00094.md) | Fix fetch/fs embedded-null-byte truncation via `Response.arrayBuffer()` / `fs.readFileSyncBytes()` / binary-aware `writeFileSync`/`appendFileSync` | Extends [ADR-00021](ADR-00021.md), [ADR-00023](ADR-00023.md), [ADR-00078](ADR-00078.md) |
+| [00095](ADR-00095.md) | Remove dead `__kml_fetch` (blocking single-transfer fetch, superseded by ADR-00050) | Extends [ADR-00094](ADR-00094.md). Superseded by [ADR-00050](ADR-00050.md) |

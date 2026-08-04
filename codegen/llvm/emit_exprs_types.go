@@ -478,6 +478,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "readFileSync":
 					return TypePtr
+				case "readFileSyncBytes":
+					return TypedArrayType("uint8")
 				case "existsSync":
 					return TypeBool
 				case "readdirSync":
@@ -738,6 +740,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					// handled separately, see emitResponseJSON) — TypePtr
 					// matches bare JSON.parse's own default-context type.
 					return TypePtr
+				}
+			case "arrayBuffer":
+				if e.inferExprType(mem.Object).IsResponse {
+					return ArrayBufferType()
 				}
 			case "split":
 				return ArrayOf(TypePtr)

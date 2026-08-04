@@ -5,11 +5,13 @@
 // a global `fs` the compiler special-cases).
 //
 // Everything here is synchronous and blocking — there's no event loop in
-// this compiler, so there's no non-blocking variant to offer. Text-only,
-// like every string in this language: a file containing embedded null
-// bytes would read back shorter than its real size (the same limitation
-// fetch's response bodies have, for the same underlying reason — see
-// examples/fetch/fetch.ts).
+// this compiler, so there's no non-blocking variant to offer. readFileSync
+// itself is still text-only (a file containing embedded null bytes reads
+// back shorter than its real size via readFileSync's plain, strlen-based
+// string) — but readFileSyncBytes, and writeFileSync/appendFileSync given
+// an ArrayBuffer/TypedArray instead of a string, are binary-safe (ADR-00094,
+// see the bottom of this file). The same split exists on the fetch() side —
+// see examples/fetch/fetch.ts's .arrayBuffer() section.
 
 const path: string = '/tmp/kml_fs_example.txt'
 
@@ -94,3 +96,32 @@ console.log(fs.readdirSync(dir).length)   // 0 — empty again
 // has no recursive-create option)
 fs.rmdirSync(dir)
 console.log(fs.existsSync(dir))   // 0 (false) — cleaned up
+
+// --- readFileSyncBytes / binary-safe writeFileSync & appendFileSync (ADR-00094) ---
+
+const binPath: string = '/tmp/kml_fs_example.bin'
+
+// A Uint8Array with an embedded null byte — 'h','i',0,'b','y','e'. Writing
+// this through plain writeFileSync(path, someString) would silently
+// truncate at the null; passing the TypedArray directly writes it whole.
+const bytes = new Uint8Array([104, 105, 0, 98, 121, 101])
+fs.writeFileSync(binPath, bytes)
+
+const readBack = fs.readFileSyncBytes(binPath)
+console.log(readBack.length)   // 6 — not 2, unlike readFileSync's strlen-based .length would give
+
+// appendFileSync accepts the same ArrayBuffer/TypedArray forms
+fs.appendFileSync(binPath, bytes)
+console.log(fs.readFileSyncBytes(binPath).length)   // 12
+
+// An ArrayBuffer works too (writeFileSync/appendFileSync accept either an
+// ArrayBuffer or any TypedArray view over one)
+const buf = new ArrayBuffer(3)
+const view = new Uint8Array(buf)
+view[0] = 1
+view[1] = 0
+view[2] = 2
+fs.writeFileSync(binPath, buf)
+console.log(fs.readFileSyncBytes(binPath).length)   // 3
+
+fs.unlinkSync(binPath)

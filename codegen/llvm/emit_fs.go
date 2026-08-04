@@ -32,6 +32,28 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
+// emitFsReadFileSyncBytes implements fs.readFileSyncBytes(path): Uint8Array
+// (ADR-00094) — the null-byte-safe sibling of readFileSync, going through
+// __kml_fs_read_file_raw directly instead of the string-returning
+// __kml_fs_read_file wrapper. __kml_fs_read_file_raw's {ptr, i64} return is
+// already the exact SSA aggregate shape a first-class TypedArray value
+// uses (see emit_arraybuffer.go's .subarray()), so no repacking is needed.
+func (e *Emitter) emitFsReadFileSyncBytes(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.readFileSyncBytes takes exactly 1 argument (path)", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+
+	e.ensureFsReadFileRaw()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %s)", r, pathVal.Ref))
+	return Value{Ref: r, Ty: TypedArrayType("uint8")}, nil
+}
+
 func (e *Emitter) emitFsWriteFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	return e.emitFsWriteLikeCall(args, pos, "fs.writeFileSync", "@__kml_fs_write_file")
 }
@@ -40,10 +62,14 @@ func (e *Emitter) emitFsAppendFileSync(args []ast.Expression, pos ast.Pos) (Valu
 	return e.emitFsWriteLikeCall(args, pos, "fs.appendFileSync", "@__kml_fs_append_file")
 }
 
-// emitFsWriteLikeCall backs both writeFileSync and appendFileSync — the
-// call-site shape (evaluate path + data, coerce both to string, call the
-// matching runtime helper) is identical; only which runtime helper (and its
-// error message/fopen mode, already baked in via runtime.go) differs.
+// emitFsWriteLikeCall backs both writeFileSync and appendFileSync. A plain
+// string `data` argument keeps using the original strlen-based runtime
+// functions, behavior-unchanged. An ArrayBuffer or TypedArray `data`
+// argument (ADR-00094) routes to the explicit-length runtime siblings
+// instead, so a buffer with an embedded null byte writes out whole rather
+// than truncating at the first one — dispatch is on data's inferred type,
+// the same pattern emitFetch already uses for its optional init fields
+// (emit_fetch.go).
 func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, runtimeFn string) (Value, error) {
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 2 arguments (path, data)", pos.Line, pos.Col, name)
@@ -53,19 +79,70 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 		return Value{}, err
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
-	dataVal, err := e.emitExpr(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	dataVal = e.coerce(dataVal, TypePtr)
 
-	if runtimeFn == "@__kml_fs_write_file" {
-		e.ensureFsWriteFile()
-	} else {
-		e.ensureFsAppendFile()
+	isWrite := runtimeFn == "@__kml_fs_write_file"
+	dataTy := e.inferExprType(args[1])
+
+	switch {
+	case dataTy.IsArrayBuffer:
+		bufVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		lenVal, err := e.emitArrayBufferByteLength(bufVal)
+		if err != nil {
+			return Value{}, err
+		}
+		dataSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
+		dataReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataReg, dataSlot))
+
+		bytesFn := "@__kml_fs_write_file_bytes"
+		if isWrite {
+			e.ensureFsWriteFileBytes()
+		} else {
+			bytesFn = "@__kml_fs_append_file_bytes"
+			e.ensureFsAppendFileBytes()
+		}
+		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", bytesFn, pathVal.Ref, dataReg, lenVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+
+	case dataTy.IsTypedArray:
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[1], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		byteLenVal, err := e.emitTypedArrayByteLength(lenReg, elemTy)
+		if err != nil {
+			return Value{}, err
+		}
+
+		bytesFn := "@__kml_fs_write_file_bytes"
+		if isWrite {
+			e.ensureFsWriteFileBytes()
+		} else {
+			bytesFn = "@__kml_fs_append_file_bytes"
+			e.ensureFsAppendFileBytes()
+		}
+		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", bytesFn, pathVal.Ref, ptrReg, byteLenVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+
+	default:
+		dataVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		dataVal = e.coerce(dataVal, TypePtr)
+
+		if isWrite {
+			e.ensureFsWriteFile()
+		} else {
+			e.ensureFsAppendFile()
+		}
+		e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", runtimeFn, pathVal.Ref, dataVal.Ref))
+		return Value{Ty: TypeVoid}, nil
 	}
-	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", runtimeFn, pathVal.Ref, dataVal.Ref))
-	return Value{Ty: TypeVoid}, nil
 }
 
 func (e *Emitter) emitFsExistsSync(args []ast.Expression, pos ast.Pos) (Value, error) {

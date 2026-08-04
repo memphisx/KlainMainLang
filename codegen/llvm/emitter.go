@@ -95,8 +95,11 @@ type Emitter struct {
 	usedFwrite               bool
 	usedFsThrow              bool
 	usedFsReadFile           bool
+	usedFsReadFileRaw        bool
 	usedFsWriteFile          bool
 	usedFsAppendFile         bool
+	usedFsWriteFileBytes     bool
+	usedFsAppendFileBytes    bool
 	usedFsExists             bool
 	usedFsUnlink             bool
 	usedBase64Encode         bool

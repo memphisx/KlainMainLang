@@ -42,3 +42,12 @@ try {
 } catch (e) {
     console.log('caught: network failure')
 }
+
+// ── .arrayBuffer() for binary bodies (ADR-00094) ────────────────────────────
+// .text()/.json() are plain (strlen-based) strings — fine for JSON/text, but
+// a binary body containing an embedded null byte would read back shorter
+// than its real size through them. .arrayBuffer() carries the real byte
+// count instead, so it comes back whole regardless of content.
+const binary = await fetch('https://httpbin.org/bytes/16')
+const bytes = new Uint8Array(binary.arrayBuffer())
+console.log(bytes.length)  // 16 — exact, even if one of those 16 random bytes happens to be 0

@@ -208,12 +208,17 @@ func PromiseOf(inner Type) Type {
 // ResponseType returns fetch()'s Response object type: a plain heap object
 // with status/ok/body fields (readable via the ordinary object field-access
 // path — no special dispatch needed for those three), plus IsResponse set so
-// emit_fetch.go's text()/json() method dispatch can recognize it.
+// emit_fetch.go's text()/json()/arrayBuffer() method dispatch can recognize
+// it. bodyLength is the real byte count of body (as opposed to body's own
+// strlen, which undercounts if the response contained an embedded null byte)
+// — an implementation-only field feeding .arrayBuffer(), not part of the
+// documented public surface (real Fetch has no such field either).
 func ResponseType() Type {
 	ty := ObjectType([]Field{
 		{Name: "status", Ty: TypeI64},
 		{Name: "ok", Ty: TypeBool},
 		{Name: "body", Ty: TypePtr},
+		{Name: "bodyLength", Ty: TypeI64},
 	})
 	ty.IsResponse = true
 	return ty
