@@ -96,6 +96,137 @@ func TestE2EFsReadFileSyncWrongArgCountRejected(t *testing.T) {
 	}
 }
 
+// --- fs.readFileSyncBytes / binary-aware writeFileSync/appendFileSync (ADR-00094) ---
+
+// TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte writes the fixture
+// directly via os.WriteFile (real Go, not KML) rather than fs.writeFileSync,
+// since a null byte can't survive today's strlen-based string write path —
+// this test is exercising the read side only. The null is NOT at the end
+// (byte 2 of 6), so an off-by-one in the length threading can't hide behind
+// a null-at-the-end body.
+func TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.bin")
+	if err := os.WriteFile(path, []byte{'h', 'i', 0, 'b', 'y', 'e'}, 0o644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	src := fmt.Sprintf(`
+const arr = fs.readFileSyncBytes(%q)
+console.log(arr.length)
+for (let i = 0; i < arr.length; i++) {
+    console.log(arr[i])
+}
+`, path)
+	assertOutput(t, src, "6\n104\n105\n0\n98\n121\n101")
+}
+
+func TestE2EFsReadFileSyncBytesNonexistentThrows(t *testing.T) {
+	src := `
+try {
+    const arr = fs.readFileSyncBytes("/definitely/does/not/exist/kml-test-file.bin")
+    console.log(arr.length)
+} catch (e) {
+    console.log("caught")
+}
+`
+	assertOutput(t, src, "caught")
+}
+
+func TestE2EFsReadFileSyncBytesWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`fs.readFileSyncBytes("a", "b")`)
+	if err == nil {
+		t.Fatal("expected a compile error for fs.readFileSyncBytes with the wrong argument count, got none")
+	}
+}
+
+// TestE2EFsWriteFileSyncUint8ArrayRoundTripsEmbeddedNullByte exercises the
+// new write side end to end: a KML-constructed Uint8Array containing an
+// embedded null, written via fs.writeFileSync, read back via os.ReadFile
+// (real Go) to confirm the bytes on disk are exactly right, not just what
+// this compiler's own readFileSyncBytes reports.
+func TestE2EFsWriteFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	src := fmt.Sprintf(`
+const arr = new Uint8Array([104, 105, 0, 98, 121, 101])
+fs.writeFileSync(%q, arr)
+`, path)
+	assertOutput(t, src, "")
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile: %v", err)
+	}
+	want := []byte{'h', 'i', 0, 'b', 'y', 'e'}
+	if string(got) != string(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestE2EFsAppendFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	src := fmt.Sprintf(`
+const arr = new Uint8Array([1, 0, 2])
+fs.writeFileSync(%q, arr)
+fs.appendFileSync(%q, arr)
+`, path, path)
+	assertOutput(t, src, "")
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile: %v", err)
+	}
+	want := []byte{1, 0, 2, 1, 0, 2}
+	if string(got) != string(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte covers the
+// ArrayBuffer branch specifically (as opposed to the TypedArray-view branch
+// the tests above already cover) — data written through a Uint8Array view
+// but passed to writeFileSync as the underlying ArrayBuffer itself.
+func TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	src := fmt.Sprintf(`
+const buf = new ArrayBuffer(3)
+const view = new Uint8Array(buf)
+view[0] = 5
+view[1] = 0
+view[2] = 6
+fs.writeFileSync(%q, buf)
+`, path)
+	assertOutput(t, src, "")
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile: %v", err)
+	}
+	want := []byte{5, 0, 6}
+	if string(got) != string(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestE2EFsWriteFileSyncStringPathUnchanged pins down that the existing
+// strlen-based string path (fs.writeFileSync/appendFileSync with a plain
+// string argument) is completely unaffected by the new ArrayBuffer/
+// TypedArray branch added alongside it.
+func TestE2EFsWriteFileSyncStringPathUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	src := fmt.Sprintf(`
+const path: string = %q
+fs.writeFileSync(path, "hello")
+console.log(fs.readFileSync(path))
+fs.appendFileSync(path, " world")
+console.log(fs.readFileSync(path))
+`, path)
+	assertOutput(t, src, "hello\nhello world")
+}
+
 // --- fs.mkdirSync / renameSync / copyFileSync / readdirSync ---
 
 func TestE2EFsMkdirSyncCreatesDirectory(t *testing.T) {

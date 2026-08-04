@@ -40,6 +40,11 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 		body := strings.Repeat("x", 40000)
 		fmt.Fprint(w, body)
 	})
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) {
+		// Embedded null NOT at the end (byte 2 of 6) — a null-at-the-end body
+		// could hide an off-by-one in the length threading (ADR-00094).
+		w.Write([]byte{'h', 'i', 0, 'b', 'y', 'e'})
+	})
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		fmt.Fprint(w, "done")
@@ -403,4 +408,91 @@ console.log(Date.now() - t0)
 	if elapsedMs >= 500 {
 		t.Errorf("two concurrent /slow (300ms) fetches via Promise.all took %dms — expected well under 600ms if they ran concurrently rather than serially (concurrency is broken)", elapsedMs)
 	}
+}
+
+// --- Response.arrayBuffer() (ADR-00094): embedded-null-byte-safe bodies ---
+
+func TestE2EFetchArrayBufferPreservesEmbeddedNullByte(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/binary")
+    const buf = r.arrayBuffer()
+    const arr = new Uint8Array(buf)
+    console.log(arr.length)
+    for (let i = 0; i < arr.length; i++) {
+        console.log(arr[i])
+    }
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "6\n104\n105\n0\n98\n121\n101")
+}
+
+func TestE2EFetchTextStillStrlenBasedAfterArrayBuffer(t *testing.T) {
+	// .text()/.json() are deliberately unchanged (ADR-00094) — still
+	// strlen-based, so a body with an embedded null still reads back short
+	// via .text() even though .arrayBuffer() (tested above) now sees the
+	// whole thing. This pins that intentional split down as a regression
+	// guard, not an oversight.
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/binary")
+    console.log(r.text().length)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "2")
+}
+
+func TestE2EPromiseAllArrayBufferPreservesEmbeddedNullByte(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/binary"))
+    ps.push(fetch("%s/binary"))
+    const responses = await Promise.all(ps)
+    for (const r of responses) {
+        const arr = new Uint8Array(r.arrayBuffer())
+        console.log(arr.length)
+    }
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "6\n6")
+}
+
+func TestE2EPromiseRaceArrayBufferPreservesEmbeddedNullByte(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/binary"))
+    const r = await Promise.race(ps)
+    const arr = new Uint8Array(r.arrayBuffer())
+    console.log(arr.length)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "6")
+}
+
+func TestE2EPromiseAllSettledArrayBufferPreservesEmbeddedNullByte(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const ps: Array<Promise<Response>> = []
+    ps.push(fetch("%s/binary"))
+    const results = await Promise.allSettled(ps)
+    for (const res of results) {
+        console.log(res.status)
+        const arr = new Uint8Array(res.value.arrayBuffer())
+        console.log(arr.length)
+    }
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "fulfilled\n6")
 }

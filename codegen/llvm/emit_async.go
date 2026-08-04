@@ -40,12 +40,13 @@ func (e *Emitter) emitAsyncEpilogue() {
 }
 
 // buildResponseFromStatusBody builds a Response object (ADR-00021's
-// {status, ok, body} struct) from a completed fetch's raw status (i64) and
-// body (ptr) SSA registers — factored out of emitAwait's IsResponse branch
-// below so Promise.all/.race (emit_promise.go, ADR-00073) can build the
-// same shape per member of a group of concurrently-awaited fetches, without
-// duplicating this struct-building code a third time.
-func (e *Emitter) buildResponseFromStatusBody(status, body string) Value {
+// {status, ok, body} struct, plus ADR-00094's bodyLength) from a completed
+// fetch's raw status (i64), body (ptr), and bodyLen (i64) SSA registers —
+// factored out of emitAwait's IsResponse branch below so Promise.all/.race
+// (emit_promise.go, ADR-00073) can build the same shape per member of a
+// group of concurrently-awaited fetches, without duplicating this
+// struct-building code a third time.
+func (e *Emitter) buildResponseFromStatusBody(status, body, bodyLen string) Value {
 	ok := e.freshReg()
 	okHigh := e.freshReg()
 	okLow := e.freshReg()
@@ -67,6 +68,7 @@ func (e *Emitter) buildResponseFromStatusBody(status, body string) Value {
 	storeField("status", "i64", status, 8)
 	storeField("ok", "i1", ok, 1)
 	storeField("body", "ptr", body, 8)
+	storeField("bodyLength", "i64", bodyLen, 8)
 
 	return Value{Ref: respReg, Ty: respTy}
 }
@@ -123,13 +125,15 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		pendingPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, hdlVal.Ref))
 		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
+		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
 		status := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr } %s, 0", status, raw))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr } %s, 1", body, raw))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
+		bodyLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
 
-		respVal := e.buildResponseFromStatusBody(status, body)
+		respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
 
 		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
 		return respVal, nil

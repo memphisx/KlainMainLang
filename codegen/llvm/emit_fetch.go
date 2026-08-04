@@ -24,7 +24,7 @@ import (
 // generic object field-read path) and need no entry here.
 func isResponseMethodName(name string) bool {
 	switch name {
-	case "text", "json":
+	case "text", "json", "arrayBuffer":
 		return true
 	}
 	return false
@@ -198,10 +198,44 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	return Value{Ref: r, Ty: fieldTy}, nil
 }
 
+// emitResponseArrayBuffer implements response.arrayBuffer() (ADR-00094):
+// unlike .text()/.json(), which read body as a plain (strlen-bounded)
+// string, this reads the real byte count from the bodyLength field
+// __kml_await_fetch/__kml_pending_finish now thread through — so a binary
+// body with an embedded null byte comes back whole. Hand-builds an
+// ArrayBuffer header exactly like emitNewArrayBufferExpression
+// (emit_arraybuffer.go) does, except it wraps the response's own already-
+// buffered body pointer directly instead of calloc'ing a fresh one — no
+// copy needed, the bytes are already there.
+func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, error) {
+	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+	}
+	bodyVal := e.loadFieldValue(objVal, bodyIdx, bodyFieldTy)
+
+	lenIdx, lenFieldTy, ok := objVal.Ty.FieldIndex("bodyLength")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+	}
+	lenVal := e.loadFieldValue(objVal, lenIdx, lenFieldTy)
+
+	e.ensureMalloc()
+	hdrReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenVal.Ref, hdrReg))
+	dataSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bodyVal.Ref, dataSlot))
+
+	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
+}
+
 // emitResponseCall dispatches a Response method call reached through the
-// generic (non-declaration-context) path — text() always, and json() when
+// generic (non-declaration-context) path — text() always, json() when
 // there's no surrounding typed declaration to parse into (falls back to
-// TypePtr, matching bare JSON.parse's own default-context behavior).
+// TypePtr, matching bare JSON.parse's own default-context behavior), and
+// arrayBuffer() (ADR-00094).
 func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Value, error) {
 	switch method {
 	case "text":
@@ -212,6 +246,8 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Va
 			return Value{}, err
 		}
 		return e.emitJSONParseValue(bodyVal, TypePtr, pos)
+	case "arrayBuffer":
+		return e.emitResponseArrayBuffer(objVal, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
 }

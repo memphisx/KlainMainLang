@@ -4,21 +4,19 @@ import (
 	"fmt"
 )
 
-// ensureFetch declares __kml_fetch: a blocking GET request via libcurl,
-// returning { i64 status, ptr body } (body always a valid, null-terminated,
-// possibly-empty string — never null). Numeric CURLOPT_*/CURLINFO_* values
-// below were verified directly against curl.h rather than trusted from
-// memory (CURLOPT_URL=10002, CURLOPT_WRITEFUNCTION=20011,
-// CURLOPT_WRITEDATA=10001, CURLOPT_FOLLOWLOCATION=52, CURLOPT_TIMEOUT=13,
-// CURLOPT_NOSIGNAL=99, CURLINFO_RESPONSE_CODE=2097154 — curl's own ABI
-// policy freezes these permanently, so hardcoding them here (rather than
-// needing curl.h at KML-compile time) is safe long-term, not just today).
-//
-// A network-level failure (DNS, connection refused, TLS handshake, timeout)
-// throws a KML Error via the existing @__kml_throw mechanism, exactly like a
-// hand-written `throw new Error(...)` would — this is the same distinction
-// real fetch makes: a non-2xx HTTP status still resolves normally (callers
-// check .ok), only a request that never got a response at all throws.
+// ensureFetch declares the curl_easy_* primitives and __kml_curl_write_cb
+// shared by every fetch call, sync or async. It no longer declares a
+// __kml_fetch function of its own (ADR-00095 removed it): the blocking,
+// single-transfer implementation that symbol used to name predates
+// ADR-00050's non-blocking multi-interface rewrite of fetch() and had been
+// dead — reachable from no live call path — ever since, confirmed by grep
+// before deletion. Numeric CURLOPT_*/CURLINFO_* values below were verified
+// directly against curl.h rather than trusted from memory (CURLOPT_URL=10002,
+// CURLOPT_WRITEFUNCTION=20011, CURLOPT_WRITEDATA=10001,
+// CURLOPT_FOLLOWLOCATION=52, CURLOPT_TIMEOUT=13, CURLOPT_NOSIGNAL=99 — curl's
+// own ABI policy freezes these permanently, so hardcoding them here (rather
+// than needing curl.h at KML-compile time) is safe long-term, not just
+// today).
 func (e *Emitter) ensureFetch() {
 	if e.usedFetch {
 		return
@@ -81,79 +79,6 @@ copy:
   store i8 0, ptr %termptr, align 1
   ret i64 %total
 }`)
-
-	errNamePtr := e.internString("Error")
-	e.emitGlobal(`
-define { i64, ptr } @__kml_fetch(ptr %url) {
-entry:
-  %inited = load i1, ptr @__kml_curl_inited, align 1
-  br i1 %inited, label %skipinit, label %doinit
-
-doinit:
-  call void @curl_global_init(i64 3)
-  store i1 1, ptr @__kml_curl_inited, align 1
-  br label %skipinit
-
-skipinit:
-  %buf = call ptr @malloc(i64 24)
-  %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
-  %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
-  %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
-  store ptr null, ptr %buf_data_p, align 8
-  store i64 0, ptr %buf_len_p, align 8
-  store i64 0, ptr %buf_cap_p, align 8
-
-  %curl = call ptr @curl_easy_init()
-
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 20011, ptr @__kml_curl_write_cb)
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10001, ptr %buf)
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 52, i64 1)
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 13, i64 30)
-  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 99, i64 1)
-
-  %perfres = call i32 @curl_easy_perform(ptr %curl)
-  %failed = icmp ne i32 %perfres, 0
-  br i1 %failed, label %neterror, label %ok
-
-neterror:
-  %errstr = call ptr @curl_easy_strerror(i32 %perfres)
-  %errobj = call ptr @malloc(i64 24)
-  %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
-  store i64 0, ptr %errobj.kind, align 8
-  %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
-  store ptr %errstr, ptr %errobj.msg, align 8
-  %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
-  store ptr ` + errNamePtr + `, ptr %errobj.name, align 8
-  call void @curl_easy_cleanup(ptr %curl)
-  call void @__kml_throw(ptr %errobj)
-  unreachable
-
-ok:
-  %statusslot = alloca i64, align 8
-  store i64 0, ptr %statusslot, align 8
-  call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %curl, i32 2097154, ptr %statusslot)
-  %status = load i64, ptr %statusslot, align 8
-  call void @curl_easy_cleanup(ptr %curl)
-
-  %finaldata = load ptr, ptr %buf_data_p, align 8
-  %isnull = icmp eq ptr %finaldata, null
-  br i1 %isnull, label %emptybody, label %havebody
-
-emptybody:
-  %emptystr = call ptr @malloc(i64 1)
-  store i8 0, ptr %emptystr, align 1
-  br label %done
-
-havebody:
-  br label %done
-
-done:
-  %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %finaldata, %havebody ]
-  %r0 = insertvalue { i64, ptr } undef, i64 %status, 0
-  %r1 = insertvalue { i64, ptr } %r0, ptr %bodyfinal, 1
-  ret { i64, ptr } %r1
-}`)
 }
 
 // ensureFetchAsync declares everything a real, non-blocking `await
@@ -204,7 +129,7 @@ done:
 //	  it, removes+cleans up the easy handle, and sets done=1. Shared by the
 //	  event loop (called after every select() wake) and __kml_await_fetch's
 //	  own busy-spin fallback path below.
-//	__kml_await_fetch(ptr pending) -> { i64 status, ptr body }
+//	__kml_await_fetch(ptr pending) -> { i64 status, ptr body, i64 bodyLen }
 //	  Loops until pending->done: if running inside a connection fiber
 //	  (@__kml_current_conn_idx >= 0), parks this specific fiber (stores
 //	  `pending` into its own connection-array entry's pendingFetch field,
@@ -391,7 +316,7 @@ done:
 	// exact same finish logic per member of a group of pending fetches,
 	// without duplicating it.
 	e.emitGlobal(`
-define { i64, ptr } @__kml_pending_finish(ptr %pending) {
+define { i64, ptr, i64 } @__kml_pending_finish(ptr %pending) {
 entry:
   %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
   %result = load i64, ptr %result_p, align 8
@@ -418,6 +343,8 @@ ok:
   %buf = load ptr, ptr %buf_p, align 8
   %bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %bodyptr = load ptr, ptr %bodyptr_p, align 8
+  %bodylen_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
+  %bodylen = load i64, ptr %bodylen_p, align 8
 
   %isnullbody = icmp eq ptr %bodyptr, null
   br i1 %isnullbody, label %emptybody, label %havebody
@@ -432,13 +359,15 @@ havebody:
 
 retdone:
   %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %bodyptr, %havebody ]
-  %r1 = insertvalue { i64, ptr } undef, i64 %status, 0
-  %r2 = insertvalue { i64, ptr } %r1, ptr %bodyfinal, 1
-  ret { i64, ptr } %r2
+  %bodylenfinal = phi i64 [ 0, %emptybody ], [ %bodylen, %havebody ]
+  %r1 = insertvalue { i64, ptr, i64 } undef, i64 %status, 0
+  %r2 = insertvalue { i64, ptr, i64 } %r1, ptr %bodyfinal, 1
+  %r3 = insertvalue { i64, ptr, i64 } %r2, i64 %bodylenfinal, 2
+  ret { i64, ptr, i64 } %r3
 }`)
 
 	e.emitGlobal(fmt.Sprintf(`
-define { i64, ptr } @__kml_await_fetch(ptr %%pending) {
+define { i64, ptr, i64 } @__kml_await_fetch(ptr %%pending) {
 entry:
   %%runningp = alloca i32, align 4
   br label %%checkloop
@@ -472,8 +401,8 @@ busyspin:
   br label %%checkloop
 
 finish:
-  %%raw = call { i64, ptr } @__kml_pending_finish(ptr %%pending)
-  ret { i64, ptr } %%raw
+  %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
+  ret { i64, ptr, i64 } %%raw
 }`, gcRestoreStackbottom))
 }
 
@@ -604,7 +533,7 @@ notfound:
 }`)
 
 	// __kml_pending_finish_settled(ptr pending) -> {i1 failed, i64 status,
-	// ptr body, ptr reasonMsg}: a non-throwing sibling of
+	// ptr body, ptr reasonMsg, i64 bodyLen}: a non-throwing sibling of
 	// __kml_pending_finish, used only by Promise.allSettled, which by
 	// definition must not abort on an individual member's transport
 	// failure. On failure, reasonMsg is the same curl_easy_strerror() string
@@ -612,9 +541,9 @@ notfound:
 	// (emit_promise.go) wraps it into a real Error object itself (matching
 	// emitNewError's own construction), rather than this function returning
 	// an already-built Error, keeping this runtime primitive's own surface
-	// C-ABI-plain.
+	// C-ABI-plain. bodyLen is 0 on failure (no body was ever received).
 	e.emitGlobal(`
-define { i1, i64, ptr, ptr } @__kml_pending_finish_settled(ptr %pending) {
+define { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %pending) {
 entry:
   %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
   %result = load i64, ptr %result_p, align 8
@@ -624,11 +553,12 @@ entry:
 neterror:
   %result32b = trunc i64 %result to i32
   %errstr = call ptr @curl_easy_strerror(i32 %result32b)
-  %rf1 = insertvalue { i1, i64, ptr, ptr } undef, i1 1, 0
-  %rf2 = insertvalue { i1, i64, ptr, ptr } %rf1, i64 0, 1
-  %rf3 = insertvalue { i1, i64, ptr, ptr } %rf2, ptr null, 2
-  %rf4 = insertvalue { i1, i64, ptr, ptr } %rf3, ptr %errstr, 3
-  ret { i1, i64, ptr, ptr } %rf4
+  %rf1 = insertvalue { i1, i64, ptr, ptr, i64 } undef, i1 1, 0
+  %rf2 = insertvalue { i1, i64, ptr, ptr, i64 } %rf1, i64 0, 1
+  %rf3 = insertvalue { i1, i64, ptr, ptr, i64 } %rf2, ptr null, 2
+  %rf4 = insertvalue { i1, i64, ptr, ptr, i64 } %rf3, ptr %errstr, 3
+  %rf5 = insertvalue { i1, i64, ptr, ptr, i64 } %rf4, i64 0, 4
+  ret { i1, i64, ptr, ptr, i64 } %rf5
 
 ok:
   %status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
@@ -637,6 +567,8 @@ ok:
   %buf = load ptr, ptr %buf_p, align 8
   %bodyptr_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %bodyptr = load ptr, ptr %bodyptr_p, align 8
+  %bodylen_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
+  %bodylen = load i64, ptr %bodylen_p, align 8
 
   %isnullbody = icmp eq ptr %bodyptr, null
   br i1 %isnullbody, label %emptybody, label %havebody
@@ -651,11 +583,13 @@ havebody:
 
 retdone:
   %bodyfinal = phi ptr [ %emptystr, %emptybody ], [ %bodyptr, %havebody ]
-  %ro1 = insertvalue { i1, i64, ptr, ptr } undef, i1 0, 0
-  %ro2 = insertvalue { i1, i64, ptr, ptr } %ro1, i64 %status, 1
-  %ro3 = insertvalue { i1, i64, ptr, ptr } %ro2, ptr %bodyfinal, 2
-  %ro4 = insertvalue { i1, i64, ptr, ptr } %ro3, ptr null, 3
-  ret { i1, i64, ptr, ptr } %ro4
+  %bodylenfinal = phi i64 [ 0, %emptybody ], [ %bodylen, %havebody ]
+  %ro1 = insertvalue { i1, i64, ptr, ptr, i64 } undef, i1 0, 0
+  %ro2 = insertvalue { i1, i64, ptr, ptr, i64 } %ro1, i64 %status, 1
+  %ro3 = insertvalue { i1, i64, ptr, ptr, i64 } %ro2, ptr %bodyfinal, 2
+  %ro4 = insertvalue { i1, i64, ptr, ptr, i64 } %ro3, ptr null, 3
+  %ro5 = insertvalue { i1, i64, ptr, ptr, i64 } %ro4, i64 %bodylenfinal, 4
+  ret { i1, i64, ptr, ptr, i64 } %ro5
 }`)
 
 	// __kml_await_group_wait(ptr group) -> void: structural clone of

@@ -215,6 +215,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			switch mem.Property {
 			case "readFileSync":
 				return e.emitFsReadFileSync(ex.Args, ex.GetPos())
+			case "readFileSyncBytes":
+				return e.emitFsReadFileSyncBytes(ex.Args, ex.GetPos())
 			case "writeFileSync":
 				return e.emitFsWriteFileSync(ex.Args, ex.GetPos())
 			case "appendFileSync":

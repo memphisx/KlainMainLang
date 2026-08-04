@@ -57,7 +57,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 | Binary data & Typed Arrays | 9/17, ~53% | [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) | No `DataView`/`Blob`/`SharedArrayBuffer`/`Atomics`; no `BigInt64Array`/`BigUint64Array` (needs `bigint`); no Node `Buffer` |
 | Web Crypto | 2/8, 25% | [WEB-CRYPTO.md](WEB-CRYPTO.md) | All of `crypto.subtle.*` unimplemented |
 | Performance & Timing (incl. Date) | 8/9, ~89% | [PERFORMANCE-TIMING.md](PERFORMANCE-TIMING.md) | `Date` is UTC-only, never local time |
-| Networking (fetch, WebSocket, SSE) | 2/6, ~33% | [NETWORKING.md](NETWORKING.md) | No `WebSocket`/`EventSource`/`XMLHttpRequest`; response bodies with embedded null bytes silently truncate (known limitation) |
+| Networking (fetch, WebSocket, SSE) | 2/6, ~33% | [NETWORKING.md](NETWORKING.md) | No `WebSocket`/`EventSource`/`XMLHttpRequest`; `.text()`/`.json()` still truncate at an embedded null byte by design — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md)) |
 | Streams | 0/8, 0% | [STREAMS.md](STREAMS.md) | Not started — neither the WHATWG API nor Node's own, differently-shaped `stream` module |
 | Events & Cancellation | 0/5, 0% | [EVENTS-CANCELLATION.md](EVENTS-CANCELLATION.md) | Not started; blocks a general `AbortController`. Distinct from Node's `EventEmitter`, see [EVENT-EMITTER.md](EVENT-EMITTER.md) below |
 | Workers / Concurrency | 0/3, 0% | [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md) | Not started; needs `pthreads` + `SharedArrayBuffer`/`Atomics` |
@@ -70,7 +70,7 @@ Node.js-specific runtime globals — not part of any Web/browser standard, but e
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
-| File System (fs) | 10/12, ~83% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | No async variants; text-only reads (embedded null bytes truncate) |
+| File System (fs) | 11/13, ~85% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | No async variants; `readFileSync`/`copyFileSync` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
 | Process / CLI I/O | 12/23, ~52% | [PROCESS-CLI.md](PROCESS-CLI.md) | No raw `process.stdout.write`; `process.env` is read-only; `process.on(...)` now covers `'SIGINT'`/`'SIGTERM'` but not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`; no async `child_process`; no interactive `readline` |
 | HTTP Server | 7/8, ~88% | [HTTP-SERVER.md](HTTP-SERVER.md) | Graceful shutdown now works via `process.on('SIGINT'/'SIGTERM', ...)`; only a formal `.close()` listener-teardown API remains |
 | `path` | 8/8, 100% | [PATH.md](PATH.md) | Done ([ADR-00081](../adr/ADR-00081.md)) — POSIX-only (this compiler doesn't cross-compile) |
@@ -181,9 +181,7 @@ Grouped by kind of work rather than a fixed sequence number, since priorities sh
 
 Pulled from each page's own Known Limitations sections: the ones worth fixing outright, as opposed to the ones documented as deliberate, permanent scope narrowings (e.g. `any`'s boolean-printing convention, see [TYPE-SYSTEM.md](TYPE-SYSTEM.md)).
 
-| Fix | Effort | Notes |
-|---|---|---|
-| `fetch`/`fs` bodies containing embedded null bytes silently truncate | Deferred | Its prerequisite, `ArrayBuffer`/TypedArrays, is now ✅ ([ADR-00078](../adr/ADR-00078.md)) — actually fixing `fetch`/`fs` to return real buffers instead of null-terminated strings is a separate, not-yet-started follow-up. See [NETWORKING.md](NETWORKING.md)/[FILE-SYSTEM.md](FILE-SYSTEM.md). |
+None currently tracked. The previous entry here — `fetch`/`fs` bodies containing embedded null bytes silently truncating — is fixed: `Response.arrayBuffer()`/`fs.readFileSyncBytes()`/binary-aware `writeFileSync`/`appendFileSync` now exist (additive, alongside the unchanged string-based originals). See [ADR-00094](../adr/ADR-00094.md), [NETWORKING.md](NETWORKING.md), [FILE-SYSTEM.md](FILE-SYSTEM.md).
 
 ### Structural priorities
 
@@ -228,4 +226,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-03 (`setImmediate`/`clearImmediate` added). Update this file (and the linked page for whichever area changed) whenever a feature is added or removed.*
+*Last updated: 2026-08-04 (`Response.arrayBuffer()`/`fs.readFileSyncBytes()`/binary-aware `writeFileSync`/`appendFileSync` added, fixing the fetch/fs embedded-null-byte truncation limitation). Update this file (and the linked page for whichever area changed) whenever a feature is added or removed.*

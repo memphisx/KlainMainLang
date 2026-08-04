@@ -76,14 +76,41 @@ func (e *Emitter) ensureFwrite() {
 
 // ensureFsReadFile declares __kml_fs_read_file: reads an entire file into a
 // malloc'd, null-terminated string. Throws (via __kml_fs_throw) if the file
-// can't be opened. Text-only, like every string in this compiler — a file
-// containing embedded null bytes will read back shorter than its real size
-// (the same, already-documented limitation fetch's response bodies have).
+// can't be opened. A thin wrapper around __kml_fs_read_file_raw
+// (ADR-00094) that discards the real byte count — kept as its own symbol,
+// behavior-unchanged, so readFileSync's existing text-only contract (a file
+// containing embedded null bytes reads back shorter than its real size)
+// stays exactly as it was; fs.readFileSyncBytes (emit_fs.go) is the
+// null-byte-safe alternative, going through __kml_fs_read_file_raw directly.
 func (e *Emitter) ensureFsReadFile() {
 	if e.usedFsReadFile {
 		return
 	}
 	e.usedFsReadFile = true
+	e.ensureFsReadFileRaw()
+	e.emitGlobal(`
+define ptr @__kml_fs_read_file(ptr %path) {
+entry:
+  %raw = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %path)
+  %buf = extractvalue { ptr, i64 } %raw, 0
+  ret ptr %buf
+}`)
+}
+
+// ensureFsReadFileRaw declares __kml_fs_read_file_raw(path) -> {ptr, i64}:
+// the actual fopen/fseek/ftell/fread implementation, returning both the
+// malloc'd (null-terminated, for the string wrapper's benefit) buffer and
+// its real byte count — ftell already computes the exact size before
+// __kml_fs_read_file used to discard it in favor of a bare ptr (ADR-00094).
+// Shared by __kml_fs_read_file (readFileSync, discards the length) and
+// emit_fs.go's emitFsReadFileSyncBytes (readFileSyncBytes, keeps it — the
+// {ptr, i64} return is already the exact SSA aggregate shape a TypedArray
+// value uses, so that caller needs no repacking at all).
+func (e *Emitter) ensureFsReadFileRaw() {
+	if e.usedFsReadFileRaw {
+		return
+	}
+	e.usedFsReadFileRaw = true
 	e.ensureFsThrow()
 	e.ensureMalloc()
 	e.ensureFopen()
@@ -94,7 +121,7 @@ func (e *Emitter) ensureFsReadFile() {
 	modePtr := e.internString("rb")
 	opDescPtr := e.internString("cannot open file for reading")
 	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_fs_read_file(ptr %%path) {
+define { ptr, i64 } @__kml_fs_read_file_raw(ptr %%path) {
 entry:
   %%f = call ptr @fopen(ptr %%path, ptr %s)
   %%isnull = icmp eq ptr %%f, null
@@ -114,7 +141,9 @@ ok:
   %%termptr = getelementptr i8, ptr %%buf, i64 %%size
   store i8 0, ptr %%termptr, align 1
   call i32 @fclose(ptr %%f)
-  ret ptr %%buf
+  %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
+  %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%size, 1
+  ret { ptr, i64 } %%r1
 }`, modePtr, opDescPtr))
 }
 
@@ -130,6 +159,22 @@ func (e *Emitter) ensureFsWriteFile() {
 // truncating.
 func (e *Emitter) ensureFsAppendFile() {
 	e.ensureFsWriteLike(&e.usedFsAppendFile, "__kml_fs_append_file", "ab", "cannot open file for appending")
+}
+
+// ensureFsWriteFileBytes/ensureFsAppendFileBytes declare the ArrayBuffer/
+// TypedArray-aware siblings of ensureFsWriteFile/ensureFsAppendFile
+// (ADR-00094) — __kml_fs_write_file_bytes/__kml_fs_append_file_bytes take
+// an explicit length instead of relying on strlen, so a buffer with an
+// embedded null byte writes out whole. emit_fs.go's emitFsWriteLikeCall
+// routes to these when the data argument is an ArrayBuffer/TypedArray, and
+// to the existing strlen-based functions above (untouched) for a plain
+// string — both sets of runtime functions coexist independently.
+func (e *Emitter) ensureFsWriteFileBytes() {
+	e.ensureFsWriteLikeBytes(&e.usedFsWriteFileBytes, "__kml_fs_write_file_bytes", "wb", "cannot open file for writing")
+}
+
+func (e *Emitter) ensureFsAppendFileBytes() {
+	e.ensureFsWriteLikeBytes(&e.usedFsAppendFileBytes, "__kml_fs_append_file_bytes", "ab", "cannot open file for appending")
 }
 
 // ensureFsWriteLike is the shared implementation behind ensureFsWriteFile
@@ -160,6 +205,39 @@ fail:
 
 ok:
   %%len = call i64 @strlen(ptr %%data)
+  %%nwritten = call i64 @fwrite(ptr %%data, i64 1, i64 %%len, ptr %%f)
+  call i32 @fclose(ptr %%f)
+  ret void
+}`, fnName, modePtr, opDescPtr))
+}
+
+// ensureFsWriteLikeBytes is ensureFsWriteLike's explicit-length sibling
+// (ADR-00094): identical shape, except the caller passes the real byte
+// count directly instead of it being derived via strlen — so a buffer with
+// an embedded null byte writes out whole, not truncated at the first one.
+func (e *Emitter) ensureFsWriteLikeBytes(used *bool, fnName, mode, opDesc string) {
+	if *used {
+		return
+	}
+	*used = true
+	e.ensureFsThrow()
+	e.ensureFopen()
+	e.ensureFclose()
+	e.ensureFwrite()
+	modePtr := e.internString(mode)
+	opDescPtr := e.internString(opDesc)
+	e.emitGlobal(fmt.Sprintf(`
+define void @%s(ptr %%path, ptr %%data, i64 %%len) {
+entry:
+  %%f = call ptr @fopen(ptr %%path, ptr %s)
+  %%isnull = icmp eq ptr %%f, null
+  br i1 %%isnull, label %%fail, label %%ok
+
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+
+ok:
   %%nwritten = call i64 @fwrite(ptr %%data, i64 1, i64 %%len, ptr %%f)
   call i32 @fclose(ptr %%f)
   ret void
