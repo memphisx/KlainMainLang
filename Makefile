@@ -1,7 +1,9 @@
-BINARY   := klainmain
-GO       := go
-CLANG    := clang
-EXAMPLES := $(shell find examples -name '*.ts' | sort)
+BINARY       := klainmain
+GO           := go
+CLANG        := clang
+EXAMPLES     := $(shell find examples -name '*.ts' | sort)
+HTTPBIN_LITE := .httpbin-lite
+HTTPBIN_LITE_PORT := 8765
 
 .PHONY: all build install test examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all help
 
@@ -21,8 +23,20 @@ test:
 	$(GO) test ./...
 
 ## examples: compile every example .ts file and run it
+## examples/fetch/*.ts and examples/async/promise_all.ts talk to a local
+## httpbin-lite fixture server (tools/httpbin-lite/, ADR-00096) instead of a
+## real external host, so the suite stays deterministic and offline-capable
+## instead of depending on some third-party website's uptime.
 examples: build
-	@ok=0; fail=0; \
+	@$(GO) build -o $(HTTPBIN_LITE) ./tools/httpbin-lite
+	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
+	fixture_pid=$$!; \
+	trap "kill $$fixture_pid 2>/dev/null" EXIT INT TERM; \
+	for i in $$(seq 1 50); do \
+		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
+		sleep 0.1; \
+	done; \
+	ok=0; fail=0; \
 	for f in $(EXAMPLES); do \
 		out=$$(dirname $$f)/$$(basename $$f .ts); \
 		printf '%-50s' "  $$f"; \
@@ -98,7 +112,7 @@ fuzz-all: fuzz fuzz-codegen
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(HTTPBIN_LITE)
 	find examples -type f ! -name '*.ts' -delete
 	find examples -name '*.ll' -delete
 
