@@ -322,6 +322,22 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.emitLabel(doYieldL)
 	ctxPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ctxPtr, ctxPtrSlot))
+	// gc mode: restore GC_stackbottom to the real process stack right
+	// before yielding back to the main/scheduler context — this fiber's own
+	// read loop is a 4th swapcontext site alongside the 3 ADR-00071
+	// documents (__kml_http_append_conn's initial launch,
+	// __kml_event_loop_run's rresume, __kml_await_fetch's doyield); missing
+	// the restore here left GC_stackbottom pointed at this fiber's stack
+	// while the main event loop kept running (accepting new connections,
+	// resuming other fibers) until the next rresume overwrote it, so a
+	// collection triggered in that window walked Boehm's root-stack scan
+	// between the live main-stack SP and a stale, unrelated fiber-stack
+	// address — see docs/adr/ADR-00071.md.
+	if e.isGCMode() {
+		origBottom := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8", origBottom))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @GC_stackbottom, align 8", origBottom))
+	}
 	e.emitInstr(fmt.Sprintf("call i32 @swapcontext(ptr %s, ptr @__kml_main_ctx)", ctxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
 

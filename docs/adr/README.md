@@ -131,3 +131,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00090](ADR-00090.md) | `os` module (Darwin `freemem()`/`cpus().times` unverified) | Implements [TDD-00024](../tdd/TDD-00024.md) |
 | [00091](ADR-00091.md) | `in` operator (`key in obj`) | |
 | [00092](ADR-00092.md) | `setImmediate(fn)` / `clearImmediate(id)` | Extends [ADR-00031](ADR-00031.md) |
+| [00093](ADR-00093.md) | Fix missing `GC_stackbottom` restore on `http.listen`'s read-loop yield (4th swapcontext site ADR-00071 missed) | Extends [ADR-00071](ADR-00071.md) |
