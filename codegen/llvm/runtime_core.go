@@ -34,6 +34,45 @@ func (e *Emitter) ensureMalloc() {
 	}
 }
 
+// ensureForkDecl/ensureCloseDecl/ensureReadDecl exist as their own
+// dedicated ensure*() helpers (rather than being inlined into whichever
+// ensure*() happened to need them first) because both
+// ensureExecFileSync (runtime_process.go) and ensureHTTPRuntime
+// (runtime_http.go, including this feature's __kml_http_cluster_fork)
+// independently need fork()/close()/read() — inlining a `declare` in both
+// places produces two identical `declare`s in the same module when a
+// program uses both features, which LLVM rejects outright ("invalid
+// redefinition of function"), confirmed directly against clang. The
+// ensure*() pattern's whole point (CLAUDE.md: "declared exactly once") is
+// what this fixes.
+func (e *Emitter) ensureForkDecl() {
+	if !e.usedForkDecl {
+		e.emitGlobal("declare i32 @fork()")
+		e.usedForkDecl = true
+	}
+}
+
+func (e *Emitter) ensureCloseDecl() {
+	if !e.usedCloseDecl {
+		e.emitGlobal("declare i32 @close(i32 noundef)")
+		e.usedCloseDecl = true
+	}
+}
+
+func (e *Emitter) ensureReadDecl() {
+	if !e.usedReadDecl {
+		e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+		e.usedReadDecl = true
+	}
+}
+
+func (e *Emitter) ensureFflushDecl() {
+	if !e.usedFflushDecl {
+		e.emitGlobal("declare i32 @fflush(ptr noundef)")
+		e.usedFflushDecl = true
+	}
+}
+
 func (e *Emitter) ensureExit() {
 	if !e.usedExit {
 		e.emitGlobal("declare void @exit(i32) noreturn")

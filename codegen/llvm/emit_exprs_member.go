@@ -289,6 +289,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetStatic(ex.Property)
 	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster" {
+		switch ex.Property {
+		case "isPrimary":
+			return e.emitClusterIsPrimary()
+		case "workerId":
+			return e.emitClusterWorkerID()
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path" {
 		switch ex.Property {
 		case "sep":

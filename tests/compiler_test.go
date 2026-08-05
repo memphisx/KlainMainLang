@@ -121,6 +121,153 @@ func buildBinaryGC(t *testing.T, src string) string {
 	return binFile
 }
 
+// asanOptionsSource overrides ASan's default leak detection off, baked
+// into the binary itself (via ASan's own __asan_default_options() hook, a
+// weak C symbol ASan looks for at startup) rather than left as an
+// ASAN_OPTIONS env var callers have to remember to set. This project's
+// `manual` memory mode never frees by design (CLAUDE.md: "every heap
+// allocation is malloc'd and (almost) never freed") — LeakSanitizer (part
+// of ASan by default on Linux) would otherwise flag that expected,
+// documented behavior as a bug on every single manual-mode ASan run,
+// confirmed directly: a trivial "let arr = [1,2,3]; console.log(...)"
+// program reports two direct leaks under plain -fsanitize=address. Actual
+// corruption bugs (heap-buffer-overflow, use-after-free, UBSan's checks)
+// are unaffected by this — only the separate "still-reachable-at-exit"
+// leak check is disabled.
+const asanOptionsSource = `const char *__asan_default_options(void) { return "detect_leaks=0"; }`
+
+// buildBinaryASan is buildBinary's AddressSanitizer/UndefinedBehaviorSanitizer
+// counterpart, for chasing memory-corruption bugs that don't reproduce
+// under a plain build (e.g. the residual -mm=gc clustering hang
+// investigated in ADR-00099). Not part of the regular `go test ./...` run
+// — ASan roughly doubles memory/time cost, and this is an opt-in debugging
+// tool a specific investigation calls deliberately, not a default check.
+// `-O1` (not `-O2`) and `-fno-omit-frame-pointer` are ASan's own documented
+// recommendation for accurate stack traces; `-g` adds line numbers to
+// those traces. `ASAN_OPTIONS`/`UBSAN_OPTIONS` (e.g. `abort_on_error=1` for
+// a core dump, `halt_on_error=0` to keep going and log every violation
+// instead of stopping at the first) can still be set by the caller in the
+// environment when running the returned binary for anything beyond the
+// leak-detection default this helper already bakes in.
+func buildBinaryASan(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	em := llvm.NewEmitter()
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	asanOptFile := filepath.Join(dir, "asan_options.c")
+	binFile := filepath.Join(dir, "prog")
+
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	if err := os.WriteFile(asanOptFile, []byte(asanOptionsSource), 0644); err != nil {
+		t.Fatalf("write asan_options.c: %v", err)
+	}
+
+	clangArgs := []string{
+		"-O1", "-g", "-fno-omit-frame-pointer",
+		"-fsanitize=address", "-fsanitize=undefined",
+		llFile, asanOptFile, "-o", binFile,
+	}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// buildBinaryGCASan is buildBinaryGC + buildBinaryASan combined, for
+// chasing GC-mode-specific memory corruption directly. Important caveat,
+// confirmed by reading gcshim.c: it #define-overrides malloc/calloc/
+// realloc/free to call straight through to GC_malloc/GC_realloc/GC_free,
+// bypassing whatever malloc clang's ASan runtime would otherwise intercept
+// — so ASan's heap redzone instrumentation does NOT cover GC_malloc'd
+// memory under this build (gcshim.c's malloc "wins" the symbol, same as it
+// does against plain libc malloc in every other build mode). ASan here
+// still catches stack- and global-variable overflows (compile-time
+// instrumented, unaffected by which allocator is linked) and UBSan's
+// checks (signed overflow, misaligned access, etc.) still apply
+// everywhere. For heap corruption specifically inside GC-managed memory,
+// Valgrind (Memcheck) is the better tool — it instruments at the
+// binary/instruction level, independent of which allocator is in play —
+// though expect Boehm's own conservative stack-scanning to trigger some
+// false-positive "uninitialized value" noise under Memcheck, a known,
+// generally-suppressible pattern for conservative collectors.
+func buildBinaryGCASan(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	em := llvm.NewEmitter()
+	em.SetMemMode("gc")
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	shimFile := filepath.Join(dir, "gcshim.c")
+	asanOptFile := filepath.Join(dir, "asan_options.c")
+	binFile := filepath.Join(dir, "prog")
+
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
+		t.Fatalf("write GC shim: %v", err)
+	}
+	if err := os.WriteFile(asanOptFile, []byte(asanOptionsSource), 0644); err != nil {
+		t.Fatalf("write asan_options.c: %v", err)
+	}
+
+	cflags, libs, err := llvm.LocateGC()
+	if err != nil {
+		t.Skipf("gc mode: %v", err)
+	}
+	clangArgs := []string{
+		"-O1", "-g", "-fno-omit-frame-pointer",
+		"-fsanitize=address", "-fsanitize=undefined",
+		llFile, shimFile, asanOptFile, "-o", binFile,
+	}
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
+			t.Skip("libgc/bdw-gc not installed")
+		}
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
 // writeMultiFile writes each file in files (keyed by relative path, e.g.
 // "math.ts") into a fresh temp directory and returns the directory.
 func writeMultiFile(t *testing.T, files map[string]string) string {

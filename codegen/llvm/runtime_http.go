@@ -5,6 +5,26 @@ import (
 	"runtime"
 )
 
+// fiberStackBytes is the size of each connection fiber's own malloc'd stack
+// (ucontext.h-based, see ensureFiberRuntime/__kml_http_append_conn). Was
+// 64KB (65536) originally; confirmed too small specifically under `-mm=gc`
+// — this stack is itself GC_malloc'd (routed through the Boehm shim like
+// every other allocation), and a collection triggered mid-fiber runs
+// Boehm's own mark/sweep machinery *on that same stack*, silently
+// overflowing it into adjacent heap memory with no crash and no signal:
+// found via a real, hard-to-reproduce intermittent hang under
+// http.listen({workers: N}) clustering + concurrent load in -mm=gc builds
+// (a worker would receive a complete HTTP request in one read(), then
+// immediately issue an inexplicable second read() with a corrupted byte
+// count instead of responding). Bisected by directly comparing failure
+// rates at the old 64KB against several larger sizes; 1MB (1048576)
+// eliminated it in 200/200 repeated runs under conditions that reliably
+// reproduced the bug within 40-150 runs at 64KB. Applied unconditionally
+// (both manual and gc mode) rather than gating by memory mode, to avoid a
+// mode-specific footgun if a manual-mode handler ever needs comparable
+// depth. See docs/adr/ADR-00100.md.
+const fiberStackBytes = 1024 * 1024
+
 // httpSockConstants returns the platform-specific setsockopt() level/option
 // values for SOL_SOCKET/SO_REUSEADDR — unlike AF_INET (2) and SOCK_STREAM
 // (1), which are the same numeric value on every POSIX target this project
@@ -455,6 +475,75 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("@__kml_current_conn_idx = internal global i64 -1, align 8")
 }
 
+// ensureHTTPClusterFork declares __kml_http_cluster_fork(i64 numWorkers) and
+// its two supporting globals (TDD-00025): a flat "spawn N-1 additional
+// peers" fan-out loop, NOT each child re-entering the loop (which would
+// fork exponentially). Called unconditionally from ensureHTTPRuntime,
+// always right after __kml_http_bind_and_listen succeeds and before any
+// connection-fiber state exists — forking after a fiber's ucontext_t/stack
+// has ever been created is unreasoned-about territory this design
+// deliberately avoids. numWorkers <= 1 (the http.listen(port, handler) form
+// with no third argument, or an explicit { workers: 1 }) is a no-op: the
+// loop condition is never true, so the process falls straight through with
+// @__kml_cluster_worker_id left at its zeroed default — today's
+// single-process behavior, byte-for-byte.
+//
+// Unlike ensureExecFileSync's fork() (runtime_process.go), whose child
+// always immediately execvp()s or _exit()s, a cluster worker must instead
+// fall through into ordinary emitted code (the caller's own
+// __kml_event_loop_run call) — so this is a genuinely new fork() call site,
+// not a reuse of that one.
+func (e *Emitter) ensureHTTPClusterFork() {
+	if e.usedHTTPClusterFork {
+		return
+	}
+	e.usedHTTPClusterFork = true
+	e.ensureForkDecl()
+	e.ensureFflushDecl()
+	e.emitGlobal("@__kml_cluster_worker_id = internal global i64 0, align 8")
+	e.emitGlobal(`
+define void @__kml_http_cluster_fork(i64 %numWorkers) {
+entry:
+  %ip = alloca i64, align 8
+  store i64 1, ptr %ip, align 8
+  %needsfork = icmp sgt i64 %numWorkers, 1
+  br i1 %needsfork, label %forkloop, label %done
+
+forkloop:
+  %i = load i64, ptr %ip, align 8
+  %cont = icmp slt i64 %i, %numWorkers
+  br i1 %cont, label %doforkw, label %done
+
+doforkw:
+  ; fflush(NULL) (flushes every open output stream, including stdout) right
+  ; before fork() is required, not optional: fork() copies libc's stdio
+  ; buffers verbatim, so any console.log output still sitting unflushed in
+  ; stdout's buffer at fork time (the common case once stdout isn't a TTY —
+  ; e.g. piped to a container's log collector, this project's own
+  ; microservice target) would otherwise get flushed independently by every
+  ; worker that inherits the copy, printing the same line once per worker
+  ; instead of once. Found via this feature's own example
+  ; (examples/http/http_cluster.ts) printing its startup banner N times
+  ; instead of once when piped (not run at a real terminal).
+  call i32 @fflush(ptr null)
+  %pid = call i32 @fork()
+  %ischild = icmp eq i32 %pid, 0
+  br i1 %ischild, label %child, label %parentnext
+
+child:
+  store i64 %i, ptr @__kml_cluster_worker_id, align 8
+  br label %done
+
+parentnext:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %ip, align 8
+  br label %forkloop
+
+done:
+  ret void
+}`)
+}
+
 func (e *Emitter) ensureHTTPRuntime() {
 	if e.usedHTTP {
 		return
@@ -503,12 +592,13 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.emitGlobal("declare i32 @bind(i32 noundef, ptr noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @listen(i32 noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @accept(i32 noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+	e.ensureReadDecl()
 	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
-	e.emitGlobal("declare i32 @close(i32 noundef)")
+	e.ensureCloseDecl()
 	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i16 @htons(i16 noundef)")
 	e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
+	e.ensureForkDecl()
 
 	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
 	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
@@ -546,7 +636,21 @@ setopt:
 dolisten:
   %%listenrc = call i32 @listen(i32 %%fd, i32 128)
   %%listenok = icmp eq i32 %%listenrc, 0
-  br i1 %%listenok, label %%success, label %%failwithfd
+  br i1 %%listenok, label %%setnonblocklistener, label %%failwithfd
+
+setnonblocklistener:
+  ; Required once http.listen({workers: N}) can fork() multiple peers that
+  ; all select()/accept() on this same inherited fd (TDD-00025): with a
+  ; blocking listener, a worker that loses the accept() race after select()
+  ; reports readiness would hang its entire event loop, not just skip a
+  ; connection. Harmless in the single-process (workers omitted/1) case too
+  ; — the existing accept path already treats any accept() failure as "no
+  ; connection this round, keep looping" (doaccept/scanconn below), which is
+  ; exactly correct EAGAIN/EWOULDBLOCK behavior once this fd is non-blocking.
+  %%listencurflags = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
+  %%listennewflags = or i32 %%listencurflags, %d
+  call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%listennewflags)
+  br label %%success
 
 success:
   ret i32 %%fd
@@ -559,9 +663,11 @@ failwithfd:
 failnofd:
   call void @__kml_http_throw(ptr %s)
   unreachable
-}`, solSocket, soReuseAddr, fam0, fam1,
+}`, solSocket, soReuseAddr, fam0, fam1, httpNonblockFlag(),
 		e.internString("http.listen: failed to bind or listen"),
 		e.internString("http.listen: failed to create socket")))
+
+	e.ensureHTTPClusterFork()
 
 	// __kml_http_append_conn: appends a new { i64 fd, ptr ctx, ptr stack,
 	// ptr pendingFetch, ptr pendingGroup } entry (growable, realloc-doubling,
@@ -581,18 +687,39 @@ failnofd:
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
 
 	// gc mode: repoint Boehm's GC_stackbottom at this fiber's own stack
-	// (stacks grow down, so the high end of the 64KB block is the "bottom"
-	// as far as GC_stackbottom's naming convention is concerned) right
-	// before swapping into it — a collection triggered while this fiber is
-	// running would otherwise have Boehm's root-stack scan walk from the
-	// live SP (now inside this malloc'd block) to the *original* process
-	// stack's address, an unrelated and likely-unmapped range. See
+	// (stacks grow down, so the high end of the fiberStackBytes block is the
+	// "bottom" as far as GC_stackbottom's naming convention is concerned)
+	// right before swapping into it — a collection triggered while this
+	// fiber is running would otherwise have Boehm's root-stack scan walk
+	// from the live SP (now inside this malloc'd block) to the *original*
+	// process stack's address, an unrelated and likely-unmapped range. See
 	// docs/adr/ADR-00071.md.
 	gcSetStackbottom := ""
+	// gc mode: restore GC_stackbottom back to the real process stack right
+	// after swapcontext returns control here — covers both ways a fiber can
+	// hand control back: an explicit yield (mid-request, waiting on more
+	// data/a pending fetch) *and* running to completion in one shot (the
+	// common case: request fully buffered, handler returns, response sent,
+	// no further yield — control returns here automatically via uc_link,
+	// with no swapcontext call of our own to hang a restore off of on the
+	// fiber's side). Only the explicit-yield case used to be handled (via a
+	// symmetric restore placed right before each such yield's own
+	// swapcontext call, in emit_http.go/runtime_fetch.go) — the
+	// runs-to-completion case left GC_stackbottom dangling at this now-freed
+	// fiber's stack until the *next* resume overwrote it, so any collection
+	// triggered in that window scanned the wrong stack range and could
+	// silently free memory still live only on the real process stack. Fixed
+	// here at the resume site instead, unconditionally, so it's correct
+	// regardless of why the fiber gave control back — see docs/adr for the
+	// ADR documenting this fix (follow-up to ADR-00071/ADR-00099).
+	gcRestoreStackbottom := ""
 	if e.isGCMode() {
-		gcSetStackbottom = `
-  %stackhigh = getelementptr i8, ptr %stack, i64 65536
-  store ptr %stackhigh, ptr @GC_stackbottom, align 8`
+		gcSetStackbottom = fmt.Sprintf(`
+  %%stackhigh = getelementptr i8, ptr %%stack, i64 %d
+  store ptr %%stackhigh, ptr @GC_stackbottom, align 8`, fiberStackBytes)
+		gcRestoreStackbottom = `
+  %origbottom0 = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
+  store ptr %origbottom0, ptr @GC_stackbottom, align 8`
 	}
 
 	e.emitGlobal(`
@@ -624,12 +751,12 @@ doappend:
   store i64 %fd64, ptr %fd_p, align 8
 
   %ctx = call ptr @malloc(i64 ` + fmt.Sprintf("%d", ctxSize) + `)
-  %stack = call ptr @malloc(i64 65536)
+  %stack = call ptr @malloc(i64 ` + fmt.Sprintf("%d", fiberStackBytes) + `)
   call void @getcontext(ptr %ctx)
   %ss_sp_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSpOff) + `
   store ptr %stack, ptr %ss_sp_p, align 8
   %ss_size_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ssSizeOff) + `
-  store i64 65536, ptr %ss_size_p, align 8
+  store i64 ` + fmt.Sprintf("%d", fiberStackBytes) + `, ptr %ss_size_p, align 8
   %uc_link_p = getelementptr i8, ptr %ctx, i64 ` + fmt.Sprintf("%d", ucLinkOff) + `
   store ptr @__kml_main_ctx, ptr %uc_link_p, align 8
   %dfp = load ptr, ptr @__kml_listen_dispatch, align 8
@@ -648,7 +775,7 @@ doappend:
   store i64 %newlen, ptr @__kml_conn_len, align 8
 
   store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
-  %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)
+  %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)` + gcRestoreStackbottom + `
   ret void
 }`)
 
@@ -679,12 +806,24 @@ entry:
 	// the event loop swaps into a fiber (a resumed, previously-yielded one
 	// rather than a freshly-created one) — see docs/adr/ADR-00071.md.
 	gcSetRStackbottom := ""
+	// gc mode: restore GC_stackbottom to the real process stack right after
+	// this swapcontext returns, unconditionally — see the identical
+	// gcRestoreStackbottom comment at __kml_http_append_conn's own resume
+	// site above for why this has to happen on the resumer's side rather
+	// than relying on the fiber to restore it before yielding (that only
+	// covers an explicit yield; a fiber that runs a request to completion
+	// in one shot returns here via uc_link with no swapcontext call of its
+	// own to hang a restore off of).
+	gcRestoreRStackbottom := ""
 	if e.isGCMode() {
-		gcSetRStackbottom = `
-  %rstack_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 2
-  %rstack = load ptr, ptr %rstack_p, align 8
-  %rstackhigh = getelementptr i8, ptr %rstack, i64 65536
-  store ptr %rstackhigh, ptr @GC_stackbottom, align 8`
+		gcSetRStackbottom = fmt.Sprintf(`
+  %%rstack_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%rslot, i32 0, i32 2
+  %%rstack = load ptr, ptr %%rstack_p, align 8
+  %%rstackhigh = getelementptr i8, ptr %%rstack, i64 %d
+  store ptr %%rstackhigh, ptr @GC_stackbottom, align 8`, fiberStackBytes)
+		gcRestoreRStackbottom = `
+  %rorigbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
+  store ptr %rorigbottom, ptr @GC_stackbottom, align 8`
 	}
 
 	e.emitGlobal(`
@@ -1026,7 +1165,7 @@ rresume:
   store i64 %ri, ptr @__kml_current_conn_idx, align 8
   %rctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %rslot, i32 0, i32 1
   %rctxptr = load ptr, ptr %rctx_p, align 8` + gcSetRStackbottom + `
-  call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)
+  call i32 @swapcontext(ptr @__kml_main_ctx, ptr %rctxptr)` + gcRestoreRStackbottom + `
   br label %rscannext
 
 rscannext:

@@ -4,6 +4,13 @@
 // third-party website's uptime/rate-limiting for CI to pass. It implements
 // only the handful of endpoints those examples actually exercise — it is
 // not a general httpbin clone.
+//
+// This is Go, not KlainMainLang, only because of one route: every endpoint
+// below except /bytes/{n} is already expressible with this compiler's own
+// http.listen (arbitrary status/headers, any method, query/body reads) —
+// /bytes/{n} needs a response body with a guaranteed embedded null byte,
+// which http.listen can't carry through today (see docs/tdd/TDD-00026.md).
+// Once that lands, this fixture should be rewritten in KlainMainLang.
 package main
 
 import (

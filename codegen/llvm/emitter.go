@@ -115,6 +115,11 @@ type Emitter struct {
 	usedCryptoRandomUUID     bool
 	usedReadLineSync         bool
 	usedExecFileSync         bool
+	usedForkDecl             bool
+	usedCloseDecl            bool
+	usedReadDecl             bool
+	usedFflushDecl           bool
+	usedHTTPClusterFork      bool
 	usedProcessCwd           bool
 	usedProcessChdir         bool
 	usedGetpid               bool
