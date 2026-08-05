@@ -459,6 +459,17 @@ ret:
 // union — a fiber is only ever parked on at most one of them at a time, but
 // they're kept as separate fields rather than overlaid to avoid any
 // byte-layout coupling between the single-pending and group-wait paths.
+//
+// @__kml_conn_active (TDD-00027) is a separate i64 counter, not derivable
+// from @__kml_conn_len alone (len only ever grows — a finished connection's
+// slot is reused, never removed): it tracks how many entries currently have
+// fd >= 0, incremented once in __kml_http_append_conn and decremented at
+// both of buildHTTPDispatcher's connection-finish sites (emit_http.go's
+// parseL/noReqL). __kml_event_loop_run's scandone folds it into its exit
+// condition so http.close() — which only stops *new* accepts by clearing
+// @__kml_listen_fd — lets already-open connections finish naturally instead
+// of being silently orphaned (leaked ucontext_t/stack, an unflushed open
+// socket) the instant the listener disappears.
 func (e *Emitter) ensureFiberRuntime() {
 	if e.usedFiber {
 		return
@@ -473,6 +484,7 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("@__kml_conn_len = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_conn_cap = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_current_conn_idx = internal global i64 -1, align 8")
+	e.emitGlobal("@__kml_conn_active = internal global i64 0, align 8")
 }
 
 // ensureHTTPClusterFork declares __kml_http_cluster_fork(i64 numWorkers) and
@@ -773,6 +785,9 @@ doappend:
 
   %newlen = add i64 %len, 1
   store i64 %newlen, ptr @__kml_conn_len, align 8
+  %activeNow = load i64, ptr @__kml_conn_active, align 8
+  %activeNew = add i64 %activeNow, 1
+  store i64 %activeNew, ptr @__kml_conn_active, align 8
 
   store i64 %len, ptr @__kml_current_conn_idx, align 8` + gcSetStackbottom + `
   %swaprc = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %ctx)` + gcRestoreStackbottom + `
@@ -934,7 +949,17 @@ scandone:
   %havetimer = icmp ne i64 %foundbest, -1
   %listenfd = load i32, ptr @__kml_listen_fd, align 4
   %haslistener = icmp sge i32 %listenfd, 0
-  %anywork = or i1 %havetimer, %haslistener
+  ; TDD-00027: http.close() clears @__kml_listen_fd immediately but leaves
+  ; any already-accepted connection to finish naturally — so the loop's own
+  ; exit condition must also check for those, not just the listener/timers,
+  ; or a connection still parked mid-request the instant close() runs would
+  ; be silently orphaned (leaked ucontext_t/stack, an unflushed open
+  ; socket). checklistener below already gates new accept()s on haslistener
+  ; alone, so this doesn't reopen accepting new connections.
+  %activeconns = load i64, ptr @__kml_conn_active, align 8
+  %hasactiveconns = icmp sgt i64 %activeconns, 0
+  %anywork0 = or i1 %havetimer, %haslistener
+  %anywork = or i1 %anywork0, %hasactiveconns
   br i1 %anywork, label %dowork, label %alldone
 
 dowork:
@@ -1218,6 +1243,40 @@ markdone:
   br label %outerloop
 
 alldone:
+  ret void
+}`)
+}
+
+// ensureHTTPClose declares __kml_http_close (TDD-00027): a direct,
+// unconditional mutation of @__kml_listen_fd, not a pending-flag deferred
+// like SIGINT/SIGTERM (runtime_process.go) — http.close() is always invoked
+// from ordinary control flow already running inside the event loop (a
+// request handler, a timer callback, or a process.on(...) closure), never
+// from real signal context, so there's no async-signal-safety hazard to
+// route around; mutating the global immediately, inline, is correct.
+// Idempotent/safe to call when there's no active listener (fd already -1,
+// e.g. called twice, or called in a program that never actually called
+// http.listen()) — a no-op in that case, matching real Node's own tolerance
+// of a redundant .close().
+func (e *Emitter) ensureHTTPClose() {
+	if e.usedHTTPClose {
+		return
+	}
+	e.usedHTTPClose = true
+	e.ensureCloseDecl()
+	e.emitGlobal(`
+define void @__kml_http_close() {
+entry:
+  %fd = load i32, ptr @__kml_listen_fd, align 4
+  %active = icmp sge i32 %fd, 0
+  br i1 %active, label %doclose, label %done
+
+doclose:
+  call i32 @close(i32 %fd)
+  store i32 -1, ptr @__kml_listen_fd, align 4
+  br label %done
+
+done:
   ret void
 }`)
 }

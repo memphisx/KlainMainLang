@@ -4,12 +4,13 @@
 // req.query/req.body and an optional response `headers` field (ADR-00072)
 // round out request/response handling beyond just method/path/status/body.
 //
-// http.listen never returns on its own (there's no .close() in V1), so this
-// example schedules a setTimeout that exits the process after a short delay
-// — the same trick that lets `make examples` verify this file runs to
-// completion without needing a real HTTP client to connect to it. Point a
-// real client at it while it's running to see it actually serve a request,
-// e.g.:
+// http.listen never returns on its own, so this example schedules a
+// setTimeout that exits the process after a short delay — the same trick
+// that lets `make examples` verify this file runs to completion without
+// needing a real HTTP client to connect to it. See http_close.ts for the
+// same idea done via http.close() (TDD-00027) instead of process.exit().
+// Point a real client at it while it's running to see it actually serve a
+// request, e.g.:
 //   curl -H "X-Greeting: hi" "http://localhost:8080/hello?name=world"
 //   curl -X POST -d '{"k":"v"}' "http://localhost:8080/echo"
 

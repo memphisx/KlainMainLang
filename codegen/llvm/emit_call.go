@@ -286,8 +286,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Memory" && mem.Property == "free" {
 			return e.emitMemoryFree(ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http" && mem.Property == "listen" {
-			return e.emitHTTPListen(ex.Args, ex.GetPos())
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http" {
+			switch mem.Property {
+			case "listen":
+				return e.emitHTTPListen(ex.Args, ex.GetPos())
+			case "close":
+				return e.emitHTTPClose(ex.Args, ex.GetPos())
+			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" {
 			switch mem.Property {

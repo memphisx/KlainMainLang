@@ -29,117 +29,126 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals                  strings.Builder // global declarations (string constants, printf decl, …)
-	functions                strings.Builder // emitted user-defined function bodies
-	allocas                  strings.Builder // alloca instructions for the current function
-	body                     strings.Builder // body instructions for the current function
-	scopes                   []scope
-	regCtr                   int
-	labelCtr                 int
-	strConsts                map[string]string // Go string value → @.s<n> name
-	strIdx                   int
-	linkLibs                 map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	memMode                  string          // "" (== "manual", the default) or "gc" — see SetMemMode
-	usedPrintf               bool
-	usedDprintf              bool
-	usedMalloc               bool
-	usedCalloc               bool
-	usedRealloc              bool
-	usedMemmove              bool
-	funcs                    map[string]FuncSig            // registered function signatures
-	interfaces               map[string]Type               // named interface, type alias, and class registry
-	interfaceMethodSigs      map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
-	classes                  map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
-	enums                    map[string]map[string]Value   // enum name → member name → constant value
-	currentRetType           Type                          // return type of the function being emitted
-	blockDone                bool                          // true after a terminator (ret/br) in the current block
-	closureCtr               int                           // monotonically increasing counter for unique closure names
-	usedStrlen               bool
-	usedMemcpy               bool
-	usedMemset               bool
-	usedStrcmp               bool
-	usedSprintf              bool
-	usedStrstr               bool
-	usedStrncmp              bool
-	usedStringTrim           bool
-	usedStringTrimStart      bool
-	usedStringTrimEnd        bool
-	usedStringToUpper        bool
-	usedStringToLower        bool
-	usedStringReplace        bool
-	usedStringReplaceAll     bool
-	usedStringSplit          bool
-	usedAtoll                bool
-	usedJSONStringifyNum     bool
-	usedJSONStringifyStr     bool
-	usedJSONParseStr         bool
-	usedJSONFindValue        bool
-	usedJSONParseFieldStr    bool
-	usedAnyEq                bool
-	usedClockGettime         bool
-	usedDateNow              bool
-	usedPerformanceNow       bool
-	usedDateDecompose        bool
-	usedSscanf               bool
-	usedDaysFromCivil        bool
-	usedDateParse            bool
-	usedDateCompose          bool
-	usedDateNameTables       bool
-	usedFetch                bool
-	usedFetchAsync           bool
-	usedPromiseCombinators   bool
-	usedCurlSlist            bool
-	usedCurlURL              bool
-	usedFopen                bool
-	usedFclose               bool
-	usedFwrite               bool
-	usedFsThrow              bool
-	usedFsReadFile           bool
-	usedFsReadFileRaw        bool
-	usedFsWriteFile          bool
-	usedFsAppendFile         bool
-	usedFsWriteFileBytes     bool
-	usedFsAppendFileBytes    bool
-	usedFsExists             bool
-	usedFsUnlink             bool
-	usedBase64Encode         bool
-	usedBase64Decode         bool
-	usedHexDigits            bool
-	usedHexDecodeTable       bool
-	usedEncodeURIComponent   bool
-	usedEncodeURI            bool
-	usedDecodeURIComponent   bool
-	usedDecodeURI            bool
-	usedCryptoRandomBytes    bool
-	usedCryptoFillNumArray   bool
-	usedCryptoRandomUUID     bool
-	usedReadLineSync         bool
-	usedExecFileSync         bool
-	usedForkDecl             bool
-	usedCloseDecl            bool
-	usedReadDecl             bool
-	usedFflushDecl           bool
-	usedHTTPClusterFork      bool
-	usedProcessCwd           bool
-	usedProcessChdir         bool
-	usedGetpid               bool
-	usedProcessKill          bool
-	usedSignalHandler        bool
-	usedSignalSigint         bool
-	usedSignalSigterm        bool
-	usedErrnoAccessor        bool
-	usedStrerror             bool
-	usedFsMkdir              bool
-	usedFsRmdir              bool
-	usedFsRename             bool
-	usedFsReaddir            bool
-	usedConsoleGroupDepth    bool
-	usedConsoleTimer         bool
-	usedConsoleCountMap      bool
-	usedMapFree              bool
-	usedClosureFree          bool
-	usedTimers               bool
-	usedHTTP                 bool
+	globals                strings.Builder // global declarations (string constants, printf decl, …)
+	functions              strings.Builder // emitted user-defined function bodies
+	allocas                strings.Builder // alloca instructions for the current function
+	body                   strings.Builder // body instructions for the current function
+	scopes                 []scope
+	regCtr                 int
+	labelCtr               int
+	strConsts              map[string]string // Go string value → @.s<n> name
+	strIdx                 int
+	linkLibs               map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	memMode                string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	usedPrintf             bool
+	usedDprintf            bool
+	usedMalloc             bool
+	usedCalloc             bool
+	usedRealloc            bool
+	usedMemmove            bool
+	funcs                  map[string]FuncSig            // registered function signatures
+	interfaces             map[string]Type               // named interface, type alias, and class registry
+	interfaceMethodSigs    map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
+	classes                map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
+	enums                  map[string]map[string]Value   // enum name → member name → constant value
+	currentRetType         Type                          // return type of the function being emitted
+	blockDone              bool                          // true after a terminator (ret/br) in the current block
+	closureCtr             int                           // monotonically increasing counter for unique closure names
+	usedStrlen             bool
+	usedMemcpy             bool
+	usedMemset             bool
+	usedStrcmp             bool
+	usedSprintf            bool
+	usedStrstr             bool
+	usedStrncmp            bool
+	usedStringTrim         bool
+	usedStringTrimStart    bool
+	usedStringTrimEnd      bool
+	usedStringToUpper      bool
+	usedStringToLower      bool
+	usedStringReplace      bool
+	usedStringReplaceAll   bool
+	usedStringSplit        bool
+	usedAtoll              bool
+	usedJSONStringifyNum   bool
+	usedJSONStringifyStr   bool
+	usedJSONParseStr       bool
+	usedJSONFindValue      bool
+	usedJSONParseFieldStr  bool
+	usedAnyEq              bool
+	usedClockGettime       bool
+	usedDateNow            bool
+	usedPerformanceNow     bool
+	usedDateDecompose      bool
+	usedSscanf             bool
+	usedDaysFromCivil      bool
+	usedDateParse          bool
+	usedDateCompose        bool
+	usedDateNameTables     bool
+	usedFetch              bool
+	usedFetchAsync         bool
+	usedPromiseCombinators bool
+	usedCurlSlist          bool
+	usedCurlURL            bool
+	usedFopen              bool
+	usedFclose             bool
+	usedFwrite             bool
+	usedFsThrow            bool
+	usedFsReadFile         bool
+	usedFsReadFileRaw      bool
+	usedFsWriteFile        bool
+	usedFsAppendFile       bool
+	usedFsWriteFileBytes   bool
+	usedFsAppendFileBytes  bool
+	usedFsExists           bool
+	usedFsUnlink           bool
+	usedBase64Encode       bool
+	usedBase64Decode       bool
+	usedHexDigits          bool
+	usedHexDecodeTable     bool
+	usedEncodeURIComponent bool
+	usedEncodeURI          bool
+	usedDecodeURIComponent bool
+	usedDecodeURI          bool
+	usedCryptoRandomBytes  bool
+	usedCryptoFillNumArray bool
+	usedCryptoRandomUUID   bool
+	usedReadLineSync       bool
+	usedExecFileSync       bool
+	usedForkDecl           bool
+	usedCloseDecl          bool
+	usedReadDecl           bool
+	usedFflushDecl         bool
+	usedHTTPClusterFork    bool
+	usedProcessCwd         bool
+	usedProcessChdir       bool
+	usedGetpid             bool
+	usedProcessKill        bool
+	usedSignalHandler      bool
+	usedSignalSigint       bool
+	usedSignalSigterm      bool
+	usedErrnoAccessor      bool
+	usedStrerror           bool
+	usedFsMkdir            bool
+	usedFsRmdir            bool
+	usedFsRename           bool
+	usedFsReaddir          bool
+	usedConsoleGroupDepth  bool
+	usedConsoleTimer       bool
+	usedConsoleCountMap    bool
+	usedMapFree            bool
+	usedClosureFree        bool
+	usedTimers             bool
+	usedHTTP               bool
+	usedHTTPClose          bool
+	// httpListenCallSeen is not a "runtime machinery emitted" flag like the
+	// usedX fields around it — it tracks whether an http.listen(...) call
+	// site has already been compiled, so a second one (only reachable at
+	// runtime now that http.close() lets the first one's call return, see
+	// TDD-00027) is rejected at compile time instead of producing a
+	// duplicate @__kml_http_dispatch definition the LLVM backend would
+	// reject with a confusing symbol-collision error.
+	httpListenCallSeen       bool
 	usedHTTPThrow            bool
 	usedSplitFirst           bool
 	usedHTTPParseHeaders     bool
