@@ -21,17 +21,31 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 // emitExprWithObjectHint evaluates expr normally, except when expr is an
 // object literal and hint is a known object type: then the literal's fields
 // are coerced against hint's declared field types instead of the literal's
-// own self-inferred ones (see docs/tdd/TDD-00007.md). Every call site that
-// knows an expression's statically-declared expected type (a variable
+// own self-inferred ones (see docs/tdd/TDD-00007.md); or when expr is an
+// array literal (or `new Array<T>(n)` with no explicit `<T>`), in which case
+// it's built against hint's declared element type instead of the literal's
+// own self-inferred one, the identical reasoning applied to the other legal
+// aggregate-literal shape (see docs/tdd/TDD-00028.md). Despite the name
+// (kept for the many existing call sites already using it), this now covers
+// both hintable literal kinds, not just objects. Every call site that knows
+// an expression's statically-declared expected type (a variable
 // declaration's annotation, a function parameter's declared type, a
 // function's declared return type, an array's declared element type) should
 // go through this instead of a bare e.emitExpr, so `{ x: 1, y: 40.6 }`
 // assigned/passed/returned into a `{ x: number, y: number }`-shaped slot
 // gets `y` coerced to i64 (40) rather than silently reinterpreting its raw
-// float64 bit pattern as an i64 — the exact bug TDD-00007 found.
+// float64 bit pattern as an i64 — the exact bug TDD-00007 found — and so
+// `[1, 2, 3]` passed into a `float64[]`-typed slot gets every element
+// coerced to double rather than left as the literal's own self-inferred i64.
 func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value, error) {
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
 		return e.emitObjectLiteralWithHint(lit, &hint)
+	}
+	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsArray {
+		return e.emitArrayLiteralAggregate(lit, hint.ElemType)
+	}
+	if na, ok := expr.(*ast.NewArrayExpression); ok && na.ElemType == nil && hint.IsArray {
+		return e.emitNewArraySizedAggregate(na, *hint.ElemType)
 	}
 	return e.emitExpr(expr)
 }

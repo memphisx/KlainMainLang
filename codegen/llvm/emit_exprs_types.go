@@ -341,6 +341,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
 		}
+		// A generic class (TDD-00010 V1) is never itself in e.classes — ask
+		// genericClassInstanceType for the shape its `new
+		// ClassName<T>(...)` instantiation would have, purely (no IR
+		// emission, no e.classes registration): inferExprType must never
+		// trigger real emission as a side effect of merely asking "what
+		// type is this."
+		if genDecl, ok := e.genericClasses[ex.ClassName]; ok && len(ex.TypeArgs) == 1 {
+			concrete := e.resolveType(ex.TypeArgs[0])
+			if ty, err := e.genericClassInstanceType(genDecl, concrete); err == nil {
+				return ty
+			}
+		}
 	case *ast.CallExpression:
 		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
@@ -387,6 +399,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
 			if sig, found := e.funcs[id.Name]; found {
 				return sig.RetType
+			}
+			// A generic function (TDD-00010 V1) is never itself in e.funcs
+			// — infer what its return type *would* be for this call's own
+			// argument types, purely (see genericCallReturnType's doc
+			// comment for why this must never trigger real emission).
+			if decl, found := e.genericFuncs[id.Name]; found {
+				if ty, ok := e.genericCallReturnType(decl, ex.Args); ok {
+					return ty
+				}
 			}
 			// Calling a closure-typed variable (e.g. a const-bound arrow
 			// function) — same fallback resolveCallback (emit_func.go)
@@ -846,6 +867,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return ArrayBufferType()
 	case *ast.ObjectLiteral:
 		return e.inferObjectType(ex)
+	case *ast.ArrayLiteral:
+		// TDD-00028: inferExprType previously had no case for a bare array
+		// literal at all (falling through to the final TypeI64 default) —
+		// harmless while array literals could only ever appear in
+		// var-decl position (var-decl's own inference went through
+		// inferArrayType directly, never through here), but a real gap now
+		// that a literal can appear as a general sub-expression: without
+		// this, inferArrayType's own first-element inference couldn't tell
+		// a nested array-literal element apart from any other unresolvable
+		// expression, silently mistyping it as i64 instead of correctly
+		// recognizing (and then, since real array-of-arrays storage isn't
+		// supported yet, cleanly rejecting) it as array-typed. See
+		// emitArrayLiteralAggregate's nested-array guard.
+		return e.inferArrayType(ex)
 	case *ast.ArrowFunction:
 		params := make([]Type, len(ex.Params))
 		for i, p := range ex.Params {

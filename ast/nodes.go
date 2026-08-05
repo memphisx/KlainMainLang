@@ -63,6 +63,7 @@ func NewVarDeclaration(kind, name string, ta *TypeAnnotation, init Expression, p
 
 type FunctionDeclaration struct {
 	Name       string
+	TypeParams []string // e.g. ["T"] for `function identity<T>(...)` — TDD-00010 V1, single param only
 	Params     []Param
 	ReturnType *TypeAnnotation
 	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
@@ -80,6 +81,16 @@ type FunctionDeclaration struct {
 func (*FunctionDeclaration) nodeMarker()   {}
 func (*FunctionDeclaration) stmtMarker()   {}
 func (f *FunctionDeclaration) GetPos() Pos { return f.pos }
+
+// SetPos back-fills source position on a FunctionDeclaration built via a
+// struct literal outside this package (parser_stmts.go's parseFunctionRest
+// sets every other field directly but can't reach the unexported pos field)
+// — GetPos() returned a permanently zero Pos{} for every top-level
+// function/method until a caller did this. Found while wiring TDD-00010
+// V1's generic-function error messages, which need a real declaration
+// position; fixed as a pre-existing, unrelated bug rather than left in
+// place (see CLAUDE.md's "fix bugs found during development" rule).
+func (f *FunctionDeclaration) SetPos(pos Pos) { f.pos = pos }
 
 type Param struct {
 	Name     string
@@ -849,8 +860,14 @@ func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTy
 // those builtins.
 type NewExpression struct {
 	ClassName string
-	Args      []Expression
-	pos       Pos
+	// TypeArgs is non-nil only for `new ClassName<T>(args)` against a generic
+	// class (TDD-00010 V1) — nil for every non-generic `new`. Unlike a bare
+	// generic function call, `new` unambiguously starts a constructor call,
+	// so this doesn't hit the `a<b>(c)` grammar ambiguity that keeps explicit
+	// call-site type arguments out of V1 for plain function calls.
+	TypeArgs []*TypeAnnotation
+	Args     []Expression
+	pos      Pos
 }
 
 func (*NewExpression) nodeMarker()   {}
@@ -863,10 +880,11 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
-	Name    string
-	Fields  []AnnotField
-	Methods []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
-	pos     Pos
+	Name       string
+	TypeParams []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
+	Fields     []AnnotField
+	Methods    []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
+	pos        Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()   {}
@@ -896,8 +914,9 @@ type InterfaceMethodSig struct {
 // receiver every one of them has is a codegen-time concern (TDD-00009 Stage
 // 1), not part of this node's shape.
 type ClassDeclaration struct {
-	Name      string
-	BaseClass string // "" if no `extends` clause (TDD-00009 Stage 3)
+	Name       string
+	TypeParams []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
+	BaseClass  string   // "" if no `extends` clause (TDD-00009 Stage 3)
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
 	BaseTypeArgs []*TypeAnnotation

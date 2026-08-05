@@ -150,21 +150,26 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 		return &ast.TypeAnnotation{Name: "Map", KeyType: keyTy, ElemType: valTy, Source: source}, nil
 	}
 
-	// Skip any other/unrecognized generic (a genuinely unsupported one —
-	// user-defined generics aren't implemented yet, see docs/tdd/TDD-00010.md).
+	// A user-defined generic type usage (Box<T>, TDD-00010 V1) or any other
+	// still-unrecognized generic name: parse one type argument the same way
+	// the Promise<T> branch above does, instead of discarding it, so
+	// resolveType has a real concrete type to substitute into a registered
+	// generic interface later. V1 supports exactly one type argument here
+	// too — a second one is a clear error rather than a silent drop.
 	if p.check(lexer.LT) {
-		depth := 0
-		for !p.check(lexer.EOF) {
-			if p.check(lexer.LT) {
-				depth++
-			} else if p.check(lexer.GT) {
-				depth--
-			}
-			p.advance()
-			if depth == 0 {
-				break
-			}
+		p.advance() // consume '<'
+		inner, err := p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
 		}
+		if p.check(lexer.COMMA) {
+			t := p.peek()
+			return nil, fmt.Errorf("%d:%d: multiple type arguments on %s<...> are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, name)
+		}
+		if err := p.expectGT(name + "<T>"); err != nil {
+			return nil, err
+		}
+		return &ast.TypeAnnotation{Name: name, ElemType: inner, Source: source}, nil
 	}
 
 	// Array suffix: T[]  (may repeat for multi-dimensional, future use)
@@ -203,6 +208,15 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
+	}
+	// Optional `<T>` type-parameter list (TDD-00010 V1).
+	var typeParams []string
+	if p.check(lexer.LT) {
+		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		if err != nil {
+			return nil, err
+		}
+		typeParams = tp
 	}
 	// Skip optional `extends Base` clause.
 	if p.peek().Type == lexer.EXTENDS {
@@ -269,7 +283,9 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos), nil
+	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
+	decl.TypeParams = typeParams
+	return decl, nil
 }
 
 func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {

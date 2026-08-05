@@ -2,12 +2,48 @@
 package llvm
 
 import (
-	"fmt"
 	"KlainMainLang/ast"
+	"fmt"
 )
+
+// emitMapOrSetCreate emits the shared string-keyed-vs-numeric-keyed heap
+// pointer creation `new Map<K,V>()`/`new Set<T>()` both reduce to (Set
+// reuses the same Map<K,ptr-unused-V> runtime, keyed on keyTy alone) —
+// factored out of emitMapVarDecl/emitSetVarDecl so the general-expression
+// producers below (TDD-00028) share it instead of duplicating the
+// isStringTy branch.
+func (e *Emitter) emitMapOrSetCreate(keyTy Type) string {
+	ptr := e.freshReg()
+	if isStringTy(keyTy) {
+		e.ensureMapStrHelpers()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", ptr))
+	} else {
+		e.ensureMapNumHelpers()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_num_create()", ptr))
+	}
+	return ptr
+}
 
 // emitMapVarDecl handles `const m = new Map<K, V>()`.
 func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpression) error {
+	val, err := e.emitNewMapValue(init)
+	if err != nil {
+		return err
+	}
+	ptrName := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+	return nil
+}
+
+// emitNewMapValue builds `new Map<K,V>()` as a plain ptr Value (TDD-00028) —
+// usable as a general expression (a call argument, a return value, an
+// object-literal field, etc.), not just a var-decl initializer. Defaults
+// (string keys, number values) match emitMapVarDecl's own when K/V aren't
+// given explicitly, since there's no var-decl annotation to infer from in
+// a general expression position.
+func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
 	keyTy := TypePtr // default: string keys
 	valTy := TypeI64 // default: number values
 	if init.KeyType != nil {
@@ -16,46 +52,29 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 	if init.ValType != nil {
 		valTy = e.resolveType(init.ValType)
 	}
-	ty := MapType(keyTy, valTy)
-
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
-
-	mapPtr := e.freshReg()
-	if isStringTy(keyTy) {
-		e.ensureMapStrHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
-	} else {
-		e.ensureMapNumHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_num_create()", mapPtr))
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", mapPtr, ptrName))
-	return nil
+	return Value{Ref: e.emitMapOrSetCreate(keyTy), Ty: MapType(keyTy, valTy)}, nil
 }
 
 // emitSetVarDecl handles `const s = new Set<T>()`.
 func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpression) error {
+	val, err := e.emitNewSetValue(init)
+	if err != nil {
+		return err
+	}
+	ptrName := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+	return nil
+}
+
+// emitNewSetValue is emitNewMapValue's Set<T> sibling (TDD-00028).
+func (e *Emitter) emitNewSetValue(init *ast.NewSetExpression) (Value, error) {
 	elemTy := TypePtr // default: string elements
 	if init.ElemType != nil {
 		elemTy = e.resolveType(init.ElemType)
 	}
-	ty := SetType(elemTy)
-
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
-
-	setPtr := e.freshReg()
-	if isStringTy(elemTy) {
-		e.ensureMapStrHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", setPtr))
-	} else {
-		e.ensureMapNumHelpers()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_num_create()", setPtr))
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", setPtr, ptrName))
-	return nil
+	return Value{Ref: e.emitMapOrSetCreate(elemTy), Ty: SetType(elemTy)}, nil
 }
 
 // resolveMapOrSetForCall resolves a Map/Set method call's receiver expression

@@ -114,7 +114,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		var rhs Value
 		if ex.Op == "=" {
-			rhs, err = e.emitExpr(ex.Right)
+			// Hint-aware (TDD-00028): `arr[i] = [1,2,3]` when elemTy is
+			// itself array-typed builds/coerces against elemTy instead of
+			// erroring — the same reasoning emitExprWithObjectHint already
+			// established for object literals (TDD-00007).
+			rhs, err = e.emitExprWithObjectHint(ex.Right, elemTy)
 			if err != nil {
 				return Value{}, err
 			}
@@ -139,6 +143,39 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		rhs = e.coerce(rhs, elemTy)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, rhs.Ref, gepReg, elemTy.Align()))
 		return rhs, nil
+	}
+
+	// Array variable reassignment: arr = val (the whole array, not
+	// arr[i] = val). A separate branch from the generic scalar-variable
+	// case below, because this compiler represents an array as two
+	// allocas (Ptr/LenPtr — see CLAUDE.md's Array value duality note), not
+	// the single alloca every other assignable form uses; the generic
+	// scalar path's single "store %s %s, ptr sym.Ptr" would try to store a
+	// whole {ptr,i64} aggregate into sym.Ptr's plain "alloca ptr" slot, a
+	// hard clang-stage type mismatch. Found while wiring TDD-00028's
+	// array-literal-as-general-expression fix — a real, pre-existing,
+	// unrelated bug (arr = otherArrayVar already failed identically before
+	// any array-literal changes, confirmed directly).
+	if ident, ok := ex.Left.(*ast.Identifier); ok {
+		if sym, found := e.lookup(ident.Name); found && sym.Ty.IsArray {
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') is not supported on an array variable", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+			}
+			if sym.IsConst {
+				return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
+			}
+			val, err := e.emitExprWithObjectHint(ex.Right, sym.Ty)
+			if err != nil {
+				return Value{}, err
+			}
+			if !val.Ty.IsArray {
+				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
+			}
+			if err := e.storeArrayAggregateInto(val, sym.Ptr, sym.LenPtr); err != nil {
+				return Value{}, err
+			}
+			return val, nil
+		}
 	}
 
 	// Object field assignment: obj.field = val  or  pts[i].field = val  (or compound ops)
@@ -171,7 +208,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		var rhs Value
 		if ex.Op == "=" {
-			rhs, err = e.emitExpr(ex.Right)
+			// Hint-aware (TDD-00028/TDD-00007): `obj.field = [1,2,3]`/`obj.field
+			// = {...}` coerces against the field's own declared type.
+			rhs, err = e.emitExprWithObjectHint(ex.Right, fieldTy)
 			if err != nil {
 				return Value{}, err
 			}
@@ -222,7 +261,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	var rhs Value
 	if ex.Op == "=" {
 		var err error
-		rhs, err = e.emitExpr(ex.Right)
+		// Hint-aware (TDD-00028/TDD-00007): sym.Ty is never array-typed
+		// here (that case is handled by its own branch above), so this
+		// only matters for an object-literal-typed scalar variable, but
+		// costs nothing to route through uniformly.
+		rhs, err = e.emitExprWithObjectHint(ex.Right, sym.Ty)
 		if err != nil {
 			return Value{}, err
 		}

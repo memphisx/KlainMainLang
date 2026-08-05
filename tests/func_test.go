@@ -139,6 +139,24 @@ console.log(h.callback())
 `, "11\n12")
 }
 
+// Regression test: emitVarDecl's pre-inference type switch for an
+// unannotated `const`/`let` initialized from a bare-identifier call used to
+// only special-case a string-returning function's result was correctly
+// allocated an i64 slot for what emitExpr(v.Init) actually produces (a ptr)
+// — a hard clang-stage type mismatch, not just a wrong value. Found while
+// wiring TDD-00010 V1's generic-function call support (whose most natural
+// usage, `const y = identity("hi")`, hit the identical gap), but the root
+// cause was entirely pre-existing and unrelated to generics.
+func TestE2EUnannotatedConstFromStringReturningFunction(t *testing.T) {
+	assertOutput(t, `
+function greet(x: string): string {
+  return x;
+}
+const y = greet("hi");
+console.log(y);
+`, "hi")
+}
+
 func TestE2EUnannotatedFunctionReturnsScalar(t *testing.T) {
 	assertOutput(t, `
 function addOne(n) { return n + 1 }

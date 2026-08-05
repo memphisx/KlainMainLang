@@ -22,6 +22,8 @@ The **design content itself** (Context, Design, Prerequisites, Open questions) s
 - Cross-reference the TDD from the ADR's `Relations` field (`Implements TDD-NNNNN`), and update the TDD's own `Status` line to point back at the ADR.
 - If the real implementation diverged from the original design, that divergence belongs in the ADR ("here's what was planned, here's what was actually built and why"), not retrofitted into the TDD's Design section — the TDD stays the honest historical record of the thinking at the time. Only the `Status` line (and, for a genuinely abandoned/replaced design, a note that it was superseded) is ever touched after the fact.
 
+The Index below keeps each of these as its own column rather than folding them together: **Status** is the bare status word only (matching the set above); **Related ADRs** lists every ADR that implements/touches this TDD, each a real link; **Notes** is for anything else worth a scanner seeing at a glance (a real caveat, an in-progress split like [TDD-00010](TDD-00010.md)'s V1/V2, an unverified platform claim) — prose, not another status value. Keeping these separate is what keeps the table scannable; when adding or updating a row, put each piece of information in its own column rather than appending it to Status as trailing text.
+
 ## Format
 
 Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should cover:
@@ -32,31 +34,33 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 
 ## Index
 
-| # | Title | Status |
-|---|---|---|
-| [00001](TDD-00001.md) | Memory Management: three mutually-exclusive compilation modes (`manual`/`gc`/`auto`) | Partially Implemented ([ADR-00030](../adr/ADR-00030.md), [ADR-00071](../adr/ADR-00071.md)) |
-| [00002](TDD-00002.md) | Timers (setTimeout/setInterval) | Implemented ([ADR-00031](../adr/ADR-00031.md)) |
-| [00003](TDD-00003.md) | Alternative fetch Backend: a Go helper instead of libcurl | Not Started |
-| [00004](TDD-00004.md) | HTTP Server | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00072](../adr/ADR-00072.md)) |
-| [00005](TDD-00005.md) | Unannotated parameter typing | Partially Implemented ([ADR-00042](../adr/ADR-00042.md)) |
-| [00006](TDD-00006.md) | Event Loop | Implemented ([ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00050](../adr/ADR-00050.md), [ADR-00051](../adr/ADR-00051.md), [ADR-00052](../adr/ADR-00052.md)) |
-| [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Implemented ([ADR-00077](../adr/ADR-00077.md)) |
-| [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented ([ADR-00047](../adr/ADR-00047.md)) |
-| [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Implemented ([ADR-00062](../adr/ADR-00062.md), [ADR-00063](../adr/ADR-00063.md), [ADR-00064](../adr/ADR-00064.md), [ADR-00067](../adr/ADR-00067.md), [ADR-00083](../adr/ADR-00083.md), [ADR-00084](../adr/ADR-00084.md)) |
-| [00010](TDD-00010.md) | Generics on user-defined functions and interfaces | Not Started |
-| [00011](TDD-00011.md) | IndexedDB-Compatible Storage API (pluggable embedded/proxy backends) | Not Started |
-| [00012](TDD-00012.md) | Computed property keys (`{ [expr]: value }`) | Implemented ([ADR-00066](../adr/ADR-00066.md)) |
-| [00013](TDD-00013.md) | Error subtypes / tagged errors | Implemented ([ADR-00082](../adr/ADR-00082.md)) |
-| [00014](TDD-00014.md) | Full-pipeline (codegen-through-binary) fuzz testing | Implemented ([ADR-00070](../adr/ADR-00070.md)) |
-| [00015](TDD-00015.md) | `JSON.parse` into nested object fields | Not Started |
-| [00016](TDD-00016.md) | `Promise.all` / `.race` / `.allSettled` | Implemented ([ADR-00073](../adr/ADR-00073.md)) |
-| [00017](TDD-00017.md) | `fetch()` client parity — custom method, headers, request body | Implemented ([ADR-00074](../adr/ADR-00074.md)) |
-| [00018](TDD-00018.md) | `ArrayBuffer` / TypedArrays | Implemented ([ADR-00078](../adr/ADR-00078.md)) |
-| [00019](TDD-00019.md) | POSIX signal handling (`process.on('SIGINT'/'SIGTERM', handler)`) | Implemented ([ADR-00079](../adr/ADR-00079.md)) |
-| [00020](TDD-00020.md) | Windows support | Not Started |
-| [00021](TDD-00021.md) | `#x` real private fields | Not Started |
-| [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started |
-| [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented ([ADR-00089](../adr/ADR-00089.md)) |
-| [00024](TDD-00024.md) | `os` module | Implemented ([ADR-00090](../adr/ADR-00090.md)) — Darwin paths unverified |
-| [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Partially Implemented ([ADR-00097](../adr/ADR-00097.md)/[ADR-00098](../adr/ADR-00098.md)/[ADR-00099](../adr/ADR-00099.md)) — `manual` mode done and recommended; `-mm=gc` has a known unresolved intermittent hang, not recommended |
-| [00026](TDD-00026.md) | Binary-safe `http.listen()` request/response bodies | Not Started |
+| # | Title | Status | Related ADRs | Notes |
+|---|---|---|---|---|
+| [00001](TDD-00001.md) | Memory Management: three mutually-exclusive compilation modes (`manual`/`gc`/`auto`) | Partially Implemented | [ADR-00030](../adr/ADR-00030.md), [ADR-00071](../adr/ADR-00071.md) | |
+| [00002](TDD-00002.md) | Timers (setTimeout/setInterval) | Implemented | [ADR-00031](../adr/ADR-00031.md) | |
+| [00003](TDD-00003.md) | Alternative fetch Backend: a Go helper instead of libcurl | Not Started | | |
+| [00004](TDD-00004.md) | HTTP Server | Implemented | [ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00072](../adr/ADR-00072.md) | |
+| [00005](TDD-00005.md) | Unannotated parameter typing | Partially Implemented | [ADR-00042](../adr/ADR-00042.md) | |
+| [00006](TDD-00006.md) | Event Loop | Implemented | [ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00050](../adr/ADR-00050.md), [ADR-00051](../adr/ADR-00051.md), [ADR-00052](../adr/ADR-00052.md) | |
+| [00007](TDD-00007.md) | Coerce object literal fields against their declared type | Implemented | [ADR-00077](../adr/ADR-00077.md) | |
+| [00008](TDD-00008.md) | External conformance suites (TypeScript + Test262) as a test-coverage benchmark | Partially Implemented | [ADR-00047](../adr/ADR-00047.md) | |
+| [00009](TDD-00009.md) | Classes / OOP (methods, constructors, inheritance) | Implemented | [ADR-00062](../adr/ADR-00062.md), [ADR-00063](../adr/ADR-00063.md), [ADR-00064](../adr/ADR-00064.md), [ADR-00067](../adr/ADR-00067.md), [ADR-00083](../adr/ADR-00083.md), [ADR-00084](../adr/ADR-00084.md) | |
+| [00010](TDD-00010.md) | Generics on user-defined functions and interfaces | Partially Implemented | [ADR-00103](../adr/ADR-00103.md) | V1 (functions/interfaces/classes) done; V2 (opt-in erasure) not started |
+| [00011](TDD-00011.md) | IndexedDB-Compatible Storage API (pluggable embedded/proxy backends) | Not Started | | |
+| [00012](TDD-00012.md) | Computed property keys (`{ [expr]: value }`) | Implemented | [ADR-00066](../adr/ADR-00066.md) | |
+| [00013](TDD-00013.md) | Error subtypes / tagged errors | Implemented | [ADR-00082](../adr/ADR-00082.md) | |
+| [00014](TDD-00014.md) | Full-pipeline (codegen-through-binary) fuzz testing | Implemented | [ADR-00070](../adr/ADR-00070.md) | |
+| [00015](TDD-00015.md) | `JSON.parse` into nested object fields | Not Started | | |
+| [00016](TDD-00016.md) | `Promise.all` / `.race` / `.allSettled` | Implemented | [ADR-00073](../adr/ADR-00073.md) | |
+| [00017](TDD-00017.md) | `fetch()` client parity — custom method, headers, request body | Implemented | [ADR-00074](../adr/ADR-00074.md) | |
+| [00018](TDD-00018.md) | `ArrayBuffer` / TypedArrays | Implemented | [ADR-00078](../adr/ADR-00078.md) | |
+| [00019](TDD-00019.md) | POSIX signal handling (`process.on('SIGINT'/'SIGTERM', handler)`) | Implemented | [ADR-00079](../adr/ADR-00079.md) | |
+| [00020](TDD-00020.md) | Windows support | Not Started | | |
+| [00021](TDD-00021.md) | `#x` real private fields | Not Started | | |
+| [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started | | |
+| [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented | [ADR-00089](../adr/ADR-00089.md) | |
+| [00024](TDD-00024.md) | `os` module | Implemented | [ADR-00090](../adr/ADR-00090.md) | Darwin paths unverified |
+| [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Implemented | [ADR-00097](../adr/ADR-00097.md), [ADR-00098](../adr/ADR-00098.md), [ADR-00099](../adr/ADR-00099.md), [ADR-00101](../adr/ADR-00101.md) | Both `manual` and `-mm=gc` modes production-quality; [ADR-00101](../adr/ADR-00101.md) root-caused and fixed the `-mm=gc` intermittent hang |
+| [00026](TDD-00026.md) | Binary-safe `http.listen()` request/response bodies | Not Started | | |
+| [00028](TDD-00028.md) | Array/Map/Set/EventEmitter literals as general expressions (not just var-decl initializers) | Implemented | [ADR-00104](../adr/ADR-00104.md) | |
+| [00029](TDD-00029.md) | Array-of-arrays (nested array) storage representation | Not Started | | |

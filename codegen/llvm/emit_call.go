@@ -639,120 +639,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	if id, ok := ex.Callee.(*ast.Identifier); ok {
 		// Named (top-level) function.
 		if sig, found := e.funcs[id.Name]; found {
-			var argParts []string
-			// How many args map to regular (non-rest) params.
-			regularCount := len(sig.ParamTypes)
-			if sig.HasRest {
-				regularCount-- // last param slot is the rest array
-			}
-			for i := 0; i < regularCount; i++ {
-				var paramTy Type
-				if i < len(sig.ParamTypes) {
-					paramTy = sig.ParamTypes[i]
-				}
-				// Use provided arg or fall back to the default expression.
-				if i < len(ex.Args) && !(sig.HasRest && i >= regularCount) {
-					arg := ex.Args[i]
-					if paramTy.IsArray {
-						if arrId, ok := arg.(*ast.Identifier); ok {
-							sym, ok := e.lookup(arrId.Name)
-							if !ok {
-								return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", arg.GetPos().Line, arg.GetPos().Col, arrId.Name)
-							}
-							if !sym.Ty.IsArray {
-								return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", arg.GetPos().Line, arg.GetPos().Col, arrId.Name)
-							}
-							ptrReg := e.freshReg()
-							lenReg := e.freshReg()
-							e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-							e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
-							argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
-						} else {
-							val, err := e.emitExpr(arg)
-							if err != nil {
-								return Value{}, err
-							}
-							if !val.Ty.IsArray {
-								return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", arg.GetPos().Line, arg.GetPos().Col)
-							}
-							ptrReg := e.freshReg()
-							lenReg := e.freshReg()
-							e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-							e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-							argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
-						}
-					} else {
-						val, err := e.emitExprWithObjectHint(arg, paramTy)
-						if err != nil {
-							return Value{}, err
-						}
-						if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
-							name := id.Name
-							paramName := fmt.Sprintf("%d", i+1)
-							if i < len(sig.ParamNames) {
-								paramName = "'" + sig.ParamNames[i] + "'"
-							}
-							return Value{}, fmt.Errorf("%d:%d: parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, paramName, name)
-						}
-						if paramTy.IR != "" {
-							val = e.coerce(val, paramTy)
-						}
-						argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
-					}
-				} else if i < len(sig.Defaults) && sig.Defaults[i] != nil {
-					// Evaluate default expression at call site.
-					val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
-					if err != nil {
-						return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
-					}
-					if paramTy.IR != "" {
-						val = e.coerce(val, paramTy)
-					}
-					argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
-				} else {
-					return Value{}, fmt.Errorf("%d:%d: missing argument %d with no default", ex.GetPos().Line, ex.GetPos().Col, i+1)
-				}
-			}
-			// Pack rest args into a temporary heap array.
-			if sig.HasRest {
-				restStart := regularCount
-				if restStart > len(ex.Args) {
-					restStart = len(ex.Args)
-				}
-				restArgs := ex.Args[restStart:]
-				restTy := sig.ParamTypes[len(sig.ParamTypes)-1]
-				elemTy := TypeI64
-				if restTy.ElemType != nil {
-					elemTy = *restTy.ElemType
-				}
-				if len(restArgs) == 0 {
-					argParts = append(argParts, "ptr null", "i64 0")
-				} else {
-					n := int64(len(restArgs))
-					e.ensureMalloc()
-					dataReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
-					for i, arg := range restArgs {
-						val, err := e.emitExprWithObjectHint(arg, elemTy)
-						if err != nil {
-							return Value{}, err
-						}
-						val = e.coerce(val, elemTy)
-						gepReg := e.freshReg()
-						e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-						e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
-					}
-					argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
-				}
-			}
-			argsStr := strings.Join(argParts, ", ")
-			if sig.RetType.IR == "void" {
-				e.emitInstr(fmt.Sprintf("call void @%s(%s)", id.Name, argsStr))
-				return Value{Ty: TypeVoid}, nil
-			}
-			reg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), id.Name, argsStr))
-			return Value{Ref: reg, Ty: sig.RetType}, nil
+			return e.emitCallToFuncSig(id.Name, sig, ex.Args, ex.GetPos())
+		}
+		// Generic (TDD-00010 V1) function: infer the type argument from
+		// whichever call-site argument lines up with the generic's own
+		// type-parameter-typed parameter, instantiate (or reuse a memoized
+		// prior instantiation) on demand, then dispatch exactly like a
+		// concrete named function.
+		if decl, found := e.genericFuncs[id.Name]; found {
+			return e.emitGenericFuncCall(decl, ex.Args, ex.GetPos())
 		}
 		// Closure variable.
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc {
@@ -762,4 +657,137 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 
 	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported", ex.GetPos().Line, ex.GetPos().Col)
+}
+
+// emitCallToFuncSig emits a call to name (a concrete, already-registered
+// LLVM function — either a plain top-level function or a TDD-00010 V1
+// generic function's specific instantiation) against sig, evaluating args
+// and applying the same per-parameter rules a named top-level call always
+// has: array-parameter special handling, per-parameter coercion, an
+// unannotated ("Inferred") parameter rejecting a non-numeric argument,
+// default-expression fallback for a missing trailing argument, and rest-
+// parameter packing into a temporary heap array.
+func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) (Value, error) {
+	var argParts []string
+	// How many args map to regular (non-rest) params.
+	regularCount := len(sig.ParamTypes)
+	if sig.HasRest {
+		regularCount-- // last param slot is the rest array
+	}
+	for i := 0; i < regularCount; i++ {
+		var paramTy Type
+		if i < len(sig.ParamTypes) {
+			paramTy = sig.ParamTypes[i]
+		}
+		// Use provided arg or fall back to the default expression.
+		if i < len(args) && !(sig.HasRest && i >= regularCount) {
+			arg := args[i]
+			if paramTy.IsArray {
+				if arrId, ok := arg.(*ast.Identifier); ok {
+					sym, ok := e.lookup(arrId.Name)
+					if !ok {
+						return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", arg.GetPos().Line, arg.GetPos().Col, arrId.Name)
+					}
+					if !sym.Ty.IsArray {
+						return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", arg.GetPos().Line, arg.GetPos().Col, arrId.Name)
+					}
+					ptrReg := e.freshReg()
+					lenReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+					argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				} else {
+					// Hint-aware (TDD-00028): an array-literal argument
+					// (or `new Array<T>(n)` with no explicit `<T>`) is
+					// built/coerced against paramTy directly instead of
+					// self-inferring its own element type — the exact bug
+					// class TDD-00007 already fixed for object literals.
+					// Found via a genuinely wrong result (not just a
+					// compile error): `sum([1, 2])` against a
+					// `float64[]` parameter silently built an i64 array
+					// and reinterpreted its raw bit pattern as a double.
+					val, err := e.emitExprWithObjectHint(arg, paramTy)
+					if err != nil {
+						return Value{}, err
+					}
+					if !val.Ty.IsArray {
+						return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", arg.GetPos().Line, arg.GetPos().Col)
+					}
+					ptrReg := e.freshReg()
+					lenReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+					argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				}
+			} else {
+				val, err := e.emitExprWithObjectHint(arg, paramTy)
+				if err != nil {
+					return Value{}, err
+				}
+				if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
+					paramName := fmt.Sprintf("%d", i+1)
+					if i < len(sig.ParamNames) {
+						paramName = "'" + sig.ParamNames[i] + "'"
+					}
+					return Value{}, fmt.Errorf("%d:%d: parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, paramName, name)
+				}
+				if paramTy.IR != "" {
+					val = e.coerce(val, paramTy)
+				}
+				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+			}
+		} else if i < len(sig.Defaults) && sig.Defaults[i] != nil {
+			// Evaluate default expression at call site.
+			val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
+			if err != nil {
+				return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
+			}
+			if paramTy.IR != "" {
+				val = e.coerce(val, paramTy)
+			}
+			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+		} else {
+			return Value{}, fmt.Errorf("%d:%d: missing argument %d with no default", pos.Line, pos.Col, i+1)
+		}
+	}
+	// Pack rest args into a temporary heap array.
+	if sig.HasRest {
+		restStart := regularCount
+		if restStart > len(args) {
+			restStart = len(args)
+		}
+		restArgs := args[restStart:]
+		restTy := sig.ParamTypes[len(sig.ParamTypes)-1]
+		elemTy := TypeI64
+		if restTy.ElemType != nil {
+			elemTy = *restTy.ElemType
+		}
+		if len(restArgs) == 0 {
+			argParts = append(argParts, "ptr null", "i64 0")
+		} else {
+			n := int64(len(restArgs))
+			e.ensureMalloc()
+			dataReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+			for i, arg := range restArgs {
+				val, err := e.emitExprWithObjectHint(arg, elemTy)
+				if err != nil {
+					return Value{}, err
+				}
+				val = e.coerce(val, elemTy)
+				gepReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+			}
+			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+		}
+	}
+	argsStr := strings.Join(argParts, ", ")
+	if sig.RetType.IR == "void" {
+		e.emitInstr(fmt.Sprintf("call void @%s(%s)", name, argsStr))
+		return Value{Ty: TypeVoid}, nil
+	}
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), name, argsStr))
+	return Value{Ref: reg, Ty: sig.RetType}, nil
 }

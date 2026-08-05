@@ -76,14 +76,33 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				case "btoa", "atob", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI":
 					ty = TypePtr
 				default:
-					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet) {
+					// A plain `ptr`-shaped return (a string — see isStringTy)
+					// was missing from this condition entirely alongside
+					// array/object/func/date/map/set: since ty otherwise stays
+					// this switch's TypeI64 default, a string-returning
+					// function assigned to an unannotated const/let allocated
+					// an i64-sized slot for what emitExpr(v.Init) then
+					// actually produces as a ptr value — a real, pre-existing,
+					// unrelated bug (confirmed with a plain, non-generic
+					// function too) found while wiring TDD-00010 V1's
+					// generic-function call support, whose most natural usage
+					// (`const y = identity("hi")`) hit this exact gap.
+					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || isStringTy(sig.RetType)) {
 						ty = sig.RetType
 					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 						// Calling a closure-typed variable (e.g. a const-bound
 						// arrow function) rather than a named declaration —
 						// same fallback as inferExprType's CallExpression case.
 						retTy := *sym.Ty.FuncRetType
-						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate || retTy.IsMap || retTy.IsSet {
+						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate || retTy.IsMap || retTy.IsSet || isStringTy(retTy) {
+							ty = retTy
+						}
+					} else if genDecl, found := e.genericFuncs[callee.Name]; found {
+						// Generic function (TDD-00010 V1): infer purely, same
+						// reasoning as the NewExpression branch below —
+						// emitVarDecl's pre-inference switch must not trigger
+						// real emission as a side effect.
+						if retTy, ok := e.genericCallReturnType(genDecl, init.Args); ok {
 							ty = retTy
 						}
 					}
@@ -118,6 +137,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.NewExpression:
 			if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
+			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == 1 {
+				// Pure lookup only (see genericClassInstanceType's doc
+				// comment) — the real, memoized instantiation still happens
+				// exactly once, from emitExpr(v.Init) below via
+				// emitNewExpression.
+				concrete := e.resolveType(init.TypeArgs[0])
+				if instTy, err := e.genericClassInstanceType(genDecl, concrete); err == nil {
+					ty = instTy
+				}
 			}
 		}
 	}
