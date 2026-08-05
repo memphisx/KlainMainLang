@@ -931,3 +931,105 @@ http.listen(8966, (req: Request): Res => {
 		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID under -mm=gc, got only %v", n, seenPIDs)
 	}
 }
+
+// --- http.close() (TDD-00027) ---
+
+// TestE2EHTTPListenCloseExitsProcess is the decisive test for TDD-00027: a
+// handler calling http.close() must let http.listen()'s own call actually
+// return (rather than the process just running forever, or being killed
+// externally like every other http.listen test's t.Cleanup does), letting
+// whatever top-level code follows it run for real. Uses
+// startBackgroundServer/waitExit (signals_test.go) rather than
+// startHTTPServer, since — unlike every other server test in this file —
+// this process is expected to exit on its own.
+func TestE2EHTTPListenCloseExitsProcess(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+
+http.listen(8967, (req: Request): Res => {
+  if (req.path === '/shutdown') {
+    http.close()
+    return { status: 200, body: "shutting down" }
+  }
+  return { status: 200, body: "ok" }
+})
+console.log("after listen returned")
+`
+	cmd, out := startBackgroundServer(t, src, 8967)
+
+	resp, err := http.Get("http://127.0.0.1:8967/shutdown")
+	if err != nil {
+		t.Fatalf("GET /shutdown: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "shutting down" {
+		t.Errorf("body = %q, want %q", body, "shutting down")
+	}
+
+	code := waitExit(t, cmd, out, 5*time.Second)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "after listen returned") {
+		t.Errorf("code after http.listen() never ran; output:\n%s", out.String())
+	}
+}
+
+// TestE2EHTTPListenCloseIsIdempotent confirms calling http.close() more than
+// once (here, from two different requests) doesn't crash or otherwise
+// misbehave — __kml_http_close is a no-op once @__kml_listen_fd is already
+// -1.
+func TestE2EHTTPListenCloseIsIdempotent(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+
+http.listen(8968, (req: Request): Res => {
+  http.close()
+  http.close()
+  return { status: 200, body: "ok" }
+})
+console.log("after listen returned")
+`
+	cmd, out := startBackgroundServer(t, src, 8968)
+
+	resp, err := http.Get("http://127.0.0.1:8968/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	resp.Body.Close()
+
+	code := waitExit(t, cmd, out, 5*time.Second)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
+	}
+}
+
+// TestE2EHTTPListenSecondCallSiteRejected: http.close() makes a second,
+// textually-later http.listen() call genuinely reachable at runtime for the
+// first time (the first call no longer necessarily runs forever) — without
+// emitHTTPListen's httpListenCallSeen guard, this would otherwise compile
+// and fail obscurely at the LLVM backend (a duplicate @__kml_http_dispatch
+// definition) instead of with a clear compile-time error.
+func TestE2EHTTPListenSecondCallSiteRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Res { status: number; body: string }
+http.listen(8969, (req: Request): Res => { http.close(); return { status: 200, body: "a" } })
+http.listen(8970, (req: Request): Res => { return { status: 200, body: "b" } })
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a second http.listen call site, got none")
+	}
+	if !strings.Contains(err.Error(), "http.listen may only be called once") {
+		t.Errorf("error = %v, want it to mention the once-per-program limitation", err)
+	}
+}
+
+// TestE2EHTTPCloseWrongArgCountRejected mirrors
+// TestE2EHTTPListenWrongArgCountRejected's pattern for the new function.
+func TestE2EHTTPCloseWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`http.close(1)`)
+	if err == nil {
+		t.Fatal("expected a compile error for http.close with an argument, got none")
+	}
+}

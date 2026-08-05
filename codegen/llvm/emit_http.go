@@ -1,9 +1,15 @@
-// emit_http.go — http.listen(port, handler): a minimal single-threaded HTTP
-// server (TDD-00004 V1) built on the generalized event loop (TDD-00006 Part
-// 1, see runtime.go's ensureHTTPRuntime). Bare global function, like fetch —
-// not a namespace with multiple methods, since V1 has no need for multiple
-// servers, inspecting server state, or a .close(). http.listen never
-// returns, the same category of thing as process.exit().
+// emit_http.go — http.listen(port, handler) and http.close() (TDD-00027): a
+// minimal HTTP server (TDD-00004 V1) built on the generalized event loop
+// (TDD-00006 Part 1, see runtime_http.go's ensureHTTPRuntime). Both are bare
+// global functions, like fetch/process.exit — not methods on a returned
+// Server handle, since http.close() can only ever be reached from code
+// already running inside the event loop itself (a request handler, a
+// setTimeout/setInterval callback, or a process.on(...) handler): there is
+// no point in a program's control flow where TS code could hold and later
+// invoke a handle object instead. http.listen() blocks until the loop
+// actually stops — either because it never does (V1 before TDD-00027), or
+// because http.close() was called and every already-accepted connection has
+// since finished.
 package llvm
 
 import (
@@ -36,8 +42,22 @@ func isPlainStringType(t Type) bool {
 // generic timer/qsort trampolines), forks into N worker processes sharing
 // that one listening socket (a no-op when the third argument is omitted or
 // N <= 1 — today's single-process behavior, unchanged), registers the
-// dispatcher with the event loop, and hands control to it.
+// dispatcher with the event loop, and hands control to it — returning once
+// the loop actually stops (TDD-00027: http.close(), called from inside the
+// handler/a timer/a signal handler, plus every already-accepted connection
+// finishing naturally).
+//
+// Only one http.listen call site is allowed per program (httpListenCallSeen
+// below): buildHTTPDispatcher emits a fixed-name @__kml_http_dispatch, which
+// was harmless when a second call site was always dead code (the first call
+// never returned) but would now produce a confusing duplicate-symbol error
+// from the LLVM backend instead, since http.close() lets control genuinely
+// reach a second call site.
 func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if e.httpListenCallSeen {
+		return Value{}, fmt.Errorf("%d:%d: http.listen may only be called once per program (V1 limitation, unchanged by http.close())", pos.Line, pos.Col)
+	}
+	e.httpListenCallSeen = true
 	if len(args) != 2 && len(args) != 3 {
 		return Value{}, fmt.Errorf("%d:%d: http.listen takes 2 arguments (port, handler) or 3 (port, handler, { workers: N })", pos.Line, pos.Col)
 	}
@@ -137,7 +157,27 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler, align 8", handlerVal.Ref))
 	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
 	e.emitInstr("call void @__kml_event_loop_run()")
-	e.emitTerminator("unreachable")
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitHTTPClose implements http.close() (TDD-00027): a bare global function,
+// not a method on a Server handle — see this file's own doc comment for why.
+// Reachable only from code already running inside the event loop (a request
+// handler, a setTimeout/setInterval callback, or a process.on(...) signal
+// handler), so — unlike SIGINT/SIGTERM (runtime_process.go) — this needs no
+// volatile-pending-flag indirection: it's always safe to mutate
+// @__kml_listen_fd immediately, right here. Calls ensureHTTPRuntime() itself
+// (idempotent, same defensive-call pattern emitClusterIsPrimary uses for
+// ensureHTTPClusterFork) so @__kml_listen_fd exists even in the unusual but
+// valid case http.close() is registered (e.g. inside a process.on('SIGINT',
+// ...) handler) textually before http.listen() itself.
+func (e *Emitter) emitHTTPClose(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: http.close takes no arguments", pos.Line, pos.Col)
+	}
+	e.ensureHTTPRuntime()
+	e.ensureHTTPClose()
+	e.emitInstr("call void @__kml_http_close()")
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -661,13 +701,30 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		extraHeadersRef = e.internString("")
 	}
 
+	// emitConnActiveDecrement mirrors @__kml_http_append_conn's own increment
+	// (runtime_http.go) — TDD-00027's http.close() lets already-accepted
+	// connections finish naturally rather than orphaning them, which needs
+	// __kml_event_loop_run's scandone to know when the last one is done;
+	// factored into a helper since both of this function's connection-finish
+	// paths (normal completion below, and the malformed-request abort at
+	// noReqL) need the identical three instructions.
+	emitConnActiveDecrement := func() {
+		activeNow := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_conn_active, align 8", activeNow))
+		activeNew := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", activeNew, activeNow))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", activeNew))
+	}
+
 	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, ptr %s)", fd32, statusVal.Ref, bodyReg, extraHeadersRef))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+	emitConnActiveDecrement()
 	e.emitTerminator("ret void")
 
 	e.emitLabel(noReqL)
 	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+	emitConnActiveDecrement()
 	e.emitTerminator("ret void")
 
 	e.functions.WriteString("\ndefine void @__kml_http_dispatch() {\nentry:\n")
