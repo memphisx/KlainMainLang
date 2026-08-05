@@ -117,12 +117,12 @@ func (e *Emitter) ensureExecFileSync() {
 	e.ensureExceptionHelpers()
 
 	e.emitGlobal("declare i32 @pipe(ptr noundef)")
-	e.emitGlobal("declare i32 @fork()")
+	e.ensureForkDecl()
 	e.emitGlobal("declare i32 @dup2(i32 noundef, i32 noundef)")
-	e.emitGlobal("declare i32 @close(i32 noundef)")
+	e.ensureCloseDecl()
 	e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
-	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+	e.ensureReadDecl()
 	e.emitGlobal("declare i32 @waitpid(i32 noundef, ptr noundef, i32 noundef)")
 
 	fmtExit := e.internString("Command failed with exit code %d: %s")

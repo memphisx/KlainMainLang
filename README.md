@@ -25,6 +25,11 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
 - `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
 
+### Debugging tools (optional, for chasing memory-corruption bugs)
+
+- **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See [ADR-00100](docs/adr/ADR-00100.md) for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
+- **Valgrind** — `apt-get install valgrind` on Debian/Ubuntu. **On Apple Silicon (arm64) macOS, Valgrind has historically had no official upstream support** — `brew install valgrind` may fail outright or install a build that doesn't actually work; confirm directly before relying on it there rather than assuming parity with the Linux box. ASan/UBSan (above) work identically on both platforms and should be the default tool; reach for Valgrind only for the specific class of bug (e.g. conservative-GC-adjacent memory questions) where its instruction-level, allocator-agnostic instrumentation is worth the extra setup friction — and expect some false-positive "uninitialized value" noise from Boehm GC's own conservative stack scanning under Memcheck, a known pattern for conservative collectors, generally addressed with suppressions rather than code changes.
+
 ## Quick start
 
 ```sh
@@ -123,7 +128,7 @@ ast/                AST node definitions
 codegen/
   llvm/             LLVM IR emitter — split into ~60 small domain files rather
                      than a handful of huge ones (see docs/adr/ADR-00075.md);
-                     the full file-by-file map lives in CLAUDE.md, condensed
+                     the full file-by-file map lives in the project's own instructions, condensed
                      here by domain:
     emitter.go, types.go   core Emitter struct/scope stack/EmitProgram; the
                      IR type system (Type, ArrayOf, ObjectOf, StructIR)

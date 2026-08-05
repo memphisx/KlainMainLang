@@ -297,16 +297,6 @@ done:
   ret void
 }`)
 
-	// gc mode: restore GC_stackbottom to the real process stack right
-	// before yielding back to the main/scheduler context — see the
-	// analogous comment at ensureFiberRuntime's swapcontext sites and
-	// docs/adr/ADR-00071.md for why this pairing is needed.
-	gcRestoreStackbottom := ""
-	if e.isGCMode() {
-		gcRestoreStackbottom = "  %origbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n" +
-			"  store ptr %origbottom, ptr @GC_stackbottom, align 8\n"
-	}
-
 	// __kml_pending_finish: a pure extraction of what used to be
 	// __kml_await_fetch's own finish/neterror/ok/emptybody/havebody/retdone
 	// blocks (ADR-00073) — throws a catchable Error on a transfer-level
@@ -390,7 +380,7 @@ doyield:
   store ptr %%pending, ptr %%pf_p, align 8
   %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
   %%ctxptr = load ptr, ptr %%ctx_p, align 8
-%scall i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  call i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
   store ptr null, ptr %%pf_p, align 8
   br label %%checkloop
 
@@ -403,7 +393,7 @@ busyspin:
 finish:
   %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
   ret { i64, ptr, i64 } %%raw
-}`, gcRestoreStackbottom))
+}`))
 }
 
 // ensureCurlSlist declares curl_slist_append (ADR-00074/TDD-00017) —
@@ -600,11 +590,6 @@ retdone:
 	// the caller already holds %group and re-derives whatever it needs
 	// (winner index via __kml_first_done_index, per-member results via
 	// __kml_pending_finish/__kml_pending_finish_settled) once this returns.
-	gcRestoreStackbottomGroup := ""
-	if e.isGCMode() {
-		gcRestoreStackbottomGroup = "  %origbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n" +
-			"  store ptr %origbottom, ptr @GC_stackbottom, align 8\n"
-	}
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_await_group_wait(ptr %%group) {
 entry:
@@ -627,7 +612,7 @@ doyield:
   store ptr %%group, ptr %%pg_p, align 8
   %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
   %%ctxptr = load ptr, ptr %%ctx_p, align 8
-%scall i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  call i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
   store ptr null, ptr %%pg_p, align 8
   br label %%checkloop
 
@@ -639,5 +624,5 @@ busyspin:
 
 finish:
   ret void
-}`, gcRestoreStackbottomGroup))
+}`))
 }

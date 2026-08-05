@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -60,6 +63,101 @@ func startHTTPServerGC(t *testing.T, src string, port int) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server never started listening on %s", addr)
+}
+
+// waitPortFree polls addr for up to 2s, returning once connections are
+// actively refused (the port is genuinely free) rather than just "the one
+// process exec.Command started is gone." Used by the cluster-server test
+// helpers' t.Cleanup: syscall.Kill(-pgid, ...) + cmd.Wait() only confirms
+// the *original* process has been reaped — a forked worker sharing that
+// same process group can take a little longer to actually have its socket
+// torn down at the kernel level, a real race found via a stale-server
+// investigation (a bind failure race, not a language/runtime bug): without
+// this wait, the next test using the same hardcoded port could start
+// *before* the previous run's listener is actually gone, silently talking
+// to stale, possibly already-degraded (workers missing) processes instead
+// of its own freshly-compiled one.
+func waitPortFree(addr string) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// startHTTPClusterServer is startHTTPServer's http.listen({ workers: N })
+// counterpart (TDD-00025): the compiled binary forks N-1 additional worker
+// processes sharing one listening socket, so cleanup has to kill the whole
+// process group, not just the one PID exec.Command started — plain
+// cmd.Process.Kill() only reaches the original process, leaving every
+// forked worker running (and, since the test binary itself doesn't reap
+// them, orphaned). Setpgid at Start time gives the server (and, since
+// fork() doesn't change process group by default, every worker it spawns)
+// its own group, separate from the test binary's own — signaling -pgid
+// reaches all of them in one call.
+func startHTTPClusterServer(t *testing.T, src string, port int) {
+	t.Helper()
+	binFile := buildBinary(t, src)
+	cmd := exec.Command(binFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		waitPortFree(addr)
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server never started listening on %s", addr)
+}
+
+// startHTTPClusterServerGC is startHTTPClusterServer's -mm=gc counterpart —
+// see ADR-00099 for what changed in gcshim.c to make Boehm GC safe across
+// http.listen's clustering fork() (GC_set_handle_fork(1) before GC_INIT()).
+// Skips (via buildBinaryGC) if libgc/bdw-gc isn't installed, same as
+// startHTTPServerGC.
+func startHTTPClusterServerGC(t *testing.T, src string, port int) {
+	t.Helper()
+	binFile := buildBinaryGC(t, src)
+	cmd := exec.Command(binFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		waitPortFree(addr)
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {
@@ -641,5 +739,195 @@ http.listen(8961, (req: Request): Res => {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "plain" {
 		t.Errorf("body: got %q, want %q", string(body), "plain")
+	}
+}
+
+// TestE2EHTTPListenClusteringMultipleWorkerPIDs (TDD-00025) is the real
+// correctness check for multi-process clustering: it's not enough that the
+// binary starts and answers one request — fork() + a shared listening
+// socket + a non-blocking accept() all have to work together for more than
+// one worker to actually end up serving traffic. Requests are fired
+// concurrently (not sequentially) since a single in-flight connection at a
+// time gives the kernel no real distribution pressure — the same worker
+// could plausibly win every sequential accept() race.
+func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8963, (req: Request): Res => {
+  return { status: 200, body: process.pid.toString() }
+}, { workers: 3 })
+`
+	startHTTPClusterServer(t, src, 8963)
+
+	const n = 40
+	results := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get("http://127.0.0.1:8963/")
+			if err != nil {
+				results <- ""
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			results <- string(body)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	seen := map[string]int{}
+	for r := range results {
+		if r != "" {
+			seen[r]++
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID (proves fork+shared-listener+non-blocking-accept work together, not just that the binary starts), got only %v", n, seen)
+	}
+}
+
+// TestE2EHTTPListenClusteringDefaultIsSingleProcess confirms the two-argument
+// form (no workers option) forks nothing — cluster.isPrimary must read true
+// and cluster.workerId 0, byte-identical to today's single-process behavior.
+func TestE2EHTTPListenClusteringDefaultIsSingleProcess(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8964, (req: Request): Res => {
+  return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + cluster.workerId.toString() }
+})
+`
+	startHTTPServer(t, src, 8964)
+	resp, err := http.Get("http://127.0.0.1:8964/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "primary 0" {
+		t.Errorf("body: got %q, want %q", string(body), "primary 0")
+	}
+}
+
+// TestE2EHTTPListenClusteringFlushesStdoutBeforeFork guards against a real
+// bug found while testing this feature: fork() duplicates libc's stdio
+// buffers verbatim, so console.log output written before http.listen's
+// clustering fork (and not yet flushed — the case whenever stdout isn't a
+// TTY, e.g. piped, which is exactly how this test — and any real containerized
+// deployment's log collector — reads it) got printed once per worker instead
+// of once. __kml_http_cluster_fork now fflush(NULL)s right before each
+// fork(). Deliberately pipes the child's stdout (exec.Command's default,
+// not a TTY) rather than checking against a real terminal, since the bug
+// only manifested in the piped/non-TTY case.
+func TestE2EHTTPListenClusteringFlushesStdoutBeforeFork(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+console.log("BANNER")
+http.listen(8965, (req: Request): Res => {
+  return { status: 200, body: "ok" }
+}, { workers: 4 })
+`
+	binFile := buildBinary(t, src)
+	cmd := exec.Command(binFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	addr := "127.0.0.1:8965"
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		waitPortFree(addr)
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Give every forked worker a moment to have run its own copy of the
+	// top-level console.log (were the bug still present) before checking.
+	time.Sleep(200 * time.Millisecond)
+
+	count := strings.Count(out.String(), "BANNER")
+	if count != 1 {
+		t.Errorf("expected \"BANNER\" to appear exactly once (printed before the 4-worker fork), got %d times: %q", count, out.String())
+	}
+}
+
+// TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs is the GC-mode
+// counterpart of TestE2EHTTPListenClusteringMultipleWorkerPIDs and
+// TestE2EHTTPListenGCModeConcurrentChurn combined: proves multi-process
+// clustering and the Boehm collector coexist correctly, not just that each
+// works in isolation. Every request does real allocation churn (same
+// shape/scale as TestE2EHTTPListenGCModeConcurrentChurn above) specifically
+// to make a collection plausible while a fork() could also be in flight —
+// the exact "fork mid-collection" race ADR-00099's GC_set_handle_fork(1)
+// fix targets. Correct, uncorrupted totals across every response is the
+// evidence collections and forking aren't corrupting each other; more than
+// one distinct worker PID answering is the evidence clustering itself
+// still works under -mm=gc.
+func TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8966, (req: Request): Res => {
+  let total = 0;
+  for (let i = 0; i < 100000; i++) {
+    let s: string = "abcdefghijklmnopqrstuvwxyz0123456789" + "abcdefghijklmnopqrstuvwxyz0123456789";
+    total = total + s.length;
+  }
+  return { status: 200, body: process.pid.toString() + ":" + total.toString() };
+}, { workers: 3 })
+`
+	startHTTPClusterServerGC(t, src, 8966)
+
+	const n = 20
+	// 100,000 iterations * 72 (two concatenated 36-byte segments).
+	const wantTotal = "7200000"
+
+	results := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get("http://127.0.0.1:8966/")
+			if err != nil {
+				results <- ""
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			results <- string(body)
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	seenPIDs := map[string]int{}
+	for r := range results {
+		if r == "" {
+			t.Error("a request failed")
+			continue
+		}
+		pid, total, ok := strings.Cut(r, ":")
+		if !ok || total != wantTotal {
+			t.Errorf("body: got %q, want \"<pid>:%s\"", r, wantTotal)
+			continue
+		}
+		seenPIDs[pid]++
+	}
+	if len(seenPIDs) < 2 {
+		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID under -mm=gc, got only %v", n, seenPIDs)
 	}
 }

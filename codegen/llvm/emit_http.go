@@ -26,17 +26,20 @@ func isPlainStringType(t Type) bool {
 		!t.IsClass && !t.IsGroupMap && !t.IsNull && !t.IsUndefined
 }
 
-// emitHTTPListen validates its two arguments (port: number, handler:
+// emitHTTPListen validates its arguments (port: number, handler:
 // (req: Request) => T where T has status/body fields, and optionally a
-// headers: Map<string,string> field), binds and listens on the given port,
-// builds a dispatcher function specialized to the handler's own
-// closure/return type (since reading status/body/headers off an arbitrary
-// user-declared return type needs Go-side knowledge of its field offsets,
-// unlike the fully generic timer/qsort trampolines), registers that
+// headers: Map<string,string> field, plus an optional third { workers: N }
+// options object — TDD-00025), binds and listens on the given port, builds a
+// dispatcher function specialized to the handler's own closure/return type
+// (since reading status/body/headers off an arbitrary user-declared return
+// type needs Go-side knowledge of its field offsets, unlike the fully
+// generic timer/qsort trampolines), forks into N worker processes sharing
+// that one listening socket (a no-op when the third argument is omitted or
+// N <= 1 — today's single-process behavior, unchanged), registers the
 // dispatcher with the event loop, and hands control to it.
 func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: http.listen takes exactly 2 arguments (port, handler)", pos.Line, pos.Col)
+	if len(args) != 2 && len(args) != 3 {
+		return Value{}, fmt.Errorf("%d:%d: http.listen takes 2 arguments (port, handler) or 3 (port, handler, { workers: N })", pos.Line, pos.Col)
 	}
 	portVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -86,12 +89,45 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	}
 	paramTy := handlerVal.Ty.FuncParams[0]
 
+	// Third argument, { workers: N } (TDD-00025): any value whose inferred
+	// type has a numeric "workers" field — no shared ListenOptions interface
+	// has to exist, matching the same FieldIndex-on-the-inferred-type
+	// pattern fetch's own optional init object already uses (emit_fetch.go).
+	// Absent (the two-argument form) means 1 worker, byte-identical to
+	// today's single-process behavior — the interned "1" is a literal
+	// operand, not a register, since nothing needed evaluating.
+	workersRef := "1"
+	if len(args) == 3 {
+		optsVal, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		if !optsVal.Ty.IsObject {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must be an object with a 'workers' field", pos.Line, pos.Col)
+		}
+		idx, fieldTy, ok := optsVal.Ty.FieldIndex("workers")
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must have a 'workers: number' field", pos.Line, pos.Col)
+		}
+		if fieldTy.IR != "i64" || fieldTy.Float {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's 'workers' field must be a number", pos.Line, pos.Col)
+		}
+		workersRef = e.loadFieldValue(optsVal, idx, fieldTy).Ref
+	}
+
 	e.ensureHTTPRuntime()
 
 	port32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, portVal.Ref))
 	listenfd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s)", listenfd, port32))
+
+	// Fork right here — after bind+listen succeeds, before any
+	// connection-fiber state exists (@__kml_conn_data/len/cap, set up by
+	// buildHTTPDispatcher/the event loop below). Every process that falls
+	// through (the original plus every fork) shares this same listenfd and
+	// proceeds identically from here on — see TDD-00025's Design section.
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s)", workersRef))
 
 	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler); err != nil {
 		return Value{}, err
@@ -103,6 +139,29 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitInstr("call void @__kml_event_loop_run()")
 	e.emitTerminator("unreachable")
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitClusterIsPrimary/emitClusterWorkerID implement the read-only
+// cluster.isPrimary/cluster.workerId globals (TDD-00025) — 0 for the
+// original process, 1..N-1 for each fork spawned by
+// __kml_http_cluster_fork. ensureHTTPClusterFork() is called here too (not
+// just from http.listen itself) so @__kml_cluster_worker_id is guaranteed
+// declared even in the (unusual but valid) case a program reads cluster.*
+// textually before its http.listen call.
+func (e *Emitter) emitClusterIsPrimary() (Value, error) {
+	e.ensureHTTPClusterFork()
+	id := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_cluster_worker_id, align 8", id))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", r, id))
+	return Value{Ref: r, Ty: TypeBool}, nil
+}
+
+func (e *Emitter) emitClusterWorkerID() (Value, error) {
+	e.ensureHTTPClusterFork()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_cluster_worker_id, align 8", r))
+	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
 // maxHTTPRequestBytes bounds how far buildHTTPDispatcher's read buffer will
@@ -170,17 +229,6 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.currentRetType = TypeVoid
 	e.pushScope()
 
-	selfIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", selfIdx))
-	connData := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
-	selfSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
-	fdPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
-	ctxPtrSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
-
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
@@ -244,6 +292,33 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	// path that can reach noReqL, including growL's "too big" abort path,
 	// which never passes through haveCapL at all.
 	e.emitLabel(readLoopL)
+	// selfIdx/connData/selfSlot/fdPtr/ctxPtrSlot are recomputed here, at the
+	// top of the read loop, rather than once at fiber-entry — this label is
+	// re-entered both on first entry and on every resume-after-yield
+	// (doYieldL's own "br label %readLoopL" below), and @__kml_conn_data's
+	// backing buffer can be realloc()'d (moved) by __kml_http_append_conn
+	// while this fiber is suspended, if enough new connections are accepted
+	// concurrently to grow the array past its current capacity. A pointer
+	// derived from a pre-suspend snapshot of that buffer would dangle after
+	// such a move — a real, confirmed use-after-free (found chasing an
+	// intermittent request-never-answered hang under concurrent load from a
+	// persistent-connection HTTP client; see docs/adr for the ADR fixing
+	// this). Recomputing here instead means every use of fdPtr/ctxPtrSlot
+	// between here and the next swapcontext (checkErrL/checkEagainL/
+	// doYieldL, and — since no further yield happens once the request is
+	// fully buffered — all the way through parseL/noReqL's own final
+	// `store i64 -1, ptr fdPtr`) is always derived from the current buffer.
+	selfIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", selfIdx))
+	connData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
+	selfSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
+	fdPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
+	ctxPtrSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 1", ctxPtrSlot, selfSlot))
+
 	fd64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, fdPtr))
 	fd32 := e.freshReg()
@@ -322,22 +397,13 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.emitLabel(doYieldL)
 	ctxPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ctxPtr, ctxPtrSlot))
-	// gc mode: restore GC_stackbottom to the real process stack right
-	// before yielding back to the main/scheduler context — this fiber's own
-	// read loop is a 4th swapcontext site alongside the 3 ADR-00071
-	// documents (__kml_http_append_conn's initial launch,
-	// __kml_event_loop_run's rresume, __kml_await_fetch's doyield); missing
-	// the restore here left GC_stackbottom pointed at this fiber's stack
-	// while the main event loop kept running (accepting new connections,
-	// resuming other fibers) until the next rresume overwrote it, so a
-	// collection triggered in that window walked Boehm's root-stack scan
-	// between the live main-stack SP and a stale, unrelated fiber-stack
-	// address — see docs/adr/ADR-00071.md.
-	if e.isGCMode() {
-		origBottom := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8", origBottom))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @GC_stackbottom, align 8", origBottom))
-	}
+	// gc mode: GC_stackbottom is restored on the *resumer's* side (see the
+	// gcRestoreStackbottom/gcRestoreRStackbottom comments in
+	// runtime_http.go's __kml_http_append_conn/__kml_event_loop_run), right
+	// after this swapcontext call returns there — not here, since a fiber
+	// that runs to completion instead of yielding again has no swapcontext
+	// call of its own to hang a restore off of, so the resumer has to
+	// handle it unconditionally either way.
 	e.emitInstr(fmt.Sprintf("call i32 @swapcontext(ptr %s, ptr @__kml_main_ctx)", ctxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
 

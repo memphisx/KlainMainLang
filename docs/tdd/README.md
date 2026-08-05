@@ -58,4 +58,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started |
 | [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented ([ADR-00089](../adr/ADR-00089.md)) |
 | [00024](TDD-00024.md) | `os` module | Implemented ([ADR-00090](../adr/ADR-00090.md)) — Darwin paths unverified |
-| [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Not Started |
+| [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Partially Implemented ([ADR-00097](../adr/ADR-00097.md)/[ADR-00098](../adr/ADR-00098.md)/[ADR-00099](../adr/ADR-00099.md)) — `manual` mode done and recommended; `-mm=gc` has a known unresolved intermittent hang, not recommended |
+| [00026](TDD-00026.md) | Binary-safe `http.listen()` request/response bodies | Not Started |
