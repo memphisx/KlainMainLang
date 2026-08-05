@@ -61,21 +61,29 @@ func classEventEmitterFieldIndex(classTy Type) int {
 
 // emitEventEmitterVarDecl handles `const e = new EventEmitter<T>()`.
 func (e *Emitter) emitEventEmitterVarDecl(v *ast.VarDeclaration, init *ast.NewEventEmitterExpression) error {
+	val, err := e.emitNewEventEmitterValue(init)
+	if err != nil {
+		return err
+	}
+	ptrName := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+	return nil
+}
+
+// emitNewEventEmitterValue is emitMap/SetVarDecl's EventEmitter<T> sibling
+// (TDD-00028) — builds `new EventEmitter<T>()` as a plain ptr Value, usable
+// as a general expression, not just a var-decl initializer.
+func (e *Emitter) emitNewEventEmitterValue(init *ast.NewEventEmitterExpression) (Value, error) {
 	payload := TypePtr
 	if init.PayloadType != nil {
 		payload = e.resolveEventEmitterPayloadType(init.PayloadType)
 	}
-	ty := EventEmitterType(payload)
-
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
-
 	e.ensureMapStrHelpers()
 	handlePtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", handlePtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", handlePtr, ptrName))
-	return nil
+	return Value{Ref: handlePtr, Ty: EventEmitterType(payload)}, nil
 }
 
 // resolveEventEmitterForCall resolves a standalone EventEmitter method

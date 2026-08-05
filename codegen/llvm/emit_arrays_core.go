@@ -20,105 +20,78 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		return nil
 	}
 
-	// Dynamic-size array: new Array<T>(runtimeSize)
+	// Dynamic-size array: new Array<T>(runtimeSize) — built via
+	// emitNewArraySizedAggregate (TDD-00028's general-expression producer)
+	// and extracted here, the same "build the aggregate once, every
+	// consumer extracts from it" shape every branch below now shares.
 	if na, ok := v.Init.(*ast.NewArrayExpression); ok {
-		sizeVal, err := e.emitExpr(na.Size)
+		val, err := e.emitNewArraySizedAggregate(na, elemTy)
 		if err != nil {
 			return err
 		}
-		sizeVal = e.coerce(sizeVal, TypeI64)
-		e.ensureCalloc()
-		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, lenName))
-		return nil
+		return e.storeArrayAggregateInto(val, ptrName, lenName)
 	}
 
 	// TypedArray construction: new Int8Array(...)/.../new Float64Array(...)
-	// — see docs/tdd/TDD-00018.md. Checked before the generic CallExpression
+	// — see docs/tdd/TDD-00018.md. Checked before the generic expression
 	// case below (TypedArray construction is its own AST node, not a call),
 	// mirroring exactly how NewArrayExpression is handled just above.
 	if nta, ok := v.Init.(*ast.NewTypedArrayExpression); ok {
 		return e.emitNewTypedArrayVarDecl(nta, ptrName, lenName, elemTy)
 	}
 
-	// Array variable initialised by a function that returns an array.
-	if call, ok := v.Init.(*ast.CallExpression); ok {
-		val, err := e.emitExpr(call)
+	// Array literal: built via emitArrayLiteralAggregate (TDD-00028), hinted
+	// against this var-decl's own resolved element type, and extracted here
+	// — same shape as every other branch. Note this also correctly handles
+	// nested array-literal elements (an ArrayLiteral element of lit is
+	// itself resolved through emitExprWithObjectHint inside
+	// emitArrayLiteralData/emitSpreadArrayLitData, which TDD-00028 also
+	// makes work instead of erroring).
+	if lit, ok := v.Init.(*ast.ArrayLiteral); ok {
+		val, err := e.emitArrayLiteralAggregate(lit, &elemTy)
 		if err != nil {
 			return err
 		}
-		// val.Ref holds the {ptr, i64} aggregate returned by emitCall.
-		ptrReg := e.freshReg()
-		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrReg, ptrName))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenName))
-		return nil
+		return e.storeArrayAggregateInto(val, ptrName, lenName)
 	}
 
-	// For index expressions (e.g. groupMap["key"]) or any other expression that
-	// produces a {ptr, i64} array aggregate, evaluate it and extract the parts.
-	if _, ok := v.Init.(*ast.ArrayLiteral); !ok {
-		val, err := e.emitExpr(v.Init)
-		if err != nil {
-			return err
-		}
-		if !val.Ty.IsArray {
-			return fmt.Errorf("%d:%d: array variable must be initialized with an array expression", v.GetPos().Line, v.GetPos().Col)
-		}
-		ptrReg := e.freshReg()
-		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrReg, ptrName))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenName))
-		return nil
+	// Any other expression that produces a {ptr, i64} array aggregate — a
+	// function call, an index expression (e.g. groupMap["key"]), a Map/Set
+	// method result, etc.
+	val, err := e.emitExpr(v.Init)
+	if err != nil {
+		return err
 	}
+	if !val.Ty.IsArray {
+		return fmt.Errorf("%d:%d: array variable must be initialized with an array expression", v.GetPos().Line, v.GetPos().Col)
+	}
+	return e.storeArrayAggregateInto(val, ptrName, lenName)
+}
 
-	lit, ok := v.Init.(*ast.ArrayLiteral)
-	if !ok {
-		return fmt.Errorf("%d:%d: array variable must be initialized with an array literal or a function returning an array", v.GetPos().Line, v.GetPos().Col)
-	}
-
-	// Check for spread elements — requires runtime length computation.
-	hasSpread := false
-	for _, elem := range lit.Elements {
-		if _, ok := elem.(*ast.SpreadElement); ok {
-			hasSpread = true
-			break
-		}
-	}
-	if hasSpread {
-		return e.emitSpreadArrayLit(lit, ptrName, lenName, elemTy)
-	}
-
-	n := int64(len(lit.Elements))
-	e.ensureMalloc()
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", n, lenName))
-
-	for i, elem := range lit.Elements {
-		val, err := e.emitExprWithObjectHint(elem, elemTy)
-		if err != nil {
-			return err
-		}
-		val = e.coerce(val, elemTy)
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
-	}
+// storeArrayAggregateInto extracts val's {ptr, i64} aggregate into a
+// var-decl's own two allocas (the "Named Symbol" array representation —
+// see the project's own Array value duality note) — the common tail every
+// emitArrayVarDecl branch now shares.
+func (e *Emitter) storeArrayAggregateInto(val Value, ptrName, lenName string) error {
+	ptrReg := e.freshReg()
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrReg, ptrName))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenName))
 	return nil
 }
 
-// emitSpreadArrayLit handles array literals that contain one or more spread elements.
-// It computes total length at runtime, allocates one contiguous buffer, and fills it
-// using a write cursor: memcpy per spread, store per static element.
-func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName string, elemTy Type) error {
+// emitSpreadArrayLitData handles array literals that contain one or more
+// spread elements: computes total length at runtime, allocates one
+// contiguous buffer, and fills it using a write cursor (memcpy per spread,
+// store per static element), returning the data pointer and length operands
+// rather than storing into caller-supplied allocas — shared by
+// emitArrayVarDecl (which stores the result into its own two allocas) and
+// emitArrayLiteralAggregate (TDD-00028, which builds a {ptr,i64} aggregate
+// from it instead), so there's exactly one spread-array-literal
+// implementation rather than one per caller shape.
+func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (dataReg, lenReg string, err error) {
 	// Count static (non-spread) elements.
 	staticCount := int64(0)
 	for _, elem := range lit.Elements {
@@ -136,16 +109,16 @@ func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName str
 		}
 		spId, ok := sp.Arg.(*ast.Identifier)
 		if !ok {
-			return fmt.Errorf("%d:%d: spread element must be an array variable", sp.GetPos().Line, sp.GetPos().Col)
+			return "", "", fmt.Errorf("%d:%d: spread element must be an array variable", sp.GetPos().Line, sp.GetPos().Col)
 		}
 		sym, found := e.lookup(spId.Name)
 		if !found || !sym.Ty.IsArray {
-			return fmt.Errorf("%d:%d: '%s' is not an array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
+			return "", "", fmt.Errorf("%d:%d: '%s' is not an array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
 		}
-		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		spLenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", spLenReg, sym.LenPtr))
 		newTotal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalReg, lenReg))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalReg, spLenReg))
 		totalReg = newTotal
 	}
 
@@ -153,10 +126,8 @@ func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName str
 	e.ensureMalloc()
 	bytesReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, totalReg, elemTy.Align()))
-	dataReg := e.freshReg()
+	dataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, bytesReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", totalReg, lenName))
 
 	// Write cursor.
 	cursorPtr := e.freshReg()
@@ -188,9 +159,9 @@ func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName str
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
 		} else {
 			// Static element.
-			val, err := e.emitExprWithObjectHint(elem, elemTy)
-			if err != nil {
-				return err
+			val, verr := e.emitExprWithObjectHint(elem, elemTy)
+			if verr != nil {
+				return "", "", verr
 			}
 			val = e.coerce(val, elemTy)
 			cVal := e.freshReg()
@@ -203,7 +174,125 @@ func (e *Emitter) emitSpreadArrayLit(lit *ast.ArrayLiteral, ptrName, lenName str
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
 		}
 	}
-	return nil
+	return dataReg, totalReg, nil
+}
+
+// emitArrayLiteralData builds a non-spread array literal's malloc'd,
+// populated backing buffer, returning the data pointer and static element
+// count — shared by every non-spread array-literal producer (var-decl
+// allocas, emitArrayLiteralAggregate's general-expression path, array
+// destructuring) so there's exactly one implementation of "malloc N *
+// elemSize, store each element" rather than one per caller.
+func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (dataReg string, n int64, err error) {
+	n = int64(len(lit.Elements))
+	e.ensureMalloc()
+	dataReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+	for i, elem := range lit.Elements {
+		val, verr := e.emitExprWithObjectHint(elem, elemTy)
+		if verr != nil {
+			return "", 0, verr
+		}
+		val = e.coerce(val, elemTy)
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+	}
+	return dataReg, n, nil
+}
+
+// emitArrayLiteralAggregate builds an array literal as a {ptr, i64}
+// aggregate Value (TDD-00028) — the general "array as an expression"
+// representation this compiler already produces for a function's own
+// array-typed return value, and already consumes in resolveArrayForHOF/
+// resolveArrayDataPtr/emitArrayVarDecl's own *ast.CallExpression branch.
+// This is what makes an array literal usable anywhere an expression is
+// expected (a call argument, a return value, an object-literal field, a
+// nested nested array-literal element, a plain reassignment), not just as a
+// var-decl initializer.
+//
+// hintElemTy, when non-nil, is the declared/expected element type already
+// known from context (a var-decl annotation, a function parameter's
+// declared type, an object-literal field's declared type — threaded through
+// via emitExprWithObjectHint) and every element is coerced against it,
+// mirroring TDD-00007's own object-literal hint-vs-self-inferred fix.
+// hintElemTy nil falls back to inferArrayType's established first-element
+// inference (the literal's pre-existing, unchanged convention for a
+// genuinely unannotated context).
+func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *Type) (Value, error) {
+	var elemTy Type
+	if hintElemTy != nil {
+		elemTy = *hintElemTy
+	} else {
+		elemTy = *e.inferArrayType(lit).ElemType
+	}
+	// Array-of-arrays (elemTy itself an array type — number[][], a nested
+	// literal, etc.) is a real, separate gap, not something TDD-00028's own
+	// fix happens to unblock: an array's backing buffer is a flat sequence
+	// of fixed-width, elemTy-sized slots (see emitArrayLiteralData), sized
+	// for a scalar/pointer element — but a nested array's own value is a
+	// {ptr, i64} *pair*, which doesn't fit in one such slot without a
+	// boxing/indirection layer this compiler doesn't have (every array
+	// read/write/HOF/.length call site throughout emit_arrays_*.go would
+	// need to know about it). Rejected here with a clear, deliberate error
+	// instead of silently reaching a confusing clang-stage type-mismatch a
+	// few instructions later (found exactly that way while implementing
+	// this fix: `store i64 %aggregateReg, ptr %slot` — a 16-byte {ptr,i64}
+	// value forced into an 8-byte slot). Real array-of-arrays support is
+	// its own follow-up design question, not scoped here.
+	if elemTy.IsArray {
+		return Value{}, fmt.Errorf("%d:%d: nested arrays (array-of-arrays) are not yet supported as a value — see docs/tdd/TDD-00028.md", lit.GetPos().Line, lit.GetPos().Col)
+	}
+
+	hasSpread := false
+	for _, elem := range lit.Elements {
+		if _, ok := elem.(*ast.SpreadElement); ok {
+			hasSpread = true
+			break
+		}
+	}
+
+	var dataReg, lenVal string
+	if hasSpread {
+		var err error
+		dataReg, lenVal, err = e.emitSpreadArrayLitData(lit, elemTy)
+		if err != nil {
+			return Value{}, err
+		}
+	} else {
+		d, n, err := e.emitArrayLiteralData(lit, elemTy)
+		if err != nil {
+			return Value{}, err
+		}
+		dataReg = d
+		lenVal = fmt.Sprintf("%d", n)
+	}
+
+	r0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenVal))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitNewArraySizedAggregate builds `new Array<T>(size)` (dynamic length,
+// zero-initialized) as a {ptr, i64} aggregate — the general-expression
+// sibling of emitArrayVarDecl's own *ast.NewArrayExpression branch, for the
+// same TDD-00028 reasons emitArrayLiteralAggregate exists.
+func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy Type) (Value, error) {
+	sizeVal, err := e.emitExpr(na.Size)
+	if err != nil {
+		return Value{}, err
+	}
+	sizeVal = e.coerce(sizeVal, TypeI64)
+	e.ensureCalloc()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
+	r0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sizeVal.Ref))
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
 func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
@@ -253,21 +342,10 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (string,
 		return ptrReg, *val.Ty.ElemType, nil
 
 	case *ast.ArrayLiteral:
-		ty := e.inferArrayType(src)
-		elemTy := *ty.ElemType
-		n := int64(len(src.Elements))
-		e.ensureMalloc()
-		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
-		for i, elem := range src.Elements {
-			val, err := e.emitExpr(elem)
-			if err != nil {
-				return "", Type{}, err
-			}
-			val = e.coerce(val, elemTy)
-			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+		elemTy := *e.inferArrayType(src).ElemType
+		dataReg, _, err := e.emitArrayLiteralData(src, elemTy)
+		if err != nil {
+			return "", Type{}, err
 		}
 		return dataReg, elemTy, nil
 	}

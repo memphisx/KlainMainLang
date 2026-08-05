@@ -157,6 +157,26 @@ func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, erro
 // (`abstract foo(): T;`) has no body at all — terminated by `;` instead of
 // a `{...}` block. Never set by a top-level function (always false there).
 func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*ast.FunctionDeclaration, error) {
+	// Position of whatever comes right after the already-consumed name (a
+	// `<` or the opening `(`) — close enough to the declaration's own
+	// position for error-reporting purposes. Backfilled via SetPos on every
+	// returned FunctionDeclaration below, since the struct literals here
+	// can't set the unexported pos field directly (see SetPos's own doc
+	// comment for why this was a real, pre-existing "always 0:0" bug).
+	pos := posOf(p.peek())
+	// Optional `<T>` type-parameter list (TDD-00010 V1). Parsed uniformly for
+	// both a top-level function and a class method/constructor — codegen
+	// only acts on it for the former today; a generic method parses cleanly
+	// but isn't specially instantiated yet (same "parse ahead of codegen"
+	// shape parseNewGenericBody already uses for classes).
+	var typeParams []string
+	if p.check(lexer.LT) {
+		tp, err := p.parseTypeParamList(name + "<T>")
+		if err != nil {
+			return nil, err
+		}
+		typeParams = tp
+	}
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -179,9 +199,11 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 
 	if bodyOptional && p.check(lexer.SEMICOLON) {
 		p.advance()
-		return &ast.FunctionDeclaration{
-			Name: name, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
-		}, nil
+		fd := &ast.FunctionDeclaration{
+			Name: name, TypeParams: typeParams, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
+		}
+		fd.SetPos(pos)
+		return fd, nil
 	}
 
 	body, err := p.parseBlock()
@@ -189,9 +211,11 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 		return nil, err
 	}
 
-	return &ast.FunctionDeclaration{
-		Name: name, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
-	}, nil
+	fd := &ast.FunctionDeclaration{
+		Name: name, TypeParams: typeParams, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
+	}
+	fd.SetPos(pos)
+	return fd, nil
 }
 
 func (p *Parser) parseParamList() ([]ast.Param, error) {

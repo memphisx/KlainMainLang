@@ -421,6 +421,39 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 	classDeclByName := make(map[string]*ast.ClassDeclaration)
 	for _, stmt := range prog.Body {
 		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+			// A generic class's field/param/return types reference an
+			// unresolvable bare type-parameter name — it's kept entirely out
+			// of this registration pipeline (no placeholder, no topo-order
+			// entry) and instantiated on demand at each `new
+			// ClassName<T>(...)` construction site instead (TDD-00010 V1,
+			// see emit_generics.go). Deliberately out of V1 scope: a generic
+			// class can't be an `extends` base or target here.
+			if len(cd.TypeParams) > 0 {
+				if cd.BaseClass != "" {
+					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'extends' — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+				}
+				if cd.IsAbstract {
+					return fmt.Errorf("%d:%d: generic class '%s' cannot be abstract — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+				}
+				if len(cd.Implements) > 0 {
+					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'implements' — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+				}
+				if len(cd.StaticBlocks) > 0 {
+					return fmt.Errorf("%d:%d: generic class '%s' cannot have a static {} block — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+				}
+				for _, f := range cd.Fields {
+					if f.Static {
+						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static field ('%s') — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
+					}
+				}
+				for _, m := range cd.Methods {
+					if m.IsStatic {
+						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static method ('%s') — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, m.Name)
+					}
+				}
+				e.genericClasses[cd.Name] = cd
+				continue
+			}
 			classDeclByName[cd.Name] = cd
 			// Placeholder: correct IR/IsObject/IsClass/ClassName, no fields
 			// yet — see canonicalizeClassTy's doc comment for why this must
@@ -466,7 +499,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		return nil
 	}
 	for _, stmt := range prog.Body {
-		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok && len(cd.TypeParams) == 0 {
 			if err := visit(cd.Name); err != nil {
 				return err
 			}
@@ -791,6 +824,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 		e.classes[cd.Name] = info
 	}
+	// Continue the TagID sequence for any later on-demand generic-class
+	// instantiation (TDD-00010 V1, emit_generics.go) — always past every
+	// real class's own TagID, so a generic instantiation's runtime identity
+	// tag can never collide with an unrelated real class's.
+	e.nextClassTagID = nextTagID
 
 	// Pass 1.5: Descendants is the inverse of AncestorChain, needed by
 	// instanceof's dynamic (any/unknown) case.
@@ -1135,15 +1173,38 @@ func (e *Emitter) emitThisExpression(pos ast.Pos) (Value, error) {
 // its constructor (if any) with the fresh pointer as the implicit receiver,
 // and return the pointer.
 func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
+	// className is the actual LLVM-symbol-bearing/e.classes-registry name —
+	// ex.ClassName itself for a plain class, but a mangled per-instantiation
+	// name for a generic one (TDD-00010 V1); user-facing error messages
+	// below still reference ex.ClassName, the name the source actually
+	// wrote.
+	className := ex.ClassName
 	info, ok := e.classes[ex.ClassName]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+		// A generic class (TDD-00010 V1) is never itself entered into
+		// e.classes — only its concrete instantiations are, keyed by their
+		// mangled name — so a construction site against the bare generic
+		// name always misses the lookup above on its first-ever use.
+		if genDecl, isGeneric := e.genericClasses[ex.ClassName]; isGeneric {
+			if len(ex.TypeArgs) != 1 {
+				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly one explicit type argument (e.g. new %s<number>(...)) — inference isn't supported for class construction (see docs/tdd/TDD-00010.md)", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, ex.ClassName)
+			}
+			concrete := e.resolveType(ex.TypeArgs[0])
+			mangled, err := e.instantiateGenericClass(genDecl, concrete)
+			if err != nil {
+				return Value{}, err
+			}
+			className = mangled
+			info = e.classes[mangled]
+		} else {
+			return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+		}
 	}
 	if info.IsAbstract {
 		return Value{}, fmt.Errorf("%d:%d: cannot create an instance of abstract class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
 	}
 	if info.Constructor != nil && info.Constructor.Visibility != "" {
-		if err := e.checkMemberVisibility(ex.ClassName, info.Constructor.Visibility, "constructor", ex.ClassName, ex.GetPos()); err != nil {
+		if err := e.checkMemberVisibility(className, info.Constructor.Visibility, "constructor", ex.ClassName, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
 	}
@@ -1159,7 +1220,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if info.Ty.HasVTable {
 		vtGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vtGep, info.Ty.StructIR(), dataReg))
-		e.emitInstr(fmt.Sprintf("store ptr @%s_vtable, ptr %s, align 8", ex.ClassName, vtGep))
+		e.emitInstr(fmt.Sprintf("store ptr @%s_vtable, ptr %s, align 8", className, vtGep))
 	}
 
 	if info.Ty.HasEventEmitter {
@@ -1185,7 +1246,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			val = e.coerce(val, info.CtorSig.ParamTypes[i])
 			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 		}
-		e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", ex.ClassName, strings.Join(argParts, ", ")))
+		e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", className, strings.Join(argParts, ", ")))
 	} else if len(ex.Args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: class '%s' has no constructor but was called with %d argument(s)",
 			ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(ex.Args))

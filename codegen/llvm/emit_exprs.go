@@ -54,15 +54,26 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 	case *ast.SpreadElement:
 		return Value{}, fmt.Errorf("%d:%d: spread element must be used inside an array literal", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.ArrayLiteral:
-		return Value{}, fmt.Errorf("%d:%d: array literal must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		// No target-type hint available in this bare-dispatch path — falls
+		// back to inferArrayType's first-element inference (unchanged
+		// convention). A caller that already knows the expected element
+		// type (a declared parameter, a var-decl annotation, an
+		// object-literal field, a return type) should go through
+		// emitExprWithObjectHint instead, which threads it through as a
+		// hint (TDD-00028) — every existing hint-aware call site already
+		// gets that for free.
+		return e.emitArrayLiteralAggregate(ex, nil)
 	case *ast.NewArrayExpression:
-		return Value{}, fmt.Errorf("%d:%d: new Array() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		if ex.ElemType == nil {
+			return Value{}, fmt.Errorf("%d:%d: new Array(n) needs an explicit element type here (e.g. new Array<number>(n)) — no declared target type is available in this position", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		return e.emitNewArraySizedAggregate(ex, e.resolveType(ex.ElemType))
 	case *ast.NewMapExpression:
-		return Value{}, fmt.Errorf("%d:%d: new Map() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		return e.emitNewMapValue(ex)
 	case *ast.NewSetExpression:
-		return Value{}, fmt.Errorf("%d:%d: new Set() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		return e.emitNewSetValue(ex)
 	case *ast.NewEventEmitterExpression:
-		return Value{}, fmt.Errorf("%d:%d: new EventEmitter() must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		return e.emitNewEventEmitterValue(ex)
 	case *ast.NewErrorExpression:
 		return e.emitNewError(ex)
 	case *ast.NewDateExpression:

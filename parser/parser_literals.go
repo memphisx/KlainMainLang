@@ -177,6 +177,27 @@ var typedArrayElemKinds = map[string]string{
 // yet (TDD-00009 Stage 1) — it's front-end groundwork only.
 func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	nameTok := p.advance() // consume class name
+	// Optional explicit `<T>` type argument (TDD-00010 V1 generic classes).
+	// Unlike a bare generic function call, `new` unambiguously starts a
+	// constructor call, so this doesn't hit the `a<b>(c)` grammar ambiguity
+	// that keeps explicit type arguments out of V1 for plain calls — the
+	// same reasoning `new Map<K,V>()`/`new Set<T>()` already rely on.
+	var typeArgs []*ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		arg, err := p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if p.check(lexer.COMMA) {
+			t := p.peek()
+			return nil, fmt.Errorf("%d:%d: multiple type arguments on new %s<...> are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, nameTok.Literal)
+		}
+		if err := p.expectGT(nameTok.Literal + "<T>"); err != nil {
+			return nil, err
+		}
+		typeArgs = append(typeArgs, arg)
+	}
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -194,7 +215,9 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewExpression(nameTok.Literal, args, pos), nil
+	ne := ast.NewNewExpression(nameTok.Literal, args, pos)
+	ne.TypeArgs = typeArgs
+	return ne, nil
 }
 
 func (p *Parser) parseNewDateBody(pos ast.Pos) (*ast.NewDateExpression, error) {

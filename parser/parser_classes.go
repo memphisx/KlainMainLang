@@ -19,6 +19,15 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Optional `<T>` type-parameter list (TDD-00010 V1).
+	var typeParams []string
+	if p.check(lexer.LT) {
+		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		if err != nil {
+			return nil, err
+		}
+		typeParams = tp
+	}
 	var baseClass string
 	var baseTypeArgs []*ast.TypeAnnotation
 	if p.check(lexer.EXTENDS) {
@@ -159,5 +168,7 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewClassDeclaration(nameTok.Literal, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos), nil
+	decl := ast.NewClassDeclaration(nameTok.Literal, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
+	decl.TypeParams = typeParams
+	return decl, nil
 }

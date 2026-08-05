@@ -8,8 +8,19 @@ import (
 	"strings"
 )
 
-// emitFunctionDecl emits one user-defined function into e.functions.
+// emitFunctionDecl emits one user-defined, non-generic function into
+// e.functions under its own source name, using its own registered signature.
 func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
+	return e.emitFunctionDeclAs(decl, decl.Name, e.funcs[decl.Name])
+}
+
+// emitFunctionDeclAs emits decl's body into e.functions under llvmName,
+// using sig for parameter/return types instead of decl's own (possibly
+// generic, T-named) annotations — the shared core both emitFunctionDecl
+// (llvmName == decl.Name, sig == e.funcs[decl.Name]) and TDD-00010 V1's
+// on-demand generic-function instantiation (a mangled llvmName, a
+// per-instantiation substituted sig — see emit_generics.go) go through.
+func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName string, sig FuncSig) error {
 	// Save current function context.
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -37,11 +48,11 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 
 	// registerFunctions already resolved the signature (explicit annotations,
 	// or best-effort inference for an unannotated return type — see
-	// inferUnannotatedReturnType) before any function body was emitted;
-	// reuse it rather than recomputing param/return types independently
-	// here, so this function's own emitted signature always matches what
-	// every caller already expects it to be.
-	sig := e.funcs[decl.Name]
+	// inferUnannotatedReturnType) before any function body was emitted (or,
+	// for a generic instantiation, the caller built and registered one
+	// on demand — see emit_generics.go); reuse it rather than recomputing
+	// param/return types independently here, so this function's own emitted
+	// signature always matches what every caller already expects it to be.
 	retType := sig.RetType
 	if retType.IsDynamic || containsDynamicElement(retType) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
@@ -108,7 +119,7 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 		// Async: emit coro.ret block (includes the implicit br + coro.end + ret ptr).
 		e.emitAsyncEpilogue()
 		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
-			decl.Name, strings.Join(llvmParams, ", ")))
+			llvmName, strings.Join(llvmParams, ", ")))
 	} else {
 		// Non-async: void → ret void; non-void → unreachable fallthrough.
 		if retType.IR == "void" {
@@ -117,7 +128,7 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 			e.emitTerminator("unreachable")
 		}
 		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
-			retType.LLVMRetType(), decl.Name, strings.Join(llvmParams, ", ")))
+			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
@@ -658,7 +669,7 @@ func firstReturnExprInStmt(stmt ast.Statement) ast.Expression {
 // (void, or a scalar placeholder) untouched. A function with multiple
 // returns of different shapes still only considers the first one; not
 // attempted here — this compiler has no general union-type support beyond
-// `T | null` (see CLAUDE.md), so a function that legitimately returns
+// `T | null` (see the project's own instructions), so a function that legitimately returns
 // different types on different paths was never a designed-for case.
 func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNames []string, paramTypes []Type) (Type, bool) {
 	retExpr := firstReturnExprInBlock(block)

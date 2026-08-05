@@ -29,31 +29,45 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals                strings.Builder // global declarations (string constants, printf decl, …)
-	functions              strings.Builder // emitted user-defined function bodies
-	allocas                strings.Builder // alloca instructions for the current function
-	body                   strings.Builder // body instructions for the current function
-	scopes                 []scope
-	regCtr                 int
-	labelCtr               int
-	strConsts              map[string]string // Go string value → @.s<n> name
-	strIdx                 int
-	linkLibs               map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	memMode                string          // "" (== "manual", the default) or "gc" — see SetMemMode
-	usedPrintf             bool
-	usedDprintf            bool
-	usedMalloc             bool
-	usedCalloc             bool
-	usedRealloc            bool
-	usedMemmove            bool
-	funcs                  map[string]FuncSig            // registered function signatures
-	interfaces             map[string]Type               // named interface, type alias, and class registry
-	interfaceMethodSigs    map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
-	classes                map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
-	enums                  map[string]map[string]Value   // enum name → member name → constant value
-	currentRetType         Type                          // return type of the function being emitted
-	blockDone              bool                          // true after a terminator (ret/br) in the current block
-	closureCtr             int                           // monotonically increasing counter for unique closure names
+	globals             strings.Builder // global declarations (string constants, printf decl, …)
+	functions           strings.Builder // emitted user-defined function bodies
+	allocas             strings.Builder // alloca instructions for the current function
+	body                strings.Builder // body instructions for the current function
+	scopes              []scope
+	regCtr              int
+	labelCtr            int
+	strConsts           map[string]string // Go string value → @.s<n> name
+	strIdx              int
+	linkLibs            map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	memMode             string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	usedPrintf          bool
+	usedDprintf         bool
+	usedMalloc          bool
+	usedCalloc          bool
+	usedRealloc         bool
+	usedMemmove         bool
+	funcs               map[string]FuncSig            // registered function signatures
+	interfaces          map[string]Type               // named interface, type alias, and class registry
+	interfaceMethodSigs map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
+	classes             map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
+	// genericFuncs/genericInterfaces/genericClasses hold the raw declaration
+	// for every `<T>`-parameterized function/interface/class (TDD-00010 V1),
+	// keyed by its bare source name — deliberately *not* also entered into
+	// funcs/interfaces/classes, since T isn't resolvable until a real call/
+	// usage/construction site supplies a concrete type. See emit_generics.go.
+	genericFuncs      map[string]*ast.FunctionDeclaration
+	genericInterfaces map[string]*ast.InterfaceDeclaration
+	genericClasses    map[string]*ast.ClassDeclaration
+	// nextClassTagID continues registerClasses' own TagID sequence (see its
+	// Pass 1) for generic class instantiations, assigned lazily on demand
+	// (emit_generics.go) — always ≥ every real class's TagID, so a
+	// Box<number> instance can never collide with an unrelated real class's
+	// runtime identity tag.
+	nextClassTagID         int64
+	enums                  map[string]map[string]Value // enum name → member name → constant value
+	currentRetType         Type                        // return type of the function being emitted
+	blockDone              bool                        // true after a terminator (ret/br) in the current block
+	closureCtr             int                         // monotonically increasing counter for unique closure names
 	usedStrlen             bool
 	usedMemcpy             bool
 	usedMemset             bool
@@ -210,6 +224,9 @@ func NewEmitter() *Emitter {
 		interfaceMethodSigs: make(map[string]map[string]FuncSig),
 		classes:             make(map[string]ClassInfo),
 		enums:               make(map[string]map[string]Value),
+		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
+		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
+		genericClasses:      make(map[string]*ast.ClassDeclaration),
 		currentRetType:      TypeI32, // main returns i32
 	}
 	e.pushScope()
@@ -404,6 +421,13 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		valTy := e.resolveType(ta.ElemType)
 		return MapType(keyTy, valTy)
 	}
+	// A registered generic interface (TDD-00010 V1), e.g. Box<number> — must
+	// also be checked before the generic ElemType fallback below, same
+	// reasoning as Promise/Map/Set/EventEmitter above.
+	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && ta.ElemType != nil {
+		concrete := e.resolveType(ta.ElemType)
+		return e.instantiateGenericInterface(genDecl, concrete)
+	}
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
 	}
@@ -464,18 +488,26 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
 	e.registerFunctions(prog)
 
-	// Pass 2: emit each function declaration.
+	// Pass 2: emit each function declaration. A generic function (TDD-00010
+	// V1) is never emitted here — it has no single concrete signature to
+	// emit; each concrete instantiation is emitted on demand from its own
+	// call site instead (emit_generics.go), and a generic function that's
+	// never called is simply never emitted at all.
 	for _, stmt := range prog.Body {
-		if fd, ok := stmt.(*ast.FunctionDeclaration); ok {
+		if fd, ok := stmt.(*ast.FunctionDeclaration); ok && len(fd.TypeParams) == 0 {
 			if err := e.emitFunctionDecl(fd); err != nil {
 				return "", err
 			}
 		}
 	}
 
-	// Pass 2b: emit each class's constructor and methods.
+	// Pass 2b: emit each class's constructor and methods. A generic class
+	// (TDD-00010 V1) is never emitted here — like a generic function, it has
+	// no single concrete shape to emit; each concrete instantiation is
+	// emitted on demand from its own `new ClassName<T>(...)` site instead
+	// (emit_generics.go).
 	for _, stmt := range prog.Body {
-		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok && len(cd.TypeParams) == 0 {
 			if err := e.emitClassDecl(cd); err != nil {
 				return "", err
 			}
@@ -490,7 +522,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	var staticInitClasses []string
 	for _, stmt := range prog.Body {
 		cd, ok := stmt.(*ast.ClassDeclaration)
-		if !ok {
+		if !ok || len(cd.TypeParams) > 0 {
 			continue
 		}
 		e.emitClassVTable(cd.Name)
@@ -623,6 +655,14 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 	for _, stmt := range prog.Body {
 		switch s := stmt.(type) {
 		case *ast.InterfaceDeclaration:
+			// A generic interface's field types reference an unresolvable
+			// bare type-parameter name — defer to on-demand instantiation
+			// at each usage site instead (TDD-00010 V1, see
+			// emit_generics.go); never entered into e.interfaces itself.
+			if len(s.TypeParams) > 0 {
+				e.genericInterfaces[s.Name] = s
+				continue
+			}
 			fields := make([]Field, len(s.Fields))
 			for i, f := range s.Fields {
 				fields[i] = Field{Name: f.Name, Ty: e.resolveType(f.Type)}
@@ -653,6 +693,17 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 	for _, stmt := range prog.Body {
 		fd, ok := stmt.(*ast.FunctionDeclaration)
 		if !ok {
+			continue
+		}
+		// A generic function's param/return types reference an unresolvable
+		// bare type-parameter name (e.g. "T") — resolving them now the same
+		// way a normal function's are would silently default to i64
+		// (ResolveTypeName's fallback). Defer entirely to on-demand
+		// instantiation at each call site instead (TDD-00010 V1, see
+		// emit_generics.go); the generic declaration itself is never
+		// entered into e.funcs.
+		if len(fd.TypeParams) > 0 {
+			e.genericFuncs[fd.Name] = fd
 			continue
 		}
 		retType := TypeVoid

@@ -140,3 +140,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00099](ADR-00099.md) | `GC_set_handle_fork(1)` for `-mm=gc` + `http.listen` clustering — fixed one real crash, one residual hang left unresolved | Extends [ADR-00097](ADR-00097.md), [ADR-00098](ADR-00098.md). Extended by [ADR-00101](ADR-00101.md) |
 | [00100](ADR-00100.md) | Fix `-mm=gc` startup crash under AddressSanitizer, and add ASan/UBSan test-build helpers | Extends [ADR-00071](ADR-00071.md), [ADR-00080](ADR-00080.md) |
 | [00101](ADR-00101.md) | Root cause of the `-mm=gc` clustering hang — `GC_stackbottom` never restored when a fiber runs to completion | Implements [TDD-00025](../tdd/TDD-00025.md). Extends [ADR-00071](ADR-00071.md), [ADR-00093](ADR-00093.md), [ADR-00099](ADR-00099.md) |
+| [00103](ADR-00103.md) | User-defined generics V1 — monomorphization for functions, interfaces, classes | Implements [TDD-00010](../tdd/TDD-00010.md) |
+| [00104](ADR-00104.md) | Array/Map/Set/EventEmitter literals as general expressions | Implements [TDD-00028](../tdd/TDD-00028.md) |
