@@ -469,6 +469,86 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		// Destructured parameter (`({x, y}: T) => ...` / `([a, b]: T[]) =>
+		// ...`) — same restricted V1 shape parseParamList's own destructured
+		// branch documents (no nesting, no per-field default, an explicit
+		// type annotation always required); a destructured *array* param is
+		// further rejected downstream in codegen (emit_func.go's
+		// emitClosureFunc) since array-typed closure parameters aren't
+		// supported at all yet, independent of destructuring. Arrow
+		// functions parse their own parameter list separately from
+		// parseParamList (used by named function declarations) rather than
+		// sharing it, so this mirrors that function's pattern-parsing
+		// branch rather than calling it directly.
+		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
+			isObject := p.check(lexer.LBRACE)
+			var arrPat []string
+			var objPat []ast.DestructProp
+			p.advance() // consume '{' or '['
+			if isObject {
+				for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+					keyTok, err := p.expect(lexer.IDENT)
+					if err != nil {
+						return nil, err
+					}
+					local := keyTok.Literal
+					if p.check(lexer.COLON) {
+						p.advance()
+						aliasTok, err := p.expect(lexer.IDENT)
+						if err != nil {
+							return nil, err
+						}
+						local = aliasTok.Literal
+					}
+					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local})
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RBRACE); err != nil {
+					return nil, err
+				}
+			} else {
+				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+					if p.check(lexer.COMMA) {
+						p.advance() // hole — consume comma, record skip
+						arrPat = append(arrPat, "")
+						continue
+					}
+					nameTok, err := p.expect(lexer.IDENT)
+					if err != nil {
+						return nil, err
+					}
+					arrPat = append(arrPat, nameTok.Literal)
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RBRACKET); err != nil {
+					return nil, err
+				}
+			}
+			var pty *ast.TypeAnnotation
+			if p.check(lexer.COLON) {
+				p.advance()
+				var err error
+				pty, err = p.parseTypeAnnotation("ts")
+				if err != nil {
+					return nil, err
+				}
+			}
+			if pty == nil {
+				return nil, fmt.Errorf("%d:%d: a destructured parameter requires an explicit type annotation", p.peek().Line, p.peek().Col)
+			}
+			if p.check(lexer.ASSIGN) {
+				return nil, fmt.Errorf("%d:%d: a default value on a destructured parameter is not yet supported", p.peek().Line, p.peek().Col)
+			}
+			syntheticName := fmt.Sprintf("__param%d", len(params))
+			params = append(params, ast.Param{Name: syntheticName, Type: pty, ArrayPattern: arrPat, ObjectPattern: objPat})
+			p.match(lexer.COMMA)
+			continue
+		}
+
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
@@ -524,6 +604,43 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		return nil, err
 	}
 	return ast.NewArrowFunction(params, retType, body, nil, pos), nil
+}
+
+// destructuredArrowParamLookahead reports whether the LPAREN at the
+// current position begins an arrow function whose first parameter is a
+// destructuring pattern (`({x, y}: T) => ...` / `([a, b]: T[]) => ...`) —
+// distinguished from a parenthesized object/array literal expression
+// (`({a: 1})`, `([1, 2])`), which starts identically, by this compiler's
+// own requirement that a destructured parameter always carries an explicit
+// type annotation (see parseArrowFunction's pattern branch): scans forward
+// to the matching close brace/bracket (tracking nesting depth, even though
+// V1 patterns are themselves always flat — a cheap, robust check either
+// way) and looks for a ':' immediately after it. Assumes p.peek() is
+// LPAREN and peekNth(1) is LBRACE or LBRACKET. Pre-lexed token buffer
+// (parser.go's peekNth) makes unbounded-distance lookahead cheap — no
+// re-lexing, just array indexing.
+func (p *Parser) destructuredArrowParamLookahead() bool {
+	open := p.peekNth(1).Type
+	closeType := lexer.RBRACE
+	if open == lexer.LBRACKET {
+		closeType = lexer.RBRACKET
+	}
+	depth := 0
+	for n := 1; ; n++ {
+		tok := p.peekNth(n)
+		if tok.Type == lexer.EOF {
+			return false
+		}
+		switch tok.Type {
+		case open:
+			depth++
+		case closeType:
+			depth--
+			if depth == 0 {
+				return p.peekNth(n+1).Type == lexer.COLON
+			}
+		}
+	}
 }
 
 func (p *Parser) parseTemplateLiteral() (ast.Expression, error) {
@@ -628,13 +745,18 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.LPAREN:
 		// Detect arrow function: () => ..., (): T => ..., (name: type, ...) => ...,
-		// (name) => ..., or (name, name, ...) => ...
+		// (name) => ..., (name, name, ...) => ..., or a destructured first
+		// parameter ({x,y}: T) => .../([a,b]: T[]) => ... — the last case
+		// needs its own, less trivial lookahead (below) to tell it apart
+		// from a parenthesized object/array literal expression like
+		// ({a: 1}) or ([1, 2]), since both start identically with `({`/`([`.
 		t1 := p.peekNth(1)
 		isArrow := (t1.Type == lexer.RPAREN &&
 			(p.peekNth(2).Type == lexer.ARROW || p.peekNth(2).Type == lexer.COLON)) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.ARROW) ||
-			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA)
+			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA) ||
+			((t1.Type == lexer.LBRACE || t1.Type == lexer.LBRACKET) && p.destructuredArrowParamLookahead())
 		if isArrow {
 			return p.parseArrowFunction()
 		}

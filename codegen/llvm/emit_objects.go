@@ -323,11 +323,20 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 	if err != nil {
 		return err
 	}
+	return e.unpackObjectPatternInto(objPtr, objTy, s.Props, s.GetPos())
+}
+
+// unpackObjectPatternInto is emitObjectDestructuring's core, factored out
+// so a destructured function parameter (whose object pointer is already
+// known — no Init expression to resolve, see emit_func.go's
+// emitFunctionDeclAs) can share the exact same per-field unpack logic
+// instead of duplicating it.
+func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast.DestructProp, pos ast.Pos) error {
 	structIR := objTy.StructIR()
-	for _, prop := range s.Props {
+	for _, prop := range props {
 		idx, fieldTy, ok := objTy.FieldIndex(prop.Key)
 		if !ok {
-			return fmt.Errorf("%d:%d: object has no field '%s'", s.GetPos().Line, s.GetPos().Col, prop.Key)
+			return fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
 		}
 		fieldTy = e.canonicalizeClassTy(fieldTy)
 		gepReg := e.freshReg()
@@ -421,6 +430,9 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "groupBy", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[1], []Type{elemTy})

@@ -752,3 +752,187 @@ const arr: number[] = Array.from(x)
 		t.Fatal("expected a compile error for Array.from on a non-iterable")
 	}
 }
+
+// --- Array-of-arrays (nested array) storage representation (TDD-00029) ---
+//
+// A nested array element is boxed (heap ptr to a malloc'd {ptr,i64} pair) so
+// an outer array's backing buffer stays a uniform 8-byte-per-slot layout
+// regardless of nesting — see codegen/llvm/emit_arrays_core.go's
+// boxArrayValue/loadArrayElem/storeArrayElem and docs/adr/ADR-00105.md.
+// Indexing, destructuring, for...of, assignment, and the copy/insert-based
+// methods (concat/reverse/slice/splice/fill/at/with/push/pop/shift/unshift/
+// copyWithin/values/entries) are all supported; a callback-invoking or
+// scalar-register-comparing method (map/filter/forEach/reduce/find*/some/
+// every/sort/indexOf/includes/join/Object.groupBy) on a nested-array element
+// is a deliberate, clean compile-time rejection instead (see
+// TestE2ENestedArrayHOFRejectedCleanly below) — closures don't yet decompose
+// an array-typed parameter into (ptr, i64) the way a named function call's
+// own ABI already does, a separate, unrelated gap.
+
+func TestE2ENestedArrayIndexingReadWrite(t *testing.T) {
+	assertOutput(t, `
+const matrix: number[][] = [[1, 2, 3], [4, 5, 6]];
+console.log(matrix.length);
+console.log(matrix[0].length);
+console.log(matrix[0][0]);
+console.log(matrix[1][2]);
+matrix[0][1] = 99;
+console.log(matrix[0][1]);
+matrix[1] = [7, 8, 9];
+console.log(matrix[1][0]);
+console.log(matrix[1].length);
+`, "2\n3\n1\n6\n99\n7\n3")
+}
+
+func TestE2ENestedArrayForOfAndDestructuring(t *testing.T) {
+	assertOutput(t, `
+const matrix: number[][] = [[1, 2], [3, 4]];
+for (const row of matrix) {
+  console.log(row.length);
+  for (const v of row) {
+    console.log(v);
+  }
+}
+const [first, second] = matrix;
+console.log(first[0]);
+console.log(second[1]);
+`, "2\n1\n2\n2\n3\n4\n1\n4")
+}
+
+func TestE2ENestedArrayOfStrings(t *testing.T) {
+	assertOutput(t, `
+const strs: string[][] = [["a", "b"], ["c"]];
+console.log(strs[0][1]);
+console.log(strs[1][0]);
+`, "b\nc")
+}
+
+func TestE2ENestedArrayJSONStringify(t *testing.T) {
+	assertOutput(t, `
+const matrix: number[][] = [[1, 2], [3, 4]];
+console.log(JSON.stringify(matrix));
+const obj = { grid: [[1, 2], [3, 4]] };
+console.log(JSON.stringify(obj));
+`, `[[1,2],[3,4]]`+"\n"+`{"grid":[[1,2],[3,4]]}`)
+}
+
+func TestE2ENestedArrayAtWithFillPushPop(t *testing.T) {
+	assertOutput(t, `
+const matrix: number[][] = [[1, 2], [3, 4]];
+console.log(matrix.at(0)[0]);
+console.log(matrix.at(-1)[1]);
+const withReplaced = matrix.with(0, [9, 9]);
+console.log(withReplaced[0][0]);
+console.log(matrix[0][0]);
+matrix.push([5, 6]);
+console.log(matrix.length);
+console.log(matrix.pop()[0]);
+console.log(matrix.length);
+`, "1\n4\n9\n1\n3\n5\n2")
+}
+
+func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
+	cases := []string{
+		`const m: number[][] = [[1,2]]; m.map((row) => row.length);`,
+		`const m: number[][] = [[1,2]]; m.forEach((row) => console.log(row.length));`,
+		`const m: number[][] = [[1,2]]; m.filter((row) => row.length > 0);`,
+		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
+		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
+		`const m: number[][] = [[1,2]]; m.sort();`,
+		`const m: number[][] = [[1,2]]; m.join(",");`,
+		`const m = new Array<number[]>(3);`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a compile error for nested-array HOF/construction, got none for: %s", src)
+		}
+	}
+}
+
+// --- .flat(depth?) / .flatMap(fn) ---
+//
+// This compiler's arrays are statically typed with a fixed nesting depth,
+// so depth has to be a compile-time constant (a literal, or the bare
+// `Infinity` identifier) rather than a general runtime expression — each
+// level of flattening unwraps one level of the receiver's own static array
+// type, and the result's type has to be knowable at compile time. See
+// codegen/llvm/emit_arrays_transform.go's resolveFlatDepth.
+
+func TestE2EArrayFlatDefaultDepth(t *testing.T) {
+	assertOutput(t, `
+const a: number[][] = [[1, 2], [3, 4, 5], []]
+const flat = a.flat()
+console.log(flat.length)
+console.log(flat[0])
+console.log(flat[4])
+`, "5\n1\n5")
+}
+
+func TestE2EArrayFlatNonNestedIsShallowCopy(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [1, 2, 3]
+const flat = a.flat()
+console.log(flat.length)
+console.log(flat[0])
+a[0] = 99
+console.log(flat[0])
+`, "3\n1\n1")
+}
+
+func TestE2EArrayFlatExplicitDepth(t *testing.T) {
+	assertOutput(t, `
+const c: number[][][] = [[[1, 2], [3]], [[4, 5, 6]]]
+const flat2 = c.flat(2)
+console.log(flat2.length)
+console.log(flat2[0])
+console.log(flat2[5])
+const flat0 = c.flat(0)
+console.log(flat0.length)
+console.log(flat0[0].length)
+`, "6\n1\n6\n2\n2")
+}
+
+func TestE2EArrayFlatInfinity(t *testing.T) {
+	assertOutput(t, `
+const c: number[][][] = [[[1, 2], [3]], [[4, 5, 6]]]
+const flat = c.flat(Infinity)
+console.log(flat.length)
+console.log(flat[0])
+console.log(flat[5])
+`, "6\n1\n6")
+}
+
+func TestE2EArrayFlatMapArrayCallback(t *testing.T) {
+	assertOutput(t, `
+const b: number[] = [1, 2, 3]
+const doubled = b.flatMap((x) => [x, x * 10])
+console.log(doubled.length)
+console.log(doubled[0])
+console.log(doubled[1])
+console.log(doubled[5])
+`, "6\n1\n10\n30")
+}
+
+func TestE2EArrayFlatMapScalarCallback(t *testing.T) {
+	assertOutput(t, `
+const b: number[] = [1, 2, 3]
+const doubled = b.flatMap((x) => x * 2)
+console.log(doubled.length)
+console.log(doubled[0])
+console.log(doubled[2])
+`, "3\n2\n6")
+}
+
+func TestE2EArrayFlatDepthRejectedWhenNotCompileTimeConstant(t *testing.T) {
+	cases := []string{
+		`const a: number[][] = [[1]]; const d = 1; a.flat(d);`,
+		`const a: number[][] = [[1]]; a.flat(-1);`,
+		`const a: number[][] = [[1]]; a.flat(1.5);`,
+		`const a: number[][] = [[1]]; a.flat(1, 2);`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a compile error for a non-compile-time-constant flat() depth, got none for: %s", src)
+		}
+	}
+}

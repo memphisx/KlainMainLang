@@ -847,6 +847,47 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if len(ex.Args) == 2 {
 					return e.inferExprType(ex.Args[1])
 				}
+			case "flat":
+				// Mirrors emitArrayFlat's own unwrap loop exactly (emit_arrays_transform.go)
+				// so an unannotated `const x = arr.flat(N)` infers the same
+				// element type codegen actually produces. Best-effort here —
+				// an invalid depth falls back to the default (1) rather than
+				// erroring, since resolveFlatDepth's own error is what
+				// actually surfaces to the user when emitArrayFlat runs.
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray && objTy.ElemType != nil {
+					depth := 1
+					if d, err := e.resolveFlatDepth(ex.Args, ex.GetPos()); err == nil {
+						depth = d
+					}
+					curElemTy := *objTy.ElemType
+					for i := 0; i < depth && curElemTy.IsArray && curElemTy.ElemType != nil; i++ {
+						curElemTy = *curElemTy.ElemType
+					}
+					return ArrayOf(curElemTy)
+				}
+			case "flatMap":
+				// Same "map"-shaped inference above, plus flatMap's own fixed
+				// one-level unwrap when the callback returns an array —
+				// mirrors emitArrayFlatMap exactly.
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray && len(ex.Args) == 1 {
+					if af, ok := ex.Args[0].(*ast.ArrowFunction); ok {
+						var retTy Type
+						if af.RetType != nil {
+							retTy = e.resolveType(af.RetType)
+						} else if af.Body != nil {
+							retTy = e.inferExprType(af.Body)
+						} else {
+							retTy = TypeI64
+						}
+						if retTy.IsArray && retTy.ElemType != nil {
+							return ArrayOf(*retTy.ElemType)
+						}
+						return ArrayOf(retTy)
+					}
+					return objTy
+				}
 			}
 		}
 	case *ast.UnaryExpression:

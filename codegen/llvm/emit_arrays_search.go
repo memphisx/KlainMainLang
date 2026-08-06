@@ -13,6 +13,9 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "indexOf", pos); err != nil {
+		return Value{}, err
+	}
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -71,6 +74,9 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "includes", pos); err != nil {
 		return Value{}, err
 	}
 	needleVal, err := e.emitExpr(args[0])
@@ -132,6 +138,9 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "findIndex", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -202,6 +211,9 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "findLast", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -277,6 +289,9 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "findLastIndex", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})

@@ -5,19 +5,39 @@ import (
 	"fmt"
 )
 
-// emitJSONStringifyArray builds a JSON array "[e1,e2,...]" from any element
-// type by looping at runtime and delegating each element to
-// emitJSONStringifyValue (which already correctly handles numbers, strings,
-// booleans, and nested objects) — the same runtime accumulator-loop shape
-// emitArrayJoin uses, just bracketed and JSON-encoding each element instead of
-// plain-string-joining. Replaces the old num/string-only special-cased
-// C helpers, which silently mishandled boolean and object element types.
+// emitJSONStringifyArray resolves arrExpr and delegates to
+// emitJSONStringifyArrayData — see that function's doc comment.
 func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos) (Value, error) {
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(arrExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitJSONStringifyArrayData(ptrReg, lenReg, elemTy)
+}
 
+// emitJSONStringifyArrayValue is emitJSONStringifyArray's counterpart for an
+// array that's already an evaluated {ptr,i64} aggregate Value rather than an
+// unevaluated ast.Expression — used by emitJSONStringifyValue's own IsArray
+// branch below to recurse into a nested-array element (TDD-00029), which
+// loadArrayElem has already unboxed into exactly this shape by the time it
+// gets here.
+func (e *Emitter) emitJSONStringifyArrayValue(val Value) (Value, error) {
+	ptrReg := e.freshReg()
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+	return e.emitJSONStringifyArrayData(ptrReg, lenReg, *val.Ty.ElemType)
+}
+
+// emitJSONStringifyArrayData is emitJSONStringifyArray/
+// emitJSONStringifyArrayValue's shared core: builds a JSON array
+// "[e1,e2,...]" from any element type by looping at runtime and delegating
+// each element to emitJSONStringifyValue (which already correctly handles
+// numbers, strings, booleans, nested objects, and — recursively, via
+// emitJSONStringifyArrayValue — nested arrays) — the same runtime
+// accumulator-loop shape emitArrayJoin uses, just bracketed and JSON-
+// encoding each element instead of plain-string-joining.
+func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type) (Value, error) {
 	accAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("["), accAlloca))
@@ -43,10 +63,9 @@ func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos) (V
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
-	elemJSONVal, err := e.emitJSONStringifyValue(Value{Ref: inElem, Ty: elemTy})
+	inElem := e.loadArrayElem(inGep, elemTy)
+	elemJSONVal, err := e.emitJSONStringifyValue(inElem)
 	if err != nil {
 		return Value{}, err
 	}
@@ -119,8 +138,15 @@ func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 		loadReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 			gepReg, val.Ty.StructIR(), val.Ref, idx))
+		// An array-typed field's struct slot is a 16-byte {ptr,i64}
+		// aggregate (StructFieldIR, ADR-00061), not field.Ty.IR's plain
+		// "ptr" — loading with the wrong width here silently dropped the
+		// array's length (found while wiring nested-array JSON support,
+		// TDD-00029; pre-existing and independent of nesting — any
+		// array-typed object field, e.g. `{ tags: string[] }`, already hit
+		// this).
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-			loadReg, field.Ty.IR, gepReg, field.Ty.Align()))
+			loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
 		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
 
 		// Key segment: `"name":` with a leading comma after the first field.
@@ -153,6 +179,9 @@ func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 	if val.Ty.IsObject {
 		return e.emitJSONStringifyObject(val)
+	}
+	if val.Ty.IsArray {
+		return e.emitJSONStringifyArrayValue(val)
 	}
 	switch val.Ty.IR {
 	case "i1":

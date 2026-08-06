@@ -72,6 +72,27 @@ console.log(a >> 1)
 `, "8\n14\n6\n-11\n20\n5")
 }
 
+// TestE2EArithmeticCompoundAssign covers +=/-=/*=//=/%= together — %= in
+// particular had no coverage anywhere: %= wasn't even a lexer token before
+// this test was added (the lexer's '%' case never checked for a following
+// '=', unlike +/-/*//, so `x %= 3` was a parse error, not just an
+// unimplemented codegen path).
+func TestE2EArithmeticCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+let x: number = 10
+x += 5
+console.log(x)
+x -= 3
+console.log(x)
+x *= 2
+console.log(x)
+x /= 4
+console.log(x)
+x %= 4
+console.log(x)
+`, "15\n12\n24\n6\n2")
+}
+
 func TestE2EBitwiseAssign(t *testing.T) {
 	assertOutput(t, `
 let x: number = 15

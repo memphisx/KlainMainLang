@@ -106,6 +106,13 @@ type Type struct {
 	// message/name's stored contents) differ between e.g. a TypeError and a
 	// RangeError. See emit_exceptions.go's errorKinds/errorKindIDs.
 	IsError bool
+	// IsRequest marks http.listen()'s Request object (RequestType): an
+	// ordinary heap object like Response/URL, plus this flag so method-call
+	// dispatch can recognize a Request receiver — needed for
+	// `req.bodyBytes(): ArrayBuffer` (TDD-00026/ADR-00106), the one
+	// dispatched method a Request has; every other property is a plain
+	// field read via the existing object machinery, same as Response/URL.
+	IsRequest bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -409,23 +416,31 @@ func (t Type) VisibleFields() []Field {
 }
 
 // RequestType returns http.listen()'s Request object type: a plain heap
-// object (readable via the ordinary object field-access path — no
-// dispatched methods) whose fields are built by buildHTTPDispatcher, not by
-// user code. query/headers are Map<string,string> — reading them (.get(),
-// .has(), iteration, ...) needs no HTTP-specific dispatch at all, since
+// object (readable via the ordinary object field-access path, plus one
+// dispatched method — `.bodyBytes(): ArrayBuffer`, TDD-00026/ADR-00106)
+// whose fields are built by buildHTTPDispatcher, not by user code.
+// query/headers are Map<string,string> — reading them (.get(), .has(),
+// iteration, ...) needs no HTTP-specific dispatch at all, since
 // resolveMapOrSetForCall's generic arbitrary-expression branch already
 // handles any Map-typed field access. headers' keys are lowercased
 // (case-insensitive HTTP header names); query keys/values are
 // percent-decoded via the same __kml_decode_uri_component decodeURIComponent
-// already uses. See emit_http.go.
+// already uses. bodyLength is the real byte count of body (as opposed to
+// body's own strlen, which undercounts if the request body contained an
+// embedded null byte) — an implementation-only field feeding .bodyBytes(),
+// the same "hidden field backing a binary accessor" shape ResponseType's own
+// bodyLength already uses for Response.arrayBuffer(). See emit_http.go.
 func RequestType() Type {
-	return ObjectType([]Field{
+	ty := ObjectType([]Field{
 		{Name: "method", Ty: TypePtr},
 		{Name: "path", Ty: TypePtr},
 		{Name: "query", Ty: MapType(TypePtr, TypePtr)},
 		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
 		{Name: "body", Ty: TypePtr},
+		{Name: "bodyLength", Ty: TypeI64},
 	})
+	ty.IsRequest = true
+	return ty
 }
 
 // PathParsedType returns path.parse(p)'s result type: a plain heap object

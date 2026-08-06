@@ -1115,12 +1115,32 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
 			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
 			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			// Destructured array parameter — see emit_func.go's
+			// emitFunctionDeclAs for the identical reasoning (this is the
+			// same param-binding shape, just for a class method/constructor
+			// instead of a top-level function).
+			if p.ArrayPattern != nil {
+				dataPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+					return err
+				}
+				continue
+			}
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
 		} else {
 			llvmParams = append(llvmParams, fmt.Sprintf("%s %%p_%s", pty.IR, p.Name))
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+			if p.ObjectPattern != nil {
+				objPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+				if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, pos); err != nil {
+					return err
+				}
+				continue
+			}
 			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 		}
 	}

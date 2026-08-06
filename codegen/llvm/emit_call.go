@@ -91,6 +91,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}
+		if mem.Property == "bodyBytes" && e.inferExprType(mem.Object).IsRequest {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitRequestBodyBytes(objVal, ex.GetPos())
+		}
 		// User-defined class method call: instance.method(args). Checked
 		// before the long unguarded mem.Property == "<name>" chain below
 		// (push/slice/map/join/...), several of which match purely on
@@ -485,6 +492,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "sort" {
 			return e.emitArraySort(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "flat" {
+			return e.emitArrayFlat(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "flatMap" {
+			return e.emitArrayFlatMap(mem, ex.Args, ex.GetPos())
 		}
 		// TypedArray-only methods. TypedArray IS a plain array (IsArray/
 		// ElemType — see IsTypedArray's doc comment), so indexing/.length/

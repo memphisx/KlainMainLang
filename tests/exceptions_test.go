@@ -46,6 +46,37 @@ try {
 `, "err: Division by zero\nerr: Division by zero\nerr: Division by zero")
 }
 
+// TestE2EDivisionOverflowThrows covers LLVM sdiv/srem's second documented
+// UB case (distinct from a zero divisor): dividing a signed integer type's
+// minimum representable value by -1, whose mathematical result overflows
+// back into the same width (i64 MIN / -1 == 2^63, which doesn't fit in an
+// i64). Unsigned division has no equivalent case (no negative divisor to
+// trigger it), so only /, %, and /= on a signed value are exercised here.
+func TestE2EDivisionOverflowThrows(t *testing.T) {
+	assertOutput(t, `
+const minVal: number = -9223372036854775808
+const negOne: number = -1
+try {
+  console.log(minVal / negOne)
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+try {
+  console.log(minVal % negOne)
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+let x: number = -9223372036854775808
+try {
+  x /= negOne
+} catch (e) {
+  console.log('err: ' + e.message)
+}
+console.log(10 / -1)
+console.log(-9223372036854775807 / -1)
+`, "err: Division overflow\nerr: Division overflow\nerr: Division overflow\n-10\n9223372036854775807")
+}
+
 func TestE2EOptionalCatchBinding(t *testing.T) {
 	assertOutput(t, `
 try {

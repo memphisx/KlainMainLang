@@ -147,6 +147,10 @@ func (l *Lexer) NextToken() (Token, error) {
 		}
 		return l.tok(SLASH, "/", line, col), nil
 	case '%':
+		if l.peek() == '=' {
+			l.advance()
+			return l.tok(PERCENT_ASSIGN, "%=", line, col), nil
+		}
 		return l.tok(PERCENT, "%", line, col), nil
 	case '=':
 		if l.peek() == '=' {

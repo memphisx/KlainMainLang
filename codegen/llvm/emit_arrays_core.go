@@ -82,6 +82,85 @@ func (e *Emitter) storeArrayAggregateInto(val Value, ptrName, lenName string) er
 	return nil
 }
 
+// boxArrayValue heap-allocates a 16-byte {ptr, i64} box and stores val's
+// aggregate into it, returning the box pointer — the storage TDD-00029 uses
+// for a nested-array element so an outer array's backing buffer can stay a
+// uniform 8-byte-per-slot layout (elemTy.IR/Align() already report "ptr"/8
+// for an array-typed elemTy) instead of needing 16-byte slots only when the
+// element happens to itself be an array. One extra malloc + one extra
+// indirection per nested-array element access is the accepted cost — see
+// docs/tdd/TDD-00029.md's Design for the (a)-vs-(b) tradeoff this resolves.
+func (e *Emitter) boxArrayValue(val Value) string {
+	e.ensureMalloc()
+	box := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", box))
+	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", val.Ref, box))
+	return box
+}
+
+// unboxArrayValue loads the {ptr, i64} aggregate out of a box pointer
+// produced by boxArrayValue, returning it as an ordinary array Value —
+// exactly the representation every other array-producing expression already
+// returns (function return, literal, slice, ...), so nothing downstream of a
+// nested-array element read needs to know boxing happened at all.
+func (e *Emitter) unboxArrayValue(boxPtr string, elemTy Type) Value {
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, boxPtr))
+	return Value{Ref: agg, Ty: elemTy}
+}
+
+// loadArrayElem loads the value at a GEP'd array-backing-buffer slot
+// (gepReg, of type elemTy). For a nested-array element (elemTy.IsArray) the
+// slot holds a box pointer (see boxArrayValue) that's transparently unboxed
+// here; every other element type loads directly, unchanged from before
+// TDD-00029. Use this instead of a raw `load elemTy.IR, ptr gepReg` at any
+// array-element-read call site so nested arrays work for free.
+func (e *Emitter) loadArrayElem(gepReg string, elemTy Type) Value {
+	if elemTy.IsArray {
+		boxPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, gepReg))
+		return e.unboxArrayValue(boxPtr, elemTy)
+	}
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, elemTy.IR, gepReg, elemTy.Align()))
+	return Value{Ref: reg, Ty: elemTy}
+}
+
+// storeArrayElem stores val (of type elemTy) into a GEP'd array-backing-
+// buffer slot. For a nested-array element, val's {ptr,i64} aggregate is
+// boxed first (see boxArrayValue) and the box pointer is what's actually
+// stored in the slot; every other element type stores directly, unchanged
+// from before TDD-00029. Use this instead of a raw
+// `store elemTy.IR val.Ref, ptr gepReg` at any array-element-write call site.
+func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
+	if elemTy.IsArray {
+		box := e.boxArrayValue(val)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", box, gepReg))
+		return
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+}
+
+// rejectNestedArrayElem returns a clear compile-time error when elemTy is
+// itself an array — used by array operations that either invoke a callback
+// with the loaded element (map/filter/forEach/reduce/find*/some/every/sort's
+// comparator) or compare/consume elements as bare, elemTy.IR-typed scalar
+// registers (indexOf/includes/join) — neither is safe yet for a boxed
+// nested-array element: closures don't decompose an array-typed parameter
+// into (ptr, i64) the way a named top-level function call's own ABI already
+// does (emitCallToFuncSig), and a raw register can't be compared/stringified
+// without knowing it's actually a box pointer needing an unbox first.
+// Indexing, destructuring, for...of, and the copy/insert-based methods
+// (concat/reverse/slice/splice/fill/at/with/...) don't have this problem —
+// they route through loadArrayElem/storeArrayElem instead and remain fully
+// supported for nested arrays. See docs/tdd/TDD-00029.md.
+func (e *Emitter) rejectNestedArrayElem(elemTy Type, opName string, pos ast.Pos) error {
+	if elemTy.IsArray {
+		return fmt.Errorf("%d:%d: .%s() does not yet support an array-of-arrays element type — see docs/tdd/TDD-00029.md", pos.Line, pos.Col, opName)
+	}
+	return nil
+}
+
 // emitSpreadArrayLitData handles array literals that contain one or more
 // spread elements: computes total length at runtime, allocates one
 // contiguous buffer, and fills it using a write cursor (memcpy per spread,
@@ -168,7 +247,7 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataReg, cVal))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+			e.storeArrayElem(gepReg, elemTy, val)
 			newC := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newC, cVal))
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
@@ -196,7 +275,7 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		val = e.coerce(val, elemTy)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+		e.storeArrayElem(gepReg, elemTy, val)
 	}
 	return dataReg, n, nil
 }
@@ -227,23 +306,10 @@ func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *T
 		elemTy = *e.inferArrayType(lit).ElemType
 	}
 	// Array-of-arrays (elemTy itself an array type — number[][], a nested
-	// literal, etc.) is a real, separate gap, not something TDD-00028's own
-	// fix happens to unblock: an array's backing buffer is a flat sequence
-	// of fixed-width, elemTy-sized slots (see emitArrayLiteralData), sized
-	// for a scalar/pointer element — but a nested array's own value is a
-	// {ptr, i64} *pair*, which doesn't fit in one such slot without a
-	// boxing/indirection layer this compiler doesn't have (every array
-	// read/write/HOF/.length call site throughout emit_arrays_*.go would
-	// need to know about it). Rejected here with a clear, deliberate error
-	// instead of silently reaching a confusing clang-stage type-mismatch a
-	// few instructions later (found exactly that way while implementing
-	// this fix: `store i64 %aggregateReg, ptr %slot` — a 16-byte {ptr,i64}
-	// value forced into an 8-byte slot). Real array-of-arrays support is
-	// its own follow-up design question, not scoped here.
-	if elemTy.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: nested arrays (array-of-arrays) are not yet supported as a value — see docs/tdd/TDD-00028.md", lit.GetPos().Line, lit.GetPos().Col)
-	}
-
+	// literal, etc.): each element is boxed (see boxArrayValue/
+	// storeArrayElem, TDD-00029) so the backing buffer below stays a
+	// uniform 8-byte-per-slot layout regardless of nesting — no special
+	// casing needed past storeArrayElem itself.
 	hasSpread := false
 	for _, elem := range lit.Elements {
 		if _, ok := elem.(*ast.SpreadElement); ok {
@@ -280,6 +346,17 @@ func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *T
 // sibling of emitArrayVarDecl's own *ast.NewArrayExpression branch, for the
 // same TDD-00028 reasons emitArrayLiteralAggregate exists.
 func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy Type) (Value, error) {
+	// A dynamic-size array is calloc'd (zero-initialized) below. For a
+	// scalar/pointer elemTy that's a well-defined zero value; for a nested
+	// array element it would zero-init every slot's box pointer to null,
+	// and reading an unwritten element (loadArrayElem's unbox) would
+	// dereference that null box. Rather than special-case a null-box read
+	// path for a construction form real code is unlikely to combine with
+	// nested arrays anyway, this is deliberately out of scope for now — use
+	// an array literal (`[[1,2],[3,4]]`) instead, which never has this gap.
+	if elemTy.IsArray {
+		return Value{}, fmt.Errorf("%d:%d: new Array<T>(n) does not yet support an array-typed element (nested arrays) — use an array literal instead. See docs/tdd/TDD-00029.md", na.GetPos().Line, na.GetPos().Col)
+	}
 	sizeVal, err := e.emitExpr(na.Size)
 	if err != nil {
 		return Value{}, err
@@ -300,17 +377,40 @@ func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
 	if err != nil {
 		return err
 	}
-	for i, name := range s.Names {
+	return e.unpackArrayPatternInto(dataPtr, elemTy, s.Names)
+}
+
+// unpackArrayPatternInto is emitArrayDestructuring's core, factored out so
+// a destructured function parameter (whose data pointer is already known —
+// no Init expression to resolve, see emit_func.go's emitFunctionDeclAs) can
+// share the exact same per-element unpack logic instead of duplicating it.
+func (e *Emitter) unpackArrayPatternInto(dataPtr string, elemTy Type, names []string) error {
+	for i, name := range names {
 		if name == "" {
 			continue
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
-		valReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, elemTy.IR, gepReg, elemTy.Align()))
+		val := e.loadArrayElem(gepReg, elemTy)
+		// A destructured element that's itself an array needs the two-alloca
+		// "Named Symbol" representation (Ptr+LenPtr — the project's own Array value
+		// duality note), not the single scalar alloca every other element
+		// type uses, so its own .length/indexing/etc. work afterward. See
+		// docs/tdd/TDD-00029.md.
+		if elemTy.IsArray {
+			ptrName := e.freshReg()
+			lenName := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
+			if err := e.storeArrayAggregateInto(val, ptrName, lenName); err != nil {
+				return err
+			}
+			e.define(name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: elemTy})
+			continue
+		}
 		localPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, elemTy.IR, elemTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, valReg, localPtr, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, localPtr, elemTy.Align()))
 		e.define(name, Symbol{Ptr: localPtr, Ty: elemTy})
 	}
 	return nil

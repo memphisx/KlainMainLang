@@ -113,3 +113,52 @@ function firstPlusLast(arr: number[]): number {
 }
 console.log(firstPlusLast(coords))           // 60  (10 + 50)
 console.log(firstPlusLast(range(1, 5)))      // 1 + 5 = 6
+
+// ─── Destructured function parameters ───────────────────────────────────────
+// Unlike a plain scalar parameter, a destructured one always needs an
+// explicit type annotation — there's no sensible unannotated default for a
+// pattern the way `number` is for a bare name.
+
+interface Point { x: number; y: number }
+
+function addPoints({ x, y }: Point, other: Point): number {
+    return x + y + other.x + other.y
+}
+console.log(addPoints({ x: 1, y: 2 }, { x: 10, y: 20 }))  // 33
+
+// Renaming works in parameter position too.
+function describe({ x: px, y: py }: Point): string {
+    return px + "," + py
+}
+console.log(describe({ x: 5, y: 6 }))  // 5,6
+
+function sumFirstTwo([a, b]: number[]): number {
+    return a + b
+}
+console.log(sumFirstTwo(coords))  // 30 (10 + 20)
+
+// Holes work in a parameter pattern the same as in a destructuring statement.
+function skipFirst([, b, c]: number[]): number {
+    return b + c
+}
+console.log(skipFirst([100, 200, 300]))  // 500
+
+// Arrow functions support object-destructured parameters too (array-
+// destructured parameters don't, yet — array-typed closure parameters
+// aren't supported at all independent of destructuring).
+const area = ({ x, y }: Point): number => x * y
+console.log(area({ x: 5, y: 6 }))  // 30
+
+// Class methods and constructors support destructured parameters as well.
+class Vec {
+    sum: number
+    constructor({ x, y }: Point) {
+        this.sum = x + y
+    }
+    static add({ x, y }: Point, other: Point): number {
+        return x + y + other.x + other.y
+    }
+}
+const v = new Vec({ x: 3, y: 4 })
+console.log(v.sum)                                  // 7
+console.log(Vec.add({ x: 1, y: 1 }, { x: 2, y: 2 })) // 6

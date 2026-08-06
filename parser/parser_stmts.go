@@ -222,6 +222,94 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		rest := p.match(lexer.ELLIPSIS)
+
+		// Destructured parameter (`{x, y}: T` / `[a, b]: T[]`) — a
+		// deliberately narrower V1 than a full binding pattern: no nesting,
+		// no per-field default values, and (checked below, after the type
+		// annotation) always requires an explicit type annotation, since
+		// unlike a plain scalar param there's no sensible unannotated
+		// default to fall back to (registerFunctions defaults a bare param
+		// to `number`; there's no "number" shape for a pattern). Combining
+		// a pattern with `...`/`?`/a whole-parameter `= default` is real,
+		// valid TS but adds real complexity (rest must bind a collector,
+		// not a nested pattern at all; a pattern default needs a null/
+		// undefined check on the whole incoming value before unpacking) —
+		// out of scope for V1, rejected below with a clear error rather
+		// than silently mishandled.
+		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
+			if rest {
+				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
+			}
+			isObject := p.check(lexer.LBRACE)
+			var arrPat []string
+			var objPat []ast.DestructProp
+			p.advance() // consume '{' or '['
+			if isObject {
+				for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+					keyTok, err := p.expect(lexer.IDENT)
+					if err != nil {
+						return nil, err
+					}
+					local := keyTok.Literal
+					if p.check(lexer.COLON) {
+						p.advance()
+						aliasTok, err := p.expect(lexer.IDENT)
+						if err != nil {
+							return nil, err
+						}
+						local = aliasTok.Literal
+					}
+					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local})
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RBRACE); err != nil {
+					return nil, err
+				}
+			} else {
+				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+					if p.check(lexer.COMMA) {
+						p.advance() // hole — consume comma, record skip
+						arrPat = append(arrPat, "")
+						continue
+					}
+					nameTok, err := p.expect(lexer.IDENT)
+					if err != nil {
+						return nil, err
+					}
+					arrPat = append(arrPat, nameTok.Literal)
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RBRACKET); err != nil {
+					return nil, err
+				}
+			}
+			var ta *ast.TypeAnnotation
+			if p.check(lexer.COLON) {
+				p.advance()
+				var err error
+				ta, err = p.parseTypeAnnotation("ts")
+				if err != nil {
+					return nil, err
+				}
+			}
+			if ta == nil {
+				return nil, fmt.Errorf("%d:%d: a destructured parameter requires an explicit type annotation", p.peek().Line, p.peek().Col)
+			}
+			if p.check(lexer.ASSIGN) {
+				return nil, fmt.Errorf("%d:%d: a default value on a destructured parameter is not yet supported", p.peek().Line, p.peek().Col)
+			}
+			syntheticName := fmt.Sprintf("__param%d", len(params))
+			params = append(params, ast.Param{Name: syntheticName, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat})
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
+
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err

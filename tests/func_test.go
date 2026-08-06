@@ -261,3 +261,170 @@ function log(msg: string) { console.log(msg) }
 log("hello")
 `, "hello")
 }
+
+// --- Destructured function parameters ---
+//
+// `parser/parser_stmts.go`'s `parseParamList` previously unconditionally
+// `expect`ed IDENT for every parameter — a destructuring pattern in
+// parameter position was a parse error. V1 scope: object and array
+// patterns (both, including array holes and object-field renaming), no
+// nesting, an explicit type annotation always required (there's no
+// sensible unannotated default for a pattern, unlike a plain scalar
+// param), and no combination with `...`/a whole-parameter default value.
+// Covers named function declarations, arrow functions (which parse their
+// own, separate parameter list — parser/parser_literals.go's
+// parseArrowFunction, not parseParamList), and class methods/constructors
+// (emit_classes.go's own, third separate param-binding loop) — three
+// genuinely independent implementations that each needed the identical
+// fix, not one shared code path.
+
+func TestE2EDestructuredObjectParamFunctionDecl(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function addPoints(p1: Point, p2: Point): number {
+  return p1.x + p1.y + p2.x + p2.y
+}
+function sum({ x, y }: Point): number {
+  return x + y
+}
+console.log(sum({ x: 3, y: 4 }))
+console.log(addPoints({ x: 1, y: 1 }, { x: 2, y: 2 }))
+`, "7\n6")
+}
+
+func TestE2EDestructuredObjectParamRenaming(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function show({ x: px, y: py }: Point): string {
+  return px + "," + py
+}
+console.log(show({ x: 1, y: 2 }))
+`, "1,2")
+}
+
+func TestE2EDestructuredArrayParamFunctionDecl(t *testing.T) {
+	assertOutput(t, `
+function sumFirstTwo([a, b]: number[]): number {
+  return a + b
+}
+const arr: number[] = [5, 6, 7]
+console.log(sumFirstTwo(arr))
+`, "11")
+}
+
+func TestE2EDestructuredArrayParamWithHole(t *testing.T) {
+	assertOutput(t, `
+function skipFirst([, b, c]: number[]): number {
+  return b + c
+}
+console.log(skipFirst([100, 200, 300]))
+`, "500")
+}
+
+func TestE2EDestructuredObjectParamArrowFunction(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const area = ({ x, y }: Point): number => x * y
+console.log(area({ x: 5, y: 6 }))
+`, "30")
+}
+
+// TestE2EDestructuredArrowParamShadowsOuterSameNamedVariable is a
+// regression test for a real bug found while building this feature:
+// gatherCaptures (emit_func.go, the closure free-variable scanner used to
+// decide what an arrow function needs to capture from its enclosing scope)
+// only knew about a parameter's synthetic internal name (e.g. "__param0"
+// for a destructured param), never the pattern's own field/element names.
+// A destructured field sharing a name with an outer-scope variable (`x`/`y`
+// here, from a top-level array-destructuring statement) was wrongly
+// free-variable-scanned as a capture of the *outer* binding — and since
+// capture setup runs after parameter unpacking within the same function,
+// it silently overwrote the correct local (parameter) binding with the
+// captured (outer) one. `x * y` computed 10 * 20 (the outer values) instead
+// of 5 * 6 (the actual arguments) before the fix.
+func TestE2EDestructuredArrowParamShadowsOuterSameNamedVariable(t *testing.T) {
+	assertOutput(t, `
+const coords: number[] = [10, 20, 30]
+const [x, y, z] = coords
+console.log(x)
+console.log(y)
+interface Point { x: number; y: number }
+const area = ({ x, y }: Point): number => x * y
+console.log(area({ x: 5, y: 6 }))
+console.log(x)
+console.log(y)
+`, "10\n20\n30\n10\n20")
+}
+
+// TestE2EParenthesizedObjectLiteralStillParsesAsExpression confirms the
+// arrow-function-vs-parenthesized-expression disambiguation lookahead
+// (parser/parser_literals.go's destructuredArrowParamLookahead) doesn't
+// misfire on a parenthesized object/array literal — which starts
+// identically to a destructured arrow parameter (`({` / `([`) and is only
+// told apart by whether an explicit `: Type` annotation follows the
+// closing brace/bracket.
+func TestE2EParenthesizedObjectLiteralStillParsesAsExpression(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = ({ x: 1, y: 2 })
+console.log(p.x)
+console.log(p.y)
+const arr: number[] = ([1, 2, 3])
+console.log(arr[1])
+`, "1\n2\n2")
+}
+
+func TestE2EDestructuredObjectParamClassMethodAndConstructor(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+class Vec {
+  sum: number
+  constructor({ x, y }: Point) {
+    this.sum = x + y
+  }
+  static add({ x, y }: Point, other: Point): number {
+    return x + y + other.x + other.y
+  }
+}
+const v = new Vec({ x: 3, y: 4 })
+console.log(v.sum)
+console.log(Vec.add({ x: 1, y: 1 }, { x: 2, y: 2 }))
+`, "7\n6")
+}
+
+func TestE2EDestructuredArrayParamOnArrowFunctionRejected(t *testing.T) {
+	// Array-typed closure parameters aren't supported at all yet
+	// (independent of destructuring — see ADR-00105's Investigation), so a
+	// destructured *array* param is specifically rejected on an arrow
+	// function/closure rather than silently miscompiling; the object-
+	// pattern case above works fine since object-typed closure params were
+	// never affected by that gap.
+	_, err := parseAndCompile(`
+const f = ([a, b]: number[]): number => a + b
+console.log(f([1, 2]))
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a destructured array parameter on an arrow function, got none")
+	}
+}
+
+func TestE2EDestructuredParamRequiresTypeAnnotation(t *testing.T) {
+	_, err := parseAndCompile(`function f({x, y}) { return x + y }`)
+	if err == nil {
+		t.Fatal("expected a compile error for a destructured parameter with no type annotation, got none")
+	}
+}
+
+func TestE2EDestructuredParamWithDefaultRejected(t *testing.T) {
+	_, err := parseAndCompile(`function f({x, y}: {x:number,y:number} = {x:1,y:2}): number { return x + y }`)
+	if err == nil {
+		t.Fatal("expected a compile error for a default value on a destructured parameter, got none")
+	}
+}
+
+func TestE2ERestDestructuredParamRejected(t *testing.T) {
+	_, err := parseAndCompile(`function f(...{x, y}: number[]) {}`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest parameter that's also a destructuring pattern, got none")
+	}
+}

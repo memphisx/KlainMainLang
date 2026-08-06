@@ -98,6 +98,18 @@ type Param struct {
 	Rest     bool       // true when declared with ...
 	Default  Expression // non-nil when declared with = expr
 	Optional bool       // true when declared with ?
+	// ArrayPattern/ObjectPattern: non-nil exactly when this parameter is a
+	// destructuring pattern (`function f([a, b]: number[])` /
+	// `function f({x, y}: T)`) rather than a plain bindable name — at most
+	// one is ever non-nil. Name still holds a synthetic internal name
+	// (e.g. "__param0") in this case, used for LLVM parameter naming and
+	// error messages; the pattern fields are what codegen actually unpacks
+	// into real local bindings. Mirrors ArrayDestructuring.Names/
+	// ObjectDestructuring.Props' own shapes so the same unpack codegen can
+	// be shared between a destructuring statement and a destructured
+	// parameter.
+	ArrayPattern  []string
+	ObjectPattern []DestructProp
 }
 
 type ReturnStatement struct {

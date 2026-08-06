@@ -94,6 +94,7 @@ func TestArithmeticOperators(t *testing.T) {
 	assertTokens(t, "a * b", []tok{{lexer.IDENT, "a"}, {lexer.STAR, "*"}, {lexer.IDENT, "b"}})
 	assertTokens(t, "a / b", []tok{{lexer.IDENT, "a"}, {lexer.SLASH, "/"}, {lexer.IDENT, "b"}})
 	assertTokens(t, "a % b", []tok{{lexer.IDENT, "a"}, {lexer.PERCENT, "%"}, {lexer.IDENT, "b"}})
+	assertTokens(t, "a %= b", []tok{{lexer.IDENT, "a"}, {lexer.PERCENT_ASSIGN, "%="}, {lexer.IDENT, "b"}})
 }
 
 func TestComparisonOperators(t *testing.T) {

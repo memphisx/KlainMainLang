@@ -97,12 +97,39 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
 			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
 			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			// A destructured array parameter (`[a, b]: number[]`) unpacks
+			// straight from the raw incoming (ptr, len) pair — no need to
+			// bind the whole array under its own synthetic name first, since
+			// nothing else in the function body can reference it by that
+			// name anyway (it was never real source syntax). See
+			// docs/tdd/TDD-00029.md's own two-alloca array Symbol shape,
+			// reused unchanged by unpackArrayPatternInto for a nested-array
+			// destructured element.
+			if p.ArrayPattern != nil {
+				dataPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+					return err
+				}
+				continue
+			}
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
 		} else {
 			llvmParams = append(llvmParams, fmt.Sprintf("%s %%p_%s", pty.IR, p.Name))
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+			// A destructured object parameter (`{x, y}: T`) unpacks straight
+			// from the raw incoming object pointer — same reasoning as the
+			// array-pattern branch above.
+			if p.ObjectPattern != nil {
+				objPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+				if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, decl.GetPos()); err != nil {
+					return err
+				}
+				continue
+			}
 			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 		}
 	}
@@ -348,9 +375,27 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 // cannot be captured yet (would require two env slots).
 func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 	// Build the initial bound set from the arrow function's own params.
+	// A destructured param's real bound names are its pattern's field/
+	// element names, not p.Name itself (a synthetic internal name, e.g.
+	// "__param0", never referenced by the body) — found live while
+	// implementing destructured params: without this, a pattern field
+	// sharing a name with an outer-scope variable (e.g. `x`/`y` from a
+	// top-level `const [x, y] = ...`) was wrongly free-variable-scanned as
+	// a capture of the *outer* binding, and the capture-setup code below
+	// (which runs after the param-unpack code, both in the same function)
+	// then silently overwrote the correct local binding with the captured
+	// one — a real, wrong-answer bug, not just a rejection.
 	bound := make(map[string]bool, len(af.Params))
 	for _, p := range af.Params {
 		bound[p.Name] = true
+		for _, n := range p.ArrayPattern {
+			if n != "" {
+				bound[n] = true
+			}
+		}
+		for _, prop := range p.ObjectPattern {
+			bound[prop.Local] = true
+		}
 	}
 	// Collect all identifier names referenced in the body.
 	refs := make(map[string]bool)
@@ -442,10 +487,31 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	paramStr := "ptr %env"
 	for i, p := range af.Params {
 		pty := paramTypes[i]
+		// Array-typed closure parameters are a separate, deeper, pre-existing
+		// gap this loop already has independent of destructuring at all:
+		// unlike a named top-level function (emitFunctionDeclAs), a closure
+		// always passes every parameter as one plain `pty.IR`-typed value,
+		// never decomposing an array into its (ptr, i64) pair the way a
+		// named function call's own ABI does — see ADR-00105's Investigation
+		// for where this was first found. A `[a, b]: T[]` destructured
+		// parameter would silently bind only the raw data pointer here,
+		// dropping the length entirely, so it's rejected with a clear error
+		// instead rather than left to miscompile.
+		if p.ArrayPattern != nil {
+			return fmt.Errorf("%d:%d: a destructured array parameter is not yet supported on an arrow function/closure (array-typed closure parameters aren't supported at all yet) — use a named function instead", af.GetPos().Line, af.GetPos().Col)
+		}
 		paramStr += fmt.Sprintf(", %s %%p_%s", pty.IR, p.Name)
 		ptrName := "%v_" + p.Name
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+		if p.ObjectPattern != nil {
+			objPtrReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+			if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, af.GetPos()); err != nil {
+				return err
+			}
+			continue
+		}
 		e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 	}
 
@@ -484,11 +550,11 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.emitTerminator("unreachable")
 		}
 	} else if af.Body != nil {
-		val, err := e.emitExpr(af.Body)
-		if err != nil {
-			return err
-		}
 		if af.IsAsync {
+			val, err := e.emitExpr(af.Body)
+			if err != nil {
+				return err
+			}
 			if e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
 				val = e.coerce(val, e.currentPromiseTy)
 				align := e.currentPromiseTy.Align()
@@ -497,10 +563,59 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			}
 			e.emitAsyncEpilogue()
 		} else if retTy.IR == "void" {
+			if _, err := e.emitExpr(af.Body); err != nil {
+				return err
+			}
 			e.emitTerminator("ret void")
+		} else if retTy.IsArray {
+			// Mirrors emitReturn's own IsArray branch (emit_stmts.go) —
+			// same named-array-identifier vs. arbitrary-expression split,
+			// and the same hint-aware evaluation (emitExprWithObjectHint)
+			// so an array-literal body's element type coerces against the
+			// declared/inferred return type instead of self-inferring.
+			// Found missing while wiring .flatMap(): an arrow-function body
+			// returning an array (`(x) => [x, x*10]`) was the first thing
+			// to actually exercise an expression-bodied arrow function
+			// returning an array — its `ret` instruction used the array's
+			// scalar `ptr` IR instead of the aggregate `{ptr, i64}`
+			// LLVMRetType, a hard clang-stage type mismatch, not survivable
+			// at all (a block-bodied arrow/named function already went
+			// through emitReturn's own correct array-aware path via
+			// emitStmt — only the expression-body shortcut here missed it).
+			if id, ok := af.Body.(*ast.Identifier); ok {
+				sym, ok := e.lookup(id.Name)
+				if !ok {
+					return fmt.Errorf("%d:%d: undefined variable '%s'", af.Body.GetPos().Line, af.Body.GetPos().Col, id.Name)
+				}
+				if !sym.Ty.IsArray {
+					return fmt.Errorf("%d:%d: '%s' is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col, id.Name)
+				}
+				ptrReg := e.freshReg()
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+				r0 := e.freshReg()
+				r1 := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
+				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+				e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
+			} else {
+				arrVal, err := e.emitExprWithObjectHint(af.Body, retTy)
+				if err != nil {
+					return err
+				}
+				if !arrVal.Ty.IsArray {
+					return fmt.Errorf("%d:%d: expression is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col)
+				}
+				e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
+			}
 		} else {
+			val, err := e.emitExprWithObjectHint(af.Body, retTy)
+			if err != nil {
+				return err
+			}
 			val = e.coerce(val, retTy)
-			e.emitTerminator(fmt.Sprintf("ret %s %s", val.Ty.IR, val.Ref))
+			e.emitTerminator(fmt.Sprintf("ret %s %s", retTy.LLVMRetType(), val.Ref))
 		}
 	}
 
