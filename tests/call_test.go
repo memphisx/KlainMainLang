@@ -436,6 +436,45 @@ console.log(t2 >= t1)
 `, "200000\n1")
 }
 
+func TestE2EPerformanceMarkMeasure(t *testing.T) {
+	assertOutput(t, `
+performance.mark("start")
+let arr: number[] = []
+for (let i = 0; i < 200000; i++) { arr.push(i) }
+performance.mark("end")
+const d1: number = performance.measure("work", "start", "end")
+console.log(d1 >= 0)
+const d2: number = performance.measure("work-to-now", "start")
+console.log(d2 >= d1)
+`, "1\n1")
+}
+
+func TestE2EPerformanceMarkOverwrite(t *testing.T) {
+	// Re-marking "m" overwrites its timestamp (last-write-wins, documented
+	// V1 scope) — a measure taken right after the second mark() should be
+	// much smaller than one spanning the whole loop before it.
+	assertOutput(t, `
+performance.mark("m")
+let arr: number[] = []
+for (let i = 0; i < 200000; i++) { arr.push(i) }
+const d1: number = performance.measure("first", "m")
+performance.mark("m")
+const d2: number = performance.measure("second", "m")
+console.log(d2 < d1)
+`, "1")
+}
+
+func TestE2EPerformanceMeasureMissingMarkThrows(t *testing.T) {
+	assertOutput(t, `
+try {
+  performance.measure("bad", "never-marked")
+} catch (e) {
+  console.log("caught")
+  console.log(e.message)
+}
+`, "caught\nperformance.measure: no mark named 'never-marked'")
+}
+
 func TestE2EBtoaAtob(t *testing.T) {
 	assertOutput(t, `
 console.log(btoa("hello"))

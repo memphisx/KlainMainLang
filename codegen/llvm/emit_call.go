@@ -71,6 +71,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", r))
 			return Value{Ref: r, Ty: TypeF64}, nil
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && mem.Property == "mark" {
+			return e.emitPerformanceMark(ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && mem.Property == "measure" {
+			return e.emitPerformanceMeasure(ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "parse" {
 			return e.emitDateParse(ex.Args, ex.GetPos())
 		}

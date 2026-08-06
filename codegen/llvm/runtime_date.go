@@ -89,6 +89,24 @@ entry:
 }`, monotonicClockID()))
 }
 
+// ensurePerformanceMarkMap declares the hidden global backing
+// performance.mark()/.measure() — a lazily-created Map<string, number>,
+// reusing the exact same __kml_map_str_* helpers console.count() already
+// uses (ensureMapStrHelpers), just never exposed as a KML-level value. The
+// map's i64 value slot holds a double mark timestamp's raw bit pattern
+// (bitcast, not a lossy numeric conversion — the same 64-bit width means no
+// precision is lost). Marking the same name twice overwrites the previous
+// timestamp (last-write-wins, V1 scope: this compiler tracks one timestamp
+// per name, not real performance's full ordered entries-by-name list).
+func (e *Emitter) ensurePerformanceMarkMap() {
+	if e.usedPerformanceMarkMap {
+		return
+	}
+	e.usedPerformanceMarkMap = true
+	e.ensureMapStrHelpers()
+	e.emitGlobal("@__kml_performance_mark_map = internal global ptr null, align 8")
+}
+
 // ensureDateDecompose declares __kml_date_decompose: converts a milliseconds-
 // since-epoch i64 into its UTC calendar fields (year, month[0-11], day,
 // weekday[0=Sun..6=Sat], hour, minute, second, millisecond) via gmtime(),
