@@ -249,6 +249,42 @@ func sigCompatible(base, override FuncSig) bool {
 	return base.RetType.IR == override.RetType.IR
 }
 
+// accessorMethodName returns the internal dispatch key a getter/setter for
+// property `prop` is registered under (TDD-00030) — both the Go-side
+// MethodSigs/Methods/etc. map key *and*, directly, the emitted LLVM
+// function name's own distinguishing suffix (registerClasses/
+// emitClassDecl/emitClassCall all use this same string as a plain method
+// name, so it has to be valid on both sides — unlike a Go map key, an LLVM
+// symbol can't contain a space). kind is "get" or "set". The `__kml_`
+// prefix follows the same "reserved, can't collide with a real
+// user-declared name" convention already established by
+// ClassTagField/ClassVTableField/ClassEventEmitterField (types.go).
+func accessorMethodName(kind, prop string) string {
+	return "__kml_" + kind + "_" + prop
+}
+
+// classAccessorSigs returns the getter/setter FuncSig for property `prop`
+// on class `className`, if either is registered (TDD-00030's
+// accessorMethodName-keyed dispatch, stored in the class's ordinary
+// MethodSigs table — see registerClasses). ok is false when neither
+// exists, meaning `prop` is either a plain field or a genuinely unknown
+// property — the caller should fall through to its own existing
+// FieldIndex-based path unchanged in that case, exactly as if this
+// function had never been called.
+func (e *Emitter) classAccessorSigs(className, prop string) (getter, setter *FuncSig, ok bool) {
+	info, found := e.classes[className]
+	if !found {
+		return nil, nil, false
+	}
+	if g, has := info.MethodSigs[accessorMethodName("get", prop)]; has {
+		getter = &g
+	}
+	if s, has := info.MethodSigs[accessorMethodName("set", prop)]; has {
+		setter = &s
+	}
+	return getter, setter, getter != nil || setter != nil
+}
+
 // checkMemberVisibility enforces TDD-00009 Stage 4's private/protected
 // rules — compile-time only, matching real TypeScript's own erasure (zero
 // runtime check ever emitted). vis == "" (public, the common case) is a
@@ -682,6 +718,87 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				e.popScope()
 			}
 
+			if m.AccessorKind != "" {
+				// TDD-00030: a getter/setter is registered as an ordinary
+				// method under a space-mangled dispatch key ("get x"/
+				// "set x" — a real identifier can never contain a space,
+				// so this can never collide with a genuine user-declared
+				// method name), which is what lets every other piece of
+				// method machinery below (inheritance, override/vtable
+				// analysis, visibility, abstract-completeness) apply with
+				// zero changes of its own.
+				if m.IsStatic {
+					return fmt.Errorf("%d:%d: static getters/setters are not yet supported ('%s %s' on class '%s')", m.GetPos().Line, m.GetPos().Col, m.AccessorKind, m.Name, cd.Name)
+				}
+				if m.AccessorKind == "get" {
+					if len(m.Params) != 0 {
+						return fmt.Errorf("%d:%d: getter '%s' on class '%s' must take no parameters", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					}
+					if sig.RetType.IR == "void" {
+						return fmt.Errorf("%d:%d: getter '%s' on class '%s' must return a value", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					}
+				} else { // "set"
+					if len(m.Params) != 1 {
+						return fmt.Errorf("%d:%d: setter '%s' on class '%s' must take exactly one parameter", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					}
+					// A setter's return value is always discarded, matching
+					// real JS — regardless of any declared/inferred return.
+					sig.RetType = TypeVoid
+				}
+
+				// Mutual exclusion: an accessor name can't collide with a
+				// plain field or a plain method (own or inherited) under
+				// the same, unmangled property name.
+				if _, _, ok := provisionalTy.FieldIndex(m.Name); ok {
+					return fmt.Errorf("%d:%d: class '%s' cannot declare accessor '%s' — a field with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				}
+				if _, ok := info.MethodSigs[m.Name]; ok {
+					return fmt.Errorf("%d:%d: class '%s' cannot declare accessor '%s' — a method with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				}
+
+				mangled := accessorMethodName(m.AccessorKind, m.Name)
+				otherKind := "set"
+				if m.AccessorKind == "set" {
+					otherKind = "get"
+				}
+				if otherSig, ok := info.MethodSigs[accessorMethodName(otherKind, m.Name)]; ok {
+					var getterRet, setterParam Type
+					if m.AccessorKind == "get" {
+						getterRet, setterParam = sig.RetType, otherSig.ParamTypes[0]
+					} else {
+						getterRet, setterParam = otherSig.RetType, sig.ParamTypes[0]
+					}
+					if getterRet.IR != setterParam.IR {
+						return fmt.Errorf("%d:%d: getter/setter '%s' on class '%s' disagree on type", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					}
+				}
+
+				if ownDeclared[mangled] {
+					return fmt.Errorf("%d:%d: class '%s' declares more than one %s accessor for '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.AccessorKind, m.Name)
+				}
+				ownDeclared[mangled] = true
+
+				if existingSig, overriding := info.MethodSigs[mangled]; overriding {
+					if !sigCompatible(existingSig, sig) {
+						return fmt.Errorf("%d:%d: accessor '%s' on class '%s' overrides an inherited accessor with an incompatible signature", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					}
+					slot := info.MethodDispatchSlot[mangled]
+					if slot == nil {
+						slot = &MethodSlot{Name: mangled}
+						info.MethodDispatchSlot[mangled] = slot
+					}
+					slot.Virtual = true
+				} else {
+					info.MethodDispatchSlot[mangled] = &MethodSlot{Name: mangled}
+					info.MethodOrder = append(info.MethodOrder, mangled)
+				}
+				info.MethodImplementor[mangled] = cd.Name
+				info.MethodSigs[mangled] = sig
+				info.Methods[mangled] = m
+				info.OwnMethodVisibility[mangled] = m.Visibility
+				continue
+			}
+
 			if m.IsStatic {
 				if ownStaticDeclared[m.Name] {
 					return fmt.Errorf("%d:%d: class '%s' declares more than one static method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
@@ -697,6 +814,16 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				return fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
 			}
 			ownDeclared[m.Name] = true
+			// Symmetric to the accessor branch's own field/method collision
+			// check above: a plain method can't reuse a name already
+			// claimed by an accessor (own-earlier-in-this-class, or
+			// inherited — both already live in info.MethodSigs by now).
+			if _, ok := info.MethodSigs[accessorMethodName("get", m.Name)]; ok {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — a getter with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+			}
+			if _, ok := info.MethodSigs[accessorMethodName("set", m.Name)]; ok {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — a setter with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+			}
 
 			if existingSig, overriding := info.MethodSigs[m.Name]; overriding {
 				if !sigCompatible(existingSig, sig) {
@@ -935,8 +1062,16 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 			}
 			continue
 		}
-		sig := info.MethodSigs[m.Name]
-		llvmName := cd.Name + "_" + m.Name
+		// TDD-00030: an accessor's real dispatch key (and therefore its
+		// emitted LLVM function name) is accessorMethodName(...), not the
+		// plain source property name — must match what emitClassCall
+		// constructs its call sites against.
+		methodKey := m.Name
+		if m.AccessorKind != "" {
+			methodKey = accessorMethodName(m.AccessorKind, m.Name)
+		}
+		sig := info.MethodSigs[methodKey]
+		llvmName := cd.Name + "_" + methodKey
 		if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false); err != nil {
 			return err
 		}
@@ -1316,11 +1451,41 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 
 	argParts := []string{"ptr " + thisVal.Ref}
 	for i, a := range args {
+		paramTy := sig.ParamTypes[i]
+		// An array-typed method parameter decomposes into two LLVM params
+		// (ptr, i64 len) at the callee side — emitClassMember's own
+		// parameter-binding loop already does this (mirrors
+		// emitFunctionDeclAs). This call-site had never been taught the
+		// matching decomposition: found while wiring getters/setters
+		// (setters can take an array-typed value), but real and
+		// pre-existing independent of that — any class method call passing
+		// an array argument (`f.addAll([1,2,3])`) was already a hard
+		// clang-stage crash (`{ptr,i64}` where a single `ptr` operand was
+		// expected), the exact same class of bug ADR-00105/ADR-00107 fixed
+		// throughout emit_arrays_*.go for the free-function/array-of-arrays
+		// case — this was simply the one remaining call site that hadn't
+		// been touched, since no test exercised a class method with an
+		// array parameter before now.
+		if paramTy.IsArray {
+			val, err := e.emitExprWithObjectHint(a, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			if !val.Ty.IsArray {
+				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+			}
+			ptrReg := e.freshReg()
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			continue
+		}
 		val, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(val, sig.ParamTypes[i])
+		val = e.coerce(val, paramTy)
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
 	argsIR := strings.Join(argParts, ", ")
@@ -1348,6 +1513,10 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 
 	paramTyStrs := []string{"ptr"}
 	for _, p := range sig.ParamTypes {
+		if p.IsArray {
+			paramTyStrs = append(paramTyStrs, "ptr", "i64")
+			continue
+		}
 		paramTyStrs = append(paramTyStrs, p.IR)
 	}
 	fnTypePart := "(" + strings.Join(paramTyStrs, ", ") + ")"
@@ -1369,6 +1538,80 @@ func (e *Emitter) emitClassMethodCall(objTy Type, objExpr ast.Expression, method
 		return Value{}, err
 	}
 	return e.emitClassCall(objTy, thisVal, methodName, args, pos, false)
+}
+
+// emitClassSetterCall invokes a setter (TDD-00030) whose single argument
+// is already an evaluated Value rather than an unevaluated ast.Expression
+// — unlike emitClassCall (which evaluates each of its own args itself via
+// e.emitExpr), a setter's right-hand side needs its own type-dependent
+// handling first (hint-aware coercion for a plain `=`, or a
+// read-current-via-getter-then-compute for a compound op — see
+// emit_exprs_assign.go's object-field-assignment branch), so there's no
+// unevaluated expression left to hand emitClassCall by the time this runs.
+// Deliberately duplicates emitClassCall's own direct-vs-vtable dispatch
+// shape rather than a larger refactor splitting argument evaluation out of
+// that function — kept small since a setter's arity is always exactly one,
+// unlike a general method call's.
+func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName string, argVal Value, pos ast.Pos) (Value, error) {
+	info, ok := e.classes[objTy.ClassName]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", pos.Line, pos.Col, objTy.ClassName)
+	}
+	sig, ok := info.MethodSigs[methodName]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: class '%s' has no method '%s'", pos.Line, pos.Col, objTy.ClassName, methodName)
+	}
+	implementor := info.MethodImplementor[methodName]
+	if vis := e.classes[implementor].OwnMethodVisibility[methodName]; vis != "" {
+		if err := e.checkMemberVisibility(implementor, vis, "method", methodName, pos); err != nil {
+			return Value{}, err
+		}
+	}
+
+	// An array-typed setter parameter decomposes into two LLVM call
+	// operands (ptr, i64 len) at this call site, matching both
+	// emitClassMember's own parameter-binding ABI and emitClassCall's
+	// identical decomposition (see that function's own doc comment for why
+	// this matters — a real, pre-existing bug this same TDD's
+	// investigation found and fixed there).
+	paramTy := sig.ParamTypes[0]
+	var argParts []string
+	var fnTypePart string
+	if paramTy.IsArray {
+		if !argVal.Ty.IsArray {
+			return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", pos.Line, pos.Col)
+		}
+		ptrReg := e.freshReg()
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, argVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, argVal.Ref))
+		argParts = []string{"ptr " + thisVal.Ref, "ptr " + ptrReg, "i64 " + lenReg}
+		fnTypePart = "(ptr, ptr, i64)"
+	} else {
+		v := e.coerce(argVal, paramTy)
+		argParts = []string{"ptr " + thisVal.Ref, fmt.Sprintf("%s %s", v.Ty.IR, v.Ref)}
+		fnTypePart = fmt.Sprintf("(ptr, %s)", paramTy.IR)
+	}
+	argsIR := strings.Join(argParts, ", ")
+
+	slot := info.MethodDispatchSlot[methodName]
+	if slot == nil || !slot.Virtual {
+		llvmName := implementor + "_" + methodName
+		e.emitInstr(fmt.Sprintf("call void @%s(%s)", llvmName, argsIR))
+		return Value{Ty: TypeVoid}, nil
+	}
+
+	vtGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vtGep, info.Ty.StructIR(), thisVal.Ref))
+	vtPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", vtPtr, vtGep))
+	slotGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr [%d x ptr], ptr %s, i32 0, i32 %d", slotGep, info.VTableSize, vtPtr, slot.Index))
+	fnPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fnPtr, slotGep))
+
+	e.emitInstr(fmt.Sprintf("call void %s %s(%s)", fnTypePart, fnPtr, argsIR))
+	return Value{Ty: TypeVoid}, nil
 }
 
 // emitStaticMethodCall evaluates `ClassName.staticMethod(args)` (TDD-00009

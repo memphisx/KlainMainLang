@@ -75,7 +75,15 @@ type FunctionDeclaration struct {
 	IsStatic   bool
 	Visibility string // "private" / "protected" / "" (public, default)
 	IsAbstract bool
-	pos        Pos
+	// AccessorKind is "get" / "set" / "" (a plain method or top-level
+	// function, the default) — TDD-00030. A getter/setter is otherwise a
+	// perfectly ordinary FunctionDeclaration (a zero-arg method for "get",
+	// a one-arg method for "set"); this is the only new AST field the
+	// feature needs, everything else routes through the class method
+	// machinery unmodified via a name-mangled dispatch key (see
+	// codegen/llvm/emit_classes.go's registerClasses).
+	AccessorKind string
+	pos          Pos
 }
 
 func (*FunctionDeclaration) nodeMarker()   {}

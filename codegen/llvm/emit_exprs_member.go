@@ -20,19 +20,35 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		return e.emitMember(plain)
 	}
 
-	// Determine the result type before emitting branches.
+	// Determine the result type before emitting branches. TDD-00030: a
+	// class accessor (getter/setter) is checked before the plain-field
+	// FieldIndex path — an accessor-only property name is never a real
+	// Field, so FieldIndex would otherwise report "no field" for it.
 	var resultTy Type
+	isAccessor := false
 	if ex.Property == "length" && !objVal.Ty.IsObject {
 		resultTy = TypeI64
+	} else if objVal.Ty.IsClass {
+		if getter, _, ok := e.classAccessorSigs(objVal.Ty.ClassName, ex.Property); ok {
+			if getter == nil {
+				return Value{}, fmt.Errorf("%d:%d: property '%s' has no getter", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+			}
+			resultTy = getter.RetType
+			isAccessor = true
+		} else {
+			_, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
+			if !ok {
+				return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+			}
+			if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+			resultTy = e.canonicalizeClassTy(fieldTy)
+		}
 	} else if objVal.Ty.IsObject {
 		_, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
 		if !ok {
 			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
-		}
-		if objVal.Ty.IsClass {
-			if err := e.checkFieldVisibility(objVal.Ty.ClassName, ex.Property, ex.GetPos()); err != nil {
-				return Value{}, err
-			}
 		}
 		resultTy = e.canonicalizeClassTy(fieldTy)
 	} else {
@@ -81,6 +97,12 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", r, objVal.Ref))
 		propVal = Value{Ref: r, Ty: TypeI64}
+	} else if isAccessor {
+		v, err := e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", ex.Property), nil, ex.GetPos(), false)
+		if err != nil {
+			return Value{}, err
+		}
+		propVal = v
 	} else {
 		idx, fieldTy, _ := objVal.Ty.FieldIndex(ex.Property)
 		gepReg := e.freshReg()
@@ -471,6 +493,19 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+	}
+	// TDD-00030: a class accessor (getter/setter) is checked before the
+	// plain-field FieldIndex path below — an accessor-only property name
+	// is never a real Field, so FieldIndex would otherwise report "no
+	// field" for it. Every non-accessor class, and every non-class object,
+	// falls through unchanged.
+	if objVal.Ty.IsClass {
+		if getter, _, ok := e.classAccessorSigs(objVal.Ty.ClassName, ex.Property); ok {
+			if getter == nil {
+				return Value{}, fmt.Errorf("%d:%d: property '%s' has no getter", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+			}
+			return e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", ex.Property), nil, ex.GetPos(), false)
+		}
 	}
 	idx, fieldTy, ok := objVal.Ty.FieldIndex(ex.Property)
 	if !ok {

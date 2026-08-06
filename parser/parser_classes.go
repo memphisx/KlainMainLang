@@ -122,9 +122,27 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 			break
 		}
 
+		// Contextual `get`/`set` (TDD-00030): like `in` (ADR-00091), not a
+		// reserved keyword — a field/method/variable literally named
+		// `get`/`set` must keep working everywhere outside this one
+		// position. Requires a 2-token lookahead (mirroring for...in's own
+		// disambiguation, parseForInBody below) rather than in's simpler
+		// 1-token check: unlike `in` (only ever a binary operator), a bare
+		// `get`/`set` is *also* a completely valid method name on its own
+		// (`get(): number { ... }`), so the token peek must confirm a real
+		// member name follows before committing to accessor parsing.
+		var accessorKind string
+		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") && p.peekNth(1).Type == lexer.IDENT {
+			accessorKind = p.peek().Literal
+			p.advance()
+		}
+
 		memberTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
+		}
+		if accessorKind != "" && memberTok.Literal == "constructor" {
+			return nil, fmt.Errorf("%d:%d: a constructor cannot be a getter/setter", memberTok.Line, memberTok.Col)
 		}
 
 		// Method or constructor: `name(...) { ... }` (or, if isMemberAbstract,
@@ -136,6 +154,7 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 			}
 			fn.IsStatic = isStatic
 			fn.Visibility = visibility
+			fn.AccessorKind = accessorKind
 			if memberTok.Literal == "constructor" {
 				if ctor != nil {
 					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, nameTok.Literal)
@@ -145,6 +164,9 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 				methods = append(methods, fn)
 			}
 			continue
+		}
+		if accessorKind != "" {
+			return nil, fmt.Errorf("%d:%d: '%s %s' must be a method (missing '()')", memberTok.Line, memberTok.Col, accessorKind, memberTok.Literal)
 		}
 
 		// Otherwise a typed field: `name: type;` (no initializer — see

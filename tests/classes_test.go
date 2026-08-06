@@ -964,3 +964,328 @@ class Cat implements Greeter {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+// TestE2EClassMethodArrayArgument is a regression test for a real,
+// pre-existing bug found while wiring getters/setters: emitClassCall (the
+// single, shared codegen path behind every `obj.method(args)` call) never
+// decomposed an array-typed argument into the (ptr, i64) pair its own
+// callee ABI (emitClassMember's parameter-binding loop) already expected —
+// any class method call passing an array argument was a hard clang-stage
+// crash. Covers both dispatch paths: a direct call (never-overridden
+// method) and the vtable-indirect call (a method overridden somewhere in
+// the class tree, ADR-00083).
+func TestE2EClassMethodArrayArgument(t *testing.T) {
+	assertOutput(t, `
+class Foo {
+  total: number
+  constructor() { this.total = 0 }
+  addAll(items: number[]): void {
+    for (const x of items) {
+      this.total = this.total + x
+    }
+  }
+}
+const f = new Foo()
+f.addAll([1, 2, 3])
+console.log(f.total)
+`, "6")
+}
+
+func TestE2EClassOverriddenMethodArrayArgumentVtableDispatch(t *testing.T) {
+	assertOutput(t, `
+class Base {
+  sum(items: number[]): number { return 0 }
+}
+class Derived extends Base {
+  sum(items: number[]): number {
+    let total: number = 0
+    for (const x of items) {
+      total = total + x
+    }
+    return total
+  }
+}
+function callIt(b: Base, items: number[]): number {
+  return b.sum(items)
+}
+const d = new Derived()
+console.log(callIt(d, [10, 20, 30]))
+`, "60")
+}
+
+// --- Getters / setters (TDD-00030) ---
+
+func TestE2EClassGetterSetterBasic(t *testing.T) {
+	assertOutput(t, `
+class Temperature {
+  private _celsius: number
+  constructor(c: number) { this._celsius = c }
+  get celsius(): number { return this._celsius }
+  set celsius(v: number) { this._celsius = v }
+}
+const t = new Temperature(0)
+console.log(t.celsius)
+t.celsius = 100
+console.log(t.celsius)
+`, "0\n100")
+}
+
+func TestE2EClassGetterOnlyComputedFromOtherFields(t *testing.T) {
+	assertOutput(t, `
+class Rect {
+  width: number
+  height: number
+  constructor(w: number, h: number) { this.width = w; this.height = h }
+  get area(): number { return this.width * this.height }
+}
+const r = new Rect(3, 4)
+console.log(r.area)
+`, "12")
+}
+
+func TestE2EClassSetterDerivesOtherField(t *testing.T) {
+	assertOutput(t, `
+class Temperature {
+  private _celsius: number
+  constructor(c: number) { this._celsius = c }
+  get celsius(): number { return this._celsius }
+  get fahrenheit(): number { return this._celsius * 9 / 5 + 32 }
+  set fahrenheit(f: number) { this._celsius = (f - 32) * 5 / 9 }
+}
+const t = new Temperature(0)
+console.log(t.fahrenheit)
+t.fahrenheit = 32
+console.log(t.celsius)
+`, "32\n0")
+}
+
+func TestE2EClassAccessorCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  private _v: number
+  constructor() { this._v = 5 }
+  get v(): number { return this._v }
+  set v(x: number) { this._v = x }
+}
+const b = new Box()
+b.v += 10
+console.log(b.v)
+b.v *= 2
+console.log(b.v)
+`, "15\n30")
+}
+
+func TestE2EClassAccessorArrayTyped(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  private _items: number[]
+  constructor() { this._items = [] }
+  get items(): number[] { return this._items }
+  set items(v: number[]) { this._items = v }
+}
+const b = new Box()
+b.items = [1, 2, 3, 4]
+console.log(b.items.length)
+console.log(b.items[2])
+`, "4\n3")
+}
+
+func TestE2EClassAccessorUsedFromAnotherMethod(t *testing.T) {
+	// Real JS semantics: even internal this.x access (from a method other
+	// than the accessor's own body) goes through the getter/setter, not a
+	// raw field read — falls out for free from emitMember treating `this`
+	// as an ordinary receiver, no special-casing needed.
+	assertOutput(t, `
+class Counter {
+  private count: number
+  constructor() { this.count = 0 }
+  get value(): number { return this.count }
+  bump(): void {
+    console.log(this.value)
+    this.count = this.count + 1
+  }
+}
+const c = new Counter()
+c.bump()
+c.bump()
+console.log(c.value)
+`, "0\n1\n2")
+}
+
+func TestE2EClassAccessorOptionalChaining(t *testing.T) {
+	assertOutput(t, `
+class Circle {
+  radius: number
+  constructor(r: number) { this.radius = r }
+  get area(): number { return this.radius * this.radius * 3 }
+}
+let maybe: Circle | null = new Circle(5)
+console.log(maybe?.area)
+maybe = null
+console.log(maybe?.area)
+`, "75\n0")
+}
+
+func TestE2EClassAccessorInheritanceOverrideVtableDispatch(t *testing.T) {
+	assertOutput(t, `
+class Base {
+  get label(): string { return "base" }
+}
+class Derived extends Base {
+  get label(): string { return "derived" }
+}
+function show(b: Base): string { return b.label }
+console.log(show(new Derived()))
+console.log(show(new Base()))
+`, "derived\nbase")
+}
+
+func TestE2EClassGetSetAsPlainMethodNamesStillWork(t *testing.T) {
+	// `get`/`set` are contextual, not reserved — a method literally named
+	// get()/set() (no property name following, so the parser's lookahead
+	// correctly falls back to treating it as an ordinary method) must keep
+	// working.
+	assertOutput(t, `
+class Container {
+  get(): number { return 99 }
+  set(): number { return 88 }
+}
+const c = new Container()
+console.log(c.get())
+console.log(c.set())
+`, "99\n88")
+}
+
+func TestE2EClassSetterOnlyPropertyReadIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo { set x(v: number) {} }
+const f = new Foo()
+console.log(f.x)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error reading a setter-only property")
+	}
+	if !strings.Contains(err.Error(), "no getter") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EClassGetterOnlyPropertyWriteIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo { get x(): number { return 1 } }
+const f = new Foo()
+f.x = 5
+`)
+	if err == nil {
+		t.Fatal("expected a compile error writing a getter-only property")
+	}
+	if !strings.Contains(err.Error(), "no setter") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EClassGetterOnlyPropertyCompoundAssignIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo { get x(): number { return 1 } }
+const f = new Foo()
+f.x += 5
+`)
+	if err == nil {
+		t.Fatal("expected a compile error compound-assigning a getter-only property")
+	}
+}
+
+func TestE2EClassAccessorLogicalAssignIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  private _x: number
+  constructor() { this._x = 1 }
+  get x(): number { return this._x }
+  set x(v: number) { this._x = v }
+}
+const f = new Foo()
+f.x ??= 5
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for logical assignment on an accessor")
+	}
+}
+
+func TestE2EClassAccessorFieldCollisionIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  x: number
+  get x(): number { return 1 }
+  constructor() { this.x = 1 }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an accessor colliding with a field name")
+	}
+}
+
+func TestE2EClassAccessorMethodCollisionIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  get x(): number { return 1 }
+  x(): void {}
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an accessor colliding with a method name")
+	}
+}
+
+func TestE2EClassStaticAccessorIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  static get x(): number { return 1 }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a static accessor (not yet supported)")
+	}
+}
+
+func TestE2EClassGetSetTypeDisagreementIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  get x(): number { return 1 }
+  set x(v: string) {}
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a getter/setter disagreeing on type")
+	}
+}
+
+func TestE2EClassGetterWithParamsIsError(t *testing.T) {
+	_, err := parseAndCompile(`class Foo { get x(y: number): number { return y } }`)
+	if err == nil {
+		t.Fatal("expected a compile error for a getter taking parameters")
+	}
+}
+
+func TestE2EClassSetterWithoutExactlyOneParamIsError(t *testing.T) {
+	cases := []string{
+		`class Foo { set x(): void {} }`,
+		`class Foo { set x(a: number, b: number): void {} }`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a compile error for a setter with the wrong parameter count: %s", src)
+		}
+	}
+}
+
+func TestE2EClassDuplicateGetterIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Foo {
+  get x(): number { return 1 }
+  get x(): number { return 2 }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a duplicate getter")
+	}
+}
