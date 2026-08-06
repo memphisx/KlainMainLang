@@ -93,6 +93,7 @@ type Emitter struct {
 	usedClockGettime       bool
 	usedDateNow            bool
 	usedPerformanceNow     bool
+	usedPerformanceMarkMap bool
 	usedDateDecompose      bool
 	usedSscanf             bool
 	usedDaysFromCivil      bool

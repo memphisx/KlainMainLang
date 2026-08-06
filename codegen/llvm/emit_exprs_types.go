@@ -492,7 +492,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Date" && mem.Property == "parse" {
 				return TypeI64
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && mem.Property == "now" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && (mem.Property == "now" || mem.Property == "measure") {
 				return TypeF64
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs" {

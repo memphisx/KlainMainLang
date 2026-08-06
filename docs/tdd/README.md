@@ -61,6 +61,11 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented | [ADR-00089](../adr/ADR-00089.md) | |
 | [00024](TDD-00024.md) | `os` module | Implemented | [ADR-00090](../adr/ADR-00090.md) | Darwin paths unverified |
 | [00025](TDD-00025.md) | Multi-process clustering for `http.listen()` | Implemented | [ADR-00097](../adr/ADR-00097.md), [ADR-00098](../adr/ADR-00098.md), [ADR-00099](../adr/ADR-00099.md), [ADR-00101](../adr/ADR-00101.md) | Both `manual` and `-mm=gc` modes production-quality; [ADR-00101](../adr/ADR-00101.md) root-caused and fixed the `-mm=gc` intermittent hang |
-| [00026](TDD-00026.md) | Binary-safe `http.listen()` request/response bodies | Not Started | | |
+| [00026](TDD-00026.md) | Binary-safe `http.listen()` request/response bodies | Implemented | [ADR-00106](../adr/ADR-00106.md) | |
+| [00027](TDD-00027.md) | `http.close()` (graceful listener teardown) | Implemented | [ADR-00102](../adr/ADR-00102.md) | |
 | [00028](TDD-00028.md) | Array/Map/Set/EventEmitter literals as general expressions (not just var-decl initializers) | Implemented | [ADR-00104](../adr/ADR-00104.md) | |
-| [00029](TDD-00029.md) | Array-of-arrays (nested array) storage representation | Not Started | | |
+| [00029](TDD-00029.md) | Array-of-arrays (nested array) storage representation | Implemented | [ADR-00105](../adr/ADR-00105.md), [ADR-00107](../adr/ADR-00107.md) | `.flat()`/`.flatMap()` followed as a direct follow-on |
+| [00030](TDD-00030.md) | Getters / setters (`get x() {}` / `set x(v) {}`) on classes | Implemented | [ADR-00110](../adr/ADR-00110.md) | Object-literal getters/setters out of scope |
+| [00031](TDD-00031.md) | Terminal UI primitives (raw mode, tty size, key reads) | Not Started | | |
+| [00032](TDD-00032.md) | Native library bindings / GUI (placeholder — general FFI is the real prerequisite) | Not Started | | Bootstrapping placeholder, not a committed design; see the TDD's own scope note |
+| [00033](TDD-00033.md) | Direct hardware/framebuffer access (placeholder) | Not Started | | Bootstrapping placeholder; Linux-only by nature, a first for this project |

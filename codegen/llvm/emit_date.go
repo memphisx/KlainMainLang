@@ -398,3 +398,157 @@ func (e *Emitter) emitDateToLocaleDateString(dateVal Value) (Value, error) {
 		buf, fmtPtr, month, day, year))
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
+
+// emitPerformanceMarkMapEnsure returns a register holding the lazily-
+// created performance.mark() backing map, creating it on first use — the
+// same alloca+store-in-each-branch+load-after-merge shape
+// emitConsoleCountMapEnsure already established.
+func (e *Emitter) emitPerformanceMarkMapEnsure() string {
+	e.ensurePerformanceMarkMap()
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	cur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_performance_mark_map, align 8", cur))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cur, resPtr))
+
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
+	createL := e.freshLabel("perfmark.create")
+	doneL := e.freshLabel("perfmark.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, createL, doneL))
+
+	e.emitLabel(createL)
+	newMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_performance_mark_map, align 8", newMap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	return result
+}
+
+// emitPerformanceMarkLookup loads the mark map, calls __kml_map_str_get,
+// and bitcasts the returned i64 bit pattern back to a double timestamp.
+func (e *Emitter) emitPerformanceMarkLookup(mapReg, namePtr string) string {
+	bits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", bits, mapReg, namePtr))
+	ts := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", ts, bits))
+	return ts
+}
+
+// emitPerformanceMark implements performance.mark(name): records the
+// current performance.now() timestamp under name in a lazily-created
+// Map<string, number> (see ensurePerformanceMarkMap). V1 scope: returns
+// void — real performance.mark() returns a PerformanceMark object, not
+// modeled here since there's no getEntriesByName/PerformanceObserver
+// machinery for it to usefully belong to.
+func (e *Emitter) emitPerformanceMark(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: performance.mark() takes exactly 1 argument (name), got %d", pos.Line, pos.Col, len(args))
+	}
+	nameVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	nameVal = e.coerce(nameVal, TypePtr)
+
+	e.ensurePerformanceNow()
+	mapReg := e.emitPerformanceMarkMapEnsure()
+	nowReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
+	bits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, nowReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, nameVal.Ref, bits))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitPerformanceMeasure implements performance.measure(name, startMark,
+// endMark?): returns the elapsed milliseconds (as a plain number, not a
+// PerformanceMeasure object — same V1 narrowing as emitPerformanceMark
+// above) between two previously-recorded marks. name itself is evaluated
+// (matching real JS's own evaluation-order guarantee) but not stored
+// anywhere, since there's no entries list for it to identify — a
+// documented scope narrowing, not an oversight. endMark defaults to the
+// current performance.now() reading when omitted, matching real
+// performance.measure()'s own "no endMark means measure through now"
+// default. Throws (via the existing exception machinery) if startMark or
+// an explicit endMark was never marked — real performance.measure() throws
+// a SyntaxError for exactly this case, so this isn't a new error shape,
+// just reusing the generic internal-throw path rather than modeling a
+// distinct SyntaxError-vs-other-kind subtype for it.
+func (e *Emitter) emitPerformanceMeasure(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 && len(args) != 3 {
+		return Value{}, fmt.Errorf("%d:%d: performance.measure() takes 2 or 3 arguments (name, startMark, endMark?), got %d", pos.Line, pos.Col, len(args))
+	}
+	nameVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	_ = e.coerce(nameVal, TypePtr) // evaluated for side effects/ordering only — not stored, see doc comment
+
+	startVal, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	startVal = e.coerce(startVal, TypePtr)
+
+	e.ensurePerformanceNow()
+	mapReg := e.emitPerformanceMarkMapEnsure()
+
+	e.ensureMalloc()
+	startHas := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", startHas, mapReg, startVal.Ref))
+	e.emitMissingMarkGuard(startHas, startVal.Ref)
+	startTs := e.emitPerformanceMarkLookup(mapReg, startVal.Ref)
+
+	var endTs string
+	if len(args) == 3 {
+		endVal, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		endVal = e.coerce(endVal, TypePtr)
+		endHas := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", endHas, mapReg, endVal.Ref))
+		e.emitMissingMarkGuard(endHas, endVal.Ref)
+		endTs = e.emitPerformanceMarkLookup(mapReg, endVal.Ref)
+	} else {
+		endReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", endReg))
+		endTs = endReg
+	}
+
+	dur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", dur, endTs, startTs))
+	return Value{Ref: dur, Ty: TypeF64}, nil
+}
+
+// emitMissingMarkGuard throws "performance.measure: no mark named '<name>'"
+// when has is false — the same sprintf-a-message-then-emitInternalThrow
+// shape emitDivZeroGuard's own static-message throw builds on, just with a
+// dynamic name interpolated in since the mark name is only known at
+// runtime.
+func (e *Emitter) emitMissingMarkGuard(has, namePtr string) {
+	okL := e.freshLabel("perfmeasure.ok")
+	missL := e.freshLabel("perfmeasure.missing")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, okL, missL))
+
+	e.emitLabel(missL)
+	e.ensureSprintf()
+	e.ensureStrlen()
+	nameLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", nameLen, namePtr))
+	bufSize := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", bufSize, nameLen))
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	msgFmt := e.internString("performance.measure: no mark named '%s'")
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", buf, msgFmt, namePtr))
+	e.emitInternalThrow(buf) // ends with `unreachable`, so missL needs no branch of its own
+
+	e.emitLabel(okL)
+}

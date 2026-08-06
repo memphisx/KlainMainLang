@@ -25,6 +25,37 @@ const t2: number = performance.now()
 console.log(arr.length)    // 200000
 console.log(t2 >= t1)      // 1 (true)
 
+// ── performance.mark() / performance.measure() ──────────────────────────────
+// Named timing marks on top of performance.now() above. mark(name) records
+// "now" under a name; measure(label, startMark, endMark?) returns the
+// elapsed milliseconds between two marks as a plain number — not a
+// PerformanceMeasure object (this compiler has no getEntriesByName/
+// PerformanceObserver machinery for one to belong to), and label itself
+// isn't stored anywhere for the same reason. endMark defaults to right now
+// when omitted.
+performance.mark("loop-start")
+let arr2: number[] = []
+for (let i = 0; i < 200000; i++) { arr2.push(i) }
+performance.mark("loop-end")
+const loopMs: number = performance.measure("loop", "loop-start", "loop-end")
+console.log(loopMs >= 0)                                  // 1 (true)
+const sinceStartMs: number = performance.measure("since-start", "loop-start")
+console.log(sinceStartMs >= loopMs)                        // 1 (true) — endMark omitted means "through now"
+
+// Re-marking a name overwrites its timestamp (last-write-wins) rather than
+// keeping every mark ever recorded under that name.
+performance.mark("loop-start")
+const freshMs: number = performance.measure("fresh", "loop-start")
+console.log(freshMs < loopMs)                               // 1 (true) — measured from the just-overwritten mark
+
+// Measuring against a name that was never marked throws, matching real
+// performance.measure()'s own SyntaxError-on-unknown-mark behavior.
+try {
+  performance.measure("bad", "never-marked")
+} catch (e) {
+  console.log(e.message)    // performance.measure: no mark named 'never-marked'
+}
+
 // ── btoa / atob — base64 ─────────────────────────────────────────────────────
 console.log(btoa("hello"))                      // aGVsbG8=
 console.log(btoa("hi"))                         // aGk=
