@@ -292,3 +292,76 @@ class Dog implements Greeter {
   }
 }
 console.log(new Dog("Rex").greet()); // Woof, I am Rex
+
+// Getters/setters (TDD-00030). `get x()`/`set x(v)` are ordinary property
+// syntax that routes through a method call instead of a plain field
+// read/write — a getter can compute a value from other fields, a setter
+// can derive a different backing field, and `obj.x`/`obj.x = v` both work
+// exactly like a plain field would from the caller's own perspective.
+class Temperature {
+  private _celsius: number;
+  constructor(c: number) {
+    this._celsius = c;
+  }
+  get celsius(): number {
+    return this._celsius;
+  }
+  set celsius(v: number) {
+    this._celsius = v;
+  }
+  // A getter/setter pair need not share a backing field 1:1 — fahrenheit
+  // has no field of its own at all, it's purely derived from celsius.
+  get fahrenheit(): number {
+    return (this._celsius * 9) / 5 + 32;
+  }
+  set fahrenheit(f: number) {
+    this._celsius = ((f - 32) * 5) / 9;
+  }
+}
+const temp = new Temperature(0);
+console.log(temp.celsius);     // 0
+console.log(temp.fahrenheit);  // 32
+temp.fahrenheit = 212;
+console.log(temp.celsius);     // 100
+temp.celsius += 10;            // compound assignment: read via getter, write via setter
+console.log(temp.celsius);     // 110
+
+// Even internal `this.x` access (from a method other than the accessor's
+// own body) goes through the getter/setter, matching real JS — falls out
+// for free from `this` being an ordinary receiver, no special-casing.
+class Counter {
+  private count: number;
+  constructor() {
+    this.count = 0;
+  }
+  get value(): number {
+    return this.count;
+  }
+  bump(): void {
+    console.log(this.value); // reads through the getter
+    this.count = this.count + 1;
+  }
+}
+const counter = new Counter();
+counter.bump(); // 0
+counter.bump(); // 1
+console.log(counter.value); // 2
+
+// Getters/setters are ordinary, overridable methods under the hood — real
+// inheritance/polymorphic dispatch through a base-typed parameter works
+// exactly like it does for any other method (Stage 3 above).
+class Shape3 {
+  get label(): string {
+    return "shape";
+  }
+}
+class Circle2 extends Shape3 {
+  get label(): string {
+    return "circle";
+  }
+}
+function showLabel(s: Shape3): string {
+  return s.label;
+}
+console.log(showLabel(new Circle2())); // circle
+console.log(showLabel(new Shape3()));  // shape

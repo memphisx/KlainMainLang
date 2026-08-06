@@ -14,6 +14,67 @@ func isLogicalAssignOp(op string) bool {
 	return op == "&&=" || op == "||=" || op == "??="
 }
 
+// tryEmitAccessorAssign attempts `obj.prop = rhs` / `obj.prop OP= rhs`
+// against a registered class accessor (TDD-00030). handled is false when
+// objVal's class has no accessor at all for this property name — the
+// caller should fall through to its own existing FieldIndex-based
+// plain-field path unchanged, exactly as if this function had never been
+// called.
+func (e *Emitter) tryEmitAccessorAssign(objVal Value, prop, op string, rhsExpr ast.Expression, pos ast.Pos) (handled bool, result Value, err error) {
+	getter, setter, ok := e.classAccessorSigs(objVal.Ty.ClassName, prop)
+	if !ok {
+		return false, Value{}, nil
+	}
+	if setter == nil {
+		return true, Value{}, fmt.Errorf("%d:%d: property '%s' has no setter", pos.Line, pos.Col, prop)
+	}
+	// emitLogicalCompoundAssign is generic over "any assignable ptr+Type
+	// lvalue" specifically because it can cheaply re-load the same memory
+	// location across its short-circuit branches — an accessor has no such
+	// location, and invoking a getter/setter more than once per
+	// source-level use risks an observable double-invocation of user code
+	// with side effects. Not attempted for V1 — see docs/tdd/TDD-00030.md.
+	if isLogicalAssignOp(op) {
+		return true, Value{}, fmt.Errorf("%d:%d: logical assignment ('%s') on a getter/setter property is not yet supported", pos.Line, pos.Col, op)
+	}
+
+	paramTy := setter.ParamTypes[0]
+	var rhs Value
+	if op == "=" {
+		// Hint-aware (TDD-00028/TDD-00007): `obj.prop = [1,2,3]`/`obj.prop
+		// = {...}` coerces against the setter's own declared parameter type.
+		rhs, err = e.emitExprWithObjectHint(rhsExpr, paramTy)
+		if err != nil {
+			return true, Value{}, err
+		}
+	} else {
+		if getter == nil {
+			return true, Value{}, fmt.Errorf("%d:%d: property '%s' has no getter (required to read the current value for '%s')", pos.Line, pos.Col, prop, op)
+		}
+		cur, err := e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", prop), nil, pos, false)
+		if err != nil {
+			return true, Value{}, err
+		}
+		rhsVal, err := e.emitExpr(rhsExpr)
+		if err != nil {
+			return true, Value{}, err
+		}
+		if err := dateCompoundAssignGuard(op, paramTy.IsDate, rhsVal.Ty.IsDate); err != nil {
+			return true, Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
+		}
+		rhsVal = e.coerce(rhsVal, paramTy)
+		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, paramTy)
+		if err != nil {
+			return true, Value{}, err
+		}
+	}
+	rhs = e.coerce(rhs, paramTy)
+	if _, err := e.emitClassSetterCall(objVal.Ty, objVal, accessorMethodName("set", prop), rhs, pos); err != nil {
+		return true, Value{}, err
+	}
+	return true, rhs, nil
+}
+
 // emitLogicalCompoundAssign implements &&=/||=/??= against an lvalue whose
 // storage is already resolved to a single ptr+Type pair — the shape shared
 // by every assignable form this compiler has (scalar variable, array
@@ -190,6 +251,18 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("field assignment on non-object")
+		}
+		// TDD-00030: a class accessor (getter/setter) is checked before the
+		// plain-field FieldIndex path below — an accessor-only property
+		// name is never a real Field, so FieldIndex would otherwise report
+		// "no field" for it. Every non-accessor class, and every non-class
+		// object, falls through unchanged.
+		if objVal.Ty.IsClass {
+			if handled, result, err := e.tryEmitAccessorAssign(objVal, memEx.Property, ex.Op, ex.Right, ex.GetPos()); err != nil {
+				return Value{}, err
+			} else if handled {
+				return result, nil
+			}
 		}
 		idx, fieldTy, ok := objVal.Ty.FieldIndex(memEx.Property)
 		if !ok {
