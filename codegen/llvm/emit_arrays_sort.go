@@ -13,6 +13,9 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "join", pos); err != nil {
+		return Value{}, err
+	}
 
 	var sepVal Value
 	if len(args) == 0 {
@@ -121,6 +124,9 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 // (sorts the caller's own array) and emitArrayToSorted (sorts a fresh copy,
 // leaving the original untouched).
 func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.Expression, pos ast.Pos) error {
+	if err := e.rejectNestedArrayElem(elemTy, "sort", pos); err != nil {
+		return err
+	}
 	e.ensureQsort()
 
 	var cmpFnRef string

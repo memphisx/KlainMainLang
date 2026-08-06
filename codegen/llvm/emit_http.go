@@ -107,6 +107,16 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 			return Value{}, fmt.Errorf("%d:%d: http.listen's handler return type's 'headers' field must be Map<string, string>", pos.Line, pos.Col)
 		}
 	}
+	// Optional binary response body (TDD-00026/ADR-00106): bodyBytes wins
+	// over body's own strlen-computed length when present and non-null at
+	// runtime, mirroring headers' own "field present at the type level,
+	// null-checked at runtime" convention above — see
+	// buildHTTPDispatcher's response-writing tail.
+	if _, bbTy, ok := retTy.FieldIndex("bodyBytes"); ok {
+		if !bbTy.IsArrayBuffer {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's handler return type's 'bodyBytes' field must be ArrayBuffer", pos.Line, pos.Col)
+		}
+	}
 	paramTy := handlerVal.Ty.FuncParams[0]
 
 	// Third argument, { workers: N } (TDD-00025): any value whose inferred
@@ -158,6 +168,41 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
 	e.emitInstr("call void @__kml_event_loop_run()")
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitRequestBodyBytes implements req.bodyBytes(): ArrayBuffer (TDD-00026/
+// ADR-00106): the binary-safe counterpart to req.body: string, returning the
+// exact byte range buildHTTPDispatcher's Content-Length-aware read loop
+// already accumulated (RequestType's own hidden bodyLength field) — a
+// request body containing an embedded null byte reaches TS code whole
+// through this accessor, unlike req.body itself, whose ordinary string
+// operations (`.length` included) revert to strlen semantics past that
+// point. Hand-builds an ArrayBuffer header exactly like
+// emitResponseArrayBuffer (emit_fetch.go, ADR-00094) does — wraps the
+// request's own already-buffered body pointer directly instead of
+// malloc'ing a fresh one, no copy needed.
+func (e *Emitter) emitRequestBodyBytes(objVal Value, pos ast.Pos) (Value, error) {
+	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a Request", pos.Line, pos.Col)
+	}
+	bodyVal := e.loadFieldValue(objVal, bodyIdx, bodyFieldTy)
+
+	lenIdx, lenFieldTy, ok := objVal.Ty.FieldIndex("bodyLength")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a Request", pos.Line, pos.Col)
+	}
+	lenVal := e.loadFieldValue(objVal, lenIdx, lenFieldTy)
+
+	e.ensureMalloc()
+	hdrReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenVal.Ref, hdrReg))
+	dataSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bodyVal.Ref, dataSlot))
+
+	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
 }
 
 // emitHTTPClose implements http.close() (TDD-00027): a bare global function,
@@ -618,6 +663,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	storeReqField("query", queryMapFinal)
 	storeReqField("headers", headersMapFinal)
 	storeReqField("body", bodyBuf)
+	storeReqField("bodyLength", contentLenFinal)
 	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
 
 	handlerPtr := e.freshReg()
@@ -701,6 +747,62 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		extraHeadersRef = e.internString("")
 	}
 
+	// Optional binary response body (TDD-00026/ADR-00106): bodyBytes wins
+	// over body's own strlen-computed length whenever it's present at the
+	// type level *and* non-null at runtime (a null bodyBytes falls back to
+	// body/strlen(body) exactly like before this field existed) — the same
+	// "field present at the type level, defensively null-checked at
+	// runtime" shape headers' own extraHeadersRef just above already uses.
+	// __kml_http_send_response always writes bodyDataRef[0:bodyLenRef] via
+	// an explicit-length write(), never a NUL-terminated %s, so a real
+	// binary payload (embedded null bytes and all) reaches the socket whole
+	// — see runtime_http.go.
+	var bodyDataRef, bodyLenRef string
+	if bbIdx, bbTy, ok := retTy.FieldIndex("bodyBytes"); ok {
+		bbGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bbGep, retTy.StructIR(), respReg, bbIdx))
+		bbReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", bbReg, bbTy.IR, bbGep, bbTy.Align()))
+		bbNotNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", bbNotNull, bbReg))
+
+		haveBBL := e.freshLabel("http.havebodybytes")
+		noBBL := e.freshLabel("http.nobodybytes")
+		mergeBBL := e.freshLabel("http.mergebodybytes")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bbNotNull, haveBBL, noBBL))
+
+		e.emitLabel(haveBBL)
+		// ArrayBuffer's hidden { i64 byteLength, ptr data } header — see
+		// emit_arraybuffer.go's emitNewArrayBufferExpression.
+		bbLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", bbLen, bbReg))
+		bbDataSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", bbDataSlot, bbReg))
+		bbData := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bbData, bbDataSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeBBL))
+
+		e.emitLabel(noBBL)
+		e.ensureStrlen()
+		strLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", strLen, bodyReg))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeBBL))
+
+		e.emitLabel(mergeBBL)
+		dataFinal := e.freshReg()
+		lenFinal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", dataFinal, bbData, haveBBL, bodyReg, noBBL))
+		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", lenFinal, bbLen, haveBBL, strLen, noBBL))
+		bodyDataRef = dataFinal
+		bodyLenRef = lenFinal
+	} else {
+		e.ensureStrlen()
+		strLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", strLen, bodyReg))
+		bodyDataRef = bodyReg
+		bodyLenRef = strLen
+	}
+
 	// emitConnActiveDecrement mirrors @__kml_http_append_conn's own increment
 	// (runtime_http.go) — TDD-00027's http.close() lets already-accepted
 	// connections finish naturally rather than orphaning them, which needs
@@ -716,7 +818,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", activeNew))
 	}
 
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, ptr %s)", fd32, statusVal.Ref, bodyReg, extraHeadersRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyDataRef, bodyLenRef, extraHeadersRef))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	emitConnActiveDecrement()
 	e.emitTerminator("ret void")

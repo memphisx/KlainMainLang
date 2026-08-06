@@ -73,10 +73,11 @@ const (
 	NOT          // !
 	INC          // ++
 	DEC          // --
-	PLUS_ASSIGN  // +=
-	MINUS_ASSIGN // -=
-	STAR_ASSIGN  // *=
-	SLASH_ASSIGN // /=
+	PLUS_ASSIGN    // +=
+	MINUS_ASSIGN   // -=
+	STAR_ASSIGN    // *=
+	SLASH_ASSIGN   // /=
+	PERCENT_ASSIGN // %=
 
 	// Bitwise operators
 	BITAND  // &
@@ -146,7 +147,7 @@ var tokenNames = map[TokenType]string{
 	LT: "<", GT: ">", LTE: "<=", GTE: ">=",
 	AND: "&&", OR: "||", NOT: "!",
 	INC: "++", DEC: "--", PLUS_ASSIGN: "+=", MINUS_ASSIGN: "-=",
-	STAR_ASSIGN: "*=", SLASH_ASSIGN: "/=",
+	STAR_ASSIGN: "*=", SLASH_ASSIGN: "/=", PERCENT_ASSIGN: "%=",
 	BITAND: "&", BITOR: "|", BITXOR: "^", BITNOT: "~",
 	LSHIFT: "<<", RSHIFT: ">>", URSHIFT: ">>>",
 	AND_ASSIGN: "&=", OR_ASSIGN: "|=", XOR_ASSIGN: "^=",

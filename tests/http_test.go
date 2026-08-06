@@ -742,6 +742,97 @@ http.listen(8961, (req: Request): Res => {
 	}
 }
 
+// --- Binary-safe request/response bodies (TDD-00026/ADR-00106) ---
+
+// TestE2EHTTPListenBodyBytesRoundTripSurvivesEmbeddedNull is the real point
+// of this feature: req.body/Res.body are plain null-terminated C strings, so
+// a body containing an embedded null byte silently truncates through them —
+// req.bodyBytes()/Res.bodyBytes carry the real byte count instead (an
+// ArrayBuffer, TDD-00018), so echoing a binary payload straight through both
+// accessors must come back byte-for-byte, null and all.
+func TestE2EHTTPListenBodyBytesRoundTripSurvivesEmbeddedNull(t *testing.T) {
+	src := `
+interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
+http.listen(8963, (req: Request): Res => {
+  const buf: ArrayBuffer = req.bodyBytes()
+  return { status: 200, body: "", bodyBytes: buf }
+})
+`
+	startHTTPServer(t, src, 8963)
+	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
+	resp, err := http.Post("http://127.0.0.1:8963/", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, payload) {
+		t.Errorf("body: got %v, want %v — an embedded null byte should survive the round trip through req.bodyBytes()/Res.bodyBytes", got, payload)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != fmt.Sprintf("%d", len(payload)) {
+		t.Errorf("Content-Length: got %q, want %q", cl, fmt.Sprintf("%d", len(payload)))
+	}
+}
+
+// TestE2EHTTPListenBodyBytesWinsOverBodyField confirms the documented
+// resolution to TDD-00026's "which field wins when both are set" open
+// question: a non-null bodyBytes wins outright over body's own (much
+// longer, in this test) string content.
+func TestE2EHTTPListenBodyBytesWinsOverBodyField(t *testing.T) {
+	src := `
+interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
+http.listen(8964, (req: Request): Res => {
+  const buf: ArrayBuffer = new ArrayBuffer(3)
+  return { status: 200, body: "this string is much longer than 3 bytes and must be ignored", bodyBytes: buf }
+})
+`
+	startHTTPServer(t, src, 8964)
+	resp, err := http.Get("http://127.0.0.1:8964/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := []byte{0, 0, 0} // ArrayBuffer is zero-initialized (real JS semantics)
+	if !bytes.Equal(got, want) {
+		t.Errorf("body: got %v (len %d), want %v — bodyBytes should win over the much-longer body field", got, len(got), want)
+	}
+}
+
+// TestE2EHTTPListenBodyBytesByteLength confirms req.bodyBytes().byteLength
+// reports the real byte count, independent of any string/strlen semantics.
+func TestE2EHTTPListenBodyBytesByteLength(t *testing.T) {
+	src := `
+interface Res { status: number; body: string }
+http.listen(8965, (req: Request): Res => {
+  const buf: ArrayBuffer = req.bodyBytes()
+  return { status: 200, body: "len=" + buf.byteLength }
+})
+`
+	startHTTPServer(t, src, 8965)
+	payload := []byte{0x41, 0x00, 0x42}
+	resp, err := http.Post("http://127.0.0.1:8965/", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("len=%d", len(payload))
+	if string(got) != want {
+		t.Errorf("body: got %q, want %q", string(got), want)
+	}
+}
+
+func TestE2EHTTPListenWrongBodyBytesFieldTypeRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Res { status: number; body: string; bodyBytes: string }
+http.listen(8966, (req: Request): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } })
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a 'bodyBytes' field that isn't ArrayBuffer, got none")
+	}
+}
+
 // TestE2EHTTPListenClusteringMultipleWorkerPIDs (TDD-00025) is the real
 // correctness check for multi-process clustering: it's not enough that the
 // binary starts and answers one request — fork() + a shared listening

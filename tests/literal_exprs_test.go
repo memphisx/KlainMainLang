@@ -107,11 +107,19 @@ console.log(len(new Array<number>(5)));
 `, "5")
 }
 
-func TestE2ENestedArrayLiteralRejectedCleanly(t *testing.T) {
-	_, err := parseAndCompile(`const nested = [[1, 2], [3, 4]];`)
-	if err == nil {
-		t.Fatal("expected a compile error for a nested array literal (array-of-arrays not yet supported), got none")
-	}
+// Nested array literals (array-of-arrays, TDD-00029) — previously rejected
+// with a clean compile error by TDD-00028's own guard; TDD-00029 replaced
+// that with real storage support (boxed elements, see
+// codegen/llvm/emit_arrays_core.go's boxArrayValue/loadArrayElem/
+// storeArrayElem). See tests/arrays_test.go for indexing/mutation/iteration
+// coverage of nested arrays; this one just confirms the literal itself
+// compiles and evaluates correctly now.
+func TestE2ENestedArrayLiteralCompiles(t *testing.T) {
+	assertOutput(t, `
+const nested: number[][] = [[1, 2], [3, 4]];
+console.log(nested[0][0]);
+console.log(nested[1][1]);
+`, "1\n4")
 }
 
 func TestE2ENewMapAsCallArgument(t *testing.T) {

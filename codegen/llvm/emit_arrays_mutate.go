@@ -32,12 +32,11 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, curPtr, newLen))
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, slot, elemTy.Align()))
+	result := e.loadArrayElem(slot, elemTy)
 
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
 
-	return Value{Ref: result, Ty: elemTy}, nil
+	return result, nil
 }
 
 // emitSplice implements arr.splice(start, deleteCount?, ...items): removes
@@ -182,7 +181,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, workPtr, slotIdx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, itemVal.Ref, slot, elemTy.Align()))
+		e.storeArrayElem(slot, elemTy, itemVal)
 	}
 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", workPtr, sym.Ptr))
@@ -272,7 +271,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, slotIdx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, itemVal.Ref, slot, elemTy.Align()))
+		e.storeArrayElem(slot, elemTy, itemVal)
 	}
 
 	// Segment 3: [start+deleteCount, len) copied to [start+numInserted, newLen).
@@ -321,8 +320,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
 
 	// save first element before moving
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, curPtr, elemTy.Align()))
+	result := e.loadArrayElem(curPtr, elemTy)
 
 	newLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", newLen, curLen))
@@ -337,7 +335,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
 
-	return Value{Ref: result, Ty: elemTy}, nil
+	return result, nil
 }
 
 // emitUnshift implements arr.unshift(val): realloc, memmove right, write at [0], increment len.
@@ -388,7 +386,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", dst, newPtr, moveBytes))
 
 	// write new element at index 0
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, newPtr, elemTy.Align()))
+	e.storeArrayElem(newPtr, elemTy, val)
 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
@@ -437,7 +435,7 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, curLen))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, slot, elemTy.Align()))
+	e.storeArrayElem(slot, elemTy, val)
 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))

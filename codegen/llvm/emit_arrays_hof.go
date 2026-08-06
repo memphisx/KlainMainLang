@@ -13,6 +13,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "map", pos); err != nil {
+		return Value{}, err
+	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -79,7 +82,13 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 
 	outGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", outGep, retElemTy.IR, outPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", retElemTy.IR, resultVal.Ref, outGep, retElemTy.Align()))
+	// A callback that returns an array per element (the shape .flatMap()
+	// builds .map() on top of) needs retElemTy's own slot boxed exactly
+	// like any other nested-array-element write — see storeArrayElem's own
+	// doc comment / TDD-00029. The *input* elemTy can never itself be
+	// array-typed here (rejectNestedArrayElem above), but the callback's
+	// return type is under no such restriction.
+	e.storeArrayElem(outGep, retElemTy, resultVal)
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
@@ -103,6 +112,9 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "forEach", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -157,6 +169,9 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "filter", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -245,6 +260,9 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "reduce", pos); err != nil {
+		return Value{}, err
+	}
 	// accTy's hint comes from a pure static inference of the initial-value
 	// expression (not evaluating it early), so the callback's accumulator
 	// parameter gets the right type while still evaluating args in their
@@ -317,6 +335,9 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "find", pos); err != nil {
+		return Value{}, err
+	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -386,6 +407,9 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	if err := e.rejectNestedArrayElem(elemTy, "some", pos); err != nil {
+		return Value{}, err
+	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -448,6 +472,9 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "every", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})

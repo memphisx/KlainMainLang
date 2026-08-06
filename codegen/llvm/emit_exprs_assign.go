@@ -141,7 +141,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 		rhs = e.coerce(rhs, elemTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, rhs.Ref, gepReg, elemTy.Align()))
+		e.storeArrayElem(gepReg, elemTy, rhs)
 		return rhs, nil
 	}
 

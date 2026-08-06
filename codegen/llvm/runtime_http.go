@@ -415,13 +415,19 @@ ret:
 //	  socket()+setsockopt(SO_REUSEADDR)+bind()+listen(); throws a catchable
 //	  Error (via __kml_http_throw) on any failure instead of returning -1,
 //	  so the Go-emitted call site never needs its own error check.
-//	__kml_http_send_response(i32 connfd, i64 status, ptr body, ptr extraHeaders)
-//	  Formats a minimal HTTP/1.1 response (fixed "OK" reason phrase
-//	  regardless of status — real clients determine success/failure from
-//	  the numeric code, not the phrase) with Content-Length/Connection:
-//	  close plus extraHeaders (empty string if the handler's return type
-//	  has no `headers` field — see ensureHTTPSerializeHeaders), writes it,
-//	  closes the connection.
+//	__kml_http_send_response(i32 connfd, i64 status, ptr body, i64 bodylen, ptr extraHeaders)
+//	  Formats a minimal HTTP/1.1 response header block (fixed "OK" reason
+//	  phrase regardless of status — real clients determine success/failure
+//	  from the numeric code, not the phrase) with Content-Length: bodylen/
+//	  Connection: close plus extraHeaders (empty string if the handler's
+//	  return type has no `headers` field — see ensureHTTPSerializeHeaders),
+//	  writes it, then writes body[0:bodylen] via a second, explicit-length
+//	  write() (not folded into the header sprintf — see this function's own
+//	  doc comment below for why), closes the connection. bodylen is
+//	  caller-supplied — either body's own strlen, or (TDD-00026/ADR-00106)
+//	  an ArrayBuffer's real byteLength when the handler's return type has a
+//	  `bodyBytes` field — so a binary response body with an embedded null
+//	  byte reaches the socket whole instead of being silently truncated.
 //	__kml_event_loop_run()
 //	  The generalized drain loop: each iteration, scans the timer queue for
 //	  the earliest-due entry exactly like __kml_timer_drain, builds an
@@ -799,19 +805,30 @@ doappend:
 	// ensureHTTPSerializeHeaders/emitHTTPListen), so this format produces
 	// byte-identical output to before extraHeaders existed when it's empty,
 	// and a correct single blank-line header/body separator either way.
-	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n%s")
+	//
+	// bodylen is now caller-supplied (emit_http.go's buildHTTPDispatcher —
+	// either body's own strlen, or bodyBytes' real byteLength, TDD-00026/
+	// ADR-00106) rather than computed internally via strlen(body), and the
+	// body itself is written via a second, explicit-length write() instead
+	// of being folded into the header sprintf's own "%s" — sprintf's %s is
+	// NUL-terminated-aware regardless of what Content-Length claims, so
+	// folding a binary body in there would still truncate it at its first
+	// embedded null byte even with a correct bodylen. Two writes (headers,
+	// then raw body bytes) is what actually makes bodyBytes' promise of
+	// surviving an embedded null byte true end to end, not just up to the
+	// Content-Length header.
+	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n")
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, ptr %%extraHeaders) {
+define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, i64 %%bodylen, ptr %%extraHeaders) {
 entry:
-  %%bodylen = call i64 @strlen(ptr %%body)
   %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
-  %%bufsize0 = add i64 %%bodylen, %%hdrlen
-  %%bufsize1 = add i64 %%bufsize0, 128
+  %%bufsize1 = add i64 %%hdrlen, 128
   %%respbuf = call ptr @malloc(i64 %%bufsize1)
-  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%extraHeaders, ptr %%body)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%extraHeaders)
   %%n64 = sext i32 %%n to i64
   call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
   call void @free(ptr %%respbuf)
+  call i64 @write(i32 %%connfd, ptr %%body, i64 %%bodylen)
   call i32 @close(i32 %%connfd)
   ret void
 }`, respFmt))

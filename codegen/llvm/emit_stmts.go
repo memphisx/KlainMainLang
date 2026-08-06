@@ -410,10 +410,21 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
 
-	// Loop variable.
+	// Loop variable. An array-typed element (nested array, TDD-00029) needs
+	// the two-alloca "Named Symbol" representation (Ptr+LenPtr) instead of
+	// the single scalar alloca every other element type uses, so .length/
+	// indexing/etc. work on it inside the loop body.
 	varPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
-	e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+	var varLenPtr string
+	if elemTy.IsArray {
+		varLenPtr = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
+		e.define(s.VarName, Symbol{Ptr: varPtr, LenPtr: varLenPtr, Ty: elemTy})
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
@@ -430,12 +441,17 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	dataPtr := e.freshReg()
 	idxVal2 := e.freshReg()
 	gepReg  := e.freshReg()
-	elemVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elemVal, elemTy.IR, gepReg, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemVal, varPtr, elemTy.Align()))
+	elemVal := e.loadArrayElem(gepReg, elemTy)
+	if elemTy.IsArray {
+		if err := e.storeArrayAggregateInto(elemVal, varPtr, varLenPtr); err != nil {
+			return err
+		}
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemVal.Ref, varPtr, elemTy.Align()))
+	}
 
 	if err := e.emitStmt(s.Body); err != nil {
 		return err

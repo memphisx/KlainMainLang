@@ -131,7 +131,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitDivZeroGuard(ty, right)
+			e.emitDivZeroGuard(ty, left, right)
 			if ty.Signed {
 				e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			} else {
@@ -143,7 +143,7 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitDivZeroGuard(ty, right)
+			e.emitDivZeroGuard(ty, left, right)
 			if ty.Signed {
 				e.emitInstr(fmt.Sprintf("%s = srem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			} else {
@@ -385,11 +385,26 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type) (Value, error
 		if ty.Float {
 			e.emitInstr(fmt.Sprintf("%s = fdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
-			e.emitDivZeroGuard(ty, right)
+			e.emitDivZeroGuard(ty, left, right)
 			if ty.Signed {
 				e.emitInstr(fmt.Sprintf("%s = sdiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			} else {
 				e.emitInstr(fmt.Sprintf("%s = udiv %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			}
+		}
+	case "%":
+		// Missing entirely until now — %= (PERCENT_ASSIGN) wasn't even a
+		// lexer token before this same pass, so this case was simply never
+		// reachable; see the lexer/token.go and lexer/lexer.go changes
+		// alongside this one.
+		if ty.Float {
+			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+		} else {
+			e.emitDivZeroGuard(ty, left, right)
+			if ty.Signed {
+				e.emitInstr(fmt.Sprintf("%s = srem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
+			} else {
+				e.emitInstr(fmt.Sprintf("%s = urem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			}
 		}
 	case "&":

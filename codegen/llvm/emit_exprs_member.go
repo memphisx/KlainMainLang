@@ -101,28 +101,75 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	return Value{Ref: result, Ty: resultTy}, nil
 }
 
-// emitDivZeroGuard emits a runtime check that throws a catchable Error when
-// dividing by zero on an integer type. LLVM's sdiv/udiv/srem/urem are
-// undefined behavior on a zero divisor — under -O2 that was observed to
-// silently produce garbage output rather than a defined crash or exception,
-// on top of being genuinely platform-dependent (traps on x86, doesn't on
-// arm64). No-op for float types, where JS's Infinity/NaN semantics already
-// fall out of IEEE-754 fdiv/frem without a guard. Must be called after the
-// divisor's Value is available and before emitting the actual div/rem
-// instruction; leaves the emitter inside a fresh "ok" block, mirroring
-// emitIndexPtr's bounds-check pattern below.
-func (e *Emitter) emitDivZeroGuard(ty Type, right Value) {
+// signedIntMin returns the minimum representable value for a signed
+// integer IR width as an LLVM literal — used by emitDivZeroGuard's second
+// UB check below. Callers only ever pass one of these four widths (every
+// integer type this compiler has, per types.go's TypeI8/.../TypeI64), so
+// the default case covers i64 rather than needing its own explicit case.
+func signedIntMin(ir string) string {
+	switch ir {
+	case "i8":
+		return "-128"
+	case "i16":
+		return "-32768"
+	case "i32":
+		return "-2147483648"
+	default: // "i64"
+		return "-9223372036854775808"
+	}
+}
+
+// emitDivZeroGuard emits runtime checks that throw a catchable Error before
+// an integer sdiv/udiv/srem/urem, covering both of LLVM's documented UB
+// cases for these instructions:
+//   - a zero divisor (any integer type, signed or unsigned);
+//   - signed types only — dividing that type's minimum representable value
+//     by -1. The mathematical result (e.g. i64 MIN / -1 = 2^63) doesn't fit
+//     back into the same width, the mirror-image overflow of the zero-
+//     divisor case. Unsigned division has no such case: there's no negative
+//     divisor to trigger it. Found by inspection while scoping TDD-00014's
+//     codegen fuzzer, not by an actual repro (reaching this exact dividend
+//     by chance is astronomically unlikely) — added once actually picked up
+//     rather than left as a documented gap indefinitely.
+//
+// Under -O2 both were observed to silently produce garbage output rather
+// than a defined crash or exception, on top of being genuinely platform-
+// dependent (traps on x86, doesn't on arm64). No-op for float types, where
+// JS's Infinity/NaN semantics already fall out of IEEE-754 fdiv/frem
+// without a guard. Must be called after both operands' Values are
+// available and before emitting the actual div/rem instruction; leaves the
+// emitter inside a fresh "ok" block, mirroring emitIndexPtr's bounds-check
+// pattern below.
+func (e *Emitter) emitDivZeroGuard(ty Type, left, right Value) {
 	if ty.Float {
 		return
 	}
 	zeroReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, 0", zeroReg, ty.IR, right.Ref))
 	zeroL := e.freshLabel("div.zero")
-	okL := e.freshLabel("div.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroReg, zeroL, okL))
+	nonZeroL := e.freshLabel("div.nonzero")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", zeroReg, zeroL, nonZeroL))
 
 	e.emitLabel(zeroL)
 	e.emitInternalThrow(e.internString("Division by zero"))
+
+	e.emitLabel(nonZeroL)
+	if !ty.Signed {
+		return
+	}
+
+	negOneReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, -1", negOneReg, ty.IR, right.Ref))
+	minReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", minReg, ty.IR, left.Ref, signedIntMin(ty.IR)))
+	overflowReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", overflowReg, negOneReg, minReg))
+	overflowL := e.freshLabel("div.overflow")
+	okL := e.freshLabel("div.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", overflowReg, overflowL, okL))
+
+	e.emitLabel(overflowL)
+	e.emitInternalThrow(e.internString("Division overflow"))
 
 	e.emitLabel(okL)
 }
@@ -229,9 +276,7 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, elemTy.IR, gepReg, elemTy.Align()))
-	return Value{Ref: reg, Ty: elemTy}, nil
+	return e.loadArrayElem(gepReg, elemTy), nil
 }
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
