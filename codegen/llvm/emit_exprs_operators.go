@@ -26,6 +26,39 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 	}
 
+	// An array compared against null/undefined (e.g. RegExp.exec()'s
+	// `T[] | null` — emitRegexExec's null-array sentinel, {ptr: null,
+	// len: 0}) needs its own path: an array value is a {ptr,i64}
+	// aggregate, which the generic icmp-based comparison further down
+	// (keyed on ty.IR, "ptr" for an array type) cannot compare directly —
+	// LLVM's icmp only ever accepts int/ptr/float operands, never an
+	// aggregate, a hard clang-stage failure otherwise. Found as a real,
+	// pre-existing gap (not RegExp-specific — any `T[] | null` comparison
+	// would have hit this) while wiring Stage 2's `.exec()`. See
+	// ADR-00116. Only the ptr half of the aggregate is ever compared;
+	// general array-vs-array equality (a separate, still-unsupported gap)
+	// is untouched.
+	if (left.Ty.IsArray && right.Ty.IsNull) || (left.Ty.IsNull && right.Ty.IsArray) {
+		arrVal := left
+		if left.Ty.IsNull {
+			arrVal = right
+		}
+		var cmpOp string
+		switch ex.Op {
+		case "==", "===":
+			cmpOp = "eq"
+		case "!=", "!==":
+			cmpOp = "ne"
+		default:
+			return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported between an array and null", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		}
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, arrVal.Ref))
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, null", reg, cmpOp, ptrReg))
+		return Value{Ref: reg, Ty: TypeBool}, nil
+	}
+
 	// "+" with exactly one string-typed operand is string concatenation
 	// with the other operand implicitly stringified, matching real JS
 	// (e.g. `"tick " + count`, `count + " tick"`). Must be handled before

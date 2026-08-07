@@ -62,6 +62,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = ArrayBufferType()
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
+		case *ast.NewTextEncoderExpression:
+			ty = TextEncoderType()
+		case *ast.NewTextDecoderExpression:
+			ty = TextDecoderType()
+		case *ast.NewRegExpExpression:
+			ty = RegExpType()
 		case *ast.AwaitExpression:
 			ty = e.inferExprType(init)
 		case *ast.ArrowFunction:
@@ -75,6 +81,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					ty = PromiseOf(ResponseType())
 				case "btoa", "atob", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI":
 					ty = TypePtr
+				case "structuredClone":
+					if len(init.Args) == 1 {
+						ty = e.inferExprType(init.Args[0])
+					}
 				default:
 					// A plain `ptr`-shaped return (a string — see isStringTy)
 					// was missing from this condition entirely alongside

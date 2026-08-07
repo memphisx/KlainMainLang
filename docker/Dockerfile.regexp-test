@@ -1,0 +1,37 @@
+# Test build verifying TDD-00035 Stage 6: does --static work for a
+# RegExp-using program? Confirmed directly on the Linux x86-64 dev machine
+# first (docs/adr/ADR-00120.md) that PCRE2 has none of libcurl's TLS-
+# backend-style transitive dependency chain (docker/Dockerfile.fetch-test's
+# whole reason for existing) — a plain `klainmain --static` links cleanly
+# with zero extra flags. This Dockerfile is the containerized confirmation
+# of that same finding, matching docker/Dockerfile's own simple single-
+# stage --static shape rather than fetch-test's clang-then-gcc workaround.
+#
+#   docker build -f docker/Dockerfile.regexp-test -t kml-regexp-static .
+#   docker run --rm kml-regexp-static
+
+# ---- Stage 1: build the KlainMainLang compiler ----
+FROM golang:1.26-alpine AS compiler-builder
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+COPY ast/ ast/
+COPY codegen/ codegen/
+COPY jsdoc/ jsdoc/
+COPY lexer/ lexer/
+COPY parser/ parser/
+COPY resolver/ resolver/
+RUN go build -o /out/klainmain .
+
+# ---- Stage 2: statically compile docker/regexp-demo.ts with that compiler ----
+FROM alpine:3.21 AS program-builder
+RUN apk add --no-cache clang musl-dev pcre2-dev
+COPY --from=compiler-builder /out/klainmain /usr/local/bin/klainmain
+COPY docker/regexp-demo.ts /src/regexp-demo.ts
+WORKDIR /src
+RUN klainmain --static -o /src/regexp-demo regexp-demo.ts
+
+# ---- Stage 3: nothing but the static binary ----
+FROM scratch
+COPY --from=program-builder /src/regexp-demo /regexp-demo
+ENTRYPOINT ["/regexp-demo"]

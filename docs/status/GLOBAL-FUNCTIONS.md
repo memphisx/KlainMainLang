@@ -2,9 +2,9 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: ~76% (13/17).
+**Coverage**: ~82% (14/17).
 
-**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `structuredClone`/`queueMicrotask` aren't implemented. `eval` won't be implemented (requires a JIT).
+**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` won't be implemented (requires a JIT).
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -22,6 +22,6 @@
 | `decodeURIComponent(s)` | ✅ | Decodes every valid `%XX` escape unconditionally. See [ADR-00024](../adr/ADR-00024.md). |
 | `atob(s)` | ✅ | Base64 decode. Permissive: malformed length/characters decode as best-effort rather than throwing. Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate "binary string" type needed). See [ADR-00024](../adr/ADR-00024.md). |
 | `btoa(s)` | ✅ | Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/ADR-00024.md). |
-| `structuredClone(obj)` | ❌ | Deep copy; medium complexity |
+| `structuredClone(obj)` | ✅ | Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, and plain objects recurse; scalars pass through as value types). `Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased — see [ADR-00113](../adr/ADR-00113.md). |
 | `queueMicrotask(fn)` | ❌ | Needs event loop |
 | `eval(s)` | ❌ | Won't implement (requires a JIT) |

@@ -872,12 +872,62 @@ func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTy
 	return &NewTypedArrayExpression{ElemKind: elemKind, Arg: arg, pos: pos}
 }
 
+// NewTextEncoderExpression is `new TextEncoder()` — no arguments. See
+// docs/status/ENCODING-TEXT.md.
+type NewTextEncoderExpression struct {
+	pos Pos
+}
+
+func (*NewTextEncoderExpression) nodeMarker()   {}
+func (*NewTextEncoderExpression) exprMarker()   {}
+func (n *NewTextEncoderExpression) GetPos() Pos { return n.pos }
+
+func NewNewTextEncoderExpression(pos Pos) *NewTextEncoderExpression {
+	return &NewTextEncoderExpression{pos: pos}
+}
+
+// NewTextDecoderExpression is `new TextDecoder()` (default, UTF-8) or
+// `new TextDecoder(label)` — Label is evaluated for side effects but
+// otherwise ignored (V1 scope: UTF-8 only, no encoding validation). See
+// docs/status/ENCODING-TEXT.md.
+type NewTextDecoderExpression struct {
+	Label Expression // nil for the no-argument form
+	pos   Pos
+}
+
+func (*NewTextDecoderExpression) nodeMarker()   {}
+func (*NewTextDecoderExpression) exprMarker()   {}
+func (n *NewTextDecoderExpression) GetPos() Pos { return n.pos }
+
+func NewNewTextDecoderExpression(label Expression, pos Pos) *NewTextDecoderExpression {
+	return &NewTextDecoderExpression{Label: label, pos: pos}
+}
+
+// NewRegExpExpression is `new RegExp(pattern, flags?)` — Flags is nil for
+// the 1-arg form. A `/pattern/flags` regex literal desugars to this same
+// node at parse time (parsePrimary's `case lexer.REGEX`), with both Pattern
+// and Flags always present as string literals there — so codegen only ever
+// sees this one shape regardless of surface syntax. See
+// docs/tdd/TDD-00035.md.
+type NewRegExpExpression struct {
+	Pattern Expression
+	Flags   Expression // nil for the no-flags constructor form
+	pos     Pos
+}
+
+func (*NewRegExpExpression) nodeMarker()   {}
+func (*NewRegExpExpression) exprMarker()   {}
+func (n *NewRegExpExpression) GetPos() Pos { return n.pos }
+
+func NewNewRegExpExpression(pattern, flags Expression, pos Pos) *NewRegExpExpression {
+	return &NewRegExpExpression{Pattern: pattern, Flags: flags, pos: pos}
+}
+
 // NewExpression — `new ClassName(args)` for a user-defined class. Unlike
-// Array/Map/Set/Error/Date/URL/URLSearchParams/ArrayBuffer/TypedArray above
-// (each its own hardcoded node, keyed on the literal callee name at parse
-// time), this is the generic fallthrough for any `new <Name>` where Name
-// isn't one of
-// those builtins.
+// Array/Map/Set/Error/Date/URL/URLSearchParams/ArrayBuffer/TypedArray/
+// TextEncoder/TextDecoder/RegExp above (each its own hardcoded node, keyed on
+// the literal callee name at parse time), this is the generic fallthrough for
+// any `new <Name>` where Name isn't one of those builtins.
 type NewExpression struct {
 	ClassName string
 	// TypeArgs is non-nil only for `new ClassName<T>(args)` against a generic

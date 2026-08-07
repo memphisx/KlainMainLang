@@ -24,6 +24,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - `clang` (LLVM 15+, needs opaque-pointer support)
 - `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
 - `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
+- `libpcre2-8`/`libpcre2-dev`, needed if the compiled program uses `RegExp` (either `new RegExp(...)` or a `/pattern/flags` literal) — `apt-get install libpcre2-dev` on Debian/Ubuntu, `brew install pcre2` on macOS, `apk add pcre2-dev` on Alpine. Same conditional-linking convention as `libcurl`: every other program stays plain-libc. See [docs/tdd/TDD-00035.md](docs/tdd/TDD-00035.md)/[docs/status/REGEXP.md](docs/status/REGEXP.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
@@ -98,11 +99,12 @@ klainmain [flags] <file.ts>
 
 Every other compiled binary here is dynamically linked (against libSystem on
 macOS, glibc on Linux, plus `libcurl` if the program calls `fetch` or
-`http.listen`), closer
+`http.listen`, plus `libpcre2-8` if it uses `RegExp`), closer
 to typical C/C++ toolchain output than a normal Go binary's usual
 self-contained default. `--static` closes that gap on Linux, verified
 end-to-end against real Docker builds: see `docker/Dockerfile` for a plain
-example and `docker/Dockerfile.fetch-test` for one using `fetch` too.
+example, `docker/Dockerfile.fetch-test` for one using `fetch`, and
+`docker/Dockerfile.regexp-test` for one using `RegExp`.
 A `fetch`-using program needs curl's *entire* static dependency chain listed
 explicitly at link time (static archives don't auto-pull their own
 dependencies the way shared libraries do), and (on Alpine/musl, at least)
@@ -112,6 +114,10 @@ linker can't consume but gcc's can. See [ADR-00033](docs/adr/ADR-00033.md) for t
 recipe and investigation; this compiler doesn't attempt to automate it
 itself, since the exact package list/workaround is specific to one distro's
 build choices, not a portable fact this compiler could bake in safely.
+`RegExp`'s `libpcre2-8` has none of that complexity — no TLS backend, no
+transitive dependency chain — so `--static` just works for it with zero
+extra flags, on both a bare Linux build and inside `Dockerfile.regexp-test`'s
+`scratch` container; see [ADR-00120](docs/adr/ADR-00120.md).
 
 ## The pipeline, in one breath
 
@@ -174,7 +180,7 @@ docs/
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
   status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail
   testing/          Conformance-suite coverage tracking (Test262 ports run alongside the regular test suite)
-docker/             Dockerfiles verifying --static (+ fetch) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
+docker/             Dockerfiles verifying --static (+ fetch, + RegExp) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
   workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
 examples/           Sample .ts files: each compiles to a native binary, all wired into `make examples`

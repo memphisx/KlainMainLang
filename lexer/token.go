@@ -123,6 +123,8 @@ const (
 	TEMPLATE_MIDDLE // } text ${
 	TEMPLATE_TAIL   // } text`
 
+	REGEX // /pattern/flags
+
 	JSDOC // /** ... */
 	EOF
 )
@@ -158,6 +160,7 @@ var tokenNames = map[TokenType]string{
 	SEMICOLON: ";", COLON: ":", COMMA: ",", DOT: ".", QUESTION: "?", NULLISH: "??", OPTIONAL_DOT: "?.", ARROW: "=>",
 	TEMPLATE_NO_SUB: "TEMPLATE_NO_SUB", TEMPLATE_HEAD: "TEMPLATE_HEAD",
 	TEMPLATE_MIDDLE: "TEMPLATE_MIDDLE", TEMPLATE_TAIL: "TEMPLATE_TAIL",
+	REGEX: "REGEX",
 	JSDOC: "JSDOC", EOF: "EOF",
 }
 
@@ -193,6 +196,7 @@ func LookupIdent(s string) TokenType {
 type Token struct {
 	Type    TokenType
 	Literal string
+	Flags   string // regex literal flags only (Type == REGEX); empty for every other token
 	Line    int
 	Col     int
 }
