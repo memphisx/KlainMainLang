@@ -352,16 +352,33 @@ func (e *Emitter) emitStringCodePointAt(mem *ast.MemberExpression, args []ast.Ex
 	return e.emitStringCharCodeAt(mem, args, pos)
 }
 
-// emitStringSearch implements s.search(pattern). Real JS coerces pattern to
-// a RegExp; this compiler has no RegExp type or regex literal syntax at all
-// (0% implemented — tracked separately), so the only value that could ever
-// reach this call site is a plain string — meaning "search for a literal
-// substring" is not a partial implementation of the real API, it is the
-// entire reachable surface of it today. Exactly indexOf's behavior under a
-// second name as a result.
+// emitStringSearch implements s.search(pattern) — real JS-shaped since
+// TDD-00035 Stage 5 (docs/adr/ADR-00119.md): a RegExp argument runs a real
+// PCRE2 search (always from offset 0, never observably affecting the
+// regex's own `lastIndex` — see emit_regexp_split.go's emitRegexSearch).
+// A plain-string argument still falls back to the original literal
+// behavior established before RegExp existed at all: exactly .indexOf()'s
+// behavior under a second name (real JS coerces a non-RegExp argument to
+// one; this compiler doesn't implement that implicit coercion, matching
+// match()/matchAll()/replace()/replaceAll()'s identical narrowing).
 func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: search takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	if e.inferExprType(args[0]).IsRegExp {
+		strVal, err := e.emitExpr(mem.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		if !isStringTy(strVal.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: search is only supported on strings", pos.Line, pos.Col)
+		}
+		strVal = e.coerce(strVal, TypePtr)
+		regexVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitRegexSearch(strVal, regexVal), nil
 	}
 	return e.emitStringIndexOf(mem, args, pos)
 }
@@ -564,6 +581,9 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: replace is only supported on strings", pos.Line, pos.Col)
 	}
+	if e.inferExprType(args[0]).IsRegExp {
+		return e.emitRegexReplace(objVal, args, pos, false)
+	}
 	searchVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -589,6 +609,9 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: replaceAll is only supported on strings", pos.Line, pos.Col)
 	}
+	if e.inferExprType(args[0]).IsRegExp {
+		return e.emitRegexReplace(objVal, args, pos, true)
+	}
 	searchVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -613,6 +636,14 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: split is only supported on strings", pos.Line, pos.Col)
+	}
+	if e.inferExprType(args[0]).IsRegExp {
+		objVal = e.coerce(objVal, TypePtr)
+		regexVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitRegexSplit(objVal, regexVal), nil
 	}
 	sepVal, err := e.emitExpr(args[0])
 	if err != nil {

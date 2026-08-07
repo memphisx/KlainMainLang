@@ -65,20 +65,18 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	return Value{Ref: reg, Ty: target}
 }
 
-// emitToBool converts any scalar value to i1 for use in a branch.
+// emitToBool converts any scalar value to i1 for use in a branch — a thin
+// alias for toBool (emit_exprs_types.go), kept as a separate name since
+// call sites elsewhere already use it. Previously its own separate
+// (near-duplicate) implementation that had quietly diverged from toBool's:
+// this one used `fcmp une` for float truthiness, which treats NaN as
+// truthy (an "unordered" comparison is true whenever either operand is
+// NaN) — wrong, since real JS's Boolean(NaN) === false. toBool's `fcmp
+// one` (ordered-and-not-equal, false for NaN) is correct; consolidating
+// onto one implementation fixes this rather than carrying two subtly
+// different bugs in two places. See ADR-00116.
 func (e *Emitter) emitToBool(v Value) Value {
-	if v.Ty.IR == "i1" {
-		return v
-	}
-	r := e.freshReg()
-	if v.Ty.IR == "ptr" {
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", r, v.Ref))
-	} else if v.Ty.Float {
-		e.emitInstr(fmt.Sprintf("%s = fcmp une %s %s, 0.0", r, v.Ty.IR, v.Ref))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = icmp ne %s %s, 0", r, v.Ty.IR, v.Ref))
-	}
-	return Value{Ref: r, Ty: TypeBool}
+	return e.toBool(v)
 }
 
 // typeBits returns the bit-width of the given LLVM IR type string.

@@ -173,6 +173,30 @@ type Type struct {
 	// `number[]` does not get. See emit_arraybuffer.go and
 	// docs/tdd/TDD-00018.md.
 	IsTypedArray bool
+	// IsTextEncoder marks `new TextEncoder()`'s result: a stateless marker
+	// value (Ref is always the constant "null" — nothing is ever allocated
+	// or read through it) whose only purpose is letting `.encode(str)`
+	// dispatch at emitCall. See emit_call_encoding.go and
+	// docs/status/ENCODING-TEXT.md.
+	IsTextEncoder bool
+	// IsTextDecoder marks `new TextDecoder(label?)`'s result — same
+	// stateless-marker shape as IsTextEncoder (label is evaluated for side
+	// effects at construction but never stored: V1 scope is UTF-8 only, see
+	// NewTextDecoderExpression's doc comment). Enables `.decode(bytes)`
+	// dispatch at emitCall. See emit_call_encoding.go and
+	// docs/status/ENCODING-TEXT.md.
+	IsTextDecoder bool
+	// IsRegExp marks `new RegExp(pattern, flags?)`'s result (and a
+	// `/pattern/flags` literal, which desugars to the same construction at
+	// parse time) — a real heap object, not a stateless marker like
+	// IsTextEncoder/IsTextDecoder: avoiding pattern recompilation on every
+	// method call and the `.lastIndex` mutable state the `g`-flag iteration
+	// idiom needs both require real per-instance storage. A hidden field at
+	// index 0 (named RegexHandleField, skipped by VisibleFields() — same
+	// convention IsError's hidden kind tag uses) holds the compiled
+	// pcre2_code* handle, never exposed via Object.keys/JSON. See
+	// RegExpType and docs/tdd/TDD-00035.md.
+	IsRegExp bool
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -275,6 +299,49 @@ func EventEmitterType(payload Type) Type {
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
+}
+
+// TextEncoderType returns `new TextEncoder()`'s result type — see
+// IsTextEncoder's doc comment for why this holds no real storage.
+func TextEncoderType() Type {
+	return Type{IR: "ptr", IsTextEncoder: true}
+}
+
+// TextDecoderType returns `new TextDecoder(...)`'s result type — see
+// IsTextDecoder's doc comment for why this holds no real storage.
+func TextDecoderType() Type {
+	return Type{IR: "ptr", IsTextDecoder: true}
+}
+
+// RegexHandleField is the name of the hidden ptr field every RegExp
+// instance carries at index 0, holding the compiled pcre2_code* handle —
+// never exposed via VisibleFields()/Object.keys/JSON, same convention
+// ClassTagField uses for a class instance's hidden tag. RegExp has no
+// user-declarable fields to collide with (unlike a class), so this exists
+// purely for readability at GEP call sites, not collision safety.
+const RegexHandleField = "__kml_regex_handle"
+
+// RegExpType returns `new RegExp(pattern, flags?)`'s (and a
+// `/pattern/flags` literal's) result type — see IsRegExp's doc comment for
+// why this is a real heap object rather than a stateless marker.
+// source/flags carry the original constructor arguments verbatim;
+// global/ignoreCase/multiline/dotAll are decomposed once at construction
+// (V1's supported flag set — see docs/tdd/TDD-00035.md's flag scope table;
+// u/y/d are deferred) so no method needs to re-parse the flags string;
+// lastIndex is mutable, `g`-flag iteration state.
+func RegExpType() Type {
+	ty := ObjectType([]Field{
+		{Name: RegexHandleField, Ty: TypePtr},
+		{Name: "source", Ty: TypePtr},
+		{Name: "flags", Ty: TypePtr},
+		{Name: "global", Ty: TypeBool},
+		{Name: "ignoreCase", Ty: TypeBool},
+		{Name: "multiline", Ty: TypeBool},
+		{Name: "dotAll", Ty: TypeBool},
+		{Name: "lastIndex", Ty: TypeI64},
+	})
+	ty.IsRegExp = true
+	return ty
 }
 
 // typedArrayElemKindToType maps the element-kind strings the parser already
@@ -410,6 +477,9 @@ func (t Type) VisibleFields() []Field {
 		return t.Fields[skip:]
 	}
 	if t.IsError && len(t.Fields) > 0 {
+		return t.Fields[1:]
+	}
+	if t.IsRegExp && len(t.Fields) > 0 {
 		return t.Fields[1:]
 	}
 	return t.Fields
@@ -694,6 +764,8 @@ func ResolveTypeName(name string) Type {
 		return URLType()
 	case "URLSearchParams":
 		return URLSearchParamsType()
+	case "RegExp":
+		return RegExpType()
 	case "ArrayBuffer":
 		return ArrayBufferType()
 	case "Int8Array":

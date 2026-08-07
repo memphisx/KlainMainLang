@@ -97,6 +97,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}
+		if mem.Property == "encode" && e.inferExprType(mem.Object).IsTextEncoder {
+			return e.emitTextEncoderEncode(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "decode" && e.inferExprType(mem.Object).IsTextDecoder {
+			return e.emitTextDecoderDecode(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "test" && e.inferExprType(mem.Object).IsRegExp {
+			return e.emitRegexTest(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "exec" && e.inferExprType(mem.Object).IsRegExp {
+			return e.emitRegexExec(mem, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "bodyBytes" && e.inferExprType(mem.Object).IsRequest {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -442,6 +454,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "search" {
 			return e.emitStringSearch(mem, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "match" {
+			return e.emitStringMatch(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "matchAll" {
+			return e.emitStringMatchAll(mem, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "localeCompare" {
 			return e.emitStringLocaleCompare(mem, ex.Args, ex.GetPos())
 		}
@@ -642,6 +660,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitClearTimer(ex.Args, "clearInterval", ex.GetPos())
 		case "clearImmediate":
 			return e.emitClearTimer(ex.Args, "clearImmediate", ex.GetPos())
+		case "structuredClone":
+			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		}
 	}
 

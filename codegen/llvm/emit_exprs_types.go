@@ -429,6 +429,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypePtr
 			case "setTimeout", "setInterval", "setImmediate":
 				return TypeI64
+			case "structuredClone":
+				if len(ex.Args) == 1 {
+					return e.inferExprType(ex.Args[0])
+				}
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
@@ -766,8 +770,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if e.inferExprType(mem.Object).IsResponse {
 					return ArrayBufferType()
 				}
+			case "encode":
+				if e.inferExprType(mem.Object).IsTextEncoder {
+					return TypedArrayType("uint8")
+				}
+			case "decode":
+				if e.inferExprType(mem.Object).IsTextDecoder {
+					return TypePtr
+				}
+			case "test":
+				if e.inferExprType(mem.Object).IsRegExp {
+					return TypeBool
+				}
+			case "exec":
+				if e.inferExprType(mem.Object).IsRegExp {
+					return regExpExecResultType()
+				}
 			case "split":
 				return ArrayOf(TypePtr)
+			case "match":
+				return regExpExecResultType()
+			case "matchAll":
+				return ArrayOf(ArrayOf(TypePtr))
 			case "substring", "trim", "toUpperCase", "toLowerCase", "replace":
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
@@ -906,6 +930,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return URLSearchParamsType()
 	case *ast.NewArrayBufferExpression:
 		return ArrayBufferType()
+	case *ast.NewTextEncoderExpression:
+		return TextEncoderType()
+	case *ast.NewTextDecoderExpression:
+		return TextDecoderType()
+	case *ast.NewRegExpExpression:
+		return RegExpType()
 	case *ast.ObjectLiteral:
 		return e.inferObjectType(ex)
 	case *ast.ArrayLiteral:
@@ -965,16 +995,108 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	return TypeI64
 }
 
-// toBool converts a Value to i1 via icmp ne 0.
+// isPlainStringTy reports whether ty is a genuine string — not an object,
+// array, closure, or any other ptr-backed builtin marker type (Map/Set/
+// EventEmitter/ArrayBuffer/TextEncoder/TextDecoder/Promise all share
+// string's bare IR=="ptr" shape with none of the other flags isStringTy
+// already excludes, so isStringTy alone isn't precise enough here). Used
+// only by toBool: a string is the one JS primitive whose truthiness
+// depends on its content (empty string is falsy) rather than "is this
+// value present at all," and treating e.g. a Map as string-shaped would
+// wrongly base its truthiness on the first byte of its internal
+// representation instead of always being truthy like any other object.
+func isPlainStringTy(ty Type) bool {
+	return isStringTy(ty) && !ty.IsMap && !ty.IsSet && !ty.IsEventEmitter &&
+		!ty.IsArrayBuffer && !ty.IsTextEncoder && !ty.IsTextDecoder && !ty.IsPromise
+}
+
+// toBool converts a Value to i1 (truthiness).
+//
+// A bare integer 0 literal is invalid LLVM syntax against a ptr-typed
+// operand (LLVM requires the `null` keyword) — found as a real, pre-
+// existing bug while wiring RegExp.exec()'s `T[] | null` return: any bare
+// ptr-typed truthiness check (`if (someObj)`, ...) previously emitted
+// unparseable IR, a hard clang-stage failure, not just a wrong runtime
+// answer. See ADR-00116.
+//
+// An array value is a {ptr,i64} aggregate, not a plain ptr — icmp cannot
+// compare an aggregate directly, so its data pointer is extracted first.
+// Only a Nullable array's truthiness actually depends on that pointer
+// (this compiler's own null-array sentinel, {ptr: null, len: 0} — see
+// emitRegexExec); a non-Nullable array is always truthy regardless of its
+// pointer, matching real JS ("any array, even an empty one, is truthy")
+// and avoiding a false "falsy" result from libc's malloc(0) sometimes
+// returning NULL for an ordinary empty array.
+//
+// A genuine string also needs its own path, found the same way: falsy for
+// a real null (a `string | null` null value) OR an empty string (""),
+// truthy for anything else — content-dependent, unlike every other
+// ptr-backed value here, which is truthy whenever merely non-null. A bare
+// "is the pointer null" check alone (what every other ptr type uses) would
+// leave `if ("")` truthy, since an empty string is still a real, non-null
+// 1-byte buffer, not a null pointer.
 func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IR == "i1" {
 		return v
 	}
+	if v.Ty.IsArray {
+		if !v.Ty.Nullable {
+			return Value{Ref: "1", Ty: TypeBool}
+		}
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", reg, ptrReg))
+		return Value{Ref: reg, Ty: TypeBool}
+	}
+	if isPlainStringTy(v.Ty) {
+		return e.emitStringTruthiness(v)
+	}
 	reg := e.freshReg()
-	if v.Ty.Float {
+	switch {
+	case v.Ty.Float:
+		// "one" (ordered-and-not-equal) is NaN-safe: a NaN comparison is
+		// "unordered," so this correctly evaluates false for NaN, matching
+		// real JS's Boolean(NaN) === false.
 		e.emitInstr(fmt.Sprintf("%s = fcmp one %s %s, 0.0", reg, v.Ty.IR, v.Ref))
-	} else {
+	case v.Ty.IR == "ptr":
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", reg, v.Ref))
+	default:
 		e.emitInstr(fmt.Sprintf("%s = icmp ne %s %s, 0", reg, v.Ty.IR, v.Ref))
 	}
 	return Value{Ref: reg, Ty: TypeBool}
+}
+
+// emitStringTruthiness implements real JS string truthiness: falsy for a
+// real null (a `string | null` null value — checked first, since loading a
+// byte through a genuinely null pointer would be undefined behavior) or an
+// empty string, truthy for anything else.
+func (e *Emitter) emitStringTruthiness(v Value) Value {
+	isNullReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, v.Ref))
+
+	nullL := e.freshLabel("strbool.null")
+	checkL := e.freshLabel("strbool.check")
+	mergeL := e.freshLabel("strbool.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, nullL, checkL))
+
+	resultSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultSlot))
+
+	e.emitLabel(nullL)
+	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(checkL)
+	firstByte := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", firstByte, v.Ref))
+	nonEmptyReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", nonEmptyReg, firstByte))
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", nonEmptyReg, resultSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultSlot))
+	return Value{Ref: result, Ty: TypeBool}
 }

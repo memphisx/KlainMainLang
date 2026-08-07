@@ -147,6 +147,12 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewURLSearchParamsBody(pos)
 	case "ArrayBuffer":
 		return p.parseNewArrayBufferBody(pos)
+	case "TextEncoder":
+		return p.parseNewTextEncoderBody(pos)
+	case "TextDecoder":
+		return p.parseNewTextDecoderBody(pos)
+	case "RegExp":
+		return p.parseNewRegExpBody(pos)
 	default:
 		if elemKind, ok := typedArrayElemKinds[nameTok.Literal]; ok {
 			return p.parseNewTypedArrayBody(pos, elemKind)
@@ -302,6 +308,58 @@ func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchPara
 		return nil, err
 	}
 	return ast.NewNewURLSearchParamsExpression(init, pos), nil
+}
+
+func (p *Parser) parseNewTextEncoderBody(pos ast.Pos) (*ast.NewTextEncoderExpression, error) {
+	p.advance() // consume 'TextEncoder'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewTextEncoderExpression(pos), nil
+}
+
+func (p *Parser) parseNewTextDecoderBody(pos ast.Pos) (*ast.NewTextDecoderExpression, error) {
+	p.advance() // consume 'TextDecoder'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var label ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		label, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewTextDecoderExpression(label, pos), nil
+}
+
+func (p *Parser) parseNewRegExpBody(pos ast.Pos) (*ast.NewRegExpExpression, error) {
+	p.advance() // consume 'RegExp'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	pattern, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	var flags ast.Expression
+	if p.match(lexer.COMMA) {
+		flags, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewRegExpExpression(pattern, flags, pos), nil
 }
 
 func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
@@ -704,6 +762,17 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.TEMPLATE_HEAD:
 		return p.parseTemplateLiteral()
+
+	case lexer.REGEX:
+		p.advance()
+		// Desugars to the same node `new RegExp(pattern, flags)` produces —
+		// codegen only ever has one shape to handle. See
+		// ast.NewRegExpExpression's doc comment.
+		return ast.NewNewRegExpExpression(
+			ast.NewStringLiteral(tok.Literal, posOf(tok)),
+			ast.NewStringLiteral(tok.Flags, posOf(tok)),
+			posOf(tok),
+		), nil
 
 	case lexer.TRUE:
 		p.advance()

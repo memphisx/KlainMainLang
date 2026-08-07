@@ -12,10 +12,17 @@ type Lexer struct {
 	line          int
 	col           int
 	templateStack []int // brace depth for each open ${ expression
+	// lastSig is the most recently returned token's type, used only to
+	// disambiguate a `/` as the start of a regex literal (an expression is
+	// expected) vs. the division operator (a value just ended) — see
+	// regexIllegalAfter and regexAllowed. Starts as SEMICOLON (a statement
+	// boundary) since start-of-input is exactly a regex-legal position too,
+	// the same as after any other statement boundary.
+	lastSig TokenType
 }
 
 func New(src string) *Lexer {
-	return &Lexer{src: []rune(src), pos: 0, line: 1, col: 1}
+	return &Lexer{src: []rune(src), pos: 0, line: 1, col: 1, lastSig: SEMICOLON}
 }
 
 func (l *Lexer) peek() rune {
@@ -58,7 +65,24 @@ func (l *Lexer) tok(typ TokenType, lit string, line, col int) Token {
 	return Token{Type: typ, Literal: lit, Line: line, Col: col}
 }
 
+// NextToken returns the next token, tracking lastSig across calls (used to
+// disambiguate a `/` as the start of a regex literal vs. the division
+// operator — see regexIllegalAfter/regexAllowed). The real scanning logic
+// lives in nextToken; this wrapper exists purely so every return path
+// through it (including the comment-skipping recursive calls inside
+// nextToken itself, which call nextToken directly rather than this
+// wrapper) only updates lastSig once per real token actually handed back
+// to the caller.
 func (l *Lexer) NextToken() (Token, error) {
+	tok, err := l.nextToken()
+	if err != nil {
+		return tok, err
+	}
+	l.lastSig = tok.Type
+	return tok, nil
+}
+
+func (l *Lexer) nextToken() (Token, error) {
 	l.skipWhitespace()
 
 	if l.pos >= len(l.src) {
@@ -75,7 +99,7 @@ func (l *Lexer) NextToken() (Token, error) {
 			for l.pos < len(l.src) && l.peek() != '\n' {
 				l.advance()
 			}
-			return l.NextToken()
+			return l.nextToken()
 		case '*':
 			l.advance() // /
 			l.advance() // *
@@ -95,8 +119,12 @@ func (l *Lexer) NextToken() (Token, error) {
 			if isJSDoc {
 				return l.tok(JSDOC, strings.TrimSpace(buf.String()), line, col), nil
 			}
-			return l.NextToken()
+			return l.nextToken()
 		}
+	}
+
+	if ch == '/' && l.regexAllowed() {
+		return l.readRegex(line, col)
 	}
 
 	if unicode.IsDigit(ch) || (ch == '.' && unicode.IsDigit(l.peekAt(1))) {
@@ -423,6 +451,90 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 		buf.WriteRune(l.advance())
 	}
 	return l.tok(STRING, buf.String(), line, col), nil
+}
+
+// regexIllegalAfter lists the token types after which a `/` cannot start a
+// regex literal — i.e. positions where a value just ended, so `/` can only
+// be the division operator. Every token type NOT listed here defaults to
+// "regex-legal" (an expression is expected) — deliberately an inverted,
+// smaller list to maintain (operators, keywords, and punctuation that
+// precede an expression vastly outnumber the handful of "a value just
+// ended" token types), matching how real JS engines actually implement
+// this same heuristic. See docs/tdd/TDD-00035.md's Stage 0 design.
+//
+// One known, deliberately accepted gap: `in`/`of` are lexed as plain IDENT
+// tokens with contextual parser-side checks (parser/parser_exprs.go), not
+// their own TokenType, so `x in /foo/` mis-lexes the `/` as division. Rare
+// enough to document rather than fix — fixing it would mean threading
+// parser-level context back into the lexer, a much bigger change than this
+// feature justifies.
+var regexIllegalAfter = map[TokenType]bool{
+	IDENT: true, NUMBER: true, STRING: true,
+	TEMPLATE_NO_SUB: true, TEMPLATE_TAIL: true,
+	TRUE: true, FALSE: true, NULL: true, UNDEFINED: true,
+	THIS: true, SUPER: true,
+	RPAREN: true, RBRACKET: true, RBRACE: true,
+	INC: true, DEC: true,
+}
+
+func (l *Lexer) regexAllowed() bool {
+	return !regexIllegalAfter[l.lastSig]
+}
+
+// readRegex scans a /pattern/flags literal. Called with the current
+// position at the opening '/' (not yet consumed) once regexAllowed() has
+// already confirmed this position expects an expression, not a division
+// operator — comment detection (`//`, `/*`) in nextToken already ran first
+// and would have won, matching real JS's own grammar restriction that a
+// regex's first character can never be `*` or `/` (so an empty regex
+// literal is inexpressible as `//`; `new RegExp("")` is the only way to
+// write one — not a bug to solve here).
+//
+// Backslash escapes are preserved verbatim (unlike readString, which
+// translates \n/\t/etc. — PCRE2 needs to see the real \d, \/, etc., not a
+// translated form), and an unescaped '/' inside a [...] character class
+// does not terminate the pattern (matches the real RegularExpressionClass
+// grammar production). Flag letters after the closing '/' are scanned with
+// no validation at this layer — deferred to the parser/emitter, consistent
+// with how this lexer never validates keyword-ness of identifiers either.
+func (l *Lexer) readRegex(line, col int) (Token, error) {
+	l.advance() // consume opening '/'
+	var pattern strings.Builder
+	inClass := false
+	for {
+		if l.pos >= len(l.src) || l.peek() == '\n' {
+			return Token{}, fmt.Errorf("%d:%d: unterminated regular expression literal", line, col)
+		}
+		c := l.peek()
+		if c == '\\' {
+			pattern.WriteRune(l.advance())
+			if l.pos >= len(l.src) || l.peek() == '\n' {
+				return Token{}, fmt.Errorf("%d:%d: unterminated regular expression literal", line, col)
+			}
+			pattern.WriteRune(l.advance())
+			continue
+		}
+		if c == '[' {
+			inClass = true
+			pattern.WriteRune(l.advance())
+			continue
+		}
+		if c == ']' {
+			inClass = false
+			pattern.WriteRune(l.advance())
+			continue
+		}
+		if c == '/' && !inClass {
+			l.advance()
+			break
+		}
+		pattern.WriteRune(l.advance())
+	}
+	var flags strings.Builder
+	for l.pos < len(l.src) && unicode.IsLetter(l.peek()) {
+		flags.WriteRune(l.advance())
+	}
+	return Token{Type: REGEX, Literal: pattern.String(), Flags: flags.String(), Line: line, Col: col}, nil
 }
 
 func (l *Lexer) readIdent(line, col int) (Token, error) {

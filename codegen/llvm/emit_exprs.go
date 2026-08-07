@@ -105,6 +105,12 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewArrayBufferExpression(ex)
 	case *ast.NewTypedArrayExpression:
 		return Value{}, fmt.Errorf("%d:%d: a TypedArray constructor must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+	case *ast.NewTextEncoderExpression:
+		return Value{Ref: "null", Ty: TextEncoderType()}, nil
+	case *ast.NewTextDecoderExpression:
+		return e.emitNewTextDecoderExpression(ex)
+	case *ast.NewRegExpExpression:
+		return e.emitNewRegExpExpression(ex)
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }
