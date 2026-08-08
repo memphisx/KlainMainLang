@@ -37,3 +37,14 @@ func (c *Comment) GetType() string {
 	}
 	return ""
 }
+
+// HasTag reports whether c carries a bare annotation tag (e.g. "erased" for
+// `@erased`), regardless of any accompanying value.
+func (c *Comment) HasTag(tag string) bool {
+	for _, a := range c.Annotations {
+		if a.Tag == tag {
+			return true
+		}
+	}
+	return false
+}

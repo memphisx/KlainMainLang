@@ -586,6 +586,16 @@ func (e *Emitter) ensureHTTPRuntime() {
 	// fiber's pendingGroup field, whether or not this program ever calls
 	// Promise.all/.race/.allSettled.
 	e.ensurePromiseCombinators()
+	// Same reasoning a third time (TDD-00038 Stage 0): __kml_event_loop_run
+	// below unconditionally calls @__kml_eventsource_scan and reads
+	// @__kml_es_active, whether or not this program ever constructs an
+	// EventSource.
+	e.ensureEventSourceRuntime()
+	// Same reasoning a fourth time (TDD-00039 Stage 3): __kml_event_loop_run
+	// below unconditionally calls @__kml_wsclient_scan and reads
+	// @__kml_wsc_active, whether or not this program ever constructs a
+	// `new WebSocket(url)`.
+	e.ensureWSClientRuntime()
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemset()
@@ -621,6 +631,14 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
 	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal global ptr null, align 8")
+	// @__kml_listen_ws_handler (TDD-00039 Stage 1): the optional `ws`
+	// closure from `http.listen(port, handler, { ws })`, null when omitted
+	// — declared unconditionally, same "always pull in the full machinery"
+	// reasoning as every other global here (ensureFetchAsync's own doc
+	// comment above), so a program with no `ws` handler just never
+	// populates or reads it, rather than needing its own conditional
+	// declaration path.
+	e.emitGlobal("@__kml_listen_ws_handler = internal global ptr null, align 8")
 
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()
@@ -873,6 +891,7 @@ entry:
   %tv = alloca { i64, i64 }, align 8
   %runningp2 = alloca i32, align 4
   %rsi = alloca i64, align 8
+  %forcezero = alloca i1, align 1
   br label %outerloop
 
 outerloop:
@@ -925,6 +944,17 @@ timerscan:
   store i64 -1, ptr %besti, align 8
   store i64 0, ptr %bestfire, align 8
   store i64 0, ptr %scani, align 8
+  ; TDD-00039 Stage 3: reset every iteration, set by wscsetloop below if any
+  ; WebSocket client entry still needs its deferred onopen/onerror+onclose
+  ; notification fired — forces this iteration's select() to return
+  ; immediately (see the timeoutpath/notimeoutpath branch further down)
+  ; rather than potentially blocking for a real timer's entire remaining
+  ; wait (or indefinitely, with no timer at all) with a notification
+  ; already sitting there ready to deliver. Found the hard way as a real
+  ; bug: onopen only fired once select() happened to return for some other
+  ; reason (a real timer elsewhere in the program firing), which is not a
+  ; bound a WebSocket-client-only program can rely on at all.
+  store i1 0, ptr %forcezero, align 1
   br label %scanloop
 
 scanloop:
@@ -975,8 +1005,24 @@ scandone:
   ; alone, so this doesn't reopen accepting new connections.
   %activeconns = load i64, ptr @__kml_conn_active, align 8
   %hasactiveconns = icmp sgt i64 %activeconns, 0
+  ; TDD-00038 Stage 0: an open (not yet closed) EventSource must also keep
+  ; the loop running, the same "don't exit out from under still-live work"
+  ; reasoning hasactiveconns already established for an in-flight
+  ; connection — otherwise a plain top-level "new EventSource(url)" with no
+  ; other pending work would fall straight through to alldone/process exit
+  ; the very first time this loop ran, never actually reading anything the
+  ; server sends.
+  %esactive = load i64, ptr @__kml_es_active, align 8
+  %hasopenes = icmp sgt i64 %esactive, 0
+  ; TDD-00039 Stage 3: an open (not yet closed) new WebSocket(url) must
+  ; also keep the loop running -- same reasoning hasopenes documents above,
+  ; one level up (a fifth scanned resource now, not a fourth).
+  %wscactive = load i64, ptr @__kml_wsc_active, align 8
+  %hasopenwsc = icmp sgt i64 %wscactive, 0
   %anywork0 = or i1 %havetimer, %haslistener
-  %anywork = or i1 %anywork0, %hasactiveconns
+  %anywork1 = or i1 %anywork0, %hasactiveconns
+  %anywork2 = or i1 %anywork1, %hasopenes
+  %anywork = or i1 %anywork2, %hasopenwsc
   br i1 %anywork, label %dowork, label %alldone
 
 dowork:
@@ -1043,6 +1089,66 @@ fsetnext:
   br label %fsetloop
 
 fsetdone:
+  ; TDD-00039 Stage 3: add every OPEN new WebSocket(url) client's own fd
+  ; into the same read fd_set -- without this, select() below would never
+  ; be told to watch that fd at all, and a plain top-level script with only
+  ; a WebSocket client (no http.listen, no timers) could block in select()
+  ; forever even with data already waiting on the socket. Reuses %fsi (the
+  ; connection-array loop above is already done with it by this point).
+  store i64 0, ptr %fsi, align 8
+  br label %wscsetloop
+
+wscsetloop:
+  %wsi = load i64, ptr %fsi, align 8
+  %wsclen = load i64, ptr @__kml_wsc_len, align 8
+  %wsinb = icmp slt i64 %wsi, %wsclen
+  br i1 %wsinb, label %wscsetbody, label %wscsetdone
+
+wscsetbody:
+  %wscdata = load ptr, ptr @__kml_wsc_data, align 8
+  %wscslot = getelementptr ptr, ptr %wscdata, i64 %wsi
+  %wscentryp = load ptr, ptr %wscslot, align 8
+  %wscstate_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 1
+  %wscstate = load i64, ptr %wscstate_p, align 8
+  %wscpending_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 2
+  %wscpending = load i64, ptr %wscpending_p, align 8
+  %wschaspending = icmp eq i64 %wscpending, 1
+  br i1 %wschaspending, label %wscmarkforce, label %wscafterforce
+
+wscmarkforce:
+  store i1 1, ptr %forcezero, align 1
+  br label %wscafterforce
+
+wscafterforce:
+  %wscisopen = icmp eq i64 %wscstate, 1
+  br i1 %wscisopen, label %wscsetbit, label %wscsetnext
+
+wscsetbit:
+  %wscfd_p = getelementptr { i64, i64, i64, ptr, i64, ptr }, ptr %wscentryp, i32 0, i32 0
+  %wscfd = load i64, ptr %wscfd_p, align 8
+  %wscfddiv8 = sdiv i64 %wscfd, 8
+  %wscfdmod8 = srem i64 %wscfd, 8
+  %wscbyteptr = getelementptr i8, ptr %fdset, i64 %wscfddiv8
+  %wscmod8_8 = trunc i64 %wscfdmod8 to i8
+  %wscmask = shl i8 1, %wscmod8_8
+  %wscoldbyte = load i8, ptr %wscbyteptr, align 1
+  %wscnewbyte = or i8 %wscoldbyte, %wscmask
+  store i8 %wscnewbyte, ptr %wscbyteptr, align 1
+  %wscfd32 = trunc i64 %wscfd to i32
+  %wsccurmax = load i32, ptr %maxfd, align 4
+  %wscisbigger = icmp sgt i32 %wscfd32, %wsccurmax
+  br i1 %wscisbigger, label %wscupdatemax, label %wscsetnext
+
+wscupdatemax:
+  store i32 %wscfd32, ptr %maxfd, align 4
+  br label %wscsetnext
+
+wscsetnext:
+  %wsinext = add i64 %wsi, 1
+  store i64 %wsinext, ptr %fsi, align 8
+  br label %wscsetloop
+
+wscsetdone:
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -1068,14 +1174,29 @@ skipmergecurlfds:
   %maxfdv = load i32, ptr %maxfd, align 4
   %nfds = add i32 %maxfdv, 1
 
-  br i1 %havetimer, label %timeoutpath, label %notimeoutpath
+  ; TDD-00039 Stage 3: %forcezero (set above by wscsetloop) routes into
+  ; timeoutpath even with no real timer pending — %bestfire's own
+  ; already-existing default of 0 (timerscan, never overwritten when no
+  ; real timer exists) makes timeoutpath's wait computation naturally
+  ; collapse to zero in that case, so no other change is needed there.
+  %needimmediate = load i1, ptr %forcezero, align 1
+  %usetimer = or i1 %havetimer, %needimmediate
+  br i1 %usetimer, label %timeoutpath, label %notimeoutpath
 
 timeoutpath:
   %targetfire = load i64, ptr %bestfire, align 8
   %now1 = call i64 @__kml_monotonic_ns()
   %rawwait = sub i64 %targetfire, %now1
   %negwait = icmp slt i64 %rawwait, 0
-  %waitns = select i1 %negwait, i64 0, i64 %rawwait
+  %waitns0 = select i1 %negwait, i64 0, i64 %rawwait
+  ; TDD-00039 Stage 3: a pending WebSocket-client notification always wins
+  ; over a real timer's own (possibly much longer) remaining wait — found
+  ; as a real bug where %usetimer's own %forcezero routing into this same
+  ; timeoutpath wasn't enough on its own, since a real timer already
+  ; present (e.g. this exact program's own setTimeout) sets %bestfire to
+  ; its own real, distant fire time, silently overriding the "wait zero"
+  ; intent by the time this path's normal wait computation runs.
+  %waitns = select i1 %needimmediate, i64 0, i64 %waitns0
   %waitsec = sdiv i64 %waitns, 1000000000
   %waitnsrem = srem i64 %waitns, 1000000000
   %waitusec = sdiv i64 %waitnsrem, 1000
@@ -1104,11 +1225,33 @@ afterselect:
   br i1 %selfailed, label %outerloop, label %afterselectok
 
 afterselectok:
+  ; TDD-00039 Stage 3: scan every open WebSocket client for a deferred
+  ; onopen/onerror+onclose notification or newly-arrived frame data —
+  ; called unconditionally, unlike checkes below, since a WebSocket client
+  ; is plain POSIX sockets with no libcurl involvement at all: a program
+  ; using only new WebSocket(url) (no fetch, no EventSource) never
+  ; initializes @__kml_curl_multi, so gating this behind %hascurl the way
+  ; checkes own scan calls are gated would make it unreachable for that
+  ; program -- found the hard way as a real bug (onopen/onmessage never
+  ; firing) when %hascurl was false for a WebSocket-client-only program.
+  call void @__kml_wsclient_scan()
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:
   call i32 @curl_multi_perform(ptr %curlmulti, ptr %runningp2)
   call void @__kml_curl_drain_messages()
+  br label %checkes
+
+checkes:
+  ; TDD-00038 Stage 0: scan every open EventSource for a readyState
+  ; transition — right after drain_messages above, so pending->done/buf are
+  ; already fresh this iteration for every entry, EventSource or plain
+  ; fetch alike. Called unconditionally (mirroring docurlperform's own
+  ; %hascurl guard doesn't apply here — @__kml_es_len is simply 0, so the
+  ; scan's own loop is a cheap no-op, when no EventSource has ever been
+  ; constructed) — unlike __kml_wsclient_scan above, EventSource itself
+  ; can't exist without curl, so this gate is harmless for it specifically.
+  call void @__kml_eventsource_scan()
   br label %checklistener
 
 checklistener:

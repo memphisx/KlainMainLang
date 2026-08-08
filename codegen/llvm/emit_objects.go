@@ -47,6 +47,23 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if na, ok := expr.(*ast.NewArrayExpression); ok && na.ElemType == nil && hint.IsArray {
 		return e.emitNewArraySizedAggregate(na, *hint.ElemType)
 	}
+	// An arrow function assigned/passed into a declared function-typed slot
+	// (`let cb: (b: Box) => void = (b) => b.value`, or `es.onmessage = (ev)
+	// => console.log(ev.data)`) gets its own unannotated parameters typed
+	// from the hint's declared param types — the same "propagate the known
+	// expected shape into the literal instead of leaving it to self-infer"
+	// principle TDD-00007/TDD-00028 already established for object/array
+	// literals, just for the one other literal-like expression kind
+	// (arrow functions) that can carry an unannotated parameter needing
+	// outside context to resolve correctly. Found missing while wiring
+	// EventSource's `.onmessage` handler (TDD-00038 Stage 1): without this,
+	// an unannotated `ev` defaulted to plain `number` (ADR-00042), so
+	// `ev.data` failed to compile as "field access on non-object" — a real,
+	// pre-existing gap confirmed directly against a plain, EventSource-
+	// unrelated `let cb: (b: Box) => void = (b) => b.value` snippet too.
+	if af, ok := expr.(*ast.ArrowFunction); ok && hint.IsFunc {
+		return e.emitArrowFunctionWithHints(af, hint.FuncParams)
+	}
 	return e.emitExpr(expr)
 }
 

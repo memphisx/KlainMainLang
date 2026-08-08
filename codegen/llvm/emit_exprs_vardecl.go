@@ -68,6 +68,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = TextDecoderType()
 		case *ast.NewRegExpExpression:
 			ty = RegExpType()
+		case *ast.NewEventSourceExpression:
+			ty = EventSourceType()
+		case *ast.NewWebSocketExpression:
+			ty = WebSocketClientType()
 		case *ast.AwaitExpression:
 			ty = e.inferExprType(init)
 		case *ast.ArrowFunction:
@@ -97,7 +101,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					// function too) found while wiring TDD-00010 V1's
 					// generic-function call support, whose most natural usage
 					// (`const y = identity("hi")`) hit this exact gap.
-					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || isStringTy(sig.RetType)) {
+					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || sig.RetType.IsDynamic || isStringTy(sig.RetType)) {
 						ty = sig.RetType
 					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 						// Calling a closure-typed variable (e.g. a const-bound
@@ -211,7 +215,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				}
 			}
 		}
-		val, err := e.emitExpr(v.Init)
+		val, err := e.emitExprWithObjectHint(v.Init, ty)
 		if err != nil {
 			return err
 		}

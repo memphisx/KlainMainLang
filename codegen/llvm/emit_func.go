@@ -54,7 +54,15 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// param/return types independently here, so this function's own emitted
 	// signature always matches what every caller already expects it to be.
 	retType := sig.RetType
-	if retType.IsDynamic || containsDynamicElement(retType) {
+	// TDD-00010 V2: an `@erased` generic function's own bare-T return
+	// position is exactly TypeAny by construction (registerFunctions), and
+	// is meant to be allowed through — but only that bare case, not a wider
+	// dynamic shape (T[], an object field typed T, etc; containsDynamicElement
+	// still catches and rejects those even when decl.Erased, since nothing
+	// downstream — HOF codegen, object field access — knows how to handle a
+	// dynamic array element/object field yet).
+	erasedRetOK := decl.Erased && retType.IsDynamic
+	if !erasedRetOK && (retType.IsDynamic || containsDynamicElement(retType)) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
 
@@ -83,7 +91,9 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	var llvmParams []string
 	for i, p := range decl.Params {
 		pty := sig.ParamTypes[i]
-		if pty.IsDynamic || containsDynamicElement(pty) {
+		// Same bare-TypeAny-only carve-out as the return-type guard above.
+		erasedParamOK := decl.Erased && pty.IsDynamic
+		if !erasedParamOK && (pty.IsDynamic || containsDynamicElement(pty)) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", decl.GetPos().Line, decl.GetPos().Col)
 		}
 		if pty.IsArray {

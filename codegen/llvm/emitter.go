@@ -119,6 +119,8 @@ type Emitter struct {
 	usedFsUnlink           bool
 	usedBase64Encode       bool
 	usedBase64Decode       bool
+	usedBase64Alphabet     bool
+	usedBase64EncodeBytes  bool
 	usedHexDigits          bool
 	usedHexDecodeTable     bool
 	usedEncodeURIComponent bool
@@ -156,6 +158,51 @@ type Emitter struct {
 	usedTimers             bool
 	usedHTTP               bool
 	usedHTTPClose          bool
+	// usedEventSource marks whether the *program* actually constructs an
+	// EventSource — distinct from ensureEventSourceRuntime's own internal
+	// idempotency flag (usedEventSourceRuntime, runtime_eventsource.go),
+	// which is set unconditionally by ensureHTTPRuntime regardless of
+	// whether EventSource is ever used (see that function's own doc
+	// comment on why every symbol __kml_event_loop_run's IR references must
+	// always be defined). This one only decides Pass 3's own tail: prefer
+	// the full __kml_event_loop_run() over the narrower __kml_timer_drain()
+	// so a plain top-level `new EventSource(...)` with no http.listen still
+	// gets its transfer driven and the process stays alive for it.
+	usedEventSource bool
+	// usedEventSourceRuntime is ensureEventSourceRuntime's own internal
+	// idempotency guard (runtime_eventsource.go) — separate from
+	// usedEventSource above, since this one is also set unconditionally by
+	// ensureHTTPRuntime regardless of whether the program ever constructs
+	// an EventSource.
+	usedEventSourceRuntime bool
+	// WebSocket runtime helpers (TDD-00039 Stage 0) — no AST/emit_* hook
+	// exists yet, these are only ever invoked directly by
+	// codegen/llvm's own internal tests until Stage 1/3 wire them up to
+	// http.listen({ws})/new WebSocket(url). usedWSFshl32 guards the shared
+	// llvm.fshl.i32 intrinsic declaration (SHA-1's rotates); the others
+	// guard the SHA-1 digest, the shared mask/unmask XOR helper (used by
+	// both frame directions, per the TDD's "one loop, not two copies"
+	// decision), and the frame encode/decode pair.
+	usedWSFshl32      bool
+	usedWSSHA1        bool
+	usedWSMaskApply   bool
+	usedWSFrameEncode bool
+	usedWSFrameDecode bool
+	// usedWSClient marks whether the *program* actually constructs a
+	// `new WebSocket(url)` (TDD-00039 Stage 3) — distinct from
+	// usedWSClientRuntime's own internal idempotency flag, mirroring
+	// usedEventSource/usedEventSourceRuntime's own split exactly (see that
+	// pair's doc comment above): this one only decides EmitProgram's Pass 3
+	// tail (prefer the full event-loop drain over the narrower timer-only
+	// one so a plain top-level `new WebSocket(...)` stays alive for its
+	// onmessage/onclose callbacks).
+	usedWSClient bool
+	// usedWSClientRuntime is ensureWSClientRuntime's own internal
+	// idempotency guard (runtime_websocket_client.go) — set unconditionally
+	// by ensureHTTPRuntime regardless of whether the program ever
+	// constructs a WebSocket client, same reasoning usedEventSourceRuntime
+	// documents.
+	usedWSClientRuntime bool
 	// httpListenCallSeen is not a "runtime machinery emitted" flag like the
 	// usedX fields around it — it tracks whether an http.listen(...) call
 	// site has already been compiled, so a second one (only reachable at
@@ -492,13 +539,16 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
 	e.registerFunctions(prog)
 
-	// Pass 2: emit each function declaration. A generic function (TDD-00010
-	// V1) is never emitted here — it has no single concrete signature to
-	// emit; each concrete instantiation is emitted on demand from its own
+	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
+	// function is never emitted here — it has no single concrete signature
+	// to emit; each concrete instantiation is emitted on demand from its own
 	// call site instead (emit_generics.go), and a generic function that's
-	// never called is simply never emitted at all.
+	// never called is simply never emitted at all. A V2 (`@erased`) generic
+	// function is the opposite: it has exactly one signature (already
+	// registered into e.funcs by registerFunctions above), so it's emitted
+	// here unconditionally, same as a plain function.
 	for _, stmt := range prog.Body {
-		if fd, ok := stmt.(*ast.FunctionDeclaration); ok && len(fd.TypeParams) == 0 {
+		if fd, ok := stmt.(*ast.FunctionDeclaration); ok && (len(fd.TypeParams) == 0 || fd.Erased) {
 			if err := e.emitFunctionDecl(fd); err != nil {
 				return "", err
 			}
@@ -580,14 +630,28 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 			return "", err
 		}
 	}
-	// If the program ever called setTimeout/setInterval/clearTimeout/
-	// clearInterval, drain any still-pending timers after the top-level
-	// script finishes — the same place real Node keeps the process alive
-	// for. Skipped entirely (via emitInstr's own dead-code check) if the
-	// last top-level statement already terminated the block, e.g.
-	// process.exit() — matching real Node, which also never drains
+	// If the program ever constructed an EventSource, prefer the full
+	// __kml_event_loop_run() over the narrower __kml_timer_drain() below —
+	// it already generalizes plain timer draining (see its own doc comment
+	// in runtime_http.go) while also driving libcurl's multi-interface and
+	// the EventSource scan every iteration, keeping the process alive for
+	// as long as any EventSource is still open (TDD-00038 Stage 0). If the
+	// program also called http.listen(...), that call's own inline
+	// __kml_event_loop_run() invocation already terminates this block
+	// (never returns), making this one dead code — same "skipped via
+	// emitInstr's own dead-code check" reasoning the usedTimers branch below
+	// already relies on.
+	//
+	// Otherwise, if the program ever called setTimeout/setInterval/
+	// clearTimeout/clearInterval, drain any still-pending timers after the
+	// top-level script finishes — the same place real Node keeps the
+	// process alive for. Skipped entirely (via emitInstr's own dead-code
+	// check) if the last top-level statement already terminated the block,
+	// e.g. process.exit() — matching real Node, which also never drains
 	// pending timers after an explicit exit.
-	if e.usedTimers {
+	if e.usedEventSource || e.usedWSClient {
+		e.emitInstr("call void @__kml_event_loop_run()")
+	} else if e.usedTimers {
 		e.emitInstr("call void @__kml_timer_drain()")
 	}
 	e.emitTerminator("ret i32 0")
@@ -707,6 +771,28 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 		// emit_generics.go); the generic declaration itself is never
 		// entered into e.funcs.
 		if len(fd.TypeParams) > 0 {
+			// TDD-00010 V2: an `@erased` generic function is compiled exactly
+			// once, under its own source name, with every bare-T parameter/
+			// return position substituted to TypeAny instead of a concrete
+			// type — the opposite of the on-demand-instantiation path below.
+			// Registered directly into e.funcs (not e.genericFuncs) so every
+			// existing e.funcs-based mechanism (call dispatch, inferExprType,
+			// Pass 2 emission) treats it exactly like a plain function whose
+			// signature happens to use TypeAny, with no new dispatch code
+			// needed anywhere else.
+			if fd.Erased {
+				typeParam := fd.TypeParams[0]
+				sig := e.buildGenericParamSig(fd.Params, typeParam, TypeAny)
+				if fd.ReturnType != nil {
+					sig.RetType = e.substituteGenericType(fd.ReturnType, typeParam, TypeAny)
+				} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, sig.ParamTypes); ok {
+					sig.RetType = inferred
+				} else {
+					sig.RetType = TypeVoid
+				}
+				e.funcs[fd.Name] = sig
+				continue
+			}
 			e.genericFuncs[fd.Name] = fd
 			continue
 		}

@@ -936,6 +936,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return TextDecoderType()
 	case *ast.NewRegExpExpression:
 		return RegExpType()
+	case *ast.NewEventSourceExpression:
+		return EventSourceType()
+	case *ast.NewWebSocketExpression:
+		return WebSocketClientType()
 	case *ast.ObjectLiteral:
 		return e.inferObjectType(ex)
 	case *ast.ArrayLiteral:

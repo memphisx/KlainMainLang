@@ -109,6 +109,27 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "exec" && e.inferExprType(mem.Object).IsRegExp {
 			return e.emitRegexExec(mem, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "close" && e.inferExprType(mem.Object).IsEventSource {
+			return e.emitEventSourceClose(mem.Object, ex.GetPos())
+		}
+		if mem.Property == "addEventListener" && e.inferExprType(mem.Object).IsEventSource {
+			return e.emitEventSourceAddListener(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "removeEventListener" && e.inferExprType(mem.Object).IsEventSource {
+			return e.emitEventSourceRemoveListener(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "send" && e.inferExprType(mem.Object).IsWSConnection {
+			return e.emitWSConnectionSend(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "close" && e.inferExprType(mem.Object).IsWSConnection {
+			return e.emitWSConnectionCloseMethod(mem.Object, ex.GetPos())
+		}
+		if mem.Property == "send" && e.inferExprType(mem.Object).IsWebSocketClient {
+			return e.emitWSClientSend(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "close" && e.inferExprType(mem.Object).IsWebSocketClient {
+			return e.emitWSClientClose(mem.Object, ex.GetPos())
+		}
 		if mem.Property == "bodyBytes" && e.inferExprType(mem.Object).IsRequest {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -770,7 +791,15 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					}
 					return Value{}, fmt.Errorf("%d:%d: parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, paramName, name)
 				}
-				if paramTy.IR != "" {
+				if paramTy.IsDynamic {
+					// TDD-00010 V2: a call to an `@erased` generic function —
+					// coerce (unlike this) has no notion of boxing, it only
+					// converts between concrete scalar IR types, so a bare-T
+					// param must be boxed explicitly instead.
+					if val, err = e.emitBoxValue(val); err != nil {
+						return Value{}, err
+					}
+				} else if paramTy.IR != "" {
 					val = e.coerce(val, paramTy)
 				}
 				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
@@ -781,7 +810,11 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			if err != nil {
 				return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
 			}
-			if paramTy.IR != "" {
+			if paramTy.IsDynamic {
+				if val, err = e.emitBoxValue(val); err != nil {
+					return Value{}, err
+				}
+			} else if paramTy.IR != "" {
 				val = e.coerce(val, paramTy)
 			}
 			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))

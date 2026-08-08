@@ -143,6 +143,10 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewDateBody(pos)
 	case "URL":
 		return p.parseNewURLBody(pos)
+	case "EventSource":
+		return p.parseNewEventSourceBody(pos)
+	case "WebSocket":
+		return p.parseNewWebSocketBody(pos)
 	case "URLSearchParams":
 		return p.parseNewURLSearchParamsBody(pos)
 	case "ArrayBuffer":
@@ -289,6 +293,36 @@ func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
 		return nil, err
 	}
 	return ast.NewNewURLExpression(url, pos), nil
+}
+
+func (p *Parser) parseNewEventSourceBody(pos ast.Pos) (*ast.NewEventSourceExpression, error) {
+	p.advance() // consume 'EventSource'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	url, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewEventSourceExpression(url, pos), nil
+}
+
+func (p *Parser) parseNewWebSocketBody(pos ast.Pos) (*ast.NewWebSocketExpression, error) {
+	p.advance() // consume 'WebSocket'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	url, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewWebSocketExpression(url, pos), nil
 }
 
 func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchParamsExpression, error) {

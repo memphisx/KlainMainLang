@@ -141,13 +141,28 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (*ast.VarDeclaration, error) {
 }
 
 func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, error) {
+	doc := p.takeDoc()
 	p.advance() // 'function'
 
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
 	}
-	return p.parseFunctionRest(nameTok.Literal, isAsync, false)
+	fd, err := p.parseFunctionRest(nameTok.Literal, isAsync, false)
+	if err != nil {
+		return nil, err
+	}
+	// TDD-00010 V2: `/** @erased */` opts a generic function out of default
+	// monomorphization. Validated here (not deferred to codegen) so the
+	// error points at the declaration itself, same as every other JSDoc
+	// annotation's validation shape in this parser.
+	if doc != nil && doc.HasTag("erased") {
+		if len(fd.TypeParams) == 0 {
+			return nil, fmt.Errorf("%d:%d: @erased requires '%s' to declare a type parameter, e.g. 'function %s<T>(...)' (see docs/tdd/TDD-00010.md)", fd.GetPos().Line, fd.GetPos().Col, fd.Name, fd.Name)
+		}
+		fd.Erased = true
+	}
+	return fd, nil
 }
 
 // parseFunctionRest parses the `(params) : retType? { body }` tail shared by
