@@ -97,6 +97,58 @@ func main() {
 		fmt.Fprint(w, "delayed")
 	})
 
+	// GET /stream — a minimal Server-Sent Events endpoint for
+	// examples/eventsource/eventsource.ts (TDD-00038 Stages 0-1). Flushes
+	// one unnamed event immediately, then blocks until the client
+	// disconnects (the example's own es.close()) rather than a fixed
+	// sleep, so this endpoint never outlives whatever's actually reading
+	// from it.
+	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: hello\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+
+	// GET /stream-named — a second SSE endpoint for the same example's
+	// Stage 2 section: one named ("greeting") event followed by one
+	// unnamed one, so addEventListener/onmessage can both be demonstrated
+	// against a single connection.
+	mux.HandleFunc("GET /stream-named", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "event: greeting\ndata: hi there\n\n")
+		fl.Flush()
+		fmt.Fprint(w, "data: plain\n\n")
+		fl.Flush()
+		<-r.Context().Done()
+	})
+
+	// GET /stream-retry — a third SSE endpoint for the same example's
+	// Stage 3 section: sends a short retry: value plus an id:, then ends
+	// the response (simulating a dropped connection) rather than blocking
+	// on r.Context().Done() like /stream and /stream-named do. The
+	// reconnect (driven entirely by the client's own auto-reconnect, no
+	// server-side awareness needed beyond reading the replayed header)
+	// arrives with a Last-Event-ID request header, which this handler
+	// echoes back so the example can show the replay actually happened.
+	mux.HandleFunc("GET /stream-retry", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		lastEventID := r.Header.Get("Last-Event-ID")
+		if lastEventID == "" {
+			fmt.Fprint(w, "retry: 100\nid: first-attempt\ndata: dropping soon\n\n")
+			fl.Flush()
+			return
+		}
+		fmt.Fprintf(w, "data: reconnected, last id was %s\n\n", lastEventID)
+		fl.Flush()
+		<-r.Context().Done()
+	})
+
 	fmt.Fprintf(os.Stderr, "httpbin-lite listening on 127.0.0.1:%s\n", port)
 	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "httpbin-lite:", err)

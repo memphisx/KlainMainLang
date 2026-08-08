@@ -184,3 +184,103 @@ class Box<T> extends Base {
 		t.Fatal("expected a compile error for a generic class using 'extends' (out of V1 scope), got none")
 	}
 }
+
+// --- User-defined generics: `@erased` type erasure (TDD-00010 V2) ---
+
+func TestE2EErasedGenericFunctionPassThrough(t *testing.T) {
+	assertOutput(t, `
+/** @erased */
+function identity<T>(x: T): T {
+  return x;
+}
+console.log(identity(5));
+console.log(identity("hello"));
+console.log(identity(true));
+`, "5\nhello\ntrue")
+}
+
+// Unlike a V1 (monomorphized) generic, an `@erased` function compiles its
+// body exactly once regardless of how many distinct concrete types call it —
+// inspects --emit-llvm-equivalent IR directly (via parseAndCompile), same
+// reasoning as TestE2EGenericFunctionMemoizedAcrossSameTypeCalls, but here
+// checking for exactly one *unmangled* symbol rather than one memoized
+// instantiation per type.
+func TestE2EErasedGenericFunctionSingleCompiledSymbol(t *testing.T) {
+	ir, err := parseAndCompile(`
+/** @erased */
+function identity<T>(x: T): T {
+  return x;
+}
+console.log(identity(1));
+console.log(identity("a"));
+console.log(identity(true));
+`)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if n := strings.Count(ir, "define { i8, i64 } @identity("); n != 1 {
+		t.Fatalf("expected exactly one compiled symbol for identity, got %d\n%s", n, ir)
+	}
+	if strings.Contains(ir, "@identity__") {
+		t.Fatalf("expected no V1-style mangled instantiation of an @erased function, got one\n%s", ir)
+	}
+}
+
+func TestE2EErasedGenericFunctionMixedConcreteAndErasedParams(t *testing.T) {
+	assertOutput(t, `
+/** @erased */
+function wrap<T>(label: string, x: T): T {
+  console.log(label);
+  return x;
+}
+console.log(wrap("num:", 42));
+console.log(wrap("str:", "hi"));
+`, "num:\n42\nstr:\nhi")
+}
+
+func TestE2EErasedGenericFunctionResultInUnannotatedConst(t *testing.T) {
+	assertOutput(t, `
+/** @erased */
+function identity<T>(x: T): T {
+  return x;
+}
+const y = identity("hi");
+console.log(y);
+`, "hi")
+}
+
+func TestE2EErasedOnNonGenericFunctionRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+/** @erased */
+function plain(x: number): number { return x; }
+`)
+	if err == nil {
+		t.Fatal("expected a parse error for @erased on a function with no type parameter, got none")
+	}
+}
+
+// T[] is deliberately out of V2's minimal scope (only a bare T parameter/
+// return position is substituted to TypeAny) — must be a clean compile error,
+// not a silent miscompile of a dynamic-element array.
+func TestE2EErasedGenericFunctionArrayOfTRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+/** @erased */
+function first<T>(arr: T[]): T { return arr[0]; }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for @erased with a T[] parameter (out of V2 scope), got none")
+	}
+}
+
+// Arithmetic on an erased T hits the same, pre-existing "operators on any/
+// unknown are rejected" wall the TDD calls out as V2's real ceiling — not a
+// new check, just confirming it actually fires for this new position.
+func TestE2EErasedGenericFunctionArithmeticOnTRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+/** @erased */
+function add<T>(a: T, b: T): T { return a + b; }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for arithmetic on an erased T, got none")
+	}
+}

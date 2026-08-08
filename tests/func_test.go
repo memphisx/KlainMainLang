@@ -262,6 +262,30 @@ log("hello")
 `, "hello")
 }
 
+// An unannotated arrow-function param assigned/declared into a declared
+// function-typed slot infers its type from the slot's own declared param
+// types, the same "propagate the known expected shape" principle object/
+// array literals already get (TDD-00007/TDD-00028) — found missing while
+// wiring EventSource's .onmessage handler (TDD-00038 Stage 1), confirmed
+// as a real, EventSource-unrelated gap via this plain repro first.
+func TestE2EUnannotatedArrowParamHintedFromVarDeclFuncType(t *testing.T) {
+	assertOutput(t, `
+interface Box { value: number }
+let cb: (b: Box) => void = (b) => { console.log(b.value) }
+cb({ value: 42 })
+`, "42")
+}
+
+func TestE2EUnannotatedArrowParamHintedFromFieldAssignFuncType(t *testing.T) {
+	assertOutput(t, `
+interface Box { value: number }
+interface Holder { cb: (b: Box) => void }
+const h: Holder = { cb: (b) => {} }
+h.cb = (b) => { console.log(b.value) }
+h.cb({ value: 7 })
+`, "7")
+}
+
 // --- Destructured function parameters ---
 //
 // `parser/parser_stmts.go`'s `parseParamList` previously unconditionally

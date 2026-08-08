@@ -197,6 +197,35 @@ type Type struct {
 	// pcre2_code* handle, never exposed via Object.keys/JSON. See
 	// RegExpType and docs/tdd/TDD-00035.md.
 	IsRegExp bool
+	// IsEventSource marks `new EventSource(url)`'s result (TDD-00038,
+	// staged — Stage 0 only so far: connection plumbing/readyState/close,
+	// no SSE parsing/dispatch yet). Storage-wise a real heap object like
+	// Response/URL/RegExp, with a hidden field (EventSourceHandleField, same
+	// convention RegExpType's hidden handle uses) pointing at the runtime's
+	// own entry struct — the two-way link the event loop's per-iteration
+	// scan (__kml_eventsource_scan, runtime_eventsource.go) needs to write
+	// readyState transitions back into this object. See emit_eventsource.go.
+	IsEventSource bool
+	// IsWSConnection marks the object passed to an `http.listen(port,
+	// handler, { ws })` upgrade handler (TDD-00039 Stage 1) — a real heap
+	// object like EventSource, with a hidden field (WSConnFdField) holding
+	// the raw socket fd `.send()`/`.close()` write to directly, independent
+	// of the connection-fiber array's own bookkeeping (see
+	// emit_websocket.go). Never constructed via a `new` expression — the
+	// compiler builds one internally right after a successful upgrade
+	// handshake and passes it to the user's `ws` callback exactly once,
+	// mirroring how a Request object is built and passed to the ordinary
+	// HTTP handler.
+	IsWSConnection bool
+	// IsWebSocketClient marks `new WebSocket(url)`'s result (TDD-00039
+	// Stage 3, `ws://` only — `wss://` is rejected at construction) — a
+	// real heap object like EventSource/WSConnection, with a hidden field
+	// (WebSocketClientHandleField) pointing at the runtime's own client
+	// entry struct in the new client-scan array (mirroring EventSource's
+	// own "fourth scanned resource" pattern, this one a fifth) the event
+	// loop walks each iteration to deliver `.onmessage`/`.onclose`/
+	// `.onerror`. See emit_websocket_client.go.
+	IsWebSocketClient bool
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -344,6 +373,183 @@ func RegExpType() Type {
 	return ty
 }
 
+// EventSourceHandleField is the name of the hidden ptr field every
+// EventSource instance carries at index 0, pointing at the runtime's own
+// entry struct (`{ ptr pending, ptr instance, i64 consumedOffset, i64
+// state }`, runtime_eventsource.go) — never exposed via VisibleFields()/
+// Object.keys/JSON, same convention RegexHandleField uses.
+const EventSourceHandleField = "__kml_es_handle"
+
+// EventSourceLastEventIdField is the name of the hidden ptr field (index 1,
+// right after EventSourceHandleField) holding the SSE "last event ID"
+// buffer (TDD-00038 Stage 1) — persists across dispatched records (an `id:`
+// field updates it; a record with none leaves it unchanged), read into
+// each dispatched MessageEvent's own lastEventId field. Hidden, not a
+// visible property on EventSource itself, matching the real spec (only
+// each individual event carries lastEventId — the source object doesn't
+// expose it as a readable property).
+const EventSourceLastEventIdField = "__kml_es_last_event_id"
+
+// EventSourceType returns `new EventSource(url)`'s result type. url/
+// readyState/onmessage are plain visible fields (readyState: 0 CONNECTING,
+// 1 OPEN, 2 CLOSED), mirroring how Response's status/ok/body are plain
+// field reads via the ordinary object machinery, no dispatched getter
+// needed — including for `onmessage`'s assignment (`es.onmessage = (ev) =>
+// ...`), which goes through the same generic object-field-assignment path
+// as any other FuncType-typed field. readyState is written from two
+// places: the event loop's own per-iteration scan (a CONNECTING->OPEN/
+// ->CLOSED transition observed asynchronously) and emitEventSourceClose
+// (synchronously, matching real EventSource's own close() setting
+// readyState immediately rather than waiting for the next scan).
+// `onmessage`, when non-null, is called directly from the runtime's own
+// per-iteration SSE record parser (__kml_eventsource_dispatch_record,
+// runtime_eventsource.go) — TDD-00038 Stage 1.
+func EventSourceType() Type {
+	ty := ObjectType([]Field{
+		{Name: EventSourceHandleField, Ty: TypePtr},
+		{Name: EventSourceLastEventIdField, Ty: TypePtr},
+		{Name: "url", Ty: TypePtr},
+		{Name: "readyState", Ty: TypeI64},
+		{Name: "onmessage", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
+		// onopen/onerror (TDD-00038 Stage 2) — appended after onmessage
+		// rather than interleaved with the hidden fields, so every existing
+		// field's index stays exactly what it was in Stage 0/1 (only
+		// VisibleFields()'s hidden-prefix count would need to change for an
+		// interleaved insertion; a trailing append needs no such change).
+		// Both fire with a MessageEventType() payload (data/lastEventId
+		// left empty, type "open"/"error") for closure-call ABI uniformity
+		// with onmessage, even though real EventSource passes a plain,
+		// data-less Event for these two — see runtime_eventsource.go's
+		// __kml_eventsource_scan for where each actually fires.
+		{Name: "onopen", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
+		{Name: "onerror", Ty: FuncType([]Type{MessageEventType()}, TypeVoid)},
+	})
+	ty.IsEventSource = true
+	return ty
+}
+
+// MessageEventType returns the fixed, concrete payload type every
+// EventSource listener is called with (TDD-00038 Stage 1) — data/type/
+// lastEventId, all strings, matching the real MessageEvent shape SSE
+// actually needs (no generic type parameter the way EventEmitter<T> has,
+// since the payload shape never varies by user code — see the TDD's own
+// Design section on why this is simpler than EventEmitter<T> in exactly
+// this one respect).
+func MessageEventType() Type {
+	return ObjectType([]Field{
+		{Name: "data", Ty: TypePtr},
+		{Name: "type", Ty: TypePtr},
+		{Name: "lastEventId", Ty: TypePtr},
+	})
+}
+
+// WSConnFdField is the name of the hidden i64 field every WSConnection
+// carries at index 0, holding the raw accepted-socket fd — set once, right
+// after the upgrade handshake, and read directly by `.send()`/`.close()`
+// (emit_websocket.go). A plain fd copy rather than a pointer back into the
+// connection-fiber array (`@__kml_conn_data`, runtime_http.go) deliberately:
+// that array's backing storage can move (realloc) whenever another
+// connection is accepted, but the fd value itself never changes for the
+// life of this connection, so copying it once is simpler and avoids any
+// dangling-pointer risk from a WSConnection outliving a fiber-array growth.
+const WSConnFdField = "__kml_ws_conn_fd"
+
+// WSConnectionType returns the type of the object passed to
+// `http.listen(port, handler, { ws })`'s upgrade handler (TDD-00039 Stage
+// 1) — see IsWSConnection's doc comment for why this is a real heap object
+// built internally rather than something user code ever constructs.
+// `onmessage`, like EventSource's own field of the same name, is a plain
+// FuncType-typed field — assigning to it (`socket.onmessage = (ev) =>
+// ...`) needs no dedicated codegen at all, since MemberExpression
+// assignment already threads the field's declared type through as a hint
+// (emitExprWithObjectHint, emit_exprs_assign.go), correctly resolving an
+// unannotated `ev` to WSMessageEventType() the same way it already does for
+// EventSource's `.onmessage`. Read directly from the runtime's own
+// persistent per-connection read loop (emit_websocket.go) whenever a
+// complete text/binary frame is decoded — no listener-list/EventEmitter
+// machinery needed, since (like EventSource) there's exactly one callback
+// slot, not an accumulating list.
+func WSConnectionType() Type {
+	ty := ObjectType([]Field{
+		{Name: WSConnFdField, Ty: TypeI64},
+		{Name: "onmessage", Ty: FuncType([]Type{WSMessageEventType()}, TypeVoid)},
+	})
+	ty.IsWSConnection = true
+	return ty
+}
+
+// WSMessageEventType returns the fixed, concrete payload type an
+// `onmessage` listener is called with (TDD-00039 Stage 1) — just `data`,
+// unlike MessageEventType's SSE-specific `type`/`lastEventId` (which have
+// no WebSocket-frame equivalent). Both text and binary frames are exposed
+// through this same string field: a binary payload with an embedded null
+// byte truncates through ordinary string operations exactly like every
+// other strlen-based string value in this compiler (`req.body`, `fetch`'s
+// `.text()`) — a real, documented V1 narrowing, not a bug; a binary-safe
+// accessor (mirroring `req.bodyBytes()`) is a real, undesigned follow-on.
+func WSMessageEventType() Type {
+	return ObjectType([]Field{
+		{Name: "data", Ty: TypePtr},
+	})
+}
+
+// WebSocketClientHandleField is the name of the hidden ptr field every
+// `new WebSocket(url)` instance carries at index 0, pointing at the
+// runtime's own client entry struct (`{ i64 fd, i64 state, i64
+// pendingNotify, ptr buf, i64 consumedOffset, ptr instance }`,
+// runtime_websocket_client.go) — never exposed via VisibleFields()/
+// Object.keys/JSON, same convention EventSourceHandleField/WSConnFdField
+// use.
+const WebSocketClientHandleField = "__kml_wsc_handle"
+
+// WebSocketClientType returns `new WebSocket(url)`'s result type
+// (TDD-00039 Stage 3). url/readyState are plain visible fields (readyState:
+// 0 CONNECTING, 1 OPEN, 2 CLOSED — EventSource's own simplified 3-state
+// model, skipping the real spec's CLOSING, same choice EventSourceType
+// already made). `onopen`/`onmessage`/`onclose`/`onerror` all share
+// WSMessageEventType() as their payload shape (data left "" for the three
+// that carry no real message, matching EventSourceType's own onopen/onerror
+// precedent — "closure-call ABI uniformity" over a payload-per-event-kind
+// design) — assigning to any of them is a plain FuncType field assignment,
+// needing no dedicated codegen (see WSConnectionType's own doc comment on
+// why the hint-propagation this depends on already exists generically).
+//
+// Unlike EventSource (whose connection is asynchronous by construction —
+// `new EventSource(url)` never blocks), `new WebSocket(url)` performs its
+// TCP connect + HTTP upgrade handshake *synchronously*, before the
+// constructor even returns (emit_websocket_client.go) — a deliberate V1
+// simplification avoiding new non-blocking-connect machinery in the event
+// loop's hand-rolled select() call (see TDD-00039's own Design section
+// noting this exact sequencing was left as an implementation detail, not a
+// design fork). This creates a real ordering problem: `.onopen` can only be
+// assigned *after* `new WebSocket(url)` returns, but by then the connection
+// has already succeeded or failed. Solved by never invoking
+// `.onopen`/`.onerror` synchronously during construction at all — readyState
+// is set immediately (reflecting the real, already-known outcome), but the
+// *callback* firing is deferred to this client's first event-loop scan
+// pass (the `pendingNotify` field on the runtime entry), by which point
+// user code has had a chance to assign `.onopen`/`.onmessage`/`.onerror`.
+// A failed connect/handshake never throws for this same reason (matching
+// real WebSocket, which also never throws synchronously for a network-level
+// failure) — it fires `.onerror` then `.onclose` on that same deferred
+// first pass instead. Only a malformed URL/unsupported scheme (`wss://`) is
+// a synchronous throw, a programmer-facing contract issue, not a network
+// failure.
+func WebSocketClientType() Type {
+	msgTy := WSMessageEventType()
+	ty := ObjectType([]Field{
+		{Name: WebSocketClientHandleField, Ty: TypePtr},
+		{Name: "url", Ty: TypePtr},
+		{Name: "readyState", Ty: TypeI64},
+		{Name: "onopen", Ty: FuncType([]Type{msgTy}, TypeVoid)},
+		{Name: "onmessage", Ty: FuncType([]Type{msgTy}, TypeVoid)},
+		{Name: "onclose", Ty: FuncType([]Type{msgTy}, TypeVoid)},
+		{Name: "onerror", Ty: FuncType([]Type{msgTy}, TypeVoid)},
+	})
+	ty.IsWebSocketClient = true
+	return ty
+}
+
 // typedArrayElemKindToType maps the element-kind strings the parser already
 // produces (parser/parser_literals.go's typedArrayElemKinds, and the same
 // names ResolveTypeName below already understands for JSDoc @type
@@ -480,6 +686,15 @@ func (t Type) VisibleFields() []Field {
 		return t.Fields[1:]
 	}
 	if t.IsRegExp && len(t.Fields) > 0 {
+		return t.Fields[1:]
+	}
+	if t.IsEventSource && len(t.Fields) > 1 {
+		return t.Fields[2:]
+	}
+	if t.IsWSConnection && len(t.Fields) > 0 {
+		return t.Fields[1:]
+	}
+	if t.IsWebSocketClient && len(t.Fields) > 0 {
 		return t.Fields[1:]
 	}
 	return t.Fields
@@ -766,6 +981,16 @@ func ResolveTypeName(name string) Type {
 		return URLSearchParamsType()
 	case "RegExp":
 		return RegExpType()
+	case "EventSource":
+		return EventSourceType()
+	case "MessageEvent":
+		return MessageEventType()
+	case "WSConnection":
+		return WSConnectionType()
+	case "WSMessageEvent":
+		return WSMessageEventType()
+	case "WebSocket":
+		return WebSocketClientType()
 	case "ArrayBuffer":
 		return ArrayBufferType()
 	case "Int8Array":

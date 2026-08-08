@@ -7,6 +7,21 @@ import (
 
 const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
+// ensureBase64Alphabet declares the shared @__kml_base64_alphabet constant
+// both __kml_btoa and __kml_base64_encode_bytes index into — factored out
+// (rather than each function declaring it inline, as __kml_btoa alone used
+// to) so a program using both in the same compile (e.g. WebSocket's
+// Sec-WebSocket-Accept, TDD-00039 Stage 1, which needs the length-aware
+// encoder, alongside ordinary user-code btoa() calls) gets exactly one
+// definition, not a duplicate-symbol link error.
+func (e *Emitter) ensureBase64Alphabet() {
+	if e.usedBase64Alphabet {
+		return
+	}
+	e.usedBase64Alphabet = true
+	e.emitGlobal(fmt.Sprintf(`@__kml_base64_alphabet = private unnamed_addr constant [64 x i8] c"%s"`, base64Alphabet))
+}
+
 // ensureBase64Encode declares __kml_btoa: standard base64 encoding (RFC
 // 4045), '='-padded. Operates byte-for-byte on the input string — real
 // btoa works over a "binary string" (one code unit per byte, 0-255); since
@@ -20,7 +35,7 @@ func (e *Emitter) ensureBase64Encode() {
 	e.usedBase64Encode = true
 	e.ensureStrlen()
 	e.ensureMalloc()
-	e.emitGlobal(fmt.Sprintf(`@__kml_base64_alphabet = private unnamed_addr constant [64 x i8] c"%s"`, base64Alphabet))
+	e.ensureBase64Alphabet()
 	e.emitGlobal(`
 define ptr @__kml_btoa(ptr %str) {
 entry:
@@ -54,6 +69,127 @@ loopbody:
   %b2_8 = load i8, ptr %p2, align 1
   %b0 = zext i8 %b0_8 to i32
   %b1 = zext i8 %b1_8 to i32
+  %b2 = zext i8 %b2_8 to i32
+
+  %b0sh = shl i32 %b0, 16
+  %b1sh = shl i32 %b1, 8
+  %n0 = or i32 %b0sh, %b1sh
+  %n = or i32 %n0, %b2
+
+  %idx0 = lshr i32 %n, 18
+  %idx0m = and i32 %idx0, 63
+  %idx1 = lshr i32 %n, 12
+  %idx1m = and i32 %idx1, 63
+  %idx2 = lshr i32 %n, 6
+  %idx2m = and i32 %idx2, 63
+  %idx3m = and i32 %n, 63
+
+  %idx0_64 = zext i32 %idx0m to i64
+  %idx1_64 = zext i32 %idx1m to i64
+  %idx2_64 = zext i32 %idx2m to i64
+  %idx3_64 = zext i32 %idx3m to i64
+
+  %c0p = getelementptr [64 x i8], ptr @__kml_base64_alphabet, i64 0, i64 %idx0_64
+  %c1p = getelementptr [64 x i8], ptr @__kml_base64_alphabet, i64 0, i64 %idx1_64
+  %c2p = getelementptr [64 x i8], ptr @__kml_base64_alphabet, i64 0, i64 %idx2_64
+  %c3p = getelementptr [64 x i8], ptr @__kml_base64_alphabet, i64 0, i64 %idx3_64
+  %c0 = load i8, ptr %c0p, align 1
+  %c1 = load i8, ptr %c1p, align 1
+  %c2raw = load i8, ptr %c2p, align 1
+  %c3raw = load i8, ptr %c3p, align 1
+
+  %c2 = select i1 %has1, i8 %c2raw, i8 61
+  %c3 = select i1 %has2, i8 %c3raw, i8 61
+
+  %oi1 = add i64 %oi, 1
+  %oi2 = add i64 %oi, 2
+  %oi3 = add i64 %oi, 3
+  %op0 = getelementptr i8, ptr %out, i64 %oi
+  %op1 = getelementptr i8, ptr %out, i64 %oi1
+  %op2 = getelementptr i8, ptr %out, i64 %oi2
+  %op3 = getelementptr i8, ptr %out, i64 %oi3
+  store i8 %c0, ptr %op0, align 1
+  store i8 %c1, ptr %op1, align 1
+  store i8 %c2, ptr %op2, align 1
+  store i8 %c3, ptr %op3, align 1
+
+  %i_next = add i64 %i, 3
+  %oi_next = add i64 %oi, 4
+  br label %loopcheck
+
+done:
+  %termp = getelementptr i8, ptr %out, i64 %oi
+  store i8 0, ptr %termp, align 1
+  ret ptr %out
+}`)
+}
+
+// ensureBase64EncodeBytes declares __kml_base64_encode_bytes(ptr data, i64
+// len): identical algorithm to __kml_btoa above, except len is a parameter
+// instead of computed via strlen — the binary-safe counterpart needed
+// whenever the input isn't a NUL-terminated C string, e.g. a SHA-1 digest
+// (TDD-00039 Stage 1's Sec-WebSocket-Accept, RFC 6455 §1.3), which can
+// legitimately contain an embedded 0x00 byte. Calling strlen-based __kml_btoa
+// on such a buffer would silently truncate (or, worse, read past the end of
+// the allocation looking for a zero byte that isn't there) — found and
+// worked around just for a test's own known-answer input in TDD-00039
+// Stage 0's ADR-00125, flagged there as needing exactly this real fix
+// before any actual handshake code could ship. Same mirroring
+// output-length formula (`ceil(len/3)*4`, `+2`/`udiv 3` idiom) and the same
+// shared @__kml_base64_alphabet table — only the length source differs.
+func (e *Emitter) ensureBase64EncodeBytes() {
+	if e.usedBase64EncodeBytes {
+		return
+	}
+	e.usedBase64EncodeBytes = true
+	e.ensureMalloc()
+	e.ensureBase64Alphabet()
+	e.emitGlobal(`
+define ptr @__kml_base64_encode_bytes(ptr %str, i64 %len) {
+entry:
+  %len_plus2 = add i64 %len, 2
+  %ngroups = udiv i64 %len_plus2, 3
+  %outlen = mul i64 %ngroups, 4
+  %outlen_plus1 = add i64 %outlen, 1
+  %out = call ptr @malloc(i64 %outlen_plus1)
+  br label %loopcheck
+
+loopcheck:
+  %i = phi i64 [ 0, %entry ], [ %i_next, %b64mergeb2 ]
+  %oi = phi i64 [ 0, %entry ], [ %oi_next, %b64mergeb2 ]
+  %cont = icmp slt i64 %i, %len
+  br i1 %cont, label %loopbody, label %done
+
+loopbody:
+  %i1 = add i64 %i, 1
+  %i2 = add i64 %i, 2
+  %has1 = icmp slt i64 %i1, %len
+  %has2 = icmp slt i64 %i2, %len
+
+  %p0 = getelementptr i8, ptr %str, i64 %i
+  %b0_8 = load i8, ptr %p0, align 1
+  %b0 = zext i8 %b0_8 to i32
+
+  br i1 %has1, label %b64loadb1, label %b64skipb1
+b64loadb1:
+  %p1 = getelementptr i8, ptr %str, i64 %i1
+  %b1_8v = load i8, ptr %p1, align 1
+  br label %b64mergeb1
+b64skipb1:
+  br label %b64mergeb1
+b64mergeb1:
+  %b1_8 = phi i8 [ %b1_8v, %b64loadb1 ], [ 0, %b64skipb1 ]
+  %b1 = zext i8 %b1_8 to i32
+
+  br i1 %has2, label %b64loadb2, label %b64skipb2
+b64loadb2:
+  %p2 = getelementptr i8, ptr %str, i64 %i2
+  %b2_8v = load i8, ptr %p2, align 1
+  br label %b64mergeb2
+b64skipb2:
+  br label %b64mergeb2
+b64mergeb2:
+  %b2_8 = phi i8 [ %b2_8v, %b64loadb2 ], [ 0, %b64skipb2 ]
   %b2 = zext i8 %b2_8 to i32
 
   %b0sh = shl i32 %b0, 16

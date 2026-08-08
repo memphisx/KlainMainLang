@@ -64,6 +64,12 @@ func NewVarDeclaration(kind, name string, ta *TypeAnnotation, init Expression, p
 type FunctionDeclaration struct {
 	Name       string
 	TypeParams []string // e.g. ["T"] for `function identity<T>(...)` — TDD-00010 V1, single param only
+	// Erased is TDD-00010 V2: set when a `/** @erased */` JSDoc annotation
+	// precedes the declaration, opting a generic function out of V1's
+	// default monomorphization into compiling its body exactly once, with
+	// every bare-T parameter/return position treated as TypeAny instead.
+	// Meaningless (always false) unless len(TypeParams) > 0.
+	Erased     bool
 	Params     []Param
 	ReturnType *TypeAnnotation
 	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
@@ -814,6 +820,45 @@ func (n *NewURLExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
 	return &NewURLExpression{URL: url, pos: pos}
+}
+
+// NewEventSourceExpression is `new EventSource(url)` — a single required
+// string argument, matching the real Web platform's own narrow constructor
+// (a `{ withCredentials }` second argument is the only other thing real
+// EventSource accepts, and has no meaning without cookies/credentialed
+// requests in this compiler's fetch model either — see docs/tdd/TDD-00038.md).
+type NewEventSourceExpression struct {
+	URL Expression
+	pos Pos
+}
+
+func (*NewEventSourceExpression) nodeMarker()   {}
+func (*NewEventSourceExpression) exprMarker()   {}
+func (n *NewEventSourceExpression) GetPos() Pos { return n.pos }
+
+func NewNewEventSourceExpression(url Expression, pos Pos) *NewEventSourceExpression {
+	return &NewEventSourceExpression{URL: url, pos: pos}
+}
+
+// NewWebSocketExpression is `new WebSocket(url)` (TDD-00039 Stage 3) — a
+// single required string argument (`ws://host:port/path` only; `wss://` is
+// rejected at construction, see emit_websocket_client.go), matching the
+// real Web platform's own constructor shape (a `protocols` second argument
+// negotiates a subprotocol, which has no equivalent in this compiler's
+// model and is simply omitted rather than accepted-and-ignored, the same
+// choice NewEventSourceExpression's own doc comment made for EventSource's
+// second argument).
+type NewWebSocketExpression struct {
+	URL Expression
+	pos Pos
+}
+
+func (*NewWebSocketExpression) nodeMarker()   {}
+func (*NewWebSocketExpression) exprMarker()   {}
+func (n *NewWebSocketExpression) GetPos() Pos { return n.pos }
+
+func NewNewWebSocketExpression(url Expression, pos Pos) *NewWebSocketExpression {
+	return &NewWebSocketExpression{URL: url, pos: pos}
 }
 
 // NewURLSearchParamsExpression is `new URLSearchParams()` (empty) or
