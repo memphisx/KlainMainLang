@@ -311,6 +311,22 @@ func (p *Parser) parsePostfix() (ast.Expression, error) {
 	return expr, nil
 }
 
+// expectPropertyName consumes the token right after a `.`/`?.` as a
+// property name. Almost always a plain IDENT, but `default` is a reserved
+// lexer keyword (lexer.DEFAULT — used by `switch`'s `default:` clause and,
+// as of TDD-00042, as the synthetic name of an `export default`), so
+// `ns.default` — the natural way to reach a default export through a
+// namespace import — would otherwise be permanently unparseable. Narrowly
+// scoped to just this one keyword rather than every reserved word as a
+// general "any keyword can be a property name" fix (real JS/TS allow that
+// broadly); widen later if another keyword-named property need shows up.
+func (p *Parser) expectPropertyName() (lexer.Token, error) {
+	if p.check(lexer.DEFAULT) {
+		return p.advance(), nil
+	}
+	return p.expect(lexer.IDENT)
+}
+
 // parseCallMember handles left-recursive .prop and (args) chains.
 func (p *Parser) parseCallMember() (ast.Expression, error) {
 	expr, err := p.parsePrimary()
@@ -322,7 +338,7 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 		switch p.peek().Type {
 		case lexer.OPTIONAL_DOT:
 			p.advance()
-			propTok, err := p.expect(lexer.IDENT)
+			propTok, err := p.expectPropertyName()
 			if err != nil {
 				return nil, err
 			}
@@ -331,7 +347,7 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			expr = mem
 		case lexer.DOT:
 			p.advance()
-			propTok, err := p.expect(lexer.IDENT)
+			propTok, err := p.expectPropertyName()
 			if err != nil {
 				return nil, err
 			}

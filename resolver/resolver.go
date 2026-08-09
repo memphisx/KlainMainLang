@@ -159,14 +159,16 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 	}
 
 	// Build each file's own combined lookup table (its own mangled decls
-	// plus its import bindings, honoring `as` aliasing) and rewrite every
-	// reference in that file accordingly.
+	// plus its import bindings, honoring `as` aliasing, plus TDD-00042's
+	// namespace-import member tables) and rewrite every reference in that
+	// file accordingly.
 	for _, path := range allPaths {
 		info := files[path]
 		lookup := make(map[string]string, len(info.mangled))
 		for orig, m := range info.mangled {
 			lookup[orig] = m
 		}
+		ns := map[string]map[string]string{}
 		dir := filepath.Dir(path)
 		for _, stmt := range info.prog.Body {
 			imp, ok := stmt.(*ast.ImportDeclaration)
@@ -183,10 +185,32 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
 						imp.GetPos().Line, imp.GetPos().Col, spec.Local)
 				}
+				if _, dup := ns[spec.Local]; dup {
+					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
+						imp.GetPos().Line, imp.GetPos().Col, spec.Local)
+				}
 				lookup[spec.Local] = target.mangled[spec.Imported]
 			}
+			if imp.Namespace != "" {
+				if _, dup := lookup[imp.Namespace]; dup {
+					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file",
+						imp.GetPos().Line, imp.GetPos().Col, imp.Namespace)
+				}
+				if _, dup := ns[imp.Namespace]; dup {
+					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file",
+						imp.GetPos().Line, imp.GetPos().Col, imp.Namespace)
+				}
+				// Only the target's actually-exported members are reachable
+				// through the namespace object — same visibility rule a
+				// named `import { x }` is already held to.
+				members := make(map[string]string, len(target.exported))
+				for name := range target.exported {
+					members[name] = target.mangled[name]
+				}
+				ns[imp.Namespace] = members
+			}
 		}
-		renameFile(info.prog, lookup)
+		renameFile(info.prog, lookupTable{names: lookup, ns: ns})
 	}
 
 	// Defensive: mangled names are constructed to already be unique (each
@@ -295,8 +319,21 @@ func mangleName(name string, fileIdx int) string {
 // genuine in-file duplicate declaration — two different files sharing a
 // name is no longer an error (that's the whole point of TDD-00041), but two
 // declarations of the same name within one file still is, same as before.
+//
+// TDD-00042: an `export default` declaration additionally gets aliased
+// under the synthetic key "default" in the returned map, alongside
+// whatever its own declared name already is (real for a named default
+// export like `export default function foo() {...}`, or already the
+// literal name "default" for the anonymous-declaration/wrapped-expression
+// forms — see parser.parseDefaultExportTarget). "default" can never be a
+// real user-declared name (lexer.DEFAULT is a reserved keyword, not an
+// IDENT), so this alias assignment can only ever collide with a second
+// `export default` in the same file — checked explicitly since the two
+// underlying declarations may have different own names ("foo" vs "bar")
+// and so wouldn't be caught by the loop's own duplicate check above.
 func mangleFileDecls(path string, prog *ast.Program, fileIdx int) (map[string]string, error) {
 	mangled := map[string]string{}
+	sawDefault := false
 	for _, stmt := range prog.Body {
 		name, ok := declNameOf(stmt)
 		if !ok {
@@ -308,18 +345,36 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int) (map[string]st
 		newName := mangleName(name, fileIdx)
 		mangled[name] = newName
 		setDeclName(stmt, newName)
+
+		if exp, ok := stmt.(*ast.ExportDeclaration); ok && exp.IsDefault {
+			if sawDefault {
+				return nil, fmt.Errorf("%d:%d: %s declares more than one 'export default'", exp.GetPos().Line, exp.GetPos().Col, path)
+			}
+			sawDefault = true
+			mangled["default"] = newName
+		}
 	}
 	return mangled, nil
 }
 
-// exportedNames returns the set of top-level names a file exports.
+// exportedNames returns the set of top-level names a file exports. A
+// default export (TDD-00042) is exposed only under the "default" key, not
+// under its own declared name too — matching real ES modules, where
+// `export default function foo() {...}` does not also make `foo` available
+// via `import { foo }`.
 func exportedNames(prog *ast.Program) map[string]bool {
 	names := map[string]bool{}
 	for _, stmt := range prog.Body {
-		if _, ok := stmt.(*ast.ExportDeclaration); ok {
-			if name, ok := declNameOf(stmt); ok {
-				names[name] = true
-			}
+		exp, ok := stmt.(*ast.ExportDeclaration)
+		if !ok {
+			continue
+		}
+		if exp.IsDefault {
+			names["default"] = true
+			continue
+		}
+		if name, ok := declNameOf(stmt); ok {
+			names[name] = true
 		}
 	}
 	return names

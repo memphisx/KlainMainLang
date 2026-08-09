@@ -11,18 +11,25 @@ import (
 // static/private/protected/public/abstract (any order, TDD-00009 Stage 4),
 // then is either a method/constructor (`name(...) { ... }` or, for an
 // abstract method, `name(...): T;` with no body), a `static { ... }`
-// initializer block, or a typed field (`name: type;`).
-func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) {
+// initializer block, or a typed field (`name: type;`). defaultName, when
+// non-empty, is used as the class's name if no IDENT immediately follows
+// `class` — the anonymous `export default class { ... }` form (TDD-00042);
+// every other caller passes "" and gets the ordinary "name required" check.
+func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.ClassDeclaration, error) {
 	tok := p.advance() // consume 'class'
 	pos := posOf(tok)
-	nameTok, err := p.expect(lexer.IDENT)
-	if err != nil {
-		return nil, err
+	name := defaultName
+	if p.check(lexer.IDENT) {
+		name = p.advance().Literal
+	} else if defaultName == "" {
+		if _, err := p.expect(lexer.IDENT); err != nil {
+			return nil, err
+		}
 	}
 	// Optional `<T>` type-parameter list (TDD-00010 V1).
 	var typeParams []string
 	if p.check(lexer.LT) {
-		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		tp, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +164,7 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 			fn.AccessorKind = accessorKind
 			if memberTok.Literal == "constructor" {
 				if ctor != nil {
-					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, nameTok.Literal)
+					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, name)
 				}
 				ctor = fn
 			} else {
@@ -190,7 +197,7 @@ func (p *Parser) parseClassDecl(isAbstract bool) (*ast.ClassDeclaration, error) 
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	decl := ast.NewClassDeclaration(nameTok.Literal, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
+	decl := ast.NewClassDeclaration(name, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
 	decl.TypeParams = typeParams
 	return decl, nil
 }

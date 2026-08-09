@@ -6,6 +6,17 @@ package resolver
 // same file that resolves — through real lexical scoping, not a blind
 // find-and-replace — to one of that file's own top-level declarations or to
 // an imported binding. See docs/tdd/TDD-00041.md for the design.
+//
+// TDD-00042 extended this pass to also resolve namespace-import member
+// access (`ns.foo` for `import * as ns from '...'`) entirely at this
+// compile-time stage — `ns` itself is never a runtime value (see the TDD's
+// Design section for why), so `ns.foo` is rewritten directly into a
+// reference to foo's mangled name, indistinguishable after this pass from a
+// normal named import of just that one member. This is why rewriteExpr
+// below returns the (possibly replaced) expression rather than mutating
+// only in place: replacing a *ast.MemberExpression node with a plain
+// *ast.Identifier requires the caller to reassign the field/slice element
+// that held it, which a bare in-place mutation can't do.
 
 import (
 	"strings"
@@ -42,20 +53,30 @@ func (s *scope) bound(name string) bool {
 	return false
 }
 
-// renameFile rewrites every top-level statement in prog using lookup — a
-// combined table of this file's own mangled declaration names plus its
-// import bindings (local name -> the imported declaration's mangled name in
-// its own file, already resolved by the caller). Local (non-top-level)
-// bindings are deliberately never added to lookup and never consulted
-// through it — they're tracked purely via the scope stack, which always
-// wins when a name is shadowed.
-func renameFile(prog *ast.Program, lookup map[string]string) {
+// lookupTable bundles the two tables a file's rename pass needs: names
+// (this file's own mangled declarations plus its ordinary/default import
+// bindings — local name -> the mangled name it refers to, exactly what
+// TDD-00041 already built) and ns (TDD-00042: namespace-import bindings —
+// local alias -> {exported member's original name -> its mangled name},
+// one entry per `import * as ns from '...'`). Both are built once by the
+// caller (resolver.go) and passed down unchanged through the whole walk.
+type lookupTable struct {
+	names map[string]string
+	ns    map[string]map[string]string
+}
+
+// renameFile rewrites every top-level statement in prog using lu — see
+// lookupTable's own doc comment. Local (non-top-level) bindings are
+// deliberately never added to lu.names and never consulted through it —
+// they're tracked purely via the scope stack, which always wins when a name
+// is shadowed.
+func renameFile(prog *ast.Program, lu lookupTable) {
 	for _, stmt := range prog.Body {
-		rewriteTopLevelStmt(stmt, lookup)
+		rewriteTopLevelStmt(stmt, lu)
 	}
 }
 
-func rewriteTopLevelStmt(stmt ast.Statement, lu map[string]string) {
+func rewriteTopLevelStmt(stmt ast.Statement, lu lookupTable) {
 	switch s := stmt.(type) {
 	case *ast.ExportDeclaration:
 		rewriteTopLevelStmt(s.Decl, lu)
@@ -68,7 +89,7 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu map[string]string) {
 			rewriteType(s.TypeAnnot, sc, lu)
 		}
 		if s.Init != nil {
-			rewriteExpr(s.Init, sc, lu)
+			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 	case *ast.InterfaceDeclaration:
 		rewriteInterfaceDecl(s, lu)
@@ -78,7 +99,7 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu map[string]string) {
 		sc := newScope()
 		for i := range s.Members {
 			if s.Members[i].Value != nil {
-				rewriteExpr(s.Members[i].Value, sc, lu)
+				s.Members[i].Value = rewriteExpr(s.Members[i].Value, sc, lu)
 			}
 		}
 	case *ast.ClassDeclaration:
@@ -97,7 +118,7 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu map[string]string) {
 // type/body. Used both for a top-level function (called with a brand new
 // scope) and a class method/constructor (called with the class's own scope,
 // already carrying its TypeParams — see rewriteClassDecl).
-func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu map[string]string) {
+func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) {
 	sc.push()
 	for _, tp := range f.TypeParams {
 		sc.bind(tp)
@@ -108,7 +129,7 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu map[string]st
 			rewriteType(f.Params[i].Type, sc, lu)
 		}
 		if f.Params[i].Default != nil {
-			rewriteExpr(f.Params[i].Default, sc, lu)
+			f.Params[i].Default = rewriteExpr(f.Params[i].Default, sc, lu)
 		}
 	}
 	if f.ReturnType != nil {
@@ -140,7 +161,7 @@ func bindParams(params []ast.Param, sc *scope) {
 	}
 }
 
-func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu map[string]string) {
+func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	sc := newScope()
 	sc.push()
 	for _, tp := range i.TypeParams {
@@ -165,7 +186,7 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu map[string]string) {
 	sc.pop()
 }
 
-func rewriteClassDecl(c *ast.ClassDeclaration, lu map[string]string) {
+func rewriteClassDecl(c *ast.ClassDeclaration, lu lookupTable) {
 	sc := newScope()
 	sc.push()
 	for _, tp := range c.TypeParams {
@@ -173,7 +194,7 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu map[string]string) {
 	}
 
 	if c.BaseClass != "" && !sc.bound(c.BaseClass) {
-		if m, ok := lu[c.BaseClass]; ok {
+		if m, ok := lu.names[c.BaseClass]; ok {
 			c.BaseClass = m
 		}
 	}
@@ -182,7 +203,7 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu map[string]string) {
 	}
 	for i := range c.Implements {
 		if !sc.bound(c.Implements[i]) {
-			if m, ok := lu[c.Implements[i]]; ok {
+			if m, ok := lu.names[c.Implements[i]]; ok {
 				c.Implements[i] = m
 			}
 		}
@@ -202,7 +223,7 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu map[string]string) {
 	sc.pop()
 }
 
-func rewriteBlock(b *ast.BlockStatement, sc *scope, lu map[string]string) {
+func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 	if b == nil {
 		return
 	}
@@ -220,7 +241,7 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu map[string]string) {
 // (nested function declarations, and the same restriction for the other
 // declaration kinds, aren't supported) — so there is no case for them
 // below; they're handled solely by rewriteTopLevelStmt.
-func rewriteStmt(stmt ast.Statement, sc *scope, lu map[string]string) {
+func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	switch s := stmt.(type) {
 	case *ast.BlockStatement:
 		rewriteBlock(s, sc, lu)
@@ -229,33 +250,33 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu map[string]string) {
 			rewriteType(s.TypeAnnot, sc, lu)
 		}
 		if s.Init != nil {
-			rewriteExpr(s.Init, sc, lu)
+			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		sc.bind(s.Name)
 	case *ast.ArrayDestructuring:
 		if s.Init != nil {
-			rewriteExpr(s.Init, sc, lu)
+			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		for _, n := range s.Names {
 			sc.bind(n)
 		}
 	case *ast.ObjectDestructuring:
 		if s.Init != nil {
-			rewriteExpr(s.Init, sc, lu)
+			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		for _, p := range s.Props {
 			sc.bind(p.Local)
 		}
 	case *ast.ExpressionStatement:
-		rewriteExpr(s.Expr, sc, lu)
+		s.Expr = rewriteExpr(s.Expr, sc, lu)
 	case *ast.ReturnStatement:
 		if s.Value != nil {
-			rewriteExpr(s.Value, sc, lu)
+			s.Value = rewriteExpr(s.Value, sc, lu)
 		}
 	case *ast.ThrowStatement:
-		rewriteExpr(s.Argument, sc, lu)
+		s.Argument = rewriteExpr(s.Argument, sc, lu)
 	case *ast.IfStatement:
-		rewriteExpr(s.Test, sc, lu)
+		s.Test = rewriteExpr(s.Test, sc, lu)
 		rewriteBlock(s.Consequent, sc, lu)
 		if s.Alternate != nil {
 			rewriteStmt(s.Alternate, sc, lu)
@@ -266,36 +287,36 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu map[string]string) {
 			rewriteStmt(s.Init, sc, lu)
 		}
 		if s.Test != nil {
-			rewriteExpr(s.Test, sc, lu)
+			s.Test = rewriteExpr(s.Test, sc, lu)
 		}
 		if s.Update != nil {
-			rewriteExpr(s.Update, sc, lu)
+			s.Update = rewriteExpr(s.Update, sc, lu)
 		}
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.ForOfStatement:
-		rewriteExpr(s.Iterable, sc, lu)
+		s.Iterable = rewriteExpr(s.Iterable, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.ForInStatement:
-		rewriteExpr(s.Object, sc, lu)
+		s.Object = rewriteExpr(s.Object, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.WhileStatement:
-		rewriteExpr(s.Test, sc, lu)
+		s.Test = rewriteExpr(s.Test, sc, lu)
 		rewriteBlock(s.Body, sc, lu)
 	case *ast.DoWhileStatement:
 		rewriteBlock(s.Body, sc, lu)
-		rewriteExpr(s.Test, sc, lu)
+		s.Test = rewriteExpr(s.Test, sc, lu)
 	case *ast.SwitchStatement:
-		rewriteExpr(s.Discriminant, sc, lu)
+		s.Discriminant = rewriteExpr(s.Discriminant, sc, lu)
 		for i := range s.Cases {
 			if s.Cases[i].Test != nil {
-				rewriteExpr(s.Cases[i].Test, sc, lu)
+				s.Cases[i].Test = rewriteExpr(s.Cases[i].Test, sc, lu)
 			}
 			sc.push()
 			for _, cs := range s.Cases[i].Body {
@@ -321,60 +342,83 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu map[string]string) {
 	}
 }
 
-func rewriteExpr(expr ast.Expression, sc *scope, lu map[string]string) {
+// rewriteExpr rewrites expr and returns the expression the caller should
+// keep in its place — almost always expr itself (mutated in place, same as
+// before TDD-00042), except for a namespace-import member access
+// (`ns.foo`), which is replaced wholesale by a fresh *ast.Identifier
+// referencing foo's mangled name. Every call site must assign the return
+// value back into whatever field/slice element held the original
+// expression — a bare `rewriteExpr(x, sc, lu)` with the result discarded
+// silently drops any such replacement.
+func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression {
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		if !sc.bound(e.Name) {
-			if m, ok := lu[e.Name]; ok {
+			if m, ok := lu.names[e.Name]; ok {
 				e.Name = m
 			}
 		}
 	case *ast.AwaitExpression:
-		rewriteExpr(e.Argument, sc, lu)
+		e.Argument = rewriteExpr(e.Argument, sc, lu)
 	case *ast.BinaryExpression:
-		rewriteExpr(e.Left, sc, lu)
-		rewriteExpr(e.Right, sc, lu)
+		e.Left = rewriteExpr(e.Left, sc, lu)
+		e.Right = rewriteExpr(e.Right, sc, lu)
 	case *ast.ConditionalExpression:
-		rewriteExpr(e.Test, sc, lu)
-		rewriteExpr(e.Consequent, sc, lu)
-		rewriteExpr(e.Alternate, sc, lu)
+		e.Test = rewriteExpr(e.Test, sc, lu)
+		e.Consequent = rewriteExpr(e.Consequent, sc, lu)
+		e.Alternate = rewriteExpr(e.Alternate, sc, lu)
 	case *ast.SpreadElement:
-		rewriteExpr(e.Arg, sc, lu)
+		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.UnaryExpression:
-		rewriteExpr(e.Arg, sc, lu)
+		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.UpdateExpression:
-		rewriteExpr(e.Arg, sc, lu)
+		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.AssignmentExpression:
-		rewriteExpr(e.Left, sc, lu)
-		rewriteExpr(e.Right, sc, lu)
+		e.Left = rewriteExpr(e.Left, sc, lu)
+		e.Right = rewriteExpr(e.Right, sc, lu)
 	case *ast.CallExpression:
-		rewriteExpr(e.Callee, sc, lu)
-		for _, a := range e.Args {
-			rewriteExpr(a, sc, lu)
+		e.Callee = rewriteExpr(e.Callee, sc, lu)
+		for i := range e.Args {
+			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
 	case *ast.MemberExpression:
-		rewriteExpr(e.Object, sc, lu)
+		e.Object = rewriteExpr(e.Object, sc, lu)
+		// TDD-00042: `ns.foo` for a namespace-import alias `ns` resolves
+		// entirely at compile time into a direct reference to foo's
+		// mangled name — ns is never a runtime value (see the TDD's
+		// Design section), so this whole node is replaced rather than
+		// merely mutated. Guarded by !sc.bound so a local variable that
+		// happens to share a namespace alias's name (shadowing it) is left
+		// as an ordinary, unresolved member access instead.
+		if id, ok := e.Object.(*ast.Identifier); ok && !sc.bound(id.Name) {
+			if members, ok := lu.ns[id.Name]; ok {
+				if mangled, ok := members[e.Property]; ok {
+					return ast.NewIdentifier(mangled, e.GetPos())
+				}
+			}
+		}
+		return e
 	case *ast.ArrayLiteral:
-		for _, el := range e.Elements {
-			rewriteExpr(el, sc, lu)
+		for i := range e.Elements {
+			e.Elements[i] = rewriteExpr(e.Elements[i], sc, lu)
 		}
 	case *ast.IndexExpression:
-		rewriteExpr(e.Object, sc, lu)
-		rewriteExpr(e.Index, sc, lu)
+		e.Object = rewriteExpr(e.Object, sc, lu)
+		e.Index = rewriteExpr(e.Index, sc, lu)
 	case *ast.NewArrayExpression:
 		if e.ElemType != nil {
 			rewriteType(e.ElemType, sc, lu)
 		}
 		if e.Size != nil {
-			rewriteExpr(e.Size, sc, lu)
+			e.Size = rewriteExpr(e.Size, sc, lu)
 		}
 	case *ast.ObjectLiteral:
 		for i := range e.Properties {
 			if e.Properties[i].KeyExpr != nil {
-				rewriteExpr(e.Properties[i].KeyExpr, sc, lu)
+				e.Properties[i].KeyExpr = rewriteExpr(e.Properties[i].KeyExpr, sc, lu)
 			}
 			if e.Properties[i].Value != nil {
-				rewriteExpr(e.Properties[i].Value, sc, lu)
+				e.Properties[i].Value = rewriteExpr(e.Properties[i].Value, sc, lu)
 			}
 		}
 	case *ast.ArrowFunction:
@@ -385,22 +429,22 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu map[string]string) {
 				rewriteType(e.Params[i].Type, sc, lu)
 			}
 			if e.Params[i].Default != nil {
-				rewriteExpr(e.Params[i].Default, sc, lu)
+				e.Params[i].Default = rewriteExpr(e.Params[i].Default, sc, lu)
 			}
 		}
 		if e.RetType != nil {
 			rewriteType(e.RetType, sc, lu)
 		}
 		if e.Body != nil {
-			rewriteExpr(e.Body, sc, lu)
+			e.Body = rewriteExpr(e.Body, sc, lu)
 		}
 		if e.Block != nil {
 			rewriteBlock(e.Block, sc, lu)
 		}
 		sc.pop()
 	case *ast.TemplateLiteral:
-		for _, ex := range e.Exprs {
-			rewriteExpr(ex, sc, lu)
+		for i := range e.Exprs {
+			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
 		}
 	case *ast.NewMapExpression:
 		if e.KeyType != nil {
@@ -419,68 +463,69 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu map[string]string) {
 		}
 	case *ast.NewErrorExpression:
 		if e.Message != nil {
-			rewriteExpr(e.Message, sc, lu)
+			e.Message = rewriteExpr(e.Message, sc, lu)
 		}
 	case *ast.NewDateExpression:
 		if e.Millis != nil {
-			rewriteExpr(e.Millis, sc, lu)
+			e.Millis = rewriteExpr(e.Millis, sc, lu)
 		}
-		for _, a := range e.Args {
-			rewriteExpr(a, sc, lu)
+		for i := range e.Args {
+			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
 	case *ast.NewURLExpression:
-		rewriteExpr(e.URL, sc, lu)
+		e.URL = rewriteExpr(e.URL, sc, lu)
 	case *ast.NewEventSourceExpression:
-		rewriteExpr(e.URL, sc, lu)
+		e.URL = rewriteExpr(e.URL, sc, lu)
 	case *ast.NewWebSocketExpression:
-		rewriteExpr(e.URL, sc, lu)
+		e.URL = rewriteExpr(e.URL, sc, lu)
 	case *ast.NewURLSearchParamsExpression:
 		if e.Init != nil {
-			rewriteExpr(e.Init, sc, lu)
+			e.Init = rewriteExpr(e.Init, sc, lu)
 		}
 	case *ast.NewHeadersExpression:
 		if e.Init != nil {
-			rewriteExpr(e.Init, sc, lu)
+			e.Init = rewriteExpr(e.Init, sc, lu)
 		}
 	case *ast.NewRequestExpression:
-		rewriteExpr(e.URL, sc, lu)
+		e.URL = rewriteExpr(e.URL, sc, lu)
 		if e.Init != nil {
-			rewriteExpr(e.Init, sc, lu)
+			e.Init = rewriteExpr(e.Init, sc, lu)
 		}
 	case *ast.NewArrayBufferExpression:
-		rewriteExpr(e.ByteLength, sc, lu)
+		e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
 	case *ast.NewTypedArrayExpression:
 		if e.Arg != nil {
-			rewriteExpr(e.Arg, sc, lu)
+			e.Arg = rewriteExpr(e.Arg, sc, lu)
 		}
 	case *ast.NewTextDecoderExpression:
 		if e.Label != nil {
-			rewriteExpr(e.Label, sc, lu)
+			e.Label = rewriteExpr(e.Label, sc, lu)
 		}
 	case *ast.NewRegExpExpression:
-		rewriteExpr(e.Pattern, sc, lu)
+		e.Pattern = rewriteExpr(e.Pattern, sc, lu)
 		if e.Flags != nil {
-			rewriteExpr(e.Flags, sc, lu)
+			e.Flags = rewriteExpr(e.Flags, sc, lu)
 		}
 	case *ast.NewExpression:
 		if !sc.bound(e.ClassName) {
-			if m, ok := lu[e.ClassName]; ok {
+			if m, ok := lu.names[e.ClassName]; ok {
 				e.ClassName = m
 			}
 		}
 		for _, ta := range e.TypeArgs {
 			rewriteType(ta, sc, lu)
 		}
-		for _, a := range e.Args {
-			rewriteExpr(a, sc, lu)
+		for i := range e.Args {
+			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
 	}
 	// Every other expression kind (literals, ThisExpression, SuperExpression,
 	// NewXMLHttpRequestExpression/NewTextEncoderExpression — both zero-arg)
 	// carries no identifier or type reference to rewrite.
+	return expr
 }
 
-func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu map[string]string) {
+func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta == nil {
 		return
 	}
@@ -508,9 +553,9 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu map[string]string) {
 // rewriteTypeName rewrites ta.Name, accounting for parser_types.go's flat
 // "Foo[]" (or multi-dimensional "Foo[][]") encoding of a named type followed
 // by an array suffix — the suffix is baked directly into the Name string
-// rather than represented via ElemType, so a plain lu[ta.Name] lookup would
-// silently miss "Foo[]" even though "Foo" itself has a mangled name.
-func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu map[string]string) {
+// rather than represented via ElemType, so a plain lu.names[ta.Name] lookup
+// would silently miss "Foo[]" even though "Foo" itself has a mangled name.
+func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	name := ta.Name
 	suffix := ""
 	for strings.HasSuffix(name, "[]") {
@@ -520,7 +565,7 @@ func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu map[string]string) {
 	if sc.bound(name) {
 		return
 	}
-	if m, ok := lu[name]; ok {
+	if m, ok := lu.names[name]; ok {
 		ta.Name = m + suffix
 	}
 }

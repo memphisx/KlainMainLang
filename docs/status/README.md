@@ -22,7 +22,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 ## TypeScript Core Language
 
-**286 / 329 features, ~87% coverage.**
+**289 / 330 features, ~88% coverage.**
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
@@ -42,7 +42,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` won't be implemented |
 | Type system features | 16/23, ~70% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics support any number of unconstrained type parameters, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md)); no intersection/tuple/mapped types |
 | Classes / OOP | 14/15, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Real JS/TS `#x` runtime-private field syntax (a different mechanism from the `private` keyword modifier — scoped separately, see [TDD-00021](../tdd/TDD-00021.md)); no user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design) |
-| Modules | 6/13, ~46% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping and import aliasing ([TDD-00041](../tdd/TDD-00041.md)) — no `export default`/namespace imports/re-exports; no dynamic `import()`/`import.meta` |
+| Modules | 9/14, ~64% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping, import aliasing ([TDD-00041](../tdd/TDD-00041.md)), `export default`/default imports, and compile-time-only namespace imports ([TDD-00042](../tdd/TDD-00042.md)) — no re-exports; no dynamic `import()`/`import.meta` |
 
 ## Web Platform APIs
 
@@ -179,4 +179,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-09 — True per-file module scope (mangled internal names) and import aliasing — [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md).*
+*Last updated: 2026-08-09 — `export default`, default imports, and compile-time-only namespace imports — [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md).*

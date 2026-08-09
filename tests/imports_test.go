@@ -217,3 +217,199 @@ console.log(sum(1, 2))
 `,
 	}, "main.ts", "3")
 }
+
+// --- export default / default imports / namespace imports (TDD-00042) ---
+
+func TestE2EExportDefaultNamedFunction(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"greet.ts": `
+export default function greet(name: string): string {
+    return "hello " + name
+}
+`,
+		"main.ts": `
+import greet from './greet'
+console.log(greet("world"))
+`,
+	}, "main.ts", "hello world")
+}
+
+func TestE2EExportDefaultAnonymousFunction(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"greet.ts": `
+export default function(name: string): string {
+    return "hi " + name
+}
+`,
+		"main.ts": `
+import greet from './greet'
+console.log(greet("there"))
+`,
+	}, "main.ts", "hi there")
+}
+
+func TestE2EExportDefaultAnonymousClass(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"widget.ts": `
+export default class {
+    label(): string { return "anon widget" }
+}
+`,
+		"main.ts": `
+import Widget from './widget'
+const w = new Widget()
+console.log(w.label())
+`,
+	}, "main.ts", "anon widget")
+}
+
+func TestE2EExportDefaultNamedClassSelfReferenceStillWorks(t *testing.T) {
+	// A named default export keeps its own name usable for the rest of the
+	// file (recursion, self-reference) — only the *export* is exposed
+	// solely under "default", not the name itself (TDD-00042).
+	assertMultiFileOutput(t, map[string]string{
+		"counter.ts": `
+export default class Counter {
+    static make(): Counter { return new Counter() }
+    value(): number { return 42 }
+}
+`,
+		"main.ts": `
+import Counter from './counter'
+const c = Counter.make()
+console.log(c.value())
+`,
+	}, "main.ts", "42")
+}
+
+func TestE2EExportDefaultExpression(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"answer.ts": `
+export default 42
+`,
+		"main.ts": `
+import answer from './answer'
+console.log(answer)
+`,
+	}, "main.ts", "42")
+}
+
+func TestE2EExportDefaultCombinedWithNamedImport(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"math.ts": `
+export function add(a: number, b: number): number { return a + b }
+export default function square(x: number): number { return x * x }
+`,
+		"main.ts": `
+import square, { add } from './math'
+console.log(square(5))
+console.log(add(2, 3))
+`,
+	}, "main.ts", "25\n5")
+}
+
+func TestE2EExportDefaultNamedExportNotAlsoAvailableByName(t *testing.T) {
+	// Real ES modules: `export default function foo() {}` does not also
+	// make `foo` importable via `import { foo }`.
+	_, err := resolveMultiFile(t, map[string]string{
+		"lib.ts": `export default function foo(): number { return 1 }`,
+		"main.ts": `
+import { foo } from './lib'
+console.log(foo())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error importing a default export by its own declared name, got none")
+	}
+}
+
+func TestE2EExportDefaultTwiceInOneFileRejected(t *testing.T) {
+	_, err := resolveMultiFile(t, map[string]string{
+		"lib.ts": `
+export default function foo(): number { return 1 }
+export default function bar(): number { return 2 }
+`,
+		"main.ts": `
+import x from './lib'
+console.log(x())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error for two 'export default' in the same file, got none")
+	}
+}
+
+func TestE2ENamespaceImportFunctionsAndDefault(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"lib.ts": `
+export function add(a: number, b: number): number { return a + b }
+export default function greet(name: string): string { return "hello " + name }
+`,
+		"main.ts": `
+import * as lib from './lib'
+console.log(lib.add(10, 20))
+console.log(lib.default("via-ns"))
+`,
+	}, "main.ts", "30\nhello via-ns")
+}
+
+func TestE2ENamespaceImportClassStaticMethod(t *testing.T) {
+	// `new ns.SomeClass(...)` isn't reachable through a namespace import —
+	// not a namespace-specific gap: parser.parseNew already requires a
+	// single IDENT after `new`, with no member-expression form at all,
+	// regardless of namespaces (see TDD-00042's Design section). A class's
+	// *static* member access (`ns.SomeClass.method()`) has no such
+	// restriction: `ns.SomeClass` alone resolves to a plain identifier
+	// (the class's mangled name) before `.method()` is ever considered.
+	assertMultiFileOutput(t, map[string]string{
+		"shapes.ts": `
+export class Squares {
+    static area(side: number): number { return side * side }
+}
+`,
+		"main.ts": `
+import * as shapes from './shapes'
+console.log(shapes.Squares.area(4))
+`,
+	}, "main.ts", "16")
+}
+
+func TestE2ENamespaceImportNonExportedMemberRejected(t *testing.T) {
+	// Only actually-exported members are reachable through the namespace
+	// object — same visibility rule a named `import { x }` is held to.
+	// Resolution itself doesn't catch this (an unresolved "ns.member"
+	// simply reaches codegen as a member access with no matching type),
+	// so this asserts through codegen too, like the bare-use case above.
+	err := resolveAndEmitMultiFile(t, map[string]string{
+		"lib.ts": `
+function internalHelper(): number { return 1 }
+export function add(a: number, b: number): number { return a + b }
+`,
+		"main.ts": `
+import * as lib from './lib'
+console.log(lib.internalHelper())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error accessing a non-exported member through a namespace import, got none")
+	}
+}
+
+func TestE2ENamespaceImportBareUseRejected(t *testing.T) {
+	// A namespace import is a compile-time-only construct (TDD-00042) —
+	// it has no runtime representation, so using it as anything other than
+	// the object of a dotted member access is rejected. Resolution itself
+	// doesn't catch this (there's no special-case detection — see the
+	// TDD's Open Questions); the bare "lib" identifier simply reaches
+	// codegen unresolved and fails there.
+	err := resolveAndEmitMultiFile(t, map[string]string{
+		"lib.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"main.ts": `
+import * as lib from './lib'
+console.log(lib)
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error using a namespace import as a bare value, got none")
+	}
+}

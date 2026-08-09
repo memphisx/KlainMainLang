@@ -294,6 +294,22 @@ func resolveMultiFile(t *testing.T, files map[string]string, entryName string) (
 	return resolver.ResolveProgram(filepath.Join(dir, entryName))
 }
 
+// resolveAndEmitMultiFile runs resolution and codegen (no clang) and
+// returns the first error from either stage — used by negative multi-file
+// tests asserting a clean rejection that only surfaces during codegen
+// (e.g. an unresolved identifier), not during resolution itself.
+func resolveAndEmitMultiFile(t *testing.T, files map[string]string, entryName string) error {
+	t.Helper()
+	dir := writeMultiFile(t, files)
+	prog, err := resolver.ResolveProgram(filepath.Join(dir, entryName))
+	if err != nil {
+		return err
+	}
+	em := llvm.NewEmitter()
+	_, err = em.EmitProgram(prog)
+	return err
+}
+
 // buildBinaryMultiFile writes files to a temp dir, resolves imports
 // starting from entryName, and compiles the merged program to a native
 // binary. The test is skipped if clang is not available.

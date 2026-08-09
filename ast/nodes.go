@@ -1143,37 +1143,47 @@ func NewTypeAliasDeclaration(name string, ta *TypeAnnotation, pos Pos) *TypeAlia
 // module-resolution marker, consumed entirely by resolver/resolver.go
 // before codegen ever runs — the resolver validates and then unwraps this
 // node, merging Decl directly into the combined program. codegen/llvm never
-// sees this node.
+// sees this node. IsDefault marks `export default ...` (TDD-00042):
+// Decl's own declared name is preserved for intra-file self-reference (or
+// is already the synthetic name "default" for an anonymous
+// function/class or a wrapped expression — see resolver.go's
+// mangleFileDecls), and the resolver additionally exposes it under the
+// export key "default" alongside whatever its own name is.
 type ExportDeclaration struct {
-	Decl Statement
-	pos  Pos
+	Decl      Statement
+	IsDefault bool
+	pos       Pos
 }
 
 func (*ExportDeclaration) nodeMarker()   {}
 func (*ExportDeclaration) stmtMarker()   {}
 func (e *ExportDeclaration) GetPos() Pos { return e.pos }
 
-func NewExportDeclaration(decl Statement, pos Pos) *ExportDeclaration {
-	return &ExportDeclaration{Decl: decl, pos: pos}
+func NewExportDeclaration(decl Statement, isDefault bool, pos Pos) *ExportDeclaration {
+	return &ExportDeclaration{Decl: decl, IsDefault: isDefault, pos: pos}
 }
 
 // ImportSpecifier is one `name` or `name as alias` entry in an import list.
-// Aliasing (Local != Imported) is parsed but not yet supported by the
-// resolver (V1 scope) — parsing it anyway means real TS-shaped `as` syntax
-// gets a clear "not yet supported" error instead of a raw parse failure.
+// A default import (`import Foo from '...'`) is represented as the
+// specifier {Imported: "default", Local: "Foo"} — see TDD-00042 — so it
+// reuses this same validation/lookup machinery with no resolver changes.
 type ImportSpecifier struct {
 	Imported string
 	Local    string
 }
 
-// ImportDeclaration — `import { a, b as c } from './path'`. Consumed
-// entirely by the module resolver (resolver/resolver.go) before codegen
-// ever runs: resolves Source relative to the importing file, validates each
-// specifier's Imported name is actually declared and exported there, then
-// this node is dropped from the merged program. codegen/llvm never sees
-// this node.
+// ImportDeclaration — `import { a, b as c } from './path'`, a default
+// import (`import Foo from '...'`, represented as a "default" specifier —
+// see ImportSpecifier's own doc comment), or a namespace import
+// (`import * as ns from '...'`, Namespace set and Specifiers empty — see
+// TDD-00042). Consumed entirely by the module resolver
+// (resolver/resolver.go) before codegen ever runs: resolves Source relative
+// to the importing file, validates each specifier's Imported name is
+// actually declared and exported there, then this node is dropped from the
+// merged program. codegen/llvm never sees this node.
 type ImportDeclaration struct {
 	Specifiers []ImportSpecifier
+	Namespace  string // local alias for `import * as ns`; empty unless this is a namespace import
 	Source     string
 	pos        Pos
 }
@@ -1182,8 +1192,8 @@ func (*ImportDeclaration) nodeMarker()   {}
 func (*ImportDeclaration) stmtMarker()   {}
 func (i *ImportDeclaration) GetPos() Pos { return i.pos }
 
-func NewImportDeclaration(specs []ImportSpecifier, source string, pos Pos) *ImportDeclaration {
-	return &ImportDeclaration{Specifiers: specs, Source: source, pos: pos}
+func NewImportDeclaration(specs []ImportSpecifier, namespace, source string, pos Pos) *ImportDeclaration {
+	return &ImportDeclaration{Specifiers: specs, Namespace: namespace, Source: source, pos: pos}
 }
 
 // --- Type annotations ---

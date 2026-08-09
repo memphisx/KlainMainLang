@@ -22,13 +22,13 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		}
 		return p.parseVarDecl(true)
 	case lexer.FUNCTION:
-		return p.parseFunctionDecl(false)
+		return p.parseFunctionDecl(false, "")
 	case lexer.CLASS:
-		return p.parseClassDecl(false)
+		return p.parseClassDecl(false, "")
 	case lexer.ABSTRACT:
 		if p.peekNth(1).Type == lexer.CLASS {
 			p.advance() // consume 'abstract'
-			return p.parseClassDecl(true)
+			return p.parseClassDecl(true, "")
 		}
 	case lexer.IMPORT:
 		return p.parseImportDeclaration()
@@ -37,7 +37,7 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 	case lexer.ASYNC:
 		if p.peekNth(1).Type == lexer.FUNCTION {
 			p.advance() // consume 'async'
-			return p.parseFunctionDecl(true)
+			return p.parseFunctionDecl(true, "")
 		}
 		// async arrow function as a statement (e.g., immediately invoked)
 		expr, err := p.parseExpressionStatement()
@@ -140,15 +140,23 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (*ast.VarDeclaration, error) {
 	return ast.NewVarDeclaration(tok.Literal, nameTok.Literal, ta, init, pos), nil
 }
 
-func (p *Parser) parseFunctionDecl(isAsync bool) (*ast.FunctionDeclaration, error) {
+// defaultName, when non-empty, is used as the function's name if no IDENT
+// immediately follows `function` — the anonymous `export default function()
+// { ... }` form (TDD-00042); every other caller passes "" and gets the
+// ordinary "name required" check.
+func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.FunctionDeclaration, error) {
 	doc := p.takeDoc()
 	p.advance() // 'function'
 
-	nameTok, err := p.expect(lexer.IDENT)
-	if err != nil {
-		return nil, err
+	name := defaultName
+	if p.check(lexer.IDENT) {
+		name = p.advance().Literal
+	} else if defaultName == "" {
+		if _, err := p.expect(lexer.IDENT); err != nil {
+			return nil, err
+		}
 	}
-	fd, err := p.parseFunctionRest(nameTok.Literal, isAsync, false)
+	fd, err := p.parseFunctionRest(name, isAsync, false)
 	if err != nil {
 		return nil, err
 	}
