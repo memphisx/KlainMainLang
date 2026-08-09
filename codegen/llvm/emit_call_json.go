@@ -177,6 +177,14 @@ func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 // emitJSONStringifyValue returns a ptr string with the JSON encoding of val.
 // Handles strings (quoted), numbers, booleans, and nested objects recursively.
 func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
+	// Must be checked before the generic IsObject branch below — Symbol
+	// reuses IsObject's struct representation (see IsSymbol's doc comment,
+	// types.go), so without this it would silently serialize as
+	// {"description":"..."} instead of erroring like real JS does on a bare
+	// Symbol argument. See docs/tdd/TDD-00044.md.
+	if val.Ty.IsSymbol {
+		return Value{}, fmt.Errorf("JSON.stringify does not support symbol values")
+	}
 	if val.Ty.IsObject {
 		return e.emitJSONStringifyObject(val)
 	}

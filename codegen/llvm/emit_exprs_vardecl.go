@@ -95,6 +95,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					if len(init.Args) == 1 {
 						ty = e.inferExprType(init.Args[0])
 					}
+				case "Symbol":
+					ty = SymbolType()
 				default:
 					// A plain `ptr`-shaped return (a string — see isStringTy)
 					// was missing from this condition entirely alongside

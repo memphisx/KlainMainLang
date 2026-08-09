@@ -133,6 +133,16 @@ type Type struct {
 	// machinery, no dispatched methods of its own) built by parsing through
 	// libcurl's URL API. See emit_url.go.
 	IsURL bool
+	// IsSymbol marks Symbol(...)'s result (TDD-00044 V1): an ordinary
+	// 1-field heap object ({description: string}, description read via the
+	// existing object field-access machinery, no dynamic property keys or
+	// well-known symbols). Uniqueness/=== come for free from pointer
+	// identity — no id/counter field needed. IsSymbol exists so the handful
+	// of dispatch sites that would otherwise mishandle it via their generic
+	// IsObject path (JSON.stringify, structuredClone, typeof, binary
+	// operators, console.log/template-literal formatting) can special-case
+	// it instead. See emit_symbol.go.
+	IsSymbol bool
 	// IsURLSearchParams marks `new URLSearchParams(...)` and `URL`'s own
 	// `.searchParams` field: storage-wise it IS a real Map<string,string>
 	// (IsMap is also set, MapKey/MapVal both TypePtr) — get/set/has/delete/
@@ -354,6 +364,16 @@ func URLType() Type {
 		{Name: "searchParams", Ty: URLSearchParamsType()},
 	})
 	ty.IsURL = true
+	return ty
+}
+
+// SymbolType returns Symbol(...)'s result type (TDD-00044 V1) — a plain
+// 1-field heap object, same "flag a generic ObjectType" shape URLType uses
+// above. Uniqueness and === come from the struct's own pointer identity, not
+// from anything stored in the struct — see IsSymbol's doc comment.
+func SymbolType() Type {
+	ty := ObjectType([]Field{{Name: "description", Ty: TypePtr}})
+	ty.IsSymbol = true
 	return ty
 }
 
@@ -1079,6 +1099,8 @@ func ResolveTypeName(name string) Type {
 		return TypeNull
 	case "undefined":
 		return TypeUndefined
+	case "symbol":
+		return SymbolType()
 	case "any", "unknown":
 		return TypeAny
 	case "Date":

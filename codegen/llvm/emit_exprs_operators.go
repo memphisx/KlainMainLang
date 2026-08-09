@@ -26,6 +26,19 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 	}
 
+	// Symbol (TDD-00044): only identity comparison is meaningful — real JS
+	// throws TypeError on every other operator applied to a Symbol operand.
+	// === / !== fall through to the generic icmp-ptr-identity path below
+	// (Symbol reuses IsObject's struct representation, which that path
+	// already handles), so only the reject needs to be explicit here.
+	if left.Ty.IsSymbol || right.Ty.IsSymbol {
+		switch ex.Op {
+		case "==", "!=", "===", "!==":
+		default:
+			return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported on symbol — only ===/!== are meaningful", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		}
+	}
+
 	// An array compared against null/undefined (e.g. RegExp.exec()'s
 	// `T[] | null` — emitRegexExec's null-array sentinel, {ptr: null,
 	// len: 0}) needs its own path: an array value is a {ptr,i64}
@@ -289,6 +302,8 @@ func typeofString(ty Type) string {
 	switch {
 	case ty.IsFunc:
 		return "function"
+	case ty.IsSymbol:
+		return "symbol"
 	case ty.IsObject, ty.IsArray:
 		return "object"
 	case ty.IR == "i1":

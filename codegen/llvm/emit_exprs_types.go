@@ -37,6 +37,12 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return e.emitDynamicToString(v)
 	}
+	if v.Ty.IsSymbol {
+		// V1 deliberately treats template-literal interpolation the same as
+		// .toString()/console.log (both format as "Symbol(desc)"); real JS
+		// is stricter and throws TypeError here — see docs/tdd/TDD-00044.md.
+		return e.emitSymbolToString(v)
+	}
 	if v.Ty.IsNull {
 		label := "null"
 		if v.Ty.IsUndefined {
@@ -433,6 +439,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if len(ex.Args) == 1 {
 					return e.inferExprType(ex.Args[0])
 				}
+			case "Symbol":
+				return SymbolType()
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {

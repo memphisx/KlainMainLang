@@ -52,6 +52,15 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
+		if val.Ty.IsSymbol {
+			strVal, err := e.emitSymbolToString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			fmtPtr := e.internString("%s\n")
+			e.emitConsolePrintVal(strVal, fmtPtr, fd)
+			continue
+		}
 		fmtPtr := e.internString(val.Ty.PrintfFmt() + "\n")
 		e.emitConsolePrintVal(val, fmtPtr, fd)
 	}

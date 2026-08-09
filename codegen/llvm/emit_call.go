@@ -90,6 +90,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitDateCall(objVal, mem.Property, ex.GetPos())
 		}
+		if mem.Property == "toString" && e.inferExprType(mem.Object).IsSymbol {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitSymbolToString(objVal)
+		}
 		if isResponseMethodName(mem.Property) && e.inferExprType(mem.Object).IsResponse {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -723,6 +730,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitClearTimer(ex.Args, "clearImmediate", ex.GetPos())
 		case "structuredClone":
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
+		case "Symbol":
+			return e.emitSymbolConstructor(ex.Args, ex.GetPos())
 		}
 	}
 

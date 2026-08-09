@@ -44,6 +44,8 @@ func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value
 // representation.
 func structuredCloneUnsupportedKind(ty Type) string {
 	switch {
+	case ty.IsSymbol:
+		return "Symbol"
 	case ty.IsURL:
 		return "URL"
 	case ty.IsURLSearchParams:

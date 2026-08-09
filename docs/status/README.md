@@ -30,7 +30,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | Operators | 42/42, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
 | Variable declarations | 4/4, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
 | Functions & closures | 8/11, ~73% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | No nested function declarations; a same-file forward-reference inference gap; no tagged templates |
-| Type primitives | 8/14, ~57% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | No `symbol`/`bigint`; no union types beyond `T \| null` |
+| Type primitives | 9/14, ~64% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | No `bigint` |
 | Async / Promise | 4/9, ~44% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Only `await fetch(...)` is genuinely non-blocking; every other `Promise<T>` is a resolved-slot read |
 | String methods | 28/33, ~85% | [STRING-METHODS.md](STRING-METHODS.md) | No `.normalize()` |
 | RegExp | 14/14, 100% | [REGEXP.md](REGEXP.md) | `u`/`y`/`d` flags out of scope for V1; several other deliberate scope narrowings (`.test()` ignores `lastIndex`, no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats |
@@ -103,7 +103,6 @@ Concerns that span every feature area rather than living in one of them.
 | Feature | Notes |
 |---|---|
 | Nested function declarations | Separate from closures; mostly a scoping change |
-| `Symbol` | Unique runtime IDs; affects `for…of`, iterators |
 | Generator functions / iterators | Suspend/resume; requires coroutine machinery |
 | Decorators | Requires metadata reflection |
 | `Proxy` / `Reflect` | Dynamic property intercept; likely impractical |
@@ -179,4 +178,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-09 — `process.stdout.write(s)`/`process.stderr.write(s)` (raw write, no auto-newline).*
+*Last updated: 2026-08-09 — `symbol` V1 (opaque unique values: `Symbol()`, `===`, `typeof`, `.description`, `.toString()`).*
