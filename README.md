@@ -8,11 +8,11 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`docs/status/`](docs/status/README.md)**: a feature-by-feature matrix, split one page per feature area, with coverage percentages — because vague marketing copy is worse than a spreadsheet, and it's the one to trust if this paragraph ever drifts out of sync with it. Current scorecard: roughly **82% of core TypeScript language features**, **~49% of Node.js-style APIs** (`fs`, `process`, a real `http.listen` server, and the `path` module are all solid; `os`, `EventEmitter`, async `child_process`, and a handful of smaller core modules — a large previously-untracked surface a 2026-07-30 audit against the actual source turned up — are still unimplemented), and **~38% of genuine browser/WHATWG-style Web Platform APIs** (`fetch`, `setTimeout`, `URL`, and `ArrayBuffer`/TypedArrays exist, `WebSocket` doesn't: priorities are a journey, not a destination).
+The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/README.md)**: a feature-by-feature matrix, one page per feature area, with coverage percentages kept current as things ship — trust it over any claim here if the two ever disagree. It also has a "Fidelity Gaps" section for features marked done that still have real, non-cosmetic differences from actual JS/TS behavior worth knowing before you rely on them.
 
-Classes are essentially done: fields, constructors, methods, `this`, `new ClassName(args)`, `instanceof`, single inheritance (`extends`/`super`, static dispatch except for provably-overridden methods, which go through a per-tree vtable), `static` members/`static {}` blocks, `private`/`protected` visibility (compile-time-only, matching real TypeScript's own erasure), `abstract` classes/methods, and `implements` (a compile-time structural self-check) are all implemented — see [TDD-00009](docs/tdd/TDD-00009.md), now fully shipped across all five stages. Still open: real JS/TS `#x` runtime-private fields (a different mechanism from the `private` keyword modifier — see [TDD-00021](docs/tdd/TDD-00021.md)) and getters/setters. And the compiler now fuzzes itself: `go test -fuzz` lanes cover the lexer, parser, and the full parse-through-binary pipeline (an arithmetic oracle plus a crash-only well-formedness fuzzer — see [TDD-00014](docs/tdd/TDD-00014.md)), runnable via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
+Broad strokes: core TypeScript language features (control flow, operators, closures, classes — including inheritance, `static`/`private`/`protected`/`abstract`/`implements`, getters/setters — generics, enums, interfaces) are mostly there; Node.js-style APIs (`fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`) are substantial; WHATWG Web Platform APIs (`fetch`, `URL`, `WebSocket`, `ArrayBuffer`/TypedArrays) are a mixed bag. The compiler also fuzzes itself (lexer, parser, and the full parse-through-binary pipeline) via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
 
-Every feature and bug fix in this repo comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. If you ever wonder "wait, why does `Date.parse` return `-1` instead of `NaN`?", the answer is in there, in more detail than is strictly healthy. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Some of the project's biggest pieces went through exactly that pipeline and are now real — a `select()`-based event loop with fiber-based concurrent connection handling backs `http.listen` and non-blocking `await fetch(...)` ([TDD-00006](docs/tdd/TDD-00006.md)), the HTTP server itself ([TDD-00004](docs/tdd/TDD-00004.md)), and memory management ([TDD-00001](docs/tdd/TDD-00001.md)) — the `manual` and `gc` modes are both real now, only the `auto` mode (compiler-inserted frees, no runtime collector) is still design-only. TDDs are linked from `docs/status/` rather than bloating it inline.
+Every feature and bug fix comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Both indexes are cross-linked from `docs/status/` wherever relevant, rather than repeated here.
 
 Want to see it in action instead of reading about it? Every language feature has a runnable example under **[`examples/`](examples/)**: no README code snippets to go stale, just `.ts` files that actually compile and run (verified by `make examples`, every time).
 
@@ -24,11 +24,11 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - `clang` (LLVM 15+, needs opaque-pointer support)
 - `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
 - `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
-- `libpcre2-8`/`libpcre2-dev`, needed if the compiled program uses `RegExp` (either `new RegExp(...)` or a `/pattern/flags` literal) — `apt-get install libpcre2-dev` on Debian/Ubuntu, `brew install pcre2` on macOS, `apk add pcre2-dev` on Alpine. Same conditional-linking convention as `libcurl`: every other program stays plain-libc. See [docs/tdd/TDD-00035.md](docs/tdd/TDD-00035.md)/[docs/status/REGEXP.md](docs/status/REGEXP.md)
+- `libpcre2-8`/`libpcre2-dev`, needed if the compiled program uses `RegExp` (either `new RegExp(...)` or a `/pattern/flags` literal) — `apt-get install libpcre2-dev` on Debian/Ubuntu, `brew install pcre2` on macOS, `apk add pcre2-dev` on Alpine. Same conditional-linking convention as `libcurl`: every other program stays plain-libc. See [docs/status/REGEXP.md](docs/status/REGEXP.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
-- **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See [ADR-00100](docs/adr/ADR-00100.md) for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
+- **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See `docs/adr/README.md` for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
 - **Valgrind** — `apt-get install valgrind` on Debian/Ubuntu. **On Apple Silicon (arm64) macOS, Valgrind has historically had no official upstream support** — `brew install valgrind` may fail outright or install a build that doesn't actually work; confirm directly before relying on it there rather than assuming parity with the Linux box. ASan/UBSan (above) work identically on both platforms and should be the default tool; reach for Valgrind only for the specific class of bug (e.g. conservative-GC-adjacent memory questions) where its instruction-level, allocator-agnostic instrumentation is worth the extra setup friction — and expect some false-positive "uninitialized value" noise from Boehm GC's own conservative stack scanning under Memcheck, a known pattern for conservative collectors, generally addressed with suppressions rather than code changes.
 
 ## Quick start
@@ -71,7 +71,7 @@ make ir FILE=examples/basics/basics.ts
 | `make vet` | Run `go vet` |
 | `make lint` | `fmt` + `vet` |
 | `make fuzz [FUZZTIME=30s]` | Fuzz the lexer and parser |
-| `make fuzz-codegen [FUZZTIME=30s]` | Fuzz the full parse→codegen→clang→run pipeline (slower per-iteration — see [TDD-00014](docs/tdd/TDD-00014.md)) |
+| `make fuzz-codegen [FUZZTIME=30s]` | Fuzz the full parse→codegen→clang→run pipeline (slower per-iteration) |
 | `make fuzz-all` | Run every fuzz target |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
@@ -92,9 +92,9 @@ klainmain [flags] <file.ts>
   -mm <mode>    Memory management mode: manual (default, Memory.free(x)
                 only — see docs/status/MEMORY-MANAGEMENT.md) or gc
                 (Boehm GC: every allocation gets collected automatically,
-                needs bdw-gc/libgc installed — see Requirements above and
-                docs/adr/ADR-00071.md). Works identically on Linux and
-                macOS, no special linker flags needed either way.
+                needs bdw-gc/libgc installed — see Requirements above).
+                Works identically on Linux and macOS, no special linker
+                flags needed either way.
 ```
 
 Every other compiled binary here is dynamically linked (against libSystem on
@@ -110,14 +110,14 @@ explicitly at link time (static archives don't auto-pull their own
 dependencies the way shared libraries do), and (on Alpine/musl, at least)
 a two-step `clang`-then-`gcc` link rather than a single `clang` invocation,
 since some of Alpine's static archives are LTO-built in a format clang's
-linker can't consume but gcc's can. See [ADR-00033](docs/adr/ADR-00033.md) for the full
+linker can't consume but gcc's can. See `docs/adr/README.md` for the full
 recipe and investigation; this compiler doesn't attempt to automate it
 itself, since the exact package list/workaround is specific to one distro's
 build choices, not a portable fact this compiler could bake in safely.
 `RegExp`'s `libpcre2-8` has none of that complexity — no TLS backend, no
 transitive dependency chain — so `--static` just works for it with zero
 extra flags, on both a bare Linux build and inside `Dockerfile.regexp-test`'s
-`scratch` container; see [ADR-00120](docs/adr/ADR-00120.md).
+`scratch` container.
 
 ## The pipeline, in one breath
 
@@ -133,8 +133,8 @@ Lexer → Parser (recursive descent, Pratt precedence climbing) → Module resol
 ast/                AST node definitions
 codegen/
   llvm/             LLVM IR emitter — split into ~60 small domain files rather
-                     than a handful of huge ones (see docs/adr/ADR-00075.md);
-                     the full file-by-file map lives in the project's own instructions, condensed
+                     than a handful of huge ones; the full file-by-file map
+                     lives in the project's own instructions, condensed
                      here by domain:
     emitter.go, types.go   core Emitter struct/scope stack/EmitProgram; the
                      IR type system (Type, ArrayOf, ObjectOf, StructIR)
@@ -210,7 +210,7 @@ Makefile            Build, test, and example targets
 ## Things this compiler will cheerfully never do
 
 - Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see [`docs/status/MEMORY-MANAGEMENT.md`](docs/status/MEMORY-MANAGEMENT.md)) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
-- Let an imported file run side-effecting top-level code, or give two unrelated files their own private scope. `import`/`export` exist, but only for sharing declarations; everything still boils down to one merged AST and one `main()` behind the scenes.
+- Let an imported file run side-effecting top-level code. `import`/`export` exist (including true per-file scoping and aliasing), but an imported file may only contain declarations; everything still boils down to one merged AST and one `main()` behind the scenes.
 - Judge you for using `var`. (It'll just quietly treat it like `let`. We've all been there.)
 
 If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, [`docs/status/`](docs/status/README.md) has the receipts.
