@@ -441,6 +441,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			case "Symbol":
 				return SymbolType()
+			case "assert":
+				return TypeVoid
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
@@ -544,6 +546,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "cpus":
 					return ArrayOf(CPUInfoType())
 				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "querystring" {
+				switch mem.Property {
+				case "parse":
+					return MapType(TypePtr, TypePtr)
+				case "stringify":
+					return TypePtr
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert" {
+				return TypeVoid
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" {
 				switch mem.Property {

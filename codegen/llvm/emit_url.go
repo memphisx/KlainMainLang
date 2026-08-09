@@ -314,16 +314,23 @@ func (e *Emitter) emitNewURLSearchParamsExpression(ex *ast.NewURLSearchParamsExp
 	return Value{Ref: mapPtr, Ty: URLSearchParamsType()}, nil
 }
 
-// emitURLSearchParamsToString implements urlSearchParams.toString():
-// serializes back to "k1=v1&k2=v2" (percent-encoding each key/value via the
-// same helper encodeURIComponent uses), in whatever order
-// __kml_map_str_keys/vals iterate — insertion order, matching every other
-// Map<string,string> iteration in this compiler.
+// emitURLSearchParamsToString implements urlSearchParams.toString(), by way
+// of emitMapStrToQueryString — shared with querystring.stringify
+// (emit_querystring.go), which serializes a Map<string,string> identically.
 func (e *Emitter) emitURLSearchParamsToString(objExpr ast.Expression, pos ast.Pos) (Value, error) {
 	_, mapPtr, err := e.resolveMapOrSetForCall(objExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitMapStrToQueryString(mapPtr)
+}
+
+// emitMapStrToQueryString serializes the Map<string,string> at mapPtr back
+// to "k1=v1&k2=v2" (percent-encoding each key/value via the same helper
+// encodeURIComponent uses), in whatever order __kml_map_str_keys/vals
+// iterate — insertion order, matching every other Map<string,string>
+// iteration in this compiler.
+func (e *Emitter) emitMapStrToQueryString(mapPtr string) (Value, error) {
 	e.ensureMapStrHelpers()
 	e.ensureEncodeURIComponent()
 

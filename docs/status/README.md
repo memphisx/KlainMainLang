@@ -40,7 +40,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | Object & collections | 23/26, ~88% | [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) | No `WeakMap`/`WeakSet`/`WeakRef`, `Object.create`/`.fromEntries` |
 | JSON | 9/11, ~82% | [JSON.md](JSON.md) | No nested-object `JSON.parse`; array-typed interface fields fail to compile instead of a clean rejection (known limitation) |
 | console | 11/12, ~92% | [CONSOLE.md](CONSOLE.md) | No `console.table()` |
-| Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` won't be implemented |
+| Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` has an opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |
 | Type system features | 17/23, ~74% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics support any number of unconstrained type parameters, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md)); union types beyond `T \| null` now work but V1 is scalar-members-only, not nested inside a container, and without flow-based narrowing ([TDD-00043](../tdd/TDD-00043.md)); no intersection/tuple/mapped types |
 | Classes / OOP | 14/15, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Real JS/TS `#x` runtime-private field syntax (a different mechanism from the `private` keyword modifier — scoped separately, see [TDD-00021](../tdd/TDD-00021.md)); no user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design) |
 | Modules | 9/14, ~64% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping, import aliasing ([TDD-00041](../tdd/TDD-00041.md)), `export default`/default imports, and compile-time-only namespace imports ([TDD-00042](../tdd/TDD-00042.md)) — no re-exports; no dynamic `import()`/`import.meta` |
@@ -68,7 +68,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Recognized as pseudo-namespaces (`fs.*`, `process.*`), like `Math`/`JSON` — not real importable modules.
 
-**52 / 76 features, ~68% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md). `EventEmitter` shipped after that — see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md) — unblocking (not yet picked up) Node's own `stream` module, async `child_process`, and interactive `readline`. `os` shipped last — see [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md); its Darwin-specific paths (`freemem()`, `cpus()`'s per-core `times`) are unverified pending real Apple Silicon hardware.
+**54 / 76 features, ~71% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md). `EventEmitter` shipped after that — see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md) — unblocking (not yet picked up) Node's own `stream` module, async `child_process`, and interactive `readline`. `os` shipped next — see [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md); its Darwin-specific paths (`freemem()`, `cpus()`'s per-core `times`) are unverified pending real Apple Silicon hardware. `querystring` and `assert` shipped last, out of the audit's lower-priority "Other core modules" bucket — see [ADR-00139](../adr/ADR-00139.md)/[ADR-00140](../adr/ADR-00140.md).
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
@@ -78,7 +78,7 @@ Node.js-specific runtime globals — not part of any Web/browser standard, but e
 | `path` | 8/8, 100% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
 | `os` | 7/7, 100% | [OS.md](OS.md) | Darwin's `freemem()`/`cpus().times` are written but unverified on real hardware — see [OS.md](OS.md)'s Known Limitations |
 | `events` (`EventEmitter`) | 6/6, 100% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | Single payload type per emitter, not real Node's variadic `...args`; no overriding `on`/`emit`/etc. in a subclass; `instanceof EventEmitter` is a compile error |
-| Other core modules (`util`, `assert`, `net`/`dgram`/`tls`/`dns`, `zlib`, `vm`, `cluster`, `http2`, `querystring`) | 0/11, 0% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | Not started; grouped together as lower-individual-priority rather than each getting a full page |
+| Other core modules (`querystring`, `assert`, `util`, `net`/`dgram`/`tls`/`dns`, `zlib`, `vm`, `cluster`, `http2`) | 2/11, ~18% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | `querystring`/`assert` done; the rest not started, grouped together as lower-individual-priority rather than each getting a full page |
 
 ## Cross-Cutting
 
@@ -121,7 +121,7 @@ Found by checking the actual lexer/parser/codegen source directly rather than re
 | Node `Buffer` | See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) |
 | Node's own `stream` module (distinct from WHATWG streams) | See [STREAMS.md](STREAMS.md) |
 | Async `child_process`, interactive `readline` | Both built on `EventEmitter` in real Node. See [EVENT-EMITTER.md](EVENT-EMITTER.md) and [PROCESS-CLI.md](PROCESS-CLI.md) |
-| `util`, `assert`, `net`/`dgram`/`tls`/`dns`, `zlib` (as a module), `vm`, `cluster`, `http2`, `querystring` | Lower individual priority — see [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |
+| `util`, `net`/`dgram`/`tls`/`dns`, `zlib` (as a module), `vm`, `cluster`, `http2` | Lower individual priority — see [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |
 
 ---
 
@@ -160,6 +160,7 @@ What's left below are the genuine orphans: not-started or partially-implemented 
 | [00032](../tdd/TDD-00032.md) Native Library Bindings / GUI | Not Started, bootstrapping placeholder | Needs general FFI first |
 | [00033](../tdd/TDD-00033.md) Direct Hardware/Framebuffer Access | Not Started, bootstrapping placeholder | Same FFI-adjacent prerequisite gap as 00032; Linux-only by nature |
 | [00036](../tdd/TDD-00036.md) Freestanding Microcontroller Target (Raspberry Pi Pico) | Not Started | Deliberately low priority; minimal-core scope only (no networking/storage/peripheral parity) |
+| [00045](../tdd/TDD-00045.md) Raspberry Pi (aarch64 SBC) Target — Minimal Boot Image + GPIO | Not Started | Hosted Linux target, distinct from 00036's freestanding Pico; low priority relative to core-language work |
 
 ---
 
@@ -201,4 +202,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-09 — audited every status page for shipped (✅) features with real, non-cosmetic fidelity gaps from actual JS/TS behavior; added the Fidelity Gaps section and populated the bugs-found-but-not-fixed table above.*
+*Last updated: 2026-08-09 — `querystring` and `assert` implemented, closing two of [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md)'s eleven gaps.*

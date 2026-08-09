@@ -342,6 +342,17 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitOSCpus(ex.Args, ex.GetPos())
 			}
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "querystring" {
+			switch mem.Property {
+			case "parse":
+				return e.emitQuerystringParse(ex.Args, ex.GetPos())
+			case "stringify":
+				return e.emitQuerystringStringify(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert" {
+			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" {
 			switch mem.Property {
 			case "getRandomValues":
@@ -732,6 +743,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		case "Symbol":
 			return e.emitSymbolConstructor(ex.Args, ex.GetPos())
+		case "assert":
+			// Bare `assert(cond, msg?)` — real Node's assert module is
+			// itself callable, equivalent to assert.ok.
+			return e.emitAssertModuleCall("ok", ex.Args, ex.GetPos())
 		}
 	}
 

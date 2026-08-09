@@ -4,7 +4,7 @@
 
 **Coverage**: ~82% (14/17).
 
-**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` won't be implemented (requires a JIT).
+**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` needs a JIT/interpreter this compiler doesn't have natively; an opt-in embedded-engine path is scoped in [TDD-00046](../tdd/TDD-00046.md) but deliberately low priority and not started.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -24,4 +24,4 @@
 | `btoa(s)` | ✅ | Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/ADR-00024.md). |
 | `structuredClone(obj)` | ✅ | Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, and plain objects recurse; scalars pass through as value types). `Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased — see [ADR-00113](../adr/ADR-00113.md). |
 | `queueMicrotask(fn)` | ❌ | Needs event loop |
-| `eval(s)` | ❌ | Won't implement (requires a JIT) |
+| `eval(s)` | ❌ | Needs a JIT/interpreter this compiler doesn't have natively; opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |

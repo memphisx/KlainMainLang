@@ -176,3 +176,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00136](ADR-00136.md) | General union types beyond `T \| null` (V1: scalar members) | Extends [ADR-00008](ADR-00008.md). Implements [TDD-00043](../tdd/TDD-00043.md) |
 | [00137](ADR-00137.md) | `process.stdout.write(s)` / `process.stderr.write(s)` | |
 | [00138](ADR-00138.md) | `symbol` V1 (opaque unique values) | Implements [TDD-00044](../tdd/TDD-00044.md) |
+| [00139](ADR-00139.md) | `querystring` module (`.parse`/`.stringify`) | |
+| [00140](ADR-00140.md) | `assert` module | |
