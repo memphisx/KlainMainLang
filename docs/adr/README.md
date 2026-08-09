@@ -173,3 +173,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00133](ADR-00133.md) | Fix two `EventSource` auto-reconnect hangs in the event loop's own `select()` wait | Extends [ADR-00122](ADR-00122.md), [ADR-00123](ADR-00123.md), [ADR-00124](ADR-00124.md), [ADR-00129](ADR-00129.md). Implements [TDD-00038](../tdd/TDD-00038.md) |
 | [00134](ADR-00134.md) | True per-file module scope via mangled internal names | Extends [ADR-00022](ADR-00022.md). Implements [TDD-00041](../tdd/TDD-00041.md) |
 | [00135](ADR-00135.md) | `export default`, default imports, and namespace imports | Extends [ADR-00022](ADR-00022.md), [ADR-00134](ADR-00134.md). Implements [TDD-00042](../tdd/TDD-00042.md) |
+| [00136](ADR-00136.md) | General union types beyond `T \| null` (V1: scalar members) | Extends [ADR-00008](ADR-00008.md). Implements [TDD-00043](../tdd/TDD-00043.md) |

@@ -71,6 +71,16 @@ type Type struct {
 	// IsDynamic marks any/unknown: a runtime-tagged { i8, i64 } box (tag +
 	// payload) instead of one fixed concrete storage type. See emit_dynamic.go.
 	IsDynamic bool
+	// UnionMembers marks a general union type beyond T | null (TDD-00043):
+	// non-nil means this IsDynamic type is a *constrained* union — the exact
+	// same runtime { i8, i64 } box any/unknown use, but restricted to this
+	// set of concrete member types at every assignment/call/return boundary
+	// (see unionAllowsAssignmentFrom, emit_dynamic.go). IsDynamic with a nil
+	// UnionMembers is bare any/unknown: fully unconstrained, and still
+	// rejected as a function param/return/array-element/object-field type
+	// (ADR-00008); IsDynamic with a non-nil UnionMembers is allowed in those
+	// positions instead, since the member set makes it fully checkable there.
+	UnionMembers []Type
 	// IsDate marks Date: a plain i64 milliseconds-since-epoch timestamp, same
 	// storage as number, distinguished only so method dispatch (getFullYear,
 	// toISOString, etc.) can recognize it. See emit_date.go.

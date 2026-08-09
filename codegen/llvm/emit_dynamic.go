@@ -1,25 +1,60 @@
-// emit_dynamic.go — real runtime-polymorphic support for any/unknown (TypeAny):
-// boxing concrete values into a { i8 tag, i64 payload } struct, and the three
-// operations that must dispatch on the runtime tag instead of a compile-time
-// type: printing (console.log/template literals), typeof, and ===/!==.
+// emit_dynamic.go — real runtime-polymorphic support for any/unknown (TypeAny)
+// and, since TDD-00043, general union types beyond T | null: both share the
+// exact same runtime representation, boxing concrete values into a
+// { i8 tag, i64 payload } struct, and the three operations that must dispatch
+// on the runtime tag instead of a compile-time type: printing (console.log/
+// template literals), typeof, and ===/!==. A union is just that same box with
+// a compile-time-tracked member set (Type.UnionMembers) checked at every
+// assignment/call/return boundary — see unionAllowsAssignmentFrom below.
 //
 // Tags: 0=int, 1=float, 2=string, 3=boolean, 4=null, 5=undefined, 6=object.
 //
-// Deliberately out of scope (see docs/adr for the any/unknown ADR): arithmetic
-// operators, any/unknown as a function parameter/return/array/object-field
-// type, and general unions beyond T | null. Those positions get a clean
-// compiler error rather than silently accepting TypeAny and producing broken
-// IR — see the guards in emit_func.go/emitter.go.
+// Deliberately out of scope (see docs/adr for the any/unknown ADR, and
+// docs/tdd/TDD-00043.md for unions): arithmetic operators; bare any/unknown
+// as a function parameter/return/array/object-field type (a *constrained*
+// union is fine in those positions — see isUnconstrainedDynamic); union
+// members beyond number/string/boolean/null/undefined (no object/array/
+// interface members yet); and flow-based narrowing (`typeof x === "string"`
+// narrowing x's effective type inside the branch). Those positions get a
+// clean compiler error rather than silently accepting a wider shape than the
+// codegen here actually handles — see the guards in emit_func.go/emitter.go.
 package llvm
 
 import "fmt"
 
-// containsDynamicElement reports whether ty is, or contains as an array
-// element or object field, an any/unknown type. Used to reject the
-// out-of-scope positions (array element, object field, function param/return)
-// with a clean compiler error instead of silently producing broken IR — a
-// top-level `ty.IsDynamic` check alone would miss e.g. `x: any[]`, where only
-// ElemType is dynamic.
+// isUnconstrainedDynamic reports whether ty is bare any/unknown — IsDynamic
+// with no UnionMembers set. A *constrained* union (IsDynamic with a non-nil
+// UnionMembers, TDD-00043) is fully checkable wherever this returns false for
+// it: its member set makes assignment/call/return positions fully verifiable
+// (see unionAllowsAssignmentFrom), which is the entire reason general unions
+// are worth having — bare any/unknown stays rejected in those positions
+// exactly as ADR-00008 left it.
+func isUnconstrainedDynamic(ty Type) bool {
+	return ty.IsDynamic && ty.UnionMembers == nil
+}
+
+// containsDynamicElement reports whether ty contains, as an array element or
+// object field, ANY dynamic type — bare any/unknown or a constrained union
+// alike. Used to reject the out-of-scope positions (array element, object
+// field) with a clean compiler error instead of silently producing broken
+// IR. Deliberately does NOT check ty itself at the top level — callers
+// combine it with their own top-level isUnconstrainedDynamic check, since
+// some call sites (e.g. a bare `let x: any`, or a constrained union as a
+// function param/return — see isUnconstrainedDynamic) allow a dynamic type
+// at the top level but still need to reject it nested inside a container.
+//
+// Note this rejects a *constrained* union nested inside an array/object too,
+// unlike the top-level positions isUnconstrainedDynamic's callers allow a
+// union through for (var decl, function param/return): member-set checking
+// (unionAllowsAssignmentFrom) is only wired up at those top-level
+// assignment/call/return boundaries, not at array-literal-element
+// construction, HOF callback element passing, or object-literal field
+// assignment — so a union nested in a container would silently skip that
+// checking today rather than being rejected, worse than not supporting it at
+// all. A real, deliberate scope cut for V1 (TDD-00043's Open Questions
+// already defers object/array *members* past V1 for a related reason); union
+// *elements*/*fields* nested in an otherwise-concrete container are a
+// separate, still-open gap from that, left for whenever this is revisited.
 func containsDynamicElement(ty Type) bool {
 	if ty.IsArray && ty.ElemType != nil {
 		return ty.ElemType.IsDynamic || containsDynamicElement(*ty.ElemType)
@@ -29,6 +64,84 @@ func containsDynamicElement(ty Type) bool {
 			if f.Ty.IsDynamic || containsDynamicElement(f.Ty) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// scalarTypeKind classifies a concrete (non-dynamic) type into one of the
+// three scalar kinds a union member can currently be (TDD-00043 V1 scope):
+// "number" (any integer or float width, including JSDoc-extended int8…
+// uint64/float32/float64 — a union member is always the canonical "number"
+// resolution, TypeI64, but a value being checked against it may carry a
+// narrower JSDoc-extended type), "string", or "boolean". Returns "" for
+// anything else (dynamic, array, object, null/undefined sentinel) — those
+// aren't valid union members in V1, and null/undefined are handled
+// separately via Type.Nullable rather than appearing here.
+func scalarTypeKind(t Type) string {
+	if t.IsDynamic || t.IsArray || t.IsObject || t.IsNull || t.IsUndefined {
+		return ""
+	}
+	switch {
+	case t.IR == "i1":
+		return "boolean"
+	case t.IR == "ptr":
+		return "string"
+	case t.Float, t.IR == "i8", t.IR == "i16", t.IR == "i32", t.IR == "i64":
+		return "number"
+	}
+	return ""
+}
+
+// validateUnionMembers rejects a union type whose members go beyond
+// TDD-00043's V1 scope — number/string/boolean only, no object/array/
+// interface members yet (a real, deliberate gap; see the TDD's Open
+// Questions). Called at every checkpoint that already rejects bare
+// any/unknown in that position (isUnconstrainedDynamic), so a union with an
+// out-of-scope member gets the same clean compile-time rejection instead of
+// silently falling through to broken codegen once its runtime tag turns out
+// to be one containsDynamicElement's/emitBoxValue's/etc. narrower callers
+// don't expect.
+func validateUnionMembers(ty Type, line, col int) error {
+	if ty.UnionMembers == nil {
+		return nil
+	}
+	for _, m := range ty.UnionMembers {
+		if scalarTypeKind(m) == "" {
+			return fmt.Errorf("%d:%d: union member types are currently limited to number, string, and boolean (plus null/undefined)", line, col)
+		}
+	}
+	return nil
+}
+
+// unionAllowsAssignmentFrom reports whether a value of type valTy may be
+// assigned/passed/returned into a slot declared as the constrained union
+// unionTy (unionTy.UnionMembers must be non-nil — callers only reach here
+// once isUnconstrainedDynamic(unionTy) is already known false). A
+// null/undefined value is allowed exactly when the union itself is Nullable,
+// matching how T | null already behaves for a concrete T. Otherwise valTy
+// must scalar-match one of the declared members (see scalarTypeKind) —
+// assigning a value whose type isn't in the declared set is a clean compile
+// error, the actual type-safety win a union has over bare any/unknown.
+func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
+	if valTy.IsNull || valTy.IsUndefined {
+		return unionTy.Nullable
+	}
+	// A value that's already boxed dynamic (e.g. assigning one union-typed
+	// variable to another, or a bare any/unknown expression) can't be
+	// statically checked against the member set — its real tag is only known
+	// at runtime. Allow it through here; it's the same trust boundary bare
+	// any/unknown already crosses everywhere else (ADR-00008).
+	if valTy.IsDynamic {
+		return true
+	}
+	valKind := scalarTypeKind(valTy)
+	if valKind == "" {
+		return false
+	}
+	for _, m := range unionTy.UnionMembers {
+		if scalarTypeKind(m) == valKind {
+			return true
 		}
 	}
 	return false

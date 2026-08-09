@@ -1229,4 +1229,12 @@ type TypeAnnotation struct {
 	FuncParams  []TypeAnnotation // param types for function type annotations
 	FuncRetType *TypeAnnotation  // return type for function type annotations
 	Nullable    bool             // true for T | null or T | undefined
+	// UnionMembers holds every non-null/undefined member of a T | U | ...
+	// union with more than one such member (TDD-00043). nil for the common
+	// single-type case (with or without Nullable) — this field only becomes
+	// non-nil once there are genuinely 2+ non-null/undefined members to
+	// track. When set, this TypeAnnotation's own Name/other fields describe
+	// the first member for backward compatibility with code that hasn't been
+	// updated to look at UnionMembers.
+	UnionMembers []*TypeAnnotation
 }

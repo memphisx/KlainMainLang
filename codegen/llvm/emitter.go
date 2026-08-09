@@ -445,6 +445,23 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta == nil {
 		return TypeI64 // default for untyped numeric variables
 	}
+	// General union (T | U | ..., TDD-00043): reuses any/unknown's runtime
+	// { i8, i64 } box (TypeAny's IR) but additionally carries the resolved
+	// member set, so it stays distinguishable from — and, unlike — bare
+	// any/unknown at every checkpoint that currently rejects IsDynamic
+	// outright (see isUnconstrainedDynamic, emit_dynamic.go). Checked before
+	// every other branch below since a union member can itself be any of the
+	// shapes those branches handle (though V1 only actually permits
+	// number/string/boolean members — see validateUnionMembers, called by
+	// this Type's actual usage sites, not here, since resolveType has no
+	// error return).
+	if ta.UnionMembers != nil {
+		members := make([]Type, len(ta.UnionMembers))
+		for i, m := range ta.UnionMembers {
+			members[i] = e.resolveType(m)
+		}
+		return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: members, Nullable: ta.Nullable}
+	}
 	if ta.IsFuncType {
 		params := make([]Type, len(ta.FuncParams))
 		for i := range ta.FuncParams {

@@ -62,8 +62,11 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// downstream — HOF codegen, object field access — knows how to handle a
 	// dynamic array element/object field yet).
 	erasedRetOK := decl.Erased && retType.IsDynamic
-	if !erasedRetOK && (retType.IsDynamic || containsDynamicElement(retType)) {
+	if !erasedRetOK && (isUnconstrainedDynamic(retType) || containsDynamicElement(retType)) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
+	}
+	if err := validateUnionMembers(retType, decl.GetPos().Line, decl.GetPos().Col); err != nil {
+		return err
 	}
 
 	// For async functions, the IR return type is always ptr (the coro handle).
@@ -93,8 +96,11 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		pty := sig.ParamTypes[i]
 		// Same bare-TypeAny-only carve-out as the return-type guard above.
 		erasedParamOK := decl.Erased && pty.IsDynamic
-		if !erasedParamOK && (pty.IsDynamic || containsDynamicElement(pty)) {
+		if !erasedParamOK && (isUnconstrainedDynamic(pty) || containsDynamicElement(pty)) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", decl.GetPos().Line, decl.GetPos().Col)
+		}
+		if err := validateUnionMembers(pty, decl.GetPos().Line, decl.GetPos().Col); err != nil {
+			return err
 		}
 		if pty.IsArray {
 			llvmParams = append(llvmParams,
@@ -624,7 +630,22 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			if err != nil {
 				return err
 			}
-			val = e.coerce(val, retTy)
+			if retTy.IsDynamic {
+				// Constrained union return type (TDD-00043) — same reasoning
+				// as emitReturn's own IsDynamic branch (emit_stmts.go): coerce
+				// doesn't box, so a dynamic-typed return needs emitBoxValue
+				// explicitly. Bare any/unknown is still rejected as a return
+				// type before this function is ever called.
+				if retTy.UnionMembers != nil && !unionAllowsAssignmentFrom(retTy, val.Ty) {
+					return fmt.Errorf("%d:%d: return value's type is not a member of the declared union return type", af.Body.GetPos().Line, af.Body.GetPos().Col)
+				}
+				val, err = e.emitBoxValue(val)
+				if err != nil {
+					return err
+				}
+			} else {
+				val = e.coerce(val, retTy)
+			}
 			e.emitTerminator(fmt.Sprintf("ret %s %s", retTy.LLVMRetType(), val.Ref))
 		}
 	}
@@ -830,15 +851,21 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
-		if paramTypes[i].IsDynamic || containsDynamicElement(paramTypes[i]) {
+		if isUnconstrainedDynamic(paramTypes[i]) || containsDynamicElement(paramTypes[i]) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", af.GetPos().Line, af.GetPos().Col)
+		}
+		if err := validateUnionMembers(paramTypes[i], af.GetPos().Line, af.GetPos().Col); err != nil {
+			return Value{}, err
 		}
 	}
 	var retTy Type
 	if af.RetType != nil {
 		retTy = e.resolveType(af.RetType)
-		if retTy.IsDynamic || containsDynamicElement(retTy) {
+		if isUnconstrainedDynamic(retTy) || containsDynamicElement(retTy) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", af.GetPos().Line, af.GetPos().Col)
+		}
+		if err := validateUnionMembers(retTy, af.GetPos().Line, af.GetPos().Col); err != nil {
+			return Value{}, err
 		}
 	} else if af.Body != nil {
 		// Temporarily push params into scope so inferExprType can resolve them.
@@ -956,7 +983,24 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
 				return Value{}, fmt.Errorf("%d:%d: parameter %d has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, i+1)
 			}
-			val = e.coerce(val, paramTy)
+			if paramTy.IsDynamic {
+				// A constrained-union-typed closure parameter (TDD-00043) —
+				// coerce has no notion of boxing, so this needs the same
+				// explicit emitBoxValue call every other dynamic-typed target
+				// already uses. Bare any/unknown can't reach here at all: a
+				// closure's own declared param types are validated the same
+				// way a named function's are, before this call site ever runs.
+				if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
+					return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", arg.GetPos().Line, arg.GetPos().Col, i+1)
+				}
+				var err error
+				val, err = e.emitBoxValue(val)
+				if err != nil {
+					return Value{}, err
+				}
+			} else {
+				val = e.coerce(val, paramTy)
+			}
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}

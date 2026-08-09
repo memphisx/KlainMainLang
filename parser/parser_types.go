@@ -20,7 +20,74 @@ func parseTrailingArrayBrackets(p *Parser, source string, ta *ast.TypeAnnotation
 	return ta, nil
 }
 
+// parseTypeAnnotation parses a full type annotation, including a trailing
+// T | U | ... union (TDD-00043): every non-null/undefined member is kept
+// (TypeAnnotation.UnionMembers), not just the first, unlike before. Delegates
+// the actual per-member parsing to parseTypeAnnotationAtom so each `|`-side
+// is parsed once, not re-entered into this same union-collecting loop.
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
+	ta, err := p.parseTypeAnnotationAtom(source)
+	if err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.BITOR) {
+		return ta, nil
+	}
+
+	nullable := ta.Nullable
+	var members []*ast.TypeAnnotation
+	if ta.Name == "null" || ta.Name == "undefined" {
+		nullable = true
+	} else {
+		members = append(members, ta)
+	}
+	for p.check(lexer.BITOR) {
+		p.advance() // consume '|'
+		right, err := p.parseTypeAnnotationAtom(source)
+		if err != nil {
+			return nil, err
+		}
+		if right.Name == "null" || right.Name == "undefined" {
+			nullable = true
+			continue
+		}
+		members = append(members, right)
+	}
+
+	switch len(members) {
+	case 0:
+		// Every member was null/undefined (e.g. "null | undefined").
+		ta.Nullable = true
+		return ta, nil
+	case 1:
+		members[0].Nullable = nullable
+		return members[0], nil
+	default:
+		// A distinct copy, not members[0] itself reused by pointer: setting
+		// UnionMembers directly on members[0] would make members[0] its own
+		// first element — a self-referential cycle that sends resolveType's
+		// member-resolution loop into infinite recursion (found via a real
+		// stack overflow while testing this). The copy shares every other
+		// field with members[0] (same Name/Fields/etc., matching the
+		// existing TypeArgs/ElemType "first member" duplication convention
+		// elsewhere in this file), but its own UnionMembers points at the
+		// list, while every entry *in* that list — including members[0]
+		// itself — keeps UnionMembers nil.
+		head := *members[0]
+		head.Nullable = nullable
+		head.UnionMembers = members
+		return &head, nil
+	}
+}
+
+// parseTypeAnnotationAtom parses a single union member: everything
+// parseTypeAnnotation used to handle directly before TDD-00043 split the
+// trailing `| U | ...` handling out into its own loop above. Note the
+// LPAREN/LBRACE/Promise-Map-generic branches below still `return` directly
+// without reaching that loop — union syntax after those forms was never
+// supported before this split either, so this preserves that exact
+// pre-existing scope rather than expanding it.
+func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, error) {
 	tok := p.peek()
 
 	// Function type annotation: (param: type, ...) => retType
@@ -189,23 +256,6 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	}
 
 	ta := &ast.TypeAnnotation{Name: name, Source: source}
-
-	// Union type: T | null / T | undefined — consume the null/undefined side and mark Nullable.
-	for p.check(lexer.BITOR) {
-		p.advance() // consume '|'
-		right, err := p.parseTypeAnnotation(source)
-		if err != nil {
-			return nil, err
-		}
-		if right.Name == "null" || right.Name == "undefined" {
-			ta.Nullable = true
-		} else if ta.Name == "null" || ta.Name == "undefined" {
-			right.Nullable = true
-			ta = right
-		}
-		// For other union members we silently accept the syntax but use the first type.
-	}
-
 	return ta, nil
 }
 

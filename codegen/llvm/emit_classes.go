@@ -1236,8 +1236,11 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 
 	for i, p := range params {
 		pty := sig.ParamTypes[i]
-		if pty.IsDynamic || containsDynamicElement(pty) {
+		if isUnconstrainedDynamic(pty) || containsDynamicElement(pty) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a method parameter type", pos.Line, pos.Col)
+		}
+		if err := validateUnionMembers(pty, pos.Line, pos.Col); err != nil {
+			return err
 		}
 		if pty.IsArray {
 			llvmParams = append(llvmParams,

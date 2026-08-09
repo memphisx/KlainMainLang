@@ -365,6 +365,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 
 	if sym.Ty.IsDynamic {
 		var err error
+		if sym.Ty.UnionMembers != nil && !unionAllowsAssignmentFrom(sym.Ty, rhs.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: value's type is not a member of '%s's declared union type", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
+		}
 		rhs, err = e.emitBoxValue(rhs)
 		if err != nil {
 			return Value{}, err

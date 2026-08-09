@@ -176,6 +176,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if containsDynamicElement(ty) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as an array element or object field type", v.GetPos().Line, v.GetPos().Col)
 	}
+	if err := validateUnionMembers(ty, v.GetPos().Line, v.GetPos().Col); err != nil {
+		return err
+	}
+	if ty.UnionMembers != nil && !ty.Nullable && v.Init == nil {
+		return fmt.Errorf("%d:%d: a union type without null/undefined as a member requires an initializer", v.GetPos().Line, v.GetPos().Col)
+	}
 	if ty.IsArray {
 		return e.emitArrayVarDecl(v, ty)
 	}
@@ -226,6 +232,9 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			return err
 		}
 		if ty.IsDynamic {
+			if ty.UnionMembers != nil && !unionAllowsAssignmentFrom(ty, val.Ty) {
+				return fmt.Errorf("%d:%d: value's type is not a member of the declared union type", v.GetPos().Line, v.GetPos().Col)
+			}
 			val, err = e.emitBoxValue(val)
 			if err != nil {
 				return err

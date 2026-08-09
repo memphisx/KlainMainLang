@@ -2,9 +2,9 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: Type primitives ~57% · Type system features ~70%.
+**Coverage**: Type primitives ~57% · Type system features ~74%.
 
-**Caveats**: Union types beyond `T | null` aren't supported (the parser discards every union member except the first) — see [ADR-00008](../adr/ADR-00008.md). `any`/`unknown` are Staged V1: declare/assign/reassign/print/`typeof`/`===` work, but arithmetic and use as a function param/return/array/object-field type are a clean compile error (except a `@erased` generic function's own bare-`T` positions — see below). User-defined generics (`function identity<T>`, `interface Box<T>`, `class Box<T>`) support any number of unconstrained type parameters (`<K, V>`, see [TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md)) but no explicit call-site type arguments (`identity<number>(5)`) or constraints, regardless of whether a declaration uses default monomorphization (functions need an inferable `T`/`T[]`-typed parameter per type parameter to infer from; classes need an explicit `new Box<K, V>(...)` type argument list instead) or the opt-in `@erased` type-erasure escape hatch, which is narrower still — functions only, and only a bare `T` parameter/return position, not `T[]`. See [TDD-00010](../tdd/TDD-00010.md).
+**Caveats**: `any`/`unknown` are Staged V1: declare/assign/reassign/print/`typeof`/`===` work, but arithmetic and use as a function param/return/array/object-field type are a clean compile error (except a `@erased` generic function's own bare-`T` positions — see below). General union types (`string | number`, TDD-00043) share that exact same runtime representation and the same Staged-V1 restrictions, plus their own: V1 scope is scalar members only (`number`/`string`/`boolean`, plus `null`/`undefined` via the pre-existing `Nullable` flag) — no object/interface/array members, and a union nested inside an array element or object field (not just at the top level of a var declaration/function param/return) is also not yet supported; both are a clean compile error. No flow-based narrowing (`typeof x === "string"` narrowing `x`'s effective type inside the branch) either — see [ADR-00136](../adr/ADR-00136.md)/[TDD-00043](../tdd/TDD-00043.md). User-defined generics (`function identity<T>`, `interface Box<T>`, `class Box<T>`) support any number of unconstrained type parameters (`<K, V>`, see [TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md)) but no explicit call-site type arguments (`identity<number>(5)`) or constraints, regardless of whether a declaration uses default monomorphization (functions need an inferable `T`/`T[]`-typed parameter per type parameter to infer from; classes need an explicit `new Box<K, V>(...)` type argument list instead) or the opt-in `@erased` type-erasure escape hatch, which is narrower still — functions only, and only a bare `T` parameter/return position, not `T[]`. See [TDD-00010](../tdd/TDD-00010.md).
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -22,7 +22,7 @@
 | JSDoc extended floats | ✅ | `@type {float32\|float64}` |
 | `Map<K,V>` | ✅ | Separate helpers for `<string,number>`, `<string,string>`, etc. |
 | `Set<T>` | ✅ | |
-| Union types beyond `T \| null` | ❌ | Parser discards every union member except the first for anything other than `null`/`undefined` — needs parser work, separate from the `any`/`unknown` tagged-value system below; see [ADR-00008](../adr/ADR-00008.md) |
+| Union types beyond `T \| null` | ✅ (V1: scalar members only — `number`/`string`/`boolean`, plus `null`/`undefined`; same Staged-V1 read/write restrictions as `any`/`unknown` below, since it's the same runtime box with a checked member set on top) | No object/interface/array members yet, and not yet supported nested inside an array element or object field (only at the top level of a var declaration/function param/return); no flow-based narrowing. See [TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md). |
 | Intersection types | ❌ | |
 | Tuple types | ❌ | |
 | Mapped / conditional types | ❌ | |

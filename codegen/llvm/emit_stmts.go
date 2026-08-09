@@ -169,7 +169,21 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	if err != nil {
 		return err
 	}
-	if e.currentRetType.IR != "void" && e.currentRetType.IR != "" {
+	if e.currentRetType.IsDynamic {
+		// A constrained union return type (TDD-00043; bare any/unknown is
+		// still rejected as a return type entirely, before the body is ever
+		// emitted — see emitFunctionDecl's guard). coerce has no notion of
+		// boxing (it only converts between concrete scalar IR types), so a
+		// dynamic-typed return needs the same explicit emitBoxValue call
+		// emitVarDecl/emitAssign/call-argument-passing already use for it.
+		if e.currentRetType.UnionMembers != nil && !unionAllowsAssignmentFrom(e.currentRetType, val.Ty) {
+			return fmt.Errorf("%d:%d: return value's type is not a member of the declared union return type", r.Value.GetPos().Line, r.Value.GetPos().Col)
+		}
+		val, err = e.emitBoxValue(val)
+		if err != nil {
+			return err
+		}
+	} else if e.currentRetType.IR != "void" && e.currentRetType.IR != "" {
 		val = e.coerce(val, e.currentRetType)
 	}
 	e.emitTerminator(fmt.Sprintf("ret %s %s", val.Ty.IR, val.Ref))

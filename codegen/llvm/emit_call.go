@@ -818,6 +818,13 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					return Value{}, fmt.Errorf("%d:%d: parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, paramName, name)
 				}
 				if paramTy.IsDynamic {
+					if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
+						paramName := fmt.Sprintf("%d", i+1)
+						if i < len(sig.ParamNames) {
+							paramName = "'" + sig.ParamNames[i] + "'"
+						}
+						return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %s's declared union type", arg.GetPos().Line, arg.GetPos().Col, paramName)
+					}
 					// TDD-00010 V2: a call to an `@erased` generic function —
 					// coerce (unlike this) has no notion of boxing, it only
 					// converts between concrete scalar IR types, so a bare-T
