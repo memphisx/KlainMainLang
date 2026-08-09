@@ -15,6 +15,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 - [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.listen` server — Node-specific runtime globals with no browser equivalent
 - [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)
 - [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity
+- [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior
 - [Design Documents (TDDs)](#design-documents-tdds)
 - [Roadmap](#roadmap)
 
@@ -73,10 +74,10 @@ Node.js-specific runtime globals — not part of any Web/browser standard, but e
 |---|---|---|---|
 | File System (fs) | 11/13, ~85% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | No async variants; `readFileSync`/`copyFileSync` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
 | Process / CLI I/O | 13/23, ~57% | [PROCESS-CLI.md](PROCESS-CLI.md) | `process.env` is read-only; `process.on(...)` now covers `'SIGINT'`/`'SIGTERM'` but not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`; no async `child_process`; no interactive `readline` |
-| HTTP Server | 11/11, 100% | [HTTP-SERVER.md](HTTP-SERVER.md) | — |
+| HTTP Server | 11/11, 100% | [HTTP-SERVER.md](HTTP-SERVER.md) | `req.body`/response `body` string fields still truncate at an embedded null byte (`bodyBytes()` accessors are additive, not a fix); `.close()` in a `{ workers: N }` cluster only stops the calling worker process |
 | `path` | 8/8, 100% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
 | `os` | 7/7, 100% | [OS.md](OS.md) | Darwin's `freemem()`/`cpus().times` are written but unverified on real hardware — see [OS.md](OS.md)'s Known Limitations |
-| `events` (`EventEmitter`) | 6/6, 100% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | — |
+| `events` (`EventEmitter`) | 6/6, 100% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | Single payload type per emitter, not real Node's variadic `...args`; no overriding `on`/`emit`/etc. in a subclass; `instanceof EventEmitter` is a compile error |
 | Other core modules (`util`, `assert`, `net`/`dgram`/`tls`/`dns`, `zlib`, `vm`, `cluster`, `http2`, `querystring`) | 0/11, 0% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | Not started; grouped together as lower-individual-priority rather than each getting a full page |
 
 ## Cross-Cutting
@@ -124,6 +125,24 @@ Found by checking the actual lexer/parser/codegen source directly rather than re
 
 ---
 
+## Fidelity Gaps in Shipped Features
+
+Every row below is marked ✅ (or 100%) on its own page — the feature genuinely works for its core, documented cases — but each hides a real, non-cosmetic difference from how actual JavaScript/TypeScript behaves, beyond a one-line documented scope narrowing. Surfaced by an audit of every page's own caveats/Known Limitations text rather than previously called out as follow-up work anywhere; not reflected in the coverage percentages above. None of these are scheduled — pick up opportunistically alongside the bugs table above or the backlog below.
+
+| Feature | Gap | Where documented |
+|---|---|---|
+| `EventEmitter` (100%) | `.emit(event, data)` takes exactly one payload type per instance, not real Node's variadic `...args`; no way to override `on`/`emit`/`off`/etc. in a subclass (hand-written dispatch, not real methods); `instanceof EventEmitter` is a compile error (never a registered class) | [EVENT-EMITTER.md](EVENT-EMITTER.md)'s Known Limitations |
+| HTTP Server (100%) | `req.body`/response `body` string fields still truncate at an embedded null byte (the binary-safe `bodyBytes()` accessors are additive fields, not a fix to the string ones); `.close()` in a `{ workers: N }` cluster only stops the calling worker process — no IPC exists to reach the rest of the cluster | [HTTP-SERVER.md](HTTP-SERVER.md)'s Known Limitations |
+| Array methods (100%) | A callback-invoking method (`.map`/`.filter`/`.reduce`/`.find`/`.some`/`.every`/`.sort`/etc.) can't take a nested-array element as the callback's own parameter — closures don't yet decompose an array-typed parameter into `(ptr, i64)` the way a named function call's own ABI already does | [ARRAY-METHODS.md](ARRAY-METHODS.md)'s own caveats paragraph |
+| RegExp (100%) | `.test()` never respects `.lastIndex` even under the `g` flag (real JS shares `.exec()`'s stateful iteration); `.exec()`/`.match()` turn an unmatched optional capture group into `""` instead of a per-element `null`, and lack `index`/`input`/`groups`; `.matchAll()` is an eager `string[][]`, not a lazy iterator; no implicit string→RegExp coercion anywhere; `.replace()`/`.replaceAll()` template support is `$1`-`$9`/`$&`/`$$` only (no `` $` ``/`$'`) with a fixed-arity `(match, offset, string)` callback (no variadic captured groups); `.split()` doesn't replicate real JS's zero-length-match splitting or splice captured groups into the result | [REGEXP.md](REGEXP.md)'s own caveats paragraph |
+| `crypto.getRandomValues` (✅) | Fills a plain `number[]`, not a real `Uint8Array` — predates `ArrayBuffer`/TypedArrays support ([ADR-00078](../adr/ADR-00078.md)) | [WEB-CRYPTO.md](WEB-CRYPTO.md) |
+| `fs.copyFileSync` (✅) | Still composes the text-only `readFileSync`/`writeFileSync` pair, so a source file with an embedded null byte copies back shorter than its real size — never migrated to the binary-safe `readFileSyncBytes`/`writeFileSync(path, ArrayBuffer)` pair [ADR-00094](../adr/ADR-00094.md) added | [FILE-SYSTEM.md](FILE-SYSTEM.md) |
+| `.codePointAt()` / `.localeCompare()` (✅) | Byte-sequence stand-ins, not real Unicode/locale behavior — `.codePointAt()` is `.charCodeAt()` under another name (no surrogate-pair decoding), `.localeCompare()` is a plain `strcmp`. Correct only for ASCII/Latin-1 text | [STRING-METHODS.md](STRING-METHODS.md) |
+| `setImmediate` (✅) | Indistinguishable from a same-tick `setTimeout(fn, 0)` — real Node guarantees `setImmediate` fires first when scheduled from an I/O callback (distinct check/timers event-loop phases); this compiler's timer queue is a single flat fire-time-ordered list with no phase concept | [TIMERS.md](TIMERS.md) |
+| `XMLHttpRequest` / `WebSocket` (100% as part of Networking) | `XMLHttpRequest` only implements the spec's legacy synchronous mode (no default-async, callback-interleaved mode); `WebSocket` has no binary `.send()` and no `wss://`/TLS on either side | [NETWORKING.md](NETWORKING.md) |
+
+---
+
 ## Design Documents (TDDs)
 
 Anything big enough to need a design pass before implementation gets scoped out in a Technical Design Document under `docs/tdd/` first. The full index — every TDD's number, title, status, and every ADR that implements it — lives in [`docs/tdd/README.md`](../tdd/README.md); that's the source of truth. Implemented TDDs aren't relisted here: their status page, linked from the coverage tables above, already carries their caveats. Likewise, several not-yet-done TDDs already have a live pointer elsewhere in this file — Memory Management's `auto` mode ([Cross-Cutting](#cross-cutting)), IndexedDB storage (Roadmap's "Later" tier), `#x` private fields (Classes / OOP row), vanilla-JS compatibility ([What Is NOT Implemented](#what-is-not-implemented) → High complexity), and `TextDecoder` non-UTF-8 (Encoding / Text row) — so they aren't repeated here either.
@@ -152,7 +171,11 @@ Grouped by kind of work rather than a fixed sequence number, since priorities sh
 
 Pulled from each page's own Known Limitations sections: the ones worth fixing outright, as opposed to the ones documented as deliberate, permanent scope narrowings (e.g. `any`'s boolean-printing convention, see [TYPE-SYSTEM.md](TYPE-SYSTEM.md)).
 
-None currently tracked.
+| Bug | Found via | Notes |
+|---|---|---|
+| `JSON.parse` into an array-typed interface field produces invalid LLVM IR (fails to compile) instead of a clean rejection | Scoping [TDD-00015](../tdd/TDD-00015.md) | `emitJSONParseObject`'s upfront rejection loop only checks `f.Ty.IsObject`, not `f.Ty.IsArray` — an array field (e.g. `tags: string[]`) falls through to the scalar-only parse path and emits a type-mismatched `phi`. Fix is a one-line addition to the existing rejection check. See [JSON.md](JSON.md)'s Known Limitations. |
+| `??` / `??=` on a `T \| null` where `T` is a non-pointer type has no real null check | Building `??=` ([ADR-00087](../adr/ADR-00087.md)) | `let x: number \| null = null; x ?? 42` silently evaluates to `0`, not `42` — both operators treat a non-pointer-typed value as never-null. A real fix needs a different runtime representation for nullable non-pointer types. See [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md)'s Known Limitations. |
+| A class iterator's `next(): number \| null` terminates immediately if its legitimate first value is exactly `0` | Verifying `Array.from` ([ADR-00088](../adr/ADR-00088.md)) | The Stage 1a iterator protocol ([ADR-00063](../adr/ADR-00063.md)) uses bare `0` as both "the number zero" and "iteration done" — same root cause as the row above. Affects plain `for...of` and `Array.from` over such an iterator; workaround is to start counting from 1. See [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md)'s Known Limitations. |
 
 Memory management, the event loop, and the HTTP server were this project's three biggest cross-cutting structural gaps; all three are now substantially closed — see their entries under [Design Documents](#design-documents-tdds) below ([TDD-00001](../tdd/TDD-00001.md), [TDD-00006](../tdd/TDD-00006.md), [TDD-00004](../tdd/TDD-00004.md)) for the full history. The one piece of the three still genuinely open is `-mm=auto` (compiler-inserted frees, no runtime collector) — see the [Cross-Cutting](#cross-cutting) table above.
 
@@ -178,4 +201,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-09 — `symbol` V1 (opaque unique values: `Symbol()`, `===`, `typeof`, `.description`, `.toString()`).*
+*Last updated: 2026-08-09 — audited every status page for shipped (✅) features with real, non-cosmetic fidelity gaps from actual JS/TS behavior; added the Fidelity Gaps section and populated the bugs-found-but-not-fixed table above.*
