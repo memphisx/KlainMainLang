@@ -72,6 +72,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = EventSourceType()
 		case *ast.NewWebSocketExpression:
 			ty = WebSocketClientType()
+		case *ast.NewHeadersExpression:
+			ty = HeadersType()
+		case *ast.NewRequestExpression:
+			ty = FetchRequestType()
+		case *ast.NewXMLHttpRequestExpression:
+			ty = XMLHttpRequestType()
 		case *ast.AwaitExpression:
 			ty = e.inferExprType(init)
 		case *ast.ArrowFunction:

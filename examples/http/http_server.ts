@@ -29,7 +29,7 @@ setTimeout(() => {
 
 console.log('listening on :8080')
 
-http.listen(8080, (req: Request): Res => {
+http.listen(8080, (req: HttpRequest): Res => {
   requestCount = requestCount + 1
   let respHeaders: Map<string, string> = new Map<string, string>()
   respHeaders.set('Content-Type', 'text/plain')

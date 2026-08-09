@@ -132,7 +132,7 @@ func wsRecvFrame(t *testing.T, conn net.Conn) (opcode int, payload []byte) {
 func TestE2EWSHandshakeAndEcho(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8975, (req: Request): Res => {
+http.listen(8975, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {
@@ -164,7 +164,7 @@ http.listen(8975, (req: Request): Res => {
 func TestE2EWSExtendedLength(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8976, (req: Request): Res => {
+http.listen(8976, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {
@@ -198,7 +198,7 @@ http.listen(8976, (req: Request): Res => {
 func TestE2EWSCoexistsWithNormalHTTP(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8977, (req: Request): Res => {
+http.listen(8977, (req: HttpRequest): Res => {
   return { status: 200, body: "plain http: " + req.path }
 }, {
   ws: (socket: WSConnection) => {
@@ -238,7 +238,7 @@ http.listen(8977, (req: Request): Res => {
 func TestE2EWSCloseFrameEndsConnectionCleanly(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8978, (req: Request): Res => {
+http.listen(8978, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {
@@ -296,7 +296,7 @@ http.listen(8978, (req: Request): Res => {
 func TestE2EWSPingPong(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8979, (req: Request): Res => {
+http.listen(8979, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {
@@ -342,7 +342,7 @@ http.listen(8979, (req: Request): Res => {
 func TestE2EWSServerInitiatedClose(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8980, (req: Request): Res => {
+http.listen(8980, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {
@@ -412,7 +412,7 @@ func runClientWithTimeout(t *testing.T, src string, timeout time.Duration) strin
 func TestE2EWebSocketClientAgainstServer(t *testing.T) {
 	serverSrc := `
 interface Res { status: number; body: string }
-http.listen(8981, (req: Request): Res => {
+http.listen(8981, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
 }, {
   ws: (socket: WSConnection) => {

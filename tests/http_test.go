@@ -172,7 +172,7 @@ func startHTTPClusterServerGC(t *testing.T, src string, port int) {
 func TestE2EHTTPListenBasicGet(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8941, (req: Request): Res => {
+http.listen(8941, (req: HttpRequest): Res => {
   return { status: 200, body: "hello from KML" }
 })
 `
@@ -194,7 +194,7 @@ http.listen(8941, (req: Request): Res => {
 func TestE2EHTTPListenMethodAndPathFields(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8942, (req: Request): Res => {
+http.listen(8942, (req: HttpRequest): Res => {
   return { status: 200, body: req.method + " " + req.path }
 })
 `
@@ -214,7 +214,7 @@ func TestE2EHTTPListenMultipleSequentialRequests(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
 let count = 0
-http.listen(8943, (req: Request): Res => {
+http.listen(8943, (req: HttpRequest): Res => {
   count = count + 1
   return { status: 200, body: "req " + count }
 })
@@ -237,7 +237,7 @@ http.listen(8943, (req: Request): Res => {
 func TestE2EHTTPListenCustomStatus(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8944, (req: Request): Res => {
+http.listen(8944, (req: HttpRequest): Res => {
   if (req.path === "/missing") {
     return { status: 404, body: "not found" }
   }
@@ -266,7 +266,7 @@ let n = 0
 setInterval(() => {
   n = n + 1
 }, 50)
-http.listen(8945, (req: Request): Res => {
+http.listen(8945, (req: HttpRequest): Res => {
   return { status: 200, body: "n=" + n }
 })
 `
@@ -287,7 +287,7 @@ func TestE2EHTTPListenBindFailureThrows(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
 try {
-  http.listen(8946, (req: Request): Res => {
+  http.listen(8946, (req: HttpRequest): Res => {
     return { status: 200, body: "ok" }
   })
 } catch (e) {
@@ -310,7 +310,7 @@ func TestE2EHTTPListenWrongArgCountRejected(t *testing.T) {
 }
 
 func TestE2EHTTPListenNonObjectReturnTypeRejected(t *testing.T) {
-	_, err := parseAndCompile(`http.listen(8948, (req: Request): number => 200)`)
+	_, err := parseAndCompile(`http.listen(8948, (req: HttpRequest): number => 200)`)
 	if err == nil {
 		t.Fatal("expected a compile error for a handler not returning an object type, got none")
 	}
@@ -319,7 +319,7 @@ func TestE2EHTTPListenNonObjectReturnTypeRejected(t *testing.T) {
 func TestE2EHTTPListenMissingBodyFieldRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 interface Res { status: number }
-http.listen(8949, (req: Request): Res => { return { status: 200 } })
+http.listen(8949, (req: HttpRequest): Res => { return { status: 200 } })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a handler return type missing a body field, got none")
@@ -337,7 +337,7 @@ http.listen(8949, (req: Request): Res => { return { status: 200 } })
 func TestE2EHTTPListenConcurrentConnections(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8950, (req: Request): Res => {
+http.listen(8950, (req: HttpRequest): Res => {
   return { status: 200, body: req.path }
 })
 `
@@ -393,7 +393,7 @@ http.listen(8950, (req: Request): Res => {
 func TestE2EHTTPListenManyRequestsDoesNotLeakStack(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8951, (req: Request): Res => {
+http.listen(8951, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 })
 `
@@ -437,7 +437,7 @@ func TestE2EHTTPListenAsyncHandlerAwaitFetch(t *testing.T) {
 	upstream := newDelayedUpstreamServer(t, 0)
 	src := fmt.Sprintf(`
 interface Res { status: number; body: string }
-http.listen(8951, async (req: Request): Promise<Res> => {
+http.listen(8951, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
   return { status: 200, body: r.text() }
 })
@@ -468,7 +468,7 @@ func TestE2EHTTPListenConcurrentAwaitFetch(t *testing.T) {
 	upstream := newDelayedUpstreamServer(t, slowDelay)
 	src := fmt.Sprintf(`
 interface Res { status: number; body: string }
-http.listen(8952, async (req: Request): Promise<Res> => {
+http.listen(8952, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
   return { status: 200, body: r.text() }
 })
@@ -515,7 +515,7 @@ http.listen(8952, async (req: Request): Promise<Res> => {
 func TestE2EHTTPListenRequestHeadersLowercasedLookup(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8953, (req: Request): Res => {
+http.listen(8953, (req: HttpRequest): Res => {
   return { status: 200, body: req.headers.get("x-test-header") + "|" + (req.headers.has("nonexistent") ? "1" : "0") }
 })
 `
@@ -541,7 +541,7 @@ http.listen(8953, (req: Request): Res => {
 func TestE2EHTTPListenQueryStringParsing(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8954, (req: Request): Res => {
+http.listen(8954, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + req.query.get("a") + "|" + req.query.get("b") + "|" + (req.query.has("flag") ? "1" : "0") + "|" + req.query.get("flag") }
 })
 `
@@ -563,7 +563,7 @@ http.listen(8954, (req: Request): Res => {
 func TestE2EHTTPListenNoQueryStringGivesEmptyMap(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8955, (req: Request): Res => {
+http.listen(8955, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + (req.query.has("anything") ? "1" : "0") }
 })
 `
@@ -582,7 +582,7 @@ http.listen(8955, (req: Request): Res => {
 func TestE2EHTTPListenRequestBody(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8956, (req: Request): Res => {
+http.listen(8956, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
 })
 `
@@ -601,7 +601,7 @@ http.listen(8956, (req: Request): Res => {
 func TestE2EHTTPListenNoBodyGivesEmptyString(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8957, (req: Request): Res => {
+http.listen(8957, (req: HttpRequest): Res => {
   return { status: 200, body: "[" + req.body + "]" }
 })
 `
@@ -626,7 +626,7 @@ http.listen(8957, (req: Request): Res => {
 func TestE2EHTTPListenLargeBodySpanningMultipleReads(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8958, (req: Request): Res => {
+http.listen(8958, (req: HttpRequest): Res => {
   return { status: 200, body: "len=" + req.body.length }
 })
 `
@@ -658,7 +658,7 @@ http.listen(8958, (req: Request): Res => {
 func TestE2EHTTPListenLargeBodyContentIntegrity(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8959, (req: Request): Res => {
+http.listen(8959, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
 })
 `
@@ -685,7 +685,7 @@ http.listen(8959, (req: Request): Res => {
 func TestE2EHTTPListenWrongHeadersFieldTypeRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 interface Res { status: number; body: string; headers: string }
-http.listen(8962, (req: Request): Res => { return { status: 200, body: "x", headers: "not a map" } })
+http.listen(8962, (req: HttpRequest): Res => { return { status: 200, body: "x", headers: "not a map" } })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a 'headers' field that isn't Map<string, string>, got none")
@@ -695,7 +695,7 @@ http.listen(8962, (req: Request): Res => { return { status: 200, body: "x", head
 func TestE2EHTTPListenResponseHeaders(t *testing.T) {
 	src := `
 interface Res { status: number; body: string; headers: Map<string, string> }
-http.listen(8960, (req: Request): Res => {
+http.listen(8960, (req: HttpRequest): Res => {
   let h: Map<string, string> = new Map<string, string>()
   h.set("X-Custom-Header", "custom-value")
   h.set("Content-Type", "application/json")
@@ -726,7 +726,7 @@ func TestE2EHTTPListenNoResponseHeadersUnchanged(t *testing.T) {
 	// blank line or header text.
 	src := `
 interface Res { status: number; body: string }
-http.listen(8961, (req: Request): Res => {
+http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "plain" }
 })
 `
@@ -753,7 +753,7 @@ http.listen(8961, (req: Request): Res => {
 func TestE2EHTTPListenBodyBytesRoundTripSurvivesEmbeddedNull(t *testing.T) {
 	src := `
 interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
-http.listen(8963, (req: Request): Res => {
+http.listen(8963, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
   return { status: 200, body: "", bodyBytes: buf }
 })
@@ -781,7 +781,7 @@ http.listen(8963, (req: Request): Res => {
 func TestE2EHTTPListenBodyBytesWinsOverBodyField(t *testing.T) {
 	src := `
 interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
-http.listen(8964, (req: Request): Res => {
+http.listen(8964, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = new ArrayBuffer(3)
   return { status: 200, body: "this string is much longer than 3 bytes and must be ignored", bodyBytes: buf }
 })
@@ -804,7 +804,7 @@ http.listen(8964, (req: Request): Res => {
 func TestE2EHTTPListenBodyBytesByteLength(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8965, (req: Request): Res => {
+http.listen(8965, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
   return { status: 200, body: "len=" + buf.byteLength }
 })
@@ -826,7 +826,7 @@ http.listen(8965, (req: Request): Res => {
 func TestE2EHTTPListenWrongBodyBytesFieldTypeRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 interface Res { status: number; body: string; bodyBytes: string }
-http.listen(8966, (req: Request): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } })
+http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a 'bodyBytes' field that isn't ArrayBuffer, got none")
@@ -844,7 +844,7 @@ http.listen(8966, (req: Request): Res => { return { status: 200, body: "x", body
 func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8963, (req: Request): Res => {
+http.listen(8963, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
 }, { workers: 3 })
 `
@@ -887,7 +887,7 @@ http.listen(8963, (req: Request): Res => {
 func TestE2EHTTPListenClusteringDefaultIsSingleProcess(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8964, (req: Request): Res => {
+http.listen(8964, (req: HttpRequest): Res => {
   return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + cluster.workerId.toString() }
 })
 `
@@ -917,7 +917,7 @@ func TestE2EHTTPListenClusteringFlushesStdoutBeforeFork(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
 console.log("BANNER")
-http.listen(8965, (req: Request): Res => {
+http.listen(8965, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 }, { workers: 4 })
 `
@@ -971,7 +971,7 @@ http.listen(8965, (req: Request): Res => {
 func TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8966, (req: Request): Res => {
+http.listen(8966, (req: HttpRequest): Res => {
   let total = 0;
   for (let i = 0; i < 100000; i++) {
     let s: string = "abcdefghijklmnopqrstuvwxyz0123456789" + "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -1037,7 +1037,7 @@ func TestE2EHTTPListenCloseExitsProcess(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
 
-http.listen(8967, (req: Request): Res => {
+http.listen(8967, (req: HttpRequest): Res => {
   if (req.path === '/shutdown') {
     http.close()
     return { status: 200, body: "shutting down" }
@@ -1075,7 +1075,7 @@ func TestE2EHTTPListenCloseIsIdempotent(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
 
-http.listen(8968, (req: Request): Res => {
+http.listen(8968, (req: HttpRequest): Res => {
   http.close()
   http.close()
   return { status: 200, body: "ok" }
@@ -1105,8 +1105,8 @@ console.log("after listen returned")
 func TestE2EHTTPListenSecondCallSiteRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 interface Res { status: number; body: string }
-http.listen(8969, (req: Request): Res => { http.close(); return { status: 200, body: "a" } })
-http.listen(8970, (req: Request): Res => { return { status: 200, body: "b" } })
+http.listen(8969, (req: HttpRequest): Res => { http.close(); return { status: 200, body: "a" } })
+http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" } })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a second http.listen call site, got none")

@@ -573,6 +573,32 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitURLSearchParamsGetAll(mem, ex.Args, ex.GetPos())
 			}
 		}
+		// XMLHttpRequest-only methods (TDD-00040).
+		if e.inferExprType(mem.Object).IsXHR {
+			switch mem.Property {
+			case "open":
+				return e.emitXHROpen(mem.Object, ex.Args, ex.GetPos())
+			case "setRequestHeader":
+				return e.emitXHRSetRequestHeader(mem.Object, ex.Args, ex.GetPos())
+			case "send":
+				return e.emitXHRSend(mem.Object, ex.Args, ex.GetPos())
+			case "abort":
+				return e.emitXHRAbort(mem.Object, ex.Args, ex.GetPos())
+			}
+		}
+		// Headers-only methods (TDD-00040), checked before the generic Map
+		// dispatch right below — same "narrower flag first" ordering
+		// IsURLSearchParams already establishes just above (Headers IS a
+		// Map<string,string> too, so forEach/entries/keys/values fall
+		// through to that generic path unchanged; only get/set/has/delete
+		// (case-insensitive) and append (no Map equivalent) need
+		// Headers-specific behavior).
+		if objTy := e.inferExprType(mem.Object); objTy.IsHeaders {
+			switch mem.Property {
+			case "get", "set", "has", "delete", "append":
+				return e.emitHeadersCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+			}
+		}
 		// Map<K,V> and Set<T> method dispatch. Checked before the generic
 		// "forEach" name below, since both Array and Map/Set have a
 		// forEach — the array codegen must not run for a Map/Set receiver.

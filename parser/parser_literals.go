@@ -149,6 +149,12 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewWebSocketBody(pos)
 	case "URLSearchParams":
 		return p.parseNewURLSearchParamsBody(pos)
+	case "Headers":
+		return p.parseNewHeadersBody(pos)
+	case "Request":
+		return p.parseNewRequestBody(pos)
+	case "XMLHttpRequest":
+		return p.parseNewXMLHttpRequestBody(pos)
 	case "ArrayBuffer":
 		return p.parseNewArrayBufferBody(pos)
 	case "TextEncoder":
@@ -342,6 +348,58 @@ func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchPara
 		return nil, err
 	}
 	return ast.NewNewURLSearchParamsExpression(init, pos), nil
+}
+
+func (p *Parser) parseNewHeadersBody(pos ast.Pos) (*ast.NewHeadersExpression, error) {
+	p.advance() // consume 'Headers'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var init ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewHeadersExpression(init, pos), nil
+}
+
+func (p *Parser) parseNewRequestBody(pos ast.Pos) (*ast.NewRequestExpression, error) {
+	p.advance() // consume 'Request'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	url, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	var init ast.Expression
+	if p.match(lexer.COMMA) {
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewRequestExpression(url, init, pos), nil
+}
+
+func (p *Parser) parseNewXMLHttpRequestBody(pos ast.Pos) (*ast.NewXMLHttpRequestExpression, error) {
+	p.advance() // consume 'XMLHttpRequest'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewXMLHttpRequestExpression(pos), nil
 }
 
 func (p *Parser) parseNewTextEncoderBody(pos ast.Pos) (*ast.NewTextEncoderExpression, error) {

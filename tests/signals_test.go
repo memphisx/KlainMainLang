@@ -154,7 +154,7 @@ process.on('SIGINT', () => {
   console.log("handled:SIGINT");
   process.exit(0);
 });
-http.listen(8231, (req: Request): { status: number; body: string } => {
+http.listen(8231, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
@@ -177,7 +177,7 @@ process.on('SIGTERM', () => {
   console.log("handled:SIGTERM");
   process.exit(0);
 });
-http.listen(8232, (req: Request): { status: number; body: string } => {
+http.listen(8232, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
@@ -207,7 +207,7 @@ process.on('SIGTERM', () => {
   console.log("handled:SIGTERM");
   process.exit(0);
 });
-http.listen(8233, (req: Request): { status: number; body: string } => {
+http.listen(8233, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
@@ -238,7 +238,7 @@ http.listen(8233, (req: Request): { status: number; body: string } => {
 // default action, same as before this feature existed.
 func TestE2ESignalNoHandlerDefaultDisposition(t *testing.T) {
 	src := `
-http.listen(8234, (req: Request): { status: number; body: string } => {
+http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `

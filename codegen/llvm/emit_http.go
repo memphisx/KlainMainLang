@@ -33,7 +33,7 @@ func isPlainStringType(t Type) bool {
 }
 
 // emitHTTPListen validates its arguments (port: number, handler:
-// (req: Request) => T where T has status/body fields, and optionally a
+// (req: HttpRequest) => T where T has status/body fields, and optionally a
 // headers: Map<string,string> field, plus an optional third { workers: N }
 // options object — TDD-00025), binds and listens on the given port, builds a
 // dispatcher function specialized to the handler's own closure/return type
@@ -75,7 +75,7 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, fmt.Errorf("%d:%d: http.listen's second argument must be a function", pos.Line, pos.Col)
 	}
 	if len(handlerVal.Ty.FuncParams) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must take exactly one parameter (req: Request)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must take exactly one parameter (req: HttpRequest)", pos.Line, pos.Col)
 	}
 	if handlerVal.Ty.FuncRetType == nil || (!handlerVal.Ty.FuncRetType.IsObject && !handlerVal.Ty.FuncRetType.IsPromise) {
 		return Value{}, fmt.Errorf("%d:%d: http.listen's handler must return an object type (or Promise of one, for an async handler) with status/body fields", pos.Line, pos.Col)
@@ -212,13 +212,13 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 func (e *Emitter) emitRequestBodyBytes(objVal Value, pos ast.Pos) (Value, error) {
 	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Request", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
 	}
 	bodyVal := e.loadFieldValue(objVal, bodyIdx, bodyFieldTy)
 
 	lenIdx, lenFieldTy, ok := objVal.Ty.FieldIndex("bodyLength")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Request", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
 	}
 	lenVal := e.loadFieldValue(objVal, lenIdx, lenFieldTy)
 

@@ -296,6 +296,106 @@ func TestE2EFetchInitWrongFieldTypesRejected(t *testing.T) {
 	}
 }
 
+// --- Headers / Request (TDD-00040) ---
+//
+// Headers IS a Map<string,string> under the hood (see IsHeaders's doc
+// comment in codegen/llvm/types.go), so these focus on the two genuinely
+// new behaviors — case-insensitive keys and append() — plus Request's own
+// construction/defaults and its wiring into fetch().
+
+func TestE2EHeadersGetSetHasDeleteCaseInsensitive(t *testing.T) {
+	src := `
+const h: Headers = new Headers()
+h.set("Content-Type", "application/json")
+console.log(h.get("content-type"))
+console.log(h.get("CONTENT-TYPE"))
+console.log(h.has("Content-Type"))
+console.log(h.has("x-missing"))
+h.delete("CONTENT-TYPE")
+console.log(h.has("content-type"))
+`
+	assertOutput(t, src, "application/json\napplication/json\n1\n0\n0")
+}
+
+func TestE2EHeadersAppendCombinesWithComma(t *testing.T) {
+	src := `
+const h: Headers = new Headers()
+h.append("X-Multi", "a")
+h.append("X-Multi", "b")
+console.log(h.get("x-multi"))
+`
+	assertOutput(t, src, "a, b")
+}
+
+func TestE2EHeadersConstructFromMapLowercasesKeys(t *testing.T) {
+	src := `
+const m: Map<string, string> = new Map<string, string>()
+m.set("X-Foo", "bar")
+const h: Headers = new Headers(m)
+console.log(h.get("x-foo"))
+`
+	assertOutput(t, src, "bar")
+}
+
+func TestE2ERequestDefaultsMethodAndEmptyHeaders(t *testing.T) {
+	src := `
+const req: Request = new Request("http://example.com/x")
+console.log(req.url)
+console.log(req.method)
+console.log(req.headers.has("anything"))
+`
+	assertOutput(t, src, "http://example.com/x\nGET\n0")
+}
+
+func TestE2ERequestInitOverridesMethodHeadersBody(t *testing.T) {
+	src := `
+const h: Headers = new Headers()
+h.set("X-Custom-Header", "hi")
+const req: Request = new Request("http://example.com/x", { method: "PUT", headers: h, body: "payload" })
+console.log(req.method)
+console.log(req.headers.get("x-custom-header"))
+console.log(req.body)
+`
+	assertOutput(t, src, "PUT\nhi\npayload")
+}
+
+func TestE2EFetchWithRequestObject(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface EchoResp { method: string; body: string; x_custom: string }
+
+async function main2(): Promise<void> {
+    const h: Headers = new Headers()
+    h.set("X-Custom-Header", "from-request")
+    const req: Request = new Request("%s/echo", { method: "POST", headers: h, body: "req-body" })
+    const r: Response = await fetch(req)
+    const data: EchoResp = r.json()
+    console.log(data.method)
+    console.log(data.body)
+    console.log(data.x_custom)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "POST\nreq-body\nfrom-request")
+}
+
+func TestE2EFetchInitAcceptsHeadersInstance(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface EchoResp { x_custom: string }
+
+async function main2(): Promise<void> {
+    const h: Headers = new Headers()
+    h.set("X-Custom-Header", "via-headers-object")
+    const r: Response = await fetch("%s/echo", { headers: h })
+    const data: EchoResp = r.json()
+    console.log(data.x_custom)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "via-headers-object")
+}
+
 func TestE2EFetchFieldAccessOnNonResponseRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 const x: number = 5

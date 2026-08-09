@@ -142,6 +142,13 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00101](ADR-00101.md) | Root cause of the `-mm=gc` clustering hang — `GC_stackbottom` never restored when a fiber runs to completion | Implements [TDD-00025](../tdd/TDD-00025.md). Extends [ADR-00071](ADR-00071.md), [ADR-00093](ADR-00093.md), [ADR-00099](ADR-00099.md) |
 | [00103](ADR-00103.md) | User-defined generics V1 — monomorphization for functions, interfaces, classes | Implements [TDD-00010](../tdd/TDD-00010.md) |
 | [00104](ADR-00104.md) | Array/Map/Set/EventEmitter literals as general expressions | Implements [TDD-00028](../tdd/TDD-00028.md) |
+| [00105](ADR-00105.md) | Array-of-arrays (nested array) storage representation | Implements [TDD-00029](../tdd/TDD-00029.md) |
+| [00106](ADR-00106.md) | Binary-safe `http.listen()` request/response bodies | Implements [TDD-00026](../tdd/TDD-00026.md) |
+| [00107](ADR-00107.md) | `Array.prototype.flat(depth?)` / `.flatMap(fn)` | Extends [ADR-00105](ADR-00105.md) (the `.flat()`/`.flatMap()` follow-on left open by [TDD-00029](../tdd/TDD-00029.md)) |
+| [00108](ADR-00108.md) | `i64::MIN / -1` UB guard, and `%=` (was entirely unimplemented) | |
+| [00109](ADR-00109.md) | Destructured function parameters | |
+| [00110](ADR-00110.md) | Getters / setters on classes | Implements [TDD-00030](../tdd/TDD-00030.md) |
+| [00111](ADR-00111.md) | `performance.mark(name)` / `performance.measure(name, start, end?)` | |
 | [00112](ADR-00112.md) | `TextEncoder`/`TextDecoder` (UTF-8 only, V1) | |
 | [00113](ADR-00113.md) | `structuredClone(obj)` — recursive deep copy dispatched on static type | |
 | [00114](ADR-00114.md) | RegExp Stage 0 — construction, literal syntax, field reads | Implements [TDD-00035](../tdd/TDD-00035.md) |
@@ -151,3 +158,14 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00118](ADR-00118.md) | RegExp Stage 4 — `str.replace()`/`str.replaceAll()`, incl. `$1`/`$&`/`$$` backreferences and a fixed-arity `(match, offset, string)` callback form | Implements [TDD-00035](../tdd/TDD-00035.md). Extends [ADR-00114](ADR-00114.md), [ADR-00115](ADR-00115.md), [ADR-00116](ADR-00116.md), [ADR-00117](ADR-00117.md) |
 | [00119](ADR-00119.md) | RegExp Stage 5 — `str.split()`/`str.search()`, on a new stateless match primitive (`.split()`/`.search()` don't use `lastIndex` the way every earlier stage does) | Implements [TDD-00035](../tdd/TDD-00035.md). Extends [ADR-00114](ADR-00114.md), [ADR-00115](ADR-00115.md), [ADR-00116](ADR-00116.md), [ADR-00117](ADR-00117.md), [ADR-00118](ADR-00118.md) |
 | [00120](ADR-00120.md) | RegExp Stage 6 — `--static` linking verification (bare Linux + real Docker `scratch` container, both confirmed working with zero extra flags) | Implements [TDD-00035](../tdd/TDD-00035.md). Extends [ADR-00114](ADR-00114.md), [ADR-00115](ADR-00115.md), [ADR-00116](ADR-00116.md), [ADR-00117](ADR-00117.md), [ADR-00118](ADR-00118.md), [ADR-00119](ADR-00119.md) |
+| [00121](ADR-00121.md) | User-defined generics V2 — `@erased` opt-in type erasure | Implements [TDD-00010](../tdd/TDD-00010.md). Extends [ADR-00103](ADR-00103.md) |
+| [00122](ADR-00122.md) | `EventSource` (SSE) Stage 0 — connection plumbing | Implements [TDD-00038](../tdd/TDD-00038.md) |
+| [00123](ADR-00123.md) | `EventSource` Stage 1 — SSE record parsing and `onmessage` | Implements [TDD-00038](../tdd/TDD-00038.md). Extends [ADR-00122](ADR-00122.md) |
+| [00124](ADR-00124.md) | `EventSource` Stage 2 — named events, `onopen`/`onerror` | Implements [TDD-00038](../tdd/TDD-00038.md). Extends [ADR-00123](ADR-00123.md) |
+| [00125](ADR-00125.md) | `WebSocket` Stage 0 — shared frame codec + SHA-1 | Implements [TDD-00039](../tdd/TDD-00039.md) (Stage 0 of 4) |
+| [00126](ADR-00126.md) | `WebSocket` Stage 1 — server-side upgrade + persistent echo loop | Implements [TDD-00039](../tdd/TDD-00039.md). Extends [ADR-00125](ADR-00125.md) |
+| [00127](ADR-00127.md) | `WebSocket` Stage 2 — automatic ping/pong + close handshake | Implements [TDD-00039](../tdd/TDD-00039.md). Extends [ADR-00126](ADR-00126.md) |
+| [00128](ADR-00128.md) | `WebSocket` Stage 3 — client-side `new WebSocket(url)` | Implements [TDD-00039](../tdd/TDD-00039.md). Extends [ADR-00127](ADR-00127.md) |
+| [00129](ADR-00129.md) | `EventSource` Stage 3 — CRLF boundaries, terminal failure, auto-reconnect | Implements [TDD-00038](../tdd/TDD-00038.md). Extends [ADR-00122](ADR-00122.md), [ADR-00123](ADR-00123.md), [ADR-00124](ADR-00124.md) |
+| [00130](ADR-00130.md) | Real `Request`/`Headers` classes, and freeing up `Request` from `http.listen`'s server-side type | Supersedes [ADR-00074](ADR-00074.md). Implements [TDD-00040](../tdd/TDD-00040.md) |
+| [00131](ADR-00131.md) | `XMLHttpRequest` — legacy synchronous-style client on top of `fetch`'s own non-blocking primitives | Extends [ADR-00050](ADR-00050.md), [ADR-00073](ADR-00073.md). Implements [TDD-00040](../tdd/TDD-00040.md) |

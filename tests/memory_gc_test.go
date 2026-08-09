@@ -106,7 +106,7 @@ func TestE2EGCModeBoundsMemory(t *testing.T) {
 func TestE2EHTTPListenGCModeConcurrentChurn(t *testing.T) {
 	src := `
 interface Res { status: number; body: string }
-http.listen(8952, (req: Request): Res => {
+http.listen(8952, (req: HttpRequest): Res => {
   let total = 0;
   for (let i = 0; i < 200000; i++) {
     let s: string = "abcdefghijklmnopqrstuvwxyz0123456789" + "abcdefghijklmnopqrstuvwxyz0123456789";

@@ -34,6 +34,6 @@ if (cluster.isPrimary) {
   console.log('primary starting ' + os.cpus().length + ' worker(s) on :8081')
 }
 
-http.listen(8081, (req: Request): Res => {
+http.listen(8081, (req: HttpRequest): Res => {
   return { status: 200, body: 'served by worker ' + cluster.workerId.toString() + ' (pid ' + process.pid.toString() + ')' }
 }, { workers: os.cpus().length })

@@ -58,7 +58,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 | Binary data & Typed Arrays | 9/17, ~53% | [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) | No `DataView`/`Blob`/`SharedArrayBuffer`/`Atomics`; no `BigInt64Array`/`BigUint64Array` (needs `bigint`); no Node `Buffer` |
 | Web Crypto | 2/8, 25% | [WEB-CRYPTO.md](WEB-CRYPTO.md) | All of `crypto.subtle.*` unimplemented |
 | Performance & Timing (incl. Date) | 9/9, 100% | [PERFORMANCE-TIMING.md](PERFORMANCE-TIMING.md) | `Date` is UTC-only, never local time |
-| Networking (fetch, WebSocket, SSE) | 4/6, ~67% | [NETWORKING.md](NETWORKING.md) | No `XMLHttpRequest`; `WebSocket` (both server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send and no `wss://`/TLS; `.text()`/`.json()` still truncate at an embedded null byte by design — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md)) |
+| Networking (fetch, WebSocket, SSE) | 6/6, 100% | [NETWORKING.md](NETWORKING.md) | `WebSocket` (both server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send and no `wss://`/TLS; `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only; `.text()`/`.json()` still truncate at an embedded null byte by design — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md)) |
 | Streams | 0/8, 0% | [STREAMS.md](STREAMS.md) | Not started — neither the WHATWG API nor Node's own, differently-shaped `stream` module |
 | Events & Cancellation | 0/5, 0% | [EVENTS-CANCELLATION.md](EVENTS-CANCELLATION.md) | Not started; blocks a general `AbortController`. Distinct from Node's `EventEmitter`, see [EVENT-EMITTER.md](EVENT-EMITTER.md) below |
 | Workers / Concurrency | 0/3, 0% | [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md) | Not started; needs `pthreads` + `SharedArrayBuffer`/`Atomics` |
@@ -180,4 +180,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-08 — `EventSource` Stage 3 shipped: CRLF-tolerant record boundaries, non-2xx/wrong-`Content-Type` terminal failure, and auto-reconnect with `retry:`/`Last-Event-ID` replay — [ADR-00129](../adr/ADR-00129.md), completing [TDD-00038](../tdd/TDD-00038.md) in full; also fixed a real use-after-free/infinite-retry-loop bug in an earlier version of the Content-Type check, found during this stage's testing.*
+*Last updated: 2026-08-08 — Real `Request`/`Headers` classes and `XMLHttpRequest` shipped, completing [TDD-00040](../tdd/TDD-00040.md) and bringing Networking to 6/6 — [ADR-00130](../adr/ADR-00130.md), [ADR-00131](../adr/ADR-00131.md); `http.listen`'s server-side request type annotation is now `HttpRequest`, not `Request` (freed up for the new client-side class).*

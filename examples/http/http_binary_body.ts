@@ -30,7 +30,7 @@ setTimeout(() => {
 
 console.log('listening on :8081')
 
-http.listen(8081, (req: Request): Res => {
+http.listen(8081, (req: HttpRequest): Res => {
   // .bodyBytes() exposes the exact byte range the server already buffered
   // (Content-Length-aware, ADR-00072) — .byteLength reflects the real
   // count even when the body contains an embedded null.

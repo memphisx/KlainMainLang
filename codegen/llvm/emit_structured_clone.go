@@ -38,15 +38,18 @@ func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value
 
 // structuredCloneUnsupportedKind names the first reference-like flag it
 // finds set on ty, or "" if ty is a plain scalar/array/object structuredClone
-// knows how to copy. URL/URLSearchParams are checked ahead of the generic
-// IsObject/IsMap checks they also happen to set, purely so the error names
-// the type the user actually wrote rather than its storage representation.
+// knows how to copy. URL/URLSearchParams/Headers are checked ahead of the
+// generic IsObject/IsMap checks they also happen to set, purely so the error
+// names the type the user actually wrote rather than its storage
+// representation.
 func structuredCloneUnsupportedKind(ty Type) string {
 	switch {
 	case ty.IsURL:
 		return "URL"
 	case ty.IsURLSearchParams:
 		return "URLSearchParams"
+	case ty.IsHeaders:
+		return "Headers"
 	case ty.IsMap:
 		return "Map"
 	case ty.IsSet:
@@ -61,6 +64,10 @@ func structuredCloneUnsupportedKind(ty Type) string {
 		return "Response"
 	case ty.IsRequest:
 		return "Request"
+	case ty.IsFetchRequest:
+		return "Request"
+	case ty.IsXHR:
+		return "XMLHttpRequest"
 	case ty.IsClass:
 		return "a class instance"
 	case ty.IsError:

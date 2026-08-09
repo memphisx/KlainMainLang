@@ -807,8 +807,9 @@ func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
 }
 
 // NewURLExpression is `new URL(url)` — a single required string argument.
-// No base-URL second argument (V1 scope, matching how fetch's own init
-// object narrows the real Request/Headers API down to a plain struct).
+// No base-URL second argument (V1 scope — out of scope independent of
+// Request/Headers, which now exist for real, see NewRequestExpression/
+// NewHeadersExpression below, TDD-00040).
 type NewURLExpression struct {
 	URL Expression
 	pos Pos
@@ -875,6 +876,56 @@ func (n *NewURLSearchParamsExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLSearchParamsExpression(init Expression, pos Pos) *NewURLSearchParamsExpression {
 	return &NewURLSearchParamsExpression{Init: init, pos: pos}
+}
+
+// NewHeadersExpression is `new Headers()` (empty) or `new Headers(init)`
+// (init: Map<string,string>, TDD-00040) — see codegen/llvm's IsHeaders doc
+// comment for why this is just a flagged Map<string,string> under the hood.
+type NewHeadersExpression struct {
+	Init Expression // nil for the no-argument form
+	pos  Pos
+}
+
+func (*NewHeadersExpression) nodeMarker()   {}
+func (*NewHeadersExpression) exprMarker()   {}
+func (n *NewHeadersExpression) GetPos() Pos { return n.pos }
+
+func NewNewHeadersExpression(init Expression, pos Pos) *NewHeadersExpression {
+	return &NewHeadersExpression{Init: init, pos: pos}
+}
+
+// NewRequestExpression is `new Request(url)` or `new Request(url, init)`
+// (TDD-00040) — init is any value with some subset of method: string /
+// headers: Map<string,string> | Headers / body: string fields, the same
+// structural-typing shape fetch(url, init)'s own second argument already
+// established (ADR-00074/TDD-00017).
+type NewRequestExpression struct {
+	URL  Expression
+	Init Expression // nil for the no-init form
+	pos  Pos
+}
+
+func (*NewRequestExpression) nodeMarker()   {}
+func (*NewRequestExpression) exprMarker()   {}
+func (n *NewRequestExpression) GetPos() Pos { return n.pos }
+
+func NewNewRequestExpression(url, init Expression, pos Pos) *NewRequestExpression {
+	return &NewRequestExpression{URL: url, Init: init, pos: pos}
+}
+
+// NewXMLHttpRequestExpression is `new XMLHttpRequest()` — no arguments,
+// matching the real constructor's own empty parameter list. See
+// docs/tdd/TDD-00040.md for this implementation's synchronous-style scope.
+type NewXMLHttpRequestExpression struct {
+	pos Pos
+}
+
+func (*NewXMLHttpRequestExpression) nodeMarker()   {}
+func (*NewXMLHttpRequestExpression) exprMarker()   {}
+func (n *NewXMLHttpRequestExpression) GetPos() Pos { return n.pos }
+
+func NewNewXMLHttpRequestExpression(pos Pos) *NewXMLHttpRequestExpression {
+	return &NewXMLHttpRequestExpression{pos: pos}
 }
 
 // NewArrayBufferExpression is `new ArrayBuffer(byteLength)` — a fixed-length,

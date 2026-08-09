@@ -30,28 +30,59 @@ func isResponseMethodName(name string) bool {
 	return false
 }
 
-// emitFetch implements fetch(url) and fetch(url, init) (ADR-00074,
-// TDD-00017): kicks off a non-blocking libcurl multi-interface transfer via
-// __kml_fetch_async and wraps the returned pending-fetch handle in a
-// Promise<Response> slot — the same slot shape emitAsyncEpilogue/emitAwait
-// (emit_async.go) already expect, just holding a not-yet-resolved pending
-// handle instead of an already-built Response, since building the Response
-// needs the transfer to have actually finished (see emitAwait's
-// IsResponse-specific branch).
+// emitFetch implements fetch(url), fetch(url, init), and fetch(request)
+// (ADR-00074/TDD-00017, TDD-00040): kicks off a non-blocking libcurl
+// multi-interface transfer via __kml_fetch_async and wraps the returned
+// pending-fetch handle in a Promise<Response> slot — the same slot shape
+// emitAsyncEpilogue/emitAwait (emit_async.go) already expect, just holding
+// a not-yet-resolved pending handle instead of an already-built Response,
+// since building the Response needs the transfer to have actually finished
+// (see emitAwait's IsResponse-specific branch).
 //
 // init, when present, is any value whose inferred type has some subset of
-// method: string / headers: Map<string,string> / body: string fields — no
-// shared RequestInit interface has to exist, matching the same
+// method: string / headers: Map<string,string> | Headers / body: string
+// fields — no shared RequestInit interface has to exist, matching the same
 // FieldIndex-on-the-inferred-type pattern http.listen's own optional
 // headers field already uses (emit_http.go's isPlainStringType, ADR-00072).
 // Each field present resolves to a ptr value passed to __kml_fetch_async;
 // each field absent passes a literal "null", which the shared runtime
 // function treats as "use curl's default" (see ensureFetchAsync's doc
 // comment in runtime.go).
+//
+// A single argument whose inferred type is IsFetchRequest (TDD-00040) is
+// destructured the same way — a real Request object always has every field
+// present (method defaults to "GET", headers to an empty Headers, body to
+// null at construction, see emit_fetch_request.go), so this is really just
+// the init-object path with the fields already resolved and validated.
 func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 && len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: fetch takes 1 argument (url) or 2 (url, init)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: fetch takes 1 argument (url or Request) or 2 (url, init)", pos.Line, pos.Col)
 	}
+
+	if len(args) == 1 {
+		if reqTy := e.inferExprType(args[0]); reqTy.IsFetchRequest {
+			reqVal, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			urlIdx, urlFieldTy, _ := reqTy.FieldIndex("url")
+			methodIdx, methodFieldTy, _ := reqTy.FieldIndex("method")
+			headersIdx, headersFieldTy, _ := reqTy.FieldIndex("headers")
+			bodyIdx, bodyFieldTy, _ := reqTy.FieldIndex("body")
+
+			urlVal := e.loadFieldValue(reqVal, urlIdx, urlFieldTy)
+			methodVal := e.loadFieldValue(reqVal, methodIdx, methodFieldTy)
+			headersVal := e.loadFieldValue(reqVal, headersIdx, headersFieldTy)
+			bodyVal := e.loadFieldValue(reqVal, bodyIdx, bodyFieldTy)
+
+			headersRef, err := e.buildFetchHeaderList(headersVal.Ref)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitFetchAsyncCall(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref)
+		}
+	}
+
 	urlVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -76,7 +107,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		if idx, fieldTy, ok := initVal.Ty.FieldIndex("headers"); ok {
 			if !fieldTy.IsMap || fieldTy.MapKey == nil || fieldTy.MapVal == nil ||
 				!isPlainStringType(*fieldTy.MapKey) || !isPlainStringType(*fieldTy.MapVal) {
-				return Value{}, fmt.Errorf("%d:%d: fetch's init.headers must be Map<string, string>", pos.Line, pos.Col)
+				return Value{}, fmt.Errorf("%d:%d: fetch's init.headers must be Map<string, string> or Headers", pos.Line, pos.Col)
 			}
 			mapVal := e.loadFieldValue(initVal, idx, fieldTy)
 			headersRef, err = e.buildFetchHeaderList(mapVal.Ref)
@@ -92,10 +123,18 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		}
 	}
 
+	return e.emitFetchAsyncCall(urlVal.Ref, methodRef, headersRef, bodyRef)
+}
+
+// emitFetchAsyncCall is the shared tail every fetch() call form (bare url,
+// url+init, or a Request object) reduces to once url/method/headers/body
+// refs are resolved: call __kml_fetch_async, box the returned pending
+// handle into a fresh Promise<Response> slot.
+func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef string) (Value, error) {
 	e.ensureFetchAsync()
 	pendingReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s)",
-		pendingReg, urlVal.Ref, methodRef, headersRef, bodyRef))
+		pendingReg, urlRef, methodRef, headersRef, bodyRef))
 
 	e.ensureMalloc()
 	slotReg := e.freshReg()

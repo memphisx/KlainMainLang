@@ -27,7 +27,7 @@ setTimeout(() => {
 
 console.log('listening on :8090')
 
-http.listen(8090, (req: Request): { status: number; body: string } => {
+http.listen(8090, (req: HttpRequest): { status: number; body: string } => {
   requestCount = requestCount + 1
   return { status: 200, body: 'hello' }
 })

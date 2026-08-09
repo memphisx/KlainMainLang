@@ -940,6 +940,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return EventSourceType()
 	case *ast.NewWebSocketExpression:
 		return WebSocketClientType()
+	case *ast.NewHeadersExpression:
+		return HeadersType()
+	case *ast.NewRequestExpression:
+		return FetchRequestType()
+	case *ast.NewXMLHttpRequestExpression:
+		return XMLHttpRequestType()
 	case *ast.ObjectLiteral:
 		return e.inferObjectType(ex)
 	case *ast.ArrayLiteral:

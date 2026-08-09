@@ -24,7 +24,7 @@ setTimeout(() => {
 
 console.log('listening on :8081')
 
-http.listen(8081, (req: Request): Res => {
+http.listen(8081, (req: HttpRequest): Res => {
   requestCount = requestCount + 1
   if (req.path === '/shutdown') {
     http.close()

@@ -106,12 +106,16 @@ type Type struct {
 	// message/name's stored contents) differ between e.g. a TypeError and a
 	// RangeError. See emit_exceptions.go's errorKinds/errorKindIDs.
 	IsError bool
-	// IsRequest marks http.listen()'s Request object (RequestType): an
+	// IsRequest marks http.listen()'s request object (RequestType), spelled
+	// `HttpRequest` in source (TDD-00040 renamed the annotation from
+	// `Request` to free that name up for the real client-side Request class
+	// — see IsFetchRequest below; the Go-side RequestType/IsRequest names are
+	// unchanged, only the user-facing TypeScript annotation moved): an
 	// ordinary heap object like Response/URL, plus this flag so method-call
-	// dispatch can recognize a Request receiver — needed for
+	// dispatch can recognize a receiver of this type — needed for
 	// `req.bodyBytes(): ArrayBuffer` (TDD-00026/ADR-00106), the one
-	// dispatched method a Request has; every other property is a plain
-	// field read via the existing object machinery, same as Response/URL.
+	// dispatched method it has; every other property is a plain field read
+	// via the existing object machinery, same as Response/URL.
 	IsRequest bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
@@ -233,6 +237,34 @@ type Type struct {
 	// parameter at compile time, instead of silently bit-reinterpreting it
 	// as an i64 (see docs/adr/ADR-00042.md).
 	Inferred bool
+	// IsHeaders marks `new Headers(...)`'s result (TDD-00040): storage-wise
+	// it IS a real Map<string,string> (IsMap also set, MapKey/MapVal both
+	// TypePtr) — exactly IsURLSearchParams's own precedent. get/set/has/
+	// delete/forEach/entries/keys/values all come for free from the existing
+	// Map machinery; IsHeaders only additionally enables case-insensitive
+	// (lowercased-key) get/set/has/delete and the one genuinely new method,
+	// append(), all dispatched in emit_call.go ahead of the generic IsMap
+	// branch. See emit_headers.go.
+	IsHeaders bool
+	// IsFetchRequest marks `new Request(...)`'s result (TDD-00040): an
+	// ordinary heap object (url/method/headers/body, all plain field reads)
+	// like Response/URL. Named to avoid colliding with the pre-existing,
+	// unrelated IsRequest/RequestType (http.listen's server-side `req`
+	// object) — both are legitimately called "Request" in user-facing text,
+	// but are otherwise unconnected types. See emit_fetch_request.go.
+	IsFetchRequest bool
+	// IsXHR marks `new XMLHttpRequest()`'s result (TDD-00040): a real heap
+	// object like EventSource/WebSocketClient, with hidden fields (method/
+	// url/headers, built up by open()/setRequestHeader()) plus visible
+	// readyState/status/responseText/response and three zero-argument
+	// callback fields (onreadystatechange/onload/onerror — deliberately
+	// zero-arg, unlike EventSource/WebSocket's payload-carrying onmessage,
+	// since a self-referential FuncType field isn't representable here; see
+	// the TDD's Design section). send() is synchronous-looking but reuses
+	// fetch()'s own non-blocking __kml_fetch_async primitive underneath, so
+	// it still yields the current fiber rather than blocking when called
+	// from inside an http.listen connection handler. See emit_xhr.go.
+	IsXHR bool
 }
 
 // ArrayOf returns an array type whose elements are of the given type.
@@ -312,6 +344,71 @@ func URLType() Type {
 		{Name: "searchParams", Ty: URLSearchParamsType()},
 	})
 	ty.IsURL = true
+	return ty
+}
+
+// HeadersType returns `new Headers(...)`'s result type (TDD-00040) — see
+// IsHeaders's doc comment for why this is just a flagged Map<string,string>.
+func HeadersType() Type {
+	ty := MapType(TypePtr, TypePtr)
+	ty.IsHeaders = true
+	return ty
+}
+
+// FetchRequestType returns `new Request(...)`'s result type (TDD-00040): a
+// plain heap object like Response/URL — url/method/headers/body are all
+// plain field reads via the existing object machinery, no dispatched
+// methods of its own. See IsFetchRequest's doc comment for the naming
+// choice (avoiding the pre-existing, unrelated IsRequest/RequestType) and
+// emit_fetch_request.go.
+func FetchRequestType() Type {
+	ty := ObjectType([]Field{
+		{Name: "url", Ty: TypePtr},
+		{Name: "method", Ty: TypePtr},
+		{Name: "headers", Ty: HeadersType()},
+		{Name: "body", Ty: TypePtr},
+	})
+	ty.IsFetchRequest = true
+	return ty
+}
+
+// XHRMethodField/XHRURLField/XHRHeadersField are the names of the hidden
+// fields every `new XMLHttpRequest()` instance carries at indices 0-2 —
+// written by open()/setRequestHeader(), read by send() — never exposed via
+// VisibleFields()/Object.keys/JSON, the same convention
+// EventSourceHandleField/WSConnFdField already use.
+const (
+	XHRMethodField  = "__kml_xhr_method"
+	XHRURLField     = "__kml_xhr_url"
+	XHRHeadersField = "__kml_xhr_headers"
+)
+
+// XMLHttpRequestType returns `new XMLHttpRequest()`'s result type
+// (TDD-00040). readyState/status/responseText/response are plain visible
+// fields (readyState: 0 UNSENT, 1 OPENED, 4 DONE — this implementation
+// skips the real spec's 2 HEADERS_RECEIVED/3 LOADING, which have no
+// meaning for a send() that runs to completion before returning, matching
+// EventSourceType's own "simplified state model" precedent).
+// onreadystatechange/onload/onerror are zero-argument callback fields (see
+// IsXHR's doc comment for why, unlike EventSource/WebSocket's
+// payload-carrying onmessage) — assigning to any of them is a plain
+// FuncType field assignment needing no dedicated codegen, same as
+// EventSource/WSConnection's own onmessage.
+func XMLHttpRequestType() Type {
+	cb := FuncType(nil, TypeVoid)
+	ty := ObjectType([]Field{
+		{Name: XHRMethodField, Ty: TypePtr},
+		{Name: XHRURLField, Ty: TypePtr},
+		{Name: XHRHeadersField, Ty: TypePtr},
+		{Name: "readyState", Ty: TypeI64},
+		{Name: "status", Ty: TypeI64},
+		{Name: "responseText", Ty: TypePtr},
+		{Name: "response", Ty: TypePtr},
+		{Name: "onreadystatechange", Ty: cb},
+		{Name: "onload", Ty: cb},
+		{Name: "onerror", Ty: cb},
+	})
+	ty.IsXHR = true
 	return ty
 }
 
@@ -697,11 +794,16 @@ func (t Type) VisibleFields() []Field {
 	if t.IsWebSocketClient && len(t.Fields) > 0 {
 		return t.Fields[1:]
 	}
+	if t.IsXHR && len(t.Fields) > 2 {
+		return t.Fields[3:]
+	}
 	return t.Fields
 }
 
-// RequestType returns http.listen()'s Request object type: a plain heap
-// object (readable via the ordinary object field-access path, plus one
+// RequestType returns http.listen()'s request object type — spelled
+// `HttpRequest` in source, not `Request` (TDD-00040 freed that name up for
+// the real client-side Request class, FetchRequestType, below): a plain
+// heap object (readable via the ordinary object field-access path, plus one
 // dispatched method — `.bodyBytes(): ArrayBuffer`, TDD-00026/ADR-00106)
 // whose fields are built by buildHTTPDispatcher, not by user code.
 // query/headers are Map<string,string> — reading them (.get(), .has(),
@@ -973,8 +1075,14 @@ func ResolveTypeName(name string) Type {
 		return TypeDate
 	case "Response":
 		return ResponseType()
-	case "Request":
+	case "HttpRequest":
 		return RequestType()
+	case "Request":
+		return FetchRequestType()
+	case "Headers":
+		return HeadersType()
+	case "XMLHttpRequest":
+		return XMLHttpRequestType()
 	case "URL":
 		return URLType()
 	case "URLSearchParams":

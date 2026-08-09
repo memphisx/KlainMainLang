@@ -115,6 +115,12 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewEventSourceExpression(ex)
 	case *ast.NewWebSocketExpression:
 		return e.emitNewWebSocketClientExpression(ex)
+	case *ast.NewHeadersExpression:
+		return e.emitNewHeadersExpression(ex)
+	case *ast.NewRequestExpression:
+		return e.emitNewRequestExpression(ex)
+	case *ast.NewXMLHttpRequestExpression:
+		return e.emitNewXMLHttpRequestExpression(ex)
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }

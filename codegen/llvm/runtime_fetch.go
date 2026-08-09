@@ -522,16 +522,74 @@ notfound:
   ret i64 -1
 }`)
 
-	// __kml_pending_finish_settled(ptr pending) -> {i1 failed, i64 status,
-	// ptr body, ptr reasonMsg, i64 bodyLen}: a non-throwing sibling of
-	// __kml_pending_finish, used only by Promise.allSettled, which by
-	// definition must not abort on an individual member's transport
-	// failure. On failure, reasonMsg is the same curl_easy_strerror() string
-	// __kml_pending_finish's neterror block already throws with — codegen
-	// (emit_promise.go) wraps it into a real Error object itself (matching
-	// emitNewError's own construction), rather than this function returning
-	// an already-built Error, keeping this runtime primitive's own surface
-	// C-ABI-plain. bodyLen is 0 on failure (no body was ever received).
+	e.ensurePendingFinishSettled()
+
+	// __kml_await_group_wait(ptr group) -> void: structural clone of
+	// __kml_await_fetch's checkloop/maybeyield/doyield/busyspin shape above,
+	// just polling __kml_group_satisfied instead of a single pending's own
+	// done flag, and parking on the connection's pendingGroup field (index
+	// 4) instead of pendingFetch (index 3) when yielding. No return value —
+	// the caller already holds %group and re-derives whatever it needs
+	// (winner index via __kml_first_done_index, per-member results via
+	// __kml_pending_finish/__kml_pending_finish_settled) once this returns.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_await_group_wait(ptr %%group) {
+entry:
+  %%runningp = alloca i32, align 4
+  br label %%checkloop
+
+checkloop:
+  %%sat = call i1 @__kml_group_satisfied(ptr %%group)
+  br i1 %%sat, label %%finish, label %%maybeyield
+
+maybeyield:
+  %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %%onfiber = icmp sge i64 %%curidx, 0
+  br i1 %%onfiber, label %%doyield, label %%busyspin
+
+doyield:
+  %%conndata = load ptr, ptr @__kml_conn_data, align 8
+  %%selfslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%conndata, i64 %%curidx
+  %%pg_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 4
+  store ptr %%group, ptr %%pg_p, align 8
+  %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
+  %%ctxptr = load ptr, ptr %%ctx_p, align 8
+  call i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
+  store ptr null, ptr %%pg_p, align 8
+  br label %%checkloop
+
+busyspin:
+  %%multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
+  call void @__kml_curl_drain_messages()
+  br label %%checkloop
+
+finish:
+  ret void
+}`))
+}
+
+// ensurePendingFinishSettled declares __kml_pending_finish_settled(ptr
+// pending) -> {i1 failed, i64 status, ptr body, ptr reasonMsg, i64
+// bodyLen}: a non-throwing sibling of __kml_pending_finish. Originally
+// built only for Promise.allSettled (which by definition must not abort on
+// an individual member's transport failure) — factored out of
+// ensurePromiseCombinators into its own ensure*() so XMLHttpRequest.send()
+// (TDD-00040, emit_xhr.go's ensureFetchAwaitSettled below) can reuse it
+// too without pulling in the group-wait machinery a program using XHR but
+// never Promise.all/.race/.allSettled has no use for. On failure,
+// reasonMsg is the same curl_easy_strerror() string __kml_pending_finish's
+// neterror block already throws with — the caller decides what to do with
+// it (emit_promise.go wraps it into a real Error object for
+// .allSettled; emit_xhr.go's send() surfaces it by firing .onerror
+// instead). bodyLen is 0 on failure (no body was ever received).
+func (e *Emitter) ensurePendingFinishSettled() {
+	if e.usedPendingFinishSettled {
+		return
+	}
+	e.usedPendingFinishSettled = true
+	e.ensureFetch()
+
 	e.emitGlobal(`
 define { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %pending) {
 entry:
@@ -581,24 +639,40 @@ retdone:
   %ro5 = insertvalue { i1, i64, ptr, ptr, i64 } %ro4, i64 %bodylenfinal, 4
   ret { i1, i64, ptr, ptr, i64 } %ro5
 }`)
+}
 
-	// __kml_await_group_wait(ptr group) -> void: structural clone of
-	// __kml_await_fetch's checkloop/maybeyield/doyield/busyspin shape above,
-	// just polling __kml_group_satisfied instead of a single pending's own
-	// done flag, and parking on the connection's pendingGroup field (index
-	// 4) instead of pendingFetch (index 3) when yielding. No return value —
-	// the caller already holds %group and re-derives whatever it needs
-	// (winner index via __kml_first_done_index, per-member results via
-	// __kml_pending_finish/__kml_pending_finish_settled) once this returns.
+// ensureFetchAwaitSettled declares __kml_await_fetch_settled(ptr pending)
+// -> {i1, i64, ptr, ptr, i64} (TDD-00040): a structural clone of
+// __kml_await_fetch's own checkloop/maybeyield/doyield/busyspin loop above
+// — same fiber-yield-if-possible, busy-spin-otherwise waiting behavior,
+// including yielding a connection-handler fiber exactly like `await
+// fetch(...)` already does — except it finishes via
+// __kml_pending_finish_settled instead of the throwing
+// __kml_pending_finish. This is XMLHttpRequest.send()'s entire transfer
+// mechanism (emit_xhr.go): send() looks synchronous from TS code, but is
+// built on the exact same non-blocking primitive fetch() itself uses, and
+// never throws on a network failure (real XMLHttpRequest doesn't either —
+// it fires .onerror instead, which is exactly what the {i1 failed, ...}
+// result lets emit_xhr.go's codegen branch on directly).
+func (e *Emitter) ensureFetchAwaitSettled() {
+	if e.usedFetchAwaitSettled {
+		return
+	}
+	e.usedFetchAwaitSettled = true
+	e.ensureFetchAsync()
+	e.ensurePendingFinishSettled()
+
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_await_group_wait(ptr %%group) {
+define { i1, i64, ptr, ptr, i64 } @__kml_await_fetch_settled(ptr %%pending) {
 entry:
   %%runningp = alloca i32, align 4
   br label %%checkloop
 
 checkloop:
-  %%sat = call i1 @__kml_group_satisfied(ptr %%group)
-  br i1 %%sat, label %%finish, label %%maybeyield
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%finish, label %%maybeyield
 
 maybeyield:
   %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
@@ -608,12 +682,12 @@ maybeyield:
 doyield:
   %%conndata = load ptr, ptr @__kml_conn_data, align 8
   %%selfslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%conndata, i64 %%curidx
-  %%pg_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 4
-  store ptr %%group, ptr %%pg_p, align 8
+  %%pf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 3
+  store ptr %%pending, ptr %%pf_p, align 8
   %%ctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%selfslot, i32 0, i32 1
   %%ctxptr = load ptr, ptr %%ctx_p, align 8
   call i32 @swapcontext(ptr %%ctxptr, ptr @__kml_main_ctx)
-  store ptr null, ptr %%pg_p, align 8
+  store ptr null, ptr %%pf_p, align 8
   br label %%checkloop
 
 busyspin:
@@ -623,6 +697,7 @@ busyspin:
   br label %%checkloop
 
 finish:
-  ret void
+  %%raw = call { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %%pending)
+  ret { i1, i64, ptr, ptr, i64 } %%raw
 }`))
 }

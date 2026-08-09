@@ -33,7 +33,7 @@ setTimeout(() => {
 
 console.log('listening on :8083 (HTTP + WebSocket upgrade)')
 
-http.listen(8083, (req: Request): Res => {
+http.listen(8083, (req: HttpRequest): Res => {
   return { status: 200, body: 'plain HTTP: ' + req.method + ' ' + req.path }
 }, {
   ws: (socket: WSConnection) => {

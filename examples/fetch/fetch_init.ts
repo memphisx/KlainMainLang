@@ -7,10 +7,13 @@
 // real network access and gives deterministic results.
 //
 // init is any value with some subset of method: string /
-// headers: Map<string,string> / body: string fields — no Request/Headers
-// class exists, matching how this compiler already represents every other
-// bag of string headers (http.listen's req.headers, a handler's own
-// optional response headers field) as a plain Map<string,string>.
+// headers: Map<string,string> | Headers / body: string fields — a plain
+// object works fine here with no Request/Headers class needed, matching how
+// this compiler already represents every other bag of string headers
+// (http.listen's req.headers, a handler's own optional response headers
+// field) as a plain Map<string,string>. Real Request/Headers classes also
+// exist (TDD-00040) for when you want them — see
+// examples/fetch/fetch_request_headers.ts.
 
 // ── a POST with a JSON body ─────────────────────────────────────────────────
 const posted = await fetch('http://127.0.0.1:8765/post', {
