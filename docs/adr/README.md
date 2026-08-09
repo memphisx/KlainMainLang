@@ -174,3 +174,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00134](ADR-00134.md) | True per-file module scope via mangled internal names | Extends [ADR-00022](ADR-00022.md). Implements [TDD-00041](../tdd/TDD-00041.md) |
 | [00135](ADR-00135.md) | `export default`, default imports, and namespace imports | Extends [ADR-00022](ADR-00022.md), [ADR-00134](ADR-00134.md). Implements [TDD-00042](../tdd/TDD-00042.md) |
 | [00136](ADR-00136.md) | General union types beyond `T \| null` (V1: scalar members) | Extends [ADR-00008](ADR-00008.md). Implements [TDD-00043](../tdd/TDD-00043.md) |
+| [00137](ADR-00137.md) | `process.stdout.write(s)` / `process.stderr.write(s)` | |

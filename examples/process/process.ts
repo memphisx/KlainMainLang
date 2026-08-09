@@ -75,6 +75,15 @@ try {
     console.log("caught: no such process")
 }
 
+// --- process.stdout.write / process.stderr.write ---
+// Raw writes with no auto-appended trailing newline, unlike console.log/
+// .error — useful for a progress indicator or assembling one line from
+// several pieces.
+process.stdout.write("building")
+process.stdout.write("...")
+process.stdout.write(" done\n")
+process.stderr.write("[warn] this goes to stderr, not stdout\n")
+
 // --- process.exit ---
 console.log("done")
 process.exit(0)

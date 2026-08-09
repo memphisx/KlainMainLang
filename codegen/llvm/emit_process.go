@@ -216,3 +216,31 @@ func (e *Emitter) emitProcessKill(args []ast.Expression, pos ast.Pos) (Value, er
 	e.emitInstr(fmt.Sprintf("call void @__kml_process_kill(i64 %s, i64 %s)", pidVal.Ref, sigRef))
 	return Value{Ty: TypeVoid}, nil
 }
+
+// emitProcessStreamWrite implements process.stdout.write(s) / process.stderr
+// .write(s): a raw write with no auto-appended trailing newline, unlike
+// console.log/.error (emit_call_console.go). fd 1 goes through buffered
+// printf, matching console.log's own fd=1 convention (never dprintf on fd 1:
+// mixing a raw fd write with stdio's own buffered printf on the same
+// descriptor risks interleaving output out of order against any console.log
+// calls elsewhere in the same program); fd 2 goes through unbuffered
+// dprintf, matching console.error's own fd=2 convention.
+func (e *Emitter) emitProcessStreamWrite(args []ast.Expression, streamName string, fd int, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.%s.write takes exactly 1 argument (s)", pos.Line, pos.Col, streamName)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	val = e.coerce(val, TypePtr)
+	fmtPtr := e.internString("%s")
+	if fd == 2 {
+		e.ensureDprintf()
+		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtPtr, val.Ref))
+	} else {
+		e.ensurePrintf()
+		e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtPtr, val.Ref))
+	}
+	return Value{Ty: TypeVoid}, nil
+}

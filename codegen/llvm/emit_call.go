@@ -257,6 +257,20 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessOn(ex.Args, ex.GetPos())
 			}
 		}
+		// process.stdout.write(s) / process.stderr.write(s): a nested
+		// two-level member chain (process.stdout is a pseudo-namespace, not
+		// a real bindable value), so this needs its own shape check rather
+		// than fitting the single-level `id.Name == "process"` switch above.
+		if inner, ok := mem.Object.(*ast.MemberExpression); ok && mem.Property == "write" {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" {
+				switch inner.Property {
+				case "stdout":
+					return e.emitProcessStreamWrite(ex.Args, "stdout", 1, ex.GetPos())
+				case "stderr":
+					return e.emitProcessStreamWrite(ex.Args, "stderr", 2, ex.GetPos())
+				}
+			}
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "fs" {
 			switch mem.Property {
 			case "readFileSync":

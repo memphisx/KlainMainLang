@@ -275,3 +275,64 @@ func TestE2EProcessKillWrongArgCountRejected(t *testing.T) {
 		t.Fatal("expected a compile error for process.kill() with no arguments, got none")
 	}
 }
+
+// --- process.stdout.write / process.stderr.write ---
+
+func TestE2EProcessStdoutWriteNoAutoNewline(t *testing.T) {
+	stdout, _ := compileAndRunCaptureStderr(t, `
+process.stdout.write("a")
+process.stdout.write("b")
+process.stdout.write("c\n")
+`)
+	if stdout != "abc\n" {
+		t.Errorf("stdout: got %q, want %q", stdout, "abc\n")
+	}
+}
+
+func TestE2EProcessStderrWriteNoAutoNewline(t *testing.T) {
+	_, stderr := compileAndRunCaptureStderr(t, `
+process.stderr.write("x")
+process.stderr.write("y")
+`)
+	if stderr != "xy" {
+		t.Errorf("stderr: got %q, want %q", stderr, "xy")
+	}
+}
+
+func TestE2EProcessStdoutWriteDoesNotGoToStderr(t *testing.T) {
+	stdout, stderr := compileAndRunCaptureStderr(t, `process.stdout.write("only-stdout")`)
+	if stdout != "only-stdout" {
+		t.Errorf("stdout: got %q, want %q", stdout, "only-stdout")
+	}
+	if stderr != "" {
+		t.Errorf("stderr: got %q, want empty", stderr)
+	}
+}
+
+func TestE2EProcessStdoutWriteInterleavesWithConsoleLog(t *testing.T) {
+	// Both go through buffered stdio on fd 1 (emitProcessStreamWrite's own
+	// doc comment explains why process.stdout.write must use printf, not
+	// dprintf, for exactly this reason) so source order is preserved.
+	stdout, _ := compileAndRunCaptureStderr(t, `
+process.stdout.write("before-")
+console.log("logged")
+process.stdout.write("after")
+`)
+	if stdout != "before-logged\nafter" {
+		t.Errorf("stdout: got %q, want %q", stdout, "before-logged\nafter")
+	}
+}
+
+func TestE2EProcessStdoutWriteWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`process.stdout.write()`)
+	if err == nil {
+		t.Fatal("expected a compile error for process.stdout.write() with no arguments, got none")
+	}
+}
+
+func TestE2EProcessStderrWriteWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`process.stderr.write("a", "b")`)
+	if err == nil {
+		t.Fatal("expected a compile error for process.stderr.write with 2 arguments, got none")
+	}
+}

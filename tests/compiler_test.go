@@ -412,6 +412,24 @@ func compileAndRunExpectExit(t *testing.T, src string) (string, int) {
 	return strings.TrimRight(stdout.String(), "\n"), exitCode
 }
 
+// compileAndRunCaptureStderr is like compileAndRun but returns stdout and
+// stderr separately (untrimmed) rather than merging or discarding either —
+// needed for asserting on raw, no-auto-newline output from
+// process.stdout.write/process.stderr.write, where trailing-newline
+// trimming would hide the exact bug this feature exists to avoid.
+func compileAndRunCaptureStderr(t *testing.T, src string) (stdout, stderr string) {
+	t.Helper()
+	binFile := buildBinary(t, src)
+	cmd := exec.Command(binFile)
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 func assertOutput(t *testing.T, src, want string) {
 	t.Helper()
 	compareLines(t, compileAndRun(t, src), want)
