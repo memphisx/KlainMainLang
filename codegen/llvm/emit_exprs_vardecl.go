@@ -157,13 +157,13 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.NewExpression:
 			if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
-			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == 1 {
+			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == len(genDecl.TypeParams) {
 				// Pure lookup only (see genericClassInstanceType's doc
 				// comment) — the real, memoized instantiation still happens
 				// exactly once, from emitExpr(v.Init) below via
 				// emitNewExpression.
-				concrete := e.resolveType(init.TypeArgs[0])
-				if instTy, err := e.genericClassInstanceType(genDecl, concrete); err == nil {
+				subs := e.buildTypeArgSubs(genDecl.TypeParams, init.TypeArgs)
+				if instTy, err := e.genericClassInstanceType(genDecl, subs); err == nil {
 					ty = instTy
 				}
 			}

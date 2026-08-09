@@ -993,7 +993,34 @@ scannext:
 
 scandone:
   %foundbest = load i64, ptr %besti, align 8
-  %havetimer = icmp ne i64 %foundbest, -1
+  %havetimer_js = icmp ne i64 %foundbest, -1
+  ; Stage 3 bug fix (see __kml_eventsource_next_reconnect_ms's own doc
+  ; comment, runtime_eventsource.go): a waiting-to-reconnect EventSource's
+  ; own deadline is pure runtime state, never entered into
+  ; @__kml_timer_data — without folding it into %bestfire/%havetimer here
+  ; too, a program with no other JS timer to incidentally bound the wait
+  ; would block in select() with a NULL timeout forever, never live long
+  ; enough to reach the reconnect deadline __kml_eventsource_scan itself
+  ; checks right after select() returns (checkes below).
+  %esreconnectms = call i64 @__kml_eventsource_next_reconnect_ms()
+  %hasesreconnect = icmp sge i64 %esreconnectms, 0
+  br i1 %hasesreconnect, label %esconsiderreconnect, label %afteresreconnect
+
+esconsiderreconnect:
+  %esreconnectns = mul i64 %esreconnectms, 1000000
+  br i1 %havetimer_js, label %escomparefire, label %estakefire
+
+escomparefire:
+  %curbestfire_es = load i64, ptr %bestfire, align 8
+  %esbetter = icmp slt i64 %esreconnectns, %curbestfire_es
+  br i1 %esbetter, label %estakefire, label %afteresreconnect
+
+estakefire:
+  store i64 %esreconnectns, ptr %bestfire, align 8
+  br label %afteresreconnect
+
+afteresreconnect:
+  %havetimer = or i1 %havetimer_js, %hasesreconnect
   %listenfd = load i32, ptr @__kml_listen_fd, align 4
   %haslistener = icmp sge i32 %listenfd, 0
   ; TDD-00027: http.close() clears @__kml_listen_fd immediately but leaves
@@ -1174,11 +1201,30 @@ skipmergecurlfds:
   %maxfdv = load i32, ptr %maxfd, align 4
   %nfds = add i32 %maxfdv, 1
 
-  ; TDD-00039 Stage 3: %forcezero (set above by wscsetloop) routes into
-  ; timeoutpath even with no real timer pending — %bestfire's own
-  ; already-existing default of 0 (timerscan, never overwritten when no
-  ; real timer exists) makes timeoutpath's wait computation naturally
-  ; collapse to zero in that case, so no other change is needed there.
+  ; Stage 3 bug fix (see __kml_eventsource_has_pending_work's own doc
+  ; comment, runtime_eventsource.go): an EventSource reconnect can have its
+  ; response already fully buffered by the time this iteration reaches
+  ; select() (delivered by __kml_eventsource_connect's own synchronous
+  ; curl_multi_perform, entirely outside this select()-then-perform cycle) —
+  ; with no *new* socket readability event ever coming for already-drained
+  ; bytes, select() blocking on this iteration's real fdset alone can wait
+  ; forever for data that already arrived. Same %forcezero mechanism
+  ; wscsetloop above already established for the equivalent WebSocket-client
+  ; hazard.
+  %eshaswork = call i1 @__kml_eventsource_has_pending_work()
+  br i1 %eshaswork, label %esmarkforce, label %esafterforce
+
+esmarkforce:
+  store i1 1, ptr %forcezero, align 1
+  br label %esafterforce
+
+esafterforce:
+  ; TDD-00039 Stage 3: %forcezero (set above by wscsetloop, or just now by
+  ; the EventSource check) routes into timeoutpath even with no real timer
+  ; pending — %bestfire's own already-existing default of 0 (timerscan,
+  ; never overwritten when no real timer exists) makes timeoutpath's wait
+  ; computation naturally collapse to zero in that case, so no other change
+  ; is needed there.
   %needimmediate = load i1, ptr %forcezero, align 1
   %usetimer = or i1 %havetimer, %needimmediate
   br i1 %usetimer, label %timeoutpath, label %notimeoutpath
@@ -1359,7 +1405,13 @@ rscannext:
   br label %rscanloop
 
 checktimerfire:
-  br i1 %havetimer, label %checkdue, label %outerloop
+  ; %havetimer_js (not the merged %havetimer, which also goes true whenever
+  ; only an EventSource reconnect deadline bounded the wait, see scandone
+  ; above) — %besti below indexes into @__kml_timer_data and is -1 whenever
+  ; no real JS timer exists, so branching on the merged flag here would
+  ; index that array at -1 the moment a reconnect-only wait's deadline
+  ; comes due.
+  br i1 %havetimer_js, label %checkdue, label %outerloop
 
 checkdue:
   %targetfire2 = load i64, ptr %bestfire, align 8

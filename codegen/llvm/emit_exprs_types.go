@@ -347,9 +347,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// emission, no e.classes registration): inferExprType must never
 		// trigger real emission as a side effect of merely asking "what
 		// type is this."
-		if genDecl, ok := e.genericClasses[ex.ClassName]; ok && len(ex.TypeArgs) == 1 {
-			concrete := e.resolveType(ex.TypeArgs[0])
-			if ty, err := e.genericClassInstanceType(genDecl, concrete); err == nil {
+		if genDecl, ok := e.genericClasses[ex.ClassName]; ok && len(ex.TypeArgs) == len(genDecl.TypeParams) {
+			subs := e.buildTypeArgSubs(genDecl.TypeParams, ex.TypeArgs)
+			if ty, err := e.genericClassInstanceType(genDecl, subs); err == nil {
 				return ty
 			}
 		}

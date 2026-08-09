@@ -40,7 +40,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | JSON | 9/11, ~82% | [JSON.md](JSON.md) | No nested-object `JSON.parse`; array-typed interface fields fail to compile instead of a clean rejection (known limitation) |
 | console | 11/12, ~92% | [CONSOLE.md](CONSOLE.md) | No `console.table()` |
 | Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` won't be implemented |
-| Type system features | 16/23, ~70% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics limited to a single unconstrained type parameter, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md)); no intersection/tuple/mapped types |
+| Type system features | 16/23, ~70% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics support any number of unconstrained type parameters, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md)); no intersection/tuple/mapped types |
 | Classes / OOP | 14/15, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Real JS/TS `#x` runtime-private field syntax (a different mechanism from the `private` keyword modifier — scoped separately, see [TDD-00021](../tdd/TDD-00021.md)); no user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design) |
 | Modules | 4/13, ~31% | [MODULES.md](MODULES.md) | Whole-program compile only — no per-file scoping, no `export default`/namespace imports/re-exports; no dynamic `import()`/`import.meta` |
 
@@ -142,7 +142,6 @@ What's left below are the genuine orphans: not-started or partially-implemented 
 | [00032](../tdd/TDD-00032.md) Native Library Bindings / GUI | Not Started, bootstrapping placeholder | Needs general FFI first |
 | [00033](../tdd/TDD-00033.md) Direct Hardware/Framebuffer Access | Not Started, bootstrapping placeholder | Same FFI-adjacent prerequisite gap as 00032; Linux-only by nature |
 | [00036](../tdd/TDD-00036.md) Freestanding Microcontroller Target (Raspberry Pi Pico) | Not Started | Deliberately low priority; minimal-core scope only (no networking/storage/peripheral parity) |
-| [00037](../tdd/TDD-00037.md) Multiple Type Parameters for User-Defined Generics (`<K, V>`) | Not Started | Extends TDD-00010's single-type-parameter scope; unconstrained only |
 
 ---
 
@@ -180,4 +179,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-08 — Real `Request`/`Headers` classes and `XMLHttpRequest` shipped, completing [TDD-00040](../tdd/TDD-00040.md) and bringing Networking to 6/6 — [ADR-00130](../adr/ADR-00130.md), [ADR-00131](../adr/ADR-00131.md); `http.listen`'s server-side request type annotation is now `HttpRequest`, not `Request` (freed up for the new client-side class).*
+*Last updated: 2026-08-09 — Fixed two `EventSource` auto-reconnect hangs in the event loop's own `select()` wait (one intermittent, one deterministic with no other timer in the program) — [ADR-00133](../adr/ADR-00133.md).*

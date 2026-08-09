@@ -1341,11 +1341,11 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		// mangled name — so a construction site against the bare generic
 		// name always misses the lookup above on its first-ever use.
 		if genDecl, isGeneric := e.genericClasses[ex.ClassName]; isGeneric {
-			if len(ex.TypeArgs) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly one explicit type argument (e.g. new %s<number>(...)) — inference isn't supported for class construction (see docs/tdd/TDD-00010.md)", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, ex.ClassName)
+			if len(ex.TypeArgs) != len(genDecl.TypeParams) {
+				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly %d explicit type argument(s) (e.g. new %s<%s>(...)) — inference isn't supported for class construction (see docs/tdd/TDD-00010.md)", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(genDecl.TypeParams), ex.ClassName, strings.Join(genDecl.TypeParams, ", "))
 			}
-			concrete := e.resolveType(ex.TypeArgs[0])
-			mangled, err := e.instantiateGenericClass(genDecl, concrete)
+			subs := e.buildTypeArgSubs(genDecl.TypeParams, ex.TypeArgs)
+			mangled, err := e.instantiateGenericClass(genDecl, subs)
 			if err != nil {
 				return Value{}, err
 			}

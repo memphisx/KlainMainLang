@@ -1214,6 +1214,7 @@ type TypeAnnotation struct {
 	Fields      []AnnotField
 	ElemType    *TypeAnnotation // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
 	KeyType     *TypeAnnotation // non-nil only for Map<K,V> — the key type K
+	TypeArgs    []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
 	IsFuncType  bool
 	FuncParams  []TypeAnnotation // param types for function type annotations
 	FuncRetType *TypeAnnotation  // return type for function type annotations

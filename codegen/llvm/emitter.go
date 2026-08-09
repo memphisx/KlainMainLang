@@ -474,12 +474,13 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		valTy := e.resolveType(ta.ElemType)
 		return MapType(keyTy, valTy)
 	}
-	// A registered generic interface (TDD-00010 V1), e.g. Box<number> — must
-	// also be checked before the generic ElemType fallback below, same
-	// reasoning as Promise/Map/Set/EventEmitter above.
-	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && ta.ElemType != nil {
-		concrete := e.resolveType(ta.ElemType)
-		return e.instantiateGenericInterface(genDecl, concrete)
+	// A registered generic interface (TDD-00010 V1 / TDD-00037), e.g.
+	// Box<number> or Box<number, string> — must also be checked before the
+	// generic ElemType fallback below, same reasoning as
+	// Promise/Map/Set/EventEmitter above.
+	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) > 0 {
+		subs := e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs)
+		return e.instantiateGenericInterface(genDecl, subs)
 	}
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
@@ -783,10 +784,13 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 			// signature happens to use TypeAny, with no new dispatch code
 			// needed anywhere else.
 			if fd.Erased {
-				typeParam := fd.TypeParams[0]
-				sig := e.buildGenericParamSig(fd.Params, typeParam, TypeAny)
+				subs := make(map[string]Type, len(fd.TypeParams))
+				for _, tp := range fd.TypeParams {
+					subs[tp] = TypeAny
+				}
+				sig := e.buildGenericParamSig(fd.Params, subs)
 				if fd.ReturnType != nil {
-					sig.RetType = e.substituteGenericType(fd.ReturnType, typeParam, TypeAny)
+					sig.RetType = e.substituteGenericType(fd.ReturnType, subs)
 				} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, sig.ParamTypes); ok {
 					sig.RetType = inferred
 				} else {

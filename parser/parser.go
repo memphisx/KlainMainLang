@@ -97,31 +97,34 @@ func (p *Parser) expectGT(context string) error {
 	return fmt.Errorf("%d:%d: expected '>' to close %s", t.Line, t.Col, context)
 }
 
-// parseTypeParamList parses a declaration-site `<T>` type-parameter list —
-// shared by function/interface/class declarations (TDD-00010 V1). Assumes
-// the caller has already checked the current token is '<'. V1 supports
-// exactly one, unconstrained type parameter; a second one (`<T, U>`) or a
-// constraint (`<T extends Base>`) produces a clear error rather than being
-// silently mis-parsed — both are explicitly out of V1's scope (see
-// docs/tdd/TDD-00010.md's Open Questions).
+// parseTypeParamList parses a declaration-site `<T>` or `<K, V>`
+// type-parameter list — shared by function/interface/class declarations
+// (TDD-00010 V1, extended to N parameters by TDD-00037). Assumes the caller
+// has already checked the current token is '<'. Type parameters remain
+// unconstrained — `<T extends Base>` produces a clear error rather than
+// being silently mis-parsed, still out of scope (see docs/tdd/TDD-00010.md's
+// and TDD-00037's Open Questions).
 func (p *Parser) parseTypeParamList(context string) ([]string, error) {
 	p.advance() // consume '<'
-	nameTok, err := p.expect(lexer.IDENT)
-	if err != nil {
-		return nil, err
-	}
-	if p.check(lexer.COMMA) {
-		t := p.peek()
-		return nil, fmt.Errorf("%d:%d: multiple type parameters on %s are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, context)
-	}
-	if p.check(lexer.EXTENDS) {
-		t := p.peek()
-		return nil, fmt.Errorf("%d:%d: type parameter constraints on %s are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, context)
+	var names []string
+	for {
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, nameTok.Literal)
+		if p.check(lexer.EXTENDS) {
+			t := p.peek()
+			return nil, fmt.Errorf("%d:%d: type parameter constraints on %s are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, context)
+		}
+		if !p.match(lexer.COMMA) {
+			break
+		}
 	}
 	if err := p.expectGT(context); err != nil {
 		return nil, err
 	}
-	return []string{nameTok.Literal}, nil
+	return names, nil
 }
 
 func (p *Parser) consumeSemicolon() {

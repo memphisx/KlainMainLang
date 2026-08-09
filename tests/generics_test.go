@@ -98,13 +98,6 @@ console.log(identity(f));
 	}
 }
 
-func TestE2EGenericMultipleTypeParamsRejected(t *testing.T) {
-	_, err := parseAndCompile(`function pair<T, U>(a: T, b: U): T { return a; }`)
-	if err == nil {
-		t.Fatal("expected a parse error for a multi-parameter generic function (out of V1 scope), got none")
-	}
-}
-
 func TestE2EGenericInterfaceMultipleInstantiations(t *testing.T) {
 	assertOutput(t, `
 interface Box<T> {
@@ -282,5 +275,112 @@ function add<T>(a: T, b: T): T { return a + b; }
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for arithmetic on an erased T, got none")
+	}
+}
+
+// --- Multiple type parameters: <K, V> (TDD-00037) ---
+
+func TestE2EGenericFunctionMultipleTypeParams(t *testing.T) {
+	assertOutput(t, `
+function firstOf<K, V>(k: K, v: V): K {
+  return k;
+}
+console.log(firstOf(1, "x"));
+console.log(firstOf("y", true));
+`, "1\ny")
+}
+
+// Each type parameter must infer independently from its own designated
+// parameter position — a mangled name mixing number and string confirms K
+// and V weren't accidentally unified to the same concrete type.
+func TestE2EGenericFunctionMultipleTypeParamsMangledNameOrder(t *testing.T) {
+	ir, err := parseAndCompile(`
+function firstOf<K, V>(k: K, v: V): K {
+  return k;
+}
+console.log(firstOf(1, "x"));
+`)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if !strings.Contains(ir, "@firstOf__num_str(") {
+		t.Fatalf("expected a declared-order-mangled instantiation @firstOf__num_str, got:\n%s", ir)
+	}
+}
+
+// A type parameter with no inferable parameter position must be named
+// specifically in the error, not just "a" type argument — the N-ary
+// generalization of the existing single-param rejection.
+func TestE2EGenericFunctionUninferableTypeParamNamed(t *testing.T) {
+	_, err := parseAndCompile(`
+function make<K, V>(k: K): K {
+  return k;
+}
+console.log(make(1));
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an uninferable type parameter 'V', got none")
+	}
+	if !strings.Contains(err.Error(), "'V'") {
+		t.Fatalf("expected the error to name the specific uninferable type parameter 'V', got: %v", err)
+	}
+}
+
+func TestE2EGenericInterfaceMultipleTypeParams(t *testing.T) {
+	assertOutput(t, `
+interface Pair<K, V> {
+  first: K;
+  second: V;
+}
+const p: Pair<number, string> = { first: 1, second: "a" };
+console.log(p.first);
+console.log(p.second);
+`, "1\na")
+}
+
+func TestE2EGenericClassMultipleTypeParams(t *testing.T) {
+	assertOutput(t, `
+class Pair<K, V> {
+  first: K;
+  second: V;
+  constructor(a: K, b: V) {
+    this.first = a;
+    this.second = b;
+  }
+}
+const p = new Pair<number, string>(1, "a");
+console.log(p.first);
+console.log(p.second);
+`, "1\na")
+}
+
+func TestE2EGenericClassMultipleTypeParamsArityMismatchRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class Pair<K, V> {
+  first: K;
+  second: V;
+  constructor(a: K, b: V) { this.first = a; this.second = b; }
+}
+const p = new Pair<number>(1);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error constructing a 2-type-param generic class with only one type argument, got none")
+	}
+}
+
+func TestE2EErasedGenericFunctionMultipleTypeParams(t *testing.T) {
+	ir, err := parseAndCompile(`
+/** @erased */
+function firstOf<K, V>(k: K, v: V): K {
+  return k;
+}
+console.log(firstOf(1, "x"));
+console.log(firstOf("y", true));
+`)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if strings.Contains(ir, "@firstOf__") {
+		t.Fatalf("expected no V1-style mangled instantiation of an @erased function, got one\n%s", ir)
 	}
 }

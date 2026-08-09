@@ -172,6 +172,7 @@ func (e *Emitter) ensureEventSourceRuntime() {
 	e.emitGlobal("@__kml_es_cap = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_es_active = internal global i64 0, align 8")
 
+
 	// Fixed string constants the record parser/scan need — interned once
 	// here (Go-level) and embedded by name into the raw IR below, the same
 	// pattern ensureFetchAsync's own __kml_pending_finish uses for its
@@ -425,6 +426,159 @@ esappend:
   store i64 %newactive, ptr @__kml_es_active, align 8
 
   ret ptr %entryptr
+}`)
+
+	// __kml_eventsource_has_pending_work (Stage 3 bug fix): scans every
+	// non-CLOSED, non-waiting-to-reconnect entry for data libcurl already
+	// delivered but __kml_eventsource_scan hasn't dispatched yet. Needed
+	// because __kml_eventsource_connect (both the original connect and a
+	// reconnect's own call to it) kicks off its transfer with its own
+	// synchronous curl_multi_perform, entirely outside the event loop's
+	// normal select()-then-perform cycle — for a fast/local response, that
+	// one call can fully deliver the whole body into pending->buf (via
+	// __kml_curl_write_cb) or even mark pending->done before this function's
+	// caller ever reaches __kml_event_loop_run's own select() call. Without
+	// this check, the loop had no way to know real, actionable EventSource
+	// work was already sitting there: with no JS timer due and no other
+	// socket activity forthcoming (the arrived bytes were already drained
+	// off the real socket, so there's no *new* readability event left to
+	// wait for), select()'s NULL-timeout notimeoutpath would then block
+	// forever — the buffered "replayed-..." message, and the onmessage
+	// handler's own es.close() that would have unblocked everything, both
+	// permanently stuck behind a select() call with nothing left to wake it.
+	// Found and root-caused via TestE2EEventSourceAutoReconnectReplaysLastEventID
+	// hanging intermittently (locally reproducible in isolation; also seen
+	// timing out CI's whole `go test ./...` run) — see ADR-00133. Mirrors
+	// __kml_wsclient_scan's own %forcezero precedent (runtime_http.go,
+	// TDD-00039 Stage 3) for the exact same underlying hazard: "a
+	// synchronous side channel resolved real work outside select()'s own
+	// wait/wake cycle" is not unique to WebSocket clients.
+	e.emitGlobal(`
+define i1 @__kml_eventsource_has_pending_work() {
+entry:
+  %islot = alloca i64, align 8
+  store i64 0, ptr %islot, align 8
+  br label %loop
+
+loop:
+  %i = load i64, ptr %islot, align 8
+  %len = load i64, ptr @__kml_es_len, align 8
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %notfound
+
+body:
+  %data = load ptr, ptr @__kml_es_data, align 8
+  %slot = getelementptr ptr, ptr %data, i64 %i
+  %ent = load ptr, ptr %slot, align 8
+  %state_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 3
+  %state = load i64, ptr %state_p, align 8
+  %isclosed = icmp eq i64 %state, 2
+  br i1 %isclosed, label %next, label %checkwaiting
+
+checkwaiting:
+  %reconnectat_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 7
+  %reconnectat = load i64, ptr %reconnectat_p, align 8
+  %iswaiting = icmp ne i64 %reconnectat, 0
+  br i1 %iswaiting, label %next, label %checkbuf
+
+checkbuf:
+  %pending_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 0
+  %pending = load ptr, ptr %pending_p, align 8
+  %buf_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  %buf = load ptr, ptr %buf_p, align 8
+  %buflen_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
+  %buflen = load i64, ptr %buflen_p, align 8
+  %consumed_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 2
+  %consumed = load i64, ptr %consumed_p, align 8
+  %hasunconsumed = icmp sgt i64 %buflen, %consumed
+  br i1 %hasunconsumed, label %found, label %checkdone
+
+checkdone:
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
+  %done = load i64, ptr %done_p, align 8
+  %isdone = icmp ne i64 %done, 0
+  br i1 %isdone, label %found, label %next
+
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %islot, align 8
+  br label %loop
+
+found:
+  ret i1 1
+
+notfound:
+  ret i1 0
+}`)
+
+	// __kml_eventsource_next_reconnect_ms (Stage 3 bug fix): returns the
+	// soonest reconnectAtMs deadline among every active, waiting-to-reconnect
+	// entry, or -1 if none is waiting. reconnectAtMs (Stage 3's own
+	// auto-reconnect bookkeeping) is never entered into @__kml_timer_data —
+	// it's pure runtime state, not a JS-visible setTimeout/setInterval — so
+	// without this, __kml_event_loop_run's own select() timeout computation
+	// (built entirely from @__kml_timer_data plus __kml_eventsource_has_
+	// pending_work's own "already-arrived-data" check above) has no way to
+	// know a reconnect is due soon, or at all, whenever nothing else in the
+	// program happens to bound the wait. A reconnecting EventSource in a
+	// program with no other timer, listener, or fetch in flight hung
+	// deterministically on this — found immediately after fixing the
+	// intermittent has_pending_work race above, by testing the exact same
+	// scenario with its incidental setTimeout(...) removed. See ADR-00133.
+	// Only computes the deadline; __kml_eventsource_scan's own dowait/
+	// doreconnect (checked separately, right after select() returns) is
+	// still what actually fires the reconnect once due.
+	e.emitGlobal(`
+define i64 @__kml_eventsource_next_reconnect_ms() {
+entry:
+  %islot = alloca i64, align 8
+  %best = alloca i64, align 8
+  store i64 0, ptr %islot, align 8
+  store i64 -1, ptr %best, align 8
+  br label %loop
+
+loop:
+  %i = load i64, ptr %islot, align 8
+  %len = load i64, ptr @__kml_es_len, align 8
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %exit
+
+body:
+  %data = load ptr, ptr @__kml_es_data, align 8
+  %slot = getelementptr ptr, ptr %data, i64 %i
+  %ent = load ptr, ptr %slot, align 8
+  %state_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 3
+  %state = load i64, ptr %state_p, align 8
+  %isclosed = icmp eq i64 %state, 2
+  br i1 %isclosed, label %next, label %checkwaiting
+
+checkwaiting:
+  %reconnectat_p = getelementptr { ptr, ptr, i64, i64, ptr, ptr, i64, i64, ptr }, ptr %ent, i32 0, i32 7
+  %reconnectat = load i64, ptr %reconnectat_p, align 8
+  %iswaiting = icmp ne i64 %reconnectat, 0
+  br i1 %iswaiting, label %checkbest, label %next
+
+checkbest:
+  %curbest = load i64, ptr %best, align 8
+  %noneyet = icmp slt i64 %curbest, 0
+  br i1 %noneyet, label %takebest, label %compare
+
+compare:
+  %better = icmp slt i64 %reconnectat, %curbest
+  br i1 %better, label %takebest, label %next
+
+takebest:
+  store i64 %reconnectat, ptr %best, align 8
+  br label %next
+
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %islot, align 8
+  br label %loop
+
+exit:
+  %result = load i64, ptr %best, align 8
+  ret i64 %result
 }`)
 
 	e.emitGlobal(`

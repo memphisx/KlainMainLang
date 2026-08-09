@@ -442,3 +442,27 @@ setTimeout(() => {}, 800);
 `, srv.URL)
 	assertOutput(t, src, "first\nreplayed-abc123")
 }
+
+// Same scenario as above but with no setTimeout (or any other timer/
+// listener/fetch) anywhere in the program — deliberately, to catch a real
+// bug ADR-00133 found and fixed: without an unrelated JS timer to
+// incidentally bound select()'s wait, the event loop had two separate gaps
+// (an already-arrived-but-undispatched EventSource response racing ahead of
+// select()'s own readiness check, and a waiting-to-reconnect entry's own
+// deadline never participating in select()'s timeout computation at all)
+// that could each, independently, leave select() blocked on a NULL timeout
+// forever. This is the only test in this file with no setTimeout at all —
+// keep it that way; adding one back would silently stop covering either gap.
+func TestE2EEventSourceAutoReconnectNoOtherTimerInProgram(t *testing.T) {
+	srv := newEventSourceTestServer(t)
+	src := fmt.Sprintf(`
+const es = new EventSource("%s/dropthenretry");
+let count = 0;
+es.onmessage = (ev) => {
+  count = count + 1;
+  console.log(ev.data);
+  if (count == 2) { es.close(); }
+};
+`, srv.URL)
+	assertOutput(t, src, "first\nreplayed-abc123")
+}
