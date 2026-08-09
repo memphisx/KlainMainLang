@@ -2,9 +2,9 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: ~31% (4/13).
+**Coverage**: ~46% (6/13).
 
-**Caveats**: Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` parses the entry file plus everything it transitively imports and merges them into one `*ast.Program` before codegen runs. There is no linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md) and `resolver/resolver.go`'s package doc for the full design. No real per-file scoping yet (all top-level names must be unique across every merged file), no import aliasing, and imported files may not run top-level side-effecting code.
+**Caveats**: Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` parses the entry file plus everything it transitively imports and merges them into one `*ast.Program` before codegen runs. There is no linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md), [ADR-00134](../adr/ADR-00134.md), and `resolver/resolver.go`'s package doc for the full design. Every top-level declaration now has true per-file scope and import aliasing works (see below); imported files still may not run top-level side-effecting code.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -13,8 +13,8 @@
 | Circular imports | ✅ | Supported for the declarations-only case — verified directly with two files calling each other's exported functions |
 | Diamond-shaped import graphs | ✅ | A file imported from multiple places is parsed once and merged once (memoized by absolute path) |
 | Imported (non-entry) files may run top-level side-effecting code | ❌ | **Deliberate V1 scope narrowing, not an oversight** — imported files may only contain declarations (and their own imports); only the entry file's top-level statements execute. Real ES modules run a file's top-level code once, in dependency order, the first time it's imported — that "run once, in order, guard against re-running on cycles" semantics is real design/implementation work of its own, intentionally deferred. **Revisit this later**: build the fuller, real-ES-modules-shaped version, possibly gated behind a compiler flag/configuration so callers can choose between the fast/simple current behavior and full module-execution semantics once both exist. |
-| True per-file module scope (mangled internal names) | ❌ | All top-level declaration names must currently be unique across *every* merged file, not just within one file — there's no real per-file scoping yet, so two unrelated files can't both declare a same-named function/interface/enum if both end up reachable from the same entry file. A real fix needs per-file symbol registries and internal name mangling (sketched in [ADR-00022](../adr/ADR-00022.md)'s Investigation) — bigger than V1's scope. |
-| Import aliasing (`import { a as b }`) | ❌ | Parsed, but rejected with a clear error — no AST-level renaming is attempted (risk of colliding with local shadowing in the importing file) |
+| True per-file module scope (mangled internal names) | ✅ | Every top-level declaration gets a file-private mangled name, and every reference to it is rewritten via a real scope-aware walk — two unrelated files may freely declare the same top-level name. See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md). Binding two different files' exports to the *same local name* in one importing file with no `as` is still rejected (a real conflict, same as real ES modules) |
+| Import aliasing (`import { a as b }`) | ✅ | A direct consequence of the per-file rename mechanism above — `b` is simply bound to the target's mangled name for `a`, no separate rename step. See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md) |
 | `export default` | ❌ | Not implemented |
 | `import * as ns from '...'` (namespace import) | ❌ | Not implemented |
 | Re-exports (`export { x } from './other'`) | ❌ | Not implemented |

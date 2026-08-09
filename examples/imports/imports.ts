@@ -3,9 +3,9 @@
 // This is the whole program's entry point: only this file's top-level
 // statements actually execute. math.ts (imported below) only contributes
 // declarations to the merged program — see its own comments for the exact
-// V1 scope and restrictions (declarations-only imported files, no
-// aliasing, names must be unique across every imported file, relative
-// paths only).
+// scope and restrictions (declarations-only imported files, relative paths
+// only). See scoping.ts/scoping_a.ts/scoping_b.ts in this same directory
+// for true per-file module scope and import aliasing (TDD-00041).
 
 import { add, mul, Point, Direction, squareOf } from './math'
 

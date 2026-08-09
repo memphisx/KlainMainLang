@@ -125,7 +125,12 @@ console.log(foo())
 	}
 }
 
-func TestE2EImportDuplicateNameAcrossFilesRejected(t *testing.T) {
+func TestE2EImportSameLocalNameFromTwoFilesWithoutAliasRejected(t *testing.T) {
+	// TDD-00041: two different files may now freely declare the same
+	// top-level name (see TestE2EImportSameNameDifferentFilesNoCollision
+	// below) — but binding two different files' exports to the very same
+	// local name in one importing file, with no `as` to disambiguate, is
+	// still a real conflict (same as real ES modules) and still rejected.
 	_, err := resolveMultiFile(t, map[string]string{
 		"math.ts": `export function add(a: number, b: number): number { return a + b }`,
 		"dup.ts":  `export function add(a: number, b: number): number { return a - b }`,
@@ -136,8 +141,44 @@ console.log(add(1, 2))
 `,
 	}, "main.ts")
 	if err == nil {
-		t.Fatal("expected a compile error for the same name declared in two different imported files, got none")
+		t.Fatal("expected a compile error for importing two different files' exports under the same local name, got none")
 	}
+}
+
+func TestE2EImportSameNameDifferentFilesNoCollision(t *testing.T) {
+	// TDD-00041: two unrelated files may each privately declare a
+	// same-named helper without colliding — true per-file module scope.
+	assertMultiFileOutput(t, map[string]string{
+		"a.ts": `
+function helper(): string { return "from a" }
+export function useA(): string { return helper() }
+`,
+		"b.ts": `
+function helper(): string { return "from b" }
+export function useB(): string { return helper() }
+`,
+		"main.ts": `
+import { useA } from './a'
+import { useB } from './b'
+console.log(useA())
+console.log(useB())
+`,
+	}, "main.ts", "from a\nfrom b")
+}
+
+func TestE2EImportSameExportedNameFromDifferentFilesViaAliasing(t *testing.T) {
+	// TDD-00041: two files may even both *export* the same name — as long
+	// as an importing file that wants both disambiguates with `as`.
+	assertMultiFileOutput(t, map[string]string{
+		"a.ts": `export function run(): string { return "a" }`,
+		"b.ts": `export function run(): string { return "b" }`,
+		"main.ts": `
+import { run as runA } from './a'
+import { run as runB } from './b'
+console.log(runA())
+console.log(runB())
+`,
+	}, "main.ts", "a\nb")
 }
 
 func TestE2EImportNonexistentModuleRejected(t *testing.T) {
@@ -164,15 +205,15 @@ console.log(x)
 	}
 }
 
-func TestE2EImportAliasingRejected(t *testing.T) {
-	_, err := resolveMultiFile(t, map[string]string{
+func TestE2EImportAliasing(t *testing.T) {
+	// TDD-00041: import aliasing works now — a direct consequence of the
+	// per-file rename mechanism (the local alias just *is* the target's
+	// mangled name inside the importing file).
+	assertMultiFileOutput(t, map[string]string{
 		"math.ts": `export function add(a: number, b: number): number { return a + b }`,
 		"main.ts": `
 import { add as sum } from './math'
 console.log(sum(1, 2))
 `,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error for import aliasing ('as'), which is not yet supported, got none")
-	}
+	}, "main.ts", "3")
 }
