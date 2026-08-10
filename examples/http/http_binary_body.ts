@@ -17,6 +17,8 @@
 // actually happen, e.g. (the \x00 embeds a real null byte in the body):
 //   printf 'AB\x00CD' | curl --data-binary @- http://localhost:8081/echo | xxd
 
+import http from 'http'
+
 interface Res {
   status: number
   body: string

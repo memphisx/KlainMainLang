@@ -121,6 +121,172 @@ func buildBinaryGC(t *testing.T, src string) string {
 	return binFile
 }
 
+// buildBinaryImports is buildBinary's counterpart for source that uses a
+// real `import` statement (TDD-00049's import-gated built-ins among them):
+// resolver.ResolveProgram only ever reads from disk, and only it — never
+// plain parser.Parse, which buildBinary uses — actually consumes/strips
+// ImportDeclaration nodes before codegen runs (see resolver's own package
+// doc). Writing src to a real temp file and resolving it from there is the
+// same thing main.go itself does, just skipped by buildBinary's
+// string-in-memory shortcut for the (much more common) import-free case.
+func buildBinaryImports(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	prog, err := resolver.ResolveProgram(srcFile)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	em := llvm.NewEmitter()
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// buildBinaryGCImports is buildBinaryGC's counterpart for source using a
+// real `import` statement — see buildBinaryImports's doc comment for why
+// this needs to go through resolver.ResolveProgram (a real file on disk)
+// rather than buildBinaryGC's plain parser.Parse(src).
+func buildBinaryGCImports(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	prog, err := resolver.ResolveProgram(srcFile)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	em := llvm.NewEmitter()
+	em.SetMemMode("gc")
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	llFile := filepath.Join(dir, "prog.ll")
+	shimFile := filepath.Join(dir, "gcshim.c")
+	binFile := filepath.Join(dir, "prog")
+
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
+		t.Fatalf("write GC shim: %v", err)
+	}
+
+	cflags, libs, err := llvm.LocateGC()
+	if err != nil {
+		t.Skipf("gc mode: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, shimFile, "-o", binFile}
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
+			t.Skip("libgc/bdw-gc not installed")
+		}
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// compileAndRunImports is compileAndRun's counterpart for source using a
+// real `import` statement — see buildBinaryImports.
+func compileAndRunImports(t *testing.T, src string) string {
+	t.Helper()
+	binFile := buildBinaryImports(t, src)
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return strings.TrimRight(string(result), "\n")
+}
+
+// assertOutputImports is assertOutput's counterpart for source using a real
+// `import` statement — see buildBinaryImports.
+func assertOutputImports(t *testing.T, src, want string) {
+	t.Helper()
+	compareLines(t, compileAndRunImports(t, src), want)
+}
+
+// compileAndRunExpectExitImports is compileAndRunExpectExit's counterpart
+// for source using a real `import` statement — see buildBinaryImports.
+func compileAndRunExpectExitImports(t *testing.T, src string) (string, int) {
+	t.Helper()
+	binFile := buildBinaryImports(t, src)
+	cmd := exec.Command(binFile)
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	err := cmd.Run()
+	exitCode := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return strings.TrimRight(stdout.String(), "\n"), exitCode
+}
+
+// parseAndCompileImports is parseAndCompile's counterpart for source using
+// a real `import` statement — see buildBinaryImports for why this needs a
+// real file on disk and resolver.ResolveProgram rather than a bare
+// parser.Parse(src) call. Used by negative tests asserting a clean
+// compile-time rejection (codegen or resolution) rather than a successful
+// run.
+func parseAndCompileImports(t *testing.T, src string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	prog, err := resolver.ResolveProgram(srcFile)
+	if err != nil {
+		return "", err
+	}
+	em := llvm.NewEmitter()
+	return em.EmitProgram(prog)
+}
+
 // asanOptionsSource overrides ASan's default leak detection off, baked
 // into the binary itself (via ASan's own __asan_default_options() hook, a
 // weak C symbol ASan looks for at startup) rather than left as an

@@ -1,6 +1,6 @@
 # path
 
-> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation. Recognized as a pseudo-namespace, like `Math`/`JSON`/`fs`/`process` — not a real importable module.
+> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation. Import-gated (`import path from 'path'` or `import { join } from 'path'`) — see [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md).
 
 **Coverage**: 100% (8/8) — see [ADR-00081](../adr/ADR-00081.md).
 

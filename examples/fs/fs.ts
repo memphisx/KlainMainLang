@@ -1,8 +1,10 @@
 // fs — synchronous file I/O (readFileSync/writeFileSync/appendFileSync/
 // existsSync/unlinkSync/mkdirSync/rmdirSync/renameSync/copyFileSync/
-// readdirSync). Recognized as a pseudo-namespace, like Math/JSON/process —
-// not a real importable module (there's no `import fs from 'fs'` here, just
-// a global `fs` the compiler special-cases).
+// readdirSync). Import-gated (TDD-00049) — a virtual built-in module, not a
+// real file, but real per-file scoping applies just like any other import:
+// the local name below is this file's own choice, and a variable of the
+// same name in some other scope would correctly shadow it instead of
+// silently colliding with it.
 //
 // Everything here is synchronous and blocking — there's no event loop in
 // this compiler, so there's no non-blocking variant to offer. readFileSync
@@ -12,6 +14,8 @@
 // an ArrayBuffer/TypedArray instead of a string, are binary-safe (ADR-00094,
 // see the bottom of this file). The same split exists on the fetch() side —
 // see examples/fetch/fetch.ts's .arrayBuffer() section.
+
+import fs from 'fs'
 
 const path: string = '/tmp/kml_fs_example.txt'
 

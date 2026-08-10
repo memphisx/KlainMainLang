@@ -2,6 +2,8 @@
 // which logs to stderr and keeps running; these throw a catchable
 // AssertionError instead), the shape scripts and tests actually use.
 
+import assert from 'assert'
+
 // ── assert.ok / bare assert(cond) ─────────────────────────────────────────
 assert.ok(1 + 1 === 2)
 assert(true, "this message is never seen")

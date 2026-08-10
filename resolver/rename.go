@@ -53,16 +53,29 @@ func (s *scope) bound(name string) bool {
 	return false
 }
 
-// lookupTable bundles the two tables a file's rename pass needs: names
-// (this file's own mangled declarations plus its ordinary/default import
+// builtinMemberRef is one named import of a single member from a virtual
+// built-in module (TDD-00049 Stage 2, `import { readFileSync } from 'fs'`)
+// — Marker is the module's own reserved identifier (`fs__kml_builtin`, see
+// virtual_modules.go), Member is the real property name to synthesize a
+// member access for (`readFileSync`, `spec.Imported` — independent of
+// whichever local alias the import bound it to).
+type builtinMemberRef struct {
+	Marker, Member string
+}
+
+// lookupTable bundles the tables a file's rename pass needs: names (this
+// file's own mangled declarations plus its ordinary/default import
 // bindings — local name -> the mangled name it refers to, exactly what
-// TDD-00041 already built) and ns (TDD-00042: namespace-import bindings —
+// TDD-00041 already built), ns (TDD-00042: namespace-import bindings —
 // local alias -> {exported member's original name -> its mangled name},
-// one entry per `import * as ns from '...'`). Both are built once by the
-// caller (resolver.go) and passed down unchanged through the whole walk.
+// one entry per `import * as ns from '...'`), and builtinMembers
+// (TDD-00049 Stage 2: local alias -> which virtual module member it names).
+// All three are built once by the caller (resolver.go) and passed down
+// unchanged through the whole walk.
 type lookupTable struct {
-	names map[string]string
-	ns    map[string]map[string]string
+	names          map[string]string
+	ns             map[string]map[string]string
+	builtinMembers map[string]builtinMemberRef
 }
 
 // renameFile rewrites every top-level statement in prog using lu — see
@@ -356,6 +369,20 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if !sc.bound(e.Name) {
 			if m, ok := lu.names[e.Name]; ok {
 				e.Name = m
+				break
+			}
+			// TDD-00049 Stage 2: a named import of one built-in module
+			// member (`import { readFileSync } from 'fs'`) resolves
+			// entirely at compile time into a synthesized member access on
+			// that module's reserved marker identifier — indistinguishable
+			// after this pass from hand-written `fs.readFileSync`, so it
+			// reaches every existing Stage 1 dispatch site
+			// (emit_call.go/emit_exprs_member.go/emit_exprs_types.go) with
+			// no codegen changes at all. Guarded by the same !sc.bound
+			// check as every other lookup here, so a local variable that
+			// happens to share the imported name still shadows it.
+			if ref, ok := lu.builtinMembers[e.Name]; ok {
+				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
 	case *ast.AwaitExpression:

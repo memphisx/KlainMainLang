@@ -178,3 +178,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00138](ADR-00138.md) | `symbol` V1 (opaque unique values) | Implements [TDD-00044](../tdd/TDD-00044.md) |
 | [00139](ADR-00139.md) | `querystring` module (`.parse`/`.stringify`) | |
 | [00140](ADR-00140.md) | `assert` module | |
+| [00141](ADR-00141.md) | Import-gated built-in bindings, Stage 1 (default/namespace form) | Implements [TDD-00049](../tdd/TDD-00049.md) |
+| [00142](ADR-00142.md) | Import-gated built-in bindings, Stage 2 (named per-member imports) | Extends [ADR-00141](ADR-00141.md). Implements [TDD-00049](../tdd/TDD-00049.md) |

@@ -1,7 +1,10 @@
 // querystring — legacy "a=b&c=d" parse/stringify. Largely superseded by
 // URLSearchParams (see examples/url/url.ts), but a natural companion when
 // a request handler already has a Map<string,string> and just needs it
-// serialized, or a raw tail string and just needs it parsed.
+// serialized, or a raw tail string and just needs it parsed. Import-gated
+// (TDD-00049) — a virtual built-in module, not a real file.
+
+import querystring from 'querystring'
 
 // ── parse: string → Map<string,string> ───────────────────────────────────
 const parsed = querystring.parse("name=Ada&topic=compilers%20and%20types")

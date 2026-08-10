@@ -43,7 +43,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` has an opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |
 | Type system features | 17/23, ~74% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics support any number of unconstrained type parameters, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md)); union types beyond `T \| null` now work but V1 is scalar-members-only, not nested inside a container, and without flow-based narrowing ([TDD-00043](../tdd/TDD-00043.md)); no intersection/tuple/mapped types |
 | Classes / OOP | 14/15, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Real JS/TS `#x` runtime-private field syntax (a different mechanism from the `private` keyword modifier — scoped separately, see [TDD-00021](../tdd/TDD-00021.md)); no user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design) |
-| Modules | 9/14, ~64% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping, import aliasing ([TDD-00041](../tdd/TDD-00041.md)), `export default`/default imports, and compile-time-only namespace imports ([TDD-00042](../tdd/TDD-00042.md)) — no re-exports; no dynamic `import()`/`import.meta` |
+| Modules | 10/15, ~67% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping, import aliasing ([TDD-00041](../tdd/TDD-00041.md)), `export default`/default imports, and compile-time-only namespace imports ([TDD-00042](../tdd/TDD-00042.md)) — no re-exports; no dynamic `import()`/`import.meta`; Node-style built-ins (`fs`/`path`/etc.) now require a default, namespace, or named import ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)) |
 
 ## Web Platform APIs
 
@@ -66,7 +66,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 ## Node.js APIs
 
-Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Recognized as pseudo-namespaces (`fs.*`, `process.*`), like `Math`/`JSON` — not real importable modules.
+Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.listen`/`.close`, `cluster.*`, and this project's own `Memory.free`) now require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
 **54 / 76 features, ~71% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md). `EventEmitter` shipped after that — see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md) — unblocking (not yet picked up) Node's own `stream` module, async `child_process`, and interactive `readline`. `os` shipped next — see [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md); its Darwin-specific paths (`freemem()`, `cpus()`'s per-core `times`) are unverified pending real Apple Silicon hardware. `querystring` and `assert` shipped last, out of the audit's lower-priority "Other core modules" bucket — see [ADR-00139](../adr/ADR-00139.md)/[ADR-00140](../adr/ADR-00140.md).
 
@@ -161,6 +161,7 @@ What's left below are the genuine orphans: not-started or partially-implemented 
 | [00033](../tdd/TDD-00033.md) Direct Hardware/Framebuffer Access | Not Started, bootstrapping placeholder | Same FFI-adjacent prerequisite gap as 00032; Linux-only by nature |
 | [00036](../tdd/TDD-00036.md) Freestanding Microcontroller Target (Raspberry Pi Pico) | Not Started | Deliberately low priority; minimal-core scope only (no networking/storage/peripheral parity) |
 | [00045](../tdd/TDD-00045.md) Raspberry Pi (aarch64 SBC) Target — Minimal Boot Image + GPIO | Not Started | Hosted Linux target, distinct from 00036's freestanding Pico; low priority relative to core-language work |
+| [00048](../tdd/TDD-00048.md) WebAssembly Target (`wasm32-unknown-wasi`) | Not Started | Not a queued priority — reference/feasibility doc, same role as 00020. `-mm=gc` and the fiber-based event loop have no real wasm equivalent; shares its root blocker with 00020 |
 
 ---
 
@@ -196,10 +197,10 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 - `AbortController` / `AbortSignal` — a *fetch-specific* cancellation token is now lower effort than the general version implies: the multi-interface machinery [ADR-00050](../adr/ADR-00050.md) built already tracks each in-flight transfer via its own easy handle, and `curl_multi_remove_handle` + `curl_easy_cleanup` is a real, already-available way to cancel one mid-transfer. A general, `EventTarget`-based signal usable by other consumers (timers, streams) is still gated on `EventTarget` existing first.
 
 **High effort (needs a concurrency model beyond the event loop's single-fiber cooperative scheduling, or a new external dependency):**
-- `Worker` (Web Workers) — threads via `pthreads`; requires `SharedArrayBuffer` + `Atomics` too. The shipped event loop is cooperative, one-fiber-at-a-time concurrency ([TDD-00006](../tdd/TDD-00006.md)), not preemptive multi-threading — a genuinely separate mechanism, not an extension of it. See [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md).
+- `Worker` (Web Workers) — threads via `pthreads`; requires `SharedArrayBuffer` + `Atomics` too. The shipped event loop is cooperative, one-fiber-at-a-time concurrency ([TDD-00006](../tdd/TDD-00006.md)), not preemptive multi-threading — a genuinely separate mechanism, not an extension of it. Scoped — see [TDD-00047](../tdd/TDD-00047.md) — and picked up ahead of `EventTarget` below despite being the higher-risk item, deliberately, to surface concurrency bugs in shared runtime state early. See [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md).
 - `crypto.subtle` (digest, encrypt, sign) — delegate to OpenSSL or Apple CommonCrypto. See [WEB-CRYPTO.md](WEB-CRYPTO.md).
 - `ReadableStream` / `WritableStream` / `TransformStream` — full streaming pipeline; complex backpressure model. See [STREAMS.md](STREAMS.md).
 
 ---
 
-*Last updated: 2026-08-09 — `querystring` and `assert` implemented, closing two of [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md)'s eleven gaps.*
+*Last updated: 2026-08-10 — [TDD-00049](../tdd/TDD-00049.md) fully implemented: Stage 1 (default/namespace-form import-gated built-in bindings, [ADR-00141](../adr/ADR-00141.md)) and Stage 2 (named per-member imports, e.g. `import { readFileSync } from 'fs'`, [ADR-00142](../adr/ADR-00142.md)).*

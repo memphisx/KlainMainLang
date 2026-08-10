@@ -13,6 +13,7 @@ func TestE2EFsWriteReadAppendUnlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const path: string = %q
 console.log(fs.existsSync(path))
 fs.writeFileSync(path, "hello")
@@ -24,33 +25,36 @@ console.log(fs.readFileSync(path))
 fs.unlinkSync(path)
 console.log(fs.existsSync(path))
 `, path)
-	assertOutput(t, src, "0\n1\nhello\nhello world\n0")
+	assertOutputImports(t, src, "0\n1\nhello\nhello world\n0")
 }
 
 func TestE2EFsWriteFileSyncOverwritesExistingContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 fs.writeFileSync(%q, "first")
 fs.writeFileSync(%q, "second")
 console.log(fs.readFileSync(%q))
 `, path, path, path)
-	assertOutput(t, src, "second")
+	assertOutputImports(t, src, "second")
 }
 
 func TestE2EFsReadFileSyncUntypedInference(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 fs.writeFileSync(%q, "abc")
 const content = fs.readFileSync(%q)
 console.log(content.length)
 `, path, path)
-	assertOutput(t, src, "3")
+	assertOutputImports(t, src, "3")
 }
 
 func TestE2EFsReadFileSyncNonexistentThrows(t *testing.T) {
 	src := `
+import fs from 'fs'
 try {
     const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
     console.log(content)
@@ -58,11 +62,12 @@ try {
     console.log("caught")
 }
 `
-	assertOutput(t, src, "caught")
+	assertOutputImports(t, src, "caught")
 }
 
 func TestE2EFsReadFileSyncNonexistentUncaughtExitsNonZero(t *testing.T) {
-	_, exitCode := compileAndRunExpectExit(t, `
+	_, exitCode := compileAndRunExpectExitImports(t, `
+import fs from 'fs'
 const content: string = fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
 console.log(content)
 `)
@@ -73,24 +78,27 @@ console.log(content)
 
 func TestE2EFsUnlinkSyncNonexistentThrows(t *testing.T) {
 	src := `
+import fs from 'fs'
 try {
     fs.unlinkSync("/definitely/does/not/exist/kml-test-file.txt")
 } catch (e) {
     console.log("caught")
 }
 `
-	assertOutput(t, src, "caught")
+	assertOutputImports(t, src, "caught")
 }
 
 func TestE2EFsWriteFileSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.writeFileSync("a")`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.writeFileSync("a")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.writeFileSync with the wrong argument count, got none")
 	}
 }
 
 func TestE2EFsReadFileSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.readFileSync("a", "b")`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readFileSync("a", "b")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.readFileSync with the wrong argument count, got none")
 	}
@@ -111,17 +119,19 @@ func TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte(t *testing.T) {
 		t.Fatalf("os.WriteFile: %v", err)
 	}
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const arr = fs.readFileSyncBytes(%q)
 console.log(arr.length)
 for (let i = 0; i < arr.length; i++) {
     console.log(arr[i])
 }
 `, path)
-	assertOutput(t, src, "6\n104\n105\n0\n98\n121\n101")
+	assertOutputImports(t, src, "6\n104\n105\n0\n98\n121\n101")
 }
 
 func TestE2EFsReadFileSyncBytesNonexistentThrows(t *testing.T) {
 	src := `
+import fs from 'fs'
 try {
     const arr = fs.readFileSyncBytes("/definitely/does/not/exist/kml-test-file.bin")
     console.log(arr.length)
@@ -129,11 +139,12 @@ try {
     console.log("caught")
 }
 `
-	assertOutput(t, src, "caught")
+	assertOutputImports(t, src, "caught")
 }
 
 func TestE2EFsReadFileSyncBytesWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.readFileSyncBytes("a", "b")`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readFileSyncBytes("a", "b")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.readFileSyncBytes with the wrong argument count, got none")
 	}
@@ -148,10 +159,11 @@ func TestE2EFsWriteFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const arr = new Uint8Array([104, 105, 0, 98, 121, 101])
 fs.writeFileSync(%q, arr)
 `, path)
-	assertOutput(t, src, "")
+	assertOutputImports(t, src, "")
 
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -167,11 +179,12 @@ func TestE2EFsAppendFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const arr = new Uint8Array([1, 0, 2])
 fs.writeFileSync(%q, arr)
 fs.appendFileSync(%q, arr)
 `, path, path)
-	assertOutput(t, src, "")
+	assertOutputImports(t, src, "")
 
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -191,6 +204,7 @@ func TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const buf = new ArrayBuffer(3)
 const view = new Uint8Array(buf)
 view[0] = 5
@@ -198,7 +212,7 @@ view[1] = 0
 view[2] = 6
 fs.writeFileSync(%q, buf)
 `, path)
-	assertOutput(t, src, "")
+	assertOutputImports(t, src, "")
 
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -218,13 +232,14 @@ func TestE2EFsWriteFileSyncStringPathUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const path: string = %q
 fs.writeFileSync(path, "hello")
 console.log(fs.readFileSync(path))
 fs.appendFileSync(path, " world")
 console.log(fs.readFileSync(path))
 `, path)
-	assertOutput(t, src, "hello\nhello world")
+	assertOutputImports(t, src, "hello\nhello world")
 }
 
 // --- fs.mkdirSync / renameSync / copyFileSync / readdirSync ---
@@ -233,11 +248,12 @@ func TestE2EFsMkdirSyncCreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "newdir")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 console.log(fs.existsSync(%q))
 fs.mkdirSync(%q)
 console.log(fs.existsSync(%q))
 `, sub, sub, sub)
-	assertOutput(t, src, "0\n1")
+	assertOutputImports(t, src, "0\n1")
 }
 
 func TestE2EFsMkdirSyncAlreadyExistsThrows(t *testing.T) {
@@ -247,6 +263,7 @@ func TestE2EFsMkdirSyncAlreadyExistsThrows(t *testing.T) {
 		t.Fatalf("os.Mkdir(%q): %v", sub, err)
 	}
 	src := fmt.Sprintf(`
+import fs from 'fs'
 try {
     fs.mkdirSync(%q)
     console.log("should not print")
@@ -254,11 +271,12 @@ try {
     console.log(e.message.startsWith("cannot create directory '%s': "))
 }
 `, sub, sub)
-	assertOutput(t, src, "1")
+	assertOutputImports(t, src, "1")
 }
 
 func TestE2EFsMkdirSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.mkdirSync()`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.mkdirSync()`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.mkdirSync() with no arguments, got none")
 	}
@@ -271,11 +289,12 @@ func TestE2EFsRmdirSyncRemovesEmptyDirectory(t *testing.T) {
 		t.Fatalf("os.Mkdir(%q): %v", sub, err)
 	}
 	src := fmt.Sprintf(`
+import fs from 'fs'
 console.log(fs.existsSync(%q))
 fs.rmdirSync(%q)
 console.log(fs.existsSync(%q))
 `, sub, sub, sub)
-	assertOutput(t, src, "1\n0")
+	assertOutputImports(t, src, "1\n0")
 }
 
 func TestE2EFsRmdirSyncNonEmptyThrows(t *testing.T) {
@@ -288,6 +307,7 @@ func TestE2EFsRmdirSyncNonEmptyThrows(t *testing.T) {
 		t.Fatalf("os.WriteFile: %v", err)
 	}
 	src := fmt.Sprintf(`
+import fs from 'fs'
 try {
     fs.rmdirSync(%q)
     console.log("should not print")
@@ -295,11 +315,12 @@ try {
     console.log("caught")
 }
 `, sub)
-	assertOutput(t, src, "caught")
+	assertOutputImports(t, src, "caught")
 }
 
 func TestE2EFsRmdirSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.rmdirSync()`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.rmdirSync()`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.rmdirSync() with no arguments, got none")
 	}
@@ -310,13 +331,14 @@ func TestE2EFsRenameSyncMovesFile(t *testing.T) {
 	oldPath := filepath.Join(dir, "old.txt")
 	newPath := filepath.Join(dir, "new.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 fs.writeFileSync(%q, "content")
 fs.renameSync(%q, %q)
 console.log(fs.existsSync(%q))
 console.log(fs.existsSync(%q))
 console.log(fs.readFileSync(%q))
 `, oldPath, oldPath, newPath, oldPath, newPath, newPath)
-	assertOutput(t, src, "0\n1\ncontent")
+	assertOutputImports(t, src, "0\n1\ncontent")
 }
 
 func TestE2EFsRenameSyncNonexistentThrows(t *testing.T) {
@@ -324,6 +346,7 @@ func TestE2EFsRenameSyncNonexistentThrows(t *testing.T) {
 	oldPath := filepath.Join(dir, "does-not-exist.txt")
 	newPath := filepath.Join(dir, "new.txt")
 	src := fmt.Sprintf(`
+import fs from 'fs'
 try {
     fs.renameSync(%q, %q)
     console.log("should not print")
@@ -331,11 +354,12 @@ try {
     console.log("caught")
 }
 `, oldPath, newPath)
-	assertOutput(t, src, "caught")
+	assertOutputImports(t, src, "caught")
 }
 
 func TestE2EFsRenameSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.renameSync("a")`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.renameSync("a")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.renameSync with the wrong argument count, got none")
 	}
@@ -346,17 +370,19 @@ func TestE2EFsCopyFileSyncCopiesContent(t *testing.T) {
 	src := filepath.Join(dir, "src.txt")
 	dest := filepath.Join(dir, "dest.txt")
 	code := fmt.Sprintf(`
+import fs from 'fs'
 fs.writeFileSync(%q, "copy me")
 fs.copyFileSync(%q, %q)
 console.log(fs.existsSync(%q))
 console.log(fs.readFileSync(%q))
 console.log(fs.readFileSync(%q))
 `, src, src, dest, src, src, dest)
-	assertOutput(t, code, "1\ncopy me\ncopy me")
+	assertOutputImports(t, code, "1\ncopy me\ncopy me")
 }
 
 func TestE2EFsCopyFileSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.copyFileSync("a")`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.copyFileSync("a")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.copyFileSync with the wrong argument count, got none")
 	}
@@ -370,6 +396,7 @@ func TestE2EFsReaddirSyncListsEntriesExcludingDotAndDotDot(t *testing.T) {
 		}
 	}
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const entries: string[] = fs.readdirSync(%q)
 console.log(entries.length)
 entries.sort()
@@ -377,20 +404,22 @@ for (const e of entries) {
     console.log(e)
 }
 `, dir)
-	assertOutput(t, src, "3\na.txt\nb.txt\nc.txt")
+	assertOutputImports(t, src, "3\na.txt\nb.txt\nc.txt")
 }
 
 func TestE2EFsReaddirSyncEmptyDirectory(t *testing.T) {
 	dir := t.TempDir()
 	src := fmt.Sprintf(`
+import fs from 'fs'
 const entries: string[] = fs.readdirSync(%q)
 console.log(entries.length)
 `, dir)
-	assertOutput(t, src, "0")
+	assertOutputImports(t, src, "0")
 }
 
 func TestE2EFsReaddirSyncNonexistentThrows(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import fs from 'fs'
 try {
     fs.readdirSync("/definitely/does/not/exist/kml-test-dir")
     console.log("should not print")
@@ -401,7 +430,8 @@ try {
 }
 
 func TestE2EFsReaddirSyncWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`fs.readdirSync()`)
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readdirSync()`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.readdirSync() with no arguments, got none")
 	}

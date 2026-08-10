@@ -22,7 +22,7 @@ import (
 // never exits on its own.
 func startHTTPServer(t *testing.T, src string, port int) {
 	t.Helper()
-	binFile := buildBinary(t, src)
+	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -51,7 +51,7 @@ func startHTTPServer(t *testing.T, src string, port int) {
 // if libgc/bdw-gc isn't installed.
 func startHTTPServerGC(t *testing.T, src string, port int) {
 	t.Helper()
-	binFile := buildBinaryGC(t, src)
+	binFile := buildBinaryGCImports(t, src)
 	cmd := exec.Command(binFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -110,7 +110,7 @@ func waitPortFree(addr string) {
 // reaches all of them in one call.
 func startHTTPClusterServer(t *testing.T, src string, port int) {
 	t.Helper()
-	binFile := buildBinary(t, src)
+	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -143,7 +143,7 @@ func startHTTPClusterServer(t *testing.T, src string, port int) {
 // startHTTPServerGC.
 func startHTTPClusterServerGC(t *testing.T, src string, port int) {
 	t.Helper()
-	binFile := buildBinaryGC(t, src)
+	binFile := buildBinaryGCImports(t, src)
 	cmd := exec.Command(binFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -171,6 +171,7 @@ func startHTTPClusterServerGC(t *testing.T, src string, port int) {
 
 func TestE2EHTTPListenBasicGet(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8941, (req: HttpRequest): Res => {
   return { status: 200, body: "hello from KML" }
@@ -193,6 +194,7 @@ http.listen(8941, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenMethodAndPathFields(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8942, (req: HttpRequest): Res => {
   return { status: 200, body: req.method + " " + req.path }
@@ -212,6 +214,7 @@ http.listen(8942, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenMultipleSequentialRequests(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 let count = 0
 http.listen(8943, (req: HttpRequest): Res => {
@@ -236,6 +239,7 @@ http.listen(8943, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenCustomStatus(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8944, (req: HttpRequest): Res => {
   if (req.path === "/missing") {
@@ -261,6 +265,7 @@ http.listen(8944, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenCoexistsWithSetInterval(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 let n = 0
 setInterval(() => {
@@ -285,6 +290,7 @@ http.listen(8945, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenBindFailureThrows(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 try {
   http.listen(8946, (req: HttpRequest): Res => {
@@ -296,28 +302,31 @@ try {
 `
 	startHTTPServer(t, src, 8946)
 	// A second instance on the same port must fail to bind and hit the catch.
-	got := compileAndRun(t, src)
+	got := compileAndRunImports(t, src)
 	if got == "" {
 		t.Fatal("expected the second instance's catch block to print something")
 	}
 }
 
 func TestE2EHTTPListenWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`http.listen(8947)`)
+	_, err := parseAndCompileImports(t, `import http from 'http'
+http.listen(8947)`)
 	if err == nil {
 		t.Fatal("expected a compile error for http.listen with only 1 argument, got none")
 	}
 }
 
 func TestE2EHTTPListenNonObjectReturnTypeRejected(t *testing.T) {
-	_, err := parseAndCompile(`http.listen(8948, (req: HttpRequest): number => 200)`)
+	_, err := parseAndCompileImports(t, `import http from 'http'
+http.listen(8948, (req: HttpRequest): number => 200)`)
 	if err == nil {
 		t.Fatal("expected a compile error for a handler not returning an object type, got none")
 	}
 }
 
 func TestE2EHTTPListenMissingBodyFieldRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import http from 'http'
 interface Res { status: number }
 http.listen(8949, (req: HttpRequest): Res => { return { status: 200 } })
 `)
@@ -336,6 +345,7 @@ http.listen(8949, (req: HttpRequest): Res => { return { status: 200 } })
 // fast connection never even runs).
 func TestE2EHTTPListenConcurrentConnections(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8950, (req: HttpRequest): Res => {
   return { status: 200, body: req.path }
@@ -392,6 +402,7 @@ http.listen(8950, (req: HttpRequest): Res => {
 // answering correctly afterward.
 func TestE2EHTTPListenManyRequestsDoesNotLeakStack(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8951, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
@@ -436,6 +447,7 @@ func newDelayedUpstreamServer(t *testing.T, slowDelay time.Duration) *httptest.S
 func TestE2EHTTPListenAsyncHandlerAwaitFetch(t *testing.T) {
 	upstream := newDelayedUpstreamServer(t, 0)
 	src := fmt.Sprintf(`
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8951, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
@@ -467,6 +479,7 @@ func TestE2EHTTPListenConcurrentAwaitFetch(t *testing.T) {
 	const slowDelay = 1200 * time.Millisecond
 	upstream := newDelayedUpstreamServer(t, slowDelay)
 	src := fmt.Sprintf(`
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8952, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
@@ -514,6 +527,7 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
 
 func TestE2EHTTPListenRequestHeadersLowercasedLookup(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8953, (req: HttpRequest): Res => {
   return { status: 200, body: req.headers.get("x-test-header") + "|" + (req.headers.has("nonexistent") ? "1" : "0") }
@@ -540,6 +554,7 @@ http.listen(8953, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenQueryStringParsing(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8954, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + req.query.get("a") + "|" + req.query.get("b") + "|" + (req.query.has("flag") ? "1" : "0") + "|" + req.query.get("flag") }
@@ -562,6 +577,7 @@ http.listen(8954, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenNoQueryStringGivesEmptyMap(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8955, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + (req.query.has("anything") ? "1" : "0") }
@@ -581,6 +597,7 @@ http.listen(8955, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenRequestBody(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8956, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
@@ -600,6 +617,7 @@ http.listen(8956, (req: HttpRequest): Res => {
 
 func TestE2EHTTPListenNoBodyGivesEmptyString(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8957, (req: HttpRequest): Res => {
   return { status: 200, body: "[" + req.body + "]" }
@@ -625,6 +643,7 @@ http.listen(8957, (req: HttpRequest): Res => {
 // original fixed 8KB one-shot buffer this replaced.
 func TestE2EHTTPListenLargeBodySpanningMultipleReads(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8958, (req: HttpRequest): Res => {
   return { status: 200, body: "len=" + req.body.length }
@@ -657,6 +676,7 @@ http.listen(8958, (req: HttpRequest): Res => {
 // echoes the full body back and compares it byte-for-byte.
 func TestE2EHTTPListenLargeBodyContentIntegrity(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8959, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
@@ -683,7 +703,8 @@ http.listen(8959, (req: HttpRequest): Res => {
 }
 
 func TestE2EHTTPListenWrongHeadersFieldTypeRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import http from 'http'
 interface Res { status: number; body: string; headers: string }
 http.listen(8962, (req: HttpRequest): Res => { return { status: 200, body: "x", headers: "not a map" } })
 `)
@@ -694,6 +715,7 @@ http.listen(8962, (req: HttpRequest): Res => { return { status: 200, body: "x", 
 
 func TestE2EHTTPListenResponseHeaders(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string; headers: Map<string, string> }
 http.listen(8960, (req: HttpRequest): Res => {
   let h: Map<string, string> = new Map<string, string>()
@@ -725,6 +747,7 @@ func TestE2EHTTPListenNoResponseHeadersUnchanged(t *testing.T) {
 	// to before response headers existed — no extra branches, no stray
 	// blank line or header text.
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "plain" }
@@ -752,6 +775,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 // accessors must come back byte-for-byte, null and all.
 func TestE2EHTTPListenBodyBytesRoundTripSurvivesEmbeddedNull(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
 http.listen(8963, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
@@ -780,6 +804,7 @@ http.listen(8963, (req: HttpRequest): Res => {
 // longer, in this test) string content.
 func TestE2EHTTPListenBodyBytesWinsOverBodyField(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
 http.listen(8964, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = new ArrayBuffer(3)
@@ -803,6 +828,7 @@ http.listen(8964, (req: HttpRequest): Res => {
 // reports the real byte count, independent of any string/strlen semantics.
 func TestE2EHTTPListenBodyBytesByteLength(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8965, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
@@ -824,7 +850,8 @@ http.listen(8965, (req: HttpRequest): Res => {
 }
 
 func TestE2EHTTPListenWrongBodyBytesFieldTypeRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import http from 'http'
 interface Res { status: number; body: string; bodyBytes: string }
 http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } })
 `)
@@ -843,6 +870,7 @@ http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", 
 // could plausibly win every sequential accept() race.
 func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8963, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
@@ -886,6 +914,8 @@ http.listen(8963, (req: HttpRequest): Res => {
 // and cluster.workerId 0, byte-identical to today's single-process behavior.
 func TestE2EHTTPListenClusteringDefaultIsSingleProcess(t *testing.T) {
 	src := `
+import http from 'http'
+import cluster from 'cluster'
 interface Res { status: number; body: string }
 http.listen(8964, (req: HttpRequest): Res => {
   return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + cluster.workerId.toString() }
@@ -915,13 +945,14 @@ http.listen(8964, (req: HttpRequest): Res => {
 // only manifested in the piped/non-TTY case.
 func TestE2EHTTPListenClusteringFlushesStdoutBeforeFork(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 console.log("BANNER")
 http.listen(8965, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 }, { workers: 4 })
 `
-	binFile := buildBinary(t, src)
+	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var out bytes.Buffer
@@ -970,6 +1001,7 @@ http.listen(8965, (req: HttpRequest): Res => {
 // still works under -mm=gc.
 func TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8966, (req: HttpRequest): Res => {
   let total = 0;
@@ -1035,6 +1067,7 @@ http.listen(8966, (req: HttpRequest): Res => {
 // this process is expected to exit on its own.
 func TestE2EHTTPListenCloseExitsProcess(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 
 http.listen(8967, (req: HttpRequest): Res => {
@@ -1073,6 +1106,7 @@ console.log("after listen returned")
 // -1.
 func TestE2EHTTPListenCloseIsIdempotent(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 
 http.listen(8968, (req: HttpRequest): Res => {
@@ -1103,7 +1137,8 @@ console.log("after listen returned")
 // and fail obscurely at the LLVM backend (a duplicate @__kml_http_dispatch
 // definition) instead of with a clear compile-time error.
 func TestE2EHTTPListenSecondCallSiteRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8969, (req: HttpRequest): Res => { http.close(); return { status: 200, body: "a" } })
 http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" } })
@@ -1119,7 +1154,8 @@ http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" }
 // TestE2EHTTPCloseWrongArgCountRejected mirrors
 // TestE2EHTTPListenWrongArgCountRejected's pattern for the new function.
 func TestE2EHTTPCloseWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`http.close(1)`)
+	_, err := parseAndCompileImports(t, `import http from 'http'
+http.close(1)`)
 	if err == nil {
 		t.Fatal("expected a compile error for http.close with an argument, got none")
 	}

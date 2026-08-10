@@ -21,6 +21,8 @@
 //     ws.on('message',m=>console.log('got:',m.toString()))"
 //   curl "http://localhost:8083/hello"   # the listener still serves plain HTTP too
 
+import http from 'http'
+
 interface Res {
   status: number
   body: string

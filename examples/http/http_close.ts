@@ -10,6 +10,8 @@
 //   curl "http://localhost:8081/hello"
 //   curl "http://localhost:8081/shutdown"   # closes the listener immediately
 
+import http from 'http'
+
 interface Res {
   status: number
   body: string

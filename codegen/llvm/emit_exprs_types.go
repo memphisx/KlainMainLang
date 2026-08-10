@@ -315,12 +315,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "platform":
 					return TypePtr
 				}
-			case "path":
+			case "path__kml_builtin":
 				switch ex.Property {
 				case "sep", "delimiter":
 					return TypePtr
 				}
-			case "os":
+			case "os__kml_builtin":
 				switch ex.Property {
 				case "EOL":
 					return TypePtr
@@ -441,7 +441,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			case "Symbol":
 				return SymbolType()
-			case "assert":
+			case "assert__kml_builtin":
 				return TypeVoid
 			}
 		}
@@ -509,7 +509,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && (mem.Property == "now" || mem.Property == "measure") {
 				return TypeF64
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs__kml_builtin" {
 				switch mem.Property {
 				case "readFileSync":
 					return TypePtr
@@ -527,7 +527,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "path" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "path__kml_builtin" {
 				switch mem.Property {
 				case "join", "resolve", "dirname", "basename", "extname", "format":
 					return TypePtr
@@ -537,7 +537,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return PathParsedType()
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "os" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "os__kml_builtin" {
 				switch mem.Property {
 				case "platform", "homedir", "tmpdir", "hostname":
 					return TypePtr
@@ -547,7 +547,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayOf(CPUInfoType())
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "querystring" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "querystring__kml_builtin" {
 				switch mem.Property {
 				case "parse":
 					return MapType(TypePtr, TypePtr)
@@ -555,7 +555,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert__kml_builtin" {
 				return TypeVoid
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" {

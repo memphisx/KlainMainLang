@@ -21,35 +21,41 @@ func TestE2EOSPlatform(t *testing.T) {
 	if want == "windows" {
 		want = "win32"
 	}
-	assertOutput(t, `console.log(os.platform())`, want)
+	assertOutputImports(t, `import os from 'os'
+console.log(os.platform())`, want)
 }
 
 func TestE2EOSEOL(t *testing.T) {
-	assertOutput(t, `console.log(os.EOL === "\n")`, "1")
+	assertOutputImports(t, `import os from 'os'
+console.log(os.EOL === "\n")`, "1")
 }
 
 func TestE2EOSHomedirMatchesEnvHOME(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 console.log(os.homedir() === process.env.HOME)
 `, "1")
 }
 
 func TestE2EOSTmpdirNonEmpty(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 const t = os.tmpdir()
 console.log(t.length > 0)
 `, "1")
 }
 
 func TestE2EOSHostnameNonEmpty(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 const h = os.hostname()
 console.log(h.length > 0)
 `, "1")
 }
 
 func TestE2EOSTotalmemFreememPositive(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 const total = os.totalmem()
 const free = os.freemem()
 console.log(total > 0)
@@ -60,11 +66,13 @@ console.log(free <= total)
 
 func TestE2EOSCpusCountMatchesRuntime(t *testing.T) {
 	want := fmt.Sprintf("%d", runtime.NumCPU())
-	assertOutput(t, `console.log(os.cpus().length)`, want)
+	assertOutputImports(t, `import os from 'os'
+console.log(os.cpus().length)`, want)
 }
 
 func TestE2EOSCpusFieldsWellFormed(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 const cpus = os.cpus()
 let allOk = true
 for (let i = 0; i < cpus.length; i = i + 1) {
@@ -84,7 +92,8 @@ func TestE2EOSCpusSameModelAcrossCores(t *testing.T) {
 	// Not a real Node guarantee in general (heterogeneous cores exist), but
 	// true for every machine this test suite actually runs on today — a
 	// cheap cross-core consistency check.
-	assertOutput(t, `
+	assertOutputImports(t, `
+import os from 'os'
 const cpus = os.cpus()
 console.log(cpus[0].model === cpus[cpus.length - 1].model)
 `, "1")

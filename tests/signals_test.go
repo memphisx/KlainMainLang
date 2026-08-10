@@ -85,7 +85,7 @@ func startAndWaitForFile(t *testing.T, binFile, readyPath string) (*exec.Cmd, *s
 // be forcibly killed during cleanup.
 func startBackgroundServer(t *testing.T, src string, port int) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
-	binFile := buildBinary(t, src)
+	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -150,6 +150,7 @@ func waitExit(t *testing.T, cmd *exec.Cmd, out fmt.Stringer, timeout time.Durati
 
 func TestE2ESignalSigintGracefulShutdown(t *testing.T) {
 	src := `
+import http from 'http'
 process.on('SIGINT', () => {
   console.log("handled:SIGINT");
   process.exit(0);
@@ -173,6 +174,7 @@ http.listen(8231, (req: HttpRequest): { status: number; body: string } => {
 
 func TestE2ESignalSigtermGracefulShutdown(t *testing.T) {
 	src := `
+import http from 'http'
 process.on('SIGTERM', () => {
   console.log("handled:SIGTERM");
   process.exit(0);
@@ -199,6 +201,7 @@ http.listen(8232, (req: HttpRequest): { status: number; body: string } => {
 // still reaches its own, distinct handler when both are registered.
 func TestE2ESignalBothRegisteredIndependently(t *testing.T) {
 	src := `
+import http from 'http'
 process.on('SIGINT', () => {
   console.log("handled:SIGINT");
   process.exit(0);
@@ -238,6 +241,7 @@ http.listen(8233, (req: HttpRequest): { status: number; body: string } => {
 // default action, same as before this feature existed.
 func TestE2ESignalNoHandlerDefaultDisposition(t *testing.T) {
 	src := `
+import http from 'http'
 http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
@@ -264,7 +268,8 @@ http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
 // needed the identical signal-check block inserted.
 func TestE2ESignalSetIntervalOnlyGracefulShutdown(t *testing.T) {
 	readyPath := filepath.Join(t.TempDir(), "ready")
-	binFile := buildBinary(t, fmt.Sprintf(`
+	binFile := buildBinaryImports(t, fmt.Sprintf(`
+import fs from 'fs'
 process.on('SIGINT', () => {
   console.log("handled:SIGINT");
   process.exit(0);
@@ -295,7 +300,8 @@ setInterval(() => { console.log("tick"); }, 100000);
 // after the process is up and its nanosleep-based wait has started.
 func TestE2ETimerNotPrematurelyFiredBySignal(t *testing.T) {
 	readyPath := filepath.Join(t.TempDir(), "ready")
-	binFile := buildBinary(t, fmt.Sprintf(`
+	binFile := buildBinaryImports(t, fmt.Sprintf(`
+import fs from 'fs'
 process.on('SIGINT', () => {
   console.log("handled:SIGINT");
   process.exit(0);

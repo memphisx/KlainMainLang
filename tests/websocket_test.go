@@ -131,6 +131,7 @@ func wsRecvFrame(t *testing.T, conn net.Conn) (opcode int, payload []byte) {
 
 func TestE2EWSHandshakeAndEcho(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8975, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
@@ -163,6 +164,7 @@ http.listen(8975, (req: HttpRequest): Res => {
 
 func TestE2EWSExtendedLength(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8976, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
@@ -197,6 +199,7 @@ http.listen(8976, (req: HttpRequest): Res => {
 
 func TestE2EWSCoexistsWithNormalHTTP(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8977, (req: HttpRequest): Res => {
   return { status: 200, body: "plain http: " + req.path }
@@ -237,6 +240,7 @@ http.listen(8977, (req: HttpRequest): Res => {
 
 func TestE2EWSCloseFrameEndsConnectionCleanly(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8978, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
@@ -295,6 +299,7 @@ http.listen(8978, (req: HttpRequest): Res => {
 // control frame, not a text/binary one).
 func TestE2EWSPingPong(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8979, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
@@ -341,6 +346,7 @@ http.listen(8979, (req: HttpRequest): Res => {
 // connection (TDD-00039 Stage 2).
 func TestE2EWSServerInitiatedClose(t *testing.T) {
 	src := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8980, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }
@@ -411,6 +417,7 @@ func runClientWithTimeout(t *testing.T, src string, timeout time.Duration) strin
 // .send()/.onmessage, and .close()/.onclose ending the process cleanly.
 func TestE2EWebSocketClientAgainstServer(t *testing.T) {
 	serverSrc := `
+import http from 'http'
 interface Res { status: number; body: string }
 http.listen(8981, (req: HttpRequest): Res => {
   return { status: 200, body: "not a websocket request" }

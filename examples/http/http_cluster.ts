@@ -21,6 +21,10 @@
 // actually load-balanced across workers, e.g. run several times in a row:
 //   curl "http://localhost:8081/"
 
+import http from 'http'
+import os from 'os'
+import cluster from 'cluster'
+
 interface Res {
   status: number
   body: string

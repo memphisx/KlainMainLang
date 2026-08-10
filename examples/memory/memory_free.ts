@@ -17,6 +17,10 @@
 // dynamically built at runtime (concatenation, .slice()/.substring(),
 // template literals, fs.readFileSync, JSON.stringify, fetch response
 // bodies, ...) — every one of those is always a real heap allocation.
+//
+// Import-gated (TDD-00049) — a virtual built-in module, not a real file.
+
+import Memory from 'memory'
 
 // ── string (must be a dynamically-built one, not a literal) ─────────────────
 let big: string = "hello " + "world"   // concatenation result -> malloc'd

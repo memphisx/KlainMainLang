@@ -14,6 +14,8 @@
 //   curl -H "X-Greeting: hi" "http://localhost:8080/hello?name=world"
 //   curl -X POST -d '{"k":"v"}' "http://localhost:8080/echo"
 
+import http from 'http'
+
 interface Res {
   status: number
   body: string

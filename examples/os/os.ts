@@ -1,7 +1,11 @@
 // os module (TDD-00024): operating-system information — platform, user/
-// temp directories, hostname, memory, and per-core CPU info. Most values
+// temp directories, hostname, memory, and per-core CPU info. Import-gated
+// (TDD-00049) — a virtual built-in module, not a real file. Most values
 // here are environment-dependent, so this example checks properties
 // (non-empty, positive, consistent) rather than exact values.
+
+import os from 'os'
+import path from 'path'
 
 console.log(os.platform().length > 0); // true
 

@@ -12,7 +12,8 @@ import (
 // result (guaranteed heap-allocated) rather than a bare literal.
 
 func TestE2EMemoryFreeString(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let s: string = "hello " + "world"
 console.log(s.length)
 Memory.free(s)
@@ -21,7 +22,8 @@ console.log(s === null)
 }
 
 func TestE2EMemoryFreeArray(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let arr: number[] = [1, 2, 3, 4, 5]
 console.log(arr.length)
 Memory.free(arr)
@@ -30,7 +32,8 @@ console.log(arr.length)
 }
 
 func TestE2EMemoryFreeObject(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 interface Point { x: number; y: number }
 let p: Point = { x: 1, y: 2 }
 console.log(p.x)
@@ -40,7 +43,8 @@ console.log("done")
 }
 
 func TestE2EMemoryFreeClosureNoCaptures(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let f: () => number = () => 42
 console.log(f())
 Memory.free(f)
@@ -54,7 +58,8 @@ func TestE2EMemoryFreeClosureLeavesSharedCaptureIntact(t *testing.T) {
 	// survive — freeing it would be a real use-after-free for the
 	// enclosing scope's own continued use of the variable, not just the
 	// user's own responsibility.
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let counter: number = 0
 const inc = (): number => { counter = counter + 1; return counter }
 console.log(inc())
@@ -65,7 +70,8 @@ console.log(counter)
 }
 
 func TestE2EMemoryFreeMap(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let m: Map<string, number> = new Map<string, number>()
 m.set("a", 1)
 m.set("b", 2)
@@ -76,7 +82,8 @@ console.log("done")
 }
 
 func TestE2EMemoryFreeSet(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let st: Set<string> = new Set<string>()
 st.add("x")
 console.log(st.size)
@@ -87,7 +94,8 @@ console.log("done")
 
 func TestE2EMemoryFreeGeneralExpression(t *testing.T) {
 	// Not just named variables — a directly-evaluated expression works too.
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 interface Point { x: number; y: number }
 function makePoint(): Point {
     return { x: 1, y: 2 }
@@ -103,7 +111,8 @@ func TestE2EMemoryFreeDoubleFreeViaSameVariableIsSafe(t *testing.T) {
 	// same variable is harmless. (Freeing the same underlying allocation
 	// through two different aliases is still unsafe, by design — this only
 	// covers the single-named-variable case.)
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 let arr: number[] = [1, 2, 3]
 Memory.free(arr)
 Memory.free(arr)
@@ -112,7 +121,8 @@ console.log("no crash")
 }
 
 func TestE2EMemoryFreeUnsupportedTypeRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	_, err := parseAndCompileImports(t, `
+import Memory from 'memory'
 let n: number = 5
 Memory.free(n)
 `)
@@ -122,7 +132,8 @@ Memory.free(n)
 }
 
 func TestE2EMemoryFreeWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`Memory.free()`)
+	_, err := parseAndCompileImports(t, `import Memory from 'memory'
+Memory.free()`)
 	if err == nil {
 		t.Fatal("expected a compile error for Memory.free() with no arguments, got none")
 	}

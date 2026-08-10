@@ -1,8 +1,10 @@
 // path — portable filesystem path manipulation (join/resolve/dirname/
-// basename/extname/isAbsolute/parse/format/sep/delimiter). Recognized as a
-// pseudo-namespace, like Math/JSON/fs/process — not a real importable
-// module. POSIX-only: this compiler doesn't cross-compile, so sep is always
-// '/' and delimiter is always ':'.
+// basename/extname/isAbsolute/parse/format/sep/delimiter). Import-gated
+// (TDD-00049) — a virtual built-in module, not a real file. POSIX-only:
+// this compiler doesn't cross-compile, so sep is always '/' and delimiter
+// is always ':'.
+
+import path from 'path'
 
 // join concatenates segments with '/' and normalizes the result — collapsing
 // repeated slashes, dropping '.' segments, and resolving '..' against

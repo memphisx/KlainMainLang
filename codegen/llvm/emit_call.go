@@ -278,7 +278,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				}
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "fs" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "fs__kml_builtin" {
 			switch mem.Property {
 			case "readFileSync":
 				return e.emitFsReadFileSync(ex.Args, ex.GetPos())
@@ -304,7 +304,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsReaddirSync(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
 			switch mem.Property {
 			case "join":
 				return e.emitPathJoin(ex.Args, ex.GetPos())
@@ -324,7 +324,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPathFormat(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "os" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {
 			switch mem.Property {
 			case "platform":
 				return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
@@ -342,7 +342,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitOSCpus(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "querystring" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "querystring__kml_builtin" {
 			switch mem.Property {
 			case "parse":
 				return e.emitQuerystringParse(ex.Args, ex.GetPos())
@@ -350,7 +350,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitQuerystringStringify(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" {
@@ -361,10 +361,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitCryptoRandomUUID(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Memory" && mem.Property == "free" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Memory__kml_builtin" && mem.Property == "free" {
 			return e.emitMemoryFree(ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" {
 			switch mem.Property {
 			case "listen":
 				return e.emitHTTPListen(ex.Args, ex.GetPos())
@@ -743,7 +743,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		case "Symbol":
 			return e.emitSymbolConstructor(ex.Args, ex.GetPos())
-		case "assert":
+		case "assert__kml_builtin":
 			// Bare `assert(cond, msg?)` — real Node's assert module is
 			// itself callable, equivalent to assert.ok.
 			return e.emitAssertModuleCall("ok", ex.Args, ex.GetPos())
@@ -780,7 +780,38 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: undefined function or closure '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 	}
 
+	// TDD-00049: a friendlier diagnostic for the single most likely cause of
+	// reaching this fallback — writing e.g. `fs.readFileSync(...)` without
+	// the now-required `import fs from 'fs'`. Checked last, only once every
+	// real dispatch path (including a legitimately-imported builtin, which
+	// never reaches here at all) has already failed to match.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if id, ok := mem.Object.(*ast.Identifier); ok {
+			if specifier, known := builtinModuleSpecifiers[id.Name]; known {
+				return Value{}, fmt.Errorf("%d:%d: '%s' is not defined — did you forget \"import %s from '%s'\"?",
+					ex.GetPos().Line, ex.GetPos().Col, id.Name, id.Name, specifier)
+			}
+		}
+	}
+
 	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported", ex.GetPos().Line, ex.GetPos().Col)
+}
+
+// builtinModuleSpecifiers maps the conventional bare identifier name a
+// program would write for a built-in module (fs.*, path.*, ...) to the
+// virtual specifier it must now be imported from (TDD-00049) — used only to
+// build a helpful "did you forget to import this?" diagnostic above, not
+// for any real dispatch decision (that's resolver/virtual_modules.go's
+// job, entirely before codegen ever runs).
+var builtinModuleSpecifiers = map[string]string{
+	"fs":          "fs",
+	"path":        "path",
+	"os":          "os",
+	"querystring": "querystring",
+	"assert":      "assert",
+	"http":        "http",
+	"cluster":     "cluster",
+	"Memory":      "memory",
 }
 
 // emitCallToFuncSig emits a call to name (a concrete, already-registered

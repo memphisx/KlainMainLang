@@ -356,7 +356,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetStatic(ex.Property)
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
 		switch ex.Property {
 		case "isPrimary":
 			return e.emitClusterIsPrimary()
@@ -364,7 +364,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitClusterWorkerID()
 		}
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
 		switch ex.Property {
 		case "sep":
 			return Value{Ref: e.internString("/"), Ty: TypePtr}, nil
@@ -372,7 +372,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(":"), Ty: TypePtr}, nil
 		}
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {
 		switch ex.Property {
 		case "EOL":
 			// Always "\n" — this compiler is POSIX-only (no Windows target,

@@ -98,6 +98,9 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 			if !ok {
 				continue
 			}
+			if _, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
+				continue // TDD-00049: a built-in module, never a real file to visit/parse
+			}
 			resolved, err := resolveImportPath(dir, imp.Source)
 			if err != nil {
 				return fmt.Errorf("%d:%d: %w", imp.GetPos().Line, imp.GetPos().Col, err)
@@ -125,6 +128,9 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 			imp, ok := stmt.(*ast.ImportDeclaration)
 			if !ok {
 				continue
+			}
+			if _, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
+				continue // TDD-00049: validated separately, once bindings are built below
 			}
 			resolved, err := resolveImportPath(dir, imp.Source)
 			if err != nil {
@@ -169,10 +175,53 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 			lookup[orig] = m
 		}
 		ns := map[string]map[string]string{}
+		builtinMembers := map[string]builtinMemberRef{}
 		dir := filepath.Dir(path)
 		for _, stmt := range info.prog.Body {
 			imp, ok := stmt.(*ast.ImportDeclaration)
 			if !ok {
+				continue
+			}
+			if marker, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
+				// TDD-00049 Stage 2: a named specifier (anything but the
+				// synthetic "default" one a default import produces, see
+				// ImportSpecifier's own doc comment) names one member of
+				// the built-in module directly — validated against that
+				// module's real member table (virtualModuleMembers), the
+				// same "does the target actually export this" check a real
+				// file import already gets against its own exportedNames.
+				members := virtualModuleMembers[imp.Source]
+				for _, spec := range imp.Specifiers {
+					if spec.Imported == "default" {
+						continue // handled by virtualImportLocal below
+					}
+					if !members[spec.Imported] {
+						return nil, fmt.Errorf("%d:%d: built-in module '%s' has no exported member '%s'",
+							imp.GetPos().Line, imp.GetPos().Col, imp.Source, spec.Imported)
+					}
+					if _, dup := lookup[spec.Local]; dup {
+						return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
+							imp.GetPos().Line, imp.GetPos().Col, spec.Local)
+					}
+					if _, dup := builtinMembers[spec.Local]; dup {
+						return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
+							imp.GetPos().Line, imp.GetPos().Col, spec.Local)
+					}
+					builtinMembers[spec.Local] = builtinMemberRef{Marker: marker, Member: spec.Imported}
+				}
+				local, hasLocal := virtualImportLocal(imp)
+				if !hasLocal {
+					continue // bare `import 'fs'` side-effect form, or named-only with no default/namespace binding — nothing more to bind
+				}
+				if _, dup := lookup[local]; dup {
+					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
+						imp.GetPos().Line, imp.GetPos().Col, local)
+				}
+				if _, dup := ns[local]; dup {
+					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
+						imp.GetPos().Line, imp.GetPos().Col, local)
+				}
+				lookup[local] = marker
 				continue
 			}
 			resolved, err := resolveImportPath(dir, imp.Source)
@@ -210,7 +259,7 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 				ns[imp.Namespace] = members
 			}
 		}
-		renameFile(info.prog, lookupTable{names: lookup, ns: ns})
+		renameFile(info.prog, lookupTable{names: lookup, ns: ns, builtinMembers: builtinMembers})
 	}
 
 	// Defensive: mangled names are constructed to already be unique (each

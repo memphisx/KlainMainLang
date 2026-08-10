@@ -97,7 +97,8 @@ const b = structuredClone(a)
 }
 
 func TestE2ESymbolMemoryFree(t *testing.T) {
-	assertOutput(t, `
+	assertOutputImports(t, `
+import Memory from 'memory'
 const a = Symbol("x")
 console.log(a.toString())
 Memory.free(a)
