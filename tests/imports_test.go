@@ -109,8 +109,11 @@ console.log(doesNotExist())
 	}
 }
 
-func TestE2EImportExecutableStatementInNonEntryFileRejected(t *testing.T) {
-	_, err := resolveMultiFile(t, map[string]string{
+func TestE2EImportExecutableStatementInAcyclicNonEntryFileRuns(t *testing.T) {
+	// TDD-00052: an acyclic imported file's top-level executable code now
+	// really runs, once, in dependency order — strictly before the entry
+	// file's own top-level statements.
+	assertMultiFileOutput(t, map[string]string{
 		"sideeffect.ts": `
 export function foo(): number { return 1 }
 console.log("side effect")
@@ -119,10 +122,7 @@ console.log("side effect")
 import { foo } from './sideeffect'
 console.log(foo())
 `,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error for an executable top-level statement in a non-entry file, got none")
-	}
+	}, "main.ts", "side effect\n1")
 }
 
 func TestE2EImportSameLocalNameFromTwoFilesWithoutAliasRejected(t *testing.T) {
@@ -412,4 +412,321 @@ console.log(lib)
 	if err == nil {
 		t.Fatal("expected a compile error using a namespace import as a bare value, got none")
 	}
+}
+
+// --- re-exports (TDD-00051) ---
+
+func TestE2EReExportNamed(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts":  `export { add } from './core'`,
+		"main.ts": `
+import { add } from './lib'
+console.log(add(2, 3))
+`,
+	}, "main.ts", "5")
+}
+
+func TestE2EReExportAliased(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts":  `export { add as sum } from './core'`,
+		"main.ts": `
+import { sum } from './lib'
+console.log(sum(4, 5))
+`,
+	}, "main.ts", "9")
+}
+
+func TestE2EReExportDefaultAsDefault(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export default function greet(name: string): string { return "hi " + name }`,
+		"lib.ts":  `export { default } from './core'`,
+		"main.ts": `
+import greet from './lib'
+console.log(greet("world"))
+`,
+	}, "main.ts", "hi world")
+}
+
+func TestE2EReExportDefaultAsNamed(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export default function greet(name: string): string { return "hi " + name }`,
+		"lib.ts":  `export { default as greet } from './core'`,
+		"main.ts": `
+import { greet } from './lib'
+console.log(greet("there"))
+`,
+	}, "main.ts", "hi there")
+}
+
+func TestE2EReExportNamedAsDefault(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export function greet(name: string): string { return "hey " + name }`,
+		"lib.ts":  `export { greet as default } from './core'`,
+		"main.ts": `
+import greet from './lib'
+console.log(greet("you"))
+`,
+	}, "main.ts", "hey you")
+}
+
+func TestE2EReExportStar(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `
+export function add(a: number, b: number): number { return a + b }
+export function mul(a: number, b: number): number { return a * b }
+`,
+		"lib.ts": `export * from './core'`,
+		"main.ts": `
+import { add, mul } from './lib'
+console.log(add(2, 3))
+console.log(mul(2, 3))
+`,
+	}, "main.ts", "5\n6")
+}
+
+func TestE2EReExportStarExcludesDefault(t *testing.T) {
+	// A star re-export never forwards a default export — real ES module
+	// semantics.
+	_, err := resolveMultiFile(t, map[string]string{
+		"core.ts": `
+export default function greet(): string { return "hi" }
+export function add(a: number, b: number): number { return a + b }
+`,
+		"lib.ts": `export * from './core'`,
+		"main.ts": `
+import greet from './lib'
+console.log(greet())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error importing a default through a star re-export, got none")
+	}
+}
+
+func TestE2EReExportChain(t *testing.T) {
+	// b re-exports from a, c re-exports from b — an arbitrarily deep chain
+	// should resolve transitively.
+	assertMultiFileOutput(t, map[string]string{
+		"a.ts": `export function add(x: number, y: number): number { return x + y }`,
+		"b.ts": `export { add } from './a'`,
+		"c.ts": `export { add as sum } from './b'`,
+		"main.ts": `
+import { sum } from './c'
+console.log(sum(7, 8))
+`,
+	}, "main.ts", "15")
+}
+
+func TestE2EReExportViaNamespaceImport(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts":  `export { add } from './core'`,
+		"main.ts": `
+import * as lib from './lib'
+console.log(lib.add(1, 2))
+`,
+	}, "main.ts", "3")
+}
+
+func TestE2EReExportDoesNotBindLocalName(t *testing.T) {
+	// `export { x } from './other'` forwards x to importers of this file —
+	// it does not introduce x as a usable bare identifier inside the
+	// re-exporting file itself, matching real ES modules. Not caught at
+	// resolve time (there's no dedicated check — an identifier the lookup
+	// table doesn't know about is simply left unrenamed), so this asserts
+	// through codegen, same pattern as the namespace bare-use case above.
+	err := resolveAndEmitMultiFile(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts": `
+export { add } from './core'
+export function useAdd(): number { return add(1, 2) }
+`,
+		"main.ts": `
+import { useAdd } from './lib'
+console.log(useAdd())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error referencing a re-exported name as a bare local identifier, got none")
+	}
+}
+
+func TestE2EReExportUnknownMemberRejected(t *testing.T) {
+	_, err := resolveMultiFile(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts":  `export { doesNotExist } from './core'`,
+		"main.ts": `
+import { doesNotExist } from './lib'
+console.log(doesNotExist())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error re-exporting a name that doesn't exist, got none")
+	}
+}
+
+func TestE2EReExportCollisionWithOwnExportRejected(t *testing.T) {
+	_, err := resolveMultiFile(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"lib.ts": `
+export function add(a: number, b: number): number { return a - b }
+export { add } from './core'
+`,
+		"main.ts": `
+import { add } from './lib'
+console.log(add(1, 2))
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error for a re-export colliding with this file's own export, got none")
+	}
+}
+
+func TestE2EReExportFromBuiltinModuleRejected(t *testing.T) {
+	_, err := resolveMultiFile(t, map[string]string{
+		"main.ts": `
+export { readFileSync } from 'fs'
+console.log("unused")
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error re-exporting from a built-in module, got none")
+	}
+}
+
+func TestE2EReExportNamespaceStarNotSupported(t *testing.T) {
+	_, err := resolveMultiFile(t, map[string]string{
+		"core.ts": `export function add(a: number, b: number): number { return a + b }`,
+		"main.ts": `
+export * as core from './core'
+console.log("unused")
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error for 'export * as ns from', got none")
+	}
+}
+
+// --- top-level side-effecting code in imported files (TDD-00052) ---
+
+func TestE2ETopLevelSideEffectDependencyOrderChain(t *testing.T) {
+	// A 3-level acyclic chain — each file's top-level code must run once,
+	// strictly before whatever imports it, entry file last.
+	assertMultiFileOutput(t, map[string]string{
+		"a.ts": `
+console.log("a")
+export function markerA(): string { return "A" }
+`,
+		"b.ts": `
+import { markerA } from './a'
+console.log("b:" + markerA())
+export function markerB(): string { return "B" }
+`,
+		"main.ts": `
+import { markerB } from './b'
+console.log("entry:" + markerB())
+`,
+	}, "main.ts", "a\nb:A\nentry:B")
+}
+
+func TestE2ETopLevelSideEffectDiamondRunsOnce(t *testing.T) {
+	// d.ts is reached from both b.ts and c.ts — its top-level code must run
+	// exactly once, before either of them, not twice.
+	assertMultiFileOutput(t, map[string]string{
+		"d.ts": `
+console.log("d")
+export function tag(): string { return "D" }
+`,
+		"b.ts": `
+import { tag } from './d'
+console.log("b")
+export function useB(): string { return "B" + tag() }
+`,
+		"c.ts": `
+import { tag } from './d'
+console.log("c")
+export function useC(): string { return "C" + tag() }
+`,
+		"main.ts": `
+import { useB } from './b'
+import { useC } from './c'
+console.log(useB())
+console.log(useC())
+`,
+	}, "main.ts", "d\nb\nc\nBD\nCD")
+}
+
+func TestE2ECyclicFileBareStatementStillRejected(t *testing.T) {
+	// A file that genuinely participates in an import cycle keeps the
+	// original declarations-only restriction — only the acyclic case gets
+	// full top-level statement freedom.
+	_, err := resolveMultiFile(t, map[string]string{
+		"circA.ts": `
+import { helperB } from './circB'
+export function helperA(): number { return 1 }
+console.log("side effect in cyclic file")
+`,
+		"circB.ts": `
+import { helperA } from './circA'
+export function helperB(): number { return 2 }
+`,
+		"main.ts": `
+import { helperA } from './circA'
+console.log(helperA())
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error for a bare executable statement in a cyclic file, got none")
+	}
+}
+
+func TestE2ECyclicFileNonLiteralVarInitRejected(t *testing.T) {
+	// The bug this TDD closes: circA's top-level `valueA` initializer reads
+	// circB's top-level `valueB` — before TDD-00052, this was already legal
+	// syntax (VarDeclaration was unconditionally "a declaration" regardless
+	// of its Init), and could read an uninitialized binding across the
+	// cycle. Now rejected at compile time instead.
+	_, err := resolveMultiFile(t, map[string]string{
+		"circA.ts": `
+import { valueB } from './circB'
+export const valueA: number = valueB + 1
+`,
+		"circB.ts": `
+import { valueA } from './circA'
+export const valueB: number = 10
+`,
+		"main.ts": `
+import { valueA } from './circA'
+console.log(valueA)
+`,
+	}, "main.ts")
+	if err == nil {
+		t.Fatal("expected a compile error for a non-literal top-level var initializer in a cyclic file, got none")
+	}
+}
+
+func TestE2ECyclicFileLiteralVarInitStillAllowed(t *testing.T) {
+	// A cyclic file's top-level var/let/const stays usable as long as its
+	// initializer is a compile-time literal — it can't observe any
+	// not-yet-run initialization from anywhere, so it's always safe.
+	assertMultiFileOutput(t, map[string]string{
+		"circA.ts": `
+import { helperB } from './circB'
+export function helperA(): number { return 1 }
+export const MAX = 100
+`,
+		"circB.ts": `
+import { helperA } from './circA'
+export function helperB(): number { return 2 }
+`,
+		"main.ts": `
+import { helperA, MAX } from './circA'
+import { helperB } from './circB'
+console.log(helperA())
+console.log(helperB())
+console.log(MAX)
+`,
+	}, "main.ts", "1\n2\n100")
 }

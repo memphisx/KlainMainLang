@@ -181,3 +181,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00141](ADR-00141.md) | Import-gated built-in bindings, Stage 1 (default/namespace form) | Implements [TDD-00049](../tdd/TDD-00049.md) |
 | [00142](ADR-00142.md) | Import-gated built-in bindings, Stage 2 (named per-member imports) | Extends [ADR-00141](ADR-00141.md). Implements [TDD-00049](../tdd/TDD-00049.md) |
 | [00143](ADR-00143.md) | Reserved ambient-global names — `-globals=strict\|permissive` | Implements [TDD-00050](../tdd/TDD-00050.md) |
+| [00144](ADR-00144.md) | Re-exports (`export { a } from './x'`, `export * from './x'`) | Implements [TDD-00051](../tdd/TDD-00051.md) |
+| [00145](ADR-00145.md) | Top-level side-effecting code in imported files (dependency-ordered, cycle-guarded) | Implements [TDD-00052](../tdd/TDD-00052.md) |
+| [00146](ADR-00146.md) | klmpm Stage 1 — compiler-side `klain_modules` resolution | Implements [TDD-00054](../tdd/TDD-00054.md) (Stage 1 only) |
+| [00147](ADR-00147.md) | klmpm Stage 2 — `klain.json`/`klain.lock` manifest parsing | Implements [TDD-00054](../tdd/TDD-00054.md) (Stage 2 only). Extends [ADR-00146](ADR-00146.md) |
+| [00148](ADR-00148.md) | `import.meta.url` (dynamic `import(...)` grammar recognized, cleanly rejected) | Implements [TDD-00055](../tdd/TDD-00055.md) (Stage 1 only) |

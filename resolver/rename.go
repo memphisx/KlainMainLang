@@ -79,6 +79,7 @@ type lookupTable struct {
 	builtinMembers       map[string]builtinMemberRef
 	allowGlobalShadowing bool
 	reservedErr          *error // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
+	filePath             string // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
 }
 
 // checkBinding is TDD-00050's hook, called at every point a local binding
@@ -576,6 +577,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
+	case *ast.ImportMetaUrl:
+		// TDD-00055 Stage 1: resolved entirely at this stage, per-file,
+		// into a plain string literal — codegen never sees this node.
+		// "file://" + absolute path matches real Node/browser
+		// import.meta.url's own convention.
+		return ast.NewStringLiteral("file://"+lu.filePath, e.GetPos())
 	}
 	// Every other expression kind (literals, ThisExpression, SuperExpression,
 	// NewXMLHttpRequestExpression/NewTextEncoderExpression — both zero-arg)

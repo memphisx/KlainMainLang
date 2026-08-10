@@ -31,6 +31,17 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 			return p.parseClassDecl(true, "")
 		}
 	case lexer.IMPORT:
+		// `import.meta.url` / dynamic `import(...)` (TDD-00055) reached at
+		// statement-initial position (e.g. `import.meta.url;` alone, or
+		// more realistically as part of a larger expression statement) —
+		// neither is a real import *declaration*, so route to ordinary
+		// expression parsing instead, where parseImportExpr gives each its
+		// own clear handling (or rejection, for the not-yet-implemented
+		// dynamic-call form) rather than parseImportDeclaration's
+		// specifier-list parsing producing a confusing error.
+		if p.peekNth(1).Type == lexer.DOT || p.peekNth(1).Type == lexer.LPAREN {
+			return p.parseExpressionStatement()
+		}
 		return p.parseImportDeclaration()
 	case lexer.EXPORT:
 		return p.parseExportDeclaration()

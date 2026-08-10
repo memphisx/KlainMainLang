@@ -104,13 +104,19 @@ func (p *Parser) parseImportSpecifierList() ([]ast.ImportSpecifier, error) {
 }
 
 // parseExportDeclaration parses `export <declaration>` — a function, var/
-// let/const, interface, type alias, enum, or class declaration — or
-// `export default <target>` (TDD-00042). `export { ... }` (re-export
-// lists) is not supported yet (left for a future TDD, see TDD-00042's
-// Context section).
-func (p *Parser) parseExportDeclaration() (*ast.ExportDeclaration, error) {
+// let/const, interface, type alias, enum, or class declaration —
+// `export default <target>` (TDD-00042), or a re-export
+// (`export { a, b as c } from './path'` / `export * from './path'`,
+// TDD-00051). `export { x };` (no `from`, exporting an already-declared
+// local name) is a different, smaller feature and is not supported here —
+// see TDD-00051's Design section.
+func (p *Parser) parseExportDeclaration() (ast.Statement, error) {
 	tok := p.advance() // 'export'
 	pos := posOf(tok)
+
+	if p.check(lexer.LBRACE) || p.check(lexer.STAR) {
+		return p.parseExportFromDeclaration(pos)
+	}
 
 	if p.check(lexer.DEFAULT) {
 		p.advance() // 'default'
@@ -132,6 +138,94 @@ func (p *Parser) parseExportDeclaration() (*ast.ExportDeclaration, error) {
 	default:
 		return nil, fmt.Errorf("%d:%d: 'export' can only precede a function, variable, interface, type alias, enum, or class declaration", pos.Line, pos.Col)
 	}
+}
+
+// parseExportFromDeclaration parses the two re-export forms (TDD-00051):
+// `export { a, b as c } from './path'` and `export * from './path'`. pos is
+// the position of the already-consumed 'export' token.
+func (p *Parser) parseExportFromDeclaration(pos ast.Pos) (*ast.ExportFromDeclaration, error) {
+	var specs []ast.ImportSpecifier
+	all := false
+
+	if p.check(lexer.STAR) {
+		p.advance() // '*'
+		if p.peek().Type == lexer.IDENT && p.peek().Literal == "as" {
+			return nil, fmt.Errorf("%d:%d: namespace re-exports ('export * as ns from') are not supported yet", p.peek().Line, p.peek().Col)
+		}
+		all = true
+	} else {
+		var err error
+		specs, err = p.parseExportFromSpecifierList()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "from") {
+		return nil, fmt.Errorf("%d:%d: expected 'from' after export specifier list, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+	}
+	p.advance() // 'from'
+
+	srcTok, err := p.expect(lexer.STRING)
+	if err != nil {
+		return nil, err
+	}
+	if p.check(lexer.SEMICOLON) {
+		p.advance()
+	}
+	return ast.NewExportFromDeclaration(specs, all, srcTok.Literal, pos), nil
+}
+
+// parseExportFromSpecifierList parses the `{ a, b as c }` list of a
+// re-export. Unlike parseImportSpecifierList, either side of an entry may
+// be the literal `default` (lexer.DEFAULT, a reserved keyword, not an
+// IDENT) — `export { default } from './x'` and `export { foo as default }
+// from './x'` are both real, meaningful re-export forms (re-exporting
+// another module's default, and re-exporting a named export as this
+// module's own default, respectively).
+func (p *Parser) parseExportFromSpecifierList() ([]ast.ImportSpecifier, error) {
+	if _, err := p.expect(lexer.LBRACE); err != nil {
+		return nil, err
+	}
+	var specs []ast.ImportSpecifier
+	for !p.check(lexer.RBRACE) {
+		name, err := p.expectIdentOrDefault()
+		if err != nil {
+			return nil, err
+		}
+		spec := ast.ImportSpecifier{Imported: name, Local: name}
+		if p.peek().Type == lexer.IDENT && p.peek().Literal == "as" {
+			p.advance() // 'as'
+			alias, err := p.expectIdentOrDefault()
+			if err != nil {
+				return nil, err
+			}
+			spec.Local = alias
+		}
+		specs = append(specs, spec)
+		if p.check(lexer.COMMA) {
+			p.advance()
+			continue
+		}
+		break
+	}
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+	return specs, nil
+}
+
+// expectIdentOrDefault consumes and returns the literal of either an IDENT
+// or the reserved `default` keyword token — see parseExportFromSpecifierList.
+func (p *Parser) expectIdentOrDefault() (string, error) {
+	if p.check(lexer.DEFAULT) {
+		return p.advance().Literal, nil
+	}
+	tok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return "", err
+	}
+	return tok.Literal, nil
 }
 
 // parseDefaultExportTarget parses whatever follows `export default`: a
@@ -178,4 +272,37 @@ func (p *Parser) parseDefaultExportTarget() (ast.Statement, error) {
 		p.advance()
 	}
 	return ast.NewVarDeclaration("const", "default", nil, expr, pos), nil
+}
+
+// parseImportExpr parses `import` reached in expression position
+// (TDD-00055) — currently only `import.meta.url` (Stage 1); dynamic
+// `import(...)` (Stage 2) isn't implemented yet and gets its own clear,
+// dedicated rejection rather than falling through to a generic parse
+// error, so it's obvious the syntax was recognized but isn't supported yet.
+// Reached via parsePrimary's `case lexer.IMPORT`, the same dedicated-parser
+// pattern `case lexer.NEW: return p.parseNew()` already uses for a keyword
+// with its own argument-shape rules rather than the generic call-postfix
+// machinery.
+func (p *Parser) parseImportExpr() (ast.Expression, error) {
+	tok := p.advance() // 'import'
+	pos := posOf(tok)
+
+	switch {
+	case p.check(lexer.DOT):
+		p.advance() // '.'
+		if !(p.peek().Type == lexer.IDENT && p.peek().Literal == "meta") {
+			return nil, fmt.Errorf("%d:%d: expected 'meta' after 'import.'", p.peek().Line, p.peek().Col)
+		}
+		p.advance() // 'meta'
+		if !p.check(lexer.DOT) || !(p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "url") {
+			return nil, fmt.Errorf("%d:%d: 'import.meta' is only supported as 'import.meta.url'", p.peek().Line, p.peek().Col)
+		}
+		p.advance() // '.'
+		p.advance() // 'url'
+		return ast.NewImportMetaUrl(pos), nil
+	case p.check(lexer.LPAREN):
+		return nil, fmt.Errorf("%d:%d: dynamic import() is not yet supported", pos.Line, pos.Col)
+	default:
+		return nil, fmt.Errorf("%d:%d: expected '.' or '(' after 'import' in an expression, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+	}
 }

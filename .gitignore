@@ -8,10 +8,14 @@
 # make examples' local httpbin-lite fixture server binary
 /.httpbin-lite
 
-# Compiled example artifacts — keep only source (.ts) and subdirectories
+# Compiled example artifacts — keep only source (.ts), klain.json package
+# manifests (needed by the klmpm-package examples, TDD-00054), and
+# subdirectories at any depth (klmpm examples nest a package one level
+# deeper than every other example: examples/imports/klain_modules/<pkg>/)
 examples/**
-!examples/*/
+!examples/**/
 !examples/**/*.ts
+!examples/**/klain.json
 
 # Build artifacts left behind by compiling docker/*.ts directly on the host
 # (e.g. while iterating on a Dockerfile) — the Dockerfiles themselves always

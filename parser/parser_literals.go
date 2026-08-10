@@ -952,6 +952,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.NEW:
 		return p.parseNew()
 
+	case lexer.IMPORT:
+		return p.parseImportExpr()
+
 	case lexer.THIS:
 		p.advance()
 		return ast.NewThisExpression(posOf(tok)), nil

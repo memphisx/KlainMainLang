@@ -1196,6 +1196,50 @@ func NewImportDeclaration(specs []ImportSpecifier, namespace, source string, pos
 	return &ImportDeclaration{Specifiers: specs, Namespace: namespace, Source: source, pos: pos}
 }
 
+// ExportFromDeclaration re-exports members of another module without
+// binding any local name in this file (TDD-00051): `export { a, b as c }
+// from './path'` (Specifiers set, All false) or `export * from './path'`
+// (All true, Specifiers empty — every name the target exports except
+// "default", matching real ES module semantics). Reuses ImportSpecifier's
+// {Imported, Local} shape — Imported is the name in the source file, Local
+// is what this file exposes it as — since it's the same name-forwarding
+// problem `import { a as b }` already solved. Consumed entirely by the
+// module resolver (resolver/resolver.go) before codegen ever runs; produces
+// no runtime statement, same as ImportDeclaration.
+type ExportFromDeclaration struct {
+	Specifiers []ImportSpecifier
+	All        bool
+	Source     string
+	pos        Pos
+}
+
+func (*ExportFromDeclaration) nodeMarker()   {}
+func (*ExportFromDeclaration) stmtMarker()   {}
+func (e *ExportFromDeclaration) GetPos() Pos { return e.pos }
+
+func NewExportFromDeclaration(specs []ImportSpecifier, all bool, source string, pos Pos) *ExportFromDeclaration {
+	return &ExportFromDeclaration{Specifiers: specs, All: all, Source: source, pos: pos}
+}
+
+// ImportMetaUrl represents the single expression `import.meta.url`
+// (TDD-00055 Stage 1) — the parser only ever produces this node for that
+// exact, complete token sequence; anything else after `import.meta` (a
+// different member, or `import.meta` used alone) is a parse-time error
+// rather than a node a later pass has to reject, since there's no real
+// "module metadata object" value to represent otherwise. Consumed entirely
+// by the module resolver (resolver/rename.go), which rewrites it in place
+// to a plain string literal (that file's own absolute path as a `file://`
+// URL) before codegen ever runs — codegen never sees this node.
+type ImportMetaUrl struct {
+	pos Pos
+}
+
+func (*ImportMetaUrl) nodeMarker()   {}
+func (*ImportMetaUrl) exprMarker()   {}
+func (i *ImportMetaUrl) GetPos() Pos { return i.pos }
+
+func NewImportMetaUrl(pos Pos) *ImportMetaUrl { return &ImportMetaUrl{pos: pos} }
+
 // --- Type annotations ---
 
 // AnnotField is one field in an object type annotation.

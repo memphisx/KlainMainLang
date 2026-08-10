@@ -8,14 +8,19 @@
 //   - Whole-program compilation, not separate compilation units: every
 //     reachable file is merged into one combined AST before codegen runs.
 //     There is no linker step and no per-file LLVM module boundary.
-//   - Imported (non-entry) files may only contain declarations (function/
-//     const/let/var/interface/type/enum/class) plus their own imports — no
-//     executable top-level statements. Only the entry file's own top-level
-//     statements become the program's actual runtime behavior. This is a
-//     deliberate simplification: real ES modules run a file's top-level
-//     code once, the first time it's imported, in dependency order — that
-//     "run once, in order, guard against re-running on cycles" semantics is
-//     real design/implementation work of its own, deferred for now.
+//   - An acyclic imported (non-entry) file's top-level statements run
+//     exactly once, in real dependency order, strictly before whatever
+//     imports it (TDD-00052) — diamond-shared dependencies still run
+//     exactly once, via the same per-path memoization that already
+//     deduplicates parsing. A file that genuinely participates in an
+//     import cycle keeps the original, stricter V1 restriction instead:
+//     only declarations (function/const/let/var/interface/type/enum/class)
+//     plus its own imports, no bare executable statements — and a
+//     top-level var/let/const initializer must additionally be a
+//     compile-time literal, closing a real hazard (a circular pair of
+//     files reading each other's not-yet-initialized top-level binding —
+//     see validateCyclicFile's doc comment) without needing to model real
+//     ES modules' TDZ/live-binding semantics.
 //   - True per-file module scope (TDD-00041): every top-level declaration
 //     gets a file-private mangled name (see rename.go's mangleFileDecls),
 //     and every reference to it — within its own file, or via another
@@ -28,13 +33,24 @@
 //     direct, safe consequence of the per-file rename mechanism above:
 //     `b` simply *is* the target's mangled name for `a` inside the
 //     importing file, no separate rename step or shadowing risk involved.
-//   - Only relative paths (`./`, `../`) are supported, resolved against the
-//     importing file's own directory, with `.ts` auto-appended if the path
-//     has no extension. No `node_modules`, no index-file resolution — there
-//     is no package ecosystem here.
+//   - Relative paths (`./`, `../`) are resolved against the importing
+//     file's own directory, with `.ts` auto-appended if the path has no
+//     extension. A bare specifier (`import x from 'pkg'`) resolves against
+//     a `klain_modules/<name>/klain.json`'s `"main"` field (TDD-00054 Stage
+//     1) if a `klain_modules` directory exists somewhere above the entry
+//     file — found once, anchored at the entry file (not each importing
+//     file's own directory, unlike Node's per-importer walk), so every file
+//     in the whole program resolves a given package name against the same
+//     single directory. No npm/`node_modules` interop, no index-file
+//     resolution, no package registry, no version resolution — see
+//     TDD-00054 for the fuller design (versioning, fetching, the klmpm
+//     tool itself), none of it built yet; this is deliberately just the
+//     resolution half, exercisable by hand-constructing a
+//     `klain_modules/<name>/` directory.
 package resolver
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +67,40 @@ type fileInfo struct {
 	exported map[string]bool
 	index    int               // assigned at first visit; used to build this file's mangled-name suffix (TDD-00041)
 	mangled  map[string]string // original top-level declaration name -> this file's mangled name for it
+
+	// TDD-00051: re-export bookkeeping. reExportBindings is populated by the
+	// export-name-augmentation pass (before mangleFileDecls runs, so it only
+	// knows local/target/remote names, not mangled values yet);
+	// reExportMangled is filled in by the follow-up pass once every file's
+	// own mangled map is final. Deliberately kept separate from `mangled` —
+	// see resolveReExports's doc comment for why re-export aliases must
+	// never be visible to this file's own intra-file scope lookup.
+	reExportBindings []reExportBinding
+	reExportMangled  map[string]string
+}
+
+// reExportBinding is one resolved `export { remote as local } from` (or one
+// name expanded out of `export * from`) entry, recorded against the
+// re-exporting file before its target's mangled names are necessarily known.
+type reExportBinding struct {
+	local  string
+	target string // absolute path of the source file
+	remote string // name as declared/exported in the source file
+}
+
+// publicMangled returns the mangled name an importer sees for name — info's
+// own declarations first, then anything info re-exports under that name.
+// This is the file's *public* export table; it is deliberately not the same
+// lookup renameFile uses to rewrite bare references inside info's own file
+// (that's `mangled` alone) — a re-exported name is forwarded to importers
+// without ever becoming a usable local identifier in the re-exporting file
+// itself, matching real ES module semantics. See TDD-00051.
+func (info *fileInfo) publicMangled(name string) (string, bool) {
+	if m, ok := info.mangled[name]; ok {
+		return m, true
+	}
+	m, ok := info.reExportMangled[name]
+	return m, ok
 }
 
 // ResolveProgram parses entryPath and everything it transitively imports,
@@ -75,13 +125,42 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		return nil, fmt.Errorf("resolving entry path: %w", err)
 	}
 
+	// TDD-00054 Stage 1: found once, anchored at the entry file's own
+	// directory — every bare-specifier lookup in the whole program
+	// (whether from the entry tree or from inside a fetched package)
+	// resolves against this same single directory. "" means no
+	// klain_modules directory exists above the entry file at all, in which
+	// case a bare specifier stays rejected exactly as before this TDD.
+	klainModulesDir := findKlainModulesDir(filepath.Dir(entryAbs))
+
 	files := map[string]*fileInfo{}
 	var order []string // dependency-first visitation order of non-entry files
 	nextIndex := 0
 
+	// TDD-00052: cycle detection, so a file that genuinely participates in
+	// an import cycle can be held to a stricter rule than an acyclic one
+	// (see validateCyclicFile's doc comment for why). `stack` is the
+	// current DFS recursion chain (paths, in visit order); `onStack` is
+	// its O(1) membership check. On a back-edge — visiting a path that's
+	// already on `stack`, not just already-finished — every file from that
+	// path's position to the top of `stack` (inclusive) is a real cycle
+	// member, marked in `cyclic`. This is a superset-safe approximation of
+	// exact strongly-connected-component detection, not full Tarjan:
+	// over-marking a file as cyclic only costs it some ergonomics (it
+	// stays on the stricter rule), never a safety hole.
+	var stack []string
+	onStack := map[string]bool{}
+	cyclic := map[string]bool{}
+
 	var visit func(path string, isEntry bool) error
 	visit = func(path string, isEntry bool) error {
 		if _, seen := files[path]; seen {
+			if onStack[path] {
+				for i := len(stack) - 1; i >= 0 && stack[i] != path; i-- {
+					cyclic[stack[i]] = true
+				}
+				cyclic[path] = true
+			}
 			return nil // already visited, or in progress (cycle) — safe to skip
 		}
 		// In-progress placeholder, guards against re-visiting on a cycle.
@@ -92,6 +171,13 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		files[path] = &fileInfo{index: nextIndex}
 		nextIndex++
 
+		stack = append(stack, path)
+		onStack[path] = true
+		defer func() {
+			stack = stack[:len(stack)-1]
+			onStack[path] = false
+		}()
+
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
@@ -100,24 +186,35 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		if err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
-		if !isEntry {
-			if err := validateDeclarationsOnly(prog); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-		}
 
 		dir := filepath.Dir(path)
 		for _, stmt := range prog.Body {
-			imp, ok := stmt.(*ast.ImportDeclaration)
-			if !ok {
+			// TDD-00051: a re-export (ExportFromDeclaration.Source) is a
+			// dependency edge exactly like an import's — it must be visited
+			// and land in `order` before this file, since resolving it
+			// later needs the target's exported/mangled tables already
+			// final. Re-exporting from a built-in module is out of scope
+			// (see the TDD's Design section), rejected here rather than
+			// treated as "nothing to visit" the way a virtual import is.
+			var source string
+			switch s := stmt.(type) {
+			case *ast.ImportDeclaration:
+				source = s.Source
+			case *ast.ExportFromDeclaration:
+				if _, isVirtual := virtualBuiltinMarkers[s.Source]; isVirtual {
+					return fmt.Errorf("%d:%d: re-exporting from a built-in module ('%s') is not supported",
+						s.GetPos().Line, s.GetPos().Col, s.Source)
+				}
+				source = s.Source
+			default:
 				continue
 			}
-			if _, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
+			if _, isVirtual := virtualBuiltinMarkers[source]; isVirtual {
 				continue // TDD-00049: a built-in module, never a real file to visit/parse
 			}
-			resolved, err := resolveImportPath(dir, imp.Source)
+			resolved, err := resolveImportPath(dir, source, klainModulesDir)
 			if err != nil {
-				return fmt.Errorf("%d:%d: %w", imp.GetPos().Line, imp.GetPos().Col, err)
+				return fmt.Errorf("%d:%d: %w", stmt.GetPos().Line, stmt.GetPos().Col, err)
 			}
 			if err := visit(resolved, false); err != nil {
 				return err
@@ -135,6 +232,77 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		return nil, err
 	}
 
+	// TDD-00052: a file's cyclic-ness can only be known once the full DFS
+	// above has completed (a back-edge discovered much later, from a
+	// completely different branch of the graph, can still mark an
+	// already-finished file) — so this validation, unlike everything else
+	// that used to run inline inside visit, has to be its own pass. Only
+	// cyclic files are restricted; the entry file is never checked here
+	// regardless of its own cyclic-ness (see validateCyclicFile's doc
+	// comment for why that's still safe).
+	for _, path := range order {
+		if !cyclic[path] {
+			continue
+		}
+		if err := validateCyclicFile(files[path].prog); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+
+	allPaths := make([]string, 0, len(order)+1)
+	allPaths = append(allPaths, order...)
+	allPaths = append(allPaths, entryAbs)
+
+	// TDD-00051: fold every file's re-exports into its own `exported` set
+	// before anything downstream consults that set. Must run in dependency
+	// order (allPaths, same as everywhere else below) — a file's re-export
+	// sources need their *final* exported set (including their own
+	// re-exports) already computed. Only resolves names/existence here, not
+	// mangled values — those aren't computed until after mangleFileDecls
+	// runs below, see the second re-export pass further down.
+	for _, path := range allPaths {
+		info := files[path]
+		dir := filepath.Dir(path)
+		for _, stmt := range info.prog.Body {
+			ef, ok := stmt.(*ast.ExportFromDeclaration)
+			if !ok {
+				continue
+			}
+			resolved, err := resolveImportPath(dir, ef.Source, klainModulesDir)
+			if err != nil {
+				return nil, fmt.Errorf("%d:%d: %w", ef.GetPos().Line, ef.GetPos().Col, err)
+			}
+			target := files[resolved]
+
+			var specs []ast.ImportSpecifier
+			if ef.All {
+				for name := range target.exported {
+					if name == "default" {
+						continue // a star re-export never forwards a default, matching real ES modules
+					}
+					specs = append(specs, ast.ImportSpecifier{Imported: name, Local: name})
+				}
+			} else {
+				specs = ef.Specifiers
+			}
+
+			for _, spec := range specs {
+				if !target.exported[spec.Imported] {
+					return nil, fmt.Errorf("%d:%d: '%s' has no exported member '%s'",
+						ef.GetPos().Line, ef.GetPos().Col, ef.Source, spec.Imported)
+				}
+				if info.exported[spec.Local] {
+					return nil, fmt.Errorf("%d:%d: '%s' is already exported from this file — use 'as' to re-export it under a different name",
+						ef.GetPos().Line, ef.GetPos().Col, spec.Local)
+				}
+				info.exported[spec.Local] = true
+				info.reExportBindings = append(info.reExportBindings, reExportBinding{
+					local: spec.Local, target: resolved, remote: spec.Imported,
+				})
+			}
+		}
+	}
+
 	// Validate every import statement's specifiers against the file it resolves to.
 	for _, info := range files {
 		dir := filepath.Dir(info.path)
@@ -146,7 +314,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 			if _, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
 				continue // TDD-00049: validated separately, once bindings are built below
 			}
-			resolved, err := resolveImportPath(dir, imp.Source)
+			resolved, err := resolveImportPath(dir, imp.Source, klainModulesDir)
 			if err != nil {
 				return nil, fmt.Errorf("%d:%d: %w", imp.GetPos().Line, imp.GetPos().Col, err)
 			}
@@ -160,10 +328,6 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		}
 	}
 
-	allPaths := make([]string, 0, len(order)+1)
-	allPaths = append(allPaths, order...)
-	allPaths = append(allPaths, entryAbs)
-
 	// TDD-00041: give every file's own top-level declarations a file-private
 	// mangled name (also catches genuine in-file duplicate declarations,
 	// same as the old global check did for the same-file case). Must fully
@@ -176,6 +340,23 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 			return nil, err
 		}
 		info.mangled = mangled
+	}
+
+	// TDD-00051: now that every file's own `mangled` map is final, resolve
+	// each re-export binding recorded above into an actual mangled name.
+	// Dependency order (allPaths) again guarantees a binding's target file
+	// was fully processed — including its own reExportMangled, so re-export
+	// chains of arbitrary depth resolve transitively for free.
+	for _, path := range allPaths {
+		info := files[path]
+		if len(info.reExportBindings) == 0 {
+			continue
+		}
+		info.reExportMangled = make(map[string]string, len(info.reExportBindings))
+		for _, b := range info.reExportBindings {
+			m, _ := files[b.target].publicMangled(b.remote)
+			info.reExportMangled[b.local] = m
+		}
 	}
 
 	// Build each file's own combined lookup table (its own mangled decls
@@ -238,7 +419,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 				lookup[local] = marker
 				continue
 			}
-			resolved, err := resolveImportPath(dir, imp.Source)
+			resolved, err := resolveImportPath(dir, imp.Source, klainModulesDir)
 			if err != nil {
 				return nil, fmt.Errorf("%d:%d: %w", imp.GetPos().Line, imp.GetPos().Col, err)
 			}
@@ -252,7 +433,8 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 					return nil, fmt.Errorf("%d:%d: '%s' is already declared in this file — use 'as' to import it under a different local name",
 						imp.GetPos().Line, imp.GetPos().Col, spec.Local)
 				}
-				lookup[spec.Local] = target.mangled[spec.Imported]
+				m, _ := target.publicMangled(spec.Imported)
+				lookup[spec.Local] = m
 			}
 			if imp.Namespace != "" {
 				if _, dup := lookup[imp.Namespace]; dup {
@@ -268,7 +450,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 				// named `import { x }` is already held to.
 				members := make(map[string]string, len(target.exported))
 				for name := range target.exported {
-					members[name] = target.mangled[name]
+					members[name], _ = target.publicMangled(name)
 				}
 				ns[imp.Namespace] = members
 			}
@@ -277,6 +459,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		renameFile(info.prog, lookupTable{
 			names: lookup, ns: ns, builtinMembers: builtinMembers,
 			allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
+			filePath: path,
 		})
 		if reservedErr != nil {
 			return nil, reservedErr
@@ -311,24 +494,82 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	return merged, nil
 }
 
-// validateDeclarationsOnly enforces the V1 restriction that imported
-// (non-entry) files may only contain declarations and imports.
-func validateDeclarationsOnly(prog *ast.Program) error {
+// validateCyclicFile enforces the restriction that still applies to a
+// non-entry file that genuinely participates in an import cycle (TDD-00052)
+// — an acyclic non-entry file has no restriction at all (see
+// ResolveProgramWithOptions's Design-section comment above the merge step).
+// Two rules: only declaration-shaped top-level statements are allowed (the
+// original V1-wide restriction, now scoped down to just the cyclic case),
+// and a VarDeclaration's initializer, if present, must be a compile-time
+// literal — closing a real bug found while designing this feature: since
+// VarDeclaration was always in the "allowed declarations" set regardless of
+// its Init expression's content, a circular pair of files could already
+// read each other's not-yet-initialized top-level binding (an uninitialized
+// LLVM alloca — undefined behavior, not a clean error). A literal can't
+// observe any not-yet-run initialization from anywhere, so this closes the
+// hole without needing to model real ES modules' TDZ/live-binding
+// semantics.
+func validateCyclicFile(prog *ast.Program) error {
 	for _, stmt := range prog.Body {
 		s := stmt
 		if exp, ok := s.(*ast.ExportDeclaration); ok {
 			s = exp.Decl
 		}
-		switch s.(type) {
-		case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.InterfaceDeclaration,
-			*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ImportDeclaration, *ast.ClassDeclaration:
-			continue
+		switch d := s.(type) {
+		case *ast.VarDeclaration:
+			if d.Init != nil && !isLiteralExpr(d.Init) {
+				return fmt.Errorf("%d:%d: a file that participates in an import cycle may only initialize a top-level binding with a compile-time literal — no calls, no references to other bindings (found initializing '%s')",
+					stmt.GetPos().Line, stmt.GetPos().Col, d.Name)
+			}
+		case *ast.FunctionDeclaration, *ast.InterfaceDeclaration,
+			*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ImportDeclaration,
+			*ast.ExportFromDeclaration, *ast.ClassDeclaration:
+			// allowed as-is
 		default:
-			return fmt.Errorf("%d:%d: imported files may only contain declarations (function/const/let/var/interface/type/enum/class) and imports — no executable top-level statements",
+			return fmt.Errorf("%d:%d: a file that participates in an import cycle may only contain declarations (function/const/let/var/interface/type/enum/class) and imports — no executable top-level statements",
 				stmt.GetPos().Line, stmt.GetPos().Col)
 		}
 	}
 	return nil
+}
+
+// isLiteralExpr reports whether expr is a compile-time literal — a
+// number/string/boolean/null/undefined literal, a prefix +/- applied to a
+// numeric literal, or an array/object literal whose elements/property
+// values are themselves (recursively) literals. Used by validateCyclicFile
+// to guarantee a cyclic file's top-level var/let/const initializer can
+// never observe another binding's not-yet-run initialization, from this
+// file or any other.
+func isLiteralExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral:
+		return true
+	case *ast.UnaryExpression:
+		if !e.Prefix || (e.Op != "-" && e.Op != "+") {
+			return false
+		}
+		_, isNum := e.Arg.(*ast.NumberLiteral)
+		return isNum
+	case *ast.ArrayLiteral:
+		for _, el := range e.Elements {
+			if !isLiteralExpr(el) {
+				return false
+			}
+		}
+		return true
+	case *ast.ObjectLiteral:
+		for _, prop := range e.Properties {
+			if prop.KeyExpr != nil && !isLiteralExpr(prop.KeyExpr) {
+				return false
+			}
+			if !isLiteralExpr(prop.Value) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // declNameOf returns the name a top-level declaration statement introduces,
@@ -453,23 +694,105 @@ func exportedNames(prog *ast.Program) map[string]bool {
 	return names
 }
 
-// resolveImportPath resolves a relative import specifier against the
-// importing file's directory, auto-appending ".ts" if omitted, and confirms
-// the resulting file exists.
-func resolveImportPath(dir, source string) (string, error) {
-	if !strings.HasPrefix(source, "./") && !strings.HasPrefix(source, "../") {
+// resolveImportPath resolves an import specifier — relative (`./`, `../`)
+// against dir, or, failing that, a bare package specifier against
+// klainModulesDir (TDD-00054 Stage 1, "" meaning no klain_modules directory
+// exists above the entry file, in which case a bare specifier is rejected
+// exactly as it always has been). Auto-appends ".ts" if the resolved path
+// has no extension, and confirms the resulting file exists.
+func resolveImportPath(dir, source, klainModulesDir string) (string, error) {
+	if strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../") {
+		abs, found, err := resolveTsFile(dir, source)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", fmt.Errorf("cannot find module '%s' (resolved to %s)", source, abs)
+		}
+		return abs, nil
+	}
+	if klainModulesDir == "" {
 		return "", fmt.Errorf("import path '%s' must start with './' or '../' — bare/package-style imports are not supported", source)
 	}
-	joined := filepath.Join(dir, source)
+	return resolveKlmpmPackage(klainModulesDir, source)
+}
+
+// resolveTsFile joins dir and rel, auto-appends ".ts" if the result has no
+// extension, and reports whether the resulting file exists — the shared
+// "resolve a relative path to a real file" mechanics both a relative import
+// and a klmpm package's own "main" field (resolveKlmpmPackage) need. abs is
+// always returned (even on a miss) so callers can phrase their own
+// not-found error around it.
+func resolveTsFile(dir, rel string) (abs string, found bool, err error) {
+	joined := filepath.Join(dir, rel)
 	if filepath.Ext(joined) == "" {
 		joined += ".ts"
 	}
-	abs, err := filepath.Abs(joined)
+	abs, err = filepath.Abs(joined)
+	if err != nil {
+		return "", false, err
+	}
+	if _, statErr := os.Stat(abs); statErr != nil {
+		return abs, false, nil
+	}
+	return abs, true, nil
+}
+
+// klmpmManifest is a klain.json package manifest (TDD-00054 Stage 1) — only
+// the one field the compiler itself ever needs. A project's own root
+// klain.json (dependency list, version, etc. — klmpm's own bookkeeping) is
+// never read here at all; only a fetched package's manifest, and only for
+// its "main" field.
+type klmpmManifest struct {
+	Main string `json:"main"`
+}
+
+// findKlainModulesDir walks upward from startDir (inclusive) to the
+// filesystem root looking for a "klain_modules" subdirectory, returning its
+// absolute path, or "" if none is found anywhere above startDir.
+func findKlainModulesDir(startDir string) string {
+	dir := startDir
+	for {
+		candidate := filepath.Join(dir, "klain_modules")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// resolveKlmpmPackage resolves a bare specifier to klainModulesDir/<name>'s
+// klain.json "main" field (TDD-00054 Stage 1). The compiler never reads a
+// package's own "dependencies" — only whether the package directory and a
+// usable "main" entry exist on disk; klmpm itself (not yet built) owns
+// fetching/versioning/the lockfile entirely.
+func resolveKlmpmPackage(klainModulesDir, name string) (string, error) {
+	pkgDir := filepath.Join(klainModulesDir, name)
+	if info, err := os.Stat(pkgDir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("cannot find package '%s' in %s", name, klainModulesDir)
+	}
+	manifestPath := filepath.Join(pkgDir, "klain.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return "", fmt.Errorf("package '%s' has no klain.json manifest (looked for %s)", name, manifestPath)
+	}
+	var manifest klmpmManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", fmt.Errorf("package '%s': invalid klain.json (%s): %w", name, manifestPath, err)
+	}
+	if manifest.Main == "" {
+		return "", fmt.Errorf("package '%s': klain.json (%s) has no \"main\" field", name, manifestPath)
+	}
+	abs, found, err := resolveTsFile(pkgDir, manifest.Main)
 	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(abs); err != nil {
-		return "", fmt.Errorf("cannot find module '%s' (resolved to %s)", source, abs)
+	if !found {
+		return "", fmt.Errorf("package '%s': klain.json's \"main\" (%s) does not exist (resolved to %s)", name, manifest.Main, abs)
 	}
 	return abs, nil
 }
@@ -481,6 +804,9 @@ func unwrap(stmts []ast.Statement) []ast.Statement {
 	for _, s := range stmts {
 		if _, ok := s.(*ast.ImportDeclaration); ok {
 			continue
+		}
+		if _, ok := s.(*ast.ExportFromDeclaration); ok {
+			continue // TDD-00051: pure name-forwarding, no runtime statement
 		}
 		if exp, ok := s.(*ast.ExportDeclaration); ok {
 			out = append(out, exp.Decl)
