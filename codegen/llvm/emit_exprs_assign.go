@@ -63,7 +63,7 @@ func (e *Emitter) tryEmitAccessorAssign(objVal Value, prop, op string, rhsExpr a
 			return true, Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
 		}
 		rhsVal = e.coerce(rhsVal, paramTy)
-		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, paramTy)
+		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, paramTy, pos)
 		if err != nil {
 			return true, Value{}, err
 		}
@@ -196,7 +196,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 			}
 			rhsVal = e.coerce(rhsVal, elemTy)
-			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, elemTy)
+			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, elemTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
@@ -299,7 +299,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 			}
 			rhsVal = e.coerce(rhsVal, fieldTy)
-			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, fieldTy)
+			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, fieldTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
@@ -357,7 +357,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		rhsVal = e.coerce(rhsVal, sym.Ty)
 
 		op := strings.TrimSuffix(ex.Op, "=")
-		rhs, err = e.emitArith(op, cur, rhsVal, sym.Ty)
+		rhs, err = e.emitArith(op, cur, rhsVal, sym.Ty, ex.GetPos())
 		if err != nil {
 			return Value{}, err
 		}

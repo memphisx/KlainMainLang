@@ -408,7 +408,38 @@ func dateCompoundAssignGuard(op string, targetIsDate, rhsIsDate bool) error {
 	return nil
 }
 
-func (e *Emitter) emitArith(op string, left, right Value, ty Type) (Value, error) {
+func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) (Value, error) {
+	// A string-typed compound-assignment target (`s += ...`) never reaches
+	// emitBinary's own top-of-function string handling — every caller here
+	// is a compound-assign path (emit_exprs_assign.go/emit_objects.go/
+	// emit_classes.go) that computes its own cur/rhsVal and calls straight
+	// into this function. Without this check, "+" fell through to the
+	// generic `add`/`fadd` case below unconditionally — a hard clang-stage
+	// "invalid operand type" on a `ptr` operand for even the plainest
+	// `let s = "a"; s += "b"`, not just a mixed string/number case. Found
+	// while building TDD-00059's own tagged-template example/tests, which
+	// exercises a tag function accumulating a string result via `+=`. Only
+	// "+" is meaningful for strings; every other arithmetic compound-assign
+	// operator on a string target still gets emitStringBinary's own clean
+	// "operator '%s' is not supported for strings" rejection instead of
+	// silently emitting invalid IR the way "+" itself used to.
+	if isStringTy(ty) {
+		l, r := left, right
+		if op == "+" {
+			var err error
+			if !isStringTy(l.Ty) {
+				if l, err = e.emitValueToString(l); err != nil {
+					return Value{}, err
+				}
+			}
+			if !isStringTy(r.Ty) {
+				if r, err = e.emitValueToString(r); err != nil {
+					return Value{}, err
+				}
+			}
+		}
+		return e.emitStringBinary(op, l, r, pos)
+	}
 	reg := e.freshReg()
 	switch op {
 	case "+":

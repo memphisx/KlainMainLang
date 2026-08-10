@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,15 @@ type Emitter struct {
 	currentRetType           Type                        // return type of the function being emitted
 	blockDone                bool                        // true after a terminator (ret/br) in the current block
 	closureCtr               int                         // monotonically increasing counter for unique closure names
+	// nestedFuncScopes/nestedFuncCtr — TDD-00057. One nestedFuncScope frame
+	// per enclosing function/closure body currently being emitted, pushed
+	// by pushNestedFuncScope and popped once that body finishes; searched
+	// innermost-first by resolveFuncRef so a nested function's name is
+	// visible throughout its own enclosing body (hoisted, self-recursive,
+	// visible to its own further-nested descendants) without ever being
+	// entered into the flat, whole-program e.funcs map.
+	nestedFuncScopes []nestedFuncScope
+	nestedFuncCtr    int
 	usedStrlen               bool
 	usedMemcpy               bool
 	usedMemset               bool
@@ -793,6 +803,7 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 // registerFunctions pre-scans all top-level function declarations and records
 // their signatures so calls can be resolved before the function body is emitted.
 func (e *Emitter) registerFunctions(prog *ast.Program) {
+	var unannotated []*ast.FunctionDeclaration
 	for _, stmt := range prog.Body {
 		fd, ok := stmt.(*ast.FunctionDeclaration)
 		if !ok {
@@ -816,70 +827,148 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 			// signature happens to use TypeAny, with no new dispatch code
 			// needed anywhere else.
 			if fd.Erased {
-				subs := make(map[string]Type, len(fd.TypeParams))
-				for _, tp := range fd.TypeParams {
-					subs[tp] = TypeAny
+				e.funcs[fd.Name] = e.buildErasedFunctionSig(fd)
+				if fd.ReturnType == nil {
+					// TDD-00058: an @erased generic function's own return-
+					// type inference has the identical same-file forward-
+					// reference boundary a plain unannotated function does
+					// (both ultimately call inferUnannotatedReturnType) —
+					// folded into the same fixed-point sweep below rather
+					// than left as a separate, narrower gap. Confirmed with
+					// a real repro (an @erased function calling a plain,
+					// later-declared unannotated function returning an
+					// object) before fixing, not assumed.
+					unannotated = append(unannotated, fd)
 				}
-				sig := e.buildGenericParamSig(fd.Params, subs)
-				if fd.ReturnType != nil {
-					sig.RetType = e.substituteGenericType(fd.ReturnType, subs)
-				} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, sig.ParamTypes); ok {
-					sig.RetType = inferred
-				} else {
-					sig.RetType = TypeVoid
-				}
-				e.funcs[fd.Name] = sig
 				continue
 			}
 			e.genericFuncs[fd.Name] = fd
 			continue
 		}
-		retType := TypeVoid
-		if fd.ReturnType != nil {
-			retType = e.resolveType(fd.ReturnType)
-		}
-		sig := FuncSig{RetType: retType}
-		for _, p := range fd.Params {
-			var pty Type
-			if p.Type != nil {
-				pty = e.resolveType(p.Type)
-			} else if p.Rest {
-				pty = ArrayOf(TypeI64) // default rest element type: number
-			} else {
-				pty = TypeI64
-				pty.Inferred = true // no annotation given — see docs/adr/ADR-00042.md
-			}
-			sig.ParamTypes = append(sig.ParamTypes, pty)
-			sig.ParamNames = append(sig.ParamNames, p.Name)
-			sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
-		}
-		if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {
-			sig.HasRest = true
-		}
-		// An unannotated function defaulted to TypeVoid above regardless of
-		// what it actually returns — every caller trusted this registered
-		// signature, so this broke both field access/calls on an
-		// object/array/closure result AND (found while verifying this fix)
-		// even a plain scalar return: emitFunctionDecl used to compute its
-		// own, separately-defaulted-to-void return type independently of
-		// this signature, so `function addOne(n) { return n + 1 }` emitted
-		// a function whose LLVM signature said void while its body still
-		// tried to `ret i64` the real value — a hard clang-stage type
-		// mismatch, not just a silently-wrong result. Best-effort inference
-		// from the function's own first return statement (see
-		// inferUnannotatedReturnType) fixes both; a function with no
-		// reachable return value at all keeps the void default.
+		e.funcs[fd.Name] = e.buildFunctionSig(fd)
 		if fd.ReturnType == nil {
-			paramNames := make([]string, len(fd.Params))
-			for i, p := range fd.Params {
-				paramNames[i] = p.Name
-			}
-			if inferred, ok := e.inferUnannotatedReturnType(fd.Body, paramNames, sig.ParamTypes); ok {
-				sig.RetType = inferred
-			}
+			unannotated = append(unannotated, fd)
 		}
-		e.funcs[fd.Name] = sig
 	}
+	e.reinferUntilFixedPoint(unannotated, func(fd *ast.FunctionDeclaration) FuncSig {
+		if fd.Erased {
+			return e.buildErasedFunctionSig(fd)
+		}
+		return e.buildFunctionSig(fd)
+	}, func(fd *ast.FunctionDeclaration, sig FuncSig) {
+		e.funcs[fd.Name] = sig
+	}, func(fd *ast.FunctionDeclaration) Type {
+		return e.funcs[fd.Name].RetType
+	})
+}
+
+// reinferUntilFixedPoint closes ADR-00041's forward-reference boundary
+// (TDD-00058): a same-file/same-scope unannotated function calling another
+// unannotated function declared later only saw an incomplete e.funcs/nested
+// scope on registerFunctions'/pushNestedFuncScope's own first, single,
+// source-order pass, so a non-scalar callee return type (object/array/
+// closure/Date) under-inferred. Re-runs build for every entry in decls,
+// writing each result back immediately (not batched) so a later entry in
+// the same sweep can already see an earlier one's freshly corrected result,
+// repeating until a full sweep changes nothing or the sweep cap
+// (len(decls), enough for any acyclic reference chain to fully propagate)
+// is reached — a genuinely circular unannotated pair can't converge by
+// construction and keeps whatever the last sweep computed, same graceful
+// fallback ADR-00041 already established, not a new failure mode.
+func (e *Emitter) reinferUntilFixedPoint(decls []*ast.FunctionDeclaration, build func(*ast.FunctionDeclaration) FuncSig, store func(*ast.FunctionDeclaration, FuncSig), current func(*ast.FunctionDeclaration) Type) {
+	for i := 0; i < len(decls); i++ {
+		changed := false
+		for _, fd := range decls {
+			prev := current(fd)
+			sig := build(fd)
+			if !reflect.DeepEqual(prev, sig.RetType) {
+				changed = true
+			}
+			store(fd, sig)
+		}
+		if !changed {
+			return
+		}
+	}
+}
+
+// buildErasedFunctionSig computes the FuncSig for one `@erased` generic
+// function declaration (TDD-00010 V2): every bare type-parameter position
+// substitutes to TypeAny, and an unannotated return type gets the same
+// best-effort inference (inferUnannotatedReturnType) a plain function's
+// does — factored out of registerFunctions' inline block so it can also be
+// re-run by reinferUntilFixedPoint (TDD-00058) for the identical same-file
+// forward-reference boundary a plain unannotated function has.
+func (e *Emitter) buildErasedFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
+	subs := make(map[string]Type, len(fd.TypeParams))
+	for _, tp := range fd.TypeParams {
+		subs[tp] = TypeAny
+	}
+	sig := e.buildGenericParamSig(fd.Params, subs)
+	if fd.ReturnType != nil {
+		sig.RetType = e.substituteGenericType(fd.ReturnType, subs)
+	} else if inferred, ok := e.inferUnannotatedReturnType(fd.Body, sig.ParamNames, sig.ParamTypes); ok {
+		sig.RetType = inferred
+	} else {
+		sig.RetType = TypeVoid
+	}
+	return sig
+}
+
+// buildFunctionSig computes the FuncSig for one non-generic function
+// declaration: resolved/defaulted parameter types, rest-param detection, and
+// an explicit or best-effort-inferred (see inferUnannotatedReturnType)
+// return type. Shared by registerFunctions (top-level, TDD-00041's original
+// home for this logic) and pushNestedFuncScope (TDD-00057) — one
+// authoritative computation for both, rather than two copies that could
+// silently drift apart the way emitFunctionDecl's own once did (see the
+// comment on the return-type fallback below).
+func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
+	retType := TypeVoid
+	if fd.ReturnType != nil {
+		retType = e.resolveType(fd.ReturnType)
+	}
+	sig := FuncSig{RetType: retType}
+	for _, p := range fd.Params {
+		var pty Type
+		if p.Type != nil {
+			pty = e.resolveType(p.Type)
+		} else if p.Rest {
+			pty = ArrayOf(TypeI64) // default rest element type: number
+		} else {
+			pty = TypeI64
+			pty.Inferred = true // no annotation given — see docs/adr/ADR-00042.md
+		}
+		sig.ParamTypes = append(sig.ParamTypes, pty)
+		sig.ParamNames = append(sig.ParamNames, p.Name)
+		sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
+	}
+	if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {
+		sig.HasRest = true
+	}
+	// An unannotated function defaulted to TypeVoid above regardless of
+	// what it actually returns — every caller trusted this registered
+	// signature, so this broke both field access/calls on an
+	// object/array/closure result AND (found while verifying this fix)
+	// even a plain scalar return: emitFunctionDecl used to compute its
+	// own, separately-defaulted-to-void return type independently of
+	// this signature, so `function addOne(n) { return n + 1 }` emitted
+	// a function whose LLVM signature said void while its body still
+	// tried to `ret i64` the real value — a hard clang-stage type
+	// mismatch, not just a silently-wrong result. Best-effort inference
+	// from the function's own first return statement (see
+	// inferUnannotatedReturnType) fixes both; a function with no
+	// reachable return value at all keeps the void default.
+	if fd.ReturnType == nil {
+		paramNames := make([]string, len(fd.Params))
+		for i, p := range fd.Params {
+			paramNames[i] = p.Name
+		}
+		if inferred, ok := e.inferUnannotatedReturnType(fd.Body, paramNames, sig.ParamTypes); ok {
+			sig.RetType = inferred
+		}
+	}
+	return sig
 }
 
 // emitFunctionDecl emits one user-defined function into e.functions.

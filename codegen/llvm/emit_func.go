@@ -45,6 +45,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
+	if decl.Body != nil {
+		if err := e.pushNestedFuncScope(decl.Body.Body); err != nil {
+			return err
+		}
+		defer e.popNestedFuncScope()
+	}
 
 	// registerFunctions already resolved the signature (explicit annotations,
 	// or best-effort inference for an unannotated return type — see
@@ -194,6 +200,116 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 }
 
 // =============================================================================
+// Nested function declarations (TDD-00057)
+// =============================================================================
+
+// nestedFuncEntry is one pre-registered nested function declaration's
+// mangled LLVM name and signature.
+type nestedFuncEntry struct {
+	Mangled string
+	Sig     FuncSig
+}
+
+// nestedFuncScope is the set of function declarations found directly (not
+// recursively into a further sub-block) in one enclosing body, pre-scanned
+// by pushNestedFuncScope before that body's statements are emitted so a
+// forward reference or self-recursive call resolves — the same two-pass
+// principle registerFunctions already applies at Program top level, scoped
+// down to a single function/closure body. byDecl (keyed by AST identity,
+// not name) is what lets emitStmt tell "this exact declaration was
+// pre-registered directly in the current body" apart from a deeper,
+// unsupported nesting that reaches emitStmt's *ast.FunctionDeclaration case
+// via some other block without ever being pre-scanned.
+type nestedFuncScope struct {
+	byName map[string]nestedFuncEntry
+	byDecl map[*ast.FunctionDeclaration]nestedFuncEntry
+}
+
+// pushNestedFuncScope pre-scans body (direct statements only) for nested
+// function declarations, registers each under a fresh mangled name, and
+// pushes the resulting scope onto e.nestedFuncScopes. Every push must be
+// matched by a popNestedFuncScope once the body's statements have been
+// emitted (skipped on an error return, same as every other per-function
+// emitter-state restore in this file — an error aborts the whole
+// compilation, so nothing downstream ever observes the unpopped frame).
+func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
+	// Pushed before the scan below runs (and popped on an early-error
+	// return, to leave e.nestedFuncScopes exactly as this function found it
+	// — every caller relies on that on error) rather than only once fully
+	// built, so an earlier-in-this-same-body sibling is already resolvable
+	// via resolveFuncRef while a later sibling's own signature is still
+	// being computed — the same immediate-write-as-you-go shape
+	// registerFunctions (emitter.go) uses for the identical reason. scope's
+	// maps are reference types, so mutating the local variable below and
+	// reading back through e.nestedFuncScopes see the same underlying data.
+	scope := nestedFuncScope{byName: map[string]nestedFuncEntry{}, byDecl: map[*ast.FunctionDeclaration]nestedFuncEntry{}}
+	e.nestedFuncScopes = append(e.nestedFuncScopes, scope)
+
+	var unannotated []*ast.FunctionDeclaration
+	for _, stmt := range body {
+		fd, ok := stmt.(*ast.FunctionDeclaration)
+		if !ok {
+			continue
+		}
+		if len(fd.TypeParams) > 0 {
+			e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+			return fmt.Errorf("%d:%d: a generic nested function declaration is not supported", fd.GetPos().Line, fd.GetPos().Col)
+		}
+		if _, dup := scope.byName[fd.Name]; dup {
+			e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+			return fmt.Errorf("%d:%d: '%s' is already declared in this scope", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
+		}
+		e.nestedFuncCtr++
+		entry := nestedFuncEntry{
+			Mangled: fmt.Sprintf("%s__nested%d", fd.Name, e.nestedFuncCtr),
+			Sig:     e.buildFunctionSig(fd),
+		}
+		scope.byName[fd.Name] = entry
+		scope.byDecl[fd] = entry
+		if fd.ReturnType == nil {
+			unannotated = append(unannotated, fd)
+		}
+	}
+	// TDD-00058: same fixed-point re-inference registerFunctions now does,
+	// scoped to this body's own directly-declared nested siblings — closes
+	// the identical forward-reference boundary ADR-00041 originally found
+	// at top level, here for a nested unannotated function calling a
+	// same-body unannotated sibling declared later.
+	e.reinferUntilFixedPoint(unannotated, func(fd *ast.FunctionDeclaration) FuncSig {
+		return e.buildFunctionSig(fd)
+	}, func(fd *ast.FunctionDeclaration, sig FuncSig) {
+		entry := nestedFuncEntry{Mangled: scope.byName[fd.Name].Mangled, Sig: sig}
+		scope.byName[fd.Name] = entry
+		scope.byDecl[fd] = entry
+	}, func(fd *ast.FunctionDeclaration) Type {
+		return scope.byName[fd.Name].Sig.RetType
+	})
+	return nil
+}
+
+// popNestedFuncScope removes the most recently pushed nestedFuncScope frame.
+func (e *Emitter) popNestedFuncScope() {
+	e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+}
+
+// resolveFuncRef resolves a bare identifier used as a callee/callback name:
+// e.nestedFuncScopes innermost-first, then the flat top-level e.funcs map.
+// Every call-site that used to index e.funcs directly by a source-written
+// identifier name goes through this instead, so a nested function's mangled
+// LLVM name is used wherever its source name would have been.
+func (e *Emitter) resolveFuncRef(name string) (string, FuncSig, bool) {
+	for i := len(e.nestedFuncScopes) - 1; i >= 0; i-- {
+		if entry, ok := e.nestedFuncScopes[i].byName[name]; ok {
+			return entry.Mangled, entry.Sig, true
+		}
+	}
+	if sig, ok := e.funcs[name]; ok {
+		return name, sig, true
+	}
+	return "", FuncSig{}, false
+}
+
+// =============================================================================
 // Closure / arrow-function support
 // =============================================================================
 
@@ -264,6 +380,11 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 	case *ast.NewArrayExpression:
 		scanExprFV(x.Size, bound, result)
 	case *ast.TemplateLiteral:
+		for _, ex := range x.Exprs {
+			scanExprFV(ex, bound, result)
+		}
+	case *ast.TaggedTemplateExpression:
+		scanExprFV(x.Tag, bound, result)
 		for _, ex := range x.Exprs {
 			scanExprFV(ex, bound, result)
 		}
@@ -476,6 +597,12 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
+	if af.Block != nil {
+		if err := e.pushNestedFuncScope(af.Block.Body); err != nil {
+			return err
+		}
+		defer e.popNestedFuncScope()
+	}
 
 	// Async arrow function: same treatment emitFunctionDecl already gives a
 	// named async function — an `await` inside a closure body was already
@@ -500,21 +627,41 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	}
 
 	// Build the LLVM parameter list string and alloca+store each regular param.
+	// Array parameters expand to two LLVM params: (ptr, i64 length) —
+	// mirrors emitFunctionDeclAs's own identical shape exactly. Originally
+	// rejected entirely (see ADR-00105's Investigation for where the gap
+	// was first found, and ADR-00151/TDD-00059 for confirming a plain
+	// array param and a rest param independently produced invalid LLVM IR,
+	// not just the destructured case) — fixed here rather than left
+	// documented, since every call site that invokes a closure
+	// (emitClosureCallByPtr, emitCBCall) needed the matching decomposition
+	// too and now has it, closing this out as a real fix rather than a
+	// narrower guard. Capturing an array *variable* from the enclosing
+	// scope (a separate mechanism — env-struct slots, not parameters) is
+	// untouched and still rejected by gatherCaptures; that's a genuinely
+	// different problem (an env slot holds one heap-cell pointer, not a
+	// (ptr, i64) pair) not attempted here.
 	paramStr := "ptr %env"
 	for i, p := range af.Params {
 		pty := paramTypes[i]
-		// Array-typed closure parameters are a separate, deeper, pre-existing
-		// gap this loop already has independent of destructuring at all:
-		// unlike a named top-level function (emitFunctionDeclAs), a closure
-		// always passes every parameter as one plain `pty.IR`-typed value,
-		// never decomposing an array into its (ptr, i64) pair the way a
-		// named function call's own ABI does — see ADR-00105's Investigation
-		// for where this was first found. A `[a, b]: T[]` destructured
-		// parameter would silently bind only the raw data pointer here,
-		// dropping the length entirely, so it's rejected with a clear error
-		// instead rather than left to miscompile.
-		if p.ArrayPattern != nil {
-			return fmt.Errorf("%d:%d: a destructured array parameter is not yet supported on an arrow function/closure (array-typed closure parameters aren't supported at all yet) — use a named function instead", af.GetPos().Line, af.GetPos().Col)
+		if pty.IsArray {
+			paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
+			ptrAlloca := "%v_" + p.Name + "_ptr"
+			lenAlloca := "%v_" + p.Name + "_len"
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			if p.ArrayPattern != nil {
+				dataPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+					return err
+				}
+				continue
+			}
+			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			continue
 		}
 		paramStr += fmt.Sprintf(", %s %%p_%s", pty.IR, p.Name)
 		ptrName := "%v_" + p.Name
@@ -843,7 +990,15 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	// Resolve param types: use hint when no annotation is present.
 	paramTypes := make([]Type, len(af.Params))
 	for i, p := range af.Params {
-		if p.Type == nil && i < len(hints) {
+		if p.Rest && p.Type == nil {
+			// Same default rest-element type buildFunctionSig (emitter.go)
+			// already gives an unannotated named-function rest param — kept
+			// consistent rather than falling into the plain-scalar
+			// unannotated-param default just below, which would be wrong
+			// for a rest param specifically (it always collects into an
+			// array, never a bare scalar).
+			paramTypes[i] = ArrayOf(TypeI64)
+		} else if p.Type == nil && i < len(hints) {
 			paramTypes[i] = hints[i]
 		} else if p.Type == nil {
 			paramTypes[i] = TypeI64
@@ -941,6 +1096,9 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	}
 
 	closureTy := FuncType(paramTypes, retTy)
+	if len(af.Params) > 0 && af.Params[len(af.Params)-1].Rest {
+		closureTy.FuncHasRest = true
+	}
 	return Value{Ref: hdr, Ty: closureTy}, nil
 }
 
@@ -967,48 +1125,102 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, closurePtr))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", epVal, epSlot))
 
+	// regularCount excludes the rest slot itself (FuncHasRest, added
+	// alongside this fix — TDD-00059/ADR-00151 — since a closure *value*'s
+	// own Type previously had no way to tell "one array-typed parameter"
+	// apart from "a rest parameter collecting N individual trailing call
+	// arguments," the same distinction FuncSig.HasRest already gives a
+	// named function's call sites).
+	regularCount := len(ty.FuncParams)
+	if ty.FuncHasRest {
+		regularCount--
+	}
+
 	// Build arg list: env first, then actual args.
 	argParts := []string{"ptr " + epVal}
-	for i, arg := range args {
-		var paramTy Type
-		haveParamTy := i < len(ty.FuncParams)
-		if haveParamTy {
-			paramTy = ty.FuncParams[i]
-		}
+	for i := 0; i < regularCount && i < len(args); i++ {
+		arg := args[i]
+		paramTy := ty.FuncParams[i]
 		val, err := e.emitExprWithObjectHint(arg, paramTy)
 		if err != nil {
 			return Value{}, err
 		}
-		if haveParamTy {
-			if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
-				return Value{}, fmt.Errorf("%d:%d: parameter %d has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, i+1)
+		if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: parameter %d has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", arg.GetPos().Line, arg.GetPos().Col, i+1)
+		}
+		if paramTy.IsDynamic {
+			// A constrained-union-typed closure parameter (TDD-00043) —
+			// coerce has no notion of boxing, so this needs the same
+			// explicit emitBoxValue call every other dynamic-typed target
+			// already uses. Bare any/unknown can't reach here at all: a
+			// closure's own declared param types are validated the same
+			// way a named function's are, before this call site ever runs.
+			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
+				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", arg.GetPos().Line, arg.GetPos().Col, i+1)
 			}
-			if paramTy.IsDynamic {
-				// A constrained-union-typed closure parameter (TDD-00043) —
-				// coerce has no notion of boxing, so this needs the same
-				// explicit emitBoxValue call every other dynamic-typed target
-				// already uses. Bare any/unknown can't reach here at all: a
-				// closure's own declared param types are validated the same
-				// way a named function's are, before this call site ever runs.
-				if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
-					return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", arg.GetPos().Line, arg.GetPos().Col, i+1)
-				}
-				var err error
-				val, err = e.emitBoxValue(val)
+			var err error
+			val, err = e.emitBoxValue(val)
+			if err != nil {
+				return Value{}, err
+			}
+		} else {
+			val = e.coerce(val, paramTy)
+		}
+		// An array-typed parameter decomposes into two LLVM args (ptr, i64
+		// len) at the call site — matches the (ptr, i64) callee ABI
+		// emitClosureFunc's own parameter loop now expands an array
+		// parameter into (ADR-00151/TDD-00059). val is already the real
+		// {ptr,i64} aggregate (emitExprWithObjectHint/emitExpr's own
+		// IsArray handling), so this only needs to split it, not build it.
+		if paramTy.IsArray {
+			ptrReg := e.freshReg()
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			continue
+		}
+		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+	}
+	// Pack rest args into a temporary heap array — identical shape to
+	// emitCallToFuncSig's own rest-packing (emit_call.go) and
+	// emitClassCall's (emit_classes.go).
+	if ty.FuncHasRest {
+		restArgs := args[regularCount:]
+		restTy := ty.FuncParams[len(ty.FuncParams)-1]
+		elemTy := TypeI64
+		if restTy.ElemType != nil {
+			elemTy = *restTy.ElemType
+		}
+		if len(restArgs) == 0 {
+			argParts = append(argParts, "ptr null", "i64 0")
+		} else {
+			n := int64(len(restArgs))
+			e.ensureMalloc()
+			dataReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+			for i, arg := range restArgs {
+				val, err := e.emitExprWithObjectHint(arg, elemTy)
 				if err != nil {
 					return Value{}, err
 				}
-			} else {
-				val = e.coerce(val, paramTy)
+				val = e.coerce(val, elemTy)
+				gepReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 			}
+			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
 		}
-		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
 
 	// Build the LLVM function type string for the indirect call.
 	// Format: retTy (ptr, argTy1, argTy2, ...)
 	paramTyStrs := []string{"ptr"}
 	for _, p := range ty.FuncParams {
+		if p.IsArray {
+			paramTyStrs = append(paramTyStrs, "ptr", "i64")
+			continue
+		}
 		paramTyStrs = append(paramTyStrs, p.IR)
 	}
 	fnTypePart := "(" + strings.Join(paramTyStrs, ", ") + ")"
@@ -1075,8 +1287,8 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 		}
 		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
 	case *ast.Identifier:
-		if sig, found := e.funcs[cb.Name]; found {
-			return Callback{kind: cbNamed, name: cb.Name, sig: sig}, nil
+		if mangled, sig, found := e.resolveFuncRef(cb.Name); found {
+			return Callback{kind: cbNamed, name: mangled, sig: sig}, nil
 		}
 		if sym, found := e.lookup(cb.Name); found && sym.Ty.IsFunc {
 			hdr := e.freshReg()
@@ -1130,12 +1342,35 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 
 		tyParts := []string{"ptr"}
 		for _, p := range params {
+			if p.IsArray {
+				tyParts = append(tyParts, "ptr", "i64")
+				continue
+			}
 			tyParts = append(tyParts, p.IR)
 		}
 		fnType := "(" + strings.Join(tyParts, ", ") + ")"
 
 		argParts := []string{"ptr " + epVal}
 		for i, v := range coerced {
+			// An array-typed callback param decomposes into two call args
+			// (ptr, i64 len) — v is already the real {ptr,i64} aggregate
+			// (whatever built `args` upstream, e.g. a HOF's own element
+			// value, already produced it in that shape); this only splits
+			// it, matching emitClosureFunc's (ptr, i64) callee ABI for an
+			// array parameter. Previously this branch used v.Ty.IR ("ptr",
+			// the array-type marker) directly as if the aggregate were a
+			// plain scalar pointer — invalid IR the moment a callback
+			// actually took an array parameter (the array-methods "no
+			// nested-array element as the callback's own parameter"
+			// caveat). See ADR-00151/TDD-00059.
+			if i < len(params) && params[i].IsArray {
+				ptrReg := e.freshReg()
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
+				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				continue
+			}
 			ty := v.Ty.IR
 			if i < len(params) {
 				ty = params[i].IR
@@ -1153,13 +1388,26 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		return Value{Ref: result, Ty: retTy}, nil
 
 	case cbNamed:
-		argParts := make([]string, len(coerced))
+		var argParts []string
 		for i, v := range coerced {
+			// Same array decomposition as the cbClosure branch above — a
+			// plain top-level function called as a callback (e.g. passed
+			// by name to .map()) needs it too, independent of the closure
+			// ABI change: this branch also used to pass an array's raw
+			// {ptr,i64} aggregate as if it were a single scalar pointer.
+			if i < len(params) && params[i].IsArray {
+				ptrReg := e.freshReg()
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
+				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				continue
+			}
 			ty := v.Ty.IR
 			if i < len(params) {
 				ty = params[i].IR
 			}
-			argParts[i] = ty + " " + v.Ref
+			argParts = append(argParts, ty+" "+v.Ref)
 		}
 		argStr := strings.Join(argParts, ", ")
 		if retTy.IR == "void" {

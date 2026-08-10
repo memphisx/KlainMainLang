@@ -505,6 +505,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for i := range e.Exprs {
 			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
 		}
+	case *ast.TaggedTemplateExpression:
+		e.Tag = rewriteExpr(e.Tag, sc, lu)
+		for i := range e.Exprs {
+			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
+		}
 	case *ast.NewMapExpression:
 		if e.KeyType != nil {
 			rewriteType(e.KeyType, sc, lu)

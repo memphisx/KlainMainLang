@@ -372,6 +372,19 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 				return nil, err
 			}
 			expr = ast.NewCallExpression(expr, args, posOf(lparen))
+		case lexer.TEMPLATE_NO_SUB:
+			// `` tag`plain text, no ${} `` — a tagged template with a
+			// single quasi and no interpolated expressions.
+			tok := p.advance()
+			expr = ast.NewTaggedTemplateExpression(expr, []string{tok.Literal}, nil, posOf(tok))
+		case lexer.TEMPLATE_HEAD:
+			tok := p.advance()
+			pos := posOf(tok)
+			quasis, exprs, err := p.parseTemplateRest(tok.Literal)
+			if err != nil {
+				return nil, err
+			}
+			expr = ast.NewTaggedTemplateExpression(expr, quasis, exprs, pos)
 		default:
 			return expr, nil
 		}

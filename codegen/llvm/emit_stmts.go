@@ -49,7 +49,18 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	case *ast.VarDeclaration:
 		return e.emitVarDecl(s)
 	case *ast.FunctionDeclaration:
-		return fmt.Errorf("%d:%d: nested function declarations are not supported", s.GetPos().Line, s.GetPos().Col)
+		// TDD-00057: only a declaration pushNestedFuncScope already
+		// pre-registered (directly in the current enclosing body) is
+		// supported — anything reaching here without having been
+		// pre-scanned is a deeper, unsupported nesting (e.g. inside a
+		// further if/for/while/switch block), rejected cleanly rather than
+		// silently mishandled.
+		if len(e.nestedFuncScopes) > 0 {
+			if entry, ok := e.nestedFuncScopes[len(e.nestedFuncScopes)-1].byDecl[s]; ok {
+				return e.emitFunctionDeclAs(s, entry.Mangled, entry.Sig)
+			}
+		}
+		return fmt.Errorf("%d:%d: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/for/while/switch block)", s.GetPos().Line, s.GetPos().Col)
 	case *ast.ReturnStatement:
 		return e.emitReturn(s)
 	case *ast.ForStatement:

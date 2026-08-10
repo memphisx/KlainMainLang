@@ -140,9 +140,6 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "findIndex", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -171,10 +168,9 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 
 	e.emitLabel(bodyL)
 	gep := e.freshReg()
-	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	cbArgs := []Value{{Ref: elem, Ty: elemTy}}
+	elemVal := e.loadArrayElem(gep, elemTy)
+	cbArgs := []Value{elemVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -213,9 +209,6 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "findLast", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -251,10 +244,9 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 
 	e.emitLabel(bodyL)
 	gep := e.freshReg()
-	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	cbArgs := []Value{{Ref: elem, Ty: elemTy}}
+	elemVal := e.loadArrayElem(gep, elemTy)
+	cbArgs := []Value{elemVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -266,7 +258,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, matchL, decL))
 
 	e.emitLabel(matchL)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elem, foundAlloca, elemTy.Align()))
+	e.storeArrayElem(foundAlloca, elemTy, elemVal)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(decL)
@@ -276,6 +268,9 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
+	if elemTy.IsArray {
+		return e.loadArrayElemMaybeNull(foundAlloca, elemTy), nil
+	}
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
 	return Value{Ref: result, Ty: elemTy}, nil
@@ -289,9 +284,6 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
-		return Value{}, err
-	}
-	if err := e.rejectNestedArrayElem(elemTy, "findLastIndex", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -324,10 +316,9 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 
 	e.emitLabel(bodyL)
 	gep := e.freshReg()
-	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
-	cbArgs := []Value{{Ref: elem, Ty: elemTy}}
+	elemVal := e.loadArrayElem(gep, elemTy)
+	cbArgs := []Value{elemVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}

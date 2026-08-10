@@ -84,6 +84,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = e.inferExprType(init)
 		case *ast.MemberExpression:
 			ty = e.inferExprType(init)
+		case *ast.TaggedTemplateExpression:
+			ty = e.inferExprType(init)
 		case *ast.CallExpression:
 			if callee, ok := init.Callee.(*ast.Identifier); ok {
 				switch callee.Name {
@@ -109,7 +111,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					// function too) found while wiring TDD-00010 V1's
 					// generic-function call support, whose most natural usage
 					// (`const y = identity("hi")`) hit this exact gap.
-					if sig, found := e.funcs[callee.Name]; found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || sig.RetType.IsDynamic || isStringTy(sig.RetType)) {
+					if _, sig, found := e.resolveFuncRef(callee.Name); found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || sig.RetType.IsDynamic || isStringTy(sig.RetType)) {
 						ty = sig.RetType
 					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 						// Calling a closure-typed variable (e.g. a const-bound

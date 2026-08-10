@@ -17,6 +17,23 @@ import (
 // named (top-level) function / closure call-site machinery that has nowhere
 // else to live.
 
+// desugarTaggedTemplate builds the plain call `` tag`a${x}b` `` is
+// equivalent to — `tag(["a","b"], x)` — as a synthetic *ast.CallExpression:
+// a real array literal of the cooked quasis as the first argument, then
+// every interpolated expression untouched (no implicit stringification —
+// unlike a plain, un-tagged template literal's own interpolation) as the
+// remaining arguments. See TDD-00059: this is the only new logic tagged
+// templates need — every existing call-dispatch/coercion/rest-param-
+// packing path handles the result exactly like a hand-written call.
+func desugarTaggedTemplate(tt *ast.TaggedTemplateExpression) *ast.CallExpression {
+	quasiExprs := make([]ast.Expression, len(tt.Quasis))
+	for i, q := range tt.Quasis {
+		quasiExprs[i] = ast.NewStringLiteral(q, tt.GetPos())
+	}
+	args := append([]ast.Expression{ast.NewArrayLiteral(quasiExprs, tt.GetPos())}, tt.Exprs...)
+	return ast.NewCallExpression(tt.Tag, args, tt.GetPos())
+}
+
 func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// super(args) / super.method(args) (TDD-00009 Stage 3) — checked first,
 	// since a SuperExpression callee/receiver never reaches the generic
@@ -761,9 +778,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 
 	// Call via bare identifier: named function or closure variable.
 	if id, ok := ex.Callee.(*ast.Identifier); ok {
-		// Named (top-level) function.
-		if sig, found := e.funcs[id.Name]; found {
-			return e.emitCallToFuncSig(id.Name, sig, ex.Args, ex.GetPos())
+		// Named function — a nested one (TDD-00057) shadows an outer/
+		// top-level function of the same name, same as real JS/TS scoping.
+		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
+			return e.emitCallToFuncSig(mangled, sig, ex.Args, ex.GetPos())
 		}
 		// Generic (TDD-00010 V1) function: infer the type argument from
 		// whichever call-site argument lines up with the generic's own

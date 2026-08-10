@@ -170,6 +170,40 @@ func (e *Emitter) inferDynamicObjectType(lit *ast.ObjectLiteral) Type {
 	return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
 }
 
+// callbackReturnType returns a HOF callback argument's inferred return
+// type, purely (no codegen) — whether it's a literal arrow function, a
+// named top-level function reference, or a closure-typed variable, the
+// same three shapes resolveCallback (emit_func.go) resolves at emission
+// time. Used by .map()/.flatMap()'s own inferExprType case: previously
+// only a literal arrow function was recognized, so `arr.map(namedFn)`
+// silently fell through to "same type as the receiver" — usually
+// harmless by coincidence (a callback that happens to return the same
+// element type the receiver already has), but genuinely wrong whenever it
+// doesn't (found via `matrix.map(rowSum)`, matrix: number[][], rowSum
+// returning a plain number — the result was mistyped as number[][]
+// instead of number[]). Not a general callback-type inference utility;
+// only handles what .map()/.flatMap() need.
+func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
+	switch cb := arg.(type) {
+	case *ast.ArrowFunction:
+		if cb.RetType != nil {
+			return e.resolveType(cb.RetType), true
+		}
+		if cb.Body != nil {
+			return e.inferExprType(cb.Body), true
+		}
+		return TypeI64, true
+	case *ast.Identifier:
+		if _, sig, found := e.resolveFuncRef(cb.Name); found {
+			return sig.RetType, true
+		}
+		if sym, found := e.lookup(cb.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
+			return *sym.Ty.FuncRetType, true
+		}
+	}
+	return Type{}, false
+}
+
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
@@ -206,7 +240,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		case "NaN", "Infinity":
 			return TypeF64
 		}
-		if _, ok := e.funcs[ex.Name]; ok {
+		if _, _, ok := e.resolveFuncRef(ex.Name); ok {
 			return Type{IR: "ptr", IsFunc: true}
 		}
 	case *ast.IndexExpression:
@@ -359,6 +393,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return ty
 			}
 		}
+	case *ast.TaggedTemplateExpression:
+		// TDD-00059: same desugaring emitExpr's own case uses — a tagged
+		// template's type is exactly its tag function's return type.
+		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
 		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
@@ -403,7 +441,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		// If calling a named function, use its registered return type (handles async too).
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
-			if sig, found := e.funcs[id.Name]; found {
+			if _, sig, found := e.resolveFuncRef(id.Name); found {
 				return sig.RetType
 			}
 			// A generic function (TDD-00010 V1) is never itself in e.funcs
@@ -865,15 +903,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return recvTy
 				}
 				if len(ex.Args) == 1 {
-					if af, ok := ex.Args[0].(*ast.ArrowFunction); ok {
-						var retTy Type
-						if af.RetType != nil {
-							retTy = e.resolveType(af.RetType)
-						} else if af.Body != nil {
-							retTy = e.inferExprType(af.Body)
-						} else {
-							retTy = TypeI64
-						}
+					if retTy, ok := e.callbackReturnType(ex.Args[0]); ok {
 						return ArrayOf(retTy)
 					}
 				}
@@ -920,15 +950,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				// mirrors emitArrayFlatMap exactly.
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray && len(ex.Args) == 1 {
-					if af, ok := ex.Args[0].(*ast.ArrowFunction); ok {
-						var retTy Type
-						if af.RetType != nil {
-							retTy = e.resolveType(af.RetType)
-						} else if af.Body != nil {
-							retTy = e.inferExprType(af.Body)
-						} else {
-							retTy = TypeI64
-						}
+					if retTy, ok := e.callbackReturnType(ex.Args[0]); ok {
 						if retTy.IsArray && retTy.ElemType != nil {
 							return ArrayOf(*retTy.ElemType)
 						}
@@ -989,7 +1011,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	case *ast.ArrowFunction:
 		params := make([]Type, len(ex.Params))
 		for i, p := range ex.Params {
-			if p.Type == nil {
+			if p.Rest && p.Type == nil {
+				// Same default rest-element type emitArrowFunctionWithHints
+				// (emit_func.go) and buildFunctionSig (emitter.go) already
+				// give an unannotated rest param — this duplicate
+				// computation (see the comment on the return-type mirror
+				// below) needs to agree, not fall into the bare-scalar
+				// unannotated-param default just below.
+				params[i] = ArrayOf(TypeI64)
+			} else if p.Type == nil {
 				params[i] = TypeI64
 				params[i].Inferred = true // no annotation — see docs/adr/ADR-00042.md
 			} else {
@@ -1024,7 +1054,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		} else {
 			ret = TypeVoid
 		}
-		return FuncType(params, ret)
+		fty := FuncType(params, ret)
+		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
+			fty.FuncHasRest = true
+		}
+		return fty
 	}
 	return TypeI64
 }

@@ -621,6 +621,17 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		// Rest parameter (`(...args: T[]) => ...`) — parses successfully
+		// (matching parseParamList's own `...` handling below), but every
+		// rest param is inherently array-typed, so it's rejected downstream
+		// in codegen (emitClosureFunc) with a clean error the same way any
+		// other array-typed arrow-function parameter is — see this file's
+		// own comment there (TDD-00059's notes) for why a parse-time
+		// rejection isn't used instead: keeping the syntax itself accepted
+		// here, consistent with the destructured-parameter branch below,
+		// which also parses fine and is rejected later for the same reason.
+		rest := p.match(lexer.ELLIPSIS)
+
 		// Destructured parameter (`({x, y}: T) => ...` / `([a, b]: T[]) =>
 		// ...`) — same restricted V1 shape parseParamList's own destructured
 		// branch documents (no nesting, no per-field default, an explicit
@@ -633,6 +644,9 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		// sharing it, so this mirrors that function's pattern-parsing
 		// branch rather than calling it directly.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
+			if rest {
+				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
+			}
 			isObject := p.check(lexer.LBRACE)
 			var arrPat []string
 			var objPat []ast.DestructProp
@@ -715,13 +729,16 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			}
 		}
 		var dflt ast.Expression
-		if p.match(lexer.ASSIGN) {
+		if !rest && p.match(lexer.ASSIGN) {
 			dflt, err = p.parseAssignment()
 			if err != nil {
 				return nil, err
 			}
 		}
-		params = append(params, ast.Param{Name: nameTok.Literal, Type: pty, Default: dflt, Optional: optional})
+		params = append(params, ast.Param{Name: nameTok.Literal, Type: pty, Rest: rest, Default: dflt, Optional: optional})
+		if rest {
+			break // rest param must be last
+		}
 		p.match(lexer.COMMA)
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
@@ -798,13 +815,27 @@ func (p *Parser) destructuredArrowParamLookahead() bool {
 func (p *Parser) parseTemplateLiteral() (ast.Expression, error) {
 	tok := p.advance() // consume TEMPLATE_HEAD
 	pos := posOf(tok)
-	quasis := []string{tok.Literal}
+	quasis, exprs, err := p.parseTemplateRest(tok.Literal)
+	if err != nil {
+		return nil, err
+	}
+	return ast.NewTemplateLiteral(quasis, exprs, pos), nil
+}
+
+// parseTemplateRest scans the TEMPLATE_MIDDLE*/TEMPLATE_TAIL continuation of
+// a template literal whose TEMPLATE_HEAD (literal text headQuasi) has
+// already been consumed by the caller — shared by parseTemplateLiteral (a
+// bare template literal) and parseCallMember's tagged-template case
+// (TDD-00059), so the interleaved quasi/expression scan exists in one
+// place rather than twice.
+func (p *Parser) parseTemplateRest(headQuasi string) ([]string, []ast.Expression, error) {
+	quasis := []string{headQuasi}
 	var exprs []ast.Expression
 
 	for {
 		expr, err := p.parseAssignment()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		exprs = append(exprs, expr)
 
@@ -816,9 +847,9 @@ func (p *Parser) parseTemplateLiteral() (ast.Expression, error) {
 		case lexer.TEMPLATE_TAIL:
 			quasis = append(quasis, next.Literal)
 			p.advance()
-			return ast.NewTemplateLiteral(quasis, exprs, pos), nil
+			return quasis, exprs, nil
 		default:
-			return nil, fmt.Errorf("%d:%d: expected template continuation, got %s", next.Line, next.Col, next.Type)
+			return nil, nil, fmt.Errorf("%d:%d: expected template continuation, got %s", next.Line, next.Col, next.Type)
 		}
 	}
 }

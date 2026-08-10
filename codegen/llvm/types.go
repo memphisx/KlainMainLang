@@ -24,6 +24,15 @@ type Type struct {
 	IsFunc      bool
 	FuncParams  []Type
 	FuncRetType *Type // nil means void
+	// FuncHasRest marks the last entry of FuncParams as a rest slot (its
+	// own declared type is the collected array type, e.g. number[] for
+	// `(...args: number[])`) — added alongside ADR-00151/TDD-00059's
+	// array-typed-closure-parameter fix so a closure *value*'s call sites
+	// (emitClosureCallByPtr, emitCBCall) can tell "one array-typed
+	// parameter" apart from "a rest parameter collecting N individual
+	// trailing call arguments," the same distinction FuncSig.HasRest
+	// already lets a named function's call sites make.
+	FuncHasRest bool
 	// IsGroupMap marks the result of Object.groupBy: a heap ptr to a dynamic
 	// string-keyed map of typed sub-arrays. ElemType is the element type of
 	// each bucket. Bracket-notation access returns ArrayOf(*ElemType).

@@ -238,7 +238,7 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 			return Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
 		}
 		rhsVal = e.coerce(rhsVal, valTy)
-		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, valTy)
+		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, valTy, pos)
 		if err != nil {
 			return Value{}, err
 		}

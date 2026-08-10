@@ -13,9 +13,6 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "map", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -64,11 +61,10 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
+	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{{Ref: inElem, Ty: elemTy}}
+	cbArgs := []Value{inVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -85,9 +81,9 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	// A callback that returns an array per element (the shape .flatMap()
 	// builds .map() on top of) needs retElemTy's own slot boxed exactly
 	// like any other nested-array-element write — see storeArrayElem's own
-	// doc comment / TDD-00029. The *input* elemTy can never itself be
-	// array-typed here (rejectNestedArrayElem above), but the callback's
-	// return type is under no such restriction.
+	// doc comment / TDD-00029. Input elemTy can independently be array-typed
+	// too now (loadArrayElem above already transparently unboxes it) —
+	// ADR-00151/TDD-00059.
 	e.storeArrayElem(outGep, retElemTy, resultVal)
 
 	idxNext := e.freshReg()
@@ -114,9 +110,6 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "forEach", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -140,11 +133,10 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
+	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{{Ref: inElem, Ty: elemTy}}
+	cbArgs := []Value{inVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -169,9 +161,6 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
-		return Value{}, err
-	}
-	if err := e.rejectNestedArrayElem(elemTy, "filter", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -208,11 +197,10 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
+	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := []Value{{Ref: inElem, Ty: elemTy}}
+	cbArgs := []Value{inVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
 	}
@@ -229,7 +217,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	cntNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cntVal, cntAlloca))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", outGep, elemTy.IR, outPtr, cntVal))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, inElem, outGep, elemTy.Align()))
+	e.storeArrayElem(outGep, elemTy, inVal)
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", cntNext, cntVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cntNext, cntAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -258,9 +246,6 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
-		return Value{}, err
-	}
-	if err := e.rejectNestedArrayElem(elemTy, "reduce", pos); err != nil {
 		return Value{}, err
 	}
 	// accTy's hint comes from a pure static inference of the initial-value
@@ -303,11 +288,10 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	accCur := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, accTy.IR, accAlloca, accTy.Align()))
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
+	inVal := e.loadArrayElem(inGep, elemTy)
 
-	newAcc, err := e.emitCBCall(cb, []Value{{Ref: accCur, Ty: accTy}, {Ref: inElem, Ty: elemTy}})
+	newAcc, err := e.emitCBCall(cb, []Value{{Ref: accCur, Ty: accTy}, inVal})
 	if err != nil {
 		return Value{}, err
 	}
@@ -333,9 +317,6 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
-		return Value{}, err
-	}
-	if err := e.rejectNestedArrayElem(elemTy, "find", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -372,10 +353,9 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
-	predVal, err := e.emitCBCall(cb, []Value{{Ref: inElem, Ty: elemTy}})
+	inVal := e.loadArrayElem(inGep, elemTy)
+	predVal, err := e.emitCBCall(cb, []Value{inVal})
 	if err != nil {
 		return Value{}, err
 	}
@@ -383,7 +363,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, matchL, incL))
 
 	e.emitLabel(matchL)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, inElem, foundAlloca, elemTy.Align()))
+	e.storeArrayElem(foundAlloca, elemTy, inVal)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(incL)
@@ -393,6 +373,9 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
+	if elemTy.IsArray {
+		return e.loadArrayElemMaybeNull(foundAlloca, elemTy), nil
+	}
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
 	return Value{Ref: result, Ty: elemTy}, nil
@@ -405,9 +388,6 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
-		return Value{}, err
-	}
-	if err := e.rejectNestedArrayElem(elemTy, "some", pos); err != nil {
 		return Value{}, err
 	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
@@ -439,10 +419,9 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
-	predVal, err := e.emitCBCall(cb, []Value{{Ref: inElem, Ty: elemTy}})
+	inVal := e.loadArrayElem(inGep, elemTy)
+	predVal, err := e.emitCBCall(cb, []Value{inVal})
 	if err != nil {
 		return Value{}, err
 	}
@@ -474,9 +453,6 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "every", pos); err != nil {
-		return Value{}, err
-	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
 	if err != nil {
 		return Value{}, err
@@ -506,10 +482,9 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
-	predVal, err := e.emitCBCall(cb, []Value{{Ref: inElem, Ty: elemTy}})
+	inVal := e.loadArrayElem(inGep, elemTy)
+	predVal, err := e.emitCBCall(cb, []Value{inVal})
 	if err != nil {
 		return Value{}, err
 	}

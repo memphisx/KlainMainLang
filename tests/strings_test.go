@@ -74,6 +74,143 @@ console.log(msg)
 `, "value is 42")
 }
 
+func TestE2EStringPlusAssign(t *testing.T) {
+	// A pre-existing bug (found while building TDD-00059's own tagged-
+	// template example/tests, which accumulate a result via `+=`): `+=`
+	// with a string-typed left-hand side reached emitArith's generic
+	// numeric-`add` fallback unconditionally, a hard clang-stage "invalid
+	// operand type" for even the plainest `s += "b"` — not just a mixed
+	// string/number case (that one already worked via `s = s + "b"`, since
+	// plain `+`/emitBinary had its own string handling all along).
+	assertOutput(t, `
+let result: string = "a"
+result += "b"
+result += "c"
+console.log(result)
+`, "abc")
+}
+
+func TestE2EStringPlusAssignWithNumber(t *testing.T) {
+	assertOutput(t, `
+let result: string = "n="
+result += 5
+console.log(result)
+`, "n=5")
+}
+
+// --- Tagged template literals (TDD-00059) ---
+
+func TestE2ETaggedTemplateBasic(t *testing.T) {
+	assertOutput(t, `
+function tag(strings: string[], ...values: number[]): string {
+    let result = strings[0];
+    for (let i = 0; i < values.length; i++) {
+        result += values[i];
+        result += strings[i + 1];
+    }
+    return result;
+}
+console.log(tag`+"`"+`a${1}b${2}c`+"`"+`)
+`, "a1b2c")
+}
+
+func TestE2ETaggedTemplateNoSubstitution(t *testing.T) {
+	assertOutput(t, `
+function tag(strings: string[]): string {
+    return strings[0];
+}
+console.log(tag`+"`"+`hello world`+"`"+`)
+`, "hello world")
+}
+
+func TestE2ETaggedTemplateValuesAreRealTypedValues(t *testing.T) {
+	// Interpolated values reach the tag function untouched (real numbers,
+	// not stringified) — unlike a plain, un-tagged template literal's own
+	// interpolation.
+	assertOutput(t, `
+function sumTag(strings: string[], ...values: number[]): number {
+    let s = 0;
+    for (const v of values) { s += v; }
+    return s;
+}
+console.log(sumTag`+"`"+`x${10}y${20}z${12}`+"`"+`)
+`, "42")
+}
+
+func TestE2ETaggedTemplateArrowFunctionTag(t *testing.T) {
+	// An arrow function's own first parameter (the strings array) is
+	// unavoidably array-typed — this only became usable as a tag once
+	// array-typed closure parameters were fixed (ADR-00151/TDD-00059,
+	// closing the ADR-00105 gap this file originally just documented
+	// around).
+	assertOutput(t, `
+const tag = (strings: string[], a: number, b: number): number => a + b + strings.length;
+console.log(tag`+"`"+`x${1}y${2}z`+"`"+`)
+`, "6")
+}
+
+func TestE2ETaggedTemplateArrowFunctionTagWithRest(t *testing.T) {
+	assertOutput(t, `
+const tag = (strings: string[], ...values: number[]): number => {
+    let s = 0;
+    for (const v of values) { s += v; }
+    return s;
+};
+console.log(tag`+"`"+`x${10}y${20}z${12}`+"`"+`)
+`, "42")
+}
+
+func TestE2ETaggedTemplateClosureCapture(t *testing.T) {
+	assertOutput(t, `
+function tag(strings: string[], ...values: number[]): number {
+    let s = 0;
+    for (const v of values) { s += v; }
+    return s;
+}
+function make(): () => number {
+    let base = 100;
+    return (): number => tag`+"`"+`x${base}y`+"`"+`;
+}
+const closure = make();
+console.log(closure())
+`, "100")
+}
+
+func TestE2ETaggedTemplateUnannotatedConst(t *testing.T) {
+	assertOutput(t, `
+function tag(strings: string[], ...values: number[]): string {
+    return strings[0] + values[0];
+}
+const r = tag`+"`"+`v=${99}`+"`"+`;
+console.log(r)
+`, "v=99")
+}
+
+func TestE2ETaggedTemplateClassMethodTag(t *testing.T) {
+	// A class method usable as a tag when it takes only the strings array
+	// (no additional params) — see TDD-00059's own notes for a separate,
+	// pre-existing class-method-call bug found (not fixed) when an array-
+	// literal argument is combined with further trailing arguments.
+	assertOutput(t, `
+class Fmt {
+    build(strings: string[]): string {
+        return strings[0];
+    }
+}
+const f = new Fmt();
+console.log(f.build`+"`"+`hi`+"`"+`)
+`, "hi")
+}
+
+func TestE2ETaggedTemplateRawPropertyRejected(t *testing.T) {
+	// Deliberate V1 scope cut (TDD-00059): no `.raw` property on the
+	// strings array.
+	_, err := parseAndCompile("function tag(strings: string[]): string { return strings.raw[0]; } console.log(tag`hi`)")
+	if err == nil {
+		t.Fatal("expected a compile error for 'strings.raw' on a tagged template's strings array, got none")
+	}
+}
+
 // --- str.repeat ---
 
 func TestE2EStringRepeat(t *testing.T) {

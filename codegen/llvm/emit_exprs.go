@@ -47,6 +47,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitAssign(ex)
 	case *ast.CallExpression:
 		return e.emitCall(ex)
+	case *ast.TaggedTemplateExpression:
+		return e.emitCall(desugarTaggedTemplate(ex))
 	case *ast.IndexExpression:
 		return e.emitIndex(ex)
 	case *ast.MemberExpression:

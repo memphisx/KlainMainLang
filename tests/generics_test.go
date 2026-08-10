@@ -242,6 +242,20 @@ console.log(y);
 `, "hi")
 }
 
+func TestE2EErasedGenericFunctionForwardReferenceUnannotatedObjectReturn(t *testing.T) {
+	// TDD-00058's fixed-point re-inference sweep now also covers an
+	// @erased generic function's own unannotated-return-type inference —
+	// found not to be covered when first fixing the plain-function case
+	// (it uses a separate signature-building path, buildErasedFunctionSig)
+	// and confirmed broken with this exact repro before extending the fix.
+	assertOutput(t, `
+/** @erased */
+function makeA<T>(x: T) { return makeB() }
+function makeB() { return { val: 1 } }
+console.log(makeA(1).val)
+`, "1")
+}
+
 func TestE2EErasedOnNonGenericFunctionRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 /** @erased */

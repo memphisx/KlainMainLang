@@ -761,13 +761,37 @@ const arr: number[] = Array.from(x)
 // boxArrayValue/loadArrayElem/storeArrayElem and docs/adr/ADR-00105.md.
 // Indexing, destructuring, for...of, assignment, and the copy/insert-based
 // methods (concat/reverse/slice/splice/fill/at/with/push/pop/shift/unshift/
-// copyWithin/values/entries) are all supported; a callback-invoking or
-// scalar-register-comparing method (map/filter/forEach/reduce/find*/some/
-// every/sort/indexOf/includes/join/Object.groupBy) on a nested-array element
-// is a deliberate, clean compile-time rejection instead (see
-// TestE2ENestedArrayHOFRejectedCleanly below) — closures don't yet decompose
-// an array-typed parameter into (ptr, i64) the way a named function call's
-// own ABI already does, a separate, unrelated gap.
+// copyWithin/values/entries) are all supported.
+//
+// Every callback-invoking method (map/filter/forEach/reduce/find/findIndex/
+// findLast/findLastIndex/some/every) now also supports a nested-array
+// element as the callback's own parameter (TestE2ENestedArrayHOFCallbacks
+// below) — closures previously never decomposed an array-typed parameter
+// into (ptr, i64) the way a named function call's own ABI already did
+// (ADR-00105's original finding); fixed alongside tagged template literals
+// (ADR-00151/TDD-00059), since an arrow function's own tag-function
+// `strings: string[]` parameter has the identical shape. loadArrayElem/
+// storeArrayElem already transparently unbox/rebox at the call site, so
+// each HOF method only needed its raw element load/store switched to use
+// them (they previously bypassed both, going straight for a raw scalar
+// load/store that a 16-byte {ptr,i64} aggregate can't fit through) plus its
+// rejectNestedArrayElem guard removed.
+//
+// Three genuinely different, unrelated mechanisms remain out of scope, each
+// for its own reason (TestE2ENestedArrayHOFRejectedCleanly below):
+//   - indexOf/includes/join compare or stringify an element as a bare
+//     elemTy.IR-typed register directly (no callback at all) — a boxed
+//     nested-array element needs an unbox first, a different fix.
+//   - sort's comparator runs through a C-ABI qsort() trampoline
+//     (emit_arrays_sort.go) with one fixed trampoline per element kind
+//     (i64/f64/str) — a fourth, array-aware trampoline is a separate task.
+//   - Object.groupBy's buckets store every element uniformly as a raw i64
+//     (ptrtoint'd for a pointer-shaped element) — a different storage
+//     scheme than a plain array's backing buffer, with no room for a
+//     16-byte aggregate without its own redesign.
+// `new Array<T[]>(n)` (construction, not consumption) and capturing an
+// array *variable* into a closure's env (a different storage shape — one
+// heap-cell pointer per env slot, not a (ptr, i64) pair) are also untouched.
 
 func TestE2ENestedArrayIndexingReadWrite(t *testing.T) {
 	assertOutput(t, `
@@ -831,15 +855,36 @@ console.log(matrix.length);
 `, "1\n4\n9\n1\n3\n5\n2")
 }
 
+func TestE2ENestedArrayHOFCallbacks(t *testing.T) {
+	// See this section's own header comment for the ADR-00151/TDD-00059
+	// fix that made all of these work — previously every one of these was
+	// a clean compile-time rejection.
+	assertOutput(t, `
+const m: number[][] = [[1, 2], [3, 4, 5], [6]];
+console.log(m.reduce((acc: number, row: number[]) => acc + row.length, 0));
+const found = m.find((row: number[]) => row.length === 3);
+console.log(found ? found.length : -1);
+const notFound = m.find((row: number[]) => row.length === 99);
+console.log(notFound === null ? "null" : "found");
+console.log(m.findIndex((row: number[]) => row.length === 3));
+console.log(m.findLastIndex((row: number[]) => row.length === 1));
+const lastLenOne = m.findLast((row: number[]) => row.length === 1);
+console.log(lastLenOne ? lastLenOne.length : -1);
+console.log(m.some((row: number[]) => row.length === 3));
+console.log(m.every((row: number[]) => row.length > 0));
+const doubled = m.map((row: number[]): number => row.length * 2);
+console.log(doubled[0]);
+console.log(doubled[1]);
+`, "6\n3\nnull\n1\n2\n1\n1\n1\n4\n6")
+}
+
 func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
 	cases := []string{
-		`const m: number[][] = [[1,2]]; m.map((row) => row.length);`,
-		`const m: number[][] = [[1,2]]; m.forEach((row) => console.log(row.length));`,
-		`const m: number[][] = [[1,2]]; m.filter((row) => row.length > 0);`,
 		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.sort();`,
 		`const m: number[][] = [[1,2]]; m.join(",");`,
+		`const m: number[][] = [[1,2]]; Object.groupBy(m, (row) => "" + row.length);`,
 		`const m = new Array<number[]>(3);`,
 	}
 	for _, src := range cases {

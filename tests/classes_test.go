@@ -1289,3 +1289,65 @@ class Foo {
 		t.Fatal("expected a compile error for a duplicate getter")
 	}
 }
+
+// --- Rest parameters on class methods (found broken while scoping tagged
+// template literals, TDD-00059/ADR-00151: emitClassCall had no notion of
+// sig.HasRest at all, so a class method with a rest parameter either hit a
+// wrong arg-count check or misread the rest slot's own array type as
+// applying to a single positional scalar argument) ---
+
+func TestE2EClassMethodRestParam(t *testing.T) {
+	assertOutput(t, `
+class Sum {
+    total(...values: number[]): number {
+        let s = 0;
+        for (const v of values) { s += v; }
+        return s;
+    }
+}
+const sm = new Sum();
+console.log(sm.total(1, 2, 3, 4));
+console.log(sm.total());
+`, "10\n0")
+}
+
+func TestE2EClassMethodArrayParamThenRestParam(t *testing.T) {
+	assertOutput(t, `
+class Fmt {
+    build(strings: string[], ...values: number[]): string {
+        let r = strings[0];
+        for (const v of values) { r += v; }
+        return r;
+    }
+}
+const f = new Fmt();
+console.log(f.build(["n="], 7, 8, 9));
+`, "n=789")
+}
+
+func TestE2EClassMethodRestParamVirtualDispatch(t *testing.T) {
+	// Calling an overridden rest-param method through a base-typed
+	// reference exercises emitClassCall's vtable-indirect-call path
+	// (distinct from the direct-call path the tests above exercise).
+	assertOutput(t, `
+class Base {
+    total(...values: number[]): number {
+        let s = 0;
+        for (const v of values) { s += v; }
+        return s;
+    }
+}
+class Derived extends Base {
+    total(...values: number[]): number {
+        let s = 0;
+        for (const v of values) { s += v; }
+        return s * 10;
+    }
+}
+function useIt(b: Base): number {
+    return b.total(1, 2, 3);
+}
+const d = new Derived();
+console.log(useIt(d));
+`, "60")
+}

@@ -23,14 +23,14 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 ## TypeScript Core Language
 
-**290 / 330 features, ~88% coverage.**
+**293 / 330 features, ~89% coverage.**
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
 | Control flow statements | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
 | Operators | 42/42, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
 | Variable declarations | 4/4, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
-| Functions & closures | 8/11, ~73% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | No nested function declarations; a same-file forward-reference inference gap; no tagged templates |
+| Functions & closures | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Nested function declarations are V1-scoped (no closure capture of the enclosing body's locals, one block deeper than the enclosing body is unsupported) — see [TDD-00057](../tdd/TDD-00057.md); tagged template literals have no `.raw` property on the `strings` array (real `String.raw` stays separately out of scope, see [ADR-00028](../adr/ADR-00028.md)) — see [TDD-00059](../tdd/TDD-00059.md)/[ADR-00152](../adr/ADR-00152.md) |
 | Type primitives | 9/14, ~64% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | No `bigint` |
 | Async / Promise | 4/9, ~44% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Only `await fetch(...)` is genuinely non-blocking; every other `Promise<T>` is a resolved-slot read |
 | String methods | 28/33, ~85% | [STRING-METHODS.md](STRING-METHODS.md) | No `.normalize()` |
@@ -104,7 +104,6 @@ Concerns that span every feature area rather than living in one of them.
 
 | Feature | Notes |
 |---|---|
-| Nested function declarations | Separate from closures; mostly a scoping change |
 | Generator functions / iterators | Suspend/resume; requires coroutine machinery |
 | Decorators | Requires metadata reflection |
 | `Proxy` / `Reflect` | Dynamic property intercept; likely impractical |
@@ -117,7 +116,7 @@ Found by checking the actual lexer/parser/codegen source directly rather than re
 
 | Feature | Notes |
 |---|---|
-| Tagged templates | Confirmed absent directly against `lexer/`/`parser/` — see [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) for the full detail and evidence per item. Getters/setters on classes are no longer in this gap list — see [TDD-00030](../tdd/TDD-00030.md)/[ADR-00110](../adr/ADR-00110.md). |
+| Spread in call arguments (`f(...arr)`) | Confirmed absent directly against the parser (`unexpected token ... in expression`) — found while re-examining [ADR-00151](../adr/ADR-00151.md)'s own scope cuts, independent of every fix in [ADR-00152](../adr/ADR-00152.md) (reproduces for a plain top-level function call, nothing array-parameter- or class-specific). Spreading a runtime-length array into a statically-typed rest slot — possibly combined with other positional arguments, multiple spreads, or a non-rest fixed-arity target — is real design space, not a mechanical fix; needs a TDD before implementation. Distinct from the already-tracked `EVENT-EMITTER.md` caveat, which only explains why `EventEmitter` chose a single fixed payload type, not that this is a general language gap. |
 | Dynamic `import()` / `import.meta` | See [MODULES.md](MODULES.md) |
 | Node `Buffer` | See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md) |
 | Node's own `stream` module (distinct from WHATWG streams) | See [STREAMS.md](STREAMS.md) |
@@ -134,7 +133,7 @@ Every row below is marked ✅ (or 100%) on its own page — the feature genuinel
 |---|---|---|
 | `EventEmitter` (100%) | `.emit(event, data)` takes exactly one payload type per instance, not real Node's variadic `...args`; no way to override `on`/`emit`/`off`/etc. in a subclass (hand-written dispatch, not real methods); `instanceof EventEmitter` is a compile error (never a registered class) | [EVENT-EMITTER.md](EVENT-EMITTER.md)'s Known Limitations |
 | HTTP Server (100%) | `req.body`/response `body` string fields still truncate at an embedded null byte (the binary-safe `bodyBytes()` accessors are additive fields, not a fix to the string ones); `.close()` in a `{ workers: N }` cluster only stops the calling worker process — no IPC exists to reach the rest of the cluster | [HTTP-SERVER.md](HTTP-SERVER.md)'s Known Limitations |
-| Array methods (100%) | A callback-invoking method (`.map`/`.filter`/`.reduce`/`.find`/`.some`/`.every`/`.sort`/etc.) can't take a nested-array element as the callback's own parameter — closures don't yet decompose an array-typed parameter into `(ptr, i64)` the way a named function call's own ABI already does | [ARRAY-METHODS.md](ARRAY-METHODS.md)'s own caveats paragraph |
+| Array methods (100%) | `.sort()`'s custom comparator (a separate C-ABI `qsort()` trampoline, not a direct closure call), `.indexOf()`/`.includes()`/`.join()` (compare/stringify a bare register directly, no callback at all), and `Object.groupBy()` (buckets store every element as a raw `i64`, a different scheme than a plain array's backing buffer) still reject a nested-array element — every *other* callback-invoking method (`.map`/`.filter`/`.forEach`/`.reduce`/`.find`/`.findIndex`/`.findLast`/`.findLastIndex`/`.some`/`.every`) now supports one, see [ADR-00152](../adr/ADR-00152.md) | [ARRAY-METHODS.md](ARRAY-METHODS.md)'s own caveats paragraph |
 | RegExp (100%) | `.test()` never respects `.lastIndex` even under the `g` flag (real JS shares `.exec()`'s stateful iteration); `.exec()`/`.match()` turn an unmatched optional capture group into `""` instead of a per-element `null`, and lack `index`/`input`/`groups`; `.matchAll()` is an eager `string[][]`, not a lazy iterator; no implicit string→RegExp coercion anywhere; `.replace()`/`.replaceAll()` template support is `$1`-`$9`/`$&`/`$$` only (no `` $` ``/`$'`) with a fixed-arity `(match, offset, string)` callback (no variadic captured groups); `.split()` doesn't replicate real JS's zero-length-match splitting or splice captured groups into the result | [REGEXP.md](REGEXP.md)'s own caveats paragraph |
 | `crypto.getRandomValues` (✅) | Fills a plain `number[]`, not a real `Uint8Array` — predates `ArrayBuffer`/TypedArrays support ([ADR-00078](../adr/ADR-00078.md)) | [WEB-CRYPTO.md](WEB-CRYPTO.md) |
 | `fs.copyFileSync` (✅) | Still composes the text-only `readFileSync`/`writeFileSync` pair, so a source file with an embedded null byte copies back shorter than its real size — never migrated to the binary-safe `readFileSyncBytes`/`writeFileSync(path, ArrayBuffer)` pair [ADR-00094](../adr/ADR-00094.md) added | [FILE-SYSTEM.md](FILE-SYSTEM.md) |
@@ -204,4 +203,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-10 — [TDD-00055](../tdd/TDD-00055.md) Stage 1 implemented: `import.meta.url` resolves at compile time, per file, into a plain string literal; dynamic `import(...)` now parses and gets a clean "not yet supported" rejection instead of a generic parse error, ahead of Stage 2/[TDD-00056](../tdd/TDD-00056.md) actually building it — see [ADR-00148](../adr/ADR-00148.md).*
+*Last updated: 2026-08-10 — Array-typed closure parameters now fully supported (arrow-function tags, rest params on arrows, nested-array elements in `.map()`/`.filter()`/etc.), plus a class-method rest-parameter call bug and an `@erased` generic forward-reference gap fixed — see [ADR-00152](../adr/ADR-00152.md).*

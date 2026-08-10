@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -416,20 +417,74 @@ console.log(Vec.add({ x: 1, y: 1 }, { x: 2, y: 2 }))
 `, "7\n6")
 }
 
-func TestE2EDestructuredArrayParamOnArrowFunctionRejected(t *testing.T) {
-	// Array-typed closure parameters aren't supported at all yet
-	// (independent of destructuring — see ADR-00105's Investigation), so a
-	// destructured *array* param is specifically rejected on an arrow
-	// function/closure rather than silently miscompiling; the object-
-	// pattern case above works fine since object-typed closure params were
-	// never affected by that gap.
-	_, err := parseAndCompile(`
+// --- Array-typed arrow-function/closure parameters (TDD-00059/ADR-00151) ---
+//
+// Previously rejected entirely (a closure's own call ABI never decomposed
+// an array parameter into its (ptr, i64) pair the way a named function's
+// does — ADR-00105's Investigation) — fixed alongside tagged template
+// literals, since an arrow function's own `strings: string[]` tag
+// parameter is unavoidably array-typed. emitClosureFunc (the callee/
+// definition side), emitClosureCallByPtr (a direct `closureVar(args)`
+// call), and emitCBCall (HOF/callback dispatch — closes the array-methods
+// "no nested-array element as the callback's own parameter" caveat too)
+// all needed the matching decomposition.
+
+func TestE2EDestructuredArrayParamOnArrowFunction(t *testing.T) {
+	assertOutput(t, `
 const f = ([a, b]: number[]): number => a + b
 console.log(f([1, 2]))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a destructured array parameter on an arrow function, got none")
-	}
+`, "3")
+}
+
+func TestE2EPlainArrayParamOnArrowFunction(t *testing.T) {
+	assertOutput(t, `
+const f = (arr: number[]): number => arr.length
+console.log(f([1, 2, 3]))
+`, "3")
+}
+
+func TestE2ERestParamOnArrowFunction(t *testing.T) {
+	assertOutput(t, `
+const f = (a: number, ...rest: number[]): number => {
+    let s = a;
+    for (const v of rest) { s += v; }
+    return s;
+}
+console.log(f(1, 2, 3, 4))
+console.log(f(1))
+`, "10\n1")
+}
+
+func TestE2EArrayParamOnArrowFunctionAsHOFCallback(t *testing.T) {
+	// The "no nested-array element as the callback's own parameter"
+	// fidelity gap ARRAY-METHODS.md documented — a HOF callback taking an
+	// array-typed parameter (a nested array's own row) is exactly the
+	// array-typed-closure-parameter gap this fix closes.
+	assertOutput(t, `
+const matrix: number[][] = [[1, 2], [3, 4], [5, 6]]
+const sums = matrix.map((row: number[]): number => {
+    let s = 0;
+    for (const v of row) { s += v; }
+    return s;
+})
+console.log(sums[0])
+console.log(sums[1])
+console.log(sums[2])
+`, "3\n7\n11")
+}
+
+func TestE2ENamedFunctionArrayParamAsHOFCallback(t *testing.T) {
+	assertOutput(t, `
+function rowSum(row: number[]): number {
+    let s = 0;
+    for (const v of row) { s += v; }
+    return s;
+}
+const matrix: number[][] = [[1, 2], [3, 4]]
+const sums = matrix.map(rowSum)
+console.log(sums[0])
+console.log(sums[1])
+`, "3\n7")
 }
 
 func TestE2EDestructuredParamRequiresTypeAnnotation(t *testing.T) {
@@ -450,5 +505,192 @@ func TestE2ERestDestructuredParamRejected(t *testing.T) {
 	_, err := parseAndCompile(`function f(...{x, y}: number[]) {}`)
 	if err == nil {
 		t.Fatal("expected a compile error for a rest parameter that's also a destructuring pattern, got none")
+	}
+}
+
+// --- Nested function declarations (TDD-00057) ---
+
+func TestE2ENestedFunctionDeclaration(t *testing.T) {
+	assertOutput(t, `
+function outer(x: number): number {
+    function inner(y: number): number {
+        return y * 2;
+    }
+    return inner(x) + 1;
+}
+console.log(outer(5));
+`, "11")
+}
+
+func TestE2ENestedFunctionForwardReference(t *testing.T) {
+	assertOutput(t, `
+function outer(): number {
+    const r = fib(6);
+    return r;
+
+    function fib(n: number): number {
+        if (n <= 1) { return n; }
+        return fib(n - 1) + fib(n - 2);
+    }
+}
+console.log(outer());
+`, "8")
+}
+
+func TestE2ENestedFunctionInArrowBlockBody(t *testing.T) {
+	assertOutput(t, `
+const f = (x: number): number => {
+    function double(n: number): number { return n * 2; }
+    function triple(n: number): number { return double(n) + n; }
+    return triple(x);
+};
+console.log(f(4));
+`, "12")
+}
+
+func TestE2ENestedFunctionThreeLevelsVisibility(t *testing.T) {
+	assertOutput(t, `
+function grand(): number {
+    function helper(): number { return 100; }
+    function outer(): number {
+        function inner(): number {
+            return helper();
+        }
+        return inner();
+    }
+    return outer();
+}
+console.log(grand());
+`, "100")
+}
+
+func TestE2ENestedFunctionSameNameDifferentEnclosersDoNotCollide(t *testing.T) {
+	assertOutput(t, `
+function a(): number {
+    function helper(): number { return 1; }
+    return helper();
+}
+function b(): number {
+    function helper(): number { return 2; }
+    return helper();
+}
+console.log(a());
+console.log(b());
+`, "1\n2")
+}
+
+func TestE2ENestedFunctionCapturingOuterLocalRejected(t *testing.T) {
+	// V1 scope (TDD-00057): a nested function declaration gets its own
+	// clean scope, same as a top-level function — it does not close over
+	// the enclosing function's locals the way an arrow function would.
+	_, err := parseAndCompile(`
+function outer(): number {
+    const x: number = 10;
+    function inner(): number {
+        return x;
+    }
+    return inner();
+}
+console.log(outer());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested function referencing an enclosing local, got none")
+	}
+}
+
+func TestE2ENestedFunctionInsideIfBlockRejected(t *testing.T) {
+	// V1 scope: only supported directly in the enclosing body's own
+	// immediate statement list, not one block deeper.
+	_, err := parseAndCompile(`
+function outer(cond: boolean): number {
+    if (cond) {
+        function inner(): number { return 1; }
+        return inner();
+    }
+    return 0;
+}
+console.log(outer(true));
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested function declared inside an if block, got none")
+	}
+	if !strings.Contains(err.Error(), "only supported directly") {
+		t.Fatalf("expected the error to explain the scoping restriction, got: %v", err)
+	}
+}
+
+func TestE2ENestedFunctionNotVisibleOutsideEncloser(t *testing.T) {
+	_, err := parseAndCompile(`
+function outer(): number {
+    function inner(): number { return 1; }
+    return inner();
+}
+console.log(inner());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for calling a nested function from outside its enclosing function, got none")
+	}
+}
+
+func TestE2ENestedFunctionDuplicateNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function outer(): number {
+    function helper(): number { return 1; }
+    function helper(): number { return 2; }
+    return helper();
+}
+console.log(outer());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for two same-named nested function declarations in the same scope, got none")
+	}
+}
+
+// --- Fixed-point unannotated-return-type inference (TDD-00058) ---
+
+func TestE2EForwardReferenceUnannotatedObjectReturn(t *testing.T) {
+	// ADR-00041's originally-accepted boundary: makeA (unannotated) calls
+	// makeB (also unannotated, declared later, returns an object) — makeA's
+	// own inferred return type used to be computed before makeB was
+	// registered, defaulting to a scalar and rejecting the field access.
+	assertOutput(t, `
+function makeA() { return makeB() }
+function makeB() { return { x: 1 } }
+console.log(makeA().x)
+`, "1")
+}
+
+func TestE2EForwardReferenceChainDepthThree(t *testing.T) {
+	assertOutput(t, `
+function makeA() { return makeB() }
+function makeB() { return makeC() }
+function makeC() { return { x: 42 } }
+console.log(makeA().x)
+`, "42")
+}
+
+func TestE2ENestedFunctionForwardReferenceUnannotatedObjectReturn(t *testing.T) {
+	// Same gap, scoped to a nested function (TDD-00057) calling a same-body
+	// unannotated sibling declared later.
+	assertOutput(t, `
+function outer() {
+    function makeA() { return makeB() }
+    function makeB() { return { x: 7 } }
+    return makeA().x;
+}
+console.log(outer())
+`, "7")
+}
+
+func TestE2ENestedGenericFunctionRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function outer(): number {
+    function identity<T>(x: T): T { return x; }
+    return identity(1);
+}
+console.log(outer());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a generic nested function declaration, got none")
 	}
 }

@@ -396,7 +396,7 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 			return Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
 		}
 		rhsVal = e.coerce(rhsVal, fieldTy)
-		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, fieldTy)
+		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, fieldTy, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -1447,13 +1447,36 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			return Value{}, err
 		}
 	}
-	if len(args) != len(sig.ParamTypes) {
+	// regularCount excludes the rest slot itself (its own ParamTypes entry
+	// is the declared array type, e.g. number[] — never one-to-one with a
+	// single positional call argument). Found and fixed alongside tagged
+	// template literals (TDD-00059): this whole function had no notion of
+	// sig.HasRest at all — a class method with a rest parameter either hit
+	// the strict arg-count check below (wrong count whenever the call
+	// supplies anything other than exactly one rest argument) or, when the
+	// count happened to match by coincidence, treated the rest slot's own
+	// array *type* as if it applied to one positional scalar argument,
+	// producing "expression does not yield an array". The free-function
+	// call path (emitCallToFuncSig, emit_call.go) already gets this right;
+	// this mirrors that function's own regularCount/rest-packing shape
+	// rather than inventing a second one.
+	regularCount := len(sig.ParamTypes)
+	if sig.HasRest {
+		regularCount--
+	}
+	if sig.HasRest {
+		if len(args) < regularCount {
+			return Value{}, fmt.Errorf("%d:%d: %s.%s expects at least %d argument(s), got %d",
+				pos.Line, pos.Col, objTy.ClassName, methodName, regularCount, len(args))
+		}
+	} else if len(args) != len(sig.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: %s.%s expects %d argument(s), got %d",
 			pos.Line, pos.Col, objTy.ClassName, methodName, len(sig.ParamTypes), len(args))
 	}
 
 	argParts := []string{"ptr " + thisVal.Ref}
-	for i, a := range args {
+	for i := 0; i < regularCount; i++ {
+		a := args[i]
 		paramTy := sig.ParamTypes[i]
 		// An array-typed method parameter decomposes into two LLVM params
 		// (ptr, i64 len) at the callee side — emitClassMember's own
@@ -1490,6 +1513,35 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		}
 		val = e.coerce(val, paramTy)
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+	}
+	// Pack rest args into a temporary heap array — identical shape to
+	// emitCallToFuncSig's own rest-packing (emit_call.go).
+	if sig.HasRest {
+		restArgs := args[regularCount:]
+		restTy := sig.ParamTypes[len(sig.ParamTypes)-1]
+		elemTy := TypeI64
+		if restTy.ElemType != nil {
+			elemTy = *restTy.ElemType
+		}
+		if len(restArgs) == 0 {
+			argParts = append(argParts, "ptr null", "i64 0")
+		} else {
+			n := int64(len(restArgs))
+			e.ensureMalloc()
+			dataReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+			for i, arg := range restArgs {
+				val, err := e.emitExprWithObjectHint(arg, elemTy)
+				if err != nil {
+					return Value{}, err
+				}
+				val = e.coerce(val, elemTy)
+				gepReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+			}
+			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+		}
 	}
 	argsIR := strings.Join(argParts, ", ")
 

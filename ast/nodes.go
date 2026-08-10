@@ -665,6 +665,29 @@ func NewTemplateLiteral(quasis []string, exprs []Expression, pos Pos) *TemplateL
 	return &TemplateLiteral{Quasis: quasis, Exprs: exprs, pos: pos}
 }
 
+// TaggedTemplateExpression represents `` tag`text ${expr} text` `` — a
+// template literal immediately preceded by the callable expression that
+// tags it. Quasis/Exprs have the same "len(Quasis) == len(Exprs)+1" shape
+// TemplateLiteral's own do; Quasis holds only the cooked form (no `.raw` —
+// see TDD-00059's Context for why). Kept as its own node rather than
+// desugared straight to a CallExpression at parse time so "this was
+// written as a tagged template" stays recoverable (codegen desugars it on
+// demand instead — see desugarTaggedTemplate in codegen/llvm).
+type TaggedTemplateExpression struct {
+	Tag    Expression
+	Quasis []string
+	Exprs  []Expression
+	pos    Pos
+}
+
+func (*TaggedTemplateExpression) nodeMarker()   {}
+func (*TaggedTemplateExpression) exprMarker()   {}
+func (t *TaggedTemplateExpression) GetPos() Pos { return t.pos }
+
+func NewTaggedTemplateExpression(tag Expression, quasis []string, exprs []Expression, pos Pos) *TaggedTemplateExpression {
+	return &TaggedTemplateExpression{Tag: tag, Quasis: quasis, Exprs: exprs, pos: pos}
+}
+
 // NewMapExpression — new Map<K, V>()
 type NewMapExpression struct {
 	KeyType *TypeAnnotation

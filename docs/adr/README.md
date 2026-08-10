@@ -186,3 +186,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00146](ADR-00146.md) | klmpm Stage 1 — compiler-side `klain_modules` resolution | Implements [TDD-00054](../tdd/TDD-00054.md) (Stage 1 only) |
 | [00147](ADR-00147.md) | klmpm Stage 2 — `klain.json`/`klain.lock` manifest parsing | Implements [TDD-00054](../tdd/TDD-00054.md) (Stage 2 only). Extends [ADR-00146](ADR-00146.md) |
 | [00148](ADR-00148.md) | `import.meta.url` (dynamic `import(...)` grammar recognized, cleanly rejected) | Implements [TDD-00055](../tdd/TDD-00055.md) (Stage 1 only) |
+| [00149](ADR-00149.md) | Nested function declarations (V1: hoisted, own scope, no capture) | Implements [TDD-00057](../tdd/TDD-00057.md) |
+| [00150](ADR-00150.md) | Fixed-point unannotated-return-type inference | Extends [ADR-00041](ADR-00041.md); Implements [TDD-00058](../tdd/TDD-00058.md) |
+| [00151](ADR-00151.md) | Tagged template literals | Implements [TDD-00059](../tdd/TDD-00059.md); Extended by [ADR-00152](ADR-00152.md) |
+| [00152](ADR-00152.md) | Closing gaps found on a second pass over ADR-00151 (array-typed closures, class-method rest params, erased-generic forward references) | Extends [ADR-00151](ADR-00151.md), [ADR-00105](ADR-00105.md), [ADR-00150](ADR-00150.md) |

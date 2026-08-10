@@ -126,6 +126,43 @@ func (e *Emitter) loadArrayElem(gepReg string, elemTy Type) Value {
 	return Value{Ref: reg, Ty: elemTy}
 }
 
+// loadArrayElemMaybeNull is loadArrayElem for a slot that may itself hold a
+// null box pointer — a "no match" sentinel (e.g. .find()'s own pre-loop
+// zero-init, reusing the same "0/null doubles as absent" convention
+// .find() already established for every other element type). Unboxing a
+// null box would dereference null; this branches around the unbox instead
+// and produces the {ptr:null,i64:0} "null array" sentinel shape
+// RegExp.exec()'s own T[] | null result already uses, rather than crashing.
+// Only meaningful for elemTy.IsArray — added alongside ADR-00151/TDD-00059
+// lifting rejectNestedArrayElem for the callback-invoking HOF methods.
+func (e *Emitter) loadArrayElemMaybeNull(slotPtr string, elemTy Type) Value {
+	boxPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, slotPtr))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, boxPtr))
+	nullL := e.freshLabel("arrelem.null")
+	foundL := e.freshLabel("arrelem.found")
+	doneL := e.freshLabel("arrelem.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, foundL))
+
+	e.emitLabel(nullL)
+	r0 := e.freshReg()
+	nullAgg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", nullAgg, r0))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(foundL)
+	foundAgg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", foundAgg, boxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", result, nullAgg, nullL, foundAgg, foundL))
+	return Value{Ref: result, Ty: elemTy}
+}
+
 // storeArrayElem stores val (of type elemTy) into a GEP'd array-backing-
 // buffer slot. For a nested-array element, val's {ptr,i64} aggregate is
 // boxed first (see boxArrayValue) and the box pointer is what's actually
