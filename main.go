@@ -17,6 +17,7 @@ func main() {
 	output := flag.String("o", "", "output binary name (default: input name without extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management mode: manual (default, Memory.free(x) only) or gc (Boehm GC — see docs/tdd/TDD-00001.md)")
+	globals := flag.String("globals", "strict", "ambient built-in global names (Math/JSON/console/process/fetch/...): strict (default, a colliding declaration is a compile error) or permissive (real JS/browser shadowing — see docs/tdd/TDD-00050.md). Constructor-style built-ins (Map/Date/RegExp/...) stay reserved either way")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -37,8 +38,15 @@ func main() {
 		fatal("unrecognized -mm value %q — must be one of: manual, gc (auto is scoped but not implemented yet, see docs/tdd/TDD-00001.md)", *mm)
 	}
 
+	switch *globals {
+	case "strict", "permissive":
+		// ok
+	default:
+		fatal("unrecognized -globals value %q — must be one of: strict, permissive (see docs/tdd/TDD-00050.md)", *globals)
+	}
+
 	inFile := flag.Arg(0)
-	prog, err := resolver.ResolveProgram(inFile)
+	prog, err := resolver.ResolveProgramWithOptions(inFile, *globals == "permissive")
 	if err != nil {
 		fatal("parse error: %v", err)
 	}

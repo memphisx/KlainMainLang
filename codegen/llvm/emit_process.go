@@ -8,13 +8,13 @@ import (
 )
 
 // isProcessEnvExpr reports whether expr is exactly `process.env` (non-optional).
-func isProcessEnvExpr(expr ast.Expression) bool {
+func (e *Emitter) isProcessEnvExpr(expr ast.Expression) bool {
 	mem, ok := expr.(*ast.MemberExpression)
 	if !ok || mem.Optional || mem.Property != "env" {
 		return false
 	}
 	id, ok := mem.Object.(*ast.Identifier)
-	return ok && id.Name == "process"
+	return ok && id.Name == "process" && !e.isShadowedByLocal(id.Name)
 }
 
 // emitProcessArgv returns process.argv as a string[] aggregate backed by the

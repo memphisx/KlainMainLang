@@ -206,7 +206,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		// JSON.parse needs the target type to choose number vs string deserialization.
 		if ce, ok := v.Init.(*ast.CallExpression); ok {
 			if mem, ok2 := ce.Callee.(*ast.MemberExpression); ok2 {
-				if id, ok3 := mem.Object.(*ast.Identifier); ok3 && id.Name == "JSON" && mem.Property == "parse" {
+				if id, ok3 := mem.Object.(*ast.Identifier); ok3 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
 					val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
 					if err != nil {
 						return err

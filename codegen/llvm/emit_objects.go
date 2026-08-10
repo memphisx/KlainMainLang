@@ -284,7 +284,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		// hardcodes TypePtr as the target (correct only for JSON.parse used
 		// outside a typed declaration, e.g. as a bare expression).
 		if mem, ok := init.Callee.(*ast.MemberExpression); ok {
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && mem.Property == "parse" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
 				val, err := e.emitJSONParse(init.Args, ty, init.GetPos())
 				if err != nil {
 					return err

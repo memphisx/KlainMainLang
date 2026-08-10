@@ -258,7 +258,7 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	// process.env["KEY"]: dynamic-key environment variable lookup.
-	if isProcessEnvExpr(ex.Object) {
+	if e.isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetDynamic(ex.Index)
 	}
 	// Group map access: grouped["key"] → sub-array.
@@ -305,7 +305,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "MAX_SAFE_INTEGER":
 			return Value{Ref: "9007199254740991", Ty: TypeI64}, nil
@@ -325,7 +325,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
 		}
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Math" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "PI":
 			return Value{Ref: "3.141592653589793e+00", Ty: TypeF64}, nil
@@ -343,7 +343,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: "4.342944819032518e-01", Ty: TypeF64}, nil
 		}
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" {
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "argv":
 			return e.emitProcessArgv()
@@ -353,7 +353,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
 		}
 	}
-	if isProcessEnvExpr(ex.Object) {
+	if e.isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetStatic(ex.Property)
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {

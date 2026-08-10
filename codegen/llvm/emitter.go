@@ -312,6 +312,21 @@ func (e *Emitter) lookup(name string) (Symbol, bool) {
 	return Symbol{}, false
 }
 
+// isShadowedByLocal reports whether name is a real, already-declared local
+// binding — checked first at every Tier 1 ambient-global dispatch site
+// (Math/JSON/console/process/fetch/... — see resolver/reserved_names.go)
+// before falling back to that name's built-in meaning, the same
+// lookup-first-then-fallback pattern this file's identifier-evaluation path
+// already used for NaN/Infinity before TDD-00050 generalized it. Only ever
+// true under `-globals=permissive`: `-globals=strict` (the default)
+// structurally guarantees no such binding can exist, since the resolver
+// rejects the declaration outright — so this check is a provably-safe
+// no-op in strict-mode builds, not a runtime mode switch of its own.
+func (e *Emitter) isShadowedByLocal(name string) bool {
+	_, ok := e.lookup(name)
+	return ok
+}
+
 // updateSymbolInPlace overwrites name's entry in whichever scope currently
 // holds it (rather than shadowing it in the innermost scope), so the update
 // stays visible after that scope's block exits.

@@ -180,3 +180,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00140](ADR-00140.md) | `assert` module | |
 | [00141](ADR-00141.md) | Import-gated built-in bindings, Stage 1 (default/namespace form) | Implements [TDD-00049](../tdd/TDD-00049.md) |
 | [00142](ADR-00142.md) | Import-gated built-in bindings, Stage 2 (named per-member imports) | Extends [ADR-00141](ADR-00141.md). Implements [TDD-00049](../tdd/TDD-00049.md) |
+| [00143](ADR-00143.md) | Reserved ambient-global names — `-globals=strict\|permissive` | Implements [TDD-00050](../tdd/TDD-00050.md) |

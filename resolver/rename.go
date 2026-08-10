@@ -68,14 +68,33 @@ type builtinMemberRef struct {
 // bindings — local name -> the mangled name it refers to, exactly what
 // TDD-00041 already built), ns (TDD-00042: namespace-import bindings —
 // local alias -> {exported member's original name -> its mangled name},
-// one entry per `import * as ns from '...'`), and builtinMembers
-// (TDD-00049 Stage 2: local alias -> which virtual module member it names).
-// All three are built once by the caller (resolver.go) and passed down
-// unchanged through the whole walk.
+// one entry per `import * as ns from '...'`), builtinMembers (TDD-00049
+// Stage 2: local alias -> which virtual module member it names), and
+// allowGlobalShadowing/reservedErr (TDD-00050: `-globals=strict|permissive`
+// — see checkBinding's own doc comment). All are built once by the caller
+// (resolver.go) and passed down unchanged through the whole walk.
 type lookupTable struct {
-	names          map[string]string
-	ns             map[string]map[string]string
-	builtinMembers map[string]builtinMemberRef
+	names                map[string]string
+	ns                   map[string]map[string]string
+	builtinMembers       map[string]builtinMemberRef
+	allowGlobalShadowing bool
+	reservedErr          *error // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
+}
+
+// checkBinding is TDD-00050's hook, called at every point a local binding
+// is introduced (every scope.bind(...) call site below). It never halts
+// the walk — none of rename.go's functions return an error today, and this
+// intentionally doesn't change that (see the TDD's Design section for why
+// a first-write-wins pointer was chosen over restructuring every function
+// here to propagate one) — it only ever records the *first* violation
+// found, which resolver.go checks once the whole walk completes.
+func (lu lookupTable) checkBinding(name string, pos ast.Pos) {
+	if lu.reservedErr == nil || *lu.reservedErr != nil {
+		return // no error slot given (shouldn't happen from resolver.go), or already recorded one
+	}
+	if err := checkReservedBinding(name, pos.Line, pos.Col, lu.allowGlobalShadowing); err != nil {
+		*lu.reservedErr = err
+	}
 }
 
 // renameFile rewrites every top-level statement in prog using lu — see
@@ -136,7 +155,7 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 	for _, tp := range f.TypeParams {
 		sc.bind(tp)
 	}
-	bindParams(f.Params, sc)
+	bindParams(f.Params, sc, lu, f.GetPos())
 	for i := range f.Params {
 		if f.Params[i].Type != nil {
 			rewriteType(f.Params[i].Type, sc, lu)
@@ -156,20 +175,26 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 
 // bindParams adds every name a parameter list binds — a plain name, or the
 // individual names of a destructured array/object parameter pattern — into
-// the current (already-pushed) scope frame.
-func bindParams(params []ast.Param, sc *scope) {
+// the current (already-pushed) scope frame. pos is the enclosing
+// function/arrow's own position — ast.Param carries no position of its
+// own, so a reserved-name violation on a parameter is reported at the
+// function's position rather than the individual parameter's (TDD-00050).
+func bindParams(params []ast.Param, sc *scope, lu lookupTable, pos ast.Pos) {
 	for _, p := range params {
 		switch {
 		case p.ArrayPattern != nil:
 			for _, n := range p.ArrayPattern {
 				sc.bind(n)
+				lu.checkBinding(n, pos)
 			}
 		case p.ObjectPattern != nil:
 			for _, dp := range p.ObjectPattern {
 				sc.bind(dp.Local)
+				lu.checkBinding(dp.Local, pos)
 			}
 		default:
 			sc.bind(p.Name)
+			lu.checkBinding(p.Name, pos)
 		}
 	}
 }
@@ -185,7 +210,7 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	}
 	for mi := range i.Methods {
 		sc.push()
-		bindParams(i.Methods[mi].Params, sc)
+		bindParams(i.Methods[mi].Params, sc, lu, i.GetPos())
 		for pi := range i.Methods[mi].Params {
 			if i.Methods[mi].Params[pi].Type != nil {
 				rewriteType(i.Methods[mi].Params[pi].Type, sc, lu)
@@ -266,12 +291,14 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		sc.bind(s.Name)
+		lu.checkBinding(s.Name, s.GetPos())
 	case *ast.ArrayDestructuring:
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		for _, n := range s.Names {
 			sc.bind(n)
+			lu.checkBinding(n, s.GetPos())
 		}
 	case *ast.ObjectDestructuring:
 		if s.Init != nil {
@@ -279,6 +306,7 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		}
 		for _, p := range s.Props {
 			sc.bind(p.Local)
+			lu.checkBinding(p.Local, s.GetPos())
 		}
 	case *ast.ExpressionStatement:
 		s.Expr = rewriteExpr(s.Expr, sc, lu)
@@ -311,12 +339,14 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		s.Iterable = rewriteExpr(s.Iterable, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
+		lu.checkBinding(s.VarName, s.GetPos())
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.ForInStatement:
 		s.Object = rewriteExpr(s.Object, sc, lu)
 		sc.push()
 		sc.bind(s.VarName)
+		lu.checkBinding(s.VarName, s.GetPos())
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.WhileStatement:
@@ -346,6 +376,7 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		if s.Catch != nil {
 			sc.push()
 			sc.bind(s.Catch.Param)
+			lu.checkBinding(s.Catch.Param, s.GetPos())
 			rewriteBlock(s.Catch.Body, sc, lu)
 			sc.pop()
 		}
@@ -450,7 +481,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.ArrowFunction:
 		sc.push()
-		bindParams(e.Params, sc)
+		bindParams(e.Params, sc, lu, e.GetPos())
 		for i := range e.Params {
 			if e.Params[i].Type != nil {
 				rewriteType(e.Params[i].Type, sc, lu)

@@ -45,16 +45,16 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 	// Special-case: console.log(...) and array.push(...)
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "String" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "String" && !e.isShadowedByLocal(id.Name) {
 			return e.emitStringStaticCall(mem.Property, ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Number" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 			return e.emitNumberStaticCall(mem.Property, ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Math" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 			return e.emitMathCall(mem.Property, ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "stringify":
 				return e.emitJSONStringify(ex.Args, ex.GetPos())
@@ -65,16 +65,16 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "now" {
 			return e.emitDateNow()
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && mem.Property == "now" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && !e.isShadowedByLocal(id.Name) && mem.Property == "now" {
 			e.ensurePerformanceNow()
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", r))
 			return Value{Ref: r, Ty: TypeF64}, nil
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && mem.Property == "mark" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && !e.isShadowedByLocal(id.Name) && mem.Property == "mark" {
 			return e.emitPerformanceMark(ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && mem.Property == "measure" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "performance" && !e.isShadowedByLocal(id.Name) && mem.Property == "measure" {
 			return e.emitPerformanceMeasure(ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "parse" {
@@ -190,7 +190,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "toString" && isNumberTy(e.inferExprType(mem.Object)) {
 			return e.emitNumberToStringRadix(mem, ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "isArray":
 				if len(ex.Args) != 1 {
@@ -217,7 +217,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPromiseAllSettled(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "groupBy":
 				return e.emitObjectGroupBy(ex.Args, ex.GetPos())
@@ -240,7 +240,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "exit":
 				return e.emitProcessExit(ex.Args, ex.GetPos())
@@ -267,9 +267,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// process.stdout.write(s) / process.stderr.write(s): a nested
 		// two-level member chain (process.stdout is a pseudo-namespace, not
 		// a real bindable value), so this needs its own shape check rather
-		// than fitting the single-level `id.Name == "process"` switch above.
+		// than fitting the single-level `id.Name == "process" && !e.isShadowedByLocal(id.Name)` switch above.
 		if inner, ok := mem.Object.(*ast.MemberExpression); ok && mem.Property == "write" {
-			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 				switch inner.Property {
 				case "stdout":
 					return e.emitProcessStreamWrite(ex.Args, "stdout", 1, ex.GetPos())
@@ -353,7 +353,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "getRandomValues":
 				return e.emitCryptoGetRandomValues(ex.Args, ex.GetPos())
@@ -372,7 +372,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitHTTPClose(ex.Args, ex.GetPos())
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "log", "info", "debug":
 				return e.emitConsolePrint(ex.Args, 1, "")
@@ -703,7 +703,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	}
 
 	// Global built-in functions.
-	if id, ok := ex.Callee.(*ast.Identifier); ok {
+	if id, ok := ex.Callee.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
 		switch id.Name {
 		case "parseInt":
 			return e.emitParseInt(ex.Args, ex.GetPos())

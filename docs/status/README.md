@@ -87,6 +87,7 @@ Concerns that span every feature area rather than living in one of them.
 | Area | Status | Page | Caveats |
 |---|---|---|---|
 | Memory management | 2/3 modes (`manual`, `gc`) | [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md) | `manual` (default) never frees on its own; `auto` (compiler-inserted frees, no runtime collector) is design-only — [TDD-00001](../tdd/TDD-00001.md) |
+| Reserved ambient-global names | ✅ 2/2 modes (`strict`, `permissive`) | — | `-globals=strict` (default): a declaration colliding with an ambient built-in name (`Math`/`process`/`fetch`/…) is a compile error. `-globals=permissive`: real JS/browser shadowing — but only for plain-identifier globals; constructor-style built-ins (`Map`/`Date`/`RegExp`/…, parser-level `new`-forms) stay reserved either way. See [TDD-00050](../tdd/TDD-00050.md)/[ADR-00143](../adr/ADR-00143.md) |
 
 ---
 
@@ -203,4 +204,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-10 — [TDD-00049](../tdd/TDD-00049.md) fully implemented: Stage 1 (default/namespace-form import-gated built-in bindings, [ADR-00141](../adr/ADR-00141.md)) and Stage 2 (named per-member imports, e.g. `import { readFileSync } from 'fs'`, [ADR-00142](../adr/ADR-00142.md)).*
+*Last updated: 2026-08-10 — [TDD-00050](../tdd/TDD-00050.md) implemented: `-globals=strict` (default) rejects a declaration colliding with an ambient built-in name; `-globals=permissive` restores real JS/browser shadowing for plain-identifier globals only — see [ADR-00143](../adr/ADR-00143.md).*

@@ -512,6 +512,61 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	return binFile
 }
 
+// resolveMultiFilePermissive is resolveMultiFile's `-globals=permissive`
+// (TDD-00050) counterpart.
+func resolveMultiFilePermissive(t *testing.T, files map[string]string, entryName string) (*ast.Program, error) {
+	t.Helper()
+	dir := writeMultiFile(t, files)
+	return resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true)
+}
+
+// buildBinaryMultiFilePermissive is buildBinaryMultiFile's
+// `-globals=permissive` (TDD-00050) counterpart.
+func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entryName string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	dir := writeMultiFile(t, files)
+
+	prog, err := resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	em := llvm.NewEmitter()
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// assertMultiFileOutputPermissive is assertMultiFileOutput's
+// `-globals=permissive` (TDD-00050) counterpart.
+func assertMultiFileOutputPermissive(t *testing.T, files map[string]string, entryName, want string) {
+	t.Helper()
+	binFile := buildBinaryMultiFilePermissive(t, files, entryName)
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(result), "\n"), want)
+}
+
 // assertMultiFileOutput builds and runs a multi-file program and compares
 // its stdout against want, line by line.
 func assertMultiFileOutput(t *testing.T, files map[string]string, entryName, want string) {

@@ -55,7 +55,21 @@ type fileInfo struct {
 
 // ResolveProgram parses entryPath and everything it transitively imports,
 // validates import/export usage, and returns one merged *ast.Program.
+// Equivalent to ResolveProgramWithOptions(entryPath, false) — see its doc
+// comment for allowGlobalShadowing's meaning (TDD-00050).
 func ResolveProgram(entryPath string) (*ast.Program, error) {
+	return ResolveProgramWithOptions(entryPath, false)
+}
+
+// ResolveProgramWithOptions is ResolveProgram plus allowGlobalShadowing
+// (TDD-00050, `-globals=permissive` in main.go — default false, i.e.
+// `-globals=strict`): whether a program may declare its own binding named
+// the same as a Tier 1 ambient global (`Math`/`process`/`fetch`/… — see
+// resolver/reserved_names.go). Tier 2 names (`Map`/`Date`/`RegExp`/… —
+// parser-level `new`-form built-ins) are rejected either way; there is no
+// flag value that lifts those, see reserved_names.go's own doc comment for
+// why.
+func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*ast.Program, error) {
 	entryAbs, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolving entry path: %w", err)
@@ -157,7 +171,7 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 	// — an importing file needs the *target's* mangled names already computed.
 	for _, path := range allPaths {
 		info := files[path]
-		mangled, err := mangleFileDecls(path, info.prog, info.index)
+		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing)
 		if err != nil {
 			return nil, err
 		}
@@ -259,7 +273,14 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 				ns[imp.Namespace] = members
 			}
 		}
-		renameFile(info.prog, lookupTable{names: lookup, ns: ns, builtinMembers: builtinMembers})
+		var reservedErr error
+		renameFile(info.prog, lookupTable{
+			names: lookup, ns: ns, builtinMembers: builtinMembers,
+			allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
+		})
+		if reservedErr != nil {
+			return nil, reservedErr
+		}
 	}
 
 	// Defensive: mangled names are constructed to already be unique (each
@@ -380,13 +401,16 @@ func mangleName(name string, fileIdx int) string {
 // `export default` in the same file — checked explicitly since the two
 // underlying declarations may have different own names ("foo" vs "bar")
 // and so wouldn't be caught by the loop's own duplicate check above.
-func mangleFileDecls(path string, prog *ast.Program, fileIdx int) (map[string]string, error) {
+func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalShadowing bool) (map[string]string, error) {
 	mangled := map[string]string{}
 	sawDefault := false
 	for _, stmt := range prog.Body {
 		name, ok := declNameOf(stmt)
 		if !ok {
 			continue
+		}
+		if err := checkReservedBinding(name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
+			return nil, err
 		}
 		if _, dup := mangled[name]; dup {
 			return nil, fmt.Errorf("'%s' is declared more than once in %s", name, path)

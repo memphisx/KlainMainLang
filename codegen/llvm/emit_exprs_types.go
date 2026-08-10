@@ -210,7 +210,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return Type{IR: "ptr", IsFunc: true}
 		}
 	case *ast.IndexExpression:
-		if isProcessEnvExpr(ex.Object) {
+		if e.isProcessEnvExpr(ex.Object) {
 			return TypePtr
 		}
 		objTy := e.inferExprType(ex.Object)
@@ -292,7 +292,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeI64
 			}
 		}
-		if id, ok := ex.Object.(*ast.Identifier); ok {
+		if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
 			switch id.Name {
 			case "Math":
 				switch ex.Property {
@@ -327,7 +327,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 		}
-		if isProcessEnvExpr(ex.Object) {
+		if e.isProcessEnvExpr(ex.Object) {
 			return TypePtr
 		}
 		// General object field read: any expression whose type is an object,
@@ -422,6 +422,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 				return *sym.Ty.FuncRetType
 			}
+			if e.isShadowedByLocal(id.Name) {
+				return TypeI64 // matches this function's own generic identifier-call fallback below
+			}
 			switch id.Name {
 			case "parseInt":
 				return TypeI64
@@ -446,7 +449,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "console" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
 				// Every console.* method returns void (emitConsolePrint and
 				// everything that delegates to it, e.g. emitConsoleDir, all
 				// return Value{Ty: TypeVoid}) — without this case, an
@@ -459,13 +462,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				// clang-stage type mismatch. See docs/adr/ADR-00043.md.
 				return TypeVoid
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "String" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "String" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "fromCharCode", "fromCodePoint":
 					return TypePtr
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Number" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "isInteger", "isFinite", "isNaN", "isSafeInteger":
 					return TypeBool
@@ -475,7 +478,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeF64
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
 					"asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p", "fround":
@@ -492,7 +495,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					}
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "stringify":
 					return TypePtr
@@ -506,7 +509,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Date" && mem.Property == "parse" {
 				return TypeI64
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && (mem.Property == "now" || mem.Property == "measure") {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && !e.isShadowedByLocal(id.Name) && (mem.Property == "now" || mem.Property == "measure") {
 				return TypeF64
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs__kml_builtin" {
@@ -521,7 +524,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayOf(TypePtr)
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "process" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "readLineSync", "execFileSync", "cwd":
 					return TypePtr
@@ -558,7 +561,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert__kml_builtin" {
 				return TypeVoid
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "getRandomValues":
 					if len(ex.Args) == 1 {
@@ -568,7 +571,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Array" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Array" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "of":
 					if len(ex.Args) > 0 {
@@ -623,7 +626,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					}
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Object" {
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "groupBy":
 					if len(ex.Args) >= 1 {
