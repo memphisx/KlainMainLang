@@ -1351,3 +1351,46 @@ const d = new Derived();
 console.log(useIt(d));
 `, "60")
 }
+
+// --- Static method calls (found broken while running the test262
+// conformance harness, TDD-00008 Design V2: emitStaticMethodCall is a
+// wholly separate function from emitClassCall's instance-method dispatch,
+// and had none of the same fixes — no default-value fallback, no rest
+// params, no array-typed-parameter decomposition) ---
+
+func TestE2EStaticMethodDefaultParam(t *testing.T) {
+	assertOutput(t, `
+class Foo {
+    static bar(x: number, message: string = "default"): string {
+        return message + x;
+    }
+}
+console.log(Foo.bar(1));
+console.log(Foo.bar(2, "hi"));
+`, "default1\nhi2")
+}
+
+func TestE2EStaticMethodRestParam(t *testing.T) {
+	assertOutput(t, `
+class Sum {
+    static total(...values: number[]): number {
+        let s = 0;
+        for (const v of values) { s += v; }
+        return s;
+    }
+}
+console.log(Sum.total(1, 2, 3));
+console.log(Sum.total());
+`, "6\n0")
+}
+
+func TestE2EStaticMethodArrayParam(t *testing.T) {
+	assertOutput(t, `
+class Sum {
+    static first(arr: number[]): number {
+        return arr[0];
+    }
+}
+console.log(Sum.first([9, 8]));
+`, "9")
+}

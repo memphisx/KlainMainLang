@@ -1464,19 +1464,40 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	if sig.HasRest {
 		regularCount--
 	}
+	// minRequired excludes any trailing regular param that has a default
+	// expression — found alongside the rest-param fix above: emitClassCall
+	// had no default-value handling at all (sig.Defaults was written by
+	// buildParamSig but never read anywhere in this file), so a class
+	// method call omitting a trailing defaulted argument (real, common
+	// TS/JS usage) hit this same strict arg-count check unconditionally.
+	// The free-function call path (emitCallToFuncSig) already falls back
+	// to evaluating the default expression at the call site; mirrored here.
+	minRequired := regularCount
+	for minRequired > 0 && minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil {
+		minRequired--
+	}
 	if sig.HasRest {
-		if len(args) < regularCount {
+		if len(args) < minRequired {
 			return Value{}, fmt.Errorf("%d:%d: %s.%s expects at least %d argument(s), got %d",
-				pos.Line, pos.Col, objTy.ClassName, methodName, regularCount, len(args))
+				pos.Line, pos.Col, objTy.ClassName, methodName, minRequired, len(args))
 		}
-	} else if len(args) != len(sig.ParamTypes) {
+	} else if len(args) < minRequired || len(args) > len(sig.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: %s.%s expects %d argument(s), got %d",
 			pos.Line, pos.Col, objTy.ClassName, methodName, len(sig.ParamTypes), len(args))
 	}
 
 	argParts := []string{"ptr " + thisVal.Ref}
 	for i := 0; i < regularCount; i++ {
-		a := args[i]
+		var a ast.Expression
+		switch {
+		case i < len(args):
+			a = args[i]
+		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
+			a = sig.Defaults[i]
+		default:
+			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
+				pos.Line, pos.Col, objTy.ClassName, methodName, i+1)
+		}
 		paramTy := sig.ParamTypes[i]
 		// An array-typed method parameter decomposes into two LLVM params
 		// (ptr, i64 len) at the callee side — emitClassMember's own
@@ -1686,19 +1707,91 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			return Value{}, err
 		}
 	}
-	if len(args) != len(sig.ParamTypes) {
+	// Same three gaps found and fixed in emitClassCall (rest params, default
+	// values, array-typed parameters) also existed here — a wholly separate
+	// function for the static-call-site case, never given the matching
+	// fixes. Mirrors emitClassCall's own regularCount/minRequired/rest-
+	// packing/array-decomposition shape exactly rather than inventing a
+	// third copy of the same logic.
+	regularCount := len(sig.ParamTypes)
+	if sig.HasRest {
+		regularCount--
+	}
+	minRequired := regularCount
+	for minRequired > 0 && minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil {
+		minRequired--
+	}
+	if sig.HasRest {
+		if len(args) < minRequired {
+			return Value{}, fmt.Errorf("%d:%d: %s.%s expects at least %d argument(s), got %d",
+				pos.Line, pos.Col, className, methodName, minRequired, len(args))
+		}
+	} else if len(args) < minRequired || len(args) > len(sig.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: %s.%s expects %d argument(s), got %d",
 			pos.Line, pos.Col, className, methodName, len(sig.ParamTypes), len(args))
 	}
 
 	var argParts []string
-	for i, a := range args {
+	for i := 0; i < regularCount; i++ {
+		var a ast.Expression
+		switch {
+		case i < len(args):
+			a = args[i]
+		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
+			a = sig.Defaults[i]
+		default:
+			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
+				pos.Line, pos.Col, className, methodName, i+1)
+		}
+		paramTy := sig.ParamTypes[i]
+		if paramTy.IsArray {
+			val, err := e.emitExprWithObjectHint(a, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			if !val.Ty.IsArray {
+				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+			}
+			ptrReg := e.freshReg()
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			continue
+		}
 		val, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(val, sig.ParamTypes[i])
+		val = e.coerce(val, paramTy)
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+	}
+	if sig.HasRest {
+		restArgs := args[regularCount:]
+		restTy := sig.ParamTypes[len(sig.ParamTypes)-1]
+		elemTy := TypeI64
+		if restTy.ElemType != nil {
+			elemTy = *restTy.ElemType
+		}
+		if len(restArgs) == 0 {
+			argParts = append(argParts, "ptr null", "i64 0")
+		} else {
+			n := int64(len(restArgs))
+			e.ensureMalloc()
+			dataReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+			for i, arg := range restArgs {
+				val, err := e.emitExprWithObjectHint(arg, elemTy)
+				if err != nil {
+					return Value{}, err
+				}
+				val = e.coerce(val, elemTy)
+				gepReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+			}
+			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+		}
 	}
 	argsIR := strings.Join(argParts, ", ")
 

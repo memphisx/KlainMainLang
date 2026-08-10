@@ -190,3 +190,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00150](ADR-00150.md) | Fixed-point unannotated-return-type inference | Extends [ADR-00041](ADR-00041.md); Implements [TDD-00058](../tdd/TDD-00058.md) |
 | [00151](ADR-00151.md) | Tagged template literals | Implements [TDD-00059](../tdd/TDD-00059.md); Extended by [ADR-00152](ADR-00152.md) |
 | [00152](ADR-00152.md) | Closing gaps found on a second pass over ADR-00151 (array-typed closures, class-method rest params, erased-generic forward references) | Extends [ADR-00151](ADR-00151.md), [ADR-00105](ADR-00105.md), [ADR-00150](ADR-00150.md) |
+| [00153](ADR-00153.md) | Test262 full-corpus conformance harness | Implements [TDD-00008](../tdd/TDD-00008.md) (Design V2) |

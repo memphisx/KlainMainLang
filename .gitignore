@@ -22,3 +22,11 @@ examples/**
 # compile inside the container, these are only ever stray local leftovers.
 docker/*.ll
 docker/*.gcshim.c
+
+# Fetched Test262 corpus (TDD-00008 Design V2, tools/conformance/fetch.sh) —
+# ~263MB, pinned by commit SHA in fetch.sh itself, not vendored into git.
+/.test262/
+
+# Generated conformance-run artifacts (tools/conformance) — the committed
+# deliverable is docs/testing/CONFORMANCE-RESULTS.md, not these raw logs.
+/.conformance-out/
