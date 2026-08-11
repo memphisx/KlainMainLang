@@ -4,6 +4,8 @@
 
 **Coverage**: 100% (8/8) — see [ADR-00081](../adr/ADR-00081.md).
 
+**Strict Coverage**: 5/8, ~63% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here was already honestly caveated (edge cases verified directly against real Node) before the audit.
+
 **Caveats**: POSIX-only (this compiler doesn't cross-compile — `sep`/`delimiter` are compile-time constants, `/` and `:`, never the Windows forms). `join`/`resolve`'s `..`-above-root handling, `basename`'s `ext`-stripping edge cases (an `ext` argument that consumes the *entire* basename is left unstripped, matching real Node's own non-obvious behavior there), and multi-slash collapsing were all verified directly against a real Node install rather than assumed — see the ADR's Verification section.
 
 | API | Status | Notes |

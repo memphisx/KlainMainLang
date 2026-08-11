@@ -4,6 +4,8 @@
 
 **Coverage**: 100% (7/7) — done. Fully verified on Linux (this project's own dev sandbox); the Darwin-specific implementation paths (`os.freemem()`, `os.cpus()`'s per-core `times`) are written against documented Mach/`sysctlbyname` APIs but have not been compiled or run on real hardware — see Known Limitations.
 
+**Strict Coverage**: 5/7, ~71% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — the two excluded rows were already honestly caveated (Darwin-unverified) before the audit.
+
 | API | Status | Notes |
 |---|---|---|
 | `os.platform()` | ✅ | Reuses `process.platform`'s existing `runtime.GOOS`-constant mechanism |

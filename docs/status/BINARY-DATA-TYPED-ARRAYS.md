@@ -4,6 +4,8 @@
 
 **Coverage**: ~53% (9/17).
 
+**Strict Coverage**: 1/2, 50% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity (counted against the 2 non-`❌` rows; the 15 `❌` rows aren't ✅ claims to begin with). See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — the TypedArrays row's construction/`.buffer`/sub-range restrictions were already honestly caveated before the audit.
+
 **Caveats**: `BigInt64Array`/`BigUint64Array` need `bigint` (0% implemented). `Uint8ClampedArray` is deliberately skipped (real clamp-on-write needs a distinct store path, not just truncation). `DataView`, `Blob`, `SharedArrayBuffer`, `Atomics` aren't implemented. A TypedArray has no `.buffer` property and only whole-buffer views at offset 0 are supported (no 3-argument sub-range constructor). Node's own `Buffer` class — distinct from the WHATWG `ArrayBuffer`/TypedArrays above, and heavily used in real Node code (`fs`, `net`, `crypto` all hand back `Buffer`s) — isn't implemented and wasn't tracked anywhere until now.
 
 | API | Status | Notes |

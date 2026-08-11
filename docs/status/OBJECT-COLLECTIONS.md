@@ -4,6 +4,8 @@
 
 **Coverage**: ~88% (23/26).
 
+**Strict Coverage**: 12/26, ~46% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveat below; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above.
+
 **Caveats**: Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this since it's already structurally impossible). `Object.create()`/`Object.fromEntries()` aren't implemented. `WeakMap`/`WeakSet`/`WeakRef` aren't implemented (no weak-reference/finalization machinery).
 
 | Feature | Status |
@@ -24,7 +26,7 @@
 | Object spread `{ ...obj, key: val }` | ✅ |
 | Computed property keys `{ [expr]: value }` | ✅ (a *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s own runtime, with `.field`/`[expr]` sugar layered on top; `V` inferred from the first property only. `...spread` combined with a computed key, and a declared-type form (`{ [key: string]: T }`), aren't supported yet. See [TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md) for full scope.) |
 | Shorthand property `{ x }` | ✅ |
-| `Map.set/get/has/delete/keys/values` | ✅ |
+| `Map.set/get/has/delete/keys/values` | ✅ (`.get()` on a missing key silently returns `0` instead of `undefined` when `V` is a numeric type — `Map<string, number>` has no runtime tag distinguishing "missing" from a real stored `0`, the same fake in-band-zero-sentinel limitation already documented for `number \| null` elsewhere, just never carried onto this row. A reference-typed `V` (string/object) correctly returns the `"null"` stand-in on a miss. `.has()`/`.delete()`/`.keys()`/`.values()` are all unaffected. Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md).) |
 | `Map.size` | ✅ |
 | `Map.entries()` | ✅ (`{key: K, value: V}[]`, not a real `[key, value]` tuple — this compiler has no tuple type. Same convention `Object.entries()` already uses; iterate with `for (const e of m.entries())` then read `e.key`/`e.value`. See [ADR-00053](../adr/ADR-00053.md).) |
 | `Map.forEach()` | ✅ (calls `fn(value, key)`, matching real JS's argument order — the 3rd `map` argument real JS also passes is dropped, the same simplification `Array.forEach`'s `(elem, index)` already makes. See [ADR-00053](../adr/ADR-00053.md).) |

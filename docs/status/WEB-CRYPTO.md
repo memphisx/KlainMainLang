@@ -4,6 +4,8 @@
 
 **Coverage**: 25% (2/8).
 
+**Strict Coverage**: 1/8, ~13% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — `getRandomValues` was already honestly caveated (plain `number[]`, not a real `Uint8Array`) before the audit.
+
 **Caveats**: All of `crypto.subtle.*` (digest, encrypt/decrypt, sign/verify, key generation/import/export/derive) is unimplemented — needs an OpenSSL/CommonCrypto FFI binding, not yet started.
 
 | API | Status | Notes |

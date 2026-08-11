@@ -4,6 +4,8 @@
 
 **Coverage**: 2/11. `querystring` and `assert` are implemented (see [ADR-00139](../adr/ADR-00139.md), [ADR-00140](../adr/ADR-00140.md)); everything else below has zero references anywhere in `codegen/llvm/`.
 
+**Strict Coverage**: 1/2, 50% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — `assert` was already honestly caveated (no `.deepEqual`, `.throws` type-blind) before the audit.
+
 **Caveats**: `net`/`dgram`/`tls`/`dns` (raw sockets) are real prerequisites for the already-tracked `WebSocket` gap (see [NETWORKING.md](NETWORKING.md)) if that's ever built without going through `http.listen`'s existing accept loop. `util` is the remaining CLI-relevant gap in this group (promisifying callback APIs, `.inspect`-style generic value formatting). `vm` has an opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md) (deliberately low priority, not started); `cluster`/`http2`/`zlib` are listed for completeness, not because any are close to being picked up.
 
 | Module | Status | Notes |

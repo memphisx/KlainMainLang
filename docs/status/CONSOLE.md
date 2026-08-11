@@ -4,16 +4,18 @@
 
 **Coverage**: ~92% (11/12).
 
+**Strict Coverage**: 5/11, ~45% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the two new caveats below.
+
 **Caveats**: `console.table()` is the one gap — deliberately deferred, needs a genuinely new algorithm (dynamic per-column width computation, box-drawing rows), not a quick extension of existing print machinery.
 
 | Feature | Status |
 |---|---|
 | `console.log(...)` | ✅ |
 | `console.error(...)` | ✅ (stderr) |
-| `console.warn(...)` | ✅ (stderr) |
+| `console.warn(...)` | ✅ (stderr) — prepends an undocumented `"Warning: "` prefix to every call; real Node's `console.warn` behaves identically to `console.error` with no prefix at all. Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
 | `console.info(...)` | ✅ |
 | `console.debug(...)` | ✅ |
-| `console.trace(...)` | ✅ |
+| `console.trace(...)` | ✅ — prints `"Trace: <message>"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all (same generic print path as `.debug()`/`.info()`, no stack-walking logic). Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
 | `console.assert(cond, msg)` | ✅ |
 | `console.table()` | ❌ (deliberately deferred, not attempted — needs a genuinely new algorithm (dynamic per-column width computation, box-drawing header/index rows over arbitrarily-shaped input), not a quick extension of existing print machinery like the other rows below) |
 | `console.time()` / `.timeEnd()` | ✅ (V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label. See [ADR-00029](../adr/ADR-00029.md).) |

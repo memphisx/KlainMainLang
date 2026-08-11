@@ -4,6 +4,8 @@
 
 **Coverage**: 100% (6/6) — done, see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md).
 
+**Strict Coverage**: 3/6, 50% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here was already honestly caveated (single-payload-type, ordering not guaranteed) before the audit.
+
 | API | Status | Notes |
 |---|---|---|
 | `new EventEmitter<T>()` / extending it via `class X extends EventEmitter<T>` | ✅ | `class` inheritance (ADR-00083) landed after this page was first written, which is what unblocked the `extends` form — `EventEmitter<T>` is a compiler-recognized generic built-in (same monomorphized-per-`T` pattern as `Map<K,V>`/`Set<T>`/`Promise<T>`), never itself a registered class (no vtable slot, no `instanceof`). See LANGUAGE-CONSTRUCTS.md's `class`/`extends` note. |

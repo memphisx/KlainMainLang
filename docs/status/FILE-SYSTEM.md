@@ -4,6 +4,8 @@
 
 **Coverage**: ~85% (11/13).
 
+**Strict Coverage**: 7/11, ~64% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page.
+
 **Caveats**: Everything here is synchronous and blocking (no async variants — matches this compiler's original lack of an event loop; not revisited since). `readFileSync`/`copyFileSync` are still text-only by design — a file with embedded null bytes reads back shorter than its real size via `readFileSync`'s `strlen`-based `.length` — but `readFileSyncBytes`, and `writeFileSync`/`appendFileSync` given an `ArrayBuffer`/TypedArray instead of a string, are binary-safe ([ADR-00094](../adr/ADR-00094.md); `fetch`'s equivalent split is `.text()`/`.json()` vs. `.arrayBuffer()`, see [NETWORKING.md](NETWORKING.md)).
 
 | API | Status | Notes |

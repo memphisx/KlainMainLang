@@ -203,3 +203,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00163](ADR-00163.md) | `.reduce()` with no initial value | Extends [ADR-00153](ADR-00153.md) |
 | [00164](ADR-00164.md) | Optional (`param?: T`) function parameters | Extends [ADR-00157](ADR-00157.md), [ADR-00158](ADR-00158.md) |
 | [00165](ADR-00165.md) | String concatenation with a null operand | Found while implementing [ADR-00164](ADR-00164.md) |
+| [00166](ADR-00166.md) | Status-doc accuracy audit and the Strict Coverage metric | Found while implementing [ADR-00164](ADR-00164.md) |

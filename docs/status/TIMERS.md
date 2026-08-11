@@ -4,6 +4,8 @@
 
 **Coverage**: 75% (3/4).
 
+**Strict Coverage**: 1/3, ~33% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here (including `setTimeout`/`clearTimeout`'s closure-only-callback restriction) was already honestly caveated before the audit.
+
 **Caveats**: `queueMicrotask` isn't implemented yet — a real microtask queue (JS's own, distinct from the timer queue) is a bigger, separate piece of design than `setImmediate` turned out to be. See [TDD-00002](../tdd/TDD-00002.md) for the full timer design (why timers needed only a sleep-until-next-due loop, not the full general-purpose event loop).
 
 | API | Status | Notes |

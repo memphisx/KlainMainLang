@@ -4,6 +4,8 @@
 
 **Coverage**: ~67% (2/3).
 
+**Strict Coverage**: 0/2, 0% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — both rows here (single-argument-only `URL`, single-value-per-key `URLSearchParams`) were already honestly caveated before the audit.
+
 **Caveats**: `URLPattern` isn't implemented. `URLSearchParams` keeps only one value per key — see Known Limitations below.
 
 | API | Status | Notes |
