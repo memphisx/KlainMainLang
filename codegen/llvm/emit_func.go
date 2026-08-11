@@ -130,7 +130,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
@@ -379,6 +379,8 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		scanExprFV(x.Arg, bound, result)
 	case *ast.NewArrayExpression:
 		scanExprFV(x.Size, bound, result)
+	case *ast.NewSetExpression:
+		scanExprFV(x.Init, bound, result)
 	case *ast.TemplateLiteral:
 		for _, ex := range x.Exprs {
 			scanExprFV(ex, bound, result)
@@ -424,6 +426,13 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 				scanExprFV(s.Init, local, result)
 			}
 			local[s.Name] = true
+		case *ast.VarDeclarationList:
+			for _, d := range s.Decls {
+				if d.Init != nil {
+					scanExprFV(d.Init, local, result)
+				}
+				local[d.Name] = true
+			}
 		case *ast.ExpressionStatement:
 			scanExprFV(s.Expr, local, result)
 		case *ast.ReturnStatement:
@@ -449,6 +458,13 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 						scanExprFV(vd.Init, inner, result)
 					}
 					inner[vd.Name] = true
+				} else if vdl, ok := s.Init.(*ast.VarDeclarationList); ok {
+					for _, d := range vdl.Decls {
+						if d.Init != nil {
+							scanExprFV(d.Init, inner, result)
+						}
+						inner[d.Name] = true
+					}
 				} else if es, ok := s.Init.(*ast.ExpressionStatement); ok {
 					scanExprFV(es.Expr, inner, result)
 				}
@@ -456,8 +472,8 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 			if s.Test != nil {
 				scanExprFV(s.Test, inner, result)
 			}
-			if s.Update != nil {
-				scanExprFV(s.Update, inner, result)
+			for _, upd := range s.Update {
+				scanExprFV(upd, inner, result)
 			}
 			if s.Body != nil {
 				scanStmtsFV(s.Body.Body, inner, result)
@@ -493,14 +509,20 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 			// no identifier references
 		case *ast.ArrayDestructuring:
 			scanExprFV(s.Init, local, result)
-			for _, name := range s.Names {
-				if name != "" {
-					local[name] = true
+			for _, elem := range s.Elems {
+				if elem.Default != nil {
+					scanExprFV(elem.Default, local, result)
+				}
+				if elem.Name != "" {
+					local[elem.Name] = true
 				}
 			}
 		case *ast.ObjectDestructuring:
 			scanExprFV(s.Init, local, result)
 			for _, prop := range s.Props {
+				if prop.Default != nil {
+					scanExprFV(prop.Default, local, result)
+				}
 				local[prop.Local] = true
 			}
 		}
@@ -525,9 +547,9 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 	bound := make(map[string]bool, len(af.Params))
 	for _, p := range af.Params {
 		bound[p.Name] = true
-		for _, n := range p.ArrayPattern {
-			if n != "" {
-				bound[n] = true
+		for _, elem := range p.ArrayPattern {
+			if elem.Name != "" {
+				bound[elem.Name] = true
 			}
 		}
 		for _, prop := range p.ObjectPattern {
@@ -655,7 +677,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue

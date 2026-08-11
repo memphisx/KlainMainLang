@@ -137,16 +137,34 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// 1-token check: unlike `in` (only ever a binary operator), a bare
 		// `get`/`set` is *also* a completely valid method name on its own
 		// (`get(): number { ... }`), so the token peek must confirm a real
-		// member name follows before committing to accessor parsing.
+		// member name follows before committing to accessor parsing. The
+		// member name may be a private name too (`get #x()` — TDD-00021
+		// private accessors), not just IDENT.
 		var accessorKind string
-		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") && p.peekNth(1).Type == lexer.IDENT {
+		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
+			(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.PRIVATE_NAME) {
 			accessorKind = p.peek().Literal
 			p.advance()
 		}
 
-		memberTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
+		// A member name is either a plain IDENT or a private name (`#x` —
+		// TDD-00021); the `#` itself fully determines visibility, so an
+		// explicit accessibility modifier alongside it is rejected below
+		// rather than silently accepted or silently overridden, matching
+		// real TypeScript.
+		var memberTok lexer.Token
+		if p.check(lexer.PRIVATE_NAME) {
+			memberTok = p.advance()
+			if visibility != "" {
+				return nil, fmt.Errorf("%d:%d: an accessibility modifier cannot be used with a private identifier", memberTok.Line, memberTok.Col)
+			}
+			visibility = "private"
+		} else {
+			var err error
+			memberTok, err = p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if accessorKind != "" && memberTok.Literal == "constructor" {
 			return nil, fmt.Errorf("%d:%d: a constructor cannot be a getter/setter", memberTok.Line, memberTok.Col)

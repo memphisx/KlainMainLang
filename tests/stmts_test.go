@@ -16,6 +16,117 @@ console.log(sum)
 `, "15")
 }
 
+// --- Multi-declarator let/const/var (`let i = 0, j = 10;`) ---
+
+func TestE2EMultiDeclaratorLet(t *testing.T) {
+	assertOutput(t, `
+let i = 1, j = 2, k = 3;
+console.log(i, j, k);
+`, "1\n2\n3")
+}
+
+func TestE2EMultiDeclaratorConst(t *testing.T) {
+	assertOutput(t, `
+const x: number = 1, y: number = 2;
+console.log(x + y);
+`, "3")
+}
+
+func TestE2EMultiDeclaratorInFunctionBody(t *testing.T) {
+	assertOutput(t, `
+function sum(): number {
+  let a = 1, b = 2, c = 3;
+  return a + b + c;
+}
+console.log(sum());
+`, "6")
+}
+
+func TestE2EMultiDeclaratorClosureCapture(t *testing.T) {
+	// Every declarator in a multi-declarator statement must be a real,
+	// individually-bound local — not accidentally treated as free/captured
+	// by a nested closure referencing it.
+	assertOutput(t, `
+function make(): () => number {
+  let a = 1, b = 2;
+  const f = () => a + b;
+  return f;
+}
+const fn = make();
+console.log(fn());
+`, "3")
+}
+
+func TestE2EForLoopMultiDeclaratorInit(t *testing.T) {
+	assertOutput(t, `
+for (let i = 0, j = 10; i < j; i++) {
+  console.log(i, j);
+  break;
+}
+`, "0\n10")
+}
+
+func TestE2EForLoopCommaUpdate(t *testing.T) {
+	// `i++, j--` — a common two-pointer idiom, not the general comma
+	// operator (which stays out of scope everywhere else in this
+	// compiler).
+	assertOutput(t, `
+let out = "";
+for (let i = 0, j = 10; i < j; i++, j--) {
+  out += i.toString() + "," + j.toString() + " ";
+}
+console.log(out.trim());
+`, "0,10 1,9 2,8 3,7 4,6")
+}
+
+func TestE2EForLoopMultiDeclaratorClosureCapture(t *testing.T) {
+	// Same free-variable-capture correctness concern as
+	// TestE2EMultiDeclaratorClosureCapture, but for a for-loop's own Init
+	// clause specifically (a separate code path in the compiler's
+	// closure-capture scan).
+	assertOutput(t, `
+function make(): () => number {
+  let result = 0;
+  for (let i = 0, j = 10; i < 3; i++, j--) {
+    result = result + i + j;
+  }
+  return () => result;
+}
+const fn = make();
+console.log(fn());
+`, "30")
+}
+
+func TestE2EExportMultiDeclaratorRejected(t *testing.T) {
+	// `export let a = 1, b = 2;` stays a clean rejection — exporting a
+	// multi-declarator statement isn't supported (a narrower, deliberate
+	// scope cut, not attempted here).
+	_, err := parseAndCompile(`
+export let a = 1, b = 2;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'export' on a multi-declarator let, got none")
+	}
+}
+
+func TestE2EForLoopPlainCommaInitRejected(t *testing.T) {
+	// `for (i = 0, j = 10; ...)` — comma-separated plain assignment
+	// expressions (not a declaration) in the init clause — stays a clean
+	// rejection. Distinct from the update clause (`i++, j--`), which is
+	// supported: this is the general comma operator in a non-for-loop-
+	// update position, still out of scope everywhere in this compiler.
+	_, err := parseAndCompile(`
+let i: number = 0;
+let j: number = 0;
+for (i = 0, j = 10; i < j; i++) {
+  console.log(i);
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for comma-separated plain-assignment for-init, got none")
+	}
+}
+
 func TestE2EWhileLoop(t *testing.T) {
 	assertOutput(t, `
 let n: number = 5

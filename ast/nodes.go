@@ -61,6 +61,27 @@ func NewVarDeclaration(kind, name string, ta *TypeAnnotation, init Expression, p
 	return &VarDeclaration{Kind: kind, Name: name, TypeAnnot: ta, Init: init, pos: pos}
 }
 
+// VarDeclarationList — multiple comma-separated declarators sharing one
+// let/const/var (`let i = 0, j = 10;`). Deliberately NOT represented as a
+// BlockStatement wrapping N VarDeclarations: BlockStatement pushes its own
+// scope (see emitStmt), which would immediately hide every declared name
+// once the "statement" ends — fatally wrong for a for-loop's init clause
+// (`for (let i = 0, j = 10; ...)`), where the loop's own test/update/body
+// need every name to stay visible in the *enclosing* scope, exactly like a
+// single-declarator `let` already does.
+type VarDeclarationList struct {
+	Decls []*VarDeclaration
+	pos   Pos
+}
+
+func (*VarDeclarationList) nodeMarker()   {}
+func (*VarDeclarationList) stmtMarker()   {}
+func (v *VarDeclarationList) GetPos() Pos { return v.pos }
+
+func NewVarDeclarationList(decls []*VarDeclaration, pos Pos) *VarDeclarationList {
+	return &VarDeclarationList{Decls: decls, pos: pos}
+}
+
 type FunctionDeclaration struct {
 	Name       string
 	TypeParams []string // e.g. ["T"] for `function identity<T>(...)` — TDD-00010 V1, single param only
@@ -118,11 +139,11 @@ type Param struct {
 	// one is ever non-nil. Name still holds a synthetic internal name
 	// (e.g. "__param0") in this case, used for LLVM parameter naming and
 	// error messages; the pattern fields are what codegen actually unpacks
-	// into real local bindings. Mirrors ArrayDestructuring.Names/
-	// ObjectDestructuring.Props' own shapes so the same unpack codegen can
-	// be shared between a destructuring statement and a destructured
-	// parameter.
-	ArrayPattern  []string
+	// into real local bindings. Mirrors ArrayDestructuring.Elems/
+	// ObjectDestructuring.Props' own shapes (including each element's own
+	// Default, ADR-00158) so the same unpack codegen can be shared between
+	// a destructuring statement and a destructured parameter.
+	ArrayPattern  []ArrayPatternElem
 	ObjectPattern []DestructProp
 }
 
@@ -140,9 +161,14 @@ func NewReturnStatement(val Expression, pos Pos) *ReturnStatement {
 }
 
 type ForStatement struct {
-	Init   Statement  // VarDeclaration or ExpressionStatement, nil if absent
-	Test   Expression // nil if absent
-	Update Expression // nil if absent
+	Init Statement  // VarDeclaration, VarDeclarationList, or ExpressionStatement, nil if absent
+	Test Expression // nil if absent
+	// Update holds one entry per comma-separated update expression
+	// (`i++, j--` — a real, common idiom, not the general comma operator,
+	// which stays out of scope everywhere else); nil (empty) if the update
+	// clause is absent. Each is evaluated in order, every iteration, purely
+	// for side effects — none of their values are ever used.
+	Update []Expression
 	Body   *BlockStatement
 	pos    Pos
 }
@@ -151,7 +177,7 @@ func (*ForStatement) nodeMarker()   {}
 func (*ForStatement) stmtMarker()   {}
 func (f *ForStatement) GetPos() Pos { return f.pos }
 
-func NewForStatement(init Statement, test, update Expression, body *BlockStatement, pos Pos) *ForStatement {
+func NewForStatement(init Statement, test Expression, update []Expression, body *BlockStatement, pos Pos) *ForStatement {
 	return &ForStatement{Init: init, Test: test, Update: update, Body: body, pos: pos}
 }
 
@@ -299,12 +325,39 @@ func NewLabeledStatement(label string, body Statement, pos Pos) *LabeledStatemen
 type DestructProp struct {
 	Key   string // field name in the source object
 	Local string // local variable name (= Key when no rename)
+	// Default is non-nil for `{ key = expr }` (ADR-00158) — only ever
+	// meaningful (checked and evaluated) when Key names a
+	// pointer-backed nullable (`T | null`) field, the only field shape
+	// this compiler can tell "was this actually provided" apart from a
+	// legitimate value for; rejected at compile time otherwise. See
+	// unpackObjectPatternInto's own doc comment.
+	Default Expression
+}
+
+// ArrayPatternElem is one binding in an array destructuring pattern —
+// ArrayDestructuring's and a destructured Param's own array-pattern
+// element, mirroring DestructProp's shape for the array-position case.
+type ArrayPatternElem struct {
+	Name string // "" = hole (skipped index)
+	// Default is non-nil for `[a = expr]` — fires exactly when this
+	// position is past the source array's actual length (see
+	// unpackArrayPatternInto's own doc comment for why that's the one
+	// reliable "was this provided" signal this compiler's array
+	// destructuring has, unlike object destructuring's field-shape
+	// restriction above).
+	Default Expression
+	// Rest marks `[a, ...rest]` (ADR-00161) — Name collects every
+	// remaining source position from here on into a real, new array.
+	// Always the parser-enforced last element (real JS: a SyntaxError
+	// otherwise); Default is never set alongside it (real JS doesn't
+	// allow one either — `[...rest = []]` is invalid).
+	Rest bool
 }
 
 // ArrayDestructuring — const/let [a, b] = expr
 type ArrayDestructuring struct {
-	Kind  string   // "let", "const", "var"
-	Names []string // empty string = hole (skipped index)
+	Kind  string // "let", "const", "var"
+	Elems []ArrayPatternElem
 	Init  Expression
 	pos   Pos
 }
@@ -313,8 +366,8 @@ func (*ArrayDestructuring) nodeMarker()   {}
 func (*ArrayDestructuring) stmtMarker()   {}
 func (a *ArrayDestructuring) GetPos() Pos { return a.pos }
 
-func NewArrayDestructuring(kind string, names []string, init Expression, pos Pos) *ArrayDestructuring {
-	return &ArrayDestructuring{Kind: kind, Names: names, Init: init, pos: pos}
+func NewArrayDestructuring(kind string, elems []ArrayPatternElem, init Expression, pos Pos) *ArrayDestructuring {
+	return &ArrayDestructuring{Kind: kind, Elems: elems, Init: init, pos: pos}
 }
 
 // ObjectDestructuring — const/let { x, y: alias } = expr
@@ -703,9 +756,12 @@ func NewNewMapExpression(key, val *TypeAnnotation, pos Pos) *NewMapExpression {
 	return &NewMapExpression{KeyType: key, ValType: val, pos: pos}
 }
 
-// NewSetExpression — new Set<T>()
+// NewSetExpression — new Set<T>() or new Set<T>(iterable) (ADR-00159:
+// Init is the optional initial-elements argument, nil for the
+// no-argument form).
 type NewSetExpression struct {
 	ElemType *TypeAnnotation
+	Init     Expression
 	pos      Pos
 }
 
@@ -713,8 +769,8 @@ func (*NewSetExpression) nodeMarker()   {}
 func (*NewSetExpression) exprMarker()   {}
 func (n *NewSetExpression) GetPos() Pos { return n.pos }
 
-func NewNewSetExpression(elem *TypeAnnotation, pos Pos) *NewSetExpression {
-	return &NewSetExpression{ElemType: elem, pos: pos}
+func NewNewSetExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewSetExpression {
+	return &NewSetExpression{ElemType: elem, Init: init, pos: pos}
 }
 
 // NewEventEmitterExpression — `new EventEmitter<T>()` (TDD-00023). Like

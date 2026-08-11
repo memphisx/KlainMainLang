@@ -23,11 +23,33 @@ func isNumberTy(ty Type) bool {
 	return ty.IR != "ptr" && !ty.IsDate
 }
 
-// emitStringConcat concatenates two string (ptr) values and returns a new heap string.
+// emitStringNullToLiteral substitutes the interned "null" string for v when
+// v is a null pointer at runtime, leaving any non-null value unchanged —
+// mirrors the same select-on-icmp-eq-null pattern emitConsoleArg's ptr case
+// (emit_call_console.go) already uses for console.log's own "%s" argument,
+// since a null string here (an optional/nullable-typed operand whose value
+// happens to be absent) is the exact same "printf/strlen(NULL) is UB"
+// hazard, just reached through string concatenation instead of printing.
+func (e *Emitter) emitStringNullToLiteral(v Value) Value {
+	isNull := e.freshReg()
+	safe := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), v.Ref))
+	return Value{Ref: safe, Ty: TypePtr}
+}
+
+// emitStringConcat concatenates two string (ptr) values and returns a new
+// heap string. Found crashing (not just wrong) on a null operand — real JS
+// stringifies `null` as "null" in a `+` (`"x" + null === "xnull"`), but this
+// called strlen()/memcpy() on the raw pointer unconditionally, so any
+// nullable-typed string that was actually null (an optional param, `T |
+// null`, a missing Map/collection lookup, ...) segfaulted here instead.
 func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
+	left = e.emitStringNullToLiteral(left)
+	right = e.emitStringNullToLiteral(right)
 	n1 := e.freshReg()
 	n2 := e.freshReg()
 	total := e.freshReg()

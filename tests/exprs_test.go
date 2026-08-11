@@ -435,6 +435,22 @@ console.log(x !== null)
 `, "1\n0\n0\n1")
 }
 
+func TestE2ENullableArrayField(t *testing.T) {
+	// Real bug found investigating destructuring defaults (ADR-00158):
+	// coerce() left a `null` literal assigned to a `T[] | null` field as a
+	// bare `ptr null`, but an array field's real struct storage type is
+	// the {ptr, i64} aggregate (StructFieldIR), not a plain ptr — produced
+	// invalid IR (`store {ptr, i64} null, ...`) that failed at the clang
+	// step, not the codegen step.
+	assertOutput(t, `
+interface Box { items: number[] | null }
+let empty: Box = { items: null }
+console.log(empty.items === null)
+let full: Box = { items: [1, 2, 3] }
+console.log(full.items === null)
+`, "1\n0")
+}
+
 func TestE2ENullInTemplate(t *testing.T) {
 	assertOutput(t, `
 const n: string | null = null

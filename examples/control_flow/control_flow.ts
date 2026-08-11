@@ -128,3 +128,23 @@ for (const w of words) console.log(w)
 // hello
 // world
 // TypeGo
+
+// ── Multi-declarator let/const/var ──────────────────────────────────────────
+// `let i = 0, j = 10;` — comma-separated declarators sharing one
+// let/const/var, each an entirely independent binding.
+
+let m = 1, n = 2, o = 3
+console.log(m + n + o)  // 6
+
+// The same for-loop init clause form, combined with a comma-separated
+// update clause (`i++, j--`) — a common two-pointer idiom, distinct from
+// the general comma operator (which stays out of scope everywhere else in
+// this compiler).
+for (let lo = 0, hi = 9; lo < hi; lo++, hi--) {
+  console.log(lo, hi)
+}
+// 0 9
+// 1 8
+// 2 7
+// 3 6
+// 4 5

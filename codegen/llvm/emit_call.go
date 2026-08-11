@@ -925,19 +925,51 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 			}
 		} else if i < len(sig.Defaults) && sig.Defaults[i] != nil {
-			// Evaluate default expression at call site.
-			val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
-			if err != nil {
-				return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
-			}
-			if paramTy.IsDynamic {
-				if val, err = e.emitBoxValue(val); err != nil {
-					return Value{}, err
+			// Evaluate default expression at call site. Array-typed
+			// defaults need the same {ptr,i64} -> (ptr, i64) decomposition
+			// the direct-arg path above uses — found in passing while
+			// wiring optional params below: an array-typed default
+			// (`a: number[] = [1,2,3]`) was passing the whole aggregate
+			// struct where the callee's LLVM signature expects two scalar
+			// params, a hard clang-stage type mismatch, not a silent bug.
+			if paramTy.IsArray {
+				val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
+				if err != nil {
+					return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
 				}
-			} else if paramTy.IR != "" {
-				val = e.coerce(val, paramTy)
+				if !val.Ty.IsArray {
+					return Value{}, fmt.Errorf("default value for param %d does not yield an array", i)
+				}
+				ptrReg := e.freshReg()
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			} else {
+				val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
+				if err != nil {
+					return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
+				}
+				if paramTy.IsDynamic {
+					if val, err = e.emitBoxValue(val); err != nil {
+						return Value{}, err
+					}
+				} else if paramTy.IR != "" {
+					val = e.coerce(val, paramTy)
+				}
+				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 			}
-			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+		} else if i < len(sig.Optional) && sig.Optional[i] {
+			// ADR-00164: an omitted `param?: T` argument gets T's zero
+			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
+			// Array-typed params decompose into two LLVM params (ptr, i64
+			// len) at the callee side, so their "zero value" is an empty
+			// array (null ptr, 0 len), not a single zeroLiteral() operand.
+			if paramTy.IsArray {
+				argParts = append(argParts, "ptr null", "i64 0")
+			} else {
+				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+			}
 		} else {
 			return Value{}, fmt.Errorf("%d:%d: missing argument %d with no default", pos.Line, pos.Col, i+1)
 		}

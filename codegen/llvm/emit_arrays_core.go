@@ -410,25 +410,83 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 }
 
 func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
-	dataPtr, elemTy, err := e.resolveArrayDataPtr(s.Init, s.GetPos())
+	dataPtr, lenVal, elemTy, err := e.resolveArrayDataPtr(s.Init, s.GetPos())
 	if err != nil {
 		return err
 	}
-	return e.unpackArrayPatternInto(dataPtr, elemTy, s.Names)
+	return e.unpackArrayPatternInto(dataPtr, lenVal, elemTy, s.Elems)
 }
 
 // unpackArrayPatternInto is emitArrayDestructuring's core, factored out so
-// a destructured function parameter (whose data pointer is already known —
-// no Init expression to resolve, see emit_func.go's emitFunctionDeclAs) can
-// share the exact same per-element unpack logic instead of duplicating it.
-func (e *Emitter) unpackArrayPatternInto(dataPtr string, elemTy Type, names []string) error {
-	for i, name := range names {
-		if name == "" {
+// a destructured function parameter (whose data pointer and length are
+// already known — no Init expression to resolve, see emit_func.go's
+// emitFunctionDeclAs) can share the exact same per-element unpack logic
+// instead of duplicating it. lenVal is any valid i64 IR operand (an SSA
+// register or an integer literal — see resolveArrayDataPtr).
+//
+// A pattern position past the source array's actual length is ordinary,
+// valid JS (`let [a, b] = [1]`), not a bug — unlike plain `arr[i]` indexing
+// (emitIndexPtr, emit_exprs_member.go), which throws on an explicit,
+// arbitrary runtime-computed index. Before this bounds check existed, an
+// out-of-range position read directly past the source array's malloc'd
+// buffer — a real out-of-bounds heap read, not just an uninitialized-value
+// bug (found investigating destructuring defaults, see ADR-00157). It's
+// also the one reliable "was this position actually provided" signal
+// array destructuring has, and ADR-00158 builds `[a = expr]` default
+// values directly on top of it: an out-of-bounds position evaluates and
+// stores elem.Default (only when actually needed — lazily, inside the
+// out-of-bounds branch, matching real JS's own lazy default evaluation)
+// instead of the fallback zero literal.
+func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, elems []ast.ArrayPatternElem) error {
+	for i, elem := range elems {
+		if elem.Name == "" {
 			continue
 		}
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
-		val := e.loadArrayElem(gepReg, elemTy)
+
+		// Rest element (`[a, ...rest]`, ADR-00161) — parser-enforced last
+		// element, always defined regardless of the source array's length
+		// (an empty array when this position is already past it, the same
+		// clamp-to-zero `.slice()` already uses for an out-of-range start
+		// index — emitArraySlice, codegen/llvm/emit_arrays_sort.go).
+		// Genuinely a new, independent array (malloc + memcpy), not an
+		// aliasing view into the source's own backing buffer, matching
+		// real JS's own copy semantics.
+		if elem.Rest {
+			e.ensureMalloc()
+			e.ensureMemcpy()
+			rawLen := e.freshReg()
+			isNegLen := e.freshReg()
+			restLen := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", rawLen, lenVal, i))
+			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNegLen, rawLen))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", restLen, isNegLen, rawLen))
+
+			byteCount := e.freshReg()
+			newPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, restLen, elemTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+
+			srcGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
+			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
+
+			ptrAlloca := e.freshReg()
+			lenAlloca := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", restLen, lenAlloca))
+			e.define(elem.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: ArrayOf(elemTy)})
+			continue
+		}
+
+		inBoundsReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBoundsReg, i, lenVal))
+		okL := e.freshLabel("destr.ok")
+		oobL := e.freshLabel("destr.oob")
+		afterL := e.freshLabel("destr.after")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBoundsReg, okL, oobL))
+
 		// A destructured element that's itself an array needs the two-alloca
 		// "Named Symbol" representation (Ptr+LenPtr — the project's own Array value
 		// duality note), not the single scalar alloca every other element
@@ -439,54 +497,110 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr string, elemTy Type, names []st
 			lenName := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
+
+			e.emitLabel(okL)
+			gepReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
+			val := e.loadArrayElem(gepReg, elemTy)
 			if err := e.storeArrayAggregateInto(val, ptrName, lenName); err != nil {
 				return err
 			}
-			e.define(name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: elemTy})
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(oobL)
+			if elem.Default != nil {
+				defVal, err := e.emitExpr(elem.Default)
+				if err != nil {
+					return err
+				}
+				if !defVal.Ty.IsArray {
+					return fmt.Errorf("%d:%d: destructuring default must be an array to match '%s'", elem.Default.GetPos().Line, elem.Default.GetPos().Col, elem.Name)
+				}
+				if err := e.storeArrayAggregateInto(defVal, ptrName, lenName); err != nil {
+					return err
+				}
+			} else {
+				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
+				e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenName))
+			}
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(afterL)
+			e.define(elem.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: elemTy})
 			continue
 		}
+
 		localPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, elemTy.IR, elemTy.Align()))
+
+		e.emitLabel(okL)
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
+		val := e.loadArrayElem(gepReg, elemTy)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, localPtr, elemTy.Align()))
-		e.define(name, Symbol{Ptr: localPtr, Ty: elemTy})
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+		e.emitLabel(oobL)
+		if elem.Default != nil {
+			defVal, err := e.emitExpr(elem.Default)
+			if err != nil {
+				return err
+			}
+			defVal = e.coerce(defVal, elemTy)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, defVal.Ref, localPtr, elemTy.Align()))
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemTy.zeroLiteral(), localPtr, elemTy.Align()))
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+		e.emitLabel(afterL)
+		e.define(elem.Name, Symbol{Ptr: localPtr, Ty: elemTy})
 	}
 	return nil
 }
 
-// resolveArrayDataPtr emits code to obtain the raw heap pointer for an array
-// expression. Handles identifiers, function calls, and array literals.
-func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (string, Type, error) {
+// resolveArrayDataPtr emits code to obtain the raw heap pointer and length
+// for an array expression — lenVal is either an SSA register or (for an
+// array-literal source, whose element count is already known at compile
+// time) a plain integer literal string; both are valid i64 operands in the
+// `icmp` unpackArrayPatternInto's own out-of-bounds check needs. Handles
+// identifiers, function calls, and array literals.
+func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr, lenVal string, elemTy Type, err error) {
 	switch src := init.(type) {
 	case *ast.Identifier:
 		sym, found := e.lookup(src.Name)
 		if !found || !sym.Ty.IsArray {
-			return "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, src.Name)
+			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, src.Name)
 		}
-		dataPtr := e.freshReg()
+		dataPtr = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, sym.Ptr))
-		return dataPtr, *sym.Ty.ElemType, nil
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		return dataPtr, lenReg, *sym.Ty.ElemType, nil
 
 	case *ast.CallExpression:
-		val, err := e.emitExpr(src)
-		if err != nil {
-			return "", Type{}, err
+		val, callErr := e.emitExpr(src)
+		if callErr != nil {
+			return "", "", Type{}, callErr
 		}
 		if !val.Ty.IsArray {
-			return "", Type{}, fmt.Errorf("%d:%d: function call does not return an array", pos.Line, pos.Col)
+			return "", "", Type{}, fmt.Errorf("%d:%d: function call does not return an array", pos.Line, pos.Col)
 		}
 		ptrReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-		return ptrReg, *val.Ty.ElemType, nil
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		return ptrReg, lenReg, *val.Ty.ElemType, nil
 
 	case *ast.ArrayLiteral:
-		elemTy := *e.inferArrayType(src).ElemType
-		dataReg, _, err := e.emitArrayLiteralData(src, elemTy)
-		if err != nil {
-			return "", Type{}, err
+		elemTy = *e.inferArrayType(src).ElemType
+		dataReg, n, litErr := e.emitArrayLiteralData(src, elemTy)
+		if litErr != nil {
+			return "", "", Type{}, litErr
 		}
-		return dataReg, elemTy, nil
+		return dataReg, fmt.Sprintf("%d", n), elemTy, nil
 	}
-	return "", Type{}, fmt.Errorf("%d:%d: array destructuring requires an array variable, function call, or array literal", pos.Line, pos.Col)
+	return "", "", Type{}, fmt.Errorf("%d:%d: array destructuring requires an array variable, function call, or array literal", pos.Line, pos.Col)
 }
 
 func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrReg, lenReg string, elemTy Type, err error) {

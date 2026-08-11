@@ -42,3 +42,19 @@ console.log(seen.size); // 0
 console.log(seen.has("apple")); // 0
 seen.add("date");
 console.log(seen.size); // 1
+
+// ── new Set(iterable): pre-populate from an array, duplicates collapse ──────
+const fromLiteral = new Set([1, 2, 3, 2, 1]);
+console.log(fromLiteral.size); // 3
+
+const source: string[] = ["x", "y", "x"];
+const fromVariable = new Set(source);
+console.log(fromVariable.size); // 2
+
+// An explicit <T> still works the same way it does for the empty form.
+const typed = new Set<number>(source.map((s) => s.length));
+console.log(typed.size); // 1 (both "x" and "y" have length 1)
+
+// An empty array argument is just an empty set — same as the no-argument form.
+const fromEmpty = new Set<number>([]);
+console.log(fromEmpty.size); // 0

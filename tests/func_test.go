@@ -203,6 +203,74 @@ console.log(box(2, 3, 4))
 `, "1\n2\n6\n24")
 }
 
+func TestE2EDefaultParamArray(t *testing.T) {
+	assertOutput(t, `
+function sum(nums: number[] = [1, 2, 3]): number {
+  let total = 0
+  for (let i = 0; i < nums.length; i++) { total += nums[i] }
+  return total
+}
+console.log(sum())
+console.log(sum([10, 20]))
+`, "6\n30")
+}
+
+// --- optional (`param?: T`) parameters ---
+
+func TestE2EOptionalParamNumber(t *testing.T) {
+	assertOutput(t, `
+function f(x?: number): number { return x }
+console.log(f())
+console.log(f(5))
+`, "0\n5")
+}
+
+func TestE2EOptionalParamString(t *testing.T) {
+	assertOutput(t, `
+function greet(name?: string): string { return name }
+console.log(greet())
+console.log(greet('Alice'))
+`, "null\nAlice")
+}
+
+func TestE2EOptionalParamMultiple(t *testing.T) {
+	assertOutput(t, `
+function box(a: number, b?: number, c?: number): number { return a + b + c }
+console.log(box(1))
+console.log(box(1, 2))
+console.log(box(1, 2, 3))
+`, "1\n3\n6")
+}
+
+func TestE2EOptionalParamArray(t *testing.T) {
+	assertOutput(t, `
+function count(nums?: number[]): number { return nums.length }
+console.log(count())
+console.log(count([1, 2, 3]))
+`, "0\n3")
+}
+
+func TestE2EOptionalParamClassMethod(t *testing.T) {
+	assertOutput(t, `
+class Greeter {
+  greet(name?: string): string { return 'Hi, ' + name }
+}
+const g = new Greeter()
+console.log(g.greet())
+console.log(g.greet('Bob'))
+`, "Hi, null\nHi, Bob")
+}
+
+func TestE2EOptionalParamStaticMethod(t *testing.T) {
+	assertOutput(t, `
+class Util {
+  static greet(name?: string): string { return 'Hi, ' + name }
+}
+console.log(Util.greet())
+console.log(Util.greet('Bob'))
+`, "Hi, null\nHi, Bob")
+}
+
 // --- void return type ---
 
 func TestE2EVoidReturn(t *testing.T) {

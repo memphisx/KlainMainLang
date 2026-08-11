@@ -202,6 +202,18 @@ func TestPunctuation(t *testing.T) {
 	assertTokens(t, "?", []tok{{lexer.QUESTION, "?"}})
 }
 
+func TestPrivateName(t *testing.T) {
+	assertTokens(t, "#foo", []tok{{lexer.PRIVATE_NAME, "#foo"}})
+	assertTokens(t, "this.#foo", []tok{{lexer.THIS, "this"}, {lexer.DOT, "."}, {lexer.PRIVATE_NAME, "#foo"}})
+	// A bare '#' not immediately followed by an identifier-start character
+	// isn't a private name — still an unhandled character, same as before
+	// this token existed.
+	_, err := lexer.Tokenize("#1")
+	if err == nil {
+		t.Fatal("expected error for '#1' ('#' not followed by an identifier-start char), got nil")
+	}
+}
+
 func TestUnexpectedCharError(t *testing.T) {
 	_, err := lexer.Tokenize("@bad")
 	if err == nil {

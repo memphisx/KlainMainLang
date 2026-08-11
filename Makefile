@@ -5,7 +5,7 @@ EXAMPLES     := $(shell find examples -name '*.ts' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all help
+.PHONY: all build install test examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance help
 
 ## all: build the compiler
 all: build
@@ -110,10 +110,18 @@ fuzz-codegen:
 ## fuzz-all: run every fuzz target (lexer, parser, and the codegen pipeline)
 fuzz-all: fuzz fuzz-codegen
 
+## conformance-fetch: clone/update the pinned Test262 corpus into .test262/ (idempotent — no-op if already at the pinned commit; TDD-00008 Design V2)
+conformance-fetch:
+	./tools/conformance/fetch.sh
+
+## conformance: regenerate docs/testing/CONFORMANCE-RESULTS.md by running the full Test262 corpus through this compiler's own pipeline (fetches the corpus first if needed; self-contained — go run, not the klainmain binary)
+conformance: conformance-fetch
+	$(GO) run ./tools/conformance
+
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:
 	rm -f $(BINARY) $(HTTPBIN_LITE)
-	find examples -type f ! -name '*.ts' -delete
+	find examples -type f ! -name '*.*' -delete
 	find examples -name '*.ll' -delete
 
 ## help: list available targets

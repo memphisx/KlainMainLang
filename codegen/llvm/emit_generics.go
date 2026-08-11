@@ -130,6 +130,7 @@ func (e *Emitter) buildGenericParamSig(params []ast.Param, subs map[string]Type)
 		sig.ParamTypes = append(sig.ParamTypes, pty)
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default)
+		sig.Optional = append(sig.Optional, p.Optional)
 	}
 	if len(params) > 0 && params[len(params)-1].Rest {
 		sig.HasRest = true
@@ -461,7 +462,7 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 	}
 	for _, m := range decl.Methods {
 		sig := info.MethodSigs[m.Name]
-		memberName := llvmName + "_" + m.Name
+		memberName := llvmSafeSymbol(llvmName + "_" + m.Name)
 		if err := e.emitClassMember(memberName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false); err != nil {
 			return err
 		}

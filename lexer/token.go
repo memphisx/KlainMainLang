@@ -8,6 +8,7 @@ const (
 	NUMBER TokenType = iota
 	STRING
 	IDENT
+	PRIVATE_NAME // #foo — a class private field/method name (TDD-00021)
 
 	// Keywords
 	LET
@@ -130,7 +131,7 @@ const (
 )
 
 var tokenNames = map[TokenType]string{
-	NUMBER: "NUMBER", STRING: "STRING", IDENT: "IDENT",
+	NUMBER: "NUMBER", STRING: "STRING", IDENT: "IDENT", PRIVATE_NAME: "PRIVATE_NAME",
 	LET: "let", CONST: "const", VAR: "var", FUNCTION: "function",
 	RETURN: "return", FOR: "for", WHILE: "while", IF: "if", ELSE: "else",
 	TRUE: "true", FALSE: "false", NULL: "null", UNDEFINED: "undefined",

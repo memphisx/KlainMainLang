@@ -130,6 +130,13 @@ console.log(shapeA instanceof Node);   // 0
 console.log(shapeB instanceof Node);   // 1
 console.log(shapeB instanceof Circle); // 0
 
+// instanceof against a built-in type (ADR-00162) — a compile-time
+// constant (this compiler's static typing already knows the answer; no
+// runtime tag to check, unlike the user-defined-class case above).
+const numbers: number[] = [1, 2, 3];
+console.log(numbers instanceof Array); // 1
+console.log(shapeA instanceof Array);  // 0 — shapeA is a Circle, not an array
+
 // Stage 3: inheritance (extends/super) + dynamic dispatch. Shape's own
 // area() is overridden by both Rectangle and RightTriangle; describe() —
 // declared once on Shape, never overridden — calls this.area() and must
@@ -365,3 +372,72 @@ function showLabel(s: Shape3): string {
 }
 console.log(showLabel(new Circle2())); // circle
 console.log(showLabel(new Shape3()));  // shape
+
+// TDD-00021: `#x` private names — real ECMAScript's own privacy mechanism
+// (not TypeScript-specific like the `private` keyword modifier above). The
+// access-control rule is identical to `private` (exact declaring-class
+// only, no subclass access) — the real difference is reflection: a
+// `#`-named field is genuinely invisible to Object.keys/JSON.stringify/
+// spread, not just erased at the type level.
+class BankAccount2 {
+  #balance: number;
+  constructor(balance: number) {
+    this.#balance = balance;
+  }
+  #describeBalance(): string {
+    return "balance is " + this.#balance.toString();
+  }
+  summary(): string {
+    return this.#describeBalance();
+  }
+  deposit(amount: number): void {
+    this.#balance = this.#balance + amount;
+  }
+}
+const acct2 = new BankAccount2(100);
+acct2.deposit(50);
+console.log(acct2.summary()); // balance is 150
+
+// Unlike `private`, `#balance` never shows up in reflection — real JS's
+// `[object Object]`/JSON default only ever sees declared, non-private keys.
+console.log(JSON.stringify(acct2)); // {}
+
+// A `#x` name and a same-spelled `x` name are entirely different fields —
+// no collision, matching real JS.
+class Box2 {
+  x: number;
+  #x: number;
+  constructor() {
+    this.x = 1;
+    this.#x = 2;
+  }
+  sum(): number {
+    return this.x + this.#x;
+  }
+}
+console.log(new Box2().sum()); // 3
+
+// `#x` also works on `static` fields/methods and on get/set accessors —
+// each independently combining with a feature `#x` itself doesn't change.
+class IdPool {
+  static #next: number;
+  static take(): number {
+    IdPool.#next = IdPool.#next + 1;
+    return IdPool.#next;
+  }
+}
+console.log(IdPool.take()); // 1
+console.log(IdPool.take()); // 2
+
+class PrivateRect {
+  #w: number;
+  #h: number;
+  constructor(w: number, h: number) {
+    this.#w = w;
+    this.#h = h;
+  }
+  get area(): number {
+    return this.#w * this.#h;
+  }
+}
+console.log(new PrivateRect(3, 4).area); // 12

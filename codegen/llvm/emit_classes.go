@@ -224,6 +224,7 @@ func (e *Emitter) buildParamSig(params []ast.Param) FuncSig {
 		sig.ParamTypes = append(sig.ParamTypes, pty)
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default)
+		sig.Optional = append(sig.Optional, p.Optional)
 	}
 	if len(params) > 0 && params[len(params)-1].Rest {
 		sig.HasRest = true
@@ -261,6 +262,16 @@ func sigCompatible(base, override FuncSig) bool {
 // ClassTagField/ClassVTableField/ClassEventEmitterField (types.go).
 func accessorMethodName(kind, prop string) string {
 	return "__kml_" + kind + "_" + prop
+}
+
+// llvmSafeSymbol replaces a private name's `#` prefix (TDD-00021) with an
+// LLVM-legal substitute before it's used to build a function symbol — `#`
+// itself isn't a legal character in a bare (unquoted) LLVM identifier. The
+// `__kml_` prefix follows the same reserved-namespace convention as
+// accessorMethodName/ClassTagField above, so it can't collide with a real
+// user-declared name. A no-op for any symbol with no private name in it.
+func llvmSafeSymbol(s string) string {
+	return strings.ReplaceAll(s, "#", "__kml_priv_")
 }
 
 // classAccessorSigs returns the getter/setter FuncSig for property `prop`
@@ -353,7 +364,7 @@ func (e *Emitter) emitStaticFieldRead(info ClassInfo, className, fieldName strin
 		return Value{}, err
 	}
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr @%s_static_%s, align %d", reg, fieldTy.IR, owner, fieldName, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr @%s, align %d", reg, fieldTy.IR, llvmSafeSymbol(owner+"_static_"+fieldName), fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}, nil
 }
 
@@ -371,7 +382,7 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 	if err := e.checkMemberVisibility(owner, vis, "static field", fieldName, pos); err != nil {
 		return Value{}, err
 	}
-	globalPtr := fmt.Sprintf("@%s_static_%s", owner, fieldName)
+	globalPtr := "@" + llvmSafeSymbol(owner+"_static_"+fieldName)
 
 	if isLogicalAssignOp(op) {
 		return e.emitLogicalCompoundAssign(op, globalPtr, fieldTy, rhsExpr)
@@ -1056,7 +1067,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		}
 		if m.IsStatic {
 			sig := info.StaticMethodSigs[m.Name]
-			llvmName := cd.Name + "_static_" + m.Name
+			llvmName := llvmSafeSymbol(cd.Name + "_static_" + m.Name)
 			if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), true); err != nil {
 				return err
 			}
@@ -1071,7 +1082,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 			methodKey = accessorMethodName(m.AccessorKind, m.Name)
 		}
 		sig := info.MethodSigs[methodKey]
-		llvmName := cd.Name + "_" + methodKey
+		llvmName := llvmSafeSymbol(cd.Name + "_" + methodKey)
 		if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false); err != nil {
 			return err
 		}
@@ -1087,7 +1098,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 func (e *Emitter) emitClassStaticFieldGlobals(className string) {
 	info := e.classes[className]
 	for name, ty := range info.OwnStaticFieldTypes {
-		e.emitGlobal(fmt.Sprintf("@%s_static_%s = global %s zeroinitializer, align %d", className, name, ty.IR, ty.Align()))
+		e.emitGlobal(fmt.Sprintf("@%s = global %s zeroinitializer, align %d", llvmSafeSymbol(className+"_static_"+name), ty.IR, ty.Align()))
 	}
 }
 
@@ -1169,7 +1180,7 @@ func (e *Emitter) emitClassVTable(className string) {
 		if slot == nil || !slot.Virtual {
 			continue
 		}
-		slots[slot.Index] = fmt.Sprintf("ptr @%s_%s", info.MethodImplementor[mname], mname)
+		slots[slot.Index] = fmt.Sprintf("ptr @%s", llvmSafeSymbol(info.MethodImplementor[mname]+"_"+mname))
 	}
 	e.emitGlobal(fmt.Sprintf("@%s_vtable = global [%d x ptr] [%s]", className, info.VTableSize, strings.Join(slots, ", ")))
 }
@@ -1260,7 +1271,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				if err := e.unpackArrayPatternInto(dataPtrReg, *pty.ElemType, p.ArrayPattern); err != nil {
+				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
@@ -1367,9 +1378,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		}
 	}
 
-	e.ensureMalloc()
+	// calloc, not malloc: this compiler doesn't verify every field is
+	// assigned on every path through the constructor (no definite-
+	// assignment check), so an under-assigned field must read back a
+	// deterministic zero rather than malloc garbage — same real bug as
+	// object literals' omitted `?:` fields, found investigating
+	// destructuring defaults, see ADR-00157.
+	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, info.Ty.StructSize()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, info.Ty.StructSize()))
 
 	tagGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))
@@ -1473,7 +1490,8 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	// The free-function call path (emitCallToFuncSig) already falls back
 	// to evaluating the default expression at the call site; mirrored here.
 	minRequired := regularCount
-	for minRequired > 0 && minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil {
+	for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
+		(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
 		minRequired--
 	}
 	if sig.HasRest {
@@ -1488,17 +1506,29 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 
 	argParts := []string{"ptr " + thisVal.Ref}
 	for i := 0; i < regularCount; i++ {
+		paramTy := sig.ParamTypes[i]
 		var a ast.Expression
 		switch {
 		case i < len(args):
 			a = args[i]
 		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
 			a = sig.Defaults[i]
+		case i < len(sig.Optional) && sig.Optional[i]:
+			// ADR-00164: an omitted `param?: T` argument gets T's zero
+			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
+			// Array-typed params decompose into two LLVM params (ptr, i64
+			// len) at the callee side, so their "zero value" is an empty
+			// array (null ptr, 0 len), not a single zeroLiteral() operand.
+			if paramTy.IsArray {
+				argParts = append(argParts, "ptr null", "i64 0")
+			} else {
+				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+			}
+			continue
 		default:
 			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
 				pos.Line, pos.Col, objTy.ClassName, methodName, i+1)
 		}
-		paramTy := sig.ParamTypes[i]
 		// An array-typed method parameter decomposes into two LLVM params
 		// (ptr, i64 len) at the callee side — emitClassMember's own
 		// parameter-binding loop already does this (mirrors
@@ -1568,7 +1598,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 
 	slot := info.MethodDispatchSlot[methodName]
 	if forceDirect || slot == nil || !slot.Virtual {
-		llvmName := info.MethodImplementor[methodName] + "_" + methodName
+		llvmName := llvmSafeSymbol(info.MethodImplementor[methodName] + "_" + methodName)
 		if sig.RetType.IR == "void" {
 			e.emitInstr(fmt.Sprintf("call void @%s(%s)", llvmName, argsIR))
 			return Value{Ty: TypeVoid}, nil
@@ -1672,7 +1702,7 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 
 	slot := info.MethodDispatchSlot[methodName]
 	if slot == nil || !slot.Virtual {
-		llvmName := implementor + "_" + methodName
+		llvmName := llvmSafeSymbol(implementor + "_" + methodName)
 		e.emitInstr(fmt.Sprintf("call void @%s(%s)", llvmName, argsIR))
 		return Value{Ty: TypeVoid}, nil
 	}
@@ -1718,7 +1748,8 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		regularCount--
 	}
 	minRequired := regularCount
-	for minRequired > 0 && minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil {
+	for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
+		(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
 		minRequired--
 	}
 	if sig.HasRest {
@@ -1733,17 +1764,29 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 
 	var argParts []string
 	for i := 0; i < regularCount; i++ {
+		paramTy := sig.ParamTypes[i]
 		var a ast.Expression
 		switch {
 		case i < len(args):
 			a = args[i]
 		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
 			a = sig.Defaults[i]
+		case i < len(sig.Optional) && sig.Optional[i]:
+			// ADR-00164: an omitted `param?: T` argument gets T's zero
+			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
+			// Array-typed params decompose into two LLVM params (ptr, i64
+			// len) at the callee side, so their "zero value" is an empty
+			// array (null ptr, 0 len), not a single zeroLiteral() operand.
+			if paramTy.IsArray {
+				argParts = append(argParts, "ptr null", "i64 0")
+			} else {
+				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+			}
+			continue
 		default:
 			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
 				pos.Line, pos.Col, className, methodName, i+1)
 		}
-		paramTy := sig.ParamTypes[i]
 		if paramTy.IsArray {
 			val, err := e.emitExprWithObjectHint(a, paramTy)
 			if err != nil {
@@ -1795,7 +1838,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	}
 	argsIR := strings.Join(argParts, ", ")
 
-	llvmName := implementor + "_static_" + methodName
+	llvmName := llvmSafeSymbol(implementor + "_static_" + methodName)
 	if sig.RetType.IR == "void" {
 		e.emitInstr(fmt.Sprintf("call void @%s(%s)", llvmName, argsIR))
 		return Value{Ty: TypeVoid}, nil
@@ -1949,6 +1992,31 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 //     Error, Date, Response, ...): constant false, matching real JS (a
 //     non-object or non-matching-constructor value is never `instanceof`
 //     anything).
+// builtinInstanceofTypes maps a built-in type name usable on the right of
+// `instanceof` to a predicate over the left side's own already-evaluated
+// static Type (ADR-00162). Unlike errorKindIDs/e.classes above, none of
+// these carry a runtime class tag to check against — this compiler's
+// static typing already answers "is this an Array/Map/Set/Date/RegExp" at
+// compile time, and there's no dynamic prototype-chain trickery here for a
+// runtime check to ever disagree with — so the result is always a
+// compile-time constant, the same reasoning emitInstanceOf's own case 3/4
+// (a statically-mismatched user-class comparison) already uses.
+//
+// Deliberately doesn't include `Object` — real JS's own semantics for
+// `instanceof Object` are "true for anything that isn't one of the
+// primitive types," which would need an exhaustive enumeration of every
+// object-shaped Type flag this compiler has (and require remembering to
+// extend it every time a new one is added later, or silently drift wrong)
+// — a real, narrower gap, left as the existing clean rejection rather than
+// risk a silently-incomplete answer.
+var builtinInstanceofTypes = map[string]func(Type) bool{
+	"Array":  func(t Type) bool { return t.IsArray },
+	"Map":    func(t Type) bool { return t.IsMap },
+	"Set":    func(t Type) bool { return t.IsSet },
+	"Date":   func(t Type) bool { return t.IsDate },
+	"RegExp": func(t Type) bool { return t.IsRegExp },
+}
+
 func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	rightIdent, ok := ex.Right.(*ast.Identifier)
 	if !ok {
@@ -1957,8 +2025,27 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	if kindID, ok := errorKindIDs[rightIdent.Name]; ok {
 		return e.emitErrorInstanceOf(ex, rightIdent.Name, kindID)
 	}
-	info, ok := e.classes[rightIdent.Name]
-	if !ok {
+	// A registered user-defined class always takes precedence over a
+	// built-in name below, even one that happens to reuse a built-in's own
+	// name (only reachable at all under `-globals=permissive` — ambient
+	// global names are reserved by default) — the more specific, real
+	// class registration a user explicitly wrote should never be silently
+	// shadowed by this compiler's own fallback built-in handling.
+	info, isClass := e.classes[rightIdent.Name]
+	if !isClass {
+		if matches, ok := builtinInstanceofTypes[rightIdent.Name]; ok {
+			// Still a real expression — evaluate for side effects, same as
+			// every other branch below, even though the answer never
+			// depends on the resulting value itself.
+			leftVal, err := e.emitExpr(ex.Left)
+			if err != nil {
+				return Value{}, err
+			}
+			if matches(leftVal.Ty) {
+				return Value{Ref: "1", Ty: TypeBool}, nil
+			}
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		}
 		return Value{}, fmt.Errorf("%d:%d: instanceof is only supported against user-defined classes; '%s' is not a registered class", ex.GetPos().Line, ex.GetPos().Col, rightIdent.Name)
 	}
 

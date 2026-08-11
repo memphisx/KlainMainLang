@@ -942,6 +942,7 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		sig.ParamTypes = append(sig.ParamTypes, pty)
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
+		sig.Optional = append(sig.Optional, p.Optional)
 	}
 	if len(fd.Params) > 0 && fd.Params[len(fd.Params)-1].Rest {
 		sig.HasRest = true

@@ -91,9 +91,14 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	if hint != nil && hint.IsObject {
 		ty = *hint
 	}
-	e.ensureMalloc()
+	// calloc, not malloc: a field absent from lit (an omitted `?:` optional
+	// interface field never gets a storeField call below) must read back a
+	// deterministic zero, not whatever garbage malloc happened to hand back
+	// — a real bug found investigating destructuring defaults, see
+	// ADR-00157.
+	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
 	structIR := ty.StructIR()
 
 	storeField := func(name string, val Value) error {
@@ -348,6 +353,22 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 // known — no Init expression to resolve, see emit_func.go's
 // emitFunctionDeclAs) can share the exact same per-field unpack logic
 // instead of duplicating it.
+//
+// A `{ key = expr }` default (ADR-00158) is only accepted when key's field
+// is a pointer-backed nullable type (`T | null` where T is a string,
+// array, object/interface, or class instance) — the only field shape with
+// a reliable "was this actually provided" signal at all in this
+// compiler's static-shape object model. Confirmed directly (not assumed):
+// a nullable *scalar* field (`number | null`, `boolean | null`, ...)
+// represents its "null" as a fake in-band sentinel (0 / false on the same
+// storage a real value also uses — `p.y === null` literally compiles to
+// `icmp eq i64 %y, 0`), indistinguishable from a legitimately-stored zero
+// value; triggering a default off that would silently override a real,
+// intentional zero. A pointer-backed nullable field's null check is a
+// genuine `icmp eq ptr %v, null` — safe. A non-nullable field (including a
+// merely-optional `?:` one, whose omitted-vs-explicit-zero ambiguity is
+// the exact same problem ADR-00157 already found and could only make
+// deterministic, not distinguishable) has no signal to check at all.
 func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast.DestructProp, pos ast.Pos) error {
 	structIR := objTy.StructIR()
 	for _, prop := range props {
@@ -356,6 +377,9 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			return fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
 		}
 		fieldTy = e.canonicalizeClassTy(fieldTy)
+		if prop.Default != nil && !(fieldTy.Nullable && fieldTy.IR == "ptr") {
+			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
+		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
 		if fieldTy.IsArray {
@@ -375,8 +399,38 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			lenAlloca := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
+
+			if prop.Default != nil {
+				isNullReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, dataPtrReg))
+				absentL := e.freshLabel("destr.absent")
+				presentL := e.freshLabel("destr.present")
+				afterL := e.freshLabel("destr.after")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, absentL, presentL))
+
+				e.emitLabel(absentL)
+				defVal, err := e.emitExpr(prop.Default)
+				if err != nil {
+					return err
+				}
+				if !defVal.Ty.IsArray {
+					return fmt.Errorf("%d:%d: destructuring default must be an array to match field '%s'", prop.Default.GetPos().Line, prop.Default.GetPos().Col, prop.Key)
+				}
+				if err := e.storeArrayAggregateInto(defVal, ptrAlloca, lenAlloca); err != nil {
+					return err
+				}
+				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+				e.emitLabel(presentL)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+				e.emitLabel(afterL)
+			} else {
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
+			}
 			e.define(prop.Local, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: fieldTy})
 			continue
 		}
@@ -384,7 +438,32 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
 		localPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, fieldTy.IR, fieldTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
+
+		if prop.Default != nil {
+			isNullReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, valReg))
+			absentL := e.freshLabel("destr.absent")
+			presentL := e.freshLabel("destr.present")
+			afterL := e.freshLabel("destr.after")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, absentL, presentL))
+
+			e.emitLabel(absentL)
+			defVal, err := e.emitExpr(prop.Default)
+			if err != nil {
+				return err
+			}
+			defVal = e.coerce(defVal, fieldTy)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, defVal.Ref, localPtr, fieldTy.Align()))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(presentL)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(afterL)
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
+		}
 		e.define(prop.Local, Symbol{Ptr: localPtr, Ty: fieldTy})
 	}
 	return nil
@@ -415,9 +494,12 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 
 	case *ast.ObjectLiteral:
 		ty := e.inferObjectType(src)
-		e.ensureMalloc()
+		// calloc, not malloc — see emitObjectLiteralWithHint's identical
+		// comment; an omitted `?:` optional field must read back zero, not
+		// malloc garbage.
+		e.ensureCalloc()
 		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, ty.StructSize()))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
 		structIR := ty.StructIR()
 		for _, prop := range src.Properties {
 			idx, fieldTy, ok := ty.FieldIndex(prop.Key)

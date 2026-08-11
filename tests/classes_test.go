@@ -318,6 +318,79 @@ console.log(c instanceof Point)
 `, "1\n0\n1\n0")
 }
 
+// --- instanceof against built-in types (ADR-00162) ---
+//
+// A compile-time constant, not a runtime tag check — this compiler's
+// static typing already answers "is this an Array/Map/Set/Date/RegExp" at
+// compile time, and there's no dynamic prototype-chain trickery here for a
+// runtime check to ever disagree with.
+
+func TestE2EInstanceOfBuiltinArrayTrue(t *testing.T) {
+	assertOutput(t, `
+let arr: number[] = [1, 2, 3];
+console.log(arr instanceof Array);
+`, "1")
+}
+
+func TestE2EInstanceOfBuiltinArrayFalseForNonArray(t *testing.T) {
+	assertOutput(t, `
+let n: number = 5;
+console.log(n instanceof Array);
+`, "0")
+}
+
+func TestE2EInstanceOfBuiltinMapAndSet(t *testing.T) {
+	assertOutput(t, `
+let m = new Map<string, number>();
+let s = new Set<number>();
+console.log(m instanceof Map);
+console.log(m instanceof Set);
+console.log(s instanceof Set);
+console.log(s instanceof Map);
+`, "1\n0\n1\n0")
+}
+
+func TestE2EInstanceOfBuiltinDate(t *testing.T) {
+	assertOutput(t, `
+let d = new Date();
+console.log(d instanceof Date);
+let s: string = "x";
+console.log(s instanceof Date);
+`, "1\n0")
+}
+
+func TestE2EInstanceOfBuiltinRegExp(t *testing.T) {
+	assertOutput(t, `
+let r = /abc/;
+console.log(r instanceof RegExp);
+console.log(r instanceof Array);
+`, "1\n0")
+}
+
+func TestE2EInstanceOfBuiltinEvaluatesSideEffects(t *testing.T) {
+	assertOutput(t, `
+function makeArr(): number[] {
+  console.log("called");
+  return [1, 2, 3];
+}
+console.log(makeArr() instanceof Array);
+`, "called\n1")
+}
+
+func TestE2EInstanceOfBuiltinObjectStillRejected(t *testing.T) {
+	// Deliberately not supported — see builtinInstanceofTypes' own doc
+	// comment (codegen/llvm/emit_classes.go) for why: real JS's "true for
+	// anything non-primitive" semantics would need an exhaustive, easy-to
+	// -drift enumeration of every object-shaped Type flag this compiler
+	// has.
+	_, err := parseAndCompile(`
+console.log((5) instanceof Object);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for instanceof Object, got none")
+	}
+}
+
 func TestE2EInstanceOfReservedFieldNameIsError(t *testing.T) {
 	_, err := parseAndCompile(`
 class Foo {
@@ -810,6 +883,178 @@ console.log(a.balance)
 	}
 	if !strings.Contains(err.Error(), "is private and not accessible") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// --- `#x` private names (TDD-00021) ---
+
+func TestE2EClassPrivateNameField(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+  #count: number;
+  constructor() { this.#count = 0; }
+  increment(): void { this.#count = this.#count + 1; }
+  getCount(): number { return this.#count; }
+}
+const c = new Counter();
+c.increment();
+c.increment();
+console.log(c.getCount());
+`, "2")
+}
+
+func TestE2EClassPrivateNameMethod(t *testing.T) {
+	assertOutput(t, `
+class Greeter {
+  #name: string;
+  constructor(name: string) { this.#name = name; }
+  #shout(): string { return this.#name + "!"; }
+  greet(): string { return this.#shout(); }
+}
+const g = new Greeter("Ada");
+console.log(g.greet());
+`, "Ada!")
+}
+
+func TestE2EClassPrivateNameStaticField(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  static #count: number;
+  static increment(): void { Box.#count = Box.#count + 1; }
+  static getCount(): number { return Box.#count; }
+}
+Box.increment();
+Box.increment();
+console.log(Box.getCount());
+`, "2")
+}
+
+func TestE2EClassPrivateNameAccessor(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  #v: number;
+  constructor(v: number) { this.#v = v; }
+  get #doubled(): number { return this.#v * 2; }
+  reveal(): number { return this.#doubled; }
+}
+const b = new Box(10);
+console.log(b.reveal());
+`, "20")
+}
+
+// A `#x` field and a same-named `x` field are entirely different names
+// (real JS: no collision) — same-class coexistence should just fall out of
+// the existing name-uniqueness checks, since they're different strings.
+func TestE2EClassPrivateNameCoexistsWithPublicSameStem(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  x: number;
+  #x: number;
+  constructor() { this.x = 1; this.#x = 2; }
+  sum(): number { return this.x + this.#x; }
+}
+const b = new Box();
+console.log(b.sum());
+`, "3")
+}
+
+// Privacy is per-*class*, not per-*instance* — a method can read another
+// instance's own private field of the same class, matching real JS.
+func TestE2EClassPrivateNameCrossInstanceSameClassAllowed(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  #v: number;
+  constructor(v: number) { this.#v = v; }
+  equals(other: Box): boolean { return this.#v == other.#v; }
+}
+const a = new Box(5);
+const b = new Box(5);
+console.log(a.equals(b));
+`, "1")
+}
+
+// Reflection (JSON.stringify, Object.keys) never sees a private name at
+// all — a real, observably different guarantee from `private`/`protected`
+// (a TypeScript-only, erased concept), the actual reason TDD-00021 exists
+// as a separate mechanism instead of just reusing the keyword modifier.
+func TestE2EClassPrivateNameHiddenFromReflection(t *testing.T) {
+	assertOutput(t, `
+class Box {
+  #v: number;
+  pub: number;
+  constructor() { this.#v = 1; this.pub = 2; }
+}
+const b = new Box();
+console.log(JSON.stringify(b));
+console.log(Object.keys(b).length);
+`, "{\"pub\":2}\n1")
+}
+
+func TestE2EClassPrivateNameFromOutsideIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Box {
+  #v: number;
+  constructor() { this.#v = 1; }
+}
+const b = new Box();
+console.log(b.#v);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for private-name field access from outside the class")
+	}
+	if !strings.Contains(err.Error(), "is private and not accessible") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EClassPrivateNameFromSubclassIsError(t *testing.T) {
+	// Exact-class-only, no protected-style relaxation — real JS has no
+	// `#`-equivalent of `protected`.
+	_, err := parseAndCompile(`
+class Base {
+  #secret: number;
+  constructor() { this.#secret = 1; }
+}
+class Derived extends Base {
+  reveal(): number { return this.#secret; }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a subclass reading a base class's private-name field")
+	}
+	if !strings.Contains(err.Error(), "is private and not accessible") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EClassPrivateNameUndeclaredIsError(t *testing.T) {
+	_, err := parseAndCompile(`
+class Box {
+  #v: number;
+  constructor() { this.#v = 1; }
+  bad(): number { return this.#nope; }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for referencing an undeclared private name")
+	}
+	if !strings.Contains(err.Error(), "no field '#nope'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EClassPrivateNameCombinedWithModifierIsError(t *testing.T) {
+	// `#` alone already determines visibility — combining it with an
+	// explicit accessibility modifier is rejected, matching real
+	// TypeScript ("An accessibility modifier cannot be used with a
+	// private identifier").
+	_, err := parseAndCompile(`
+class Box {
+  private #v: number;
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for combining an accessibility modifier with a private name")
 	}
 }
 

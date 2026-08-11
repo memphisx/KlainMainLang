@@ -139,6 +139,9 @@ func (l *Lexer) nextToken() (Token, error) {
 	if unicode.IsLetter(ch) || ch == '_' || ch == '$' {
 		return l.readIdent(line, col)
 	}
+	if ch == '#' && (unicode.IsLetter(l.peekAt(1)) || l.peekAt(1) == '_' || l.peekAt(1) == '$') {
+		return l.readPrivateName(line, col)
+	}
 
 	l.advance()
 	switch ch {
@@ -469,7 +472,7 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 // parser-level context back into the lexer, a much bigger change than this
 // feature justifies.
 var regexIllegalAfter = map[TokenType]bool{
-	IDENT: true, NUMBER: true, STRING: true,
+	IDENT: true, NUMBER: true, STRING: true, PRIVATE_NAME: true,
 	TEMPLATE_NO_SUB: true, TEMPLATE_TAIL: true,
 	TRUE: true, FALSE: true, NULL: true, UNDEFINED: true,
 	THIS: true, SUPER: true,
@@ -549,6 +552,24 @@ func (l *Lexer) readIdent(line, col int) (Token, error) {
 	}
 	lit := buf.String()
 	return l.tok(LookupIdent(lit), lit, line, col), nil
+}
+
+// readPrivateName reads a class private name `#foo` — real JS's own
+// PrivateIdentifier token kind, syntactically distinct from a plain
+// identifier and never usable as one (TDD-00021). The literal keeps the
+// leading `#` so `#foo` and `foo` never collide as field names.
+func (l *Lexer) readPrivateName(line, col int) (Token, error) {
+	var buf strings.Builder
+	buf.WriteRune(l.advance()) // '#'
+	for l.pos < len(l.src) {
+		c := l.peek()
+		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '$' {
+			buf.WriteRune(l.advance())
+		} else {
+			break
+		}
+	}
+	return l.tok(PRIVATE_NAME, buf.String(), line, col), nil
 }
 
 // readTemplateSegment reads template content from the current position until

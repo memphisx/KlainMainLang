@@ -192,3 +192,14 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00152](ADR-00152.md) | Closing gaps found on a second pass over ADR-00151 (array-typed closures, class-method rest params, erased-generic forward references) | Extends [ADR-00151](ADR-00151.md), [ADR-00105](ADR-00105.md), [ADR-00150](ADR-00150.md) |
 | [00153](ADR-00153.md) | Test262 full-corpus conformance harness | Implements [TDD-00008](../tdd/TDD-00008.md) (Design V2) |
 | [00154](ADR-00154.md) | Object literal string/numeric-literal property keys | Extends [ADR-00153](ADR-00153.md) |
+| [00155](ADR-00155.md) | `#x` private names | Implements [TDD-00021](../tdd/TDD-00021.md); Extends [ADR-00153](ADR-00153.md) |
+| [00156](ADR-00156.md) | Multi-declarator `let`/`const`/`var`, for-loop comma-update | Extends [ADR-00153](ADR-00153.md) |
+| [00157](ADR-00157.md) | Uninitialized-heap-memory reads (optional fields, class fields, array destructuring bounds) | Extends [ADR-00153](ADR-00153.md) |
+| [00158](ADR-00158.md) | Destructuring default values (`[a = expr]`, `{ a = expr }`) | Extends [ADR-00153](ADR-00153.md), [ADR-00157](ADR-00157.md) |
+| [00159](ADR-00159.md) | `new Set(iterable)` | Extends [ADR-00153](ADR-00153.md) |
+| [00160](ADR-00160.md) | Destructuring assignment (`[a, b] = expr`, `({ a, b } = expr)`) | Extends [ADR-00153](ADR-00153.md), [ADR-00157](ADR-00157.md), [ADR-00158](ADR-00158.md) |
+| [00161](ADR-00161.md) | Array rest destructuring (`[a, ...rest]`) | Extends [ADR-00153](ADR-00153.md), [ADR-00157](ADR-00157.md), [ADR-00160](ADR-00160.md) |
+| [00162](ADR-00162.md) | `instanceof` against built-in types (`Array`, `Map`, `Set`, `Date`, `RegExp`) | Extends [ADR-00153](ADR-00153.md) |
+| [00163](ADR-00163.md) | `.reduce()` with no initial value | Extends [ADR-00153](ADR-00153.md) |
+| [00164](ADR-00164.md) | Optional (`param?: T`) function parameters | Extends [ADR-00157](ADR-00157.md), [ADR-00158](ADR-00158.md) |
+| [00165](ADR-00165.md) | String concatenation with a null operand | Found while implementing [ADR-00164](ADR-00164.md) |

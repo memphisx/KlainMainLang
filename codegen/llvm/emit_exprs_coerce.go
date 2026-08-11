@@ -4,6 +4,19 @@ import "fmt"
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// null/undefined assigned to an array-typed target becomes an empty-
+	// array aggregate ({ptr, i64}, not a bare `ptr` — see StructFieldIR's
+	// own doc comment for why an array field's real storage type differs
+	// from its own Type.IR) — checked before the plain non-ptr
+	// null-to-zero-value branch below, since an IsArray target also
+	// reports IR == "ptr" and would otherwise fall through untouched into
+	// the unchanged-value case further down, producing an invalid `store
+	// {ptr, i64} null, ...` (null is only a valid literal for a bare ptr,
+	// not this aggregate shape) — a real bug found assigning a literal
+	// `null` to a `T[] | null` interface field (ADR-00158).
+	if v.Ty.IsNull && target.IsArray {
+		return Value{Ref: "{ ptr null, i64 0 }", Ty: target}
+	}
 	// null/undefined assigned to a non-ptr type becomes the zero value.
 	if v.Ty.IsNull && target.IR != "ptr" {
 		return Value{Ref: zeroRef(target), Ty: target}

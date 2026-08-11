@@ -27,6 +27,18 @@ console.log(count + " tick")
 `, "tick 3\n3 tick")
 }
 
+// Regression test: concatenating a null string used to segfault
+// (emitStringConcat called strlen() on the raw null pointer unconditionally)
+// instead of stringifying it as "null", matching real JS's `"x" + null ===
+// "xnull"` and this compiler's own console.log(null) behavior.
+func TestE2EStringConcatWithNull(t *testing.T) {
+	assertOutput(t, `
+let s: string | null = null
+console.log('Hi, ' + s)
+console.log(s + ', world')
+`, "Hi, null\nnull, world")
+}
+
 func TestE2EStringPlusBooleanConcat(t *testing.T) {
 	assertOutput(t, `
 let flag: boolean = true

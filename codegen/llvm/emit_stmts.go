@@ -48,6 +48,13 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:
 		return e.emitVarDecl(s)
+	case *ast.VarDeclarationList:
+		for _, d := range s.Decls {
+			if err := e.emitVarDecl(d); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *ast.FunctionDeclaration:
 		// TDD-00057: only a declaration pushNestedFuncScope already
 		// pre-registered (directly in the current enclosing body) is
@@ -241,8 +248,8 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
-	if s.Update != nil {
-		if _, err := e.emitExpr(s.Update); err != nil {
+	for _, upd := range s.Update {
+		if _, err := e.emitExpr(upd); err != nil {
 			return err
 		}
 	}

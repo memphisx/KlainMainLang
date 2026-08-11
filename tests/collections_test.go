@@ -206,6 +206,69 @@ console.log(s.has(20))
 console.log(s.has(30))
 `, "2\n1\n0")
 }
+// --- new Set(iterable) — ADR-00159 ---
+
+func TestE2ENewSetFromArrayLiteralNumber(t *testing.T) {
+	assertOutput(t, `
+const s = new Set([1, 2, 3, 2, 1])
+console.log(s.size)
+console.log(s.has(2))
+console.log(s.has(9))
+`, "3\n1\n0")
+}
+func TestE2ENewSetFromArrayLiteralString(t *testing.T) {
+	assertOutput(t, `
+const s = new Set(["a", "b", "a"])
+console.log(s.size)
+`, "2")
+}
+func TestE2ENewSetFromArrayVariable(t *testing.T) {
+	// Real bug found building this feature: the resolver's rename pass
+	// (TDD-00041, per-file name mangling) had no case for
+	// NewSetExpression.Init, so a reference to an already-declared array
+	// variable inside `new Set(arr)` was never rewritten to match arr's
+	// own mangled top-level name — 'arr' is not an array at codegen time
+	// even though arr was declared correctly one statement earlier.
+	assertOutput(t, `
+const arr: number[] = [5, 6, 7]
+const s = new Set(arr)
+console.log(s.size)
+console.log(s.has(6))
+`, "3\n1")
+}
+func TestE2ENewSetFromArrayExplicitTypeArg(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [1, 2]
+const s = new Set<number>(arr)
+console.log(s.size)
+`, "2")
+}
+func TestE2ENewSetFromEmptyArray(t *testing.T) {
+	assertOutput(t, `
+const s = new Set<number>([])
+console.log(s.size)
+`, "0")
+}
+func TestE2ENewSetNoArgumentStillWorks(t *testing.T) {
+	assertOutput(t, `
+const s = new Set<string>()
+s.add("a")
+console.log(s.size)
+`, "1")
+}
+func TestE2ENewSetFromArrayCapturedByClosure(t *testing.T) {
+	assertOutput(t, `
+function make(): () => boolean {
+  let target: number = 2
+  let arr: number[] = [1, 2, 3]
+  let s = new Set(arr)
+  return () => s.has(target)
+}
+const fn = make()
+console.log(fn())
+`, "1")
+}
+
 func TestE2EForOfSet(t *testing.T) {
 	assertOutput(t, `
 const s = new Set<number>()

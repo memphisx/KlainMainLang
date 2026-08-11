@@ -238,12 +238,22 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
-// emitArrayReduce implements arr.reduce(cb, initial): folds elements left-to-right.
-// The callback signature is (acc, elem) => newAcc. Returns the final accumulator.
+// emitArrayReduce implements arr.reduce(cb[, initial]): folds elements
+// left-to-right. The callback signature is (acc, elem) => newAcc. Returns
+// the final accumulator.
+//
+// The initial value is optional (ADR-00163), matching real JS: when
+// omitted, the array's own first element seeds the accumulator and the
+// fold starts from index 1 instead of 0 — an empty array with no initial
+// value throws (real JS: `TypeError: Reduce of empty array with no
+// initial value`; this compiler's own internal-throw convention for a
+// runtime-detected error like this is always a plain Error, not a
+// TypeError, matching e.g. the array-index-out-of-bounds throw elsewhere).
 func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: reduce takes exactly 2 arguments (callback, initial)", pos.Line, pos.Col)
+	if len(args) != 1 && len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: reduce takes 1 or 2 arguments (callback[, initial])", pos.Line, pos.Col)
 	}
+	hasInitial := len(args) == 2
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
@@ -252,25 +262,52 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	// expression (not evaluating it early), so the callback's accumulator
 	// parameter gets the right type while still evaluating args in their
 	// original left-to-right order (callback resolved first, matching
-	// real JS's argument evaluation order, exactly as before).
-	accTyHint := e.inferExprType(args[1])
+	// real JS's argument evaluation order, exactly as before). With no
+	// initial value, the accumulator's type is just the element type — it
+	// starts as (and only ever holds) an actual array element.
+	accTyHint := elemTy
+	if hasInitial {
+		accTyHint = e.inferExprType(args[1])
+	}
 	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy})
 	if err != nil {
 		return Value{}, err
 	}
-	initVal, err := e.emitExpr(args[1])
-	if err != nil {
-		return Value{}, err
-	}
-	accTy := initVal.Ty
 
+	var accTy Type
 	accAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, initVal.Ref, accAlloca, accTy.Align()))
-
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+
+	if hasInitial {
+		initVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		accTy = initVal.Ty
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, initVal.Ref, accAlloca, accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	} else {
+		accTy = elemTy
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
+
+		emptyReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", emptyReg, lenReg))
+		emptyL := e.freshLabel("red.empty")
+		seedL := e.freshLabel("red.seed")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", emptyReg, emptyL, seedL))
+
+		e.emitLabel(emptyL)
+		e.emitInternalThrow(e.internString("Reduce of empty array with no initial value"))
+
+		e.emitLabel(seedL)
+		firstGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 0", firstGep, elemTy.IR, ptrReg))
+		firstVal := e.loadArrayElem(firstGep, elemTy)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, firstVal.Ref, accAlloca, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", idxAlloca))
+	}
 
 	condL := e.freshLabel("red.cond")
 	bodyL := e.freshLabel("red.body")

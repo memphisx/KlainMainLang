@@ -124,6 +124,16 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu lookupTable) {
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
+	case *ast.VarDeclarationList:
+		for _, d := range s.Decls {
+			sc := newScope()
+			if d.TypeAnnot != nil {
+				rewriteType(d.TypeAnnot, sc, lu)
+			}
+			if d.Init != nil {
+				d.Init = rewriteExpr(d.Init, sc, lu)
+			}
+		}
 	case *ast.InterfaceDeclaration:
 		rewriteInterfaceDecl(s, lu)
 	case *ast.TypeAliasDeclaration:
@@ -157,6 +167,7 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 		sc.bind(tp)
 	}
 	bindParams(f.Params, sc, lu, f.GetPos())
+	rewritePatternDefaults(f.Params, sc, lu)
 	for i := range f.Params {
 		if f.Params[i].Type != nil {
 			rewriteType(f.Params[i].Type, sc, lu)
@@ -184,9 +195,9 @@ func bindParams(params []ast.Param, sc *scope, lu lookupTable, pos ast.Pos) {
 	for _, p := range params {
 		switch {
 		case p.ArrayPattern != nil:
-			for _, n := range p.ArrayPattern {
-				sc.bind(n)
-				lu.checkBinding(n, pos)
+			for _, elem := range p.ArrayPattern {
+				sc.bind(elem.Name)
+				lu.checkBinding(elem.Name, pos)
 			}
 		case p.ObjectPattern != nil:
 			for _, dp := range p.ObjectPattern {
@@ -196,6 +207,26 @@ func bindParams(params []ast.Param, sc *scope, lu lookupTable, pos ast.Pos) {
 		default:
 			sc.bind(p.Name)
 			lu.checkBinding(p.Name, pos)
+		}
+	}
+}
+
+// rewritePatternDefaults rewrites every `= expr` default inside params'
+// own destructuring patterns (ADR-00158) — sc must already have every
+// pattern name bound (call after bindParams), so a default referencing an
+// earlier-bound sibling in the same pattern (`[a, b = a]`) resolves
+// correctly rather than as an outer/imported name of the same spelling.
+func rewritePatternDefaults(params []ast.Param, sc *scope, lu lookupTable) {
+	for i := range params {
+		for j := range params[i].ArrayPattern {
+			if d := params[i].ArrayPattern[j].Default; d != nil {
+				params[i].ArrayPattern[j].Default = rewriteExpr(d, sc, lu)
+			}
+		}
+		for j := range params[i].ObjectPattern {
+			if d := params[i].ObjectPattern[j].Default; d != nil {
+				params[i].ObjectPattern[j].Default = rewriteExpr(d, sc, lu)
+			}
 		}
 	}
 }
@@ -293,21 +324,43 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		}
 		sc.bind(s.Name)
 		lu.checkBinding(s.Name, s.GetPos())
+	case *ast.VarDeclarationList:
+		for _, d := range s.Decls {
+			if d.TypeAnnot != nil {
+				rewriteType(d.TypeAnnot, sc, lu)
+			}
+			if d.Init != nil {
+				d.Init = rewriteExpr(d.Init, sc, lu)
+			}
+			sc.bind(d.Name)
+			lu.checkBinding(d.Name, d.GetPos())
+		}
 	case *ast.ArrayDestructuring:
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
-		for _, n := range s.Names {
-			sc.bind(n)
-			lu.checkBinding(n, s.GetPos())
+		// A later element's default may reference an earlier one in the
+		// same pattern (`[a, b = a]`, real JS) — rewrite each element's
+		// own Default before binding it, so it still resolves as whatever
+		// it would outside the pattern, then bind so the *next* element's
+		// default sees it as local.
+		for i := range s.Elems {
+			if s.Elems[i].Default != nil {
+				s.Elems[i].Default = rewriteExpr(s.Elems[i].Default, sc, lu)
+			}
+			sc.bind(s.Elems[i].Name)
+			lu.checkBinding(s.Elems[i].Name, s.GetPos())
 		}
 	case *ast.ObjectDestructuring:
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
-		for _, p := range s.Props {
-			sc.bind(p.Local)
-			lu.checkBinding(p.Local, s.GetPos())
+		for i := range s.Props {
+			if s.Props[i].Default != nil {
+				s.Props[i].Default = rewriteExpr(s.Props[i].Default, sc, lu)
+			}
+			sc.bind(s.Props[i].Local)
+			lu.checkBinding(s.Props[i].Local, s.GetPos())
 		}
 	case *ast.ExpressionStatement:
 		s.Expr = rewriteExpr(s.Expr, sc, lu)
@@ -331,8 +384,8 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		if s.Test != nil {
 			s.Test = rewriteExpr(s.Test, sc, lu)
 		}
-		if s.Update != nil {
-			s.Update = rewriteExpr(s.Update, sc, lu)
+		for i, upd := range s.Update {
+			s.Update[i] = rewriteExpr(upd, sc, lu)
 		}
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
@@ -483,6 +536,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.ArrowFunction:
 		sc.push()
 		bindParams(e.Params, sc, lu, e.GetPos())
+		rewritePatternDefaults(e.Params, sc, lu)
 		for i := range e.Params {
 			if e.Params[i].Type != nil {
 				rewriteType(e.Params[i].Type, sc, lu)
@@ -520,6 +574,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.NewSetExpression:
 		if e.ElemType != nil {
 			rewriteType(e.ElemType, sc, lu)
+		}
+		if e.Init != nil {
+			e.Init = rewriteExpr(e.Init, sc, lu)
 		}
 	case *ast.NewEventEmitterExpression:
 		if e.PayloadType != nil {

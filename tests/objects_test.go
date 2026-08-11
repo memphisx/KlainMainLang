@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -815,5 +816,192 @@ console.log(k in p)
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a non-literal 'in' key")
+	}
+}
+
+// --- Uninitialized field safety ---
+//
+// Object literal allocation must zero-fill, not just malloc: a field
+// omitted from a given literal (an optional `?:` interface field) never
+// gets its own storeField call, so it must read back a deterministic zero,
+// not whatever garbage was already in that heap slot. Real bug found
+// investigating destructuring defaults; see ADR-00157.
+
+func TestE2EOptionalFieldOmittedReadsZero(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y?: number }
+let p: Point = { x: 1 };
+console.log(p.x, p.y);
+`, "1\n0")
+}
+
+func TestE2EOptionalFieldOmittedReadsZeroAfterHeapChurn(t *testing.T) {
+	// A fresh, never-reused heap page can look zeroed by pure luck even
+	// with plain malloc — churn the heap with unrelated allocations first
+	// (not asserted on, purely to disturb whatever memory a naive fix might
+	// still hand back unzeroed) so this test would have caught the bug for
+	// real, not just by accident of allocator behavior on a small/first
+	// allocation.
+	assertOutput(t, `
+interface Point { x: number; y?: number }
+for (let i = 0; i < 50; i++) {
+  const s = "filler-" + i.toString();
+}
+let p: Point = { x: 1 };
+console.log(p.y);
+`, "0")
+}
+
+func TestE2EClassFieldUnassignedInConstructorReadsZero(t *testing.T) {
+	// This compiler doesn't verify every field is assigned on every path
+	// through the constructor (no definite-assignment check) — an
+	// under-assigned field must read back a deterministic zero, same
+	// reasoning and fix as the optional-object-field case above.
+	assertOutput(t, `
+class Box {
+  x: number;
+  y: number;
+  constructor() { this.x = 1; }
+}
+const b = new Box();
+console.log(b.x, b.y);
+`, "1\n0")
+}
+
+// --- Object destructuring default values (`{a = expr} = obj`, ADR-00158) ---
+//
+// Only accepted for a pointer-backed nullable field (T | null where T is
+// string/array/object/class) — the one field shape with a real, safe null
+// check (`icmp eq ptr %v, null`). A nullable *scalar* field (number|null,
+// boolean|null) fakes its null via an in-band sentinel (0/false) that
+// collides with a legitimate value of the same spelling, and a
+// non-nullable (including merely-optional `?:`) field has no signal at
+// all — both are a clean compile-time rejection instead.
+
+func TestE2EObjectDestructuringDefaultUsedWhenNull(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string | null }
+let u: User = { name: null };
+let { name = "anon" } = u;
+console.log(name);
+`, "anon")
+}
+
+func TestE2EObjectDestructuringDefaultNotUsedWhenPresent(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string | null }
+let u: User = { name: "Alice" };
+let { name = "anon" } = u;
+console.log(name);
+`, "Alice")
+}
+
+func TestE2EObjectDestructuringDefaultOnNullableArrayField(t *testing.T) {
+	assertOutput(t, `
+interface Box { items: number[] | null }
+let empty: Box = { items: null };
+let { items = [1, 2, 3] } = empty;
+console.log(items.length, items[0]);
+`, "3\n1")
+}
+
+func TestE2EDestructuredObjectParamDefault(t *testing.T) {
+	assertOutput(t, `
+interface Opts { label: string | null }
+function f({ label = "default" }: Opts): void {
+  console.log(label);
+}
+f({ label: null });
+f({ label: "set" });
+`, "default\nset")
+}
+
+func TestE2EObjectDestructuringDefaultOnNonNullableFieldRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Point { x: number }
+let p: Point = { x: 1 };
+let { x = 5 } = p;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a destructuring default on a non-nullable field")
+	}
+	if !strings.Contains(err.Error(), "nullable reference type") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestE2EObjectDestructuringDefaultOnNullableScalarFieldRejected(t *testing.T) {
+	// number | null fakes its null via an in-band 0 sentinel — indistinct
+	// from a real 0, so a default here would silently override a
+	// legitimate value. Rejected, not allowed to be unsound.
+	_, err := parseAndCompile(`
+interface Point { x: number | null }
+let p: Point = { x: 0 };
+let { x = 5 } = p;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a destructuring default on a nullable scalar field")
+	}
+}
+
+// --- Object destructuring assignment (`({ a, b } = expr)`, ADR-00160) ---
+
+func TestE2EObjectDestructuringAssignmentShorthand(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+let x: number = 0, y: number = 0;
+let p: Point = { x: 5, y: 6 };
+({x, y} = p);
+console.log(x, y);
+`, "5\n6")
+}
+
+func TestE2EObjectDestructuringAssignmentRenamed(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+let px: number = 0, py: number = 0;
+let p: Point = { x: 10, y: 20 };
+({x: px, y: py} = p);
+console.log(px, py);
+`, "10\n20")
+}
+
+func TestE2EObjectDestructuringAssignmentClosureCapture(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function make(): () => number {
+  let px: number = 0;
+  let py: number = 0;
+  let p: Point = { x: 10, y: 20 };
+  ({x: px, y: py} = p);
+  return () => px + py;
+}
+const fn = make();
+console.log(fn());
+`, "30")
+}
+
+func TestE2EObjectDestructuringAssignmentConstTargetRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Point { x: number; y: number }
+let x: number = 0;
+const y: number = 0;
+let p: Point = { x: 5, y: 6 };
+({x, y} = p);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error assigning into a const destructuring target")
+	}
+}
+
+func TestE2EObjectDestructuringAssignmentUnknownFieldRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+interface Point { x: number; y: number }
+let x: number = 0, z: number = 0;
+let p: Point = { x: 5, y: 6 };
+({x, z} = p);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a destructuring assignment field the source object doesn't have")
 	}
 }

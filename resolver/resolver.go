@@ -472,14 +472,12 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	declaredIn := map[string]string{}
 	for _, path := range allPaths {
 		for _, stmt := range files[path].prog.Body {
-			name, ok := declNameOf(stmt)
-			if !ok {
-				continue
+			for _, ref := range declRefsOf(stmt) {
+				if prev, dup := declaredIn[ref.Name]; dup {
+					return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", ref.Name, prev, path)
+				}
+				declaredIn[ref.Name] = path
 			}
-			if prev, dup := declaredIn[name]; dup {
-				return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", name, prev, path)
-			}
-			declaredIn[name] = path
 		}
 	}
 
@@ -520,6 +518,13 @@ func validateCyclicFile(prog *ast.Program) error {
 			if d.Init != nil && !isLiteralExpr(d.Init) {
 				return fmt.Errorf("%d:%d: a file that participates in an import cycle may only initialize a top-level binding with a compile-time literal — no calls, no references to other bindings (found initializing '%s')",
 					stmt.GetPos().Line, stmt.GetPos().Col, d.Name)
+			}
+		case *ast.VarDeclarationList:
+			for _, one := range d.Decls {
+				if one.Init != nil && !isLiteralExpr(one.Init) {
+					return fmt.Errorf("%d:%d: a file that participates in an import cycle may only initialize a top-level binding with a compile-time literal — no calls, no references to other bindings (found initializing '%s')",
+						stmt.GetPos().Line, stmt.GetPos().Col, one.Name)
+				}
 			}
 		case *ast.FunctionDeclaration, *ast.InterfaceDeclaration,
 			*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ImportDeclaration,
@@ -572,49 +577,47 @@ func isLiteralExpr(expr ast.Expression) bool {
 	}
 }
 
-// declNameOf returns the name a top-level declaration statement introduces,
-// unwrapping ExportDeclaration first.
-func declNameOf(stmt ast.Statement) (string, bool) {
-	if exp, ok := stmt.(*ast.ExportDeclaration); ok {
-		stmt = exp.Decl
-	}
-	switch s := stmt.(type) {
-	case *ast.FunctionDeclaration:
-		return s.Name, true
-	case *ast.VarDeclaration:
-		return s.Name, true
-	case *ast.InterfaceDeclaration:
-		return s.Name, true
-	case *ast.TypeAliasDeclaration:
-		return s.Name, true
-	case *ast.EnumDeclaration:
-		return s.Name, true
-	case *ast.ClassDeclaration:
-		return s.Name, true
-	}
-	return "", false
+// declRef is one top-level name a declaration statement introduces, paired
+// with a setter to rename it in place. Almost every declaration kind
+// introduces exactly one name, but *ast.VarDeclarationList (`let i = 0, j =
+// 10;` — multiple comma-separated declarators sharing one let/const/var)
+// introduces one per declarator, so declRefsOf returns a slice rather than
+// a single name.
+type declRef struct {
+	Name string
+	Set  func(string)
 }
 
-// setDeclName overwrites the name a top-level declaration statement
-// introduces — declNameOf's rename counterpart, used to apply mangling.
-func setDeclName(stmt ast.Statement, name string) {
+// declRefsOf returns every top-level name stmt introduces, unwrapping
+// ExportDeclaration first. Empty (not nil) for a statement that introduces
+// no top-level name at all (import/export-from, or any executable
+// statement).
+func declRefsOf(stmt ast.Statement) []declRef {
 	if exp, ok := stmt.(*ast.ExportDeclaration); ok {
 		stmt = exp.Decl
 	}
 	switch s := stmt.(type) {
 	case *ast.FunctionDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
 	case *ast.VarDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+	case *ast.VarDeclarationList:
+		refs := make([]declRef, len(s.Decls))
+		for i, d := range s.Decls {
+			d := d
+			refs[i] = declRef{d.Name, func(n string) { d.Name = n }}
+		}
+		return refs
 	case *ast.InterfaceDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
 	case *ast.TypeAliasDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
 	case *ast.EnumDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
 	case *ast.ClassDeclaration:
-		s.Name = name
+		return []declRef{{s.Name, func(n string) { s.Name = n }}}
 	}
+	return nil
 }
 
 // mangleName builds fileIdx's file-private internal name for a top-level
@@ -625,7 +628,7 @@ func mangleName(name string, fileIdx int) string {
 }
 
 // mangleFileDecls assigns every top-level declaration in prog a file-private
-// mangled name (renaming the declaration in place via setDeclName) and
+// mangled name (renaming each declRefsOf entry in place via its own Set) and
 // returns the original-name -> mangled-name map for this file. Errors on a
 // genuine in-file duplicate declaration — two different files sharing a
 // name is no longer an error (that's the whole point of TDD-00041), but two
@@ -646,26 +649,30 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 	mangled := map[string]string{}
 	sawDefault := false
 	for _, stmt := range prog.Body {
-		name, ok := declNameOf(stmt)
-		if !ok {
-			continue
+		refs := declRefsOf(stmt)
+		var lastNewName string
+		for _, ref := range refs {
+			if err := checkReservedBinding(ref.Name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
+				return nil, err
+			}
+			if _, dup := mangled[ref.Name]; dup {
+				return nil, fmt.Errorf("'%s' is declared more than once in %s", ref.Name, path)
+			}
+			newName := mangleName(ref.Name, fileIdx)
+			mangled[ref.Name] = newName
+			ref.Set(newName)
+			lastNewName = newName
 		}
-		if err := checkReservedBinding(name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
-			return nil, err
-		}
-		if _, dup := mangled[name]; dup {
-			return nil, fmt.Errorf("'%s' is declared more than once in %s", name, path)
-		}
-		newName := mangleName(name, fileIdx)
-		mangled[name] = newName
-		setDeclName(stmt, newName)
 
+		// `export default` can only ever wrap a single-name declaration
+		// (function/class/expression) — never a VarDeclarationList, not
+		// valid JS/TS grammar — so len(refs) is always exactly 1 here.
 		if exp, ok := stmt.(*ast.ExportDeclaration); ok && exp.IsDefault {
 			if sawDefault {
 				return nil, fmt.Errorf("%d:%d: %s declares more than one 'export default'", exp.GetPos().Line, exp.GetPos().Col, path)
 			}
 			sawDefault = true
-			mangled["default"] = newName
+			mangled["default"] = lastNewName
 		}
 	}
 	return mangled, nil
@@ -687,8 +694,8 @@ func exportedNames(prog *ast.Program) map[string]bool {
 			names["default"] = true
 			continue
 		}
-		if name, ok := declNameOf(stmt); ok {
-			names[name] = true
+		for _, ref := range declRefsOf(stmt) {
+			names[ref.Name] = true
 		}
 	}
 	return names

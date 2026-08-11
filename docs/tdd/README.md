@@ -56,7 +56,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00018](TDD-00018.md) | `ArrayBuffer` / TypedArrays | Implemented | [ADR-00078](../adr/ADR-00078.md) | |
 | [00019](TDD-00019.md) | POSIX signal handling (`process.on('SIGINT'/'SIGTERM', handler)`) | Implemented | [ADR-00079](../adr/ADR-00079.md) | |
 | [00020](TDD-00020.md) | Windows support | Not Started | | |
-| [00021](TDD-00021.md) | `#x` real private fields | Not Started | | |
+| [00021](TDD-00021.md) | `#x` real private fields | Implemented | [ADR-00155](../adr/ADR-00155.md) | No field-initializer syntax (pre-existing, not `#`-specific); no early-error check for `#m`/`static #m` name collision or `#constructor`-is-banned |
 | [00022](TDD-00022.md) | Best-effort vanilla JavaScript compatibility (opt-in) | Not Started | | |
 | [00023](TDD-00023.md) | `EventEmitter<T>` (`events` module) | Implemented | [ADR-00089](../adr/ADR-00089.md) | |
 | [00024](TDD-00024.md) | `os` module | Implemented | [ADR-00090](../adr/ADR-00090.md) | Darwin paths unverified |

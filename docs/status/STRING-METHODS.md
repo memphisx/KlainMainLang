@@ -8,7 +8,7 @@
 
 | Method | Status |
 |---|---|
-| `+` (concatenation) | ✅ |
+| `+` (concatenation) | ✅ (a null operand — an optional param, `T \| null`, a missing collection lookup, ... — used to segfault via `strlen(NULL)`; now stringifies as `"null"`, matching real JS's `"x" + null === "xnull"`. See [ADR-00165](../adr/ADR-00165.md)) |
 | `.length` | ✅ |
 | `.slice(start, end?)` | ✅ |
 | `.substring(start, end?)` | ✅ |

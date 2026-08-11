@@ -23,13 +23,13 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 ## TypeScript Core Language
 
-**293 / 330 features, ~89% coverage.**
+**294 / 330 features, ~89% coverage.**
 
 | Category | Coverage | Page | Caveats |
 |---|---|---|---|
-| Control flow statements | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
+| Control flow statements | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | A `for` loop's update clause supports comma-separated expressions (`i++, j--`) — see [ADR-00156](../adr/ADR-00156.md) — but a non-declaration init clause (`for (i = 0, j = 10; ...)`) is still a clean rejection; no ASI restriction on a line break before a postfix `++`/`--` |
 | Operators | 42/42, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
-| Variable declarations | 4/4, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | — |
+| Variable declarations | 4/4, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Multi-declarator `let`/`const`/`var` (`let i = 0, j = 10;`) is now done — see [ADR-00156](../adr/ADR-00156.md) — but `const` doesn't reject a missing initializer, and `arguments`/`eval` aren't reserved as binding names |
 | Functions & closures | 11/11, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Nested function declarations are V1-scoped (no closure capture of the enclosing body's locals, one block deeper than the enclosing body is unsupported) — see [TDD-00057](../tdd/TDD-00057.md); tagged template literals have no `.raw` property on the `strings` array (real `String.raw` stays separately out of scope, see [ADR-00028](../adr/ADR-00028.md)) — see [TDD-00059](../tdd/TDD-00059.md)/[ADR-00152](../adr/ADR-00152.md) |
 | Type primitives | 9/14, ~64% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | No `bigint` |
 | Async / Promise | 4/9, ~44% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Only `await fetch(...)` is genuinely non-blocking; every other `Promise<T>` is a resolved-slot read |
@@ -37,12 +37,12 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 | RegExp | 14/14, 100% | [REGEXP.md](REGEXP.md) | `u`/`y`/`d` flags out of scope for V1; several other deliberate scope narrowings (`.test()` ignores `lastIndex`, no implicit string→RegExp coercion, etc.) — see [REGEXP.md](REGEXP.md)'s own Caveats |
 | Array methods | 40/40, 100% | [ARRAY-METHODS.md](ARRAY-METHODS.md) | `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md)); `Array.from` supports the array-like overload only |
 | Number / Math | 35/35, 100% | [NUMBER-MATH.md](NUMBER-MATH.md) | — |
-| Object & collections | 23/26, ~88% | [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) | No `WeakMap`/`WeakSet`/`WeakRef`, `Object.create`/`.fromEntries` |
+| Object & collections | 23/26, ~88% | [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) | No `WeakMap`/`WeakSet`/`WeakRef`, `Object.create`/`.fromEntries`; `new Set(iterable)` now accepts an initial-elements array (see [ADR-00159](../adr/ADR-00159.md)), but `new Map(entries)` still doesn't — each entry would need a real `[K, V]` tuple type, which this compiler doesn't have |
 | JSON | 9/11, ~82% | [JSON.md](JSON.md) | No nested-object `JSON.parse`; array-typed interface fields fail to compile instead of a clean rejection (known limitation) |
 | console | 11/12, ~92% | [CONSOLE.md](CONSOLE.md) | No `console.table()` |
 | Global functions & constants | 14/17, ~82% | [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md) | No `queueMicrotask`; `eval` has an opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |
 | Type system features | 17/23, ~74% | [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | Generics support any number of unconstrained type parameters, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md)); union types beyond `T \| null` now work but V1 is scalar-members-only, not nested inside a container, and without flow-based narrowing ([TDD-00043](../tdd/TDD-00043.md)); no intersection/tuple/mapped types |
-| Classes / OOP | 14/15, ~93% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | Real JS/TS `#x` runtime-private field syntax (a different mechanism from the `private` keyword modifier — scoped separately, see [TDD-00021](../tdd/TDD-00021.md)); no user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design) |
+| Classes / OOP | 15/15, 100% | [LANGUAGE-CONSTRUCTS.md](LANGUAGE-CONSTRUCTS.md) | No user-definable `class X extends Error` (built-in types aren't valid `extends` targets, by design); `#x` private names ([TDD-00021](../tdd/TDD-00021.md)/[ADR-00155](../adr/ADR-00155.md)) have no field-initializer syntax (pre-existing, not `#`-specific) and no early-error check for `#m`/`static #m` name collision or the `#constructor`-is-banned rule |
 | Modules | 14/15, ~93% | [MODULES.md](MODULES.md) | Whole-program compile only, with true per-file scoping, import aliasing ([TDD-00041](../tdd/TDD-00041.md)), `export default`/default imports, compile-time-only namespace imports ([TDD-00042](../tdd/TDD-00042.md)), re-exports ([TDD-00051](../tdd/TDD-00051.md)), dependency-ordered top-level execution for acyclic imported files ([TDD-00052](../tdd/TDD-00052.md)), bare-specifier resolution against a hand-built `klain_modules/<name>/` directory — klmpm Stage 1 only, no package-manager tool yet ([TDD-00054](../tdd/TDD-00054.md)) — and `import.meta.url` ([TDD-00055](../tdd/TDD-00055.md) Stage 1) — no namespace re-exports (`export * as ns from`); no npm/`node_modules` interop ([TDD-00053](../tdd/TDD-00053.md)); no dynamic `import()` yet (parses and is cleanly rejected, not silently mishandled — [TDD-00055](../tdd/TDD-00055.md)/[TDD-00056](../tdd/TDD-00056.md)); Node-style built-ins (`fs`/`path`/etc.) now require a default, namespace, or named import ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)) |
 
 ## Web Platform APIs
@@ -144,12 +144,13 @@ Every row below is marked ✅ (or 100%) on its own page — the feature genuinel
 | `.codePointAt()` / `.localeCompare()` (✅) | Byte-sequence stand-ins, not real Unicode/locale behavior — `.codePointAt()` is `.charCodeAt()` under another name (no surrogate-pair decoding), `.localeCompare()` is a plain `strcmp`. Correct only for ASCII/Latin-1 text | [STRING-METHODS.md](STRING-METHODS.md) |
 | `setImmediate` (✅) | Indistinguishable from a same-tick `setTimeout(fn, 0)` — real Node guarantees `setImmediate` fires first when scheduled from an I/O callback (distinct check/timers event-loop phases); this compiler's timer queue is a single flat fire-time-ordered list with no phase concept | [TIMERS.md](TIMERS.md) |
 | `XMLHttpRequest` / `WebSocket` (100% as part of Networking) | `XMLHttpRequest` only implements the spec's legacy synchronous mode (no default-async, callback-interleaved mode); `WebSocket` has no binary `.send()` and no `wss://`/TLS on either side | [NETWORKING.md](NETWORKING.md) |
+| Optional (`?:`) interface fields, under-assigned class fields, array destructuring past the source's length (all ✅/100%) | Read as a deterministic zero (or, for a nested-array destructured element, a safe empty array) — a real, documented simplification, not real JS's `undefined` (no general sentinel for that on a concrete scalar type). Previously read genuinely uninitialized/out-of-bounds heap memory instead, a real memory-safety bug fixed alongside this — see [ADR-00157](../adr/ADR-00157.md) | [ADR-00157](../adr/ADR-00157.md) |
 
 ---
 
 ## Design Documents (TDDs)
 
-Anything big enough to need a design pass before implementation gets scoped out in a Technical Design Document under `docs/tdd/` first. The full index — every TDD's number, title, status, and every ADR that implements it — lives in [`docs/tdd/README.md`](../tdd/README.md); that's the source of truth. Implemented TDDs aren't relisted here: their status page, linked from the coverage tables above, already carries their caveats. Likewise, several not-yet-done TDDs already have a live pointer elsewhere in this file — Memory Management's `auto` mode ([Cross-Cutting](#cross-cutting)), IndexedDB storage (Roadmap's "Later" tier), `#x` private fields (Classes / OOP row), vanilla-JS compatibility ([What Is NOT Implemented](#what-is-not-implemented) → High complexity), and `TextDecoder` non-UTF-8 (Encoding / Text row) — so they aren't repeated here either.
+Anything big enough to need a design pass before implementation gets scoped out in a Technical Design Document under `docs/tdd/` first. The full index — every TDD's number, title, status, and every ADR that implements it — lives in [`docs/tdd/README.md`](../tdd/README.md); that's the source of truth. Implemented TDDs aren't relisted here: their status page, linked from the coverage tables above, already carries their caveats. Likewise, several not-yet-done TDDs already have a live pointer elsewhere in this file — Memory Management's `auto` mode ([Cross-Cutting](#cross-cutting)), IndexedDB storage (Roadmap's "Later" tier), vanilla-JS compatibility ([What Is NOT Implemented](#what-is-not-implemented) → High complexity), and `TextDecoder` non-UTF-8 (Encoding / Text row) — so they aren't repeated here either.
 
 What's left below are the genuine orphans: not-started or partially-implemented TDDs with no other pointer anywhere in this file.
 
@@ -207,4 +208,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-11 — Object literal keys now accept string/numeric literals (`{"foo": 1}`, `{0: "a"}`), not just bare identifiers; found via the Test262 conformance report's largest addressable non-mega-scope buckets — see [ADR-00154](../adr/ADR-00154.md).*
+*Last updated: 2026-08-11 — Optional (`param?: T`) function parameters now actually work (the row was already marked ✅ but codegen never read `Param.Optional` at all, rejecting every omitted-argument call); fixed two pre-existing bugs found in passing along the way, array-typed default parameter values (hard compile error) and string concatenation with a null operand (segfault) — see [ADR-00164](../adr/ADR-00164.md)/[ADR-00165](../adr/ADR-00165.md).*

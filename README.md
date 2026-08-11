@@ -73,6 +73,8 @@ make ir FILE=examples/basics/basics.ts
 | `make fuzz [FUZZTIME=30s]` | Fuzz the lexer and parser |
 | `make fuzz-codegen [FUZZTIME=30s]` | Fuzz the full parse→codegen→clang→run pipeline (slower per-iteration) |
 | `make fuzz-all` | Run every fuzz target |
+| `make conformance-fetch` | Clone/update the pinned Test262 corpus into `.test262/` (idempotent, gitignored — see [Test262 conformance](#test262-conformance)) |
+| `make conformance` | Regenerate `docs/testing/CONFORMANCE-RESULTS.md` against the full Test262 corpus (fetches first if needed) |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
 ## CLI flags
@@ -118,6 +120,17 @@ build choices, not a portable fact this compiler could bake in safely.
 transitive dependency chain — so `--static` just works for it with zero
 extra flags, on both a bare Linux build and inside `Dockerfile.regexp-test`'s
 `scratch` container.
+
+## Test262 conformance
+
+`docs/testing/CONFORMANCE-RESULTS.md` is a generated report, not hand-written — regenerate it, don't edit it. It's produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/ADR-00153.md) for the full design/investigation.
+
+```sh
+make conformance-fetch   # clone the pinned test262 commit into .test262/ (idempotent, gitignored — ~263MB, not vendored)
+make conformance         # regenerate docs/testing/CONFORMANCE-RESULTS.md (fetches first if needed; ~30s, all CPU cores)
+```
+
+Both targets are safe to re-run on a fresh machine (a new dev machine, after `git clone`, or after switching hosts per this project's own "Machine switch" practice) — `make conformance` alone is enough; it fetches on demand. `tools/conformance/fetch.sh` pins an exact commit SHA (test262 has no versioned release tags upstream) so re-running reproduces the identical corpus; `tools/conformance/main.go` walks it directly as a Go library (no dependency on the `klainmain` binary being built first) and needs only `clang` on `PATH`, same as everything else here. `tools/conformance/harness-shim/` holds this repo's own compiler-compatible reimplementation of test262's shared `sta.js`/`assert.js` harness files (the real upstream ones use prototype-based pseudo-classes this compiler's type system can't represent) — every actual test file stays 100% unmodified.
 
 ## The pipeline, in one breath
 
@@ -179,7 +192,7 @@ docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
   status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail
-  testing/          Conformance-suite coverage tracking (Test262 ports run alongside the regular test suite)
+  testing/          Test262 conformance results — generated, not hand-written; see "Test262 conformance" above
 docker/             Dockerfiles verifying --static (+ fetch, + RegExp) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
   workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
@@ -190,6 +203,9 @@ parser/             Recursive-descent parser with Pratt precedence climbing
 resolver/           Module resolver: parses the entry file's transitive imports, merges into one AST
 main.go             CLI entry point
 tests/              End-to-end tests (parse → IR → clang → run → assert on stdout), split by feature area; shared harness in tests/compiler_test.go
+tools/
+  conformance/      Test262 runner — fetch.sh, main.go, harness-shim/; see "Test262 conformance" above
+  httpbin-lite/     Local HTTP fixture server backing `make examples`'s fetch/http examples (ADR-00096)
 VERSIONING.md       SemVer policy + the automated release mechanism
 Makefile            Build, test, and example targets
 ```

@@ -582,14 +582,23 @@ func (p *Parser) parseNewSetBody(pos ast.Pos) (*ast.NewSetExpression, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
+	// Optional initial-elements argument (`new Set([1, 2, 3])`) — an
+	// iterable per the real spec, narrowed here to "an array expression"
+	// (this compiler's own array/HOF machinery is the only iterable
+	// concept it has for a general expression in this position).
+	var init ast.Expression
 	if !p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: new Set() does not accept arguments", pos.Line, pos.Col)
+		var err error
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
 
-	return ast.NewNewSetExpression(elemType, pos), nil
+	return ast.NewNewSetExpression(elemType, init, pos), nil
 }
 
 func (p *Parser) parseNewEventEmitterBody(pos ast.Pos) (*ast.NewEventEmitterExpression, error) {
@@ -654,7 +663,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
 			}
 			isObject := p.check(lexer.LBRACE)
-			var arrPat []string
+			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
 			p.advance() // consume '{' or '['
 			if isObject {
@@ -672,7 +681,14 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 						}
 						local = aliasTok.Literal
 					}
-					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local})
+					var dflt ast.Expression
+					if p.match(lexer.ASSIGN) {
+						dflt, err = p.parseAssignment()
+						if err != nil {
+							return nil, err
+						}
+					}
+					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
 					if !p.match(lexer.COMMA) {
 						break
 					}
@@ -682,16 +698,32 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 				}
 			} else {
 				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+					if p.check(lexer.ELLIPSIS) {
+						p.advance() // consume '...'
+						nameTok, err := p.expect(lexer.IDENT)
+						if err != nil {
+							return nil, err
+						}
+						arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
+						break
+					}
 					if p.check(lexer.COMMA) {
 						p.advance() // hole — consume comma, record skip
-						arrPat = append(arrPat, "")
+						arrPat = append(arrPat, ast.ArrayPatternElem{})
 						continue
 					}
 					nameTok, err := p.expect(lexer.IDENT)
 					if err != nil {
 						return nil, err
 					}
-					arrPat = append(arrPat, nameTok.Literal)
+					var dflt ast.Expression
+					if p.match(lexer.ASSIGN) {
+						dflt, err = p.parseAssignment()
+						if err != nil {
+							return nil, err
+						}
+					}
+					arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
 					if !p.match(lexer.COMMA) {
 						break
 					}

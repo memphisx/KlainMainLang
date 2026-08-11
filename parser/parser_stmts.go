@@ -2,6 +2,7 @@ package parser
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/jsdoc"
 	"KlainMainLang/lexer"
 	"fmt"
 )
@@ -110,11 +111,50 @@ func (p *Parser) parseLabeledStatement() (*ast.LabeledStatement, error) {
 	return ast.NewLabeledStatement(label, body, posOf(tok)), nil
 }
 
-func (p *Parser) parseVarDecl(consumeSemi bool) (*ast.VarDeclaration, error) {
+// parseVarDecl parses `let/const/var name[: type][= init][, name2...];` —
+// one or more comma-separated declarators sharing one let/const/var. A
+// single declarator returns a plain *ast.VarDeclaration (unchanged from
+// before multi-declarator support existed); two or more return an
+// *ast.VarDeclarationList instead (see its own doc comment for why that's
+// not just a BlockStatement of several VarDeclarations). Returns
+// ast.Statement rather than a concrete type since callers (parseStatement,
+// parseForStatement's init clause) only ever use the result as a generic
+// statement — neither destructures a concrete *ast.VarDeclaration field
+// afterward.
+func (p *Parser) parseVarDecl(consumeSemi bool) (ast.Statement, error) {
 	doc := p.takeDoc()
 	tok := p.advance() // let / const / var
 	pos := posOf(tok)
 
+	first, err := p.parseOneVarDeclarator(tok.Literal, pos, doc)
+	if err != nil {
+		return nil, err
+	}
+	decls := []*ast.VarDeclaration{first}
+	for p.match(lexer.COMMA) {
+		declTok := p.peek()
+		d, err := p.parseOneVarDeclarator(tok.Literal, posOf(declTok), nil)
+		if err != nil {
+			return nil, err
+		}
+		decls = append(decls, d)
+	}
+
+	if consumeSemi {
+		p.consumeSemicolon()
+	}
+
+	if len(decls) == 1 {
+		return decls[0], nil
+	}
+	return ast.NewVarDeclarationList(decls, pos), nil
+}
+
+// parseOneVarDeclarator parses a single `name[: type][= init]` declarator —
+// either the first one right after let/const/var, or a subsequent one after
+// a comma. doc is only ever non-nil for the first declarator: a JSDoc
+// comment precedes the statement as a whole, not each individual name.
+func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comment) (*ast.VarDeclaration, error) {
 	nameTok, err := p.expect(lexer.IDENT)
 	if err != nil {
 		return nil, err
@@ -144,11 +184,7 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (*ast.VarDeclaration, error) {
 		}
 	}
 
-	if consumeSemi {
-		p.consumeSemicolon()
-	}
-
-	return ast.NewVarDeclaration(tok.Literal, nameTok.Literal, ta, init, pos), nil
+	return ast.NewVarDeclaration(kind, nameTok.Literal, ta, init, pos), nil
 }
 
 // defaultName, when non-empty, is used as the function's name if no IDENT
@@ -275,7 +311,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
 			}
 			isObject := p.check(lexer.LBRACE)
-			var arrPat []string
+			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
 			p.advance() // consume '{' or '['
 			if isObject {
@@ -293,7 +329,14 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 						}
 						local = aliasTok.Literal
 					}
-					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local})
+					var dflt ast.Expression
+					if p.match(lexer.ASSIGN) {
+						dflt, err = p.parseAssignment()
+						if err != nil {
+							return nil, err
+						}
+					}
+					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
 					if !p.match(lexer.COMMA) {
 						break
 					}
@@ -303,16 +346,32 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				}
 			} else {
 				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+					if p.check(lexer.ELLIPSIS) {
+						p.advance() // consume '...'
+						nameTok, err := p.expect(lexer.IDENT)
+						if err != nil {
+							return nil, err
+						}
+						arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
+						break
+					}
 					if p.check(lexer.COMMA) {
 						p.advance() // hole — consume comma, record skip
-						arrPat = append(arrPat, "")
+						arrPat = append(arrPat, ast.ArrayPatternElem{})
 						continue
 					}
 					nameTok, err := p.expect(lexer.IDENT)
 					if err != nil {
 						return nil, err
 					}
-					arrPat = append(arrPat, nameTok.Literal)
+					var dflt ast.Expression
+					if p.match(lexer.ASSIGN) {
+						dflt, err = p.parseAssignment()
+						if err != nil {
+							return nil, err
+						}
+					}
+					arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
 					if !p.match(lexer.COMMA) {
 						break
 					}
@@ -451,13 +510,23 @@ func (p *Parser) parseForStatement() (ast.Statement, error) {
 		return nil, err
 	}
 
-	// Update (optional)
-	var update ast.Expression
+	// Update (optional) — one or more comma-separated expressions
+	// (`i++, j--`), each evaluated purely for side effects every
+	// iteration; not the general comma operator (still out of scope
+	// everywhere else), just this one well-known idiom's grammar position.
+	var update []ast.Expression
 	if !p.check(lexer.RPAREN) {
-		var err error
-		update, err = p.parseExpression()
+		expr, err := p.parseExpression()
 		if err != nil {
 			return nil, err
+		}
+		update = append(update, expr)
+		for p.match(lexer.COMMA) {
+			expr, err := p.parseExpression()
+			if err != nil {
+				return nil, err
+			}
+			update = append(update, expr)
 		}
 	}
 
@@ -688,17 +757,38 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 	tok := p.advance() // let/const/var
 	pos := posOf(tok)
 	p.advance() // [
-	var names []string
+	var elems []ast.ArrayPatternElem
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+		if p.check(lexer.ELLIPSIS) {
+			// Rest element (`[a, ...rest]`, ADR-00161) — always last:
+			// break out immediately after, rather than looping for a
+			// trailing comma/further elements, so `[...rest, x]` hits a
+			// clean "expected ], got ," at the closing bracket instead of
+			// silently accepting a real syntax error.
+			p.advance() // consume '...'
+			nameTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
+			break
+		}
 		if p.check(lexer.COMMA) {
 			p.advance() // hole — consume comma, record skip
-			names = append(names, "")
+			elems = append(elems, ast.ArrayPatternElem{})
 		} else {
 			nameTok, err := p.expect(lexer.IDENT)
 			if err != nil {
 				return nil, err
 			}
-			names = append(names, nameTok.Literal)
+			var dflt ast.Expression
+			if p.match(lexer.ASSIGN) {
+				dflt, err = p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+			}
+			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -715,7 +805,7 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 		return nil, err
 	}
 	p.consumeSemicolon()
-	return ast.NewArrayDestructuring(tok.Literal, names, init, pos), nil
+	return ast.NewArrayDestructuring(tok.Literal, elems, init, pos), nil
 }
 
 func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
@@ -737,7 +827,14 @@ func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 			}
 			local = aliasTok.Literal
 		}
-		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local})
+		var dflt ast.Expression
+		if p.match(lexer.ASSIGN) {
+			dflt, err = p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+		}
+		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
 		if !p.match(lexer.COMMA) {
 			break
 		}

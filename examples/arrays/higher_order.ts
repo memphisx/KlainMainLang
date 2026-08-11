@@ -20,6 +20,24 @@ console.log(sum)  // 15
 const product = nums.reduce((acc, n) => acc * n, 1)
 console.log(product)  // 120
 
+// The initial value is optional — the array's own first element seeds the
+// accumulator, and the fold starts from the second element.
+const sumNoInitial = nums.reduce((acc, n) => acc + n)
+console.log(sumNoInitial)  // 15 (same as sum above)
+
+// With a single element and no initial value, the callback never runs —
+// the seeded first element is the whole result.
+const single: number[] = [42]
+console.log(single.reduce((acc, n) => acc + n))  // 42
+
+// An empty array with no initial value throws, matching real JS.
+const empty: number[] = []
+try {
+  empty.reduce((acc, n) => acc + n)
+} catch (e) {
+  console.log(e.message)  // Reduce of empty array with no initial value
+}
+
 // ── find ──────────────────────────────────────────────────────────────────────
 const first3 = nums.find(x => x > 3)
 console.log(first3)  // 4

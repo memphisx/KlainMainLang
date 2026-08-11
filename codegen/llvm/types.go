@@ -801,14 +801,19 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 // Fields for every non-class/non-error object type, but with the hidden
 // leading fields (tag, plus vtable pointer when HasVTable, plus the
 // EventEmitter listener-map handle when HasEventEmitter — TDD-00023)
-// stripped. Use this instead of Fields directly at any reflection/
-// enumeration call site (Object.keys, Object.values, Object.entries,
-// Object.assign, JSON.stringify, for...in, object-literal/spread field
-// copying) — GEP/field-access code should keep using Fields (via
-// FieldIndex) unchanged, since the hidden fields' presence is what makes
-// those indices correct in the first place.
+// stripped, and (TDD-00021) any `#`-named private field/method filtered out
+// regardless of position — real JS reflection never sees a private name at
+// all, unlike `private`/`protected` (a TypeScript-only, compile-time-erased
+// concept real JS reflection doesn't know exists). Use this instead of
+// Fields directly at any reflection/enumeration call site (Object.keys,
+// Object.values, Object.entries, Object.assign, JSON.stringify, for...in,
+// object-literal/spread field copying) — GEP/field-access code should keep
+// using Fields (via FieldIndex) unchanged, since the hidden fields'
+// presence is what makes those indices correct in the first place.
 func (t Type) VisibleFields() []Field {
-	if t.IsClass && len(t.Fields) > 0 {
+	fields := t.Fields
+	switch {
+	case t.IsClass && len(fields) > 0:
 		skip := 1
 		if t.HasVTable {
 			skip++
@@ -816,27 +821,37 @@ func (t Type) VisibleFields() []Field {
 		if t.HasEventEmitter {
 			skip++
 		}
-		return t.Fields[skip:]
+		fields = fields[skip:]
+	case t.IsError && len(fields) > 0:
+		fields = fields[1:]
+	case t.IsRegExp && len(fields) > 0:
+		fields = fields[1:]
+	case t.IsEventSource && len(fields) > 1:
+		fields = fields[2:]
+	case t.IsWSConnection && len(fields) > 0:
+		fields = fields[1:]
+	case t.IsWebSocketClient && len(fields) > 0:
+		fields = fields[1:]
+	case t.IsXHR && len(fields) > 2:
+		fields = fields[3:]
 	}
-	if t.IsError && len(t.Fields) > 0 {
-		return t.Fields[1:]
+	hasPrivate := false
+	for _, f := range fields {
+		if strings.HasPrefix(f.Name, "#") {
+			hasPrivate = true
+			break
+		}
 	}
-	if t.IsRegExp && len(t.Fields) > 0 {
-		return t.Fields[1:]
+	if !hasPrivate {
+		return fields
 	}
-	if t.IsEventSource && len(t.Fields) > 1 {
-		return t.Fields[2:]
+	visible := make([]Field, 0, len(fields))
+	for _, f := range fields {
+		if !strings.HasPrefix(f.Name, "#") {
+			visible = append(visible, f)
+		}
 	}
-	if t.IsWSConnection && len(t.Fields) > 0 {
-		return t.Fields[1:]
-	}
-	if t.IsWebSocketClient && len(t.Fields) > 0 {
-		return t.Fields[1:]
-	}
-	if t.IsXHR && len(t.Fields) > 2 {
-		return t.Fields[3:]
-	}
-	return t.Fields
+	return visible
 }
 
 // RequestType returns http.listen()'s request object type — spelled
@@ -1010,6 +1025,21 @@ func (t Type) Align() int {
 	return 8
 }
 
+// zeroLiteral returns t's LLVM zero-value literal text — used by
+// unpackArrayPatternInto's out-of-bounds fallback (a destructured position
+// past the source array's actual length reads as zero, a deliberate
+// simplification documented in ADR-00157, not real JS's `undefined`, which
+// this compiler has no general sentinel for on a concrete scalar type).
+func (t Type) zeroLiteral() string {
+	if t.Float {
+		return "0.0"
+	}
+	if t.IR == "ptr" {
+		return "null"
+	}
+	return "0"
+}
+
 // IsInteger returns true for integer (non-float) types.
 func (t Type) IsInteger() bool { return !t.Float && t.IR != "ptr" && t.IR != "void" }
 
@@ -1085,6 +1115,14 @@ type FuncSig struct {
 	RetType    Type
 	HasRest    bool             // last param is a rest (variadic) parameter
 	Defaults   []ast.Expression // per-param default expression; nil entry means no default
+	// Optional marks a `param?: T` parameter (ADR-00164) — a call site
+	// omitting it (and with no Defaults[i] expression either) gets T's own
+	// zero value (Type.zeroLiteral()) rather than a "missing argument"
+	// error, this compiler's established stand-in for real JS's
+	// `undefined` on a concrete type with no general sentinel for it (the
+	// same simplification ADR-00157's calloc fix and ADR-00158's
+	// destructuring defaults both already document).
+	Optional []bool
 }
 
 // ResolveTypeName maps a TypeScript or JSDoc type name to an LLVM Type.

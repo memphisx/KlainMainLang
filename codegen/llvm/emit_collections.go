@@ -68,13 +68,66 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 	return nil
 }
 
-// emitNewSetValue is emitNewMapValue's Set<T> sibling (TDD-00028).
+// emitNewSetValue is emitNewMapValue's Set<T> sibling (TDD-00028), extended
+// (ADR-00159) to accept an optional initial-elements array argument
+// (`new Set([1, 2, 3])`) — real spec takes any iterable, narrowed here to
+// an array expression, the only iterable concept a general expression has
+// in this compiler. elemTy is the explicit `<T>` type argument if given,
+// else inferred from the initializer array's own element type, else the
+// pre-existing string-element default for the bare no-argument form.
 func (e *Emitter) emitNewSetValue(init *ast.NewSetExpression) (Value, error) {
 	elemTy := TypePtr // default: string elements
+	var srcPtr, srcLen string
+	haveSrc := false
+	if init.Init != nil {
+		ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(init.Init, init.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		srcPtr, srcLen, elemTy, haveSrc = ptrReg, lenReg, srcElemTy, true
+	}
 	if init.ElemType != nil {
 		elemTy = e.resolveType(init.ElemType)
 	}
-	return Value{Ref: e.emitMapOrSetCreate(elemTy), Ty: SetType(elemTy)}, nil
+
+	setPtr := e.emitMapOrSetCreate(elemTy)
+
+	if haveSrc {
+		strElem := isStringTy(elemTy)
+		idxPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+		condL := e.freshLabel("set.init.cond")
+		bodyL := e.freshLabel("set.init.body")
+		endL := e.freshLabel("set.init.end")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+		e.emitLabel(condL)
+		idxReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxReg, idxPtr))
+		condReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxReg, srcLen))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
+
+		e.emitLabel(bodyL)
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, srcPtr, idxReg))
+		elemVal := e.loadArrayElem(gepReg, elemTy)
+		eRef := e.valueToMapKey(elemVal, elemTy)
+		if strElem {
+			e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", setPtr, eRef))
+		} else {
+			e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 0)", setPtr, eRef))
+		}
+		nextIdx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+		e.emitLabel(endL)
+	}
+
+	return Value{Ref: setPtr, Ty: SetType(elemTy)}, nil
 }
 
 // resolveMapOrSetForCall resolves a Map/Set method call's receiver expression

@@ -324,6 +324,13 @@ func (p *Parser) expectPropertyName() (lexer.Token, error) {
 	if p.check(lexer.DEFAULT) {
 		return p.advance(), nil
 	}
+	// A private name (`this.#x`, `obj.#x` — TDD-00021) is syntactically
+	// valid in member-access position; whether it names a field the
+	// enclosing class actually declares is a semantic check, not a parse
+	// one (checkMemberVisibility, codegen/llvm/emit_classes.go).
+	if p.check(lexer.PRIVATE_NAME) {
+		return p.advance(), nil
+	}
 	return p.expect(lexer.IDENT)
 }
 

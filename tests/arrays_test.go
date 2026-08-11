@@ -100,6 +100,48 @@ console.log(joined)
 `, "6\nabbccc")
 }
 
+// --- .reduce() with no initial value (ADR-00163) ---
+//
+// Matches real JS: the array's own first element seeds the accumulator,
+// the fold starts from index 1, and an empty array with no initial value
+// throws. This was already documented as supported ("reduce(fn, init?)")
+// before this fix — the implementation itself required exactly 2
+// arguments, a real code/doc mismatch, not a new feature.
+
+func TestE2EArrayReduceNoInitialValue(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [1, 2, 3, 4]
+console.log(arr.reduce((acc, val) => acc + val))
+`, "10")
+}
+
+func TestE2EArrayReduceNoInitialValueSingleElement(t *testing.T) {
+	// Callback never runs — the loop starts at index 1 with length 1, so
+	// the seeded first element is returned as-is.
+	assertOutput(t, `
+const arr: number[] = [42]
+console.log(arr.reduce((acc, val) => acc + val))
+`, "42")
+}
+
+func TestE2EArrayReduceWithInitialValueStillWorks(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [1, 2, 3, 4]
+console.log(arr.reduce((acc, val) => acc + val, 100))
+`, "110")
+}
+
+func TestE2EArrayReduceEmptyNoInitialValueThrows(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = []
+try {
+  arr.reduce((acc, val) => acc + val)
+} catch (e) {
+  console.log(e.message)
+}
+`, "Reduce of empty array with no initial value")
+}
+
 func TestE2EArraySort(t *testing.T) {
 	assertOutput(t, `
 const nums: number[] = [3, 1, 4, 1, 5, 9, 2, 6]
@@ -979,5 +1021,302 @@ func TestE2EArrayFlatDepthRejectedWhenNotCompileTimeConstant(t *testing.T) {
 		if _, err := parseAndCompile(src); err == nil {
 			t.Fatalf("expected a compile error for a non-compile-time-constant flat() depth, got none for: %s", src)
 		}
+	}
+}
+
+// --- Array destructuring (`let [a, b] = arr`) ---
+
+func TestE2EArrayDestructuringBasic(t *testing.T) {
+	assertOutput(t, `
+let [a, b, c] = [10, 20, 30];
+console.log(a, b, c);
+`, "10\n20\n30")
+}
+
+func TestE2EArrayDestructuringOutOfBoundsReadsZero(t *testing.T) {
+	// A pattern position past the source array's actual length is ordinary,
+	// valid JS (unlike plain out-of-bounds `arr[i]` indexing, which throws)
+	// — it must read a safe, deterministic zero, not garbage from whatever
+	// heap memory happens to sit past the source array's malloc'd buffer.
+	// Real bug found investigating destructuring defaults; see ADR-00157.
+	assertOutput(t, `
+let [a, b] = [1];
+console.log(a, b);
+`, "1\n0")
+}
+
+func TestE2EArrayDestructuringAllOutOfBoundsReadsZero(t *testing.T) {
+	assertOutput(t, `
+let arr: number[] = [];
+let [a, b] = arr;
+console.log(a, b);
+`, "0\n0")
+}
+
+func TestE2EArrayDestructuringNestedArrayOutOfBoundsIsEmptyArray(t *testing.T) {
+	// The out-of-bounds fallback for an array-typed destructured element
+	// (nested destructuring) is a safe empty array (null ptr, length 0),
+	// not the scalar zero literal used for every other element type.
+	assertOutput(t, `
+let [x, y] = [[1, 2, 3]];
+console.log(x[0]);
+console.log(y.length);
+`, "1\n0")
+}
+
+func TestE2EDestructuredArrayParamOutOfBoundsReadsZero(t *testing.T) {
+	assertOutput(t, `
+function f([a, b]: number[]): void {
+  console.log(a, b);
+}
+f([5]);
+`, "5\n0")
+}
+
+// --- Array destructuring default values (`[a = expr] = arr`, ADR-00158) ---
+//
+// Fires exactly when a pattern position is past the source array's actual
+// length (the same bounds check ADR-00157 added) — the one reliable "was
+// this provided" signal array destructuring has, unlike object
+// destructuring's field-shape restriction below.
+
+func TestE2EArrayDestructuringDefaultUsedWhenOutOfBounds(t *testing.T) {
+	assertOutput(t, `
+let [a = 10, b = 20] = [1];
+console.log(a, b);
+`, "1\n20")
+}
+
+func TestE2EArrayDestructuringDefaultNotUsedWhenInBounds(t *testing.T) {
+	assertOutput(t, `
+let [a = 10, b = 20] = [1, 2];
+console.log(a, b);
+`, "1\n2")
+}
+
+func TestE2EArrayDestructuringDefaultReferencesEarlierElement(t *testing.T) {
+	// Real JS: a later default may reference an earlier binding in the
+	// same pattern.
+	assertOutput(t, `
+let [a = 5, b = a] = [1];
+console.log(a, b);
+`, "1\n1")
+}
+
+func TestE2EArrayDestructuringDefaultCapturesOuterVariable(t *testing.T) {
+	assertOutput(t, `
+function make(): () => number {
+  let fallback = 42;
+  let [a = fallback] = [];
+  return () => a;
+}
+const fn = make();
+console.log(fn());
+`, "42")
+}
+
+func TestE2EDestructuredArrayParamDefault(t *testing.T) {
+	assertOutput(t, `
+function f([a = 10, b = 20]: number[]): void {
+  console.log(a, b);
+}
+f([1]);
+f([1, 2]);
+`, "1\n20\n1\n2")
+}
+
+// --- Array destructuring assignment (`[a, b] = expr`, ADR-00160) ---
+//
+// V1 scope, narrower than the declaration form: every target must be a
+// plain, already-declared, non-array, non-const variable — no nested
+// patterns, no rest, no per-element default.
+
+func TestE2EArrayDestructuringAssignmentBasic(t *testing.T) {
+	assertOutput(t, `
+let a: number, b: number;
+[a, b] = [1, 2];
+console.log(a, b);
+`, "1\n2")
+}
+
+func TestE2EArrayDestructuringAssignmentSwapIdiom(t *testing.T) {
+	assertOutput(t, `
+let a: number = 1;
+let b: number = 2;
+[a, b] = [b, a];
+console.log(a, b);
+`, "2\n1")
+}
+
+func TestE2EArrayDestructuringAssignmentFromVariable(t *testing.T) {
+	assertOutput(t, `
+let a: number = 0, b: number = 0;
+let src: number[] = [7];
+[a, b] = src;
+console.log(a, b);
+`, "7\n0")
+}
+
+func TestE2EArrayDestructuringAssignmentOutOfBoundsReadsZero(t *testing.T) {
+	assertOutput(t, `
+let a: number = 9, b: number = 9;
+[a, b] = [1];
+console.log(a, b);
+`, "1\n0")
+}
+
+func TestE2EArrayDestructuringAssignmentAtTopLevel(t *testing.T) {
+	// Top-level bindings go through the resolver's per-file name mangling
+	// (TDD-00041) — a real risk area this session (see ADR-00159's own
+	// finding for `new Set(arr)`); confirmed this feature needed no new
+	// resolver plumbing since it reuses ArrayLiteral/ObjectLiteral nodes
+	// the rename pass already traverses generically, but still verified
+	// directly rather than assumed.
+	assertOutput(t, `
+let a: number = 0;
+let b: number = 0;
+[a, b] = [9, 10];
+console.log(a, b);
+`, "9\n10")
+}
+
+func TestE2EArrayDestructuringAssignmentClosureCapture(t *testing.T) {
+	assertOutput(t, `
+function make(): () => number {
+  let a: number = 0;
+  let b: number = 0;
+  [a, b] = [3, 4];
+  return () => a + b;
+}
+const fn = make();
+console.log(fn());
+`, "7")
+}
+
+func TestE2EArrayDestructuringAssignmentConstTargetRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let a: number = 1;
+const b: number = 2;
+[a, b] = [3, 4];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error assigning into a const destructuring target")
+	}
+}
+
+func TestE2EArrayDestructuringAssignmentNestedTargetRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let arr: number[] = [1, 2];
+let x: number = 0;
+[arr[0], x] = [5, 6];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-identifier destructuring assignment target")
+	}
+}
+
+func TestE2EArrayDestructuringCompoundAssignmentRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let a: number = 1, b: number = 2;
+[a, b] += [1, 2];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for compound destructuring assignment")
+	}
+}
+
+// --- Array rest destructuring (`[a, ...rest]`, ADR-00161) ---
+//
+// A rest element collects every remaining source position into a real,
+// independent new array (malloc + memcpy — not an aliasing view into the
+// source's own backing buffer), defined even when the source is shorter
+// than the pattern (an empty array, not an error). Parser-enforced last
+// element, no default alongside it.
+
+func TestE2EArrayRestDestructuringBasic(t *testing.T) {
+	assertOutput(t, `
+let [a, ...rest] = [1, 2, 3];
+console.log(a, rest.length, rest[0], rest[1]);
+`, "1\n2\n2\n3")
+}
+
+func TestE2EArrayRestDestructuringEmptyWhenSourceExhausted(t *testing.T) {
+	assertOutput(t, `
+let [a, b, ...rest] = [1, 2];
+console.log(a, b, rest.length);
+`, "1\n2\n0")
+}
+
+func TestE2EArrayRestDestructuringWholeArray(t *testing.T) {
+	assertOutput(t, `
+let [...all] = [1, 2, 3];
+console.log(all.length, all[0], all[2]);
+`, "3\n1\n3")
+}
+
+func TestE2EArrayRestDestructuringIsIndependentCopy(t *testing.T) {
+	assertOutput(t, `
+let src: number[] = [1, 2, 3];
+let [a, ...rest] = src;
+src.push(99);
+console.log(rest.length);
+`, "2")
+}
+
+func TestE2EArrayRestDestructuredParam(t *testing.T) {
+	assertOutput(t, `
+function f([first, ...rest]: number[]): number {
+  return first + rest.length;
+}
+console.log(f([10, 20, 30, 40]));
+`, "13")
+}
+
+func TestE2EArrayRestDestructuringAssignment(t *testing.T) {
+	assertOutput(t, `
+let a: number = 0;
+let rest: number[] = [];
+[a, ...rest] = [1, 2, 3];
+console.log(a, rest.length);
+`, "1\n2")
+}
+
+func TestE2EArrayRestDestructuringAssignmentTargetMustBeArray(t *testing.T) {
+	_, err := parseAndCompile(`
+let a: number = 0;
+let notArr: number = 0;
+[a, ...notArr] = [1, 2, 3];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error assigning a rest target into a non-array variable")
+	}
+}
+
+func TestE2EArrayRestDestructuringAssignmentMustBeLast(t *testing.T) {
+	_, err := parseAndCompile(`
+let a: number = 0;
+let rest: number[] = [];
+[...rest, a] = [1, 2, 3];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest destructuring-assignment target that isn't last")
+	}
+}
+
+func TestE2EArrayRestDestructuringNotLastRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let [...rest, a] = [1, 2, 3];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest declaration element that isn't last")
+	}
+}
+
+func TestE2EArrayRestDestructuringWithDefaultRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let [...rest = []] = [1, 2, 3];
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest element combined with a default value")
 	}
 }
