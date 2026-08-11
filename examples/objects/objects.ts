@@ -123,3 +123,27 @@ console.log(base.hasOwnProperty('q'))     // 0
 // Object.hasOwn/.hasOwnProperty above, just as an operator: `key in obj`.
 console.log('x' in base)     // 1
 console.log('z' in base)     // 0
+
+// --- String/numeric-literal property keys ---
+// A key doesn't have to be a bare identifier — a string or numeric literal
+// works too and names the same field a matching identifier key would.
+interface Named { name: string; age: number }
+let quoted: Named = { "name": "Alice", "age": 30 }
+console.log(quoted.name)   // Alice
+console.log(quoted.age)    // 30
+
+// Identifier and string/numeric-literal keys can be mixed freely.
+let mixedKeys: Named = { "name": "Bob", age: 40 }
+console.log(mixedKeys.name)   // Bob
+console.log(mixedKeys.age)    // 40
+
+// A numeric-literal key isn't dot/bracket-readable back (no identifier or
+// static field-name syntax spells "0"; a "0"-named field also can't be
+// declared in an interface/type annotation — quoted names are an
+// object-literal-only extension, not yet a field-declaration one), but
+// it's a real field — visible to JSON.stringify, which walks the field
+// list by name rather than through source-level access syntax.
+function makeDigits() {
+    return { 0: "a", 1: "b" }
+}
+console.log(JSON.stringify(makeDigits()))   // {"0":"a","1":"b"}

@@ -81,17 +81,23 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 			continue
 		}
-		keyTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
+		// PropertyName: IDENT, or a STRING/NUMBER literal used as the key
+		// text (`{ "foo": 1 }`, `{ 0: 'a' }`) — real JS/TS allow both,
+		// only the identifier form supports shorthand.
+		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+			return nil, fmt.Errorf("%d:%d: expected property name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 		}
+		keyTok := p.advance()
 		var val ast.Expression
 		if p.check(lexer.COLON) {
 			p.advance() // ':'
+			var err error
 			val, err = p.parseAssignment()
 			if err != nil {
 				return nil, err
 			}
+		} else if keyTok.Type != lexer.IDENT {
+			return nil, fmt.Errorf("%d:%d: expected :, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 		} else {
 			// Shorthand property `{ x }` — sugar for `{ x: x }`, referencing
 			// the in-scope variable/binding of the same name.

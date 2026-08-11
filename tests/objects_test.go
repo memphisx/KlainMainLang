@@ -90,6 +90,46 @@ console.log(p.y)
 `, "5\n6")
 }
 
+// --- Object literal string/numeric-literal property keys ---
+
+func TestE2EObjectLiteralStringKeys(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const p: Point = { "x": 1, "y": 2 }
+console.log(p.x)
+console.log(p.y)
+`, "1\n2")
+}
+func TestE2EObjectLiteralNumericKeys(t *testing.T) {
+	// Numeric-literal keys (`{ 0: "a" }`) aren't dot/bracket-readable back
+	// (no interface can declare a "0"-named field, and bracket access on a
+	// static struct isn't supported) — verified instead through
+	// JSON.stringify, which walks the field list directly by name.
+	assertOutput(t, `
+function makeDigits() { return { 0: "a", 1: "b" } }
+console.log(JSON.stringify(makeDigits()))
+`, `{"0":"a","1":"b"}`)
+}
+func TestE2EObjectLiteralMixedKeyForms(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string; age: number }
+const u: User = { "name": "Alice", age: 30 }
+console.log(u.name)
+console.log(u.age)
+`, "Alice\n30")
+}
+func TestE2EObjectLiteralStringKeyShorthandRejected(t *testing.T) {
+	// A string-literal key has no shorthand form — `{ "foo" }` is invalid,
+	// matching real JS (unlike a bare-identifier key, a string isn't also a
+	// referenceable binding to shorthand from).
+	_, err := parseAndCompile(`
+const o = { "foo" }
+`)
+	if err == nil {
+		t.Fatal("expected a parse error for a string-keyed property with no value, got none")
+	}
+}
+
 // --- Object literal shorthand properties and spread ---
 
 func TestE2EObjectShorthandProps(t *testing.T) {

@@ -207,4 +207,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-11 — Test262 full-corpus conformance harness built and run (TDD-00008 Design V2): 4,475/53,578 (8.4%), a real external number rather than hand-curated ports. Surfaced and fixed a static-method call bug (missing default/rest/array-param handling), and added four real, previously-undocumented gaps to What Is NOT Implemented (function/class expressions, calling a call's result, generic object stringification) — see [ADR-00153](../adr/ADR-00153.md).*
+*Last updated: 2026-08-11 — Object literal keys now accept string/numeric literals (`{"foo": 1}`, `{0: "a"}`), not just bare identifiers; found via the Test262 conformance report's largest addressable non-mega-scope buckets — see [ADR-00154](../adr/ADR-00154.md).*
