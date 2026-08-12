@@ -1002,16 +1002,6 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		}
 		return expr, nil
 
-	case lexer.ASYNC:
-		// async (params) => expr / async (params): RetType => { ... }
-		p.advance() // consume 'async'
-		af, err := p.parseArrowFunction()
-		if err != nil {
-			return nil, err
-		}
-		af.IsAsync = true
-		return af, nil
-
 	case lexer.LBRACKET:
 		return p.parseArrayLiteral()
 
@@ -1031,6 +1021,49 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.SUPER:
 		p.advance()
 		return ast.NewSuperExpression(posOf(tok)), nil
+
+	case lexer.FUNCTION:
+		// Function expression: var f = function(x): T { return x; }
+		// Named function expressions (function fact(n) { ... }) are deferred
+		// to V2 (TDD-00060) — the name is visible only inside the function's
+		// own body, which needs new scope machinery this compiler doesn't have.
+		p.advance() // consume 'function'
+		fPos := posOf(tok)
+		var name string
+		if p.check(lexer.IDENT) {
+			name = p.advance().Literal
+			return nil, fmt.Errorf("%d:%d: named function expressions are not yet supported", fPos.Line, fPos.Col)
+		}
+		fd, err := p.parseFunctionRest(name, false, false)
+		if err != nil {
+			return nil, err
+		}
+		return ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, false, fPos), nil
+
+	case lexer.ASYNC:
+		// async (params) => expr / async (params): RetType => { ... }
+		// async function(x) { ... } — function expression variant
+		p.advance() // consume 'async'
+		if p.check(lexer.FUNCTION) {
+			p.advance() // consume 'function'
+			fPos := posOf(tok)
+			var name string
+			if p.check(lexer.IDENT) {
+				name = p.advance().Literal
+				return nil, fmt.Errorf("%d:%d: named function expressions are not yet supported", fPos.Line, fPos.Col)
+			}
+			fd, err := p.parseFunctionRest(name, true, false)
+			if err != nil {
+				return nil, err
+			}
+			return ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, true, fPos), nil
+		}
+		af, err := p.parseArrowFunction()
+		if err != nil {
+			return nil, err
+		}
+		af.IsAsync = true
+		return af, nil
 	}
 
 	return nil, fmt.Errorf("%d:%d: unexpected token %s in expression", tok.Line, tok.Col, tok.Type)

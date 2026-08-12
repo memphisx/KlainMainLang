@@ -99,6 +99,7 @@ func main() {
 	limit := flag.Int("limit", 0, "stop after N files (0 = no limit) — for smoke-testing the harness itself")
 	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for clang and for running each compiled test binary")
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
+	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
 	flag.Parse()
 
 	testDir := filepath.Join(*corpus, "test")
@@ -177,6 +178,18 @@ func main() {
 
 	if err := writeReport(*out, all); err != nil {
 		fatal("writing report: %v", err)
+	}
+	if *passList != "" {
+		var passing []string
+		for _, r := range all {
+			if r.Pass {
+				passing = append(passing, r.Path)
+			}
+		}
+		sort.Strings(passing)
+		if err := os.WriteFile(*passList, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
+			fatal("writing passlist: %v", err)
+		}
 	}
 	fmt.Fprintf(os.Stderr, "done. report written to %s\n", *out)
 }

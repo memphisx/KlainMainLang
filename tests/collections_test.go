@@ -206,6 +206,7 @@ console.log(s.has(20))
 console.log(s.has(30))
 `, "2\n1\n0")
 }
+
 // --- new Set(iterable) — ADR-00159 ---
 
 func TestE2ENewSetFromArrayLiteralNumber(t *testing.T) {

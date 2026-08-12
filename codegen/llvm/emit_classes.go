@@ -1992,6 +1992,7 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 //     Error, Date, Response, ...): constant false, matching real JS (a
 //     non-object or non-matching-constructor value is never `instanceof`
 //     anything).
+//
 // builtinInstanceofTypes maps a built-in type name usable on the right of
 // `instanceof` to a predicate over the left side's own already-evaluated
 // static Type (ADR-00162). Unlike errorKindIDs/e.classes above, none of

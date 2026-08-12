@@ -178,6 +178,24 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 }
 
+// emitScalarZero emits a zero constant of the given scalar type as a Value.
+// For an aggregate type (array {ptr,i64}) the caller should emit the two-part
+// insertvalue {ptr,i64} undef, ptr null, 0 / insertvalue {ptr,i64} ..., i64 0, 1
+// pattern directly instead — this helper is for scalar-typed zeros only.
+func (e *Emitter) emitScalarZero(t Type) Value {
+	zero := t.zeroLiteral()
+	reg := e.freshReg()
+	switch {
+	case t.Float:
+		e.emitInstr(fmt.Sprintf("%s = fadd %s %s, %s", reg, t.IR, zero, zero))
+	case t.IR == "ptr":
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 0 to ptr", reg))
+	default:
+		e.emitInstr(fmt.Sprintf("%s = or %s %s, %s", reg, t.IR, zero, zero))
+	}
+	return Value{Ref: reg, Ty: t}
+}
+
 // rejectNestedArrayElem returns a clear compile-time error when elemTy is
 // itself an array — used by array operations that either invoke a callback
 // with the loaded element (map/filter/forEach/reduce/find*/some/every/sort's

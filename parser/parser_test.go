@@ -369,9 +369,9 @@ func TestThisExpression(t *testing.T) {
 
 func TestParseError(t *testing.T) {
 	cases := []string{
-		"let",          // missing name
-		"const x =",   // missing initialiser
-		"if x { }",    // missing parens
+		"let",       // missing name
+		"const x =", // missing initialiser
+		"if x { }",  // missing parens
 		"class Foo { constructor() {} constructor() {} }", // duplicate constructor
 	}
 	for _, src := range cases {

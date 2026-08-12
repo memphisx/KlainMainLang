@@ -762,3 +762,159 @@ console.log(outer());
 		t.Fatal("expected a compile error for a generic nested function declaration, got none")
 	}
 }
+
+// --- Function expressions (TDD-00060) ---
+
+func TestE2EFunctionExpressionBasic(t *testing.T) {
+	assertOutput(t, `
+const add = function(x: number): number { return x + 1; };
+console.log(add(5));
+`, "6")
+}
+
+func TestE2EFunctionExpressionClosureCapture(t *testing.T) {
+	assertOutput(t, `
+const n = 10;
+const addN = function(x: number): number { return n + x; };
+console.log(addN(5));
+`, "15")
+}
+
+func TestE2EFunctionExpressionAsCallback(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [1, 2, 3];
+const doubled = arr.map(function(x: number): number { return x * 2; });
+console.log(doubled[0], doubled[1], doubled[2]);
+`, "2\n4\n6")
+}
+
+func TestE2EFunctionExpressionNoAnnotation(t *testing.T) {
+	assertOutput(t, `
+const triple = function(x) { return x * 3; };
+console.log(triple(7));
+`, "21")
+}
+
+func TestE2ENamedFunctionExpressionRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const fact = function factorial(n: number): number { return n; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a named function expression, got none")
+	}
+	if !strings.Contains(err.Error(), "named function expressions are not yet supported") {
+		t.Fatalf("expected 'named function expressions are not yet supported', got: %v", err)
+	}
+}
+
+func TestE2EDuplicateParamNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = function(a: number, a: number): number { return a; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a duplicate parameter name, got none")
+	}
+	if !strings.Contains(err.Error(), "duplicate parameter name") {
+		t.Fatalf("expected 'duplicate parameter name', got: %v", err)
+	}
+}
+
+func TestE2EDuplicateParamNameRejectedOnDeclaration(t *testing.T) {
+	_, err := parseAndCompile(`
+function f(a: number, a: number): number { return a; }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a duplicate parameter name, got none")
+	}
+	if !strings.Contains(err.Error(), "duplicate parameter name") {
+		t.Fatalf("expected 'duplicate parameter name', got: %v", err)
+	}
+}
+
+func TestE2EUseStrictNonSimpleParamListRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = function(a: number = 0): number { "use strict"; return a; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-simple parameter list under 'use strict', got none")
+	}
+	if !strings.Contains(err.Error(), "non-simple parameter list") {
+		t.Fatalf("expected 'non-simple parameter list', got: %v", err)
+	}
+}
+
+func TestE2EUseStrictEvalParamNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = function(eval: number): number { "use strict"; return eval; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'eval' as a strict-mode parameter name, got none")
+	}
+	if !strings.Contains(err.Error(), "cannot be a parameter name in strict mode") {
+		t.Fatalf("expected 'cannot be a parameter name in strict mode', got: %v", err)
+	}
+}
+
+func TestE2EUseStrictSimpleParamsAllowed(t *testing.T) {
+	assertOutput(t, `
+const f = function(a: number, b: number): number { "use strict"; return a + b; };
+console.log(f(2, 3));
+`, "5")
+}
+
+func TestE2EFunctionExpressionVoid(t *testing.T) {
+	assertOutput(t, `
+let count = 0;
+const bump = function() { count++; };
+bump();
+bump();
+console.log(count);
+`, "2")
+}
+
+func TestE2EUnannotatedFunctionExpressionParamHintedFromVarDeclFuncType(t *testing.T) {
+	assertOutput(t, `
+interface Box { value: number }
+let cb: (b: Box) => void = function(b) { console.log(b.value); };
+cb({ value: 42 })
+`, "42")
+}
+
+func TestE2EFunctionExpressionIIFE(t *testing.T) {
+	assertOutput(t, `
+console.log((function(x: number): number { return x + 1; })(5));
+`, "6")
+}
+
+func TestE2EDuplicateDestructuredParamNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function f({x}: {x: number}, {x}: {x: number}): number { return x; }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for two destructured params binding the same name, got none")
+	}
+	if !strings.Contains(err.Error(), "duplicate parameter name") {
+		t.Fatalf("expected 'duplicate parameter name', got: %v", err)
+	}
+}
+
+func TestE2ENestedFunctionExpressionDestructuredParamShadowsOuterCapture(t *testing.T) {
+	// A destructured parameter's real bound name is its pattern's field
+	// name, not the parameter's own synthetic internal name — a nested
+	// function expression's free-variable scan (run while gathering the
+	// *enclosing* closure's own captures) must know that, or it wrongly
+	// treats the inner `items` as an unresolved reference to the outer
+	// `items: number[]` array, hitting "capturing array variable 'items'
+	// in a closure is not yet supported" for code that never actually
+	// references the outer array at all.
+	assertOutput(t, `
+const items: number[] = [1, 2, 3];
+const outer = (): number => {
+    const inner = function({items}: {items: number}): number {
+        return items;
+    };
+    return inner({ items: 99 });
+};
+console.log(outer());
+`, "99")
+}

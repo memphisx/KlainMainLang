@@ -64,11 +64,11 @@ type Emitter struct {
 	// (emit_generics.go) — always ≥ every real class's TagID, so a
 	// Box<number> instance can never collide with an unrelated real class's
 	// runtime identity tag.
-	nextClassTagID           int64
-	enums                    map[string]map[string]Value // enum name → member name → constant value
-	currentRetType           Type                        // return type of the function being emitted
-	blockDone                bool                        // true after a terminator (ret/br) in the current block
-	closureCtr               int                         // monotonically increasing counter for unique closure names
+	nextClassTagID int64
+	enums          map[string]map[string]Value // enum name → member name → constant value
+	currentRetType Type                        // return type of the function being emitted
+	blockDone      bool                        // true after a terminator (ret/br) in the current block
+	closureCtr     int                         // monotonically increasing counter for unique closure names
 	// nestedFuncScopes/nestedFuncCtr — TDD-00057. One nestedFuncScope frame
 	// per enclosing function/closure body currently being emitted, pushed
 	// by pushNestedFuncScope and popped once that body finishes; searched
@@ -76,8 +76,8 @@ type Emitter struct {
 	// visible throughout its own enclosing body (hoisted, self-recursive,
 	// visible to its own further-nested descendants) without ever being
 	// entered into the flat, whole-program e.funcs map.
-	nestedFuncScopes []nestedFuncScope
-	nestedFuncCtr    int
+	nestedFuncScopes         []nestedFuncScope
+	nestedFuncCtr            int
 	usedStrlen               bool
 	usedMemcpy               bool
 	usedMemset               bool

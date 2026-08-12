@@ -17,7 +17,7 @@ import (
 // named (top-level) function / closure call-site machinery that has nowhere
 // else to live.
 
-// desugarTaggedTemplate builds the plain call `` tag`a${x}b` `` is
+// desugarTaggedTemplate builds the plain call “ tag`a${x}b` “ is
 // equivalent to — `tag(["a","b"], x)` — as a synthetic *ast.CallExpression:
 // a real array literal of the cooked quasis as the first argument, then
 // every interpolated expression untouched (no implicit stringification —
@@ -770,6 +770,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// Immediately-invoked arrow function: ((x: number) => x+1)(5)
 	if af, ok := ex.Callee.(*ast.ArrowFunction); ok {
 		closureVal, err := e.emitArrowFunction(af)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitClosureCallByPtr(closureVal.Ref, closureVal.Ty, ex.Args, ex.GetPos())
+	}
+
+	// Immediately-invoked function expression: (function(x: number) { return x+1; })(5)
+	if fe, ok := ex.Callee.(*ast.FunctionExpression); ok {
+		closureVal, err := e.emitFunctionExpression(fe, nil)
 		if err != nil {
 			return Value{}, err
 		}

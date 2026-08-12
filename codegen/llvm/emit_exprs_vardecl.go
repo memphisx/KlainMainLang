@@ -82,6 +82,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = e.inferExprType(init)
 		case *ast.ArrowFunction:
 			ty = e.inferExprType(init)
+		case *ast.FunctionExpression:
+			ty = e.inferExprType(init)
 		case *ast.MemberExpression:
 			ty = e.inferExprType(init)
 		case *ast.TaggedTemplateExpression:
@@ -143,7 +145,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					}
 				case "pop", "shift":
 					if arrId, ok := mem.Object.(*ast.Identifier); ok {
-						if s, found := e.lookup(arrId.Name); found && s.Ty.IsArray && s.Ty.ElemType != nil && s.Ty.ElemType.IsObject {
+						if s, found := e.lookup(arrId.Name); found && s.Ty.IsArray && s.Ty.ElemType != nil {
 							ty = *s.Ty.ElemType
 						}
 					}

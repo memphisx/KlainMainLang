@@ -281,11 +281,45 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 		return nil, err
 	}
 
+	// A function whose body's own first statement is a literal "use strict"
+	// directive is early-error-checked the same way real strict-mode code
+	// is: a non-simple parameter list (default/rest/destructured) is a
+	// SyntaxError, and so is binding 'eval' or 'arguments' as a parameter
+	// name. This only fires on the textually-first-statement case (real
+	// JS's directive prologue can hold more than one string-literal
+	// statement before "use strict") — narrower than the full spec rule,
+	// but covers the shape every real "use strict" function actually uses.
+	if bodyStartsWithUseStrict(body) {
+		for _, prm := range params {
+			if prm.ArrayPattern != nil || prm.ObjectPattern != nil || prm.Rest || prm.Default != nil {
+				return nil, fmt.Errorf("%d:%d: a strict-mode function cannot have a non-simple parameter list", pos.Line, pos.Col)
+			}
+			if prm.Name == "eval" || prm.Name == "arguments" {
+				return nil, fmt.Errorf("%d:%d: '%s' cannot be a parameter name in strict mode", pos.Line, pos.Col, prm.Name)
+			}
+		}
+	}
+
 	fd := &ast.FunctionDeclaration{
 		Name: name, TypeParams: typeParams, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
 	}
 	fd.SetPos(pos)
 	return fd, nil
+}
+
+// bodyStartsWithUseStrict reports whether body's first statement is a bare
+// "use strict" directive (an expression-statement string literal) — the
+// shape every real "use strict" function body uses in practice.
+func bodyStartsWithUseStrict(body *ast.BlockStatement) bool {
+	if body == nil || len(body.Body) == 0 {
+		return false
+	}
+	es, ok := body.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		return false
+	}
+	sl, ok := es.Expr.(*ast.StringLiteral)
+	return ok && sl.Value == "use strict"
 }
 
 func (p *Parser) parseParamList() ([]ast.Param, error) {
@@ -407,6 +441,15 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Duplicate parameter names are a SyntaxError in real JS for any
+		// non-simple parameter list (and always for TypeScript, which is
+		// this compiler's actual source language) — reject unconditionally
+		// rather than modeling sloppy-mode's narrower allowance.
+		for _, prm := range params {
+			if prm.Name == nameTok.Literal && prm.ArrayPattern == nil && prm.ObjectPattern == nil {
+				return nil, fmt.Errorf("%d:%d: duplicate parameter name '%s'", nameTok.Line, nameTok.Col, nameTok.Literal)
+			}
+		}
 		optional := p.match(lexer.QUESTION)
 		var ta *ast.TypeAnnotation
 		if p.check(lexer.COLON) {
@@ -429,6 +472,38 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 		}
 		if !p.match(lexer.COMMA) {
 			break
+		}
+	}
+	// Duplicate parameter names are a SyntaxError in real JS for any
+	// non-simple parameter list (and always for TypeScript, which is this
+	// compiler's actual source language) — reject unconditionally rather
+	// than modeling sloppy-mode's narrower allowance. Checked against each
+	// param's real bound name(s): a destructured param's synthetic Name
+	// (e.g. "__param0") never collides with anything, but its pattern's
+	// own field/element names do bind in the function body and must be
+	// checked the same as a plain param name would be.
+	seen := make(map[string]bool, len(params))
+	for _, prm := range params {
+		var names []string
+		switch {
+		case prm.ArrayPattern != nil:
+			for _, elem := range prm.ArrayPattern {
+				if elem.Name != "" {
+					names = append(names, elem.Name)
+				}
+			}
+		case prm.ObjectPattern != nil:
+			for _, prop := range prm.ObjectPattern {
+				names = append(names, prop.Local)
+			}
+		default:
+			names = []string{prm.Name}
+		}
+		for _, n := range names {
+			if seen[n] {
+				return nil, fmt.Errorf("%d:%d: duplicate parameter name '%s'", p.peek().Line, p.peek().Col, n)
+			}
+			seen[n] = true
 		}
 	}
 	return params, nil

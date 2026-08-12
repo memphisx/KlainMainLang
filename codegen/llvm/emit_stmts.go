@@ -3,8 +3,8 @@
 package llvm
 
 import (
-	"fmt"
 	"KlainMainLang/ast"
+	"fmt"
 )
 
 // namedLabel is one entry in Emitter.namedLabelStack: a label name and the
@@ -211,8 +211,8 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	condL := e.freshLabel("for.cond")
 	bodyL := e.freshLabel("for.body")
-	incL  := e.freshLabel("for.inc")
-	endL  := e.freshLabel("for.end")
+	incL := e.freshLabel("for.inc")
+	endL := e.freshLabel("for.end")
 
 	e.pushScope()
 	defer e.popScope()
@@ -262,7 +262,7 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 func (e *Emitter) emitWhile(s *ast.WhileStatement) error {
 	condL := e.freshLabel("while.cond")
 	bodyL := e.freshLabel("while.body")
-	endL  := e.freshLabel("while.end")
+	endL := e.freshLabel("while.end")
 
 	e.breakStack = append(e.breakStack, endL)
 	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
@@ -294,7 +294,7 @@ func (e *Emitter) emitWhile(s *ast.WhileStatement) error {
 
 func (e *Emitter) emitIf(s *ast.IfStatement) error {
 	thenL := e.freshLabel("if.then")
-	endL  := e.freshLabel("if.end")
+	endL := e.freshLabel("if.end")
 	elseL := endL
 	if s.Alternate != nil {
 		elseL = e.freshLabel("if.else")
@@ -354,8 +354,8 @@ func (e *Emitter) splitArrayAggregate(arrVal Value) (dataPtrAlloca, lenAlloca st
 func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	condL := e.freshLabel("forof.cond")
 	bodyL := e.freshLabel("forof.body")
-	incL  := e.freshLabel("forof.inc")
-	endL  := e.freshLabel("forof.end")
+	incL := e.freshLabel("forof.inc")
+	endL := e.freshLabel("forof.end")
 
 	e.pushScope()
 	defer e.popScope()
@@ -461,8 +461,8 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
-	idxVal  := e.freshReg()
-	lenVal  := e.freshReg()
+	idxVal := e.freshReg()
+	lenVal := e.freshReg()
 	condReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenVal, lenAlloca))
@@ -472,7 +472,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitLabel(bodyL)
 	dataPtr := e.freshReg()
 	idxVal2 := e.freshReg()
-	gepReg  := e.freshReg()
+	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
@@ -492,7 +492,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	e.emitLabel(incL)
 	idxVal3 := e.freshReg()
-	newIdx  := e.freshReg()
+	newIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))
@@ -655,7 +655,7 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 func (e *Emitter) emitDoWhile(s *ast.DoWhileStatement) error {
 	bodyL := e.freshLabel("dowhile.body")
 	condL := e.freshLabel("dowhile.cond")
-	endL  := e.freshLabel("dowhile.end")
+	endL := e.freshLabel("dowhile.end")
 
 	e.breakStack = append(e.breakStack, endL)
 	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
@@ -691,8 +691,8 @@ func (e *Emitter) emitDoWhile(s *ast.DoWhileStatement) error {
 func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	condL := e.freshLabel("forin.cond")
 	bodyL := e.freshLabel("forin.body")
-	incL  := e.freshLabel("forin.inc")
-	endL  := e.freshLabel("forin.end")
+	incL := e.freshLabel("forin.inc")
+	endL := e.freshLabel("forin.end")
 
 	e.pushScope()
 	defer e.popScope()
@@ -720,12 +720,12 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 
 	// Cache the {ptr, i64} aggregate fields into allocas so the loop can read them.
 	dataPtrAlloca := e.freshReg()
-	lenAlloca     := e.freshReg()
+	lenAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", dataPtrAlloca))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
 
 	dataExtract := e.freshReg()
-	lenExtract  := e.freshReg()
+	lenExtract := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataExtract, keysVal.Ref))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenExtract, keysVal.Ref))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataExtract, dataPtrAlloca))
@@ -744,8 +744,8 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
-	idxVal  := e.freshReg()
-	lenVal  := e.freshReg()
+	idxVal := e.freshReg()
+	lenVal := e.freshReg()
 	condReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenVal, lenAlloca))
@@ -755,7 +755,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	e.emitLabel(bodyL)
 	dataPtr := e.freshReg()
 	idxVal2 := e.freshReg()
-	gepReg  := e.freshReg()
+	gepReg := e.freshReg()
 	elemVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
@@ -770,7 +770,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 
 	e.emitLabel(incL)
 	idxVal3 := e.freshReg()
-	newIdx  := e.freshReg()
+	newIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))

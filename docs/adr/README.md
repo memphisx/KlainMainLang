@@ -204,3 +204,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00164](ADR-00164.md) | Optional (`param?: T`) function parameters | Extends [ADR-00157](ADR-00157.md), [ADR-00158](ADR-00158.md) |
 | [00165](ADR-00165.md) | String concatenation with a null operand | Found while implementing [ADR-00164](ADR-00164.md) |
 | [00166](ADR-00166.md) | Status-doc accuracy audit and the Strict Coverage metric | Found while implementing [ADR-00164](ADR-00164.md) |
+| [00167](ADR-00167.md) | Guard pop and shift against empty arrays | Fixes findings from [ADR-00166](ADR-00166.md) |
+| [00168](ADR-00168.md) | Function expressions (V1: anonymous only) + early-error checks that fix the conformance regressions it exposed | Implements [TDD-00060](../tdd/TDD-00060.md) |

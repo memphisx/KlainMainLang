@@ -127,6 +127,8 @@ func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy T
 	var err error
 	if af, ok := arg.(*ast.ArrowFunction); ok {
 		val, err = e.emitArrowFunctionWithHints(af, []Type{payloadTy})
+	} else if fe, ok := arg.(*ast.FunctionExpression); ok {
+		val, err = e.emitFunctionExpression(fe, []Type{payloadTy})
 	} else {
 		val, err = e.emitExpr(arg)
 	}

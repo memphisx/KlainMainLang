@@ -555,6 +555,26 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			rewriteBlock(e.Block, sc, lu)
 		}
 		sc.pop()
+	case *ast.FunctionExpression:
+		// Same treatment as ArrowFunction — the body's identifiers must be
+		// rewritten against the lookup table so they match mangled names
+		// registered in the emitter's scope stack.
+		sc.push()
+		bindParams(e.Params, sc, lu, e.GetPos())
+		rewritePatternDefaults(e.Params, sc, lu)
+		for i := range e.Params {
+			if e.Params[i].Type != nil {
+				rewriteType(e.Params[i].Type, sc, lu)
+			}
+			if e.Params[i].Default != nil {
+				e.Params[i].Default = rewriteExpr(e.Params[i].Default, sc, lu)
+			}
+		}
+		if e.RetType != nil {
+			rewriteType(e.RetType, sc, lu)
+		}
+		rewriteBlock(e.Body, sc, lu)
+		sc.pop()
 	case *ast.TemplateLiteral:
 		for i := range e.Exprs {
 			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)

@@ -64,6 +64,13 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if af, ok := expr.(*ast.ArrowFunction); ok && hint.IsFunc {
 		return e.emitArrowFunctionWithHints(af, hint.FuncParams)
 	}
+	// Same hint propagation, for a function expression assigned/passed into
+	// a declared function-typed slot (`let cb: (b: Box) => number =
+	// function(b) { return b.value; }`) — function expressions need the
+	// same outside-context typing an arrow function does (TDD-00060).
+	if fe, ok := expr.(*ast.FunctionExpression); ok && hint.IsFunc {
+		return e.emitFunctionExpression(fe, hint.FuncParams)
+	}
 	return e.emitExpr(expr)
 }
 

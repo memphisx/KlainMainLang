@@ -193,6 +193,24 @@ func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
 			return e.inferExprType(cb.Body), true
 		}
 		return TypeI64, true
+	case *ast.FunctionExpression:
+		if cb.RetType != nil {
+			return e.resolveType(cb.RetType), true
+		}
+		paramNames := make([]string, len(cb.Params))
+		paramTypes := make([]Type, len(cb.Params))
+		for i, p := range cb.Params {
+			paramNames[i] = p.Name
+			if p.Type != nil {
+				paramTypes[i] = e.resolveType(p.Type)
+			} else {
+				paramTypes[i] = TypeI64
+			}
+		}
+		if inferred, ok := e.inferUnannotatedReturnType(cb.Body, paramNames, paramTypes); ok {
+			return inferred, true
+		}
+		return TypeVoid, true
 	case *ast.Identifier:
 		if _, sig, found := e.resolveFuncRef(cb.Name); found {
 			return sig.RetType, true
@@ -958,6 +976,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					}
 					return objTy
 				}
+			case "push", "unshift":
+				// Returns the new length (i64), matching JS semantics.
+				return TypeI64
+			case "pop", "shift":
+				// Returns the removed element (or the element type's zero
+				// value on an empty array).  Must match emitPop/emitShift's
+				// own codegen-time type (the receiver's element type), not
+				// the generic fallback below (which would be TypeI64 for
+				// every untracked method, wrongly coercing a string element
+				// to an i64 store target).
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray && objTy.ElemType != nil {
+					return *objTy.ElemType
+				}
+				return objTy
+			case "splice":
+				// Returns the removed elements as a new array of the same
+				// kind as the receiver.
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsArray {
+					return objTy
+				}
 			}
 		}
 	case *ast.UnaryExpression:
@@ -1047,6 +1087,44 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				paramNames[i] = p.Name
 			}
 			if inferred, ok := e.inferUnannotatedReturnType(ex.Block, paramNames, params); ok {
+				ret = inferred
+			} else {
+				ret = TypeI64
+			}
+		} else {
+			ret = TypeVoid
+		}
+		fty := FuncType(params, ret)
+		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
+			fty.FuncHasRest = true
+		}
+		return fty
+	case *ast.FunctionExpression:
+		// Same type-inference as ArrowFunction above — a function expression
+		// is a block-only closure whose type is determined by param/return
+		// types and captures. Params use the same resolver; unlike arrows,
+		// function expressions never have expression bodies (Body is always
+		// a BlockStatement, never an Expression).
+		params := make([]Type, len(ex.Params))
+		for i, p := range ex.Params {
+			if p.Rest && p.Type == nil {
+				params[i] = ArrayOf(TypeI64)
+			} else if p.Type == nil {
+				params[i] = TypeI64
+				params[i].Inferred = true
+			} else {
+				params[i] = e.resolveType(p.Type)
+			}
+		}
+		var ret Type
+		if ex.RetType != nil {
+			ret = e.resolveType(ex.RetType)
+		} else if blockHasReturn(ex.Body) {
+			paramNames := make([]string, len(ex.Params))
+			for i, p := range ex.Params {
+				paramNames[i] = p.Name
+			}
+			if inferred, ok := e.inferUnannotatedReturnType(ex.Body, paramNames, params); ok {
 				ret = inferred
 			} else {
 				ret = TypeI64

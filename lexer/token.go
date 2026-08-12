@@ -55,25 +55,25 @@ const (
 	IMPLEMENTS
 
 	// Operators
-	PLUS         // +
-	MINUS        // -
-	STAR         // *
-	SLASH        // /
-	PERCENT      // %
-	ASSIGN       // =
-	EQ           // ==
-	NEQ          // !=
-	STRICT_EQ    // ===
-	STRICT_NEQ   // !==
-	LT           // <
-	GT           // >
-	LTE          // <=
-	GTE          // >=
-	AND          // &&
-	OR           // ||
-	NOT          // !
-	INC          // ++
-	DEC          // --
+	PLUS           // +
+	MINUS          // -
+	STAR           // *
+	SLASH          // /
+	PERCENT        // %
+	ASSIGN         // =
+	EQ             // ==
+	NEQ            // !=
+	STRICT_EQ      // ===
+	STRICT_NEQ     // !==
+	LT             // <
+	GT             // >
+	LTE            // <=
+	GTE            // >=
+	AND            // &&
+	OR             // ||
+	NOT            // !
+	INC            // ++
+	DEC            // --
 	PLUS_ASSIGN    // +=
 	MINUS_ASSIGN   // -=
 	STAR_ASSIGN    // *=
@@ -103,12 +103,12 @@ const (
 	NULLISH_ASSIGN     // ??=
 
 	// Punctuation
-	LPAREN    // (
-	RPAREN    // )
-	LBRACE    // {
-	RBRACE    // }
-	LBRACKET  // [
-	RBRACKET  // ]
+	LPAREN       // (
+	RPAREN       // )
+	LBRACE       // {
+	RBRACE       // }
+	LBRACKET     // [
+	RBRACKET     // ]
 	SEMICOLON    // ;
 	COLON        // :
 	COMMA        // ,
@@ -141,7 +141,7 @@ var tokenNames = map[TokenType]string{
 	ASYNC: "async", AWAIT: "await",
 	IMPORT: "import", EXPORT: "export",
 	ELLIPSIS: "...",
-	CLASS: "class", THIS: "this", INSTANCEOF: "instanceof",
+	CLASS:    "class", THIS: "this", INSTANCEOF: "instanceof",
 	EXTENDS: "extends", SUPER: "super",
 	STATIC: "static", PRIVATE: "private", PROTECTED: "protected", PUBLIC: "public",
 	ABSTRACT: "abstract", IMPLEMENTS: "implements",

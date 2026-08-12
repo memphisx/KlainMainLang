@@ -4,8 +4,8 @@
 package llvm
 
 import (
-	"fmt"
 	"KlainMainLang/ast"
+	"fmt"
 )
 
 // isStringTy returns true for a plain string (ptr, not object/array/closure).

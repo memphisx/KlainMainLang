@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -279,6 +280,76 @@ outer: while (i < 3) {
 }
 `, "0\n0\n1\n0\n2\n0")
 }
+func TestE2ELabeledBreakAcrossFunctionBoundaryRejected(t *testing.T) {
+	// A labeled break/continue can only target a loop in the *same*
+	// function — reaching into an enclosing function's loop from inside a
+	// nested closure would need a `br label` crossing into a different
+	// LLVM function's own label space, which is invalid IR. Found via
+	// ADR-00168's IIFE work: before the break/continue/named-label stacks
+	// were reset per function entry, this silently compiled to invalid IR
+	// that only `clang` rejected, not this compiler itself.
+	_, err := parseAndCompile(`
+var x = 0;
+LABEL1: do {
+    x++;
+    (function(){ break LABEL1; })();
+} while (0);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a labeled break crossing a function boundary, got none")
+	}
+	if !strings.Contains(err.Error(), "undefined label") {
+		t.Fatalf("expected 'undefined label', got: %v", err)
+	}
+}
+
+func TestE2ELabeledContinueAcrossFunctionBoundaryRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+var x = 0;
+LABEL1: do {
+    x++;
+    (function(){ continue LABEL1; })();
+} while (0);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a labeled continue crossing a function boundary, got none")
+	}
+	if !strings.Contains(err.Error(), "undefined label") {
+		t.Fatalf("expected 'undefined label', got: %v", err)
+	}
+}
+
+func TestE2EUnlabeledBreakAcrossFunctionBoundaryRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+for (let i = 0; i < 3; i++) {
+    (function(){ break; })();
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a bare break inside a closure nested in a loop, got none")
+	}
+	if !strings.Contains(err.Error(), "break statement outside of loop") {
+		t.Fatalf("expected 'break statement outside of loop', got: %v", err)
+	}
+}
+
+func TestE2EBreakInsideNestedClosureOwnLoopStillWorks(t *testing.T) {
+	// The fix must not reject a break/continue targeting a loop declared
+	// *within* the closure's own body — only one reaching into an
+	// enclosing function.
+	assertOutput(t, `
+const f = function(): number {
+    let sum = 0;
+    for (let i = 0; i < 5; i++) {
+        if (i === 3) { break; }
+        sum += i;
+    }
+    return sum;
+};
+console.log(f());
+`, "3")
+}
+
 func TestE2EBreakStillWorksWithoutSemicolon(t *testing.T) {
 	// Regression guard: a bare `break`/`continue` with no label, on its own
 	// line with no semicolon, must not swallow the next line's leading

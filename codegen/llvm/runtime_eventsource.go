@@ -172,7 +172,6 @@ func (e *Emitter) ensureEventSourceRuntime() {
 	e.emitGlobal("@__kml_es_cap = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_es_active = internal global i64 0, align 8")
 
-
 	// Fixed string constants the record parser/scan need — interned once
 	// here (Go-level) and embedded by name into the raw IR below, the same
 	// pattern ensureFetchAsync's own __kml_pending_finish uses for its

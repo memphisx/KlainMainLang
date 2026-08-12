@@ -84,6 +84,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitObjectLiteral(ex)
 	case *ast.ArrowFunction:
 		return e.emitArrowFunction(ex)
+	case *ast.FunctionExpression:
+		return e.emitFunctionExpression(ex, nil)
 	case *ast.TemplateLiteral:
 		return e.emitTemplateLiteral(ex)
 	case *ast.ConditionalExpression:

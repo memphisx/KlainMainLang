@@ -33,7 +33,35 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	savedPromiseTy := e.currentPromiseTy
 	savedCoroRetLabel := e.coroRetLabel
 
-	// Reset for this function.
+	// Reset for this function. break/continue/named-label stacks reset too
+	// (not just scopes) — a bare `break`/`continue` or a `break LABEL`/
+	// `continue LABEL` targeting an enclosing loop is only ever valid
+	// within that loop's own function; without this reset, a function
+	// declaration nested inside a live loop body would silently inherit
+	// the outer loop's break/continue targets and emit a `br label` into a
+	// different LLVM function's own label space — invalid IR clang itself
+	// would reject, not a clean compile-time error from this compiler.
+	// Restored via defer (not a plain assignment at the bottom of this
+	// function) because emitDoWhile/emitFor/etc. manage these same three
+	// fields with their own push-then-defer-pop pattern — if this
+	// function's body emission returns an error partway through (e.g.
+	// exactly the "undefined label" error this reset is meant to produce),
+	// a plain end-of-function restore is skipped, leaving the *enclosing*
+	// loop's own deferred pop to run against a stack it no longer
+	// recognizes (observed directly: a slice-bounds panic in emitDoWhile's
+	// own deferred cleanup, from restoring this via plain assignment
+	// instead of defer on a first attempt at this same fix).
+	savedBreakStack := e.breakStack
+	savedContinueStack := e.continueStack
+	savedNamedLabelStack := e.namedLabelStack
+	e.breakStack = nil
+	e.continueStack = nil
+	e.namedLabelStack = nil
+	defer func() {
+		e.breakStack = savedBreakStack
+		e.continueStack = savedContinueStack
+		e.namedLabelStack = savedNamedLabelStack
+	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
 	e.regCtr = 0
@@ -338,6 +366,27 @@ func envStructSize(caps []CapturedVar) int64 {
 
 // --- free-variable scanning ---
 
+// addParamBoundNames adds the names params actually bind in their own body
+// scope. A destructured param's real bound names are its pattern's field/
+// element names, not the param's own Name (a synthetic internal name, e.g.
+// "__param0", never referenced by the body) — see gatherCaptures' own
+// comment for the wrong-answer bug this avoids: a pattern field sharing a
+// name with an outer-scope variable must shadow it, not be free-variable-
+// scanned as a capture of the outer binding.
+func addParamBoundNames(bound map[string]bool, params []ast.Param) {
+	for _, p := range params {
+		bound[p.Name] = true
+		for _, elem := range p.ArrayPattern {
+			if elem.Name != "" {
+				bound[elem.Name] = true
+			}
+		}
+		for _, prop := range p.ObjectPattern {
+			bound[prop.Local] = true
+		}
+	}
+}
+
 func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bool) {
 	if expr == nil {
 		return
@@ -400,15 +449,23 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		for k, v := range bound {
 			innerBound[k] = v
 		}
-		for _, p := range x.Params {
-			innerBound[p.Name] = true
-		}
+		addParamBoundNames(innerBound, x.Params)
 		if x.Body != nil {
 			scanExprFV(x.Body, innerBound, result)
 		}
 		if x.Block != nil {
 			scanStmtsFV(x.Block.Body, innerBound, result)
 		}
+	case *ast.FunctionExpression:
+		// Function expression: its own params are bound within its body;
+		// no outer captures leak automatically but the body's free vars
+		// against the outer bound set ARE actual captures.
+		innerBound := make(map[string]bool, len(bound)+len(x.Params))
+		for k, v := range bound {
+			innerBound[k] = v
+		}
+		addParamBoundNames(innerBound, x.Params)
+		scanStmtsFV(x.Body.Body, innerBound, result)
 		// NumberLiteral, StringLiteral, BooleanLiteral: no identifiers
 	}
 }
@@ -533,29 +590,11 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 // function's body references (sorted for deterministic output). Array variables
 // cannot be captured yet (would require two env slots).
 func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
-	// Build the initial bound set from the arrow function's own params.
-	// A destructured param's real bound names are its pattern's field/
-	// element names, not p.Name itself (a synthetic internal name, e.g.
-	// "__param0", never referenced by the body) — found live while
-	// implementing destructured params: without this, a pattern field
-	// sharing a name with an outer-scope variable (e.g. `x`/`y` from a
-	// top-level `const [x, y] = ...`) was wrongly free-variable-scanned as
-	// a capture of the *outer* binding, and the capture-setup code below
-	// (which runs after the param-unpack code, both in the same function)
-	// then silently overwrote the correct local binding with the captured
-	// one — a real, wrong-answer bug, not just a rejection.
+	// Build the initial bound set from the arrow function's own params —
+	// see addParamBoundNames' own comment for why a destructured param's
+	// pattern names, not its synthetic p.Name, are what actually matters.
 	bound := make(map[string]bool, len(af.Params))
-	for _, p := range af.Params {
-		bound[p.Name] = true
-		for _, elem := range p.ArrayPattern {
-			if elem.Name != "" {
-				bound[elem.Name] = true
-			}
-		}
-		for _, prop := range p.ObjectPattern {
-			bound[prop.Local] = true
-		}
-	}
+	addParamBoundNames(bound, af.Params)
 	// Collect all identifier names referenced in the body.
 	refs := make(map[string]bool)
 	if af.Body != nil {
@@ -606,6 +645,28 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	savedCoroHdl := e.coroHdl
 	savedPromiseTy := e.currentPromiseTy
 	savedCoroRetLabel := e.coroRetLabel
+	// A closure's own break/continue/named-label context starts empty, not
+	// inherited from whatever loop happens to enclose it lexically — a
+	// `break`/`continue`/`break LABEL` inside this closure's body can only
+	// ever target a loop declared *within* this same closure, never one in
+	// the enclosing function (that would need a `br label` crossing into a
+	// different LLVM function's own label space, which is invalid IR).
+	// Restored via defer, not a plain assignment below — see
+	// emitFunctionDeclAs' identical reset for why: an error return
+	// partway through this closure's own body emission must not skip the
+	// restore, or an *enclosing* loop's own deferred break/continue/label
+	// stack pop panics on a stack it no longer recognizes.
+	savedBreakStack := e.breakStack
+	savedContinueStack := e.continueStack
+	savedNamedLabelStack := e.namedLabelStack
+	e.breakStack = nil
+	e.continueStack = nil
+	e.namedLabelStack = nil
+	defer func() {
+		e.breakStack = savedBreakStack
+		e.continueStack = savedContinueStack
+		e.namedLabelStack = savedNamedLabelStack
+	}()
 
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -1124,6 +1185,285 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	return Value{Ref: hdr, Ty: closureTy}, nil
 }
 
+// emitFunctionExpression handles an anonymous function expression
+// (`var f = function(x): T { return x; }`) — the same closure-value
+// construction emitArrowFunctionWithHints already uses for arrows, adapted
+// for a FunctionExpression's block-only body (function expressions never
+// have expression bodies) and with the same capture / LLVM-function-emission
+// / {funcPtr,envPtr} heap-allocation pipeline.
+func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Type) (Value, error) {
+	// Gather captured variables BEFORE resetting emitter state — the
+	// free-variable scan needs the enclosing scope's context (same
+	// ordering gatherCaptures uses for arrow functions).
+	refs := make(map[string]bool)
+	bound := make(map[string]bool, len(fe.Params))
+	addParamBoundNames(bound, fe.Params)
+	scanStmtsFV(fe.Body.Body, bound, refs)
+
+	var caps []CapturedVar
+	for name := range refs {
+		sym, found := e.lookup(name)
+		if !found {
+			continue
+		}
+		if sym.Ty.IsArray {
+			return Value{}, fmt.Errorf("capturing array variable '%s' in a closure is not yet supported", name)
+		}
+		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
+	}
+	// Sort for deterministic LLVM output.
+	for i := 0; i < len(caps); i++ {
+		for j := i + 1; j < len(caps); j++ {
+			if caps[i].Name > caps[j].Name {
+				caps[i], caps[j] = caps[j], caps[i]
+			}
+		}
+	}
+
+	// Resolve param types.
+	paramTypes := make([]Type, len(fe.Params))
+	for i, p := range fe.Params {
+		if p.Rest && p.Type == nil {
+			paramTypes[i] = ArrayOf(TypeI64)
+		} else if p.Type == nil && i < len(hints) {
+			paramTypes[i] = hints[i]
+		} else if p.Type == nil {
+			paramTypes[i] = TypeI64
+			paramTypes[i].Inferred = true
+		} else {
+			paramTypes[i] = e.resolveType(p.Type)
+		}
+		if isUnconstrainedDynamic(paramTypes[i]) || containsDynamicElement(paramTypes[i]) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", fe.GetPos().Line, fe.GetPos().Col)
+		}
+		if err := validateUnionMembers(paramTypes[i], fe.GetPos().Line, fe.GetPos().Col); err != nil {
+			return Value{}, err
+		}
+	}
+
+	// Resolve return type.
+	var retTy Type
+	if fe.RetType != nil {
+		retTy = e.resolveType(fe.RetType)
+		if isUnconstrainedDynamic(retTy) || containsDynamicElement(retTy) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", fe.GetPos().Line, fe.GetPos().Col)
+		}
+		if err := validateUnionMembers(retTy, fe.GetPos().Line, fe.GetPos().Col); err != nil {
+			return Value{}, err
+		}
+	} else if blockHasReturn(fe.Body) {
+		paramNames := make([]string, len(fe.Params))
+		for i, p := range fe.Params {
+			paramNames[i] = p.Name
+		}
+		if inferred, ok := e.inferUnannotatedReturnType(fe.Body, paramNames, paramTypes); ok {
+			retTy = inferred
+		} else {
+			retTy = TypeI64
+		}
+	} else {
+		retTy = TypeVoid
+	}
+
+	// Emit the LLVM function for this closure. Reuse emitClosureFunc by
+	// adapting to its ArrowFunction-typed interface — the only ArrowFunction
+	// fields emitClosureFunc actually uses are Params, Block, Body, IsAsync,
+	// and GetPos. Block and Body are mutually exclusive; function expressions
+	// only ever have a Body (block), never an expression body.
+	closureName := fmt.Sprintf("@__closure_%d", e.closureCtr)
+	e.closureCtr++
+
+	savedAllocas := e.allocas
+	savedBody := e.body
+	savedRegCtr := e.regCtr
+	savedLabelCtr := e.labelCtr
+	savedScopes := e.scopes
+	savedRetType := e.currentRetType
+	savedBlockDone := e.blockDone
+	savedIsAsync := e.isAsync
+	savedCoroHdl := e.coroHdl
+	savedPromiseTy := e.currentPromiseTy
+	savedCoroRetLabel := e.coroRetLabel
+	// Same reset emitClosureFunc gives an arrow function's own break/
+	// continue/named-label context, restored via defer for the same
+	// reason (see its comment) — an error return partway through this
+	// function expression's own body must not skip the restore, or an
+	// enclosing loop's own deferred stack pop panics.
+	savedBreakStack := e.breakStack
+	savedContinueStack := e.continueStack
+	savedNamedLabelStack := e.namedLabelStack
+	e.breakStack = nil
+	e.continueStack = nil
+	e.namedLabelStack = nil
+	defer func() {
+		e.breakStack = savedBreakStack
+		e.continueStack = savedContinueStack
+		e.namedLabelStack = savedNamedLabelStack
+	}()
+
+	e.allocas = strings.Builder{}
+	e.body = strings.Builder{}
+	e.regCtr = 0
+	e.labelCtr = 0
+	e.scopes = nil
+	e.blockDone = false
+	e.currentRetType = retTy
+	e.isAsync = fe.IsAsync
+	e.coroHdl = ""
+	e.currentPromiseTy = TypeVoid
+	e.coroRetLabel = ""
+	e.pushScope()
+	if err := e.pushNestedFuncScope(fe.Body.Body); err != nil {
+		return Value{}, err
+	}
+	defer e.popNestedFuncScope()
+
+	if fe.IsAsync {
+		if retTy.IsPromise && retTy.PromiseType != nil {
+			e.currentPromiseTy = *retTy.PromiseType
+		}
+		e.coroRetLabel = e.freshLabel("coro.ret")
+		e.emitAsyncPrologue()
+	}
+
+	// Build the LLVM parameter list string and alloca+store each regular param.
+	// Mirrors emitClosureFunc's own identical shape exactly.
+	paramStr := "ptr %env"
+	closureParamTypes := paramTypes // save a copy before the loop consumes paramTypes
+	for _, p := range fe.Params {
+		pty := paramTypes[0]
+		paramTypes = paramTypes[1:] // consume
+		if pty.IsArray {
+			paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
+			ptrAlloca := "%v_" + p.Name + "_ptr"
+			lenAlloca := "%v_" + p.Name + "_len"
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			if p.ArrayPattern != nil {
+				dataPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				elemTy := TypeI64
+				if pty.ElemType != nil {
+					elemTy = *pty.ElemType
+				}
+				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", elemTy, p.ArrayPattern); err != nil {
+					return Value{}, err
+				}
+				continue
+			}
+			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			continue
+		}
+		paramStr += fmt.Sprintf(", %s %%p_%s", pty.IR, p.Name)
+		ptrName := "%v_" + p.Name
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+		if p.ObjectPattern != nil {
+			objPtrReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+			if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, fe.GetPos()); err != nil {
+				return Value{}, err
+			}
+			continue
+		}
+		e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+	}
+
+	// Set up captured-variable access — same pattern emitClosureFunc uses.
+	if len(caps) > 0 {
+		ir := envStructIR(caps)
+		for i, cap := range caps {
+			slotGep := fmt.Sprintf("%%vcapslot_%s", cap.Name)
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
+			cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
+			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
+		}
+	}
+
+	// Emit the body.
+	for _, stmt := range fe.Body.Body {
+		if err := e.emitStmt(stmt); err != nil {
+			return Value{}, err
+		}
+	}
+	if fe.IsAsync {
+		e.emitAsyncEpilogue()
+	} else if retTy.IR == "void" {
+		e.emitTerminator("ret void")
+	} else {
+		e.emitTerminator("unreachable")
+	}
+
+	// Write the function into e.functions — exactly the same
+	// pattern emitClosureFunc uses: define + allocas + body + }.
+	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
+		retTy.LLVMRetType(), closureName, paramStr))
+	e.functions.WriteString(e.allocas.String())
+	e.functions.WriteString(e.body.String())
+	e.functions.WriteString("}\n")
+
+	// Restore state.
+	e.allocas = savedAllocas
+	e.body = savedBody
+	e.regCtr = savedRegCtr
+	e.labelCtr = savedLabelCtr
+	e.scopes = savedScopes
+	e.currentRetType = savedRetType
+	e.blockDone = savedBlockDone
+	e.isAsync = savedIsAsync
+	e.coroHdl = savedCoroHdl
+	e.currentPromiseTy = savedPromiseTy
+	e.coroRetLabel = savedCoroRetLabel
+
+	// Allocate the {funcPtr, envPtr} closure header.
+	e.ensureMalloc()
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+
+	fpSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", closureName, fpSlot))
+
+	epSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, hdr))
+	if len(caps) > 0 {
+		envSize := envStructSize(caps)
+		envIR := envStructIR(caps)
+		env := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envSize))
+		for i, cap := range caps {
+			cellPtr := cap.Sym.Ptr
+			if !cap.Sym.Boxed {
+				newCell := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, cap.Ty.Align()))
+				curVal := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+					curVal, cap.Ty.IR, cap.Sym.Ptr, cap.Ty.Align()))
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
+					cap.Ty.IR, curVal, newCell, cap.Ty.Align()))
+				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
+				cellPtr = newCell
+			}
+			slotReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
+				slotReg, envIR, env, i))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, epSlot))
+	} else {
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", epSlot))
+	}
+
+	closureTy := FuncType(closureParamTypes, retTy)
+	if len(fe.Params) > 0 && fe.Params[len(fe.Params)-1].Rest {
+		closureTy.FuncHasRest = true
+	}
+	return Value{Ref: hdr, Ty: closureTy}, nil
+}
+
 // --- closure call paths ---
 
 // emitClosureCall calls a closure whose header pointer is stored in sym.Ptr.
@@ -1308,6 +1648,12 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 			return Callback{}, err
 		}
 		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
+	case *ast.FunctionExpression:
+		v, err := e.emitFunctionExpression(cb, nil)
+		if err != nil {
+			return Callback{}, err
+		}
+		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
 	case *ast.Identifier:
 		if mangled, sig, found := e.resolveFuncRef(cb.Name); found {
 			return Callback{kind: cbNamed, name: mangled, sig: sig}, nil
@@ -1327,6 +1673,13 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 func (e *Emitter) resolveCallbackWithHints(arg ast.Expression, hints []Type) (Callback, error) {
 	if af, ok := arg.(*ast.ArrowFunction); ok {
 		v, err := e.emitArrowFunctionWithHints(af, hints)
+		if err != nil {
+			return Callback{}, err
+		}
+		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
+	}
+	if fe, ok := arg.(*ast.FunctionExpression); ok {
+		v, err := e.emitFunctionExpression(fe, hints)
 		if err != nil {
 			return Callback{}, err
 		}

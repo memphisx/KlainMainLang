@@ -27,6 +27,35 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
 
+	// Guard: empty array — return the element type's zero value and leave
+	// length unchanged (0). Real JS returns `undefined`; this compiler has
+	// no general sentinel for that on a concrete scalar type, so we return
+	// the type's own zero value — the same simplification already used by
+	// optional parameters, under-assigned class fields, and destructuring
+	// past the source's length (ADR-00157/ADR-00158/ADR-00164).
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, curLen))
+
+	emptyL := e.freshLabel("pop.empty")
+	popL := e.freshLabel("pop.pop")
+	doneL := e.freshLabel("pop.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, emptyL, popL))
+
+	e.emitLabel(emptyL)
+	var zeroVal Value
+	if elemTy.IsArray {
+		// Nested-array element: zero is a {null, 0} aggregate.
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
+		zeroVal = Value{Ref: r1, Ty: elemTy}
+	} else {
+		zeroVal = e.emitScalarZero(elemTy)
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(popL)
 	newLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", newLen, curLen))
 
@@ -35,8 +64,18 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	result := e.loadArrayElem(slot, elemTy)
 
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
-	return result, nil
+	e.emitLabel(doneL)
+	phiReg := e.freshReg()
+	if elemTy.IsArray {
+		// Nested array: {ptr, i64} aggregate.
+		e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", phiReg, zeroVal.Ref, emptyL, result.Ref, popL))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, popL))
+	}
+
+	return Value{Ref: phiReg, Ty: elemTy}, nil
 }
 
 // emitSplice implements arr.splice(start, deleteCount?, ...items): removes
@@ -297,6 +336,11 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 }
 
 // emitShift implements arr.shift(): save ptr[0], memmove left, decrement len.
+// On an empty array, returns the element type's zero value and leaves length
+// unchanged (0) — real JS returns `undefined`, but this compiler has no general
+// sentinel for that on a concrete scalar type (the same simplification used by
+// optional params, class-field zero-initialization, and destructuring past the
+// source length — ADR-00157/ADR-00158/ADR-00164).
 func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: shift takes no arguments", pos.Line, pos.Col)
@@ -319,6 +363,29 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
 
+	// Guard: empty array — return the element type's zero value.
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, curLen))
+
+	emptyL := e.freshLabel("shift.empty")
+	shiftL := e.freshLabel("shift.shift")
+	doneL := e.freshLabel("shift.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, emptyL, shiftL))
+
+	e.emitLabel(emptyL)
+	var zeroVal Value
+	if elemTy.IsArray {
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
+		zeroVal = Value{Ref: r1, Ty: elemTy}
+	} else {
+		zeroVal = e.emitScalarZero(elemTy)
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(shiftL)
 	// save first element before moving
 	result := e.loadArrayElem(curPtr, elemTy)
 
@@ -334,8 +401,17 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", curPtr, src, moveBytes))
 
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
-	return result, nil
+	e.emitLabel(doneL)
+	phiReg := e.freshReg()
+	if elemTy.IsArray {
+		e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", phiReg, zeroVal.Ref, emptyL, result.Ref, shiftL))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, shiftL))
+	}
+
+	return Value{Ref: phiReg, Ty: elemTy}, nil
 }
 
 // emitUnshift implements arr.unshift(val): realloc, memmove right, write at [0], increment len.

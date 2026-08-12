@@ -700,6 +700,29 @@ func NewArrowFunction(params []Param, retType *TypeAnnotation, body Expression, 
 	return &ArrowFunction{Params: params, RetType: retType, Body: body, Block: block, pos: pos}
 }
 
+// --- Function expressions ---
+
+// FunctionExpression is an anonymous function expression (`var f = function(x): number { return x; }`).
+// It may capture variables from its enclosing scope (closure) — the same runtime
+// closure machinery arrow functions already use. Name is "" for anonymous;
+// a named function expression is a V1 scope cut (TDD-00060).
+type FunctionExpression struct {
+	Name    string // "" for anonymous, rejected for named V1
+	Params  []Param
+	RetType *TypeAnnotation // nil = infer
+	Body    *BlockStatement
+	IsAsync bool
+	pos     Pos
+}
+
+func (*FunctionExpression) nodeMarker()   {}
+func (*FunctionExpression) exprMarker()   {}
+func (f *FunctionExpression) GetPos() Pos { return f.pos }
+
+func NewFunctionExpression(name string, params []Param, retType *TypeAnnotation, body *BlockStatement, isAsync bool, pos Pos) *FunctionExpression {
+	return &FunctionExpression{Name: name, Params: params, RetType: retType, Body: body, IsAsync: isAsync, pos: pos}
+}
+
 // --- Template literals ---
 
 // TemplateLiteral represents a template literal `text ${expr} text`.
@@ -718,7 +741,7 @@ func NewTemplateLiteral(quasis []string, exprs []Expression, pos Pos) *TemplateL
 	return &TemplateLiteral{Quasis: quasis, Exprs: exprs, pos: pos}
 }
 
-// TaggedTemplateExpression represents `` tag`text ${expr} text` `` — a
+// TaggedTemplateExpression represents “ tag`text ${expr} text` “ — a
 // template literal immediately preceded by the callable expression that
 // tags it. Quasis/Exprs have the same "len(Quasis) == len(Exprs)+1" shape
 // TemplateLiteral's own do; Quasis holds only the cooked form (no `.raw` —
@@ -1345,8 +1368,8 @@ type TypeAnnotation struct {
 	Name        string // e.g. "number", "string", "int32", "uint8", "float64"
 	Source      string // "ts" or "jsdoc"
 	Fields      []AnnotField
-	ElemType    *TypeAnnotation // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
-	KeyType     *TypeAnnotation // non-nil only for Map<K,V> — the key type K
+	ElemType    *TypeAnnotation   // non-nil for { ... }[], or Promise<T>/Array<T>/Set<T>'s T, or Map<K,V>'s V
+	KeyType     *TypeAnnotation   // non-nil only for Map<K,V> — the key type K
 	TypeArgs    []*TypeAnnotation // N type arguments for a user-defined generic interface usage, e.g. Box<number, string> (TDD-00037); built-ins keep using ElemType/KeyType above, unrelated to this field
 	IsFuncType  bool
 	FuncParams  []TypeAnnotation // param types for function type annotations

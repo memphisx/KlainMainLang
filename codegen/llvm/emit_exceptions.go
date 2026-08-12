@@ -2,8 +2,8 @@
 package llvm
 
 import (
-	"fmt"
 	"KlainMainLang/ast"
+	"fmt"
 )
 
 // errorKinds is the fixed, built-in Error kind enum (TDD-00013 Option A) —
@@ -140,22 +140,23 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 // emitTry emits a try/catch/finally statement using setjmp/longjmp.
 //
 // Control flow layout:
-//   current_block → (setjmp == 0) → try_body
-//                 → (setjmp != 0) → catch_block
-//   try_body   → (success) → after
-//   catch_block            → after
-//   after      → finally body (inline)
+//
+//	current_block → (setjmp == 0) → try_body
+//	              → (setjmp != 0) → catch_block
+//	try_body   → (success) → after
+//	catch_block            → after
+//	after      → finally body (inline)
 func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	e.ensureExceptionHelpers()
 
-	tryL   := e.freshLabel("try.body")
+	tryL := e.freshLabel("try.body")
 	catchL := e.freshLabel("try.catch")
 	afterL := e.freshLabel("try.after")
 
 	// Push a jmpbuf slot and call setjmp.
 	jmpbuf := e.freshReg()
-	sjRet  := e.freshReg()
-	threw  := e.freshReg()
+	sjRet := e.freshReg()
+	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
 	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sjRet, jmpbuf))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))

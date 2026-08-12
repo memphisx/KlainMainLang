@@ -897,6 +897,58 @@ console.log(matrix.length);
 `, "1\n4\n9\n1\n3\n5\n2")
 }
 
+// --- pop on empty array: returns element type's zero value, length stays 0 ---
+
+func TestE2EPopOnEmptyArray(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [];
+const result = arr.pop();
+console.log(result);
+console.log(arr.length);
+`, "0\n0")
+}
+
+func TestE2EPopOnEmptyStringArray(t *testing.T) {
+	assertOutput(t, `
+const arr: string[] = [];
+const result = arr.pop();
+console.log("result:", result);
+console.log("len:", arr.length);
+`, "result:\nnull\nlen:\n0")
+}
+
+// --- shift on empty array: returns element type's zero value, length stays 0 ---
+
+func TestE2EShiftOnEmptyArray(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [];
+const result = arr.shift();
+console.log(result);
+console.log(arr.length);
+`, "0\n0")
+}
+
+func TestE2EShiftOnEmptyStringArray(t *testing.T) {
+	assertOutput(t, `
+const arr: string[] = [];
+const result = arr.shift();
+console.log("result:", result);
+console.log("len:", arr.length);
+`, "result:\nnull\nlen:\n0")
+}
+
+// --- pop/shift on non-empty array still works normally (non-regression) ---
+
+func TestE2EPopShiftOnNonEmptyArray(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = [10, 20, 30];
+console.log(arr.pop());
+console.log(arr.shift());
+console.log(arr.length);
+console.log(arr[0]);
+`, "30\n10\n1\n20")
+}
+
 func TestE2ENestedArrayHOFCallbacks(t *testing.T) {
 	// See this section's own header comment for the ADR-00151/TDD-00059
 	// fix that made all of these work — previously every one of these was

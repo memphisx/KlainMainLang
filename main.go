@@ -1,6 +1,8 @@
 package main
 
 import (
+	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/resolver"
 	"flag"
 	"fmt"
 	"os"
@@ -8,8 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"KlainMainLang/codegen/llvm"
-	"KlainMainLang/resolver"
 )
 
 func main() {
