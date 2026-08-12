@@ -24,6 +24,19 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	if v.Ty.IR == target.IR {
 		return v
 	}
+	// Boxing a concrete scalar into a dynamic/union box ({ i8, i64 }): the
+	// target is NOT a machine integer, but IsInteger() reports true for it
+	// (any non-ptr/non-float/non-void IR, the aggregate box included), so
+	// without this guard the int->int branch below would emit an invalid
+	// `trunc i64 ... to { i8, i64 }`. Boxing is emitBoxValue's job, not a
+	// cast; callers that must surface a boxing error do so before reaching
+	// coerce (see emit_call.go / emitStaticMethodCall) — here it is a
+	// best-effort backstop so no coerce call site can produce that bad IR.
+	if target.IsDynamic && !v.Ty.IsDynamic {
+		if boxed, err := e.emitBoxValue(v); err == nil {
+			return boxed
+		}
+	}
 	reg := e.freshReg()
 
 	srcInt := v.Ty.IsInteger()

@@ -1806,7 +1806,25 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(val, paramTy)
+		// A dynamic/union parameter (the { i8, i64 } tag+payload box) needs
+		// its argument *boxed* (insertvalue), not run through coerce: coerce
+		// has no notion of boxing, and because IsInteger() reports true for
+		// the box's aggregate IR it would otherwise misfire into an integer
+		// `trunc i64 -> { i8, i64 }` (invalid IR, clang-stage failure).
+		// Mirrors the free-function call path in emit_call.go, which already
+		// handles this — this static-method call site had only the bare
+		// coerce, silently breaking every static method with a union/any
+		// parameter (e.g. the Test262 harness shim's `assert.sameValue`).
+		if paramTy.IsDynamic {
+			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
+				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
+			}
+			if val, err = e.emitBoxValue(val); err != nil {
+				return Value{}, err
+			}
+		} else if paramTy.IR != "" {
+			val = e.coerce(val, paramTy)
+		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
 	if sig.HasRest {

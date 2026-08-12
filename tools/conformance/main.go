@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"KlainMainLang/codegen/llvm"
@@ -207,6 +208,31 @@ func loadHarness(dir string, names []string) (string, error) {
 	return b.String(), nil
 }
 
+// killableCommand builds an exec.Cmd whose whole process *group* is killed
+// when ctx expires, and which never blocks Wait for more than a moment once
+// killed. Both matter for the pathological inputs in this corpus: a handful
+// of files generate tens of MB of LLVM IR (39MB seen), on which `clang -O2`
+// runs for many minutes. Plain exec.CommandContext + CombinedOutput would
+// (a) kill only the clang *driver*, leaving its forked `clang -cc1` child
+// orphaned and still running, and (b) block Wait indefinitely reading the
+// output pipe that orphaned child still holds open — so one bad file could
+// hang the whole run far past its per-file timeout. Setpgid + a group-wide
+// SIGKILL on cancel reaps the child too; WaitDelay bounds any residual
+// pipe wait. Unix-only attrs, fine on this project's Linux+macOS targets.
+func killableCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			// Negative pid ⇒ signal the entire process group.
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
+
 // runOne compiles and (if applicable) runs a single test262 file, returning
 // its classification. Recovers from a panic in this compiler's own
 // parser/codegen so one crashing input can't take down the whole batch —
@@ -283,11 +309,15 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if out, err := exec.CommandContext(cctx, "clang", clangArgs...).CombinedOutput(); err != nil {
+	var clangOut bytes.Buffer
+	clangCmd := killableCommand(cctx, "clang", clangArgs...)
+	clangCmd.Stdout = &clangOut
+	clangCmd.Stderr = &clangOut
+	if err := clangCmd.Run(); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			res.Reason = "CLANG_TIMEOUT"
 		} else {
-			res.Reason = normalizeReason("CLANG_ERROR", firstLine(string(out)))
+			res.Reason = normalizeReason("CLANG_ERROR", firstLine(clangOut.String()))
 		}
 		return res
 	}
@@ -296,7 +326,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
 	defer rcancel()
 	var stdout, stderr bytes.Buffer
-	runCmd := exec.CommandContext(rctx, binFile)
+	runCmd := killableCommand(rctx, binFile)
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
 	runErr := runCmd.Run()

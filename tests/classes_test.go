@@ -1639,3 +1639,39 @@ class Sum {
 console.log(Sum.first([9, 8]));
 `, "9")
 }
+
+// A static method whose parameter is a constrained union / dynamic box
+// ({ i8, i64 }) must have its scalar argument *boxed*, not run through
+// coerce: the static-call path previously used a bare coerce, and because
+// IsInteger() reports true for the box's aggregate IR that misfired into an
+// invalid `trunc i64 ... to { i8, i64 }` (clang-stage failure). This is the
+// exact shape the Test262 harness shim's `assert.sameValue` relies on.
+func TestE2EStaticMethodUnionParam(t *testing.T) {
+	assertOutput(t, `
+class Check {
+    static eq(actual: number | string | boolean, expected: number | string | boolean): void {
+        if (actual === expected) { console.log("ok"); return; }
+        console.log("no");
+    }
+}
+Check.eq(1 + 1, 2);
+Check.eq("a" + "b", "ab");
+Check.eq(true, false);
+`, "ok\nok\nno")
+}
+
+// The `| null` member of a static method's union parameter accepts both
+// `null` and `undefined` arguments (union V1's Nullable branch) — the
+// `assert.sameValue(x, undefined)` / `..., null)` comparison shape.
+func TestE2EStaticMethodUnionParamNullMember(t *testing.T) {
+	assertOutput(t, `
+class Check {
+    static eq(actual: number | string | boolean | null, expected: number | string | boolean | null): void {
+        if (actual === expected) { console.log("same"); return; }
+        console.log("diff");
+    }
+}
+Check.eq(1, undefined);
+Check.eq(2, 2);
+`, "diff\nsame")
+}

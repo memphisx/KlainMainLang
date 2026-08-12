@@ -19,12 +19,14 @@
 // as a parameter type outright, and confirmed directly (empirically, not
 // assumed) that a per-method generic type parameter (`static
 // sameValue<T>(...)`) doesn't parse on a class method at all ("expected :,
-// got <"). A *constrained* union (`number | string | boolean`) does work
-// as a parameter type, though (isUnconstrainedDynamic only rejects the
+// got <"). A *constrained* union (`number | string | boolean | null`) does
+// work as a parameter type, though (isUnconstrainedDynamic only rejects the
 // bare/unconstrained form — codegen/llvm/emit_dynamic.go) — used here
-// instead. This covers every scalar value; a call passing an object,
-// array, or null/undefined fails to compile at that specific call site, a
-// real and visible (not hidden) gap for those files.
+// instead. The `| null` member accepts both `null` and `undefined`
+// arguments (the pre-existing Nullable branch of union V1), covering the
+// very common `assert.sameValue(x, undefined)` / `..., null)` comparisons.
+// A call passing an object or array still fails to compile at that specific
+// call site, a real and visible (not hidden) gap for those files.
 //
 // `assert.throws(ErrorConstructor, fn)` is even more fundamentally
 // unavailable in full: real JS passes a built-in error type (`TypeError`,
@@ -47,14 +49,14 @@ class assert {
         throw new Test262Error(message);
     }
 
-    static sameValue(actual: number | string | boolean, expected: number | string | boolean, message: string = ""): void {
+    static sameValue(actual: number | string | boolean | null, expected: number | string | boolean | null, message: string = ""): void {
         if (actual === expected) {
             return;
         }
         throw new Test262Error("assert.sameValue failed: " + message);
     }
 
-    static notSameValue(actual: number | string | boolean, unexpected: number | string | boolean, message: string = ""): void {
+    static notSameValue(actual: number | string | boolean | null, unexpected: number | string | boolean | null, message: string = ""): void {
         if (actual !== unexpected) {
             return;
         }
