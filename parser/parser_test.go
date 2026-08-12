@@ -224,6 +224,119 @@ func TestFunctionDeclaration(t *testing.T) {
 	if fn.Name != "add" || len(fn.Params) != 2 {
 		t.Errorf("name=%q params=%d", fn.Name, len(fn.Params))
 	}
+	if fn.IsGenerator {
+		t.Error("plain function declaration should not be IsGenerator")
+	}
+}
+
+// --- Generator functions (TDD-00061) ---
+
+func TestGeneratorFunctionDeclaration(t *testing.T) {
+	prog := mustParse(t, "function* gen() { yield 1; }")
+	fn, ok := prog.Body[0].(*ast.FunctionDeclaration)
+	if !ok {
+		t.Fatalf("expected FunctionDeclaration, got %T", prog.Body[0])
+	}
+	if fn.Name != "gen" || !fn.IsGenerator {
+		t.Errorf("name=%q isGenerator=%v", fn.Name, fn.IsGenerator)
+	}
+}
+
+func TestAsyncGeneratorFunctionDeclaration(t *testing.T) {
+	prog := mustParse(t, "async function* gen() { yield 1; }")
+	fn, ok := prog.Body[0].(*ast.FunctionDeclaration)
+	if !ok {
+		t.Fatalf("expected FunctionDeclaration, got %T", prog.Body[0])
+	}
+	if !fn.IsGenerator || !fn.IsAsync {
+		t.Errorf("isGenerator=%v isAsync=%v", fn.IsGenerator, fn.IsAsync)
+	}
+}
+
+func TestYieldExpressionWithArgument(t *testing.T) {
+	prog := mustParse(t, "function* gen() { yield 1 + 2; }")
+	fn := prog.Body[0].(*ast.FunctionDeclaration)
+	es := fn.Body.Body[0].(*ast.ExpressionStatement)
+	y, ok := es.Expr.(*ast.YieldExpression)
+	if !ok {
+		t.Fatalf("expected YieldExpression, got %T", es.Expr)
+	}
+	if y.Delegate {
+		t.Error("plain yield should not be Delegate")
+	}
+	if _, ok := y.Argument.(*ast.BinaryExpression); !ok {
+		t.Errorf("expected a BinaryExpression argument, got %T", y.Argument)
+	}
+}
+
+func TestYieldStarExpression(t *testing.T) {
+	prog := mustParse(t, "function* gen() { yield* other(); }")
+	fn := prog.Body[0].(*ast.FunctionDeclaration)
+	es := fn.Body.Body[0].(*ast.ExpressionStatement)
+	y, ok := es.Expr.(*ast.YieldExpression)
+	if !ok {
+		t.Fatalf("expected YieldExpression, got %T", es.Expr)
+	}
+	if !y.Delegate {
+		t.Error("yield* should be Delegate")
+	}
+}
+
+func TestBareYieldNoOperand(t *testing.T) {
+	prog := mustParse(t, "function* gen() { yield; }")
+	fn := prog.Body[0].(*ast.FunctionDeclaration)
+	es := fn.Body.Body[0].(*ast.ExpressionStatement)
+	y, ok := es.Expr.(*ast.YieldExpression)
+	if !ok {
+		t.Fatalf("expected YieldExpression, got %T", es.Expr)
+	}
+	if y.Argument != nil {
+		t.Errorf("bare yield should have a nil Argument, got %v", y.Argument)
+	}
+}
+
+func TestYieldNoOperandBeforeLineTerminator(t *testing.T) {
+	// Same ASI restriction as a bare return/break/continue: a line
+	// terminator right after `yield` means no operand — the next line's
+	// leading expression must not be swallowed as yield's own argument.
+	prog := mustParse(t, "function* gen() { yield\n1; }")
+	fn := prog.Body[0].(*ast.FunctionDeclaration)
+	if len(fn.Body.Body) != 2 {
+		t.Fatalf("expected 2 statements (yield; then 1;), got %d", len(fn.Body.Body))
+	}
+	es := fn.Body.Body[0].(*ast.ExpressionStatement)
+	y, ok := es.Expr.(*ast.YieldExpression)
+	if !ok {
+		t.Fatalf("expected YieldExpression, got %T", es.Expr)
+	}
+	if y.Argument != nil {
+		t.Errorf("yield before a line terminator should have a nil Argument, got %v", y.Argument)
+	}
+}
+
+func TestYieldAsAssignmentRHS(t *testing.T) {
+	// `x = yield y` must parse as `x = (yield y)` — yield binds at
+	// assignment precedence, lower than the ternary/logical/etc. chain.
+	prog := mustParse(t, "function* gen() { x = yield y; }")
+	fn := prog.Body[0].(*ast.FunctionDeclaration)
+	es := fn.Body.Body[0].(*ast.ExpressionStatement)
+	assign, ok := es.Expr.(*ast.AssignmentExpression)
+	if !ok {
+		t.Fatalf("expected AssignmentExpression, got %T", es.Expr)
+	}
+	if _, ok := assign.Right.(*ast.YieldExpression); !ok {
+		t.Errorf("expected assignment RHS to be a YieldExpression, got %T", assign.Right)
+	}
+}
+
+func TestYieldReservedAsIdentifier(t *testing.T) {
+	// `yield` is a hard keyword in this compiler (matching `await`'s own
+	// precedent, not real JS's narrower "reserved only inside a generator
+	// body" rule) — see TDD-00061.
+	_, err := parser.Parse("let yield = 5;")
+	if err == nil {
+		t.Fatal("expected a parse error using 'yield' as a plain identifier, got none")
+	}
 }
 
 // --- Literals ---

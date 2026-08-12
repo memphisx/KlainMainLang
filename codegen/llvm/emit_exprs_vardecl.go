@@ -89,6 +89,23 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.TaggedTemplateExpression:
 			ty = e.inferExprType(init)
 		case *ast.CallExpression:
+			// Generator construction (TDD-00061/ADR-00172): `gen(args)`'s
+			// own type is the constructed instance's GenTy — checked before
+			// the callee-name switch below, which has no case for it
+			// (GenTy deliberately isn't IsObject/IsArray/IsFunc/etc., same
+			// reasoning IsEventEmitter's own type doesn't trigger any of
+			// this switch's other type-preserving branches either, so
+			// without this check `ty` would silently stay this whole
+			// switch's blind TypeI64 default — confirmed directly: without
+			// this case, `const g = gen();` allocated an i64-sized slot for
+			// what emitExpr(v.Init) actually produces as a ptr-typed
+			// generator instance, a hard clang-stage type mismatch, not
+			// just a wrong result).
+			if id, ok := init.Callee.(*ast.Identifier); ok {
+				if info, found := e.generators[id.Name]; found {
+					ty = info.GenTy
+				}
+			}
 			if callee, ok := init.Callee.(*ast.Identifier); ok {
 				switch callee.Name {
 				case "fetch":

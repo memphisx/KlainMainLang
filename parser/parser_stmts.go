@@ -194,6 +194,13 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.FunctionDeclaration, error) {
 	doc := p.takeDoc()
 	p.advance() // 'function'
+	// `function* name() {}` / `async function* name() {}` (TDD-00061) — V1
+	// scope is a top-level/nested function declaration only, so this check
+	// lives here rather than in parseFunctionRest (also called for class
+	// methods and, via parser_literals.go's own separate `case
+	// lexer.FUNCTION:`, function expressions — neither gets generator
+	// support in V1).
+	isGenerator := p.match(lexer.STAR)
 
 	name := defaultName
 	if p.check(lexer.IDENT) {
@@ -207,6 +214,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 	if err != nil {
 		return nil, err
 	}
+	fd.IsGenerator = isGenerator
 	// TDD-00010 V2: `/** @erased */` opts a generic function out of default
 	// monomorphization. Validated here (not deferred to codegen) so the
 	// error points at the declaration itself, same as every other JSDoc
@@ -786,21 +794,60 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 	var finally *ast.BlockStatement
 
 	if p.check(lexer.CATCH) {
-		p.advance() // consume 'catch'
+		catchTok := p.advance() // consume 'catch'
+		catchPos := posOf(catchTok)
 		var paramName string
+		var objPattern []ast.DestructProp
 		// Optional catch binding: `catch { ... }` with no `(e)` at all.
 		if p.check(lexer.LPAREN) {
 			p.advance()
-			paramTok, err := p.expect(lexer.IDENT)
-			if err != nil {
-				return nil, err
-			}
-			paramName = paramTok.Literal
-			// Optional type annotation on catch param — skip it.
-			if p.check(lexer.COLON) {
-				p.advance()
-				if _, err := p.parseTypeAnnotation("ts"); err != nil {
+			if p.check(lexer.LBRACE) {
+				// Destructured catch binding: `catch ({ message, name }) {
+				// ... }` — same object-pattern shape parseObjectDestructuring
+				// parses for a `const {..} = ..` declaration, minus the
+				// trailing `= init` (the caught value is the implicit source).
+				p.advance() // '{'
+				for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+					keyTok, err := p.expect(lexer.IDENT)
+					if err != nil {
+						return nil, err
+					}
+					local := keyTok.Literal
+					if p.check(lexer.COLON) {
+						p.advance()
+						aliasTok, err := p.expect(lexer.IDENT)
+						if err != nil {
+							return nil, err
+						}
+						local = aliasTok.Literal
+					}
+					var dflt ast.Expression
+					if p.match(lexer.ASSIGN) {
+						dflt, err = p.parseAssignment()
+						if err != nil {
+							return nil, err
+						}
+					}
+					objPattern = append(objPattern, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if _, err := p.expect(lexer.RBRACE); err != nil {
 					return nil, err
+				}
+			} else {
+				paramTok, err := p.expect(lexer.IDENT)
+				if err != nil {
+					return nil, err
+				}
+				paramName = paramTok.Literal
+				// Optional type annotation on catch param — skip it.
+				if p.check(lexer.COLON) {
+					p.advance()
+					if _, err := p.parseTypeAnnotation("ts"); err != nil {
+						return nil, err
+					}
 				}
 			}
 			if _, err := p.expect(lexer.RPAREN); err != nil {
@@ -811,7 +858,7 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 		if err != nil {
 			return nil, err
 		}
-		catch = &ast.CatchClause{Param: paramName, Body: cbody}
+		catch = &ast.CatchClause{Param: paramName, ObjectPattern: objPattern, Body: cbody, Pos: catchPos}
 	}
 
 	if p.check(lexer.FINALLY) {

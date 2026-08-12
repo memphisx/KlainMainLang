@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -90,6 +91,58 @@ try {
   console.log('should not reach')
 }
 `, "caught, no binding\n42")
+}
+
+func TestE2EDestructuredCatchBinding(t *testing.T) {
+	assertOutput(t, `
+try {
+  throw new Error('boom')
+} catch ({ message, name }) {
+  console.log(message)
+  console.log(name)
+}
+`, "boom\nError")
+}
+
+func TestE2EDestructuredCatchBindingRenamed(t *testing.T) {
+	assertOutput(t, `
+try {
+  throw new TypeError('bad type')
+} catch ({ message: msg, name: kind }) {
+  console.log(msg)
+  console.log(kind)
+}
+`, "bad type\nTypeError")
+}
+
+func TestE2EDestructuredCatchBindingScopedCorrectly(t *testing.T) {
+	// The destructured local must not leak into, or shadow across, the
+	// enclosing scope — same as any other object destructuring.
+	assertOutput(t, `
+const message: string = 'outer'
+try {
+  throw new Error('inner boom')
+} catch ({ message }) {
+  console.log(message)
+}
+console.log(message)
+`, "inner boom\nouter")
+}
+
+func TestE2EDestructuredCatchBindingUnknownFieldRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+try {
+  throw new Error('boom')
+} catch ({ notAField }) {
+  console.log(notAField)
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an unknown field in a destructured catch binding, got none")
+	}
+	if !strings.Contains(err.Error(), "object has no field 'notAField'") {
+		t.Fatalf("expected \"object has no field 'notAField'\", got: %v", err)
+	}
 }
 
 func TestE2ETryCatchNoThrow(t *testing.T) {

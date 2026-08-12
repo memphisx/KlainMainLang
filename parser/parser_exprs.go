@@ -27,6 +27,17 @@ func (p *Parser) parseExpression() (ast.Expression, error) {
 }
 
 func (p *Parser) parseAssignment() (ast.Expression, error) {
+	// `yield` (TDD-00061) binds at assignment precedence, same as real JS's
+	// own grammar (`YieldExpression` is itself an `AssignmentExpression`
+	// production, lower precedence than the ternary/logical/etc. chain
+	// parseTernary below covers) — checked before descending into that
+	// chain, not as one more case alongside it, since `yield`'s own operand
+	// is a full AssignmentExpression, not something any higher-precedence
+	// level here could parse as an operand of its own.
+	if p.check(lexer.YIELD) {
+		return p.parseYield()
+	}
+
 	left, err := p.parseTernary()
 	if err != nil {
 		return nil, err
@@ -46,6 +57,44 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		return ast.NewAssignmentExpression(opTok.Literal, left, right, posOf(opTok)), nil
 	}
 	return left, nil
+}
+
+// parseYield parses `yield`, `yield expr`, and `yield* expr` (TDD-00061).
+// No context check here for whether we're actually inside a generator
+// function body — this compiler's parser doesn't track that kind of
+// enclosing-function-kind state anywhere else either (the analogous "break
+// outside a loop"/"this outside a method" checks are both done at codegen
+// time, against the emitter's own per-function context, not here); codegen
+// has no generator machinery at all yet regardless, so every YieldExpression
+// reaching it is rejected uniformly (see emitFunctionDecl's IsGenerator
+// check) rather than needing a parser-level distinction between "wrong
+// context" and "not implemented" that codegen can give more precisely once
+// real generator support exists.
+func (p *Parser) parseYield() (ast.Expression, error) {
+	tok := p.advance() // 'yield'
+	pos := posOf(tok)
+	delegate := p.match(lexer.STAR) // `yield*`
+
+	// Same no-operand shape as a bare `return`/`break`/`continue`: a line
+	// terminator right after `yield` (ASI) means no operand, and so does
+	// any token that can't start an expression here (closing the
+	// surrounding construct, or a comma/colon separating this yield from
+	// whatever comes next) — `yield` can appear inside a call's argument
+	// list or an array/object literal, unlike return/break/continue, which
+	// are always a full statement on their own.
+	if p.peek().Line != tok.Line {
+		return ast.NewYieldExpression(nil, delegate, pos), nil
+	}
+	switch p.peek().Type {
+	case lexer.SEMICOLON, lexer.RPAREN, lexer.RBRACKET, lexer.RBRACE, lexer.COMMA, lexer.COLON, lexer.EOF:
+		return ast.NewYieldExpression(nil, delegate, pos), nil
+	}
+
+	arg, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	return ast.NewYieldExpression(arg, delegate, pos), nil
 }
 
 func (p *Parser) parseTernary() (ast.Expression, error) {

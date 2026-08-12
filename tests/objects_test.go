@@ -1005,3 +1005,76 @@ let p: Point = { x: 5, y: 6 };
 		t.Fatal("expected a compile error for a destructuring assignment field the source object doesn't have")
 	}
 }
+
+// --- Object literal method shorthand (`{ foo() {...} }`) ---
+
+func TestE2EObjectLiteralMethodShorthand(t *testing.T) {
+	assertOutput(t, `
+const obj = {
+    valueOf() {
+        return 42;
+    }
+};
+console.log(obj.valueOf());
+`, "42")
+}
+
+func TestE2EObjectLiteralMethodShorthandWithParamsAndReturnType(t *testing.T) {
+	assertOutput(t, `
+const calc = {
+    add(a: number, b: number): number {
+        return a + b;
+    },
+    label: "calculator"
+};
+console.log(calc.add(2, 3));
+console.log(calc.label);
+`, "5\ncalculator")
+}
+
+func TestE2EObjectLiteralMethodShorthandStringKey(t *testing.T) {
+	assertOutput(t, `
+const obj = {
+    "greet"(): string {
+        return "hi";
+    }
+};
+console.log(obj.greet());
+`, "hi")
+}
+
+func TestE2EObjectLiteralMethodShorthandNamedGet(t *testing.T) {
+	// "get"/"set" are contextual, not reserved — a plain method literally
+	// named get/set (not an accessor, no getter/setter support on object
+	// literals at all) must still parse as an ordinary method.
+	assertOutput(t, `
+const obj = {
+    get(): number { return 5; }
+};
+console.log(obj.get());
+`, "5")
+}
+
+func TestE2EObjectLiteralMethodShorthandThisRejected(t *testing.T) {
+	// V1 scope: a method-shorthand value desugars to a plain anonymous
+	// function expression (TDD-00060), which has no `this` binding at all —
+	// unlike a class method, an object literal has no static nominal type to
+	// give `this` a known shape, and no dynamic this-binding machinery
+	// exists yet. Confirmed this fails cleanly (not a silent miscompile).
+	_, err := parseAndCompile(`
+const counter = {
+    count: 0,
+    increment() {
+        this.count = this.count + 1;
+        return this.count;
+    }
+};
+console.log(counter.increment());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'this' inside an object-literal method, got none")
+	}
+	if !strings.Contains(err.Error(), "'this' is only valid inside a method or constructor body") {
+		t.Fatalf("expected the 'this' is only valid... error, got: %v", err)
+	}
+}

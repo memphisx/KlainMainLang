@@ -39,6 +39,7 @@ const (
 	DO
 	ASYNC
 	AWAIT
+	YIELD
 	IMPORT
 	EXPORT
 	ELLIPSIS
@@ -138,7 +139,7 @@ var tokenNames = map[TokenType]string{
 	NEW: "new", TYPEOF: "typeof", VOID: "void",
 	SWITCH: "switch", CASE: "case", DEFAULT: "default", BREAK: "break", CONTINUE: "continue",
 	THROW: "throw", TRY: "try", CATCH: "catch", FINALLY: "finally", DO: "do",
-	ASYNC: "async", AWAIT: "await",
+	ASYNC: "async", AWAIT: "await", YIELD: "yield",
 	IMPORT: "import", EXPORT: "export",
 	ELLIPSIS: "...",
 	CLASS:    "class", THIS: "this", INSTANCEOF: "instanceof",
@@ -179,7 +180,7 @@ var keywords = map[string]TokenType{
 	"new": NEW, "typeof": TYPEOF, "void": VOID,
 	"switch": SWITCH, "case": CASE, "default": DEFAULT, "break": BREAK, "continue": CONTINUE,
 	"throw": THROW, "try": TRY, "catch": CATCH, "finally": FINALLY, "do": DO,
-	"async": ASYNC, "await": AWAIT,
+	"async": ASYNC, "await": AWAIT, "yield": YIELD,
 	"import": IMPORT, "export": EXPORT,
 	"class": CLASS, "this": THIS, "instanceof": INSTANCEOF,
 	"extends": EXTENDS, "super": SUPER,

@@ -59,6 +59,19 @@ type Emitter struct {
 	genericFuncs      map[string]*ast.FunctionDeclaration
 	genericInterfaces map[string]*ast.InterfaceDeclaration
 	genericClasses    map[string]*ast.ClassDeclaration
+	// generators holds one entry per top-level `function*` declaration
+	// (TDD-00061/ADR-00172), keyed by its bare source name — deliberately
+	// separate from funcs, since constructing a generator (`gen(args)`)
+	// never emits a plain `call` to the generator's own compiled body
+	// function the way an ordinary named-function call does; see
+	// emit_generators.go.
+	generators map[string]*GeneratorInfo
+	// currentGenerator is non-nil exactly while emitting a generator
+	// function's own body — set/cleared by emitGeneratorFunctionDecl the
+	// same way currentRetType/isAsync are for an ordinary function, checked
+	// by emitYieldExpression and emitReturn to route `yield`/`return`
+	// through the suspend-and-swap path instead of an ordinary value/`ret`.
+	currentGenerator *generatorEmitCtx
 	// nextClassTagID continues registerClasses' own TagID sequence (see its
 	// Pass 1) for generic class instantiations, assigned lazily on demand
 	// (emit_generics.go) — always ≥ every real class's TagID, so a
@@ -229,6 +242,8 @@ type Emitter struct {
 	usedHTTPParseQuery       bool
 	usedHTTPSerializeHeaders bool
 	usedFiber                bool
+	usedGeneratorRuntime     bool
+	generatorBodyCtr         int
 	usedMathFuncs            bool
 	usedCtlz32               bool
 	usedArc4Random           bool
@@ -290,6 +305,7 @@ func NewEmitter() *Emitter {
 		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
 		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
 		genericClasses:      make(map[string]*ast.ClassDeclaration),
+		generators:          make(map[string]*GeneratorInfo),
 		currentRetType:      TypeI32, // main returns i32
 	}
 	e.pushScope()
@@ -582,7 +598,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	}
 
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
-	e.registerFunctions(prog)
+	if err := e.registerFunctions(prog); err != nil {
+		return "", err
+	}
 
 	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
 	// function is never emitted here — it has no single concrete signature
@@ -593,7 +611,17 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// registered into e.funcs by registerFunctions above), so it's emitted
 	// here unconditionally, same as a plain function.
 	for _, stmt := range prog.Body {
-		if fd, ok := stmt.(*ast.FunctionDeclaration); ok && (len(fd.TypeParams) == 0 || fd.Erased) {
+		fd, ok := stmt.(*ast.FunctionDeclaration)
+		if !ok {
+			continue
+		}
+		if fd.IsGenerator {
+			if err := e.emitGeneratorFunctionDecl(fd, e.generators[fd.Name]); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if len(fd.TypeParams) == 0 || fd.Erased {
 			if err := e.emitFunctionDecl(fd); err != nil {
 				return "", err
 			}
@@ -802,11 +830,24 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 
 // registerFunctions pre-scans all top-level function declarations and records
 // their signatures so calls can be resolved before the function body is emitted.
-func (e *Emitter) registerFunctions(prog *ast.Program) {
+func (e *Emitter) registerFunctions(prog *ast.Program) error {
 	var unannotated []*ast.FunctionDeclaration
 	for _, stmt := range prog.Body {
 		fd, ok := stmt.(*ast.FunctionDeclaration)
 		if !ok {
+			continue
+		}
+		// TDD-00061/ADR-00172: a generator function is never registered into
+		// e.funcs at all — constructing one (`gen(args)`) doesn't emit an
+		// ordinary `call`, it builds a fiber-backed instance struct instead
+		// (see emit_generators.go), a fundamentally different dispatch than
+		// every other entry in e.funcs gets.
+		if fd.IsGenerator {
+			info, err := e.buildGeneratorSig(fd)
+			if err != nil {
+				return err
+			}
+			e.generators[fd.Name] = info
 			continue
 		}
 		// A generic function's param/return types reference an unresolvable
@@ -860,6 +901,7 @@ func (e *Emitter) registerFunctions(prog *ast.Program) {
 	}, func(fd *ast.FunctionDeclaration) Type {
 		return e.funcs[fd.Name].RetType
 	})
+	return nil
 }
 
 // reinferUntilFixedPoint closes ADR-00041's forward-reference boundary

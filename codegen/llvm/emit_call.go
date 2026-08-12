@@ -679,6 +679,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitEventEmitterCall(*ty.EventEmitterPayload, ptr, mem.Property, ex.Args, ex.GetPos(), Value{Ref: ptr, Ty: ty})
 		}
+		// gen.next(value) (TDD-00061/ADR-00172) — gated the same way every
+		// other type-tag-dispatched method above is, before the unguarded
+		// generic chain below (a `.next` name has no other meaning
+		// elsewhere in this compiler today, but matching the established
+		// pattern here rather than assuming that stays true).
+		if mem.Property == "next" && e.inferExprType(mem.Object).IsGenerator {
+			return e.emitGeneratorNext(mem.Object, e.inferExprType(mem.Object), ex.Args, ex.GetPos())
+		}
 		if mem.Property == "forEach" {
 			return e.emitArrayForEach(mem, ex.Args, ex.GetPos())
 		}
@@ -787,6 +795,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 
 	// Call via bare identifier: named function or closure variable.
 	if id, ok := ex.Callee.(*ast.Identifier); ok {
+		// Generator construction (TDD-00061/ADR-00172, top-level only in
+		// V1) — checked before the ordinary named-function dispatch just
+		// below, since a generator is never entered into e.funcs/
+		// resolveFuncRef at all: calling one doesn't emit an ordinary
+		// `call`, it builds a fiber-backed instance struct instead.
+		if info, found := e.generators[id.Name]; found {
+			return e.emitGeneratorConstruction(info, ex.Args, ex.GetPos())
+		}
 		// Named function — a nested one (TDD-00057) shadows an outer/
 		// top-level function of the same name, same as real JS/TS scoping.
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
@@ -819,6 +835,27 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 					ex.GetPos().Line, ex.GetPos().Col, id.Name, id.Name, specifier)
 			}
 		}
+	}
+
+	// General fallback: call the result of any other expression whose
+	// static type is a function value — `f()()`, `(cond ? f : g)()`,
+	// `obj.getHandler()()`, a parenthesized expression of any of the
+	// above (parens have no wrapper node in this parser, so the callee
+	// here is already whatever was inside them), and so on. The dispatch
+	// mechanism itself (emitClosureCallByPtr) already handles any
+	// function-typed value regardless of which expression shape produced
+	// it — every branch above this one is a narrower, more specific
+	// pattern checked first only because it can skip the general
+	// inferExprType call, not because the general path can't handle it
+	// too. Checked last so a more specific/helpful error (like the
+	// import-forgot diagnostic just above) still wins when both could
+	// apply.
+	if e.inferExprType(ex.Callee).IsFunc {
+		val, err := e.emitExpr(ex.Callee)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitClosureCallByPtr(val.Ref, val.Ty, ex.Args, ex.GetPos())
 	}
 
 	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported", ex.GetPos().Line, ex.GetPos().Col)

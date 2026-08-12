@@ -97,6 +97,19 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return Value{Ref: "null", Ty: TypeNull}, nil
 	case *ast.AwaitExpression:
 		return e.emitAwait(ex)
+	case *ast.YieldExpression:
+		// TDD-00061/ADR-00172: gated on e.currentGenerator, set only while
+		// emitting a generator function's own body (emitGeneratorFunctionDecl)
+		// — reached directly (not via that path) for a `yield` with no
+		// enclosing generator function at all, since this compiler's parser
+		// doesn't restrict `yield` to a generator body's own context (no
+		// per-function context tracking to check that against at parse
+		// time; see ADR-00171's own Investigation for why that was deferred
+		// to codegen).
+		if e.currentGenerator == nil {
+			return Value{}, fmt.Errorf("%d:%d: 'yield' is only valid inside a generator function body", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		return e.emitYieldExpression(ex)
 	case *ast.ThisExpression:
 		return e.emitThisExpression(ex.GetPos())
 	case *ast.NewExpression:

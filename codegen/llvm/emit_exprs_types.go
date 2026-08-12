@@ -457,6 +457,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 		}
+		// Generator construction (TDD-00061/ADR-00172) — `gen(args)`'s own
+		// type is the constructed instance's GenTy, not ElemTy (that's
+		// `.next()`'s own result's `value` field type instead, handled by
+		// the member-expression case just below).
+		if id, ok := ex.Callee.(*ast.Identifier); ok {
+			if info, found := e.generators[id.Name]; found {
+				return info.GenTy
+			}
+		}
+		// gen.next(value)'s own result type ({value: T, done: bool}) —
+		// checked before the generic member-expression dispatch further
+		// down, same as every other type-tag-gated case there.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "next" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsGenerator {
+				return genNextResultType(*objTy.GeneratorElemType)
+			}
+		}
 		// If calling a named function, use its registered return type (handles async too).
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
 			if _, sig, found := e.resolveFuncRef(id.Name); found {
@@ -998,6 +1015,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if objTy.IsArray {
 					return objTy
 				}
+			}
+		}
+		// General fallback: calling a plain (non-class) object's own
+		// function-typed field — `obj.getHandler()` where `getHandler` is
+		// declared `() => T`, not a hardcoded built-in method name above.
+		// The MemberExpression case's own general object-field fallback
+		// already resolves ex.Callee's type correctly (including a field
+		// access chained off another call, e.g. `f().getHandler()`); this
+		// just asks for that and unwraps the function type's return type.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if calleeTy := e.inferExprType(mem); calleeTy.IsFunc && calleeTy.FuncRetType != nil {
+				return *calleeTy.FuncRetType
 			}
 		}
 	case *ast.UnaryExpression:

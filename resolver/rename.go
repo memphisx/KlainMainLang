@@ -429,8 +429,17 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		rewriteBlock(s.Body, sc, lu)
 		if s.Catch != nil {
 			sc.push()
-			sc.bind(s.Catch.Param)
-			lu.checkBinding(s.Catch.Param, s.GetPos())
+			if s.Catch.Param != "" {
+				sc.bind(s.Catch.Param)
+				lu.checkBinding(s.Catch.Param, s.GetPos())
+			}
+			for i, dp := range s.Catch.ObjectPattern {
+				sc.bind(dp.Local)
+				lu.checkBinding(dp.Local, s.Catch.Pos)
+				if dp.Default != nil {
+					s.Catch.ObjectPattern[i].Default = rewriteExpr(dp.Default, sc, lu)
+				}
+			}
 			rewriteBlock(s.Catch.Body, sc, lu)
 			sc.pop()
 		}
@@ -472,6 +481,10 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.AwaitExpression:
 		e.Argument = rewriteExpr(e.Argument, sc, lu)
+	case *ast.YieldExpression:
+		if e.Argument != nil {
+			e.Argument = rewriteExpr(e.Argument, sc, lu)
+		}
 	case *ast.BinaryExpression:
 		e.Left = rewriteExpr(e.Left, sc, lu)
 		e.Right = rewriteExpr(e.Right, sc, lu)

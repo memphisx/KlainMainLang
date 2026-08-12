@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"fmt"
 	"strings"
 )
 
@@ -177,6 +178,20 @@ type Type struct {
 	// payload's IR shape. See emit_eventemitter.go and docs/tdd/TDD-00023.md.
 	IsEventEmitter      bool
 	EventEmitterPayload *Type
+	// IsGenerator marks a `function* name(): T {}`'s instance value (the
+	// result of calling the generator function, TDD-00061/ADR-00172) — a
+	// ptr to a heap struct carrying its own fiber (ucontext_t + stack),
+	// yield/sent value slots, and its own declared parameters. Deliberately
+	// does NOT set IsObject, same reasoning IsEventEmitter's own doc
+	// comment gives: the struct's fields are internal plumbing (accessed by
+	// codegen via GeneratorType's own Fields, built with ObjectType purely
+	// to reuse its StructIR/StructSize/FieldIndex machinery), not a
+	// user-facing object shape — a generator's only real surface is
+	// `.next()`. GeneratorElemType is the T in `function* f(): T` — every
+	// yield/`.next()` call site needs it to know the yielded/sent value's
+	// own IR shape.
+	IsGenerator       bool
+	GeneratorElemType *Type
 	// HasEventEmitter marks a class whose instances carry a hidden
 	// listener-map-handle field (TDD-00023) — set for a class that directly
 	// `extends EventEmitter<T>`, and propagated to every descendant the same
@@ -458,6 +473,48 @@ func XMLHttpRequestType() Type {
 func EventEmitterType(payload Type) Type {
 	payloadCopy := payload
 	return Type{IR: "ptr", IsEventEmitter: true, EventEmitterPayload: &payloadCopy}
+}
+
+// Generator instance struct field names (TDD-00061/ADR-00172) — a fixed
+// prologue shared by every generator, followed by one field per the
+// generator function's own declared parameter (named "__param0",
+// "__param1", ... — same synthetic-name convention a destructured function
+// parameter's own pattern fields already use, see ast.Param's doc comment).
+const (
+	GeneratorCtxField       = "__ctx"       // this generator's own ucontext_t (ptr, malloc'd ucontextLayout()-sized)
+	GeneratorStackField     = "__stack"     // this generator's own fiber stack (ptr, malloc'd fiberStackBytes)
+	GeneratorCallerCtxField = "__callerCtx" // where to swapcontext back to on yield/return — reset before every .next() call
+	GeneratorStartedField   = "__started"   // false until the first .next() call
+	GeneratorDoneField      = "__done"      // true once the body has returned or fallen off the end
+	GeneratorYieldedField   = "__yielded"   // what the most recent yield/return produced
+	GeneratorSentField      = "__sent"      // what the current .next(value) call is passing in
+)
+
+// GeneratorType returns a `function* f(params): T {}`'s instance value type
+// — see IsGenerator's own doc comment for why this reuses ObjectType purely
+// for its struct-layout machinery rather than actually being IsObject.
+// paramTypes is the generator function's own declared parameter types, in
+// order, stored as trailing fields so construction can populate them once
+// and the generator body can read them back on its own fiber stack.
+func GeneratorType(elem Type, paramTypes []Type) Type {
+	elemCopy := elem
+	fields := []Field{
+		{Name: GeneratorCtxField, Ty: TypePtr},
+		{Name: GeneratorStackField, Ty: TypePtr},
+		{Name: GeneratorCallerCtxField, Ty: TypePtr},
+		{Name: GeneratorStartedField, Ty: TypeBool},
+		{Name: GeneratorDoneField, Ty: TypeBool},
+		{Name: GeneratorYieldedField, Ty: elem},
+		{Name: GeneratorSentField, Ty: elem},
+	}
+	for i, pt := range paramTypes {
+		fields = append(fields, Field{Name: fmt.Sprintf("__param%d", i), Ty: pt})
+	}
+	ty := ObjectType(fields)
+	ty.IsObject = false
+	ty.IsGenerator = true
+	ty.GeneratorElemType = &elemCopy
+	return ty
 }
 
 // ArrayBufferType returns `new ArrayBuffer(...)`'s result type — see

@@ -89,7 +89,21 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 		}
 		keyTok := p.advance()
 		var val ast.Expression
-		if p.check(lexer.COLON) {
+		if p.check(lexer.LPAREN) {
+			// Method shorthand `{ foo() { ... } }` — sugar for `{ foo:
+			// function() { ... } }`, reusing the same parseFunctionRest tail
+			// a class method/named function declaration already shares, and
+			// the same FunctionExpression value a `key: function(){}` field
+			// already works with. V1 scope matches this compiler's own class
+			// methods: no `async`/generator method shorthand (neither is
+			// supported for class methods either — a separate, larger gap).
+			fnPos := posOf(p.peek())
+			fd, err := p.parseFunctionRest("", false, false)
+			if err != nil {
+				return nil, err
+			}
+			val = ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+		} else if p.check(lexer.COLON) {
 			p.advance() // ':'
 			var err error
 			val, err = p.parseAssignment()

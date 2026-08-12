@@ -21,6 +21,21 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 // on-demand generic-function instantiation (a mangled llvmName, a
 // per-instantiation substituted sig — see emit_generics.go) go through.
 func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName string, sig FuncSig) error {
+	// TDD-00061/ADR-00172: a top-level generator function is diverted to
+	// emitGeneratorFunctionDecl straight from EmitProgram's own Pass 2 loop
+	// and never reaches this function at all — so IsGenerator reaching here
+	// only ever means a *nested* generator declaration (routed through
+	// here via emit_stmts.go's ordinary nested-function-declaration
+	// dispatch) or an on-demand generic instantiation (emit_generics.go) —
+	// neither supported yet (V1 scope: top-level declarations only).
+	// Without this check, a generator with no `yield` in its body (legal,
+	// if unusual, real JS) would silently compile and run as an ordinary
+	// function instead of being rejected — exactly the "parses now,
+	// silently mishandled" failure mode this project's own conventions
+	// treat as worse than a clean rejection.
+	if decl.IsGenerator {
+		return fmt.Errorf("%d:%d: a nested generator function declaration is not yet supported (see TDD-00061)", decl.GetPos().Line, decl.GetPos().Col)
+	}
 	// Save current function context.
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -57,10 +72,24 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// currentGenerator resets the same way, same reasoning, same
+	// defer-not-plain-assignment fix: a `return`/`yield` inside THIS
+	// function's own body must never be misrouted into an *enclosing*
+	// generator's own suspend-and-swap machinery — confirmed directly as a
+	// real bug, not a theoretical one: an arrow function's own plain
+	// `return n;`, declared inside a generator's body, silently emitted a
+	// GEP into the generator's own instance struct *inside the arrow
+	// function's own separately-compiled LLVM function*, corrupting
+	// unrelated memory (a different function's `%env` parameter
+	// reinterpreted as if it were a generator instance pointer) instead of
+	// a normal `ret`.
+	savedCurrentGenerator := e.currentGenerator
+	e.currentGenerator = nil
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
+		e.currentGenerator = savedCurrentGenerator
 	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -662,10 +691,18 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// currentGenerator resets the same way, same reasoning — see
+	// emitFunctionDeclAs's identical reset for the real, confirmed bug this
+	// avoids (a `return`/`yield` inside this function's own body must
+	// never be misrouted into an *enclosing* generator's own suspend
+	// machinery).
+	savedCurrentGenerator := e.currentGenerator
+	e.currentGenerator = nil
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
+		e.currentGenerator = savedCurrentGenerator
 	}()
 
 	e.allocas = strings.Builder{}
@@ -1295,10 +1332,18 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.breakStack = nil
 	e.continueStack = nil
 	e.namedLabelStack = nil
+	// currentGenerator resets the same way, same reasoning — see
+	// emitFunctionDeclAs's identical reset for the real, confirmed bug this
+	// avoids (a `return`/`yield` inside this function's own body must
+	// never be misrouted into an *enclosing* generator's own suspend
+	// machinery).
+	savedCurrentGenerator := e.currentGenerator
+	e.currentGenerator = nil
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
+		e.currentGenerator = savedCurrentGenerator
 	}()
 
 	e.allocas = strings.Builder{}

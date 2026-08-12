@@ -110,7 +110,15 @@ type FunctionDeclaration struct {
 	// machinery unmodified via a name-mangled dispatch key (see
 	// codegen/llvm/emit_classes.go's registerClasses).
 	AccessorKind string
-	pos          Pos
+	// IsGenerator is `function* name() {}` (TDD-00061) — parses into a real
+	// AST flag and enables `yield`/`yield*` inside this function's own body,
+	// but codegen has no generator suspend/resume machinery yet: a
+	// generator-flagged declaration is a clean, explicit compile-time
+	// rejection ("generator functions are not yet supported"), not a
+	// silent no-op. V1 scope: top-level/nested function declarations only —
+	// not class/object methods, not function expressions/arrows.
+	IsGenerator bool
+	pos         Pos
 }
 
 func (*FunctionDeclaration) nodeMarker()   {}
@@ -460,6 +468,28 @@ func (a *AwaitExpression) GetPos() Pos { return a.pos }
 
 func NewAwaitExpression(arg Expression, pos Pos) *AwaitExpression {
 	return &AwaitExpression{Argument: arg, pos: pos}
+}
+
+// YieldExpression is `yield expr` / `yield* expr` / a bare `yield` with no
+// operand (TDD-00061) — Argument is nil for the bare form, matching
+// ReturnStatement's own "no value" convention. Delegate is true for `yield*`
+// (iterate another iterable/generator, re-yielding each of its own values) —
+// parses into real AST either way, but codegen has no generator machinery
+// yet at all (see FunctionDeclaration.IsGenerator's own doc comment), so
+// `yield*`'s actual delegation semantics are unimplemented design space
+// regardless of this flag, not a "works but untested" case.
+type YieldExpression struct {
+	Argument Expression // nil for a bare `yield`
+	Delegate bool       // true for `yield*`
+	pos      Pos
+}
+
+func (*YieldExpression) nodeMarker()   {}
+func (*YieldExpression) exprMarker()   {}
+func (y *YieldExpression) GetPos() Pos { return y.pos }
+
+func NewYieldExpression(arg Expression, delegate bool, pos Pos) *YieldExpression {
+	return &YieldExpression{Argument: arg, Delegate: delegate, pos: pos}
 }
 
 type Identifier struct {
@@ -866,7 +896,18 @@ func NewTryStatement(body *BlockStatement, catch *CatchClause, finally *BlockSta
 
 type CatchClause struct {
 	Param string
-	Body  *BlockStatement
+	// ObjectPattern is non-nil for a destructured catch binding
+	// (`catch ({ message, name }) { ... }`) — Param is unused in that case.
+	// No array-pattern form: the caught value's static shape (errorObjType)
+	// has no numeric-indexed fields to destructure into, so there's nothing
+	// a `catch ([a, b])` binding could ever usefully bind.
+	ObjectPattern []DestructProp
+	Body          *BlockStatement
+	// Pos is the catch clause's own position (the `catch` keyword) — used
+	// for a destructured binding's own error messages (an unknown field
+	// name, etc.); Param's plain-identifier form doesn't need its own
+	// separate position since IDENT-not-found errors point at the token.
+	Pos Pos
 }
 
 // NewErrorExpression — `new Error("message")`, or one of its built-in

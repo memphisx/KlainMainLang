@@ -120,6 +120,17 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 }
 
 func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
+	// Generator functions (TDD-00061/ADR-00172): a `return` inside a
+	// generator body never emits an ordinary `ret` at all — it suspends via
+	// the same fiber-swap `yield` uses, just with done=true so the
+	// generator's own fiber is never resumed again. Checked first, before
+	// the async case below, since a generator function itself can't be
+	// async in V1 (async generators are separately deferred — see
+	// TDD-00061) and the two are mutually exclusive at emission time
+	// either way.
+	if e.currentGenerator != nil {
+		return e.emitGeneratorReturn(r)
+	}
 	// Async functions: store result directly in the malloc'd promise slot, branch to async-ret.
 	if e.isAsync {
 		if r.Value != nil && e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
@@ -385,6 +396,24 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		}
 	}
 
+	// TDD-00061/ADR-00172: a generator instance (`for (const x of gen())
+	// {...}`) — a third genuinely different loop shape, its own {value,
+	// done} result rather than either a pre-materialized array or Stage
+	// 1a's T | null sentinel (a legitimately falsy/zero yielded value must
+	// not be misread as "done", the reason this needed its own case rather
+	// than reusing the sentinel path above). The iterable is evaluated
+	// once here (constructing exactly one generator instance — s.Iterable
+	// may itself be a `gen(...)` call, which must not run again per
+	// iteration) and handed to emitForOfGenerator, which drives it via
+	// repeated .next() calls against that same instance.
+	if objTy := e.inferExprType(s.Iterable); objTy.IsGenerator {
+		genVal, err := e.emitExpr(s.Iterable)
+		if err != nil {
+			return err
+		}
+		return e.emitForOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
+	}
+
 	// Resolve the iterable to a data-ptr alloca and a len alloca.
 	// For named variables we reuse their existing allocas (no copy).
 	// For any other expression we evaluate it, extract the aggregate fields,
@@ -411,7 +440,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			elemTy = *valsVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
-			return fmt.Errorf("%d:%d: '%s' is not an array, Map, Set, or a class with a next(): T | null method", s.GetPos().Line, s.GetPos().Col, id.Name)
+			return fmt.Errorf("%d:%d: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method", s.GetPos().Line, s.GetPos().Col, id.Name)
 		}
 	} else {
 		arrVal, err := e.emitExpr(s.Iterable)
@@ -433,7 +462,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			elemTy = *valsVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(valsVal)
 		default:
-			return fmt.Errorf("%d:%d: for...of requires an array, Map, Set, or class-with-next() value", s.GetPos().Line, s.GetPos().Col)
+			return fmt.Errorf("%d:%d: for...of requires an array, Map, Set, generator, or class-with-next() value", s.GetPos().Line, s.GetPos().Col)
 		}
 	}
 

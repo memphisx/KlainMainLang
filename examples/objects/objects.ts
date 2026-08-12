@@ -147,3 +147,24 @@ function makeDigits() {
     return { 0: "a", 1: "b" }
 }
 console.log(JSON.stringify(makeDigits()))   // {"0":"a","1":"b"}
+
+// --- Method shorthand ---
+// `{ foo() {...} }` is sugar for `{ foo: function() {...} }` — a plain
+// anonymous function value, with no `this` binding (unlike a class method,
+// an object literal has no static nominal type to give `this` a shape).
+const calculator = {
+    add(a: number, b: number): number {
+        return a + b
+    },
+    label: "calc"
+}
+console.log(calculator.add(2, 3))   // 5
+console.log(calculator.label)       // calc
+
+// A string-literal key can have a method body too, same as an identifier key.
+const greeter = {
+    "greet"(): string {
+        return "hi"
+    }
+}
+console.log(greeter.greet())   // hi

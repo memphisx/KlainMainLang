@@ -206,3 +206,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00166](ADR-00166.md) | Status-doc accuracy audit and the Strict Coverage metric | Found while implementing [ADR-00164](ADR-00164.md) |
 | [00167](ADR-00167.md) | Guard pop and shift against empty arrays | Fixes findings from [ADR-00166](ADR-00166.md) |
 | [00168](ADR-00168.md) | Function expressions (V1: anonymous only) + early-error checks that fix the conformance regressions it exposed | Implements [TDD-00060](../tdd/TDD-00060.md) |
+| [00169](ADR-00169.md) | Generalized call dispatch + object literal method shorthand | Extends [ADR-00153](ADR-00153.md) |
+| [00170](ADR-00170.md) | Destructured catch binding (`catch ({ message, name }) {}`) | Extends [ADR-00086](ADR-00086.md) |
+| [00171](ADR-00171.md) | Generator function front-end (`function* f() { yield x; }` lexer/parser/AST) — parses, cleanly rejected by codegen | Implements the front-end slice of [TDD-00061](../tdd/TDD-00061.md) |
+| [00172](ADR-00172.md) | Generator function suspend/resume codegen (construction, `yield`, `.next()`) | Implements [TDD-00061](../tdd/TDD-00061.md); extends [ADR-00171](ADR-00171.md) |
+| [00173](ADR-00173.md) | `for...of` over a generator | Implements the remainder of [TDD-00061](../tdd/TDD-00061.md); extends [ADR-00172](ADR-00172.md) |

@@ -918,3 +918,98 @@ const outer = (): number => {
 console.log(outer());
 `, "99")
 }
+
+// --- Calling the result of an arbitrary expression ---
+
+func TestE2ECallResultOfCallExpression(t *testing.T) {
+	assertOutput(t, `
+function make(): () => number {
+    return () => 42;
+}
+console.log(make()());
+`, "42")
+}
+
+func TestE2ECallResultOfConditionalExpression(t *testing.T) {
+	assertOutput(t, `
+const f = (x: number): number => x + 1;
+const g = (x: number): number => x + 2;
+const cond = true;
+console.log((cond ? f : g)(10));
+`, "11")
+}
+
+func TestE2ECallResultOfObjectFieldReturningAClosure(t *testing.T) {
+	assertOutput(t, `
+interface Box { getHandler: () => (() => number) }
+const b: Box = { getHandler: () => (() => 99) };
+console.log(b.getHandler()());
+`, "99")
+}
+
+// --- Generator functions (TDD-00061/ADR-00172): V1 scope cuts still rejected ---
+// (Real, working generator behavior is covered in generators_test.go.)
+
+func TestE2EGeneratorFunctionMissingReturnTypeRejected(t *testing.T) {
+	// V1 requires an explicit return type annotation (the yielded element
+	// type) — no yield-based inference exists yet.
+	_, err := parseAndCompile(`
+function* gen() {
+    yield 1;
+}
+console.log(gen());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a generator with no return type annotation, got none")
+	}
+	if !strings.Contains(err.Error(), "requires an explicit return type annotation") {
+		t.Fatalf("expected 'requires an explicit return type annotation', got: %v", err)
+	}
+}
+
+func TestE2ENestedGeneratorFunctionRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function outer(): void {
+    function* gen(): number {
+        yield 1;
+    }
+    console.log(gen());
+}
+outer();
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested generator function, got none")
+	}
+	if !strings.Contains(err.Error(), "nested generator function declaration is not yet supported") {
+		t.Fatalf("expected 'nested generator function declaration is not yet supported', got: %v", err)
+	}
+}
+
+func TestE2EYieldOutsideGeneratorRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function notAGenerator(): void {
+    yield 1;
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for yield outside a generator, got none")
+	}
+	if !strings.Contains(err.Error(), "'yield' is only valid inside a generator function body") {
+		t.Fatalf("expected \"'yield' is only valid inside a generator function body\", got: %v", err)
+	}
+}
+
+func TestE2EYieldStarRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function* gen(): number {
+    yield* [1, 2, 3];
+}
+console.log(gen());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for yield*, got none")
+	}
+	if !strings.Contains(err.Error(), "yield* is not yet supported") {
+		t.Fatalf("expected 'yield* is not yet supported', got: %v", err)
+	}
+}

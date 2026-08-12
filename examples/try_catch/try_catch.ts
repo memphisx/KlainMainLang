@@ -49,3 +49,12 @@ try {
 } catch {
   console.log('caught, no binding needed')
 }
+
+// Destructured catch binding: `catch ({ message, name })` pulls the caught
+// error's own fields directly into locals, renaming with `key: local` same
+// as any other object destructuring.
+try {
+  throw new TypeError('bad type')
+} catch ({ message, name: kind }) {
+  console.log(message + ' (' + kind + ')')
+}

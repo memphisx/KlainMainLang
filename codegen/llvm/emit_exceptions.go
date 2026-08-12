@@ -187,6 +187,20 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", errPtr, varPtr))
 			e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: errorObjType})
+		} else if len(s.Catch.ObjectPattern) > 0 {
+			// Destructured catch binding (`catch ({ message, name }) {}`) —
+			// every thrown value (including a thrown non-Error primitive,
+			// see buildErrorObj's own doc comment) is force-shaped into
+			// errorObjType by the time it reaches here, so this can only
+			// ever destructure that fixed {kind, message, name} shape, not
+			// whatever arbitrary object a `throw` expression's own source
+			// literal happened to have.
+			errPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errPtr))
+			if err := e.unpackObjectPatternInto(errPtr, errorObjType, s.Catch.ObjectPattern, s.Catch.Pos); err != nil {
+				e.popScope()
+				return err
+			}
 		}
 		for _, stmt := range s.Catch.Body.Body {
 			if err := e.emitStmt(stmt); err != nil {
