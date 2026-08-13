@@ -795,15 +795,55 @@ console.log(triple(7));
 `, "21")
 }
 
-func TestE2ENamedFunctionExpressionRejected(t *testing.T) {
+// TDD-00060/ADR-00178: a named function expression's name is bound only inside
+// its own body, for self-reference/recursion.
+func TestE2ENamedFunctionExpressionRecursion(t *testing.T) {
+	assertOutput(t, `
+const fact = function factorial(n: number): number {
+	if (n <= 1) { return 1; }
+	return n * factorial(n - 1);
+};
+console.log(fact(5));
+`, "120")
+}
+
+// The name is visible only inside the body, not in the enclosing scope.
+func TestE2ENamedFunctionExpressionNameNotLeaked(t *testing.T) {
 	_, err := parseAndCompile(`
-const fact = function factorial(n: number): number { return n; };
+const f = function foo(): number { return 1; };
+console.log(foo());
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a named function expression, got none")
+		t.Fatal("expected the function-expression name 'foo' to be undefined outside its body, got no error")
 	}
-	if !strings.Contains(err.Error(), "named function expressions are not yet supported") {
-		t.Fatalf("expected 'named function expressions are not yet supported', got: %v", err)
+}
+
+// Self-reference works alongside a captured variable from the enclosing scope.
+func TestE2ENamedFunctionExpressionRecursionWithCapture(t *testing.T) {
+	assertOutput(t, `
+const base = 10;
+const sum = function rec(n: number): number {
+	if (n === 0) { return base; }
+	return n + rec(n - 1);
+};
+console.log(sum(3));
+`, "16")
+}
+
+// A name that shadows a top-level function of the same name is rejected
+// cleanly (the resolver has already mangled the self-reference to the outer
+// function; see ADR-00178) rather than silently calling the outer function.
+func TestE2ENamedFunctionExpressionShadowingTopLevelRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function rec(n: number): number { return n; }
+const f = function rec(n: number): number { if (n <= 0) { return 0; } return n + rec(n - 1); };
+console.log(f(3));
+`)
+	if err == nil {
+		t.Fatal("expected a clean error for a named FE shadowing a top-level function, got none")
+	}
+	if !strings.Contains(err.Error(), "shadows a top-level function") {
+		t.Fatalf("expected 'shadows a top-level function', got: %v", err)
 	}
 }
 

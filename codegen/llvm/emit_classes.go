@@ -1247,8 +1247,13 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 
 	for i, p := range params {
 		pty := sig.ParamTypes[i]
-		if isUnconstrainedDynamic(pty) || containsDynamicElement(pty) {
-			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a method parameter type", pos.Line, pos.Col)
+		// TDD-00062 (Staged V2): a bare `any`/`unknown` method parameter is now
+		// allowed — its { i8, i64 } argument is boxed at the call site (the
+		// static-method path in emitStaticMethodCall and the instance path in
+		// emitClassCall both box IsDynamic params) and bound here exactly like
+		// a constrained-union param. Only a nested dynamic shape stays rejected.
+		if containsDynamicElement(pty) {
+			return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object method parameter type", pos.Line, pos.Col)
 		}
 		if err := validateUnionMembers(pty, pos.Line, pos.Col); err != nil {
 			return err
@@ -1562,7 +1567,21 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(val, paramTy)
+		// A dynamic/union parameter (the { i8, i64 } box) needs its argument
+		// boxed, not coerced — same reasoning and shape as the free-function
+		// (emit_call.go) and static-method (emitStaticMethodCall) paths. The
+		// coerce backstop would box it too, but only the explicit path here
+		// also validates a constrained union's member set.
+		if paramTy.IsDynamic {
+			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
+				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
+			}
+			if val, err = e.emitBoxValue(val); err != nil {
+				return Value{}, err
+			}
+		} else if paramTy.IR != "" {
+			val = e.coerce(val, paramTy)
+		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
 	// Pack rest args into a temporary heap array — identical shape to

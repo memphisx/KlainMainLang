@@ -1006,10 +1006,27 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if isArrow {
 			return p.parseArrowFunction()
 		}
-		p.advance()
+		lparen := p.advance()
 		expr, err := p.parseExpression()
 		if err != nil {
 			return nil, err
+		}
+		// The comma operator inside a parenthesized group: `(a, b, c)` evaluates
+		// each operand left to right and yields the last. Each operand is a
+		// single assignment expression (not a nested sequence), so the commas
+		// here never conflict with call-argument/array-element commas, which are
+		// parsed elsewhere one assignment apiece.
+		if p.check(lexer.COMMA) {
+			seq := []ast.Expression{expr}
+			for p.check(lexer.COMMA) {
+				p.advance() // consume ','
+				next, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				seq = append(seq, next)
+			}
+			expr = ast.NewSequenceExpression(seq, posOf(lparen))
 		}
 		if _, err := p.expect(lexer.RPAREN); err != nil {
 			return nil, err
@@ -1038,15 +1055,14 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.FUNCTION:
 		// Function expression: var f = function(x): T { return x; }
-		// Named function expressions (function fact(n) { ... }) are deferred
-		// to V2 (TDD-00060) — the name is visible only inside the function's
-		// own body, which needs new scope machinery this compiler doesn't have.
+		// A named function expression (var f = function fact(n) { ... }) binds
+		// its own name only inside its body, for self-reference/recursion —
+		// wired up in codegen (emitFunctionExpression, TDD-00060/ADR-00178).
 		p.advance() // consume 'function'
 		fPos := posOf(tok)
 		var name string
 		if p.check(lexer.IDENT) {
 			name = p.advance().Literal
-			return nil, fmt.Errorf("%d:%d: named function expressions are not yet supported", fPos.Line, fPos.Col)
 		}
 		fd, err := p.parseFunctionRest(name, false, false)
 		if err != nil {
@@ -1064,7 +1080,6 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			var name string
 			if p.check(lexer.IDENT) {
 				name = p.advance().Literal
-				return nil, fmt.Errorf("%d:%d: named function expressions are not yet supported", fPos.Line, fPos.Col)
 			}
 			fd, err := p.parseFunctionRest(name, true, false)
 			if err != nil {

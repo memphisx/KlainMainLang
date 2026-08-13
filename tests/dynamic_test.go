@@ -75,14 +75,109 @@ console.log(x + 1)
 	}
 }
 
-func TestE2EAnyAsFunctionParamRejected(t *testing.T) {
+// TDD-00062 (Staged V2): a bare `any`/`unknown` parameter is now supported —
+// its argument is boxed at the call site and can be printed, compared with
+// `===`, and reflected on with `typeof`, exactly like any other any-typed
+// value. (Arithmetic/field-access/indexing on it stay rejected, as for any
+// any-typed value — see the other tests here.)
+func TestE2EAnyAsFunctionParam(t *testing.T) {
+	assertOutput(t, `
+function f(x: any): void { console.log(x); }
+f(5);
+f("hi");
+f(true);
+`, "5\nhi\ntrue")
+}
+
+func TestE2EAnyParamStrictEquality(t *testing.T) {
+	assertOutput(t, `
+function eq(a: any, b: any): void {
+	console.log(a === b ? "same" : "diff");
+}
+eq(1, 1);
+eq(1, "1");
+let o = { v: 1 };
+eq(o, o);
+eq(o, { v: 1 });
+`, "same\ndiff\nsame\ndiff")
+}
+
+// Arrow-function and function-expression parameters get the same bare
+// any/unknown support as named functions — the closure-call path already
+// boxes a dynamic-typed argument.
+func TestE2EAnyArrowParam(t *testing.T) {
+	assertOutput(t, `
+const eq = (a: any, b: any): void => {
+	console.log(a === b ? "same" : "diff");
+};
+eq(1, 1);
+eq(1, "1");
+`, "same\ndiff")
+}
+
+func TestE2EAnyArrowReturn(t *testing.T) {
+	assertOutput(t, `
+const pick = (flag: boolean, a: any, b: any): any => flag ? a : b;
+console.log(pick(true, "yes", 0));
+console.log(pick(false, "yes", 0));
+`, "yes\n0")
+}
+
+func TestE2EAnyFunctionExpressionParam(t *testing.T) {
+	assertOutput(t, `
+const show = function (x: any): void { console.log(x); };
+show(7);
+show("hi");
+`, "7\nhi")
+}
+
+func TestE2EUnknownAsFunctionParam(t *testing.T) {
+	assertOutput(t, `
+function f(x: unknown): void { console.log(typeof x); }
+f(5);
+f("hi");
+`, "number\nstring")
+}
+
+// A nested dynamic (any as an array element) stays rejected in parameter
+// position — only the bare top-level any/unknown was lifted.
+func TestE2EAnyArrayParamRejected(t *testing.T) {
 	_, err := parseAndCompile(`
-function f(x: any): void { console.log(x) }
-f(5)
+function f(xs: any[]): void { console.log(xs.length) }
+f([1, 2, 3])
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for any as a function parameter type, got none")
+		t.Fatal("expected a compile error for any[] as a function parameter type, got none")
 	}
+}
+
+// An array argument to an `any` parameter is boxed by its data pointer, so
+// `===` is reference identity (arrays are reference types in JS): the same
+// array boxed twice is equal; two distinct arrays are not. `typeof` is
+// "object". Contents/length are not preserved, so it stringifies to the
+// `[object Array]` tag (a documented deviation from JS's "1,2,3").
+func TestE2EArrayArgumentToAnyParamReferenceEquality(t *testing.T) {
+	assertOutput(t, `
+function eq(a: any, b: any): void { console.log(a === b ? "same" : "diff"); }
+let a = [1, 2, 3];
+let b = [1, 2, 3];
+eq(a, a);
+eq(a, b);
+function kind(x: any): void { console.log(typeof x); }
+kind(a);
+function show(x: any): void { console.log(x); }
+show(a);
+`, "same\ndiff\nobject\n[object Array]")
+}
+
+// A boxed object now stringifies to JS's "[object Object]" instead of
+// printing the raw struct bytes (blank/garbage) — a now-reachable path once
+// any-typed parameters can carry an object.
+func TestE2EBoxedObjectToString(t *testing.T) {
+	assertOutput(t, `
+function show(x: any): void { console.log(x); }
+show({ a: 1 });
+`, "[object Object]")
 }
 
 func TestE2EAnyArrayElementRejected(t *testing.T) {

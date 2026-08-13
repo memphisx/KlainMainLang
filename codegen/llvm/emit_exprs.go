@@ -90,6 +90,19 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitTemplateLiteral(ex)
 	case *ast.ConditionalExpression:
 		return e.emitConditional(ex)
+	case *ast.SequenceExpression:
+		// Comma operator: evaluate each operand for its side effects, yield the
+		// last. An empty list can't occur (the parser always has a first
+		// operand before the comma).
+		var last Value
+		for _, sub := range ex.Exprs {
+			v, err := e.emitExpr(sub)
+			if err != nil {
+				return Value{}, err
+			}
+			last = v
+		}
+		return last, nil
 	case *ast.NullLiteral:
 		if ex.IsUndefined {
 			return Value{Ref: "null", Ty: TypeUndefined}, nil

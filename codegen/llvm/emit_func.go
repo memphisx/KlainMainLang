@@ -117,16 +117,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// param/return types independently here, so this function's own emitted
 	// signature always matches what every caller already expects it to be.
 	retType := sig.RetType
-	// TDD-00010 V2: an `@erased` generic function's own bare-T return
-	// position is exactly TypeAny by construction (registerFunctions), and
-	// is meant to be allowed through — but only that bare case, not a wider
-	// dynamic shape (T[], an object field typed T, etc; containsDynamicElement
-	// still catches and rejects those even when decl.Erased, since nothing
-	// downstream — HOF codegen, object field access — knows how to handle a
-	// dynamic array element/object field yet).
-	erasedRetOK := decl.Erased && retType.IsDynamic
-	if !erasedRetOK && (isUnconstrainedDynamic(retType) || containsDynamicElement(retType)) {
-		return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", decl.GetPos().Line, decl.GetPos().Col)
+	// TDD-00062 (Staged V2): a bare `any`/`unknown` return type is now
+	// allowed — the { i8, i64 } box round-trips through a return position
+	// exactly as TDD-00010 V2's `@erased` bare-T return already did. Only a
+	// *nested* dynamic shape (T[], an object field typed T, etc.) is still
+	// rejected: containsDynamicElement deliberately skips the top level, so
+	// this catches those without catching bare any/unknown. (Rejecting
+	// nested dynamics also subsumes the old erased-only carve-out — an
+	// erased T[] is IsArray, not top-level IsDynamic, so it still fails.)
+	if containsDynamicElement(retType) {
+		return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
 	if err := validateUnionMembers(retType, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 		return err
@@ -157,10 +157,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	var llvmParams []string
 	for i, p := range decl.Params {
 		pty := sig.ParamTypes[i]
-		// Same bare-TypeAny-only carve-out as the return-type guard above.
-		erasedParamOK := decl.Erased && pty.IsDynamic
-		if !erasedParamOK && (isUnconstrainedDynamic(pty) || containsDynamicElement(pty)) {
-			return fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", decl.GetPos().Line, decl.GetPos().Col)
+		// TDD-00062 (Staged V2): a bare `any`/`unknown` parameter is now
+		// allowed (same box round-trip as the return type above). Only a
+		// nested dynamic shape stays rejected — containsDynamicElement skips
+		// the top level, so bare any/unknown passes here.
+		if containsDynamicElement(pty) {
+			return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", decl.GetPos().Line, decl.GetPos().Col)
 		}
 		if err := validateUnionMembers(pty, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 			return err
@@ -375,6 +377,12 @@ type CapturedVar struct {
 	Name string
 	Ty   Type
 	Sym  Symbol // the symbol as it exists in the enclosing scope
+	// IsSelf marks the synthetic self-reference capture of a named function
+	// expression (`var f = function fact(n) { ... fact(n-1) ... }`): its cell
+	// holds the closure's own header pointer rather than a value copied from an
+	// enclosing symbol, so its env-build path is special (see
+	// emitFunctionExpression). Sym is unused for it.
+	IsSelf bool
 }
 
 // envStructIR returns the LLVM struct type string for the closure environment.
@@ -472,6 +480,10 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		scanExprFV(x.Test, bound, result)
 		scanExprFV(x.Consequent, bound, result)
 		scanExprFV(x.Alternate, bound, result)
+	case *ast.SequenceExpression:
+		for _, sub := range x.Exprs {
+			scanExprFV(sub, bound, result)
+		}
 	case *ast.ArrowFunction:
 		// Nested arrow function: its params are bound within its own body.
 		innerBound := make(map[string]bool, len(bound)+len(x.Params))
@@ -1126,8 +1138,12 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
-		if isUnconstrainedDynamic(paramTypes[i]) || containsDynamicElement(paramTypes[i]) {
-			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", af.GetPos().Line, af.GetPos().Col)
+		// TDD-00062 (Staged V2): a bare `any`/`unknown` arrow-function
+		// parameter is allowed — the closure-call path (emitClosureCallByPtr)
+		// already boxes a dynamic-typed argument. Only a nested dynamic shape
+		// stays rejected.
+		if containsDynamicElement(paramTypes[i]) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", af.GetPos().Line, af.GetPos().Col)
 		}
 		if err := validateUnionMembers(paramTypes[i], af.GetPos().Line, af.GetPos().Col); err != nil {
 			return Value{}, err
@@ -1136,8 +1152,10 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	var retTy Type
 	if af.RetType != nil {
 		retTy = e.resolveType(af.RetType)
-		if isUnconstrainedDynamic(retTy) || containsDynamicElement(retTy) {
-			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", af.GetPos().Line, af.GetPos().Col)
+		// TDD-00062 (Staged V2): bare `any`/`unknown` arrow-function return
+		// type is allowed; only a nested dynamic shape stays rejected.
+		if containsDynamicElement(retTy) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", af.GetPos().Line, af.GetPos().Col)
 		}
 		if err := validateUnionMembers(retTy, af.GetPos().Line, af.GetPos().Col); err != nil {
 			return Value{}, err
@@ -1239,6 +1257,13 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 
 	var caps []CapturedVar
 	for name := range refs {
+		// A named function expression's own name resolves to the function
+		// itself inside its body (a self-reference binding added below), and
+		// shadows any enclosing variable of the same name — so it is never
+		// captured from the enclosing scope here.
+		if name == fe.Name {
+			continue
+		}
 		sym, found := e.lookup(name)
 		if !found {
 			continue
@@ -1270,8 +1295,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 		}
-		if isUnconstrainedDynamic(paramTypes[i]) || containsDynamicElement(paramTypes[i]) {
-			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function parameter type", fe.GetPos().Line, fe.GetPos().Col)
+		// TDD-00062 (Staged V2): a bare `any`/`unknown` function-expression
+		// parameter is allowed (same closure-call boxing as arrow functions).
+		// Only a nested dynamic shape stays rejected.
+		if containsDynamicElement(paramTypes[i]) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", fe.GetPos().Line, fe.GetPos().Col)
 		}
 		if err := validateUnionMembers(paramTypes[i], fe.GetPos().Line, fe.GetPos().Col); err != nil {
 			return Value{}, err
@@ -1282,8 +1310,10 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	var retTy Type
 	if fe.RetType != nil {
 		retTy = e.resolveType(fe.RetType)
-		if isUnconstrainedDynamic(retTy) || containsDynamicElement(retTy) {
-			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported as a function return type", fe.GetPos().Line, fe.GetPos().Col)
+		// TDD-00062 (Staged V2): bare `any`/`unknown` function-expression
+		// return type is allowed; only a nested dynamic shape stays rejected.
+		if containsDynamicElement(retTy) {
+			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", fe.GetPos().Line, fe.GetPos().Col)
 		}
 		if err := validateUnionMembers(retTy, fe.GetPos().Line, fe.GetPos().Col); err != nil {
 			return Value{}, err
@@ -1300,6 +1330,55 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		}
 	} else {
 		retTy = TypeVoid
+	}
+
+	// A named function expression binds its own name inside its body for
+	// self-reference/recursion (TDD-00060). Model it as a synthetic capture
+	// whose env cell holds this closure's own header pointer — filled after the
+	// header is allocated (below). Appended last so its env-slot index is
+	// deterministic and stable across the body-setup and env-build loops. Only
+	// added when the body actually references the name (refs), so a merely
+	// decorative name costs nothing.
+	selfTy := FuncType(paramTypes, retTy)
+	if len(fe.Params) > 0 && fe.Params[len(fe.Params)-1].Rest {
+		selfTy.FuncHasRest = true
+	}
+	if fe.Name != "" {
+		// A named function expression whose name shadows a top-level function of
+		// the same name is not yet supported: inside the expression body, JS
+		// scoping makes the name refer to the expression itself, but this
+		// compiler resolves top-level function references *before* codegen sees
+		// this self-scope, so the self-binding below can't reclaim them and the
+		// recursion would silently call the outer function instead. Reject the
+		// collision cleanly rather than miscompile it — the plain
+		// (non-shadowing) recursive case is unaffected.
+		//
+		// Detected two ways because the full pipeline runs the resolver's rename
+		// pass (TDD-00041) but the direct parse→emit test path does not:
+		//   (1) resolver present: the body's `N` was rewritten to the outer
+		//       function's mangled `N__kml_mod<N>`, and the outer decl renamed,
+		//       so resolveFuncRef(fe.Name) misses — catch the mangled reference.
+		//   (2) resolver absent: the name is still `N` and the outer function is
+		//       still registered under it — catch via resolveFuncRef.
+		mangledSelfPrefix := fe.Name + "__kml_mod"
+		collides := false
+		for ref := range refs {
+			if strings.HasPrefix(ref, mangledSelfPrefix) {
+				collides = true
+				break
+			}
+		}
+		if refs[fe.Name] {
+			if _, _, topLevelExists := e.resolveFuncRef(fe.Name); topLevelExists {
+				collides = true
+			}
+		}
+		if collides {
+			return Value{}, fmt.Errorf("%d:%d: a named function expression whose name '%s' shadows a top-level function of the same name is not yet supported — rename one of them", fe.GetPos().Line, fe.GetPos().Col, fe.Name)
+		}
+		if refs[fe.Name] {
+			caps = append(caps, CapturedVar{Name: fe.Name, Ty: selfTy, IsSelf: true})
+		}
 	}
 
 	// Emit the LLVM function for this closure. Reuse emitClosureFunc by
@@ -1480,6 +1559,20 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		env := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envSize))
 		for i, cap := range caps {
+			// Self-reference cell (named function expression): holds this
+			// closure's own header pointer. Circular by construction — the
+			// header's env contains this cell, and the cell points back at the
+			// header — which is exactly what lets the body call itself.
+			if cap.IsSelf {
+				selfCell := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", selfCell))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, selfCell))
+				slotReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
+					slotReg, envIR, env, i))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", selfCell, slotReg))
+				continue
+			}
 			cellPtr := cap.Sym.Ptr
 			if !cap.Sym.Boxed {
 				newCell := e.freshReg()

@@ -155,6 +155,7 @@ const (
 	kmlTagNull      = 4
 	kmlTagUndefined = 5
 	kmlTagObject    = 6
+	kmlTagArray     = 7
 )
 
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
@@ -163,6 +164,27 @@ const (
 func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return v, nil
+	}
+	// An array value is a { ptr, i64 } aggregate (data pointer + length), which
+	// doesn't fit the box's single i64 payload slot. Box its *data pointer* as
+	// the identity: arrays are reference types in JS, so `===` on two boxed
+	// arrays is reference equality (kmlTagArray, compared by pointer in
+	// __kml_any_eq), and the data pointer is the stable per-array identity a
+	// value-typed array has (`a === a` is the same pointer boxed twice → true;
+	// two distinct literals have distinct buffers → false). The length and
+	// element type are *not* preserved — a boxed array supports `===`/`!==` and
+	// `typeof` (→ "object"), but not indexing, `.length`, or content-accurate
+	// printing (its toString is the `[object Array]` tag string, TDD-00062).
+	if v.Ty.IsArray {
+		dataPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", dataPtr, v.Ref))
+		payload := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", payload, dataPtr))
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagArray))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, payload))
+		return Value{Ref: r1, Ty: TypeAny}, nil
 	}
 
 	var tag int
@@ -299,11 +321,24 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	store(e.internString("undefined"))
 	e.emitLabel(nextL)
 
-	// Remaining tag: object (not reachable in V1, no in-scope path boxes one,
-	// but handled for completeness rather than left as undefined behavior).
-	objPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payload))
-	store(objPtr)
+	// A boxed array stringifies to the `[object Array]` tag: the box holds only
+	// the array's data pointer (see emitBoxValue), so the length and element
+	// type needed to render its contents (`1,2,3`) are not recoverable — this
+	// fixed tag string is the honest, non-garbage stand-in (a deviation from
+	// JS's `String([1,2,3]) === "1,2,3"`, documented in TDD-00062).
+	matchL, nextL = e.emitTagCheck(tag, kmlTagArray, "dynstr.array")
+	e.emitLabel(matchL)
+	store(e.internString("[object Array]"))
+	e.emitLabel(nextL)
+
+	// Remaining tag: object → "[object Object]", matching JS's
+	// `String({}) === "[object Object]"` (a plain object has no useful
+	// value-string, and its field contents aren't recovered from the boxed
+	// pointer). Previously this branch `inttoptr`'d the payload and stored it
+	// as a string pointer, printing the object's raw struct bytes as a C
+	// string (garbage/empty) — a now-reachable bug once any-typed parameters
+	// can carry an object.
+	store(e.internString("[object Object]"))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()

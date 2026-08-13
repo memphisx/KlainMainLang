@@ -491,3 +491,49 @@ const t2: string | null = "hello"
 console.log(t2?.length)
 `, "0\n5")
 }
+
+// --- Comma / sequence operator (ADR-00179) ---
+
+// A sequence yields its last operand's value; earlier operands run for side
+// effects only.
+func TestE2ESequenceYieldsLast(t *testing.T) {
+	assertOutput(t, `
+const x = (1, 2, 3);
+console.log(x);
+`, "3")
+}
+
+func TestE2ESequenceSideEffects(t *testing.T) {
+	assertOutput(t, `
+let r = (console.log("a"), console.log("b"), 5);
+console.log(r);
+`, "a\nb\n5")
+}
+
+// An operand may reference a local variable and mutate it (assignment is an
+// expression), and the sequence's value takes the last operand's type.
+func TestE2ESequenceLocalAndAssignment(t *testing.T) {
+	assertOutput(t, `
+let a = 0;
+let b = (a = 7, a + 1);
+console.log(a, b);
+`, "7\n8")
+}
+
+// The last operand's type drives the result even when it differs from earlier
+// operands (a regression guard: the value's storage slot must match).
+func TestE2ESequenceLastTypeWins(t *testing.T) {
+	assertOutput(t, `
+const s = (1, "hello");
+console.log(s);
+console.log(typeof s);
+`, "hello\nstring")
+}
+
+// A sequence works in a condition position.
+func TestE2ESequenceInCondition(t *testing.T) {
+	assertOutput(t, `
+let a = 0;
+if ((a = 1, a === 1)) { console.log("yes"); } else { console.log("no"); }
+`, "yes")
+}

@@ -46,6 +46,13 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = e.inferExprType(init)
 		case *ast.BinaryExpression:
 			ty = e.inferExprType(init)
+		case *ast.SequenceExpression:
+			// The comma operator's value is its last operand's — inferExprType
+			// handles that; without this case the switch's default left `ty` at
+			// its number default, so a sequence whose last operand was a
+			// non-number (e.g. `const s = (log(), "x")`) allocated an i64 slot
+			// and then stored a pointer into it (invalid IR).
+			ty = e.inferExprType(init)
 		case *ast.ArrayLiteral:
 			ty = e.inferArrayType(init)
 		case *ast.ObjectLiteral:

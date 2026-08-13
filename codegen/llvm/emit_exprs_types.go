@@ -1035,6 +1035,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 	case *ast.ConditionalExpression:
 		return e.inferExprType(ex.Consequent)
+	case *ast.SequenceExpression:
+		// The comma operator's value (and type) is its last operand's.
+		if len(ex.Exprs) > 0 {
+			return e.inferExprType(ex.Exprs[len(ex.Exprs)-1])
+		}
+		return TypeI64
 	case *ast.NewErrorExpression:
 		return errorObjType
 	case *ast.NewDateExpression:

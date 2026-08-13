@@ -546,6 +546,24 @@ func NewConditionalExpression(test, consequent, alternate Expression, pos Pos) *
 	return &ConditionalExpression{Test: test, Consequent: consequent, Alternate: alternate, pos: pos}
 }
 
+// SequenceExpression — the comma operator (`a, b, c`): evaluates each operand
+// left to right and yields the last one's value. Only produced where a full
+// expression is allowed (a parenthesized group, an expression statement, a
+// `for` header) — never for the commas that separate call arguments, array
+// elements, or parameters, which are parsed one assignment-expression apiece.
+type SequenceExpression struct {
+	Exprs []Expression
+	pos   Pos
+}
+
+func (*SequenceExpression) nodeMarker()   {}
+func (*SequenceExpression) exprMarker()   {}
+func (s *SequenceExpression) GetPos() Pos { return s.pos }
+
+func NewSequenceExpression(exprs []Expression, pos Pos) *SequenceExpression {
+	return &SequenceExpression{Exprs: exprs, pos: pos}
+}
+
 // SpreadElement — ...expr inside an array literal.
 type SpreadElement struct {
 	Arg Expression

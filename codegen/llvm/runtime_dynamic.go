@@ -6,10 +6,12 @@ import ()
 // { i8 tag, i64 payload } for equality (backs === / !==). Equal-tag pairs
 // compare directly per tag's meaning (string payloads are ptrtoint'd string
 // pointers, so string/string compares via strcmp, not pointer identity;
-// object/object compares by pointer, matching JS reference equality); an
-// int/float tag mismatch (either order) is still a real numeric comparison,
-// converting the int side to double first; any other tag mismatch is false.
-// Tags: 0=int, 1=float, 2=string, 3=boolean, 4=null, 5=undefined, 6=object.
+// object/object and array/array compare by pointer, matching JS reference
+// equality); an int/float tag mismatch (either order) is still a real numeric
+// comparison, converting the int side to double first; any other tag mismatch
+// is false.
+// Tags: 0=int, 1=float, 2=string, 3=boolean, 4=null, 5=undefined, 6=object,
+// 7=array.
 func (e *Emitter) ensureAnyEq() {
 	if e.usedAnyEq {
 		return
@@ -79,7 +81,9 @@ check_null_undef:
   br i1 %is_null_or_undef, label %ret_true, label %check_object
 check_object:
   %is_object = icmp eq i8 %tagA, 6
-  br i1 %is_object, label %cmp_object, label %not_equal
+  %is_array = icmp eq i8 %tagA, 7
+  %is_ref = or i1 %is_object, %is_array
+  br i1 %is_ref, label %cmp_object, label %not_equal
 cmp_object:
   %oa = inttoptr i64 %payA to ptr
   %ob = inttoptr i64 %payB to ptr

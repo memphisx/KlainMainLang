@@ -816,7 +816,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if decl, found := e.genericFuncs[id.Name]; found {
 			return e.emitGenericFuncCall(decl, ex.Args, ex.GetPos())
 		}
-		// Closure variable.
+		// Closure variable — including a named function expression's own
+		// self-reference binding (TDD-00060).
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc {
 			return e.emitClosureCall(sym, ex.Args, ex.GetPos())
 		}

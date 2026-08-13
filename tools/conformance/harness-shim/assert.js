@@ -15,18 +15,14 @@
 // not silently patched around.
 //
 // `sameValue`/`notSameValue`/`throws` all need a parameter type that
-// covers "any test value," but this compiler rejects bare `any`/`unknown`
-// as a parameter type outright, and confirmed directly (empirically, not
-// assumed) that a per-method generic type parameter (`static
-// sameValue<T>(...)`) doesn't parse on a class method at all ("expected :,
-// got <"). A *constrained* union (`number | string | boolean | null`) does
-// work as a parameter type, though (isUnconstrainedDynamic only rejects the
-// bare/unconstrained form — codegen/llvm/emit_dynamic.go) — used here
-// instead. The `| null` member accepts both `null` and `undefined`
-// arguments (the pre-existing Nullable branch of union V1), covering the
-// very common `assert.sameValue(x, undefined)` / `..., null)` comparisons.
-// A call passing an object or array still fails to compile at that specific
-// call site, a real and visible (not hidden) gap for those files.
+// covers "any test value." Since TDD-00062 (Staged V2) a bare `any`
+// parameter is supported, so these take `any` directly — the argument is
+// boxed at the call site and compared with `===` (which dispatches on the
+// runtime tag). This covers scalars, `null`/`undefined`, and objects
+// (compared by reference identity, matching JS `===`). Passing an *array*
+// value is still a clean compile error at that call site (boxing an array
+// into any/unknown is not yet supported) — a real, visible gap for the
+// files that assert on array values directly.
 //
 // `assert.throws(ErrorConstructor, fn)` is even more fundamentally
 // unavailable in full: real JS passes a built-in error type (`TypeError`,
@@ -49,21 +45,21 @@ class assert {
         throw new Test262Error(message);
     }
 
-    static sameValue(actual: number | string | boolean | null, expected: number | string | boolean | null, message: string = ""): void {
+    static sameValue(actual: any, expected: any, message: string = ""): void {
         if (actual === expected) {
             return;
         }
         throw new Test262Error("assert.sameValue failed: " + message);
     }
 
-    static notSameValue(actual: number | string | boolean | null, unexpected: number | string | boolean | null, message: string = ""): void {
+    static notSameValue(actual: any, unexpected: any, message: string = ""): void {
         if (actual !== unexpected) {
             return;
         }
         throw new Test262Error("assert.notSameValue failed: " + message);
     }
 
-    static throws(expectedErrorConstructor: number | string | boolean, func: () => void, message: string = ""): void {
+    static throws(expectedErrorConstructor: any, func: () => void, message: string = ""): void {
         try {
             func();
         } catch (e) {

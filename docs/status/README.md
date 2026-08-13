@@ -207,4 +207,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-12 — `for...of` over a generator shipped, closing out TDD-00061's V1 scope (construction, `yield`, `.next()`, and now iteration) — see [ADR-00173](../adr/ADR-00173.md).*
+*Last updated: 2026-08-12 — the comma / sequence operator `(a, b, c)` is now supported (evaluates each operand, yields the last) — see [ADR-00179](../adr/ADR-00179.md).*
