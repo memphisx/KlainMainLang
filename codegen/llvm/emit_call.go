@@ -821,6 +821,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc {
 			return e.emitClosureCall(sym, ex.Args, ex.GetPos())
 		}
+		// Static-string eval fast path (TDD-00046 static subset): a
+		// compile-time-constant `eval("<expression>")` is compiled through
+		// this compiler's own parser + codegen, in place — no embedded
+		// engine. Checked after every user-binding lookup, so a
+		// user-defined function named `eval` still wins.
+		if id.Name == "eval" {
+			return e.emitStaticEval(ex.Args, ex.GetPos())
+		}
 		return Value{}, fmt.Errorf("%d:%d: undefined function or closure '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 	}
 

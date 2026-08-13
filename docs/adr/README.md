@@ -235,3 +235,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00195](ADR-00195.md) | Conformance report: category descriptions, pipeline-phase breakdown, per-reason example files | Extends [ADR-00153](ADR-00153.md) |
 | [00196](ADR-00196.md) | `String.fromCharCode`/`fromCodePoint` reject a non-number argument instead of emitting invalid IR | Surfaced by [ADR-00195](ADR-00195.md)'s phase breakdown |
 | [00197](ADR-00197.md) | Reject numeric separators in legacy-octal / non-octal-decimal literals (`0_0`, `08_0`) | Extends [ADR-00085](ADR-00085.md); surfaced by [ADR-00195](ADR-00195.md) |
+| [00198](ADR-00198.md) | Static-string `eval` fast path — compile a constant expression in place, no embedded engine | Implements a subset of [TDD-00046](../tdd/TDD-00046.md); corpus +45 |

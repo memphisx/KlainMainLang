@@ -6,7 +6,7 @@
 
 **Strict Coverage**: 3/14, ~21% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveats above.
 
-**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` needs a JIT/interpreter this compiler doesn't have natively; an opt-in embedded-engine path is scoped in [TDD-00046](../tdd/TDD-00046.md) but deliberately low priority and not started.
+**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` now has a static subset — a compile-time-constant `eval("<expression>")` is compiled in place through this compiler's own pipeline (no engine) — see [ADR-00198](../adr/ADR-00198.md); the general dynamic case still needs the opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), deliberately low priority and not started.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -26,4 +26,4 @@
 | `btoa(s)` | ✅ | Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/ADR-00024.md). |
 | `structuredClone(obj)` | ✅ | Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, and plain objects recurse; scalars pass through as value types). `Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased — see [ADR-00113](../adr/ADR-00113.md). |
 | `queueMicrotask(fn)` | ❌ | Needs event loop |
-| `eval(s)` | ❌ | Needs a JIT/interpreter this compiler doesn't have natively; opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |
+| `eval(s)` | ❌ | General/dynamic `eval` is unimplemented (needs the opt-in embedded engine, [TDD-00046](../tdd/TDD-00046.md), not started). A narrow **static subset** does work: a compile-time-constant `eval("<expression>")` is compiled in place through this compiler's own parser+codegen, no engine — see [ADR-00198](../adr/ADR-00198.md). A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw (so it can't false-pass a negative test) |

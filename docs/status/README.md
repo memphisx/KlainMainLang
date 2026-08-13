@@ -205,4 +205,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-13 — string/template literals now decode the full ES escape grammar ([ADR-00194](../adr/ADR-00194.md)), plus two conformance-surfaced fixes: `String.fromCharCode` rejects a non-number argument instead of emitting invalid IR ([ADR-00196](../adr/ADR-00196.md)) and a numeric separator in a legacy-octal/non-octal-decimal literal (`0_0`) is now a clean error ([ADR-00197](../adr/ADR-00197.md)); Test262 corpus at 5180/53578 (9.7%).*
+*Last updated: 2026-08-13 — a static-string `eval` fast path now compiles a compile-time-constant `eval("<expression>")` in place through this compiler's own pipeline (no embedded engine), a subset of [TDD-00046](../tdd/TDD-00046.md) — see [ADR-00198](../adr/ADR-00198.md); Test262 corpus at 5225/53578 (9.8%).*
