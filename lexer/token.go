@@ -59,6 +59,7 @@ const (
 	PLUS           // +
 	MINUS          // -
 	STAR           // *
+	POW            // **
 	SLASH          // /
 	PERCENT        // %
 	ASSIGN         // =
@@ -78,6 +79,7 @@ const (
 	PLUS_ASSIGN    // +=
 	MINUS_ASSIGN   // -=
 	STAR_ASSIGN    // *=
+	POW_ASSIGN     // **=
 	SLASH_ASSIGN   // /=
 	PERCENT_ASSIGN // %=
 
@@ -146,12 +148,12 @@ var tokenNames = map[TokenType]string{
 	EXTENDS: "extends", SUPER: "super",
 	STATIC: "static", PRIVATE: "private", PROTECTED: "protected", PUBLIC: "public",
 	ABSTRACT: "abstract", IMPLEMENTS: "implements",
-	PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
+	PLUS: "+", MINUS: "-", STAR: "*", POW: "**", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQ: "==", NEQ: "!=", STRICT_EQ: "===", STRICT_NEQ: "!==",
 	LT: "<", GT: ">", LTE: "<=", GTE: ">=",
 	AND: "&&", OR: "||", NOT: "!",
 	INC: "++", DEC: "--", PLUS_ASSIGN: "+=", MINUS_ASSIGN: "-=",
-	STAR_ASSIGN: "*=", SLASH_ASSIGN: "/=", PERCENT_ASSIGN: "%=",
+	STAR_ASSIGN: "*=", POW_ASSIGN: "**=", SLASH_ASSIGN: "/=", PERCENT_ASSIGN: "%=",
 	BITAND: "&", BITOR: "|", BITXOR: "^", BITNOT: "~",
 	LSHIFT: "<<", RSHIFT: ">>", URSHIFT: ">>>",
 	AND_ASSIGN: "&=", OR_ASSIGN: "|=", XOR_ASSIGN: "^=",

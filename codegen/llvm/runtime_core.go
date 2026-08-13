@@ -218,6 +218,44 @@ func (e *Emitter) ensureMathFuncs() {
 	e.emitGlobal("declare double @log1p(double noundef)")
 }
 
+// ensureIPow defines __kml_ipow, an exact i64 integer exponentiation (base**exp)
+// by squaring — used by the `**` operator when both operands are integers, so a
+// result like `2 ** 62` stays exact rather than losing precision through a
+// double round-trip. A negative exponent returns 0 (the integer-model
+// truncation of 1/base^|exp|, matching this compiler's truncating integer `/`);
+// exp == 0 returns 1 (including 0 ** 0 === 1, as in JS). i64 overflow wraps like
+// every other integer op here.
+func (e *Emitter) ensureIPow() {
+	if e.usedIPow {
+		return
+	}
+	e.usedIPow = true
+	e.emitGlobal(`
+define i64 @__kml_ipow(i64 %base, i64 %exp) {
+entry:
+  %neg = icmp slt i64 %exp, 0
+  br i1 %neg, label %retzero, label %header
+retzero:
+  ret i64 0
+header:
+  %result = phi i64 [ 1, %entry ], [ %result_next, %body ]
+  %b = phi i64 [ %base, %entry ], [ %b_sq, %body ]
+  %e = phi i64 [ %exp, %entry ], [ %e_half, %body ]
+  %more = icmp ne i64 %e, 0
+  br i1 %more, label %body, label %exit
+body:
+  %bit = and i64 %e, 1
+  %is_odd = icmp ne i64 %bit, 0
+  %rmul = mul i64 %result, %b
+  %result_next = select i1 %is_odd, i64 %rmul, i64 %result
+  %b_sq = mul i64 %b, %b
+  %e_half = lshr i64 %e, 1
+  br label %header
+exit:
+  ret i64 %result
+}`)
+}
+
 // ensureCtlz32 declares LLVM's own count-leading-zeros intrinsic for Math.clz32
 // — a standard IR intrinsic (not a libc/libm call), so unlike ensureMathFuncs
 // this needs no -lm link requirement.

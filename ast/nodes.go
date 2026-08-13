@@ -771,6 +771,30 @@ func NewFunctionExpression(name string, params []Param, retType *TypeAnnotation,
 	return &FunctionExpression{Name: name, Params: params, RetType: retType, Body: body, IsAsync: isAsync, pos: pos}
 }
 
+// ClassExpression — a `class [Name] { ... }` in expression position
+// (TDD-00063 Stage 4). Classes are compile-time nominal types here, not
+// first-class runtime values, so V1 supports a class expression only as the
+// initializer of a top-level `const/let/var X = class {...}` binding: a
+// codegen pre-pass rewrites it into a nominal ClassDeclaration named after
+// the LHS (rewriteTopLevelClassExpressions). Any other position — an
+// argument, a return value, a nested (non-top-level) binding — reaches
+// emitExpr and is a clean rejection, since no runtime constructor value
+// exists to produce. Decl carries the fully-parsed class body (Stages 1–3
+// members included); its Name is a placeholder until the rewrite overwrites
+// it with the LHS name.
+type ClassExpression struct {
+	Decl *ClassDeclaration
+	pos  Pos
+}
+
+func (*ClassExpression) nodeMarker()   {}
+func (*ClassExpression) exprMarker()   {}
+func (c *ClassExpression) GetPos() Pos { return c.pos }
+
+func NewClassExpression(decl *ClassDeclaration, pos Pos) *ClassExpression {
+	return &ClassExpression{Decl: decl, pos: pos}
+}
+
 // --- Template literals ---
 
 // TemplateLiteral represents a template literal `text ${expr} text`.

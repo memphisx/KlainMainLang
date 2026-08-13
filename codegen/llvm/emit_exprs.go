@@ -151,6 +151,14 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewRequestExpression(ex)
 	case *ast.NewXMLHttpRequestExpression:
 		return e.emitNewXMLHttpRequestExpression(ex)
+	case *ast.ClassExpression:
+		// A top-level `const X = class {...}` binding was already rewritten to
+		// a nominal class declaration before emission (TDD-00063 Stage 4,
+		// rewriteTopLevelClassExpressions). Reaching here means the class
+		// expression was used as a value — an argument, a return, a nested or
+		// non-top-level binding — which this compiler's nominal (non-first-
+		// class) class model can't produce a runtime value for.
+		return Value{}, fmt.Errorf("%d:%d: a class expression is only supported as a top-level `const/let/var X = class {...}` binding (V1) — using it as a value (an argument, a return value, or a nested/non-top-level binding) is not yet supported (see docs/tdd/TDD-00063.md Stage 4)", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }

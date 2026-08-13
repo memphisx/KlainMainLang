@@ -19,10 +19,10 @@ let a: string = 'foo'
 let b: string = 'foo'
 let c: string = 'bar'
 
-console.log(a === b)  // 1 (true)
-console.log(a === c)  // 0 (false)
-console.log(a !== c)  // 1 (true)
-console.log(a !== b)  // 0 (false)
+console.log(a === b)  // true
+console.log(a === c)  // false
+console.log(a !== c)  // true
+console.log(a !== b)  // false
 
 // Ordering comparison
 console.log(a > c)    // 1  ('foo' > 'bar')

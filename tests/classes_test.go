@@ -2025,3 +2025,69 @@ class C {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+// --- TDD-00063 Stage 4: class expressions (nominal binding) ---
+
+// An anonymous class expression bound to a const, used via `new`.
+func TestE2EClassExpressionAnonymous(t *testing.T) {
+	assertOutput(t, `
+const Counter = class {
+  n: number = 0;
+  bump(): number { this.n = this.n + 1; return this.n; }
+};
+const c = new Counter();
+console.log(c.bump());
+console.log(c.bump());
+`, "1\n2")
+}
+
+// A class expression inherits Stage 1-3 members (fields, constructor, methods).
+func TestE2EClassExpressionWithConstructor(t *testing.T) {
+	assertOutput(t, `
+const Point = class {
+  x: number;
+  y: number;
+  constructor(x: number, y: number) { this.x = x; this.y = y; }
+  sum(): number { return this.x + this.y; }
+};
+console.log(new Point(3, 4).sum());
+`, "7")
+}
+
+// A named class expression binds under the LHS name (the internal name is
+// dropped in V1); the class is usable as a type annotation too.
+func TestE2EClassExpressionNamedAndAsType(t *testing.T) {
+	assertOutput(t, `
+const Box = class Impl {
+  v: number;
+  constructor(v: number) { this.v = v; }
+};
+function make(n: number): Box { return new Box(n); }
+console.log(make(9).v);
+`, "9")
+}
+
+// A class expression with a generator method (Stage 2b machinery reused).
+func TestE2EClassExpressionGeneratorMethod(t *testing.T) {
+	assertOutput(t, `
+const Seq = class {
+  *nums(): number { yield 1; yield 2; yield 3; }
+};
+for (const n of new Seq().nums()) { console.log(n); }
+`, "1\n2\n3")
+}
+
+// A class expression used as a runtime value (an argument) is a clean,
+// specific rejection in V1.
+func TestE2EClassExpressionAsValueRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function f(x: number): number { return x; }
+f(class {});
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a class expression used as a value")
+	}
+	if !strings.Contains(err.Error(), "class expression is only supported") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}

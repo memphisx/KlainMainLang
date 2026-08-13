@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"KlainMainLang/parser"
@@ -49,12 +50,166 @@ console.log(1 !== 2)
 `, "true\nfalse\ntrue\ntrue")
 }
 
+// TestE2ENaNComparisons pins JS's NaN comparison semantics: NaN is not equal
+// to anything (including itself), so only `!=`/`!==` against NaN are true and
+// every ordered comparison (`===`, `<`, `>`, `<=`, `>=`) is false. Before
+// ADR-00188 `!=`/`!==` used the ordered `one` predicate, wrongly making
+// `NaN !== NaN` false.
+func TestE2ENaNComparisons(t *testing.T) {
+	assertOutput(t, `
+const x: float64 = NaN
+console.log(x === x)
+console.log(x !== x)
+console.log(x === 1.0)
+console.log(x !== 1.0)
+console.log(x < 1.0)
+console.log(x > 1.0)
+console.log(x >= 1.0)
+// a non-NaN float still compares normally
+const y: float64 = 2.5
+console.log(y !== 2.5)
+console.log(y !== 3.5)
+`, "false\ntrue\nfalse\ntrue\nfalse\nfalse\nfalse\nfalse\ntrue")
+}
+
+// TestE2EUnannotatedBooleanVarInference: an unannotated `let b = true` must
+// infer boolean, not fall through to the i64 default (which printed `1`/`0`).
+// Covers a bare literal, a reassignment, a `!`-valued initializer, and a
+// comparison-valued initializer.
+func TestE2EUnannotatedBooleanVarInference(t *testing.T) {
+	assertOutput(t, `
+let a = true
+console.log(a)
+let b = false
+console.log(b)
+let c = true
+c = false
+console.log(c)
+const y = 5
+let n = !(y > 3)
+console.log(n)
+let m = y > 3
+console.log(m)
+`, "true\nfalse\nfalse\nfalse\ntrue")
+}
+
+// TestE2EUnannotatedNegativeFloatLiteral: `let z = -3.5` is a UnaryExpression,
+// not a NumberLiteral, so it needs the unary-inference path to keep float type
+// — otherwise it fell through to i64 and printed `-3`.
+func TestE2EUnannotatedNegativeFloatLiteral(t *testing.T) {
+	assertOutput(t, `
+let z = -3.5
+console.log(z)
+let w = -7
+console.log(w)
+`, "-3.5\n-7")
+}
+
 func TestE2ETernary(t *testing.T) {
 	assertOutput(t, `
 const x: number = 5
 const abs: number = x < 0 ? -x : x
 console.log(abs)
 `, "5")
+}
+
+// --- Logical operators (short-circuit) ---
+
+// TestE2ELogicalShortCircuit pins down that `&&`/`||` genuinely skip the right
+// operand when the left already decides the result — not just "produce the
+// right boolean" but never run the right-hand call. Before ADR-00186 both
+// operands were always evaluated (a plain `and i1`/`or i1`).
+func TestE2ELogicalShortCircuit(t *testing.T) {
+	assertOutput(t, `
+function sideL(): boolean { console.log('L'); return false }
+function sideR(): boolean { console.log('R'); return true }
+// left is false: && must skip the right side entirely
+const a: boolean = sideL() && sideR()
+console.log(a)
+// left is true: || must skip the right side entirely
+const b: boolean = sideR() || sideL()
+console.log(b)
+`, "L\nfalse\nR\ntrue")
+}
+
+// TestE2ELogicalShortCircuitValues checks the non-side-effecting truth table
+// still holds after the control-flow rewrite, including a nested `&&` inside an
+// `||` (each operand may span its own blocks).
+func TestE2ELogicalShortCircuitValues(t *testing.T) {
+	assertOutput(t, `
+console.log(true && true)
+console.log(true && false)
+console.log(false && true)
+console.log(true || false)
+console.log(false || false)
+console.log((1 < 2 && 3 < 2) || 4 < 5)
+`, "true\nfalse\nfalse\ntrue\nfalse\ntrue")
+}
+
+// --- Exponentiation operator (ES2016) ---
+
+// TestE2EExponentiation covers `**`: integer results stay exact i64, the
+// operator binds tighter than `*` and is right-associative.
+func TestE2EExponentiation(t *testing.T) {
+	assertOutput(t, `
+console.log(2 ** 10)
+console.log(3 ** 3)
+console.log(2 ** 0)
+console.log(2 ** 3 ** 2)
+console.log(5 ** 2 * 2)
+console.log(10 ** 3 + 1)
+`, "1024\n27\n1\n512\n50\n1001")
+}
+
+// TestE2EExponentiationNegativeExponentIsZero pins the integer-model choice: a
+// negative exponent truncates to 0 (the integer analogue of `1 / base**|n|`),
+// consistent with this compiler's truncating integer `/`.
+func TestE2EExponentiationNegativeExponentIsZero(t *testing.T) {
+	assertOutput(t, `
+console.log(2 ** -1)
+console.log(10 ** -3)
+`, "0\n0")
+}
+
+// TestE2EExponentiationFloat uses float operands, which route through libm
+// pow() and yield a float.
+func TestE2EExponentiationFloat(t *testing.T) {
+	assertOutput(t, `
+const f: float64 = 2.0
+console.log(f ** 10.0)
+`, "1024")
+}
+
+// TestE2EExponentiationCompoundAssign covers `**=`.
+func TestE2EExponentiationCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+let n: number = 2
+n **= 5
+console.log(n)
+n **= 2
+console.log(n)
+`, "32\n1024")
+}
+
+// TestE2EExponentiationParenthesizedUnaryLeft: `(-2) ** 2` is valid (4) while a
+// bare `-2 ** 2` is a SyntaxError — the parentheses disambiguate.
+func TestE2EExponentiationParenthesizedUnaryLeft(t *testing.T) {
+	assertOutput(t, `
+console.log((-2) ** 2)
+console.log(-(2 ** 2))
+`, "4\n-4")
+}
+
+// TestE2EExponentiationUnaryLeftRejected: an unparenthesized unary on the left
+// of `**` is rejected, matching JS's early SyntaxError.
+func TestE2EExponentiationUnaryLeftRejected(t *testing.T) {
+	_, err := parseAndCompile(`console.log(-2 ** 2)`)
+	if err == nil {
+		t.Fatal("expected a parse error for an unparenthesized unary on the left of '**', got none")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected the '**' ambiguity error, got: %v", err)
+	}
 }
 
 // --- Bitwise operators ---

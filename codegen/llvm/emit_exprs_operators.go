@@ -6,6 +6,13 @@ import (
 )
 
 func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
+	// && / || must short-circuit: the right operand is only evaluated when the
+	// left doesn't already decide the result. This has to happen before the
+	// eager both-operands evaluation below, so it's intercepted here.
+	if ex.Op == "&&" || ex.Op == "||" {
+		return e.emitShortCircuit(ex)
+	}
+
 	left, err := e.emitExpr(ex.Left)
 	if err != nil {
 		return Value{}, err
@@ -197,13 +204,40 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			}
 		}
 		return Value{Ref: reg, Ty: ty}, nil
+	case "**":
+		// Exponentiation. Float operands (either side) use libm's pow() and
+		// yield a float, matching Math.pow. Integer operands use an exact
+		// i64 exponentiation-by-squaring helper and stay i64 — consistent with
+		// this compiler's integer-arithmetic model for `number` (like `/`,
+		// which truncates for i64 rather than producing JS's float). A negative
+		// integer exponent yields 0 (1/base^|n| truncated), the integer-model
+		// analogue of that same truncation; use an explicitly float-typed
+		// operand for real fractional results.
+		if ty.Float {
+			f1 := e.coerce(left, TypeF64)
+			f2 := e.coerce(right, TypeF64)
+			e.ensureMathFuncs()
+			e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
+			return Value{Ref: reg, Ty: TypeF64}, nil
+		}
+		e.ensureIPow()
+		li := e.coerce(left, TypeI64)
+		ri := e.coerce(right, TypeI64)
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ipow(i64 %s, i64 %s)", reg, li.Ref, ri.Ref))
+		return Value{Ref: reg, Ty: TypeI64}, nil
 
 	case "<", ">", "<=", ">=", "==", "!=", "===", "!==":
 		boolTy := TypeBool
 		if ty.Float {
+			// `!=`/`!==` use the *unordered* predicate `une` so that `NaN != x`
+			// (including `NaN != NaN`) is true, matching JS — `one` (ordered)
+			// wrongly returns false whenever either operand is NaN. `==`/`===`
+			// stay ordered `oeq` (`NaN === NaN` is correctly false), and the
+			// relational `< > <= >=` stay ordered (any NaN comparison is false),
+			// both already matching JS.
 			fop := map[string]string{
 				"<": "olt", ">": "ogt", "<=": "ole", ">=": "oge",
-				"==": "oeq", "!=": "one", "===": "oeq", "!==": "one",
+				"==": "oeq", "!=": "une", "===": "oeq", "!==": "une",
 			}[ex.Op]
 			e.emitInstr(fmt.Sprintf("%s = fcmp %s %s %s, %s", reg, fop, ty.IR, left.Ref, right.Ref))
 		} else if ty.Signed {
@@ -221,17 +255,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 		return Value{Ref: reg, Ty: boolTy}, nil
 
-	case "&&":
-		// Simplified: both operands must already be i1
-		l := e.toBool(left)
-		r := e.toBool(right)
-		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", reg, l.Ref, r.Ref))
-		return Value{Ref: reg, Ty: TypeBool}, nil
-	case "||":
-		l := e.toBool(left)
-		r := e.toBool(right)
-		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", reg, l.Ref, r.Ref))
-		return Value{Ref: reg, Ty: TypeBool}, nil
+	// && / || are handled up-front by emitShortCircuit (they short-circuit and
+	// so must not fall through to the eager both-operands path above).
 
 	// Bitwise — operands coerced to i64
 	case "&":
@@ -501,12 +526,75 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 		ri := e.coerce(right, TypeI64)
 		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %s", reg, li.Ref, ri.Ref))
 		return Value{Ref: reg, Ty: TypeI64}, nil
+	case "**":
+		// Backs `**=`; mirrors emitBinary's `**` — libm pow() for float, exact
+		// i64 exponentiation-by-squaring otherwise. See emitBinary for the
+		// integer-model rationale (negative exponent → 0, result stays i64).
+		if ty.Float {
+			f1 := e.coerce(left, TypeF64)
+			f2 := e.coerce(right, TypeF64)
+			e.ensureMathFuncs()
+			e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
+			return Value{Ref: reg, Ty: TypeF64}, nil
+		}
+		e.ensureIPow()
+		li := e.coerce(left, TypeI64)
+		ri := e.coerce(right, TypeI64)
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ipow(i64 %s, i64 %s)", reg, li.Ref, ri.Ref))
+		return Value{Ref: reg, Ty: TypeI64}, nil
 	case "<<", ">>", ">>>":
 		return e.emitBitShift(op, left, right)
 	default:
 		return Value{}, fmt.Errorf("unknown arithmetic operator '%s'", op)
 	}
 	return Value{Ref: reg, Ty: ty}, nil
+}
+
+// emitShortCircuit emits a logical `&&`/`||` with real short-circuit semantics:
+// the right operand is only evaluated when the left doesn't already decide the
+// result (left falsy for `&&`, left truthy for `||`). Result type is i1 — the
+// value-preserving form (`x || "default"` yielding the operand itself) would
+// need a union result type this compiler doesn't have here; both operands are
+// coerced to bool, matching typed TS where `&&`/`||` over booleans yield a
+// boolean. Uses the alloca+store/load pattern (same as emitConditional/
+// emitNullCoalesce) to avoid hand-tracking phi predecessor blocks — the left or
+// right operand may itself span multiple blocks (a nested `&&`/`||`/ternary).
+func (e *Emitter) emitShortCircuit(ex *ast.BinaryExpression) (Value, error) {
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
+
+	left, err := e.emitExpr(ex.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	l := e.toBool(left)
+	// The result defaults to the left operand's bool; it's overwritten only on
+	// the path that evaluates the right operand.
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", l.Ref, resPtr))
+
+	rhsL := e.freshLabel("sc.rhs")
+	mergeL := e.freshLabel("sc.merge")
+
+	// `&&`: evaluate rhs only when left is true. `||`: only when left is false.
+	if ex.Op == "&&" {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", l.Ref, rhsL, mergeL))
+	} else {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", l.Ref, mergeL, rhsL))
+	}
+
+	e.emitLabel(rhsL)
+	right, err := e.emitExpr(ex.Right)
+	if err != nil {
+		return Value{}, err
+	}
+	r := e.toBool(right)
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r.Ref, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resPtr))
+	return Value{Ref: result, Ty: TypeBool}, nil
 }
 
 // emitConditional emits a ternary expression cond ? consequent : alternate.

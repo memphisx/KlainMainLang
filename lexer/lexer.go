@@ -166,6 +166,14 @@ func (l *Lexer) nextToken() (Token, error) {
 		}
 		return l.tok(MINUS, "-", line, col), nil
 	case '*':
+		if l.peek() == '*' {
+			l.advance()
+			if l.peek() == '=' {
+				l.advance()
+				return l.tok(POW_ASSIGN, "**=", line, col), nil
+			}
+			return l.tok(POW, "**", line, col), nil
+		}
 		if l.peek() == '=' {
 			l.advance()
 			return l.tok(STAR_ASSIGN, "*=", line, col), nil

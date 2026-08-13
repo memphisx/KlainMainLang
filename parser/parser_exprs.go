@@ -3,12 +3,13 @@ package parser
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/lexer"
+	"fmt"
 )
 
 // --- Expression parsing (precedence climbing) ---
 //
 // Precedence (low → high):
-//   1  assignment  = += -= *= /= &= |= ^= <<= >>= >>>= &&= ||= ??=   (right-assoc)
+//   1  assignment  = += -= *= **= /= &= |= ^= <<= >>= >>>= &&= ||= ??=   (right-assoc)
 //   2  ||
 //   3  &&
 //   4  |
@@ -19,8 +20,9 @@ import (
 //   9  << >> >>>
 //  10  + -
 //  11  * / %
-//  12  unary prefix: ! ~ - + ++ --
-//  13  postfix ++ --  then call/member chains
+//  12  ** (right-assoc)
+//  13  unary prefix: ! ~ - + ++ --
+//  14  postfix ++ --  then call/member chains
 
 func (p *Parser) parseExpression() (ast.Expression, error) {
 	return p.parseAssignment()
@@ -45,7 +47,7 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 
 	switch p.peek().Type {
 	case lexer.ASSIGN,
-		lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.SLASH_ASSIGN, lexer.PERCENT_ASSIGN,
+		lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.POW_ASSIGN, lexer.SLASH_ASSIGN, lexer.PERCENT_ASSIGN,
 		lexer.AND_ASSIGN, lexer.OR_ASSIGN, lexer.XOR_ASSIGN,
 		lexer.LSHIFT_ASSIGN, lexer.RSHIFT_ASSIGN, lexer.URSHIFT_ASSIGN,
 		lexer.LOGICAL_AND_ASSIGN, lexer.LOGICAL_OR_ASSIGN, lexer.NULLISH_ASSIGN:
@@ -292,17 +294,48 @@ func (p *Parser) parseAdditive() (ast.Expression, error) {
 }
 
 func (p *Parser) parseMultiplicative() (ast.Expression, error) {
-	left, err := p.parseUnary()
+	left, err := p.parseExponentiation()
 	if err != nil {
 		return nil, err
 	}
 	for p.peek().Type == lexer.STAR || p.peek().Type == lexer.SLASH || p.peek().Type == lexer.PERCENT {
 		op := p.advance()
-		right, err := p.parseUnary()
+		right, err := p.parseExponentiation()
 		if err != nil {
 			return nil, err
 		}
 		left = ast.NewBinaryExpression(op.Literal, left, right, posOf(op))
+	}
+	return left, nil
+}
+
+// parseExponentiation parses `a ** b`. `**` binds tighter than `* / %` and is
+// right-associative (`2 ** 3 ** 2` === `2 ** (3 ** 2)` === 512), so the right
+// operand recurses back here while the left is a single unary/postfix operand.
+// JS makes an unparenthesized unary expression on the *left* a SyntaxError
+// (`-2 ** 2` is ambiguous — parenthesize as `(-2) ** 2` or `-(2 ** 2)`); that
+// early error is enforced here rather than silently picking one grouping.
+func (p *Parser) parseExponentiation() (ast.Expression, error) {
+	// The start token distinguishes an unparenthesized unary (`-2 ** 2`, a
+	// SyntaxError) from a parenthesized one (`(-2) ** 2`, valid): both parse to
+	// the same UnaryExpression node — parentheses aren't kept in the AST — so
+	// only a leading `(` tells them apart. Prefix `++`/`--` are UpdateExpression
+	// nodes, not UnaryExpression, and stay allowed on the left, matching JS.
+	startTok := p.peek()
+	left, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+	if p.peek().Type == lexer.POW {
+		if u, ok := left.(*ast.UnaryExpression); ok && u.Prefix && startTok.Type != lexer.LPAREN {
+			return nil, fmt.Errorf("%d:%d: unary operator '%s' before '**' is ambiguous — parenthesize as '(%s x) ** y' or '%s(x ** y)'", startTok.Line, startTok.Col, u.Op, u.Op, u.Op)
+		}
+		op := p.advance()
+		right, err := p.parseExponentiation()
+		if err != nil {
+			return nil, err
+		}
+		left = ast.NewBinaryExpression("**", left, right, posOf(op))
 	}
 	return left, nil
 }

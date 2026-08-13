@@ -25,8 +25,8 @@ console.log(path.basename('/foo/bar/baz.js'))  // baz.js
 console.log(path.basename('/foo/bar/baz.js', '.js')) // baz
 console.log(path.extname('/foo/bar/baz.js'))   // .js
 
-console.log(path.isAbsolute('/foo/bar')) // 1 (true)
-console.log(path.isAbsolute('foo/bar'))  // 0 (false)
+console.log(path.isAbsolute('/foo/bar')) // true
+console.log(path.isAbsolute('foo/bar'))  // false
 
 // parse decomposes a path into its parts; format does the reverse.
 const parsed = path.parse('/home/user/dir/file.txt')

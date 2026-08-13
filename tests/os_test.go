@@ -85,7 +85,7 @@ for (let i = 0; i < cpus.length; i = i + 1) {
   if (cpus[i].times.irq < 0) { allOk = false }
 }
 console.log(allOk)
-`, "1")
+`, "true")
 }
 
 func TestE2EOSCpusSameModelAcrossCores(t *testing.T) {

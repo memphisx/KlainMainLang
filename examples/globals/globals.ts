@@ -6,10 +6,18 @@
 // directly without the Number. prefix (real JS has both forms too). A local
 // variable of the same name still shadows these, checked before falling
 // back to the built-in constant.
-console.log(isNaN(NaN))            // 1 (true)
-console.log(isFinite(Infinity))    // 0 (false)
-console.log(-Infinity < 0)         // 1 (true)
-console.log(Infinity > 1000000)    // 1 (true)
+console.log(isNaN(NaN))            // true
+console.log(isFinite(Infinity))    // false
+console.log(-Infinity < 0)         // true
+console.log(Infinity > 1000000)    // true
+
+// NaN is not equal to anything, including itself — so `!==` against NaN is
+// true and every other comparison (`===`, `<`, `>`, `<=`, `>=`) is false.
+const nan: float64 = NaN
+console.log(nan === nan)           // false
+console.log(nan !== nan)           // true  (the defining property of NaN)
+console.log(nan < 1.0)             // false
+console.log(nan >= 1.0)            // false
 
 // ── performance.now() ────────────────────────────────────────────────────────
 // A CLOCK_MONOTONIC-based timestamp in milliseconds (a double, sub-
@@ -23,7 +31,7 @@ let arr: number[] = []
 for (let i = 0; i < 200000; i++) { arr.push(i) }
 const t2: number = performance.now()
 console.log(arr.length)    // 200000
-console.log(t2 >= t1)      // 1 (true)
+console.log(t2 >= t1)      // true
 
 // ── performance.mark() / performance.measure() ──────────────────────────────
 // Named timing marks on top of performance.now() above. mark(name) records
@@ -38,15 +46,15 @@ let arr2: number[] = []
 for (let i = 0; i < 200000; i++) { arr2.push(i) }
 performance.mark("loop-end")
 const loopMs: number = performance.measure("loop", "loop-start", "loop-end")
-console.log(loopMs >= 0)                                  // 1 (true)
+console.log(loopMs >= 0)                                  // true
 const sinceStartMs: number = performance.measure("since-start", "loop-start")
-console.log(sinceStartMs >= loopMs)                        // 1 (true) — endMark omitted means "through now"
+console.log(sinceStartMs >= loopMs)                        // true — endMark omitted means "through now"
 
 // Re-marking a name overwrites its timestamp (last-write-wins) rather than
 // keeping every mark ever recorded under that name.
 performance.mark("loop-start")
 const freshMs: number = performance.measure("fresh", "loop-start")
-console.log(freshMs < loopMs)                               // 1 (true) — measured from the just-overwritten mark
+console.log(freshMs < loopMs)                               // true — measured from the just-overwritten mark
 
 // Measuring against a name that was never marked throws, matching real
 // performance.measure()'s own SyntaxError-on-unknown-mark behavior.

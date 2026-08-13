@@ -8,7 +8,7 @@
 const sentence: string = 'the quick brown fox'
 console.log(sentence.search('brown'))                       // 10
 console.log(sentence.search('missing'))                     // -1
-console.log(sentence.search('brown') === sentence.indexOf('brown'))  // 1 (true)
+console.log(sentence.search('brown') === sentence.indexOf('brown'))  // true
 
 // --- .localeCompare(other) ---
 // Byte-order comparison via strcmp, normalized to exactly -1/0/1 — not real

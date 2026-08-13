@@ -137,6 +137,19 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	return nil
 }
 
+// emitPendingFinallys emits every enclosing `finally` block inline, innermost
+// first, so a `return` that leaves a try/catch still runs its finally cleanup
+// before the `ret`. It unwinds the whole stack (down to the function boundary);
+// break/continue instead use emitFinallysToDepth to stop at their loop. While
+// emitting the i-th finally the active pending stack is narrowed to the
+// finallys outside it, so a control-flow exit *inside* a finally runs only
+// those outer ones — and that exit's own terminator then supersedes the
+// original pending one (via blockDone), matching JS's "an abrupt completion in
+// finally wins" rule.
+func (e *Emitter) emitPendingFinallys() error {
+	return e.emitFinallysToDepth(0)
+}
+
 // emitTry emits a try/catch/finally statement using setjmp/longjmp.
 //
 // Control flow layout:
@@ -161,6 +174,13 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sjRet, jmpbuf))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
+
+	// A `return`/`break`/`continue` inside the try or catch must run this
+	// finally before it exits — push it so emitPendingFinallys can splice it in
+	// (popped just before the normal-path inline finally at afterL below).
+	if s.Finally != nil {
+		e.pendingFinallys = append(e.pendingFinallys, s.Finally.Body)
+	}
 
 	// --- try body ---
 	e.emitLabel(tryL)
@@ -213,6 +233,11 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 	// --- merge / finally ---
+	// Pop the pending finally: from here on it runs via the normal fall-through
+	// path below, not via an early-exit splice.
+	if s.Finally != nil {
+		e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
+	}
 	e.emitLabel(afterL)
 	if s.Finally != nil {
 		e.pushScope()

@@ -580,3 +580,39 @@ const metrics = new Metrics();
 metrics.record(3);   // called by the plain name the computed key desugars to
 metrics.record(4);
 console.log(metrics.sum); // 7
+
+// TDD-00063 Stage 4: class expressions. `class { ... }` in expression position
+// binds a nominal class under the left-hand-side name — classes are
+// compile-time types here (not first-class runtime values), so V1 supports a
+// class expression only as a top-level `const/let/var X = class {...}` binding
+// (usable as `new X()` and as a type annotation, inheriting every Stage 1-3
+// member). A class expression used as a value — an argument, a return, or a
+// nested binding — is a clean rejection.
+const Accumulator = class {
+  private total: number = 0;
+  private count: number = 0;
+  add(n: number): void {
+    this.total = this.total + n;
+    this.count = this.count + 1;
+  }
+  average(): number {
+    return this.total / this.count;
+  }
+};
+const acc = new Accumulator();
+acc.add(10);
+acc.add(20);
+console.log(acc.average()); // 15
+
+// A named class expression binds under the LHS name (the internal name is
+// dropped in V1); either way the class is usable as a type annotation.
+const Money = class Currency {
+  cents: number;
+  constructor(cents: number) {
+    this.cents = cents;
+  }
+};
+function dollars(m: Money): number {
+  return m.cents / 100;
+}
+console.log(dollars(new Money(500))); // 5

@@ -38,4 +38,4 @@
 // is ever rejected.
 console.log(Math.floor(3.7))          // 3
 console.log(parseInt('42') + 1)       // 43
-console.log(process.argv.length >= 1) // 1 (true)
+console.log(process.argv.length >= 1) // true

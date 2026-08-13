@@ -27,12 +27,12 @@
 try {
     const r = await fetch('https://wttr.in/Thessaloniki?0T')
     console.log(r.status)  // 200
-    console.log(r.ok)      // 1 (true)
+    console.log(r.ok)      // true
 
     const body: string = r.text()
     const lines: string[] = body.split('\n')
     console.log(lines[0])          // Weather report: Thessaloniki
-    console.log(lines[1] === '')   // 1 (true) — a blank line always follows the header
+    console.log(lines[1] === '')   // true — a blank line always follows the header
 
     console.log('--- current conditions (changes with the real weather, not asserted) ---')
     console.log(body)

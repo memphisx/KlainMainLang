@@ -14,7 +14,7 @@ const b = true
 console.log(structuredClone(n))
 console.log(structuredClone(s))
 console.log(structuredClone(b))
-`, "42\nhi\n1")
+`, "42\nhi\ntrue")
 }
 
 func TestE2EStructuredCloneArrayIsIndependentCopy(t *testing.T) {

@@ -226,6 +226,11 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			if visibility != "" {
 				return nil, fmt.Errorf("%d:%d: an accessibility modifier cannot be used with a private identifier", memberTok.Line, memberTok.Col)
 			}
+			// `#constructor` is a reserved private name — an early SyntaxError
+			// regardless of static/instance or method/field position.
+			if memberTok.Literal == "#constructor" {
+				return nil, fmt.Errorf("%d:%d: '#constructor' is a reserved class member name", memberTok.Line, memberTok.Col)
+			}
 			visibility = "private"
 		} else {
 			var err error

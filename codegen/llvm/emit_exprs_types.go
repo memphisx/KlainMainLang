@@ -307,6 +307,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeDate
 			}
 			return TypeI64
+		case "**":
+			// Exponentiation promotes to float if either operand is float,
+			// otherwise stays this compiler's default i64 `number` — matching
+			// emitBinary's own `**` result type.
+			lt := e.inferExprType(ex.Left)
+			rt := e.inferExprType(ex.Right)
+			if lt.Float || rt.Float {
+				return TypeF64
+			}
+			return TypeI64
 		case "&&", "||":
 			return e.inferExprType(ex.Left)
 		case "??":
@@ -1030,8 +1040,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 	case *ast.UnaryExpression:
-		if ex.Op == "typeof" {
+		switch ex.Op {
+		case "typeof":
 			return TypePtr
+		case "!":
+			return TypeBool
+		case "-", "+":
+			// Unary +/- preserve the operand's numeric type (i64 or float).
+			return e.inferExprType(ex.Arg)
+		case "~":
+			return TypeI64
 		}
 	case *ast.ConditionalExpression:
 		return e.inferExprType(ex.Consequent)

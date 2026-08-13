@@ -16,9 +16,9 @@ import { EOL } from 'os' // a plain value, not a function — same mechanism eit
 
 const path = '/tmp/kml_named_import_example.txt'
 
-console.log(existsSync(path)) // 0 (false)
+console.log(existsSync(path)) // false
 wfs(path, 'hello from a named import')
-console.log(existsSync(path)) // 1 (true)
+console.log(existsSync(path)) // true
 console.log(readFileSync(path))
-console.log(EOL === '\n') // 1 (true)
+console.log(EOL === '\n') // true
 unlinkSync(path)

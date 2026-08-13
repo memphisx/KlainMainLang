@@ -524,7 +524,7 @@ for (const b of buf) {
     if (b < 0 || b > 255) { allInRange = false }
 }
 console.log(allInRange)
-`, "16\n1")
+`, "16\ntrue")
 }
 
 func TestE2ECryptoRandomUUID(t *testing.T) {

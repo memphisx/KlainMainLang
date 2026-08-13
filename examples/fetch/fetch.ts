@@ -17,13 +17,13 @@
 // ── status, ok, and the raw body text ───────────────────────────────────────
 const r = await fetch('http://127.0.0.1:8765/get')
 console.log(r.status)          // 200
-console.log(r.ok)              // 1 (true)
-console.log(r.text().length > 0)   // 1 (true)
+console.log(r.ok)              // true
+console.log(r.text().length > 0)   // true
 
 // ── a 404 still resolves normally — .ok is what distinguishes it ───────────
 const missing = await fetch('http://127.0.0.1:8765/status/404')
 console.log(missing.status)    // 404
-console.log(missing.ok)        // 0 (false)
+console.log(missing.ok)        // false
 
 // ── redirects are followed automatically ────────────────────────────────────
 const redirected = await fetch('http://127.0.0.1:8765/redirect-to?url=/get')
@@ -34,7 +34,7 @@ console.log(redirected.status) // 200, not 302 — the redirect was already foll
 // has — see examples/json/json_methods.ts)
 interface Ip { origin: string }
 const ipInfo: Ip = (await fetch('http://127.0.0.1:8765/ip')).json()
-console.log(ipInfo.origin.length > 0)  // 1 (true) — some IP address string came back
+console.log(ipInfo.origin.length > 0)  // true — some IP address string came back
 
 // ── a network-level failure throws, same as any other Error ────────────────
 try {

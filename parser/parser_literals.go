@@ -1053,6 +1053,21 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		p.advance()
 		return ast.NewSuperExpression(posOf(tok)), nil
 
+	case lexer.CLASS:
+		// Class expression `class [Name] { ... }` (TDD-00063 Stage 4).
+		// parseClassDecl consumes `class` itself and accepts an anonymous
+		// class via its defaultName parameter (a placeholder here — the real
+		// name comes from the LHS at rewrite time, since classes are nominal).
+		// V1 is binding-position only: a codegen pre-pass rewrites a top-level
+		// `const X = class {...}` into a class named X; anywhere else this node
+		// reaches emitExpr and is cleanly rejected.
+		cPos := posOf(tok)
+		decl, err := p.parseClassDecl(false, "$ClassExpr")
+		if err != nil {
+			return nil, err
+		}
+		return ast.NewClassExpression(decl, cPos), nil
+
 	case lexer.FUNCTION:
 		// Function expression: var f = function(x): T { return x; }
 		// A named function expression (var f = function fact(n) { ... }) binds

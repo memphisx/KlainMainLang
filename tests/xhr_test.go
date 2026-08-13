@@ -68,7 +68,7 @@ xhr.send()
 console.log(loaded)
 console.log(errored)
 `, srv.URL)
-	assertOutput(t, src, "1\n0")
+	assertOutput(t, src, "true\nfalse")
 }
 
 func TestE2EXHROnErrorFiresOnNetworkFailureNoThrow(t *testing.T) {
@@ -85,7 +85,7 @@ console.log(errored)
 console.log(xhr.status)
 console.log(xhr.readyState)
 `
-	assertOutput(t, src, "0\n1\n0\n4")
+	assertOutput(t, src, "false\ntrue\n0\n4")
 }
 
 func TestE2EXHRAbortResetsReadyState(t *testing.T) {

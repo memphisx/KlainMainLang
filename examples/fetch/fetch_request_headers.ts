@@ -12,7 +12,7 @@
 const headers = new Headers()
 headers.set('Content-Type', 'application/json')
 console.log(headers.get('content-type'))   // application/json — lookup is case-insensitive
-console.log(headers.has('CONTENT-TYPE'))   // 1 (true)
+console.log(headers.has('CONTENT-TYPE'))   // true
 
 // append() combines with a comma instead of overwriting, unlike set()
 headers.append('X-Trace', 'a')
@@ -32,11 +32,11 @@ console.log(req.headers.get('content-type'))  // application/json
 // fetch(url, init) (all three forms are still supported side by side)
 const posted = await fetch(req)
 console.log(posted.status)  // 200
-console.log(posted.text().indexOf('"hello":"world"') > -1)  // 1 (true)
+console.log(posted.text().indexOf('"hello":"world"') > -1)  // true
 
 // fetch(url, init)'s own init.headers field also accepts a real Headers
 // instance directly, not just a plain Map<string,string>
 const withHeaders = new Headers()
 withHeaders.set('X-Example-Header', 'kml-value')
 const r = await fetch('http://127.0.0.1:8765/headers', { headers: withHeaders })
-console.log(r.text().indexOf('kml-value') > -1)  // 1 (true)
+console.log(r.text().indexOf('kml-value') > -1)  // true

@@ -285,6 +285,13 @@ func (e *Emitter) emitJSONParseObject(jsonVal Value, targetTy Type, pos ast.Pos)
 		if f.Ty.IsObject {
 			return Value{}, fmt.Errorf("%d:%d: JSON.parse into a nested object field ('%s') is not yet supported", pos.Line, pos.Col, f.Name)
 		}
+		// An array-typed field falls through to the scalar-only per-field parse
+		// path below, which would emit a type-mismatched phi (a scalar value
+		// where the field's `ptr` array type is expected) and fail at the clang
+		// stage. Reject cleanly instead — array-valued fields aren't parsed yet.
+		if f.Ty.IsArray {
+			return Value{}, fmt.Errorf("%d:%d: JSON.parse into an array-typed field ('%s') is not yet supported", pos.Line, pos.Col, f.Name)
+		}
 	}
 
 	e.ensureMalloc()

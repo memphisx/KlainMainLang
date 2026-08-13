@@ -26,7 +26,7 @@ import Memory from 'memory'
 let big: string = "hello " + "world"   // concatenation result -> malloc'd
 console.log(big.length)   // 11
 Memory.free(big)
-console.log(big === null)  // 1 (true) — the variable's own storage was nulled
+console.log(big === null)  // true — the variable's own storage was nulled
 
 // ── array ────────────────────────────────────────────────────────────────────
 let nums: number[] = [1, 2, 3, 4, 5]

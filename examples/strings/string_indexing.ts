@@ -45,6 +45,6 @@ console.log(isVowel(test[2]))  // 0  (p is not a vowel)
 // from the end, and returns "" (not undefined) for any out-of-range index.
 const greeting: string = 'hi'
 console.log(greeting.charAt(0))         // h
-console.log(greeting.charAt(0) === greeting[0])   // 1 (true)
+console.log(greeting.charAt(0) === greeting[0])   // true
 console.log("[" + greeting.charAt(10) + "]")   // [] — out of range, empty string
 console.log("[" + greeting.charAt(-1) + "]")   // [] — negative never wraps

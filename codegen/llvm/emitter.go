@@ -107,6 +107,7 @@ type Emitter struct {
 	usedStringReplaceAll     bool
 	usedStringSplit          bool
 	usedAtoll                bool
+	usedIPow                 bool
 	usedJSONStringifyNum     bool
 	usedJSONStringifyStr     bool
 	usedJSONParseStr         bool
@@ -279,6 +280,18 @@ type Emitter struct {
 	usedRegexMatch           bool
 	breakStack               []string // end labels for enclosing loops / switch
 	continueStack            []string // continue-target labels for enclosing loops
+	// pendingFinallys is the stack of enclosing `finally` block bodies, innermost
+	// last. A `return` (or `break`/`continue`) that exits a try/catch runs these
+	// inline — innermost first — before its own terminator, so `finally` still
+	// executes on an early exit. See emitPendingFinallys / emitTry.
+	pendingFinallys [][]ast.Statement
+	// breakFinallyDepth / continueFinallyDepth record len(pendingFinallys) at
+	// each loop/switch entry, in lockstep with breakStack / continueStack, so a
+	// `break`/`continue` runs only the finallys nested inside its target
+	// loop/switch (not the ones outside it, unlike `return`). See emitBreak /
+	// emitContinue and pushBreakTarget / pushContinueTarget.
+	breakFinallyDepth    []int
+	continueFinallyDepth []int
 	// pendingLabel is set by a LabeledStatement just before emitting its body;
 	// the next loop to start consumes it via pushPendingLabel. Non-loop bodies
 	// leave it unconsumed, so the label is simply never registered.
@@ -582,7 +595,38 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 // --- Top-level entry ---
 
 // EmitProgram generates LLVM IR for an entire program (script-style: top-level → main).
+// rewriteTopLevelClassExpressions turns each top-level `const/let/var X =
+// class {...}` into a nominal `class X {...}` declaration in place (TDD-00063
+// Stage 4), so all the existing class-registration/emit machinery applies
+// unchanged. Only a single-declarator VarDeclaration is rewritten; a class
+// expression anywhere else (a multi-declarator list, a nested/non-top-level
+// binding, an argument or return value, an `export`-wrapped binding) is left
+// as a ClassExpression node and cleanly rejected when it reaches emitExpr.
+// The LHS name always wins: a named class expression's own name (`class D
+// {...}`) is dropped, so a body self-reference to it is a clean "unknown
+// class" error — the self-reference subset is a deferred V1 cut.
+func (e *Emitter) rewriteTopLevelClassExpressions(prog *ast.Program) {
+	for i, stmt := range prog.Body {
+		vd, ok := stmt.(*ast.VarDeclaration)
+		if !ok {
+			continue
+		}
+		ce, ok := vd.Init.(*ast.ClassExpression)
+		if !ok {
+			continue
+		}
+		ce.Decl.Name = vd.Name
+		prog.Body[i] = ce.Decl
+	}
+}
+
 func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
+	// Pass -2: rewrite each top-level `const/let/var X = class {...}` binding
+	// into a nominal `class X {...}` declaration (TDD-00063 Stage 4), before
+	// any registration runs — a class expression is not a runtime value here,
+	// so binding it is the same as declaring the class under the LHS name.
+	e.rewriteTopLevelClassExpressions(prog)
+
 	// Pass -1: register enums so members are available as constants everywhere.
 	e.registerEnums(prog)
 

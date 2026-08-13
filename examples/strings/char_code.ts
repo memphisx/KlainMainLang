@@ -44,4 +44,4 @@ console.log(isUpper('M'))   // 1
 // second name. Correct for ASCII/Latin-1 text (where a "code point" and a
 // "char code" are the same number).
 console.log(s.codePointAt(0))                          // 72
-console.log(s.codePointAt(0) === s.charCodeAt(0))      // 1 (true)
+console.log(s.codePointAt(0) === s.charCodeAt(0))      // true

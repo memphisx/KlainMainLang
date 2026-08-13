@@ -190,6 +190,137 @@ try {
 `, "1")
 }
 
+// TestE2EFinallyRunsOnReturn: a `return` inside try/catch must still run the
+// finally block (before ADR-00191 the return's `ret` bypassed it entirely).
+func TestE2EFinallyRunsOnReturn(t *testing.T) {
+	assertOutput(t, `
+function f(): number {
+  try {
+    console.log("try")
+    return 1
+  } finally {
+    console.log("finally")
+  }
+}
+console.log(f())
+`, "try\nfinally\n1")
+}
+
+// TestE2EFinallyRunsOnReturnInCatch: a return from the catch block runs finally.
+func TestE2EFinallyRunsOnReturnInCatch(t *testing.T) {
+	assertOutput(t, `
+function f(): number {
+  try {
+    throw new Error("x")
+  } catch (e) {
+    return 2
+  } finally {
+    console.log("finally")
+  }
+}
+console.log(f())
+`, "finally\n2")
+}
+
+// TestE2EFinallyReturnOverridesTryReturn: a return in finally wins over the
+// try's pending return, matching JS.
+func TestE2EFinallyReturnOverridesTryReturn(t *testing.T) {
+	assertOutput(t, `
+function f(): number {
+  try {
+    return 1
+  } finally {
+    return 9
+  }
+}
+console.log(f())
+`, "9")
+}
+
+// TestE2ENestedFinallyRunInnermostFirstOnReturn: a return from an inner try
+// runs the inner finally, then the outer.
+func TestE2ENestedFinallyRunInnermostFirstOnReturn(t *testing.T) {
+	assertOutput(t, `
+function f(): number {
+  try {
+    try {
+      return 5
+    } finally {
+      console.log("inner")
+    }
+  } finally {
+    console.log("outer")
+  }
+}
+console.log(f())
+`, "inner\nouter\n5")
+}
+
+// TestE2EFinallyValueCapturedBeforeFinally: the returned scalar is captured
+// before finally runs, so a finally mutation of the source variable doesn't
+// change the returned value.
+func TestE2EFinallyValueCapturedBeforeFinally(t *testing.T) {
+	assertOutput(t, `
+function f(): number {
+  let x = 1
+  try {
+    return x
+  } finally {
+    x = 99
+  }
+}
+console.log(f())
+`, "1")
+}
+
+// TestE2EFinallyRunsOnBreak: a break out of a loop runs the loop-nested finally
+// but not a finally outside the loop.
+func TestE2EFinallyRunsOnBreak(t *testing.T) {
+	assertOutput(t, `
+try {
+  for (let i = 0; i < 3; i++) {
+    try {
+      if (i === 1) { break }
+      console.log("body " + i)
+    } finally {
+      console.log("innerfin " + i)
+    }
+  }
+} finally {
+  console.log("outerfin")
+}
+`, "body 0\ninnerfin 0\ninnerfin 1\nouterfin")
+}
+
+// TestE2EFinallyRunsOnContinue: continue runs the inner finally each iteration,
+// not the outer one.
+func TestE2EFinallyRunsOnContinue(t *testing.T) {
+	assertOutput(t, `
+for (let i = 0; i < 3; i++) {
+  try {
+    if (i === 1) { continue }
+    console.log("body " + i)
+  } finally {
+    console.log("fin " + i)
+  }
+}
+`, "body 0\nfin 0\nfin 1\nbody 2\nfin 2")
+}
+
+// TestE2EFinallyRunsOnLabeledBreak: a labeled break through a finally runs it.
+func TestE2EFinallyRunsOnLabeledBreak(t *testing.T) {
+	assertOutput(t, `
+outer: for (let i = 0; i < 2; i++) {
+  try {
+    if (i === 0) { break outer }
+  } finally {
+    console.log("fin " + i)
+  }
+}
+console.log("done")
+`, "fin 0\ndone")
+}
+
 func TestE2EThrowInCatch(t *testing.T) {
 	assertOutput(t, `
 try {

@@ -28,7 +28,7 @@ posted.open('POST', 'http://127.0.0.1:8765/post')
 posted.setRequestHeader('X-Example-Header', 'kml-value')
 posted.send(JSON.stringify({ hello: 'world' }))
 console.log(posted.status)  // 200
-console.log(posted.responseText.indexOf('"hello":"world"') > -1)  // 1 (true)
+console.log(posted.responseText.indexOf('"hello":"world"') > -1)  // true
 
 // A network-level failure fires onerror instead of throwing
 const failed = new XMLHttpRequest()
@@ -36,5 +36,5 @@ let sawError = false
 failed.onerror = () => { sawError = true }
 failed.open('GET', 'http://127.0.0.1:1/unreachable')
 failed.send()
-console.log(sawError)     // 1 (true)
+console.log(sawError)     // true
 console.log(failed.status)  // 0

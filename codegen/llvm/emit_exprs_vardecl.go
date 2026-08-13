@@ -29,6 +29,13 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			} else {
 				ty = TypeNull
 			}
+		case *ast.BooleanLiteral:
+			// Without this case an unannotated `let b = true` fell through to
+			// the switch's blind TypeI64 default, so the boolean stored as i64
+			// and printed as `1`/`0` instead of `true`/`false` (a comparison- or
+			// `!`-valued initializer already infers bool via the BinaryExpression
+			// /UnaryExpression cases — only a bare boolean literal was missed).
+			ty = TypeBool
 		case *ast.StringLiteral:
 			ty = TypePtr
 		case *ast.TemplateLiteral:
@@ -45,6 +52,11 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.IndexExpression:
 			ty = e.inferExprType(init)
 		case *ast.BinaryExpression:
+			ty = e.inferExprType(init)
+		case *ast.UnaryExpression:
+			// `!x` is bool, unary `-`/`+` preserve the operand's numeric type —
+			// without this an unannotated `let n = !cond` fell through to the
+			// TypeI64 default and printed `0`/`1` instead of `false`/`true`.
 			ty = e.inferExprType(init)
 		case *ast.SequenceExpression:
 			// The comma operator's value is its last operand's — inferExprType

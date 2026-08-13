@@ -18,7 +18,7 @@ console.log(out)   // hello from execFileSync
 
 // ── args is optional ─────────────────────────────────────────────────────────
 const bare: string = process.execFileSync('/bin/echo')
-console.log(bare.length > 0)   // 1 (true) — just the newline echo prints alone
+console.log(bare.length > 0)   // true — just the newline echo prints alone
 
 // ── no shell: metacharacters come back out verbatim ─────────────────────────
 const literalArgs: string[] = ['$(whoami); rm -rf /tmp/nothing']

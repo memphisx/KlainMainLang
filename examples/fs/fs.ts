@@ -19,10 +19,10 @@ import fs from 'fs'
 
 const path: string = '/tmp/kml_fs_example.txt'
 
-console.log(fs.existsSync(path))   // 0 (false) — nothing there yet
+console.log(fs.existsSync(path))   // false — nothing there yet
 
 fs.writeFileSync(path, 'first line')
-console.log(fs.existsSync(path))   // 1 (true)
+console.log(fs.existsSync(path))   // true
 
 const content: string = fs.readFileSync(path)
 console.log(content)               // first line
@@ -51,13 +51,13 @@ try {
 console.log(fs.existsSync('/definitely/does/not/exist/kml-example.txt'))  // 0
 
 fs.unlinkSync(path)
-console.log(fs.existsSync(path))   // 0 (false) — cleaned up
+console.log(fs.existsSync(path))   // false — cleaned up
 
 // --- mkdirSync / readdirSync / renameSync / copyFileSync ---
 
 const dir: string = '/tmp/kml_fs_example_dir'
 fs.mkdirSync(dir)
-console.log(fs.existsSync(dir))    // 1 (true)
+console.log(fs.existsSync(dir))    // true
 
 fs.writeFileSync(dir + '/a.txt', 'file a')
 fs.writeFileSync(dir + '/b.txt', 'file b')
@@ -99,7 +99,7 @@ console.log(fs.readdirSync(dir).length)   // 0 — empty again
 // only ever removes a directory that's already empty, just like mkdirSync
 // has no recursive-create option)
 fs.rmdirSync(dir)
-console.log(fs.existsSync(dir))   // 0 (false) — cleaned up
+console.log(fs.existsSync(dir))   // false — cleaned up
 
 // --- readFileSyncBytes / binary-safe writeFileSync & appendFileSync (ADR-00094) ---
 

@@ -16,7 +16,7 @@ let allInRange = true
 for (const b of buf) {
     if (b < 0 || b > 255) { allInRange = false }
 }
-console.log(allInRange)   // 1 (true) — every value is a valid byte
+console.log(allInRange)   // true — every value is a valid byte
 
 // ── crypto.randomUUID() ──────────────────────────────────────────────────────
 // A standard RFC 4122 version-4 UUID string:
@@ -25,7 +25,7 @@ console.log(allInRange)   // 1 (true) — every value is a valid byte
 const id1: string = crypto.randomUUID()
 const id2: string = crypto.randomUUID()
 console.log(id1.length)      // 36
-console.log(id1 !== id2)     // 1 (true) — two calls give two different UUIDs
+console.log(id1 !== id2)     // true — two calls give two different UUIDs
 console.log(id1[8])          // -
 console.log(id1[13])         // -
 console.log(id1[14])         // 4 (the version nibble, always 4)

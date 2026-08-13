@@ -16,6 +16,10 @@ type namedLabel struct {
 	name      string
 	breakL    string
 	continueL string
+	// finallyDepth is len(pendingFinallys) at this labeled loop's entry, so a
+	// labeled `break`/`continue` runs the finallys nested since here (same role
+	// as breakFinallyDepth for unlabeled targets).
+	finallyDepth int
 }
 
 // pushPendingLabel registers breakL/continueL under the label set by the
@@ -30,7 +34,7 @@ func (e *Emitter) pushPendingLabel(breakL, continueL string) func() {
 	}
 	name := e.pendingLabel
 	e.pendingLabel = ""
-	e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL})
+	e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL, finallyDepth: len(e.pendingFinallys)})
 	return func() { e.namedLabelStack = e.namedLabelStack[:len(e.namedLabelStack)-1] }
 }
 
@@ -148,6 +152,9 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	}
 
 	if r.Value == nil {
+		if err := e.emitPendingFinallys(); err != nil {
+			return err
+		}
 		if e.currentRetType.IR == "void" {
 			e.emitTerminator("ret void")
 		} else {
@@ -180,6 +187,9 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			r1 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+			if err := e.emitPendingFinallys(); err != nil {
+				return err
+			}
 			e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
 			return nil
 		}
@@ -189,6 +199,9 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		}
 		if !arrVal.Ty.IsArray {
 			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
+		}
+		if err := e.emitPendingFinallys(); err != nil {
+			return err
 		}
 		e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
 		return nil
@@ -215,6 +228,9 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	} else if e.currentRetType.IR != "void" && e.currentRetType.IR != "" {
 		val = e.coerce(val, e.currentRetType)
 	}
+	if err := e.emitPendingFinallys(); err != nil {
+		return err
+	}
 	e.emitTerminator(fmt.Sprintf("ret %s %s", val.Ty.IR, val.Ref))
 	return nil
 }
@@ -227,10 +243,8 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 
 	e.pushScope()
 	defer e.popScope()
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
-	e.continueStack = append(e.continueStack, incL)
-	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
+	defer e.pushBreakTarget(endL)()
+	defer e.pushContinueTarget(incL)()
 	defer e.pushPendingLabel(endL, incL)()
 
 	if s.Init != nil {
@@ -275,10 +289,8 @@ func (e *Emitter) emitWhile(s *ast.WhileStatement) error {
 	bodyL := e.freshLabel("while.body")
 	endL := e.freshLabel("while.end")
 
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
-	e.continueStack = append(e.continueStack, condL)
-	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
+	defer e.pushBreakTarget(endL)()
+	defer e.pushContinueTarget(condL)()
 	defer e.pushPendingLabel(endL, condL)()
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -370,10 +382,8 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	e.pushScope()
 	defer e.popScope()
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
-	e.continueStack = append(e.continueStack, incL)
-	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
+	defer e.pushBreakTarget(endL)()
+	defer e.pushContinueTarget(incL)()
 	defer e.pushPendingLabel(endL, incL)()
 
 	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
@@ -533,17 +543,68 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 // emitBreak jumps to the nearest enclosing loop/switch end label, or — when
 // labeled — to the named loop's end label, however many levels out that is.
+// pushBreakTarget registers a break label together with the finally depth at
+// this loop/switch entry, so a `break` to it runs exactly the finallys nested
+// since here. The returned func pops both stacks (use with `defer ...()`).
+func (e *Emitter) pushBreakTarget(label string) func() {
+	e.breakStack = append(e.breakStack, label)
+	e.breakFinallyDepth = append(e.breakFinallyDepth, len(e.pendingFinallys))
+	return func() {
+		e.breakStack = e.breakStack[:len(e.breakStack)-1]
+		e.breakFinallyDepth = e.breakFinallyDepth[:len(e.breakFinallyDepth)-1]
+	}
+}
+
+// pushContinueTarget is pushBreakTarget's counterpart for the continue label.
+func (e *Emitter) pushContinueTarget(label string) func() {
+	e.continueStack = append(e.continueStack, label)
+	e.continueFinallyDepth = append(e.continueFinallyDepth, len(e.pendingFinallys))
+	return func() {
+		e.continueStack = e.continueStack[:len(e.continueStack)-1]
+		e.continueFinallyDepth = e.continueFinallyDepth[:len(e.continueFinallyDepth)-1]
+	}
+}
+
+// emitFinallysToDepth runs the pending finallys nested since a target depth —
+// used by break/continue, which unwind only to their loop, unlike return's
+// emitPendingFinallys (which runs all the way to the function boundary).
+func (e *Emitter) emitFinallysToDepth(depth int) error {
+	saved := e.pendingFinallys
+	defer func() { e.pendingFinallys = saved }()
+	for i := len(saved) - 1; i >= depth; i-- {
+		if e.blockDone {
+			break
+		}
+		e.pendingFinallys = saved[:i]
+		e.pushScope()
+		for _, stmt := range saved[i] {
+			if err := e.emitStmt(stmt); err != nil {
+				e.popScope()
+				return err
+			}
+		}
+		e.popScope()
+	}
+	return nil
+}
+
 func (e *Emitter) emitBreak(s *ast.BreakStatement) error {
 	if s.Label != "" {
 		lbl, ok := e.lookupNamedLabel(s.Label)
 		if !ok {
 			return fmt.Errorf("%d:%d: undefined label '%s'", s.GetPos().Line, s.GetPos().Col, s.Label)
 		}
+		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
+			return err
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", lbl.breakL))
 		return nil
 	}
 	if len(e.breakStack) == 0 {
 		return fmt.Errorf("break statement outside of loop or switch")
+	}
+	if err := e.emitFinallysToDepth(e.breakFinallyDepth[len(e.breakFinallyDepth)-1]); err != nil {
+		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", e.breakStack[len(e.breakStack)-1]))
 	return nil
@@ -558,11 +619,17 @@ func (e *Emitter) emitContinue(s *ast.ContinueStatement) error {
 		if lbl.continueL == "" {
 			return fmt.Errorf("%d:%d: label '%s' does not label a loop; continue does not apply", s.GetPos().Line, s.GetPos().Col, s.Label)
 		}
+		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
+			return err
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", lbl.continueL))
 		return nil
 	}
 	if len(e.continueStack) == 0 {
 		return fmt.Errorf("continue statement outside of a loop")
+	}
+	if err := e.emitFinallysToDepth(e.continueFinallyDepth[len(e.continueFinallyDepth)-1]); err != nil {
+		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", e.continueStack[len(e.continueStack)-1]))
 	return nil
@@ -573,8 +640,7 @@ func (e *Emitter) emitContinue(s *ast.ContinueStatement) error {
 func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 	endL := e.freshLabel("switch.end")
 
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
+	defer e.pushBreakTarget(endL)()
 
 	disc, err := e.emitExpr(s.Discriminant)
 	if err != nil {
@@ -686,10 +752,8 @@ func (e *Emitter) emitDoWhile(s *ast.DoWhileStatement) error {
 	condL := e.freshLabel("dowhile.cond")
 	endL := e.freshLabel("dowhile.end")
 
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
-	e.continueStack = append(e.continueStack, condL)
-	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
+	defer e.pushBreakTarget(endL)()
+	defer e.pushContinueTarget(condL)()
 	defer e.pushPendingLabel(endL, condL)()
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", bodyL))
@@ -725,10 +789,8 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 
 	e.pushScope()
 	defer e.popScope()
-	e.breakStack = append(e.breakStack, endL)
-	defer func() { e.breakStack = e.breakStack[:len(e.breakStack)-1] }()
-	e.continueStack = append(e.continueStack, incL)
-	defer func() { e.continueStack = e.continueStack[:len(e.continueStack)-1] }()
+	defer e.pushBreakTarget(endL)()
+	defer e.pushContinueTarget(incL)()
 	defer e.pushPendingLabel(endL, incL)()
 
 	// Resolve the object being iterated. for...in only ever needs the

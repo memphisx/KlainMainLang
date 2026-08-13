@@ -211,3 +211,21 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00171](ADR-00171.md) | Generator function front-end (`function* f() { yield x; }` lexer/parser/AST) — parses, cleanly rejected by codegen | Implements the front-end slice of [TDD-00061](../tdd/TDD-00061.md) |
 | [00172](ADR-00172.md) | Generator function suspend/resume codegen (construction, `yield`, `.next()`) | Implements [TDD-00061](../tdd/TDD-00061.md); extends [ADR-00171](ADR-00171.md) |
 | [00173](ADR-00173.md) | `for...of` over a generator | Implements the remainder of [TDD-00061](../tdd/TDD-00061.md); extends [ADR-00172](ADR-00172.md) |
+| [00174](ADR-00174.md) | Box union/dynamic arguments at static-method call sites (fixes `assert.sameValue`) | |
+| [00175](ADR-00175.md) | Conformance harness — kill the whole process group and bound the pipe wait | Tooling |
+| [00176](ADR-00176.md) | Bare `any`/`unknown` as a function/method parameter and return type (V2) | Implements [TDD-00062](../tdd/TDD-00062.md); extends [ADR-00008](ADR-00008.md)/[ADR-00174](ADR-00174.md) |
+| [00177](ADR-00177.md) | Box arrays (by reference) and fix reference-type toString for `any`/`unknown` | Extends [ADR-00176](ADR-00176.md); implements [TDD-00062](../tdd/TDD-00062.md) |
+| [00178](ADR-00178.md) | Named function expressions (self-reference binding) | Implements [TDD-00060](../tdd/TDD-00060.md); extends [ADR-00168](ADR-00168.md) |
+| [00179](ADR-00179.md) | The comma / sequence operator (`(a, b, c)`) | |
+| [00180](ADR-00180.md) | Class field initializers (TDD-00063 Stage 1) | Implements [TDD-00063](../tdd/TDD-00063.md) Stage 1; extends [ADR-00155](ADR-00155.md) |
+| [00181](ADR-00181.md) | Async class methods + method-modifier parsing (TDD-00063 Stage 2a) | Implements [TDD-00063](../tdd/TDD-00063.md) Stage 2a; extends [ADR-00180](ADR-00180.md) |
+| [00182](ADR-00182.md) | Generator methods (TDD-00063 Stage 2b) | Implements [TDD-00063](../tdd/TDD-00063.md) Stage 2b; extends [ADR-00181](ADR-00181.md) |
+| [00183](ADR-00183.md) | `console.log(boolean)` prints `true`/`false`, not `1`/`0` | |
+| [00184](ADR-00184.md) | Computed class member names (TDD-00063 Stage 3) | Implements [TDD-00063](../tdd/TDD-00063.md) Stage 3; extends [ADR-00182](ADR-00182.md) |
+| [00185](ADR-00185.md) | Class expressions (TDD-00063 Stage 4) | Implements [TDD-00063](../tdd/TDD-00063.md) Stage 4; extends [ADR-00184](ADR-00184.md) |
+| [00186](ADR-00186.md) | `&&` / `||` short-circuit instead of evaluating both operands | Extends [ADR-00087](ADR-00087.md); corrects a caveat flagged by [ADR-00183](ADR-00183.md) |
+| [00187](ADR-00187.md) | The `**` exponentiation operator (and `**=`) | Fixes the `**` ❌ row flagged by [ADR-00166](ADR-00166.md) |
+| [00188](ADR-00188.md) | `!=`/`!==` on floats use unordered `fcmp une` so `NaN != NaN` is true | Fixes the NaN-comparison bug flagged by [ADR-00166](ADR-00166.md) |
+| [00189](ADR-00189.md) | `JSON.parse` into an array-typed field is a clean rejection, not invalid IR | Fixes a bug tracked under [TDD-00015](../tdd/TDD-00015.md) |
+| [00190](ADR-00190.md) | Unannotated `let b = true` / `let n = !cond` / `let z = -3.5` infer their real type | Follows [ADR-00183](ADR-00183.md) (fixes the storage side of boolean printing) |
+| [00191](ADR-00191.md) | `finally` runs on `return`/`break`/`continue`, not only on fall-through | Fixes the finally-on-return bug flagged by [ADR-00166](ADR-00166.md) |

@@ -21,13 +21,13 @@ const posted = await fetch('http://127.0.0.1:8765/post', {
     body: JSON.stringify({ hello: 'world' }),
 })
 console.log(posted.status)                              // 200
-console.log(posted.text().indexOf('"hello":"world"') > -1)  // 1 (true) — the fixture echoes the body back verbatim
+console.log(posted.text().indexOf('"hello":"world"') > -1)  // true — the fixture echoes the body back verbatim
 
 // ── custom headers, sent alongside a GET ────────────────────────────────────
 const headers: Map<string, string> = new Map<string, string>()
 headers.set('X-Example-Header', 'kml-value')
 const withHeaders = await fetch('http://127.0.0.1:8765/headers', { headers: headers })
-console.log(withHeaders.text().indexOf('kml-value') > -1)  // 1 (true) — the fixture's /headers echoes every request header back
+console.log(withHeaders.text().indexOf('kml-value') > -1)  // true — the fixture's /headers echoes every request header back
 
 // ── an explicit method with no body still works (e.g. DELETE) ──────────────
 const deleted = await fetch('http://127.0.0.1:8765/delete', { method: 'DELETE' })
@@ -38,7 +38,7 @@ console.log(deleted.status)  // 200
 // unless overridden by an explicit method; confirmed directly, not assumed
 // — see ADR-00074's Investigation)
 const bodyOnly = await fetch('http://127.0.0.1:8765/post', { body: 'raw-body-text' })
-console.log(bodyOnly.text().indexOf('raw-body-text') > -1)  // 1 (true)
+console.log(bodyOnly.text().indexOf('raw-body-text') > -1)  // true
 
 // ── fetch(url) with no init argument still works exactly as before ─────────
 const plain = await fetch('http://127.0.0.1:8765/get')
