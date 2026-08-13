@@ -22,17 +22,17 @@ console.log(raw.trim().toUpperCase())  // HELLO
 
 // ── startsWith / endsWith ─────────────────────────────────────────────────────
 const url: string = 'https://example.com'
-console.log(url.startsWith('https')) // 1
-console.log(url.startsWith('http://')) // 0
+console.log(url.startsWith('https')) // true
+console.log(url.startsWith('http://')) // false
 
 const file: string = 'report.pdf'
-console.log(file.endsWith('.pdf'))  // 1
-console.log(file.endsWith('.txt'))  // 0
+console.log(file.endsWith('.pdf'))  // true
+console.log(file.endsWith('.txt'))  // false
 
-// Both return false (0) when the string is shorter than the argument.
+// Both return false when the string is shorter than the argument.
 const short: string = 'hi'
-console.log(short.startsWith('hello'))  // 0
-console.log(short.endsWith('world'))    // 0
+console.log(short.startsWith('hello'))  // false
+console.log(short.endsWith('world'))    // false
 
 // ── replace ───────────────────────────────────────────────────────────────────
 const greeting: string = 'Hello World'

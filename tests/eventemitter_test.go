@@ -15,7 +15,7 @@ e.on('msg', (data: string): void => {
 })
 const result = e.emit('msg', 'hello')
 console.log(result)
-`, "got: hello\n1")
+`, "got: hello\ntrue")
 }
 
 func TestE2EEventEmitterBasicOnEmitNumber(t *testing.T) {
@@ -43,7 +43,7 @@ const e = new EventEmitter<string>()
 e.on('a', (data: string): void => { console.log(data) })
 console.log(e.emit('a', 'hi'))
 console.log(e.emit('b', 'nope'))
-`, "hi\n1\n0")
+`, "hi\ntrue\nfalse")
 }
 
 func TestE2EEventEmitterOnce(t *testing.T) {
@@ -101,7 +101,7 @@ e.on('b', (data: string): void => { console.log('b: ' + data) })
 e.removeAllListeners()
 console.log(e.emit('a', 'x'))
 console.log(e.emit('b', 'y'))
-`, "0\n0")
+`, "false\nfalse")
 }
 
 func TestE2EEventEmitterListenerCountAndEventNames(t *testing.T) {
@@ -156,7 +156,7 @@ try {
   console.log(err.message)
   console.log(err instanceof Error)
 }
-`, "bad thing\n1")
+`, "bad thing\ntrue")
 }
 
 func TestE2EEventEmitterErrorPayloadListenedWithUntypedListener(t *testing.T) {

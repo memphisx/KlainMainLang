@@ -18,7 +18,7 @@ let s: string = "hello " + "world"
 console.log(s.length)
 Memory.free(s)
 console.log(s === null)
-`, "11\n1")
+`, "11\ntrue")
 }
 
 func TestE2EMemoryFreeArray(t *testing.T) {

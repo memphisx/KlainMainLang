@@ -117,25 +117,25 @@ class Circle {
     this.r = r;
   }
 }
-console.log(head instanceof Node);   // 1 (true)
-console.log(head instanceof Circle); // 0 (false)
-console.log(tail.nextNode instanceof Node); // 0 — a null field is never an instance of anything
+console.log(head instanceof Node);   // true
+console.log(head instanceof Circle); // false
+console.log(tail.nextNode instanceof Node); // false — a null field is never an instance of anything
 
 // The any/unknown case is where instanceof does real runtime work: the
 // concrete class isn't known until the tag is actually read back.
 const shapeA: any = new Circle(5);
 const shapeB: any = head;
-console.log(shapeA instanceof Circle); // 1
-console.log(shapeA instanceof Node);   // 0
-console.log(shapeB instanceof Node);   // 1
-console.log(shapeB instanceof Circle); // 0
+console.log(shapeA instanceof Circle); // true
+console.log(shapeA instanceof Node);   // false
+console.log(shapeB instanceof Node);   // true
+console.log(shapeB instanceof Circle); // false
 
 // instanceof against a built-in type (ADR-00162) — a compile-time
 // constant (this compiler's static typing already knows the answer; no
 // runtime tag to check, unlike the user-defined-class case above).
 const numbers: number[] = [1, 2, 3];
-console.log(numbers instanceof Array); // 1
-console.log(shapeA instanceof Array);  // 0 — shapeA is a Circle, not an array
+console.log(numbers instanceof Array); // true
+console.log(shapeA instanceof Array);  // false — shapeA is a Circle, not an array
 
 // Stage 3: inheritance (extends/super) + dynamic dispatch. Shape's own
 // area() is overridden by both Rectangle and RightTriangle; describe() —
@@ -198,14 +198,14 @@ printShape(new Rectangle(3, 4));      // rectangle has area 12
 printShape(new RightTriangle(6, 5));  // triangle has area 15 (a right triangle)
 
 const rect: Shape = new Rectangle(2, 5);
-console.log(rect instanceof Shape);      // 1 — true through inheritance
-console.log(rect instanceof Rectangle);  // 1
-console.log(rect instanceof RightTriangle); // 0
+console.log(rect instanceof Shape);      // true — true through inheritance
+console.log(rect instanceof Rectangle);  // true
+console.log(rect instanceof RightTriangle); // false
 
 const anyShape: any = new RightTriangle(3, 4);
-console.log(anyShape instanceof Shape);        // 1
-console.log(anyShape instanceof RightTriangle); // 1
-console.log(anyShape instanceof Rectangle);     // 0
+console.log(anyShape instanceof Shape);        // true
+console.log(anyShape instanceof RightTriangle); // true
+console.log(anyShape instanceof Rectangle);     // false
 
 // Stage 4: static members + static {} blocks. A static field/method
 // belongs to the class itself, not an instance — no `this`, accessed only
@@ -441,3 +441,142 @@ class PrivateRect {
   }
 }
 console.log(new PrivateRect(3, 4).area); // 12
+
+// TDD-00063 Stage 1: class field initializers. A field may carry an `= expr`
+// default (`x = 5`, or annotated `n: number = 5`); it runs at construction
+// time, in declaration order, right after super() in a derived class. A class
+// whose every field initializes itself needs no explicit constructor at all.
+class Config {
+  retries = 3;
+  timeout: number = 30;
+  name = "default";
+}
+const cfg = new Config();
+console.log(cfg.retries);          // 3
+console.log(cfg.timeout);          // 30
+console.log(cfg.name);             // default
+
+// Initializers run before the constructor body, so a constructor assignment
+// to the same field overrides the initializer (spec order: init, then body).
+class Widget {
+  id = 0;
+  clicks = 0;
+  constructor(id: number) {
+    this.id = id; // overrides the `id = 0` initializer
+  }
+}
+const w = new Widget(7);
+console.log(w.id);                 // 7
+console.log(w.clicks);             // 0 — from the initializer, no constructor assignment
+
+// An initializer may reference `this` (an earlier field's already-set value).
+class Circle3 {
+  radius = 10;
+  diameter = this.radius * 2;
+}
+console.log(new Circle3().diameter); // 20
+
+// In a derived class, own field initializers run right after super() returns.
+// Here Labeled has no explicit constructor, so the synthesized one forwards
+// to super(...) and then runs `tag = "labeled"`.
+class Base2 {
+  kind: string;
+  constructor(kind: string) {
+    this.kind = kind;
+  }
+}
+class Labeled extends Base2 {
+  tag = "labeled";
+}
+const lab = new Labeled("box");
+console.log(lab.kind);             // box
+console.log(lab.tag);              // labeled
+
+// Private fields (TDD-00021) may carry an initializer too — the syntax
+// TDD-00021 itself deferred, now filled in.
+class Ticker {
+  #count = 0;
+  tick(): number {
+    this.#count = this.#count + 1;
+    return this.#count;
+  }
+}
+const ticker = new Ticker();
+console.log(ticker.tick());        // 1
+console.log(ticker.tick());        // 2
+
+// TDD-00063 Stage 2a: async methods. `async` on a class method works exactly
+// like an async top-level function — it returns a Promise<T> the caller
+// awaits, and its body can `await` other async work (including another async
+// method on the same instance via `this`). Static async methods work too.
+// (Generator methods — `*m()` / `async *m()` — parse but are a clean
+// "not yet supported" rejection; that's Stage 2b.)
+class Account {
+  private balance: number;
+  constructor(balance: number) {
+    this.balance = balance;
+  }
+  async currentBalance(): Promise<number> {
+    return this.balance;
+  }
+  async deposit(amount: number): Promise<number> {
+    const current = await this.currentBalance(); // await another async method via `this`
+    this.balance = current + amount;
+    return this.balance;
+  }
+  static async openWith(amount: number): Promise<Account> {
+    return new Account(amount); // a static async factory
+  }
+}
+const account = await Account.openWith(100);
+console.log(await account.deposit(50));  // 150
+console.log(await account.currentBalance()); // 150
+
+// TDD-00063 Stage 2b: generator methods. A `*method()` on a class is a real
+// generator — calling it constructs a generator instance (it does not run the
+// body), and the body can `yield` values and read `this`. Drive it with
+// for...of or explicit .next(). (Static and `async *` generator methods are a
+// clean "not yet supported" rejection in V1.)
+class NumberRange {
+  private lo: number;
+  private hi: number;
+  constructor(lo: number, hi: number) {
+    this.lo = lo;
+    this.hi = hi;
+  }
+  *values(): number {
+    for (let i = this.lo; i < this.hi; i = i + 1) {
+      yield i;
+    }
+  }
+}
+const range = new NumberRange(1, 5);
+for (const v of range.values()) {
+  console.log(v); // 1 2 3 4
+}
+// Explicit .next() drive, including the {value, done} shape.
+const it = new NumberRange(10, 12).values();
+const step = it.next();
+console.log(step.value); // 10
+console.log(step.done);  // false
+console.log(it.next().value); // 11
+console.log(it.next().done);  // true
+
+// TDD-00063 Stage 3: computed member names. A compile-time-constant string or
+// numeric key in brackets is desugared to the equivalent named member —
+// `['area']()` is exactly `area()`. (A dynamic key — an identifier, a call, a
+// Symbol, or an interpolated template — is a clean rejection in V1, since
+// member names are resolved statically here.)
+class Metrics {
+  private total: number = 0;
+  ["record"](n: number): void {
+    this.total = this.total + n;
+  }
+  get ["sum"](): number {
+    return this.total;
+  }
+}
+const metrics = new Metrics();
+metrics.record(3);   // called by the plain name the computed key desugars to
+metrics.record(4);
+console.log(metrics.sum); // 7

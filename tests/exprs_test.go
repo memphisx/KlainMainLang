@@ -46,7 +46,7 @@ console.log(1 < 2)
 console.log(2 > 3)
 console.log(1 === 1)
 console.log(1 !== 2)
-`, "1\n0\n1\n1")
+`, "true\nfalse\ntrue\ntrue")
 }
 
 func TestE2ETernary(t *testing.T) {
@@ -432,7 +432,7 @@ console.log(x !== null)
 x = "hello"
 console.log(x === null)
 console.log(x !== null)
-`, "1\n0\n0\n1")
+`, "true\nfalse\nfalse\ntrue")
 }
 
 func TestE2ENullableArrayField(t *testing.T) {
@@ -448,7 +448,7 @@ let empty: Box = { items: null }
 console.log(empty.items === null)
 let full: Box = { items: [1, 2, 3] }
 console.log(full.items === null)
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2ENullInTemplate(t *testing.T) {
@@ -480,7 +480,7 @@ func TestE2ENullEquality(t *testing.T) {
 console.log(null === null)
 console.log(null === undefined)
 console.log(null !== null)
-`, "1\n1\n0")
+`, "true\ntrue\nfalse")
 }
 
 func TestE2ENullOptionalChain(t *testing.T) {

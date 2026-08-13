@@ -95,7 +95,7 @@ const person: Person = JSON.parse('{"name":"Alice","age":30,"active":true}')
 console.log(person.name)
 console.log(person.age)
 console.log(person.active)
-`, "Alice\n30\n1")
+`, "Alice\n30\ntrue")
 }
 
 func TestE2EJSONParseObjectMissingField(t *testing.T) {
@@ -372,7 +372,7 @@ console.log(Object.hasOwn(p, "x"))
 console.log(Object.hasOwn(p, "z"))
 console.log(p.hasOwnProperty("y"))
 console.log(p.hasOwnProperty("q"))
-`, "1\n0\n1\n0")
+`, "true\nfalse\ntrue\nfalse")
 }
 
 func TestE2EObjectHasOwnDynamicKeyIsError(t *testing.T) {
@@ -407,7 +407,7 @@ class Foo {
 const f = new Foo(5);
 console.log(f.toString())
 console.log(f.hasOwnProperty("x"))
-`, "custom-tostring\n0")
+`, "custom-tostring\nfalse")
 }
 
 // --- Near-zero-effort roadmap batch: NaN/Infinity, performance.now,
@@ -422,7 +422,7 @@ console.log(-Infinity < 0)
 console.log(Infinity > 1000000)
 const x = NaN
 console.log(isNaN(x))
-`, "1\n0\n1\n1\n1")
+`, "true\nfalse\ntrue\ntrue\ntrue")
 }
 
 func TestE2EPerformanceNow(t *testing.T) {
@@ -433,7 +433,7 @@ for (let i = 0; i < 200000; i++) { arr.push(i) }
 const t2: number = performance.now()
 console.log(arr.length)
 console.log(t2 >= t1)
-`, "200000\n1")
+`, "200000\ntrue")
 }
 
 func TestE2EPerformanceMarkMeasure(t *testing.T) {
@@ -446,7 +446,7 @@ const d1: number = performance.measure("work", "start", "end")
 console.log(d1 >= 0)
 const d2: number = performance.measure("work-to-now", "start")
 console.log(d2 >= d1)
-`, "1\n1")
+`, "true\ntrue")
 }
 
 func TestE2EPerformanceMarkOverwrite(t *testing.T) {
@@ -461,7 +461,7 @@ const d1: number = performance.measure("first", "m")
 performance.mark("m")
 const d2: number = performance.measure("second", "m")
 console.log(d2 < d1)
-`, "1")
+`, "true")
 }
 
 func TestE2EPerformanceMeasureMissingMarkThrows(t *testing.T) {
@@ -538,5 +538,5 @@ console.log(id1[13])
 console.log(id1[18])
 console.log(id1[23])
 console.log(id1[14])
-`, "36\n1\n-\n-\n-\n-\n4")
+`, "36\ntrue\n-\n-\n-\n-\n4")
 }

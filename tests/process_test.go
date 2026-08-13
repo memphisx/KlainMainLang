@@ -79,7 +79,7 @@ const line3 = process.readLineSync()
 console.log(line3 === null)
 `
 	got := compileAndRunWithStdin(t, src, "hello\nworld\n")
-	compareLines(t, got, "got: hello\ngot: world\n1")
+	compareLines(t, got, "got: hello\ngot: world\ntrue")
 }
 func TestE2EProcessReadLineSyncNoTrailingNewline(t *testing.T) {
 	src := `
@@ -89,7 +89,7 @@ const line2 = process.readLineSync()
 console.log(line2 === null)
 `
 	got := compileAndRunWithStdin(t, src, "last line no newline")
-	compareLines(t, got, "got: last line no newline\n1")
+	compareLines(t, got, "got: last line no newline\ntrue")
 }
 
 // --- process.execFileSync ---
@@ -220,7 +220,7 @@ try {
 } catch (e) {
     console.log(e.message.startsWith("cannot change directory to '/definitely/does/not/exist/kml-test-dir': "))
 }
-`, "1")
+`, "true")
 }
 
 func TestE2EProcessChdirWrongArgCountRejected(t *testing.T) {
@@ -231,7 +231,7 @@ func TestE2EProcessChdirWrongArgCountRejected(t *testing.T) {
 }
 
 func TestE2EProcessPidIsPositive(t *testing.T) {
-	assertOutput(t, `console.log(process.pid > 0)`, "1")
+	assertOutput(t, `console.log(process.pid > 0)`, "true")
 }
 
 func TestE2EProcessPlatform(t *testing.T) {
@@ -266,7 +266,7 @@ try {
 } catch (e) {
     console.log(e.message.startsWith("kill(pid=999999999, signal=0): "))
 }
-`, "1")
+`, "true")
 }
 
 func TestE2EProcessKillWrongArgCountRejected(t *testing.T) {

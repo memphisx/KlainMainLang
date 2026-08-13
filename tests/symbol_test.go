@@ -15,7 +15,7 @@ const c = a
 console.log(a === b)
 console.log(a !== b)
 console.log(a === c)
-`, "0\n1\n1")
+`, "false\ntrue\ntrue")
 }
 
 func TestE2ESymbolTypeofAndDescription(t *testing.T) {

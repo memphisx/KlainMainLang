@@ -333,7 +333,16 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 		if f.Name == ClassTagField || f.Name == ClassVTableField || f.Name == ClassEventEmitterField {
 			return "", nil, fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime state", decl.GetPos().Line, decl.GetPos().Col, decl.Name, f.Name)
 		}
-		ownFields = append(ownFields, Field{Name: f.Name, Ty: e.substituteGenericType(f.Type, subs)})
+		// An unannotated field (`x = expr`, TDD-00063 Stage 1) has no type to
+		// substitute T into — its type comes from its initializer instead,
+		// the same compile-time inference the non-generic path uses.
+		var fty Type
+		if f.Type != nil {
+			fty = e.substituteGenericType(f.Type, subs)
+		} else {
+			fty = e.inferExprType(f.Initializer)
+		}
+		ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 	}
 	return mangled, ownFields, nil
 }
@@ -402,13 +411,33 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		info.OwnFieldVisibility[f.Name] = f.Visibility
 	}
 
-	if decl.Constructor != nil {
+	// TDD-00063 Stage 1: run own field initializers at the top of the
+	// constructor. A generic class can never `extends` (registerClasses
+	// rejects it), so there is never a super() to sequence after — the
+	// initializers always go first. This path runs once per distinct
+	// type-arg set, so it builds a fresh constructor/body rather than
+	// splicing into the shared template AST (which the non-generic
+	// registerClasses path, running exactly once per class, does instead).
+	_, allFieldsInit := classHasOwnFieldInit(decl)
+	switch {
+	case decl.Constructor != nil:
 		sig := e.buildGenericParamSig(decl.Constructor.Params, subs)
 		sig.RetType = TypeVoid
-		info.Constructor = decl.Constructor
+		ctor := decl.Constructor
+		if inits := classFieldInitStmts(decl); len(inits) > 0 {
+			body := ast.NewBlockStatement(append(append([]ast.Statement{}, inits...), decl.Constructor.Body.Body...), decl.Constructor.GetPos())
+			ctor = &ast.FunctionDeclaration{Name: decl.Constructor.Name, Params: decl.Constructor.Params, ReturnType: decl.Constructor.ReturnType, Body: body}
+		}
+		info.Constructor = ctor
 		info.CtorSig = sig
-	} else if len(ownFields) > 0 {
-		return "", fmt.Errorf("%d:%d: class '%s' has fields but no constructor to initialize them", decl.GetPos().Line, decl.GetPos().Col, decl.Name)
+	case len(ownFields) > 0 && allFieldsInit:
+		body := ast.NewBlockStatement(classFieldInitStmts(decl), decl.GetPos())
+		sig := e.buildGenericParamSig(nil, subs)
+		sig.RetType = TypeVoid
+		info.Constructor = &ast.FunctionDeclaration{Name: "constructor", Body: body}
+		info.CtorSig = sig
+	case len(ownFields) > 0:
+		return "", fmt.Errorf("%d:%d: class '%s' has a field with no initializer and no constructor to initialize it", decl.GetPos().Line, decl.GetPos().Col, decl.Name)
 	}
 
 	for _, m := range decl.Methods {
@@ -456,14 +485,19 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, info ClassInfo) error {
 	if info.Constructor != nil {
 		ctorName := llvmName + "_constructor"
-		if err := e.emitClassMember(ctorName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false); err != nil {
+		if err := e.emitClassMember(ctorName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false); err != nil {
 			return err
 		}
 	}
 	for _, m := range decl.Methods {
+		// TDD-00063 Stage 2: generator methods aren't wired through codegen
+		// yet — clean rejection rather than a silently-wrong plain method.
+		if m.IsGenerator {
+			return fmt.Errorf("%d:%d: generator method '%s' on class '%s' is not yet supported (see docs/tdd/TDD-00063.md Stage 2b)", m.GetPos().Line, m.GetPos().Col, m.Name, decl.Name)
+		}
 		sig := info.MethodSigs[m.Name]
 		memberName := llvmSafeSymbol(llvmName + "_" + m.Name)
-		if err := e.emitClassMember(memberName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false); err != nil {
+		if err := e.emitClassMember(memberName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false, m.IsAsync); err != nil {
 			return err
 		}
 	}

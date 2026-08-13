@@ -80,7 +80,7 @@ func TestE2EArraySomeEveryUnannotatedStringParam(t *testing.T) {
 const names: string[] = ["apple", "bob", "cat"]
 console.log(names.some((n) => n.length === 3))
 console.log(names.every((n) => n.length <= 5))
-`, "1\n1")
+`, "true\ntrue")
 }
 
 func TestE2EArrayFindIndexUnannotatedStringParam(t *testing.T) {
@@ -203,7 +203,7 @@ func TestE2EArrayIncludes(t *testing.T) {
 const nums: number[] = [10, 20, 30]
 console.log(nums.includes(20))
 console.log(nums.includes(99))
-`, "1\n0")
+`, "true\nfalse")
 }
 
 // --- arr.findIndex ---
@@ -274,7 +274,7 @@ func TestE2EArrayIsArray(t *testing.T) {
 const nums: number[] = [1, 2, 3]
 console.log(Array.isArray(nums))
 console.log(Array.isArray('hello'))
-`, "1\n0")
+`, "true\nfalse")
 }
 
 // --- Array bounds checking ---
@@ -969,7 +969,7 @@ console.log(m.every((row: number[]) => row.length > 0));
 const doubled = m.map((row: number[]): number => row.length * 2);
 console.log(doubled[0]);
 console.log(doubled[1]);
-`, "6\n3\nnull\n1\n2\n1\n1\n1\n4\n6")
+`, "6\n3\nnull\n1\n2\n1\ntrue\ntrue\n4\n6")
 }
 
 func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {

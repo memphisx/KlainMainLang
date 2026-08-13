@@ -26,7 +26,7 @@ const r2 = g.next();
 console.log(r2.value, r2.done);
 const r3 = g.next();
 console.log(r3.value, r3.done);
-`, "1\n0\n2\n0\n3\n1")
+`, "1\nfalse\n2\nfalse\n3\ntrue")
 }
 
 func TestE2EGeneratorNextAfterDoneReturnsZeroValue(t *testing.T) {
@@ -45,7 +45,7 @@ const r2 = g.next();
 console.log(r2.value, r2.done);
 const r3 = g.next();
 console.log(r3.value, r3.done);
-`, "2\n1\n0\n1")
+`, "2\ntrue\n0\ntrue")
 }
 
 func TestE2EGeneratorSentValue(t *testing.T) {
@@ -119,7 +119,7 @@ function* gen(): number {
 const g = gen();
 const r = g.next();
 console.log(r.value, r.done);
-`, "42\n1")
+`, "42\ntrue")
 }
 
 func TestE2EGeneratorClosureInsideBody(t *testing.T) {

@@ -56,6 +56,12 @@ type ClassInfo struct {
 	// inherited-but-not-overridden is found here exactly like an own one.
 	Methods    map[string]*ast.FunctionDeclaration
 	MethodSigs map[string]FuncSig
+	// GenMethodInfo holds one GeneratorInfo per generator method (`*m()`,
+	// TDD-00063 Stage 2b) this class declares — keyed by method name. A call
+	// to such a method constructs a generator instance (emitClassCall's own
+	// interception) rather than running the method body directly. Empty for a
+	// class with no generator methods.
+	GenMethodInfo map[string]*GeneratorInfo
 	// MethodImplementor names which class's @Implementor_methodName
 	// function actually runs for a given method name on this class (the
 	// nearest declaration at-or-above this class in the chain).
@@ -423,7 +429,16 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 // "cheapest useful check" pattern, e.g. Stage 1's flat "constructor
 // required if fields present" rule), not full control-flow analysis.
 func hasTopLevelSuperCall(body *ast.BlockStatement) bool {
-	for _, s := range body.Body {
+	return topLevelSuperCallIndex(body) >= 0
+}
+
+// topLevelSuperCallIndex returns the statement index of the first top-level
+// `super(...)` call in body, or -1 if there is none — the insertion anchor
+// for field initializers (TDD-00063 Stage 1), which must run immediately
+// after super() returns (so `this` exists) and before the rest of the
+// constructor body. Same shallow, non-nested scan as hasTopLevelSuperCall.
+func topLevelSuperCallIndex(body *ast.BlockStatement) int {
+	for i, s := range body.Body {
 		es, ok := s.(*ast.ExpressionStatement)
 		if !ok {
 			continue
@@ -433,10 +448,54 @@ func hasTopLevelSuperCall(body *ast.BlockStatement) bool {
 			continue
 		}
 		if _, ok := call.Callee.(*ast.SuperExpression); ok {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
+}
+
+// classFieldInitStmts desugars a class's own instance-field initializers
+// (TDD-00063 Stage 1) into `this.<field> = <initExpr>` expression statements,
+// in field-declaration order — the exact order the spec runs them. Static
+// fields and fields without an initializer are skipped. The returned
+// statements are spliced into the constructor body by registerClasses (after
+// super(), or at the top for a base class) and then emitted by the ordinary
+// constructor path with no further special-casing.
+func classFieldInitStmts(cd *ast.ClassDeclaration) []ast.Statement {
+	var stmts []ast.Statement
+	for _, f := range cd.Fields {
+		if f.Static || f.Initializer == nil {
+			continue
+		}
+		pos := f.Initializer.GetPos()
+		target := ast.NewMemberExpression(ast.NewThisExpression(pos), f.Name, pos)
+		assign := ast.NewAssignmentExpression("=", target, f.Initializer, pos)
+		stmts = append(stmts, ast.NewExpressionStatement(assign, pos))
+	}
+	return stmts
+}
+
+// classHasOwnFieldInit reports whether cd declares at least one own instance
+// field with an initializer, and whether *every* own instance field has one
+// — the two facts registerClasses' constructor-synthesis rules need to decide
+// whether a class with fields but no explicit constructor is now legal
+// (TDD-00063 Stage 1 relaxes the previous "fields require a constructor"
+// rule exactly when every field initializes itself).
+func classHasOwnFieldInit(cd *ast.ClassDeclaration) (any, all bool) {
+	all = true
+	sawInstanceField := false
+	for _, f := range cd.Fields {
+		if f.Static {
+			continue
+		}
+		sawInstanceField = true
+		if f.Initializer != nil {
+			any = true
+		} else {
+			all = false
+		}
+	}
+	return any, all && sawInstanceField
 }
 
 // registerClasses pre-scans all top-level class declarations, resolving
@@ -616,6 +675,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal EventEmitter listener map", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassEventEmitterField)
 			}
 			if f.Static {
+				// TDD-00063 Stage 1 covers instance-field initializers only
+				// (they lower into the constructor); a static field's
+				// initializer would have to run in the class's staticinit
+				// instead, a separate mechanism left for a later stage.
+				if f.Initializer != nil {
+					return fmt.Errorf("%d:%d: static field initializer on '%s' is not yet supported (class '%s') — assign it in a `static { ... }` block instead", cd.GetPos().Line, cd.GetPos().Col, f.Name, cd.Name)
+				}
 				fty := e.resolveType(f.Type)
 				staticFieldTypes[f.Name] = fty
 				staticFieldOwner[f.Name] = cd.Name
@@ -627,7 +693,15 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				return fmt.Errorf("%d:%d: class '%s' redeclares inherited field '%s'", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
 			}
 			seen[f.Name] = true
-			fty := e.resolveType(f.Type)
+			// An unannotated field (`x = expr`, TDD-00063 Stage 1) takes its
+			// type from its initializer, the same compile-time inference a
+			// `let x = expr` uses; an annotated field keeps its declared type.
+			var fty Type
+			if f.Type != nil {
+				fty = e.resolveType(f.Type)
+			} else {
+				fty = e.inferExprType(f.Initializer)
+			}
 			ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 			fieldOrigin[f.Name] = cd.Name
 			ownFieldVisibility[f.Name] = f.Visibility
@@ -661,6 +735,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			FlatFields:                flatFields,
 			Methods:                   make(map[string]*ast.FunctionDeclaration),
 			MethodSigs:                make(map[string]FuncSig),
+			GenMethodInfo:             make(map[string]*GeneratorInfo),
 			MethodImplementor:         make(map[string]string),
 			MethodDispatchSlot:        make(map[string]*MethodSlot),
 			TagID:                     nextTagID,
@@ -687,6 +762,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				info.MethodImplementor[mname] = baseInfo.MethodImplementor[mname]
 				info.MethodDispatchSlot[mname] = baseInfo.MethodDispatchSlot[mname]
 				info.Methods[mname] = baseInfo.Methods[mname]
+			}
+			// A generator method (TDD-00063 Stage 2b) is inherited by name too
+			// — a subclass calling it constructs the same generator instance,
+			// dispatched by the base's own GeneratorInfo (its body func and
+			// receiver binding are the base's).
+			for mname, gi := range baseInfo.GenMethodInfo {
+				info.GenMethodInfo[mname] = gi
 			}
 			info.MethodOrder = append(info.MethodOrder, baseInfo.MethodOrder...)
 			for mname, sig := range baseInfo.StaticMethodSigs {
@@ -727,6 +809,27 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 					sig.RetType = inferred
 				}
 				e.popScope()
+			}
+
+			// Generator method (TDD-00063 Stage 2b): calling `obj.m(...)`
+			// constructs a generator instance rather than running the body, so
+			// its registered return type is the generator instance type, and
+			// its GeneratorInfo (body func name, element/param types, receiver
+			// binding) is recorded for emitClassCall's own construction path.
+			// V1 scope: instance methods only.
+			if m.IsGenerator {
+				if m.IsStatic {
+					return fmt.Errorf("%d:%d: a static generator method ('%s' on class '%s') is not yet supported (TDD-00063 Stage 2b covers instance methods)", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+				}
+				if m.Body == nil {
+					return fmt.Errorf("%d:%d: an abstract generator method ('%s' on class '%s') is not supported", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+				}
+				genInfo, gerr := e.buildGeneratorMethodInfo(m, cd.Name, provisionalTy)
+				if gerr != nil {
+					return gerr
+				}
+				info.GenMethodInfo[m.Name] = genInfo
+				sig.RetType = genInfo.GenTy
 			}
 
 			if m.AccessorKind != "" {
@@ -807,6 +910,26 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				info.MethodSigs[mangled] = sig
 				info.Methods[mangled] = m
 				info.OwnMethodVisibility[mangled] = m.Visibility
+				continue
+			}
+
+			// Generator method (TDD-00063 Stage 2b): registered like a plain
+			// method (name, sig, implementor, visibility) so dispatch-key and
+			// visibility checks work, but deliberately given NO vtable slot —
+			// emitClassCall intercepts it (via GenMethodInfo) and constructs a
+			// generator instance, so it is never dispatched through a
+			// @Class_method symbol or a vtable entry (its real body is the
+			// @__generator_method_* function). Claiming a slot would make the
+			// vtable emitter reference a symbol that does not exist.
+			if m.IsGenerator {
+				if ownDeclared[m.Name] {
+					return fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				}
+				ownDeclared[m.Name] = true
+				info.MethodImplementor[m.Name] = cd.Name
+				info.MethodSigs[m.Name] = sig
+				info.Methods[m.Name] = m
+				info.OwnMethodVisibility[m.Name] = m.Visibility
 				continue
 			}
 
@@ -908,6 +1031,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			baseCtor = baseInfo.Constructor
 			baseCtorSig = baseInfo.CtorSig
 		}
+		_, allFieldsInit := classHasOwnFieldInit(cd)
 		switch {
 		case cd.Constructor != nil:
 			callsSuper := hasTopLevelSuperCall(cd.Constructor.Body)
@@ -927,6 +1051,47 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			sig := e.buildParamSig(cd.Constructor.Params)
 			sig.RetType = TypeVoid
 			info.CtorSig = sig
+			// TDD-00063 Stage 1: splice own field initializers in right after
+			// super() returns (`this` now exists), or at the top for a base
+			// class, before the rest of the constructor body runs.
+			if inits := classFieldInitStmts(cd); len(inits) > 0 {
+				at := topLevelSuperCallIndex(cd.Constructor.Body) + 1 // -1 → 0 when there is no super()
+				stmts := cd.Constructor.Body.Body
+				spliced := make([]ast.Statement, 0, len(stmts)+len(inits))
+				spliced = append(spliced, stmts[:at]...)
+				spliced = append(spliced, inits...)
+				spliced = append(spliced, stmts[at:]...)
+				cd.Constructor.Body.Body = spliced
+			}
+
+		case len(ownFields) > 0 && allFieldsInit && (baseCtor == nil || !baseCtorSig.HasRest):
+			// TDD-00063 Stage 1: a class whose every own field carries an
+			// initializer no longer needs an explicit constructor — synthesize
+			// one that runs the initializers, forwarding to super(...) first
+			// when the base has a constructor (exactly the pass-through shape
+			// the case below builds, with the initializers appended).
+			var stmts []ast.Statement
+			var params []ast.Param
+			if baseCtor != nil {
+				params = make([]ast.Param, len(baseCtorSig.ParamNames))
+				superArgs := make([]ast.Expression, len(baseCtorSig.ParamNames))
+				for i, pname := range baseCtorSig.ParamNames {
+					params[i] = ast.Param{Name: pname}
+					superArgs[i] = ast.NewIdentifier(pname, cd.GetPos())
+				}
+				superCall := ast.NewCallExpression(ast.NewSuperExpression(cd.GetPos()), superArgs, cd.GetPos())
+				stmts = append(stmts, ast.NewExpressionStatement(superCall, cd.GetPos()))
+			}
+			stmts = append(stmts, classFieldInitStmts(cd)...)
+			body := ast.NewBlockStatement(stmts, cd.GetPos())
+			info.Constructor = &ast.FunctionDeclaration{Name: "constructor", Params: params, Body: body}
+			if baseCtor != nil {
+				info.CtorSig = baseCtorSig
+			} else {
+				sig := e.buildParamSig(nil)
+				sig.RetType = TypeVoid
+				info.CtorSig = sig
+			}
 
 		case len(ownFields) == 0 && baseCtor != nil && !baseCtorSig.HasRest:
 			// Implicit pass-through constructor: `constructor(...args) {
@@ -950,14 +1115,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 		case len(ownFields) > 0:
 			// A class with fields but no constructor would leave every
-			// instance's fields as uninitialized (garbage) malloc'd memory
-			// — this compiler has no field-initializer syntax (Stage 0
-			// scope) to fall back on; requiring a constructor here is the
-			// same "no silently uninitialized state" philosophy Stage 1
-			// already established, just now scoped to *own* fields (an
-			// inherited field is the base constructor's responsibility via
-			// super(...), not this class's).
-			return fmt.Errorf("%d:%d: class '%s' has fields but no constructor to initialize them", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+			// instance's fields as uninitialized (garbage) malloc'd memory.
+			// TDD-00063 Stage 1 now lets a field initialize itself (`x =
+			// expr`), handled by the synthesis case above when *every* own
+			// field does so; reaching here means at least one own field has
+			// neither an initializer nor a constructor to assign it — still
+			// rejected, the same "no silently uninitialized state" philosophy.
+			return fmt.Errorf("%d:%d: class '%s' has a field with no initializer and no constructor to initialize it", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 		}
 
 		e.classes[cd.Name] = info
@@ -1053,7 +1217,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 	info := e.classes[cd.Name]
 	if info.Constructor != nil {
 		llvmName := cd.Name + "_constructor"
-		if err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false); err != nil {
+		if err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false); err != nil {
 			return err
 		}
 	}
@@ -1065,10 +1229,26 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		if m.Body == nil {
 			continue
 		}
+		// TDD-00063 Stage 2b: a generator method emits its own fiber-backed
+		// body (via the shared generator machinery), binding `this` from the
+		// receiver stored at construction — not an ordinary method function.
+		// Async generators (async *) stay rejected: their runtime semantics
+		// are out of scope (see the async-iteration ceiling in TDD-00063).
+		if m.IsGenerator {
+			if m.IsAsync {
+				return fmt.Errorf("%d:%d: async generator method '%s' on class '%s' is not yet supported (see docs/tdd/TDD-00063.md Stage 2)", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+			}
+			genInfo := info.GenMethodInfo[m.Name]
+			genInfo.ThisTy = &info.Ty // final class type (registration used the pre-vtable provisional)
+			if err := e.emitGeneratorFunctionDecl(m, genInfo); err != nil {
+				return err
+			}
+			continue
+		}
 		if m.IsStatic {
 			sig := info.StaticMethodSigs[m.Name]
 			llvmName := llvmSafeSymbol(cd.Name + "_static_" + m.Name)
-			if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), true); err != nil {
+			if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), true, m.IsAsync); err != nil {
 				return err
 			}
 			continue
@@ -1083,7 +1263,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		}
 		sig := info.MethodSigs[methodKey]
 		llvmName := llvmSafeSymbol(cd.Name + "_" + methodKey)
-		if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false); err != nil {
+		if err := e.emitClassMember(llvmName, info.Ty, m.Params, sig, m.Body, sig.RetType, m.GetPos(), false, m.IsAsync); err != nil {
 			return err
 		}
 	}
@@ -1201,13 +1381,17 @@ func (e *Emitter) emitClassVTable(className string) {
 // top-level function already depends on (same reasoning docs/adr/ADR-00061.md
 // gives for resolveObjectPtr's ObjectLiteral case duplicating
 // emitObjectLiteral).
-func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Param, sig FuncSig, body *ast.BlockStatement, retType Type, pos ast.Pos, isStatic bool) error {
+func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Param, sig FuncSig, body *ast.BlockStatement, retType Type, pos ast.Pos, isStatic, isAsync bool) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
 	savedRegCtr := e.regCtr
 	savedLabelCtr := e.labelCtr
 	savedScopes := e.scopes
 	savedRetType := e.currentRetType
+	savedIsAsync := e.isAsync
+	savedCoroHdl := e.coroHdl
+	savedPromiseTy := e.currentPromiseTy
+	savedCoroRetLabel := e.coroRetLabel
 
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -1215,8 +1399,27 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	e.labelCtr = 0
 	e.scopes = nil
 	e.blockDone = false
-	e.currentRetType = retType
 	e.pushScope()
+
+	// Async method (TDD-00063 Stage 2a): compiles to a coroutine exactly like
+	// a top-level async function — the IR return type is `ptr` (the coro
+	// handle), the logical Promise<T>'s T is tracked in currentPromiseTy, and
+	// the prologue/epilogue bracket the body. See emit_func.go's identical
+	// setup for a top-level async function.
+	e.isAsync = isAsync
+	e.coroHdl = ""
+	e.currentPromiseTy = TypeVoid
+	e.coroRetLabel = ""
+	if isAsync {
+		if retType.IsPromise && retType.PromiseType != nil {
+			e.currentPromiseTy = *retType.PromiseType
+		}
+		e.currentRetType = TypePtr
+		e.coroRetLabel = e.freshLabel("coro.ret")
+		e.emitAsyncPrologue()
+	} else {
+		e.currentRetType = retType
+	}
 
 	// __kml_enclosing_class (TDD-00009 Stage 4) is a Ptr-less, lookup-only
 	// scope symbol (same established idiom this function's own return-type
@@ -1305,13 +1508,19 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		}
 	}
 
-	if retType.IR == "void" {
-		e.emitTerminator("ret void")
+	if isAsync {
+		e.emitAsyncEpilogue()
+		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
+			llvmName, strings.Join(llvmParams, ", ")))
 	} else {
-		e.emitTerminator("unreachable")
+		if retType.IR == "void" {
+			e.emitTerminator("ret void")
+		} else {
+			e.emitTerminator("unreachable")
+		}
+		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
+			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	}
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
-		retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
@@ -1322,6 +1531,10 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	e.labelCtr = savedLabelCtr
 	e.scopes = savedScopes
 	e.currentRetType = savedRetType
+	e.isAsync = savedIsAsync
+	e.coroHdl = savedCoroHdl
+	e.currentPromiseTy = savedPromiseTy
+	e.coroRetLabel = savedCoroRetLabel
 	e.blockDone = false
 
 	return nil
@@ -1419,11 +1632,36 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		}
 		argParts := []string{"ptr " + dataReg}
 		for i, a := range ex.Args {
+			paramTy := info.CtorSig.ParamTypes[i]
+			// An array-typed constructor parameter decomposes into two LLVM
+			// params (ptr, i64 len) at the callee side, exactly like an
+			// array-typed method parameter — emitClassCall's own argument loop
+			// already does this; this constructor path had never been taught
+			// the matching decomposition, so `new C([1, 2, 3])` against a
+			// `constructor(xs: number[])` was a hard clang-stage type mismatch
+			// ({ptr,i64} where a single ptr was expected). Found in passing
+			// while wiring generator methods (TDD-00063 Stage 2b); a real,
+			// pre-existing bug independent of them.
+			if paramTy.IsArray {
+				val, err := e.emitExprWithObjectHint(a, paramTy)
+				if err != nil {
+					return Value{}, err
+				}
+				if !val.Ty.IsArray {
+					return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+				}
+				ptrReg := e.freshReg()
+				lenReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				continue
+			}
 			val, err := e.emitExpr(a)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(val, info.CtorSig.ParamTypes[i])
+			val = e.coerce(val, paramTy)
 			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 		}
 		e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", className, strings.Join(argParts, ", ")))
@@ -1468,6 +1706,13 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		if err := e.checkMemberVisibility(implementor, vis, "method", methodName, pos); err != nil {
 			return Value{}, err
 		}
+	}
+	// Generator method (TDD-00063 Stage 2b): calling it constructs a generator
+	// instance (receiver stored into __this, args into __paramN), not an
+	// ordinary method call — the returned value is the generator, iterated via
+	// the same .next()/for...of machinery a free-function generator uses.
+	if genInfo := info.GenMethodInfo[methodName]; genInfo != nil {
+		return e.emitGeneratorConstructionWithThis(genInfo, thisVal.Ref, args, pos)
 	}
 	// regularCount excludes the rest slot itself (its own ParamTypes entry
 	// is the declared array type, e.g. number[] — never one-to-one with a

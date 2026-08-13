@@ -22,6 +22,10 @@ type GeneratorInfo struct {
 	ElemTy       Type   // T in `function* f(): T` — the yielded/returned value type
 	GenTy        Type   // GeneratorType(ElemTy, ParamTypes) — the constructed instance's own type
 	BodyFuncName string // mangled LLVM function name for the compiled body, e.g. "@__generator_body_gen_1"
+	// ThisTy is the receiver type for a generator *method* (TDD-00063 Stage
+	// 2b) — nil for a free-function generator. When set, GenTy carries a
+	// __this slot and the body binds `this` from it at entry.
+	ThisTy *Type
 }
 
 // generatorEmitCtx tracks state while emitting one generator function's own
@@ -81,9 +85,25 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		ParamTypes:   paramTypes,
 		ParamNames:   paramNames,
 		ElemTy:       elemTy,
-		GenTy:        GeneratorType(elemTy, paramTypes),
+		GenTy:        GeneratorType(elemTy, paramTypes, nil),
 		BodyFuncName: fmt.Sprintf("@__generator_body_%s_%d", fd.Name, e.generatorBodyCtr),
 	}, nil
+}
+
+// buildGeneratorMethodInfo is buildGeneratorSig's sibling for a generator
+// *method* (TDD-00063 Stage 2b): same param/element-type rules, but the
+// resulting GenTy carries a __this slot (the receiver), and the body func
+// name is namespaced by class+method rather than a bare function name.
+// classTy is the receiver type `this` binds to inside the body.
+func (e *Emitter) buildGeneratorMethodInfo(fd *ast.FunctionDeclaration, className string, classTy Type) (*GeneratorInfo, error) {
+	base, err := e.buildGeneratorSig(fd)
+	if err != nil {
+		return nil, err
+	}
+	base.ThisTy = &classTy
+	base.GenTy = GeneratorType(base.ElemTy, base.ParamTypes, &classTy)
+	base.BodyFuncName = fmt.Sprintf("@__generator_method_%s_%s_%d", llvmSafeSymbol(className), llvmSafeSymbol(fd.Name), e.generatorBodyCtr)
+	return base, nil
 }
 
 // genNextResultType returns `.next()`'s own result shape ({value: T, done:
@@ -159,6 +179,15 @@ func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string)
 // the generator's own opaque instance value — the body only actually starts
 // running on the first .next() call (emitGeneratorNext).
 func (e *Emitter) emitGeneratorConstruction(info *GeneratorInfo, args []ast.Expression, pos ast.Pos) (Value, error) {
+	return e.emitGeneratorConstructionWithThis(info, "", args, pos)
+}
+
+// emitGeneratorConstructionWithThis is emitGeneratorConstruction's shared
+// core, additionally storing a receiver into the __this slot when thisRef is
+// non-empty (a generator method, TDD-00063 Stage 2b) — a free-function
+// generator passes "". Everything else (fiber ctx/stack setup, __paramN
+// stores, the returned opaque instance value) is identical either way.
+func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != len(info.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: generator expects %d argument(s), got %d", pos.Line, pos.Col, len(info.ParamTypes), len(args))
 	}
@@ -210,6 +239,9 @@ func (e *Emitter) emitGeneratorConstruction(info *GeneratorInfo, args []ast.Expr
 		}
 		val = e.coerce(val, info.ParamTypes[i])
 		e.storeGeneratorField(genObj, genTy, fmt.Sprintf("__param%d", i), val.Ty.IR, val.Ref)
+	}
+	if thisRef != "" {
+		e.storeGeneratorField(genObj, genTy, GeneratorThisField, "ptr", thisRef)
 	}
 
 	return Value{Ref: genObj, Ty: genTy}, nil
@@ -364,6 +396,25 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 
 	gctx := &generatorEmitCtx{genObjReg: genObjReg, genTy: info.GenTy, elemTy: info.ElemTy}
 	e.currentGenerator = gctx
+
+	// A generator *method* (TDD-00063 Stage 2b) binds `this` (and `super`/the
+	// lexical enclosing-class identity for visibility checks) from the __this
+	// slot the construction site stored — the same load-once-at-entry story
+	// the __paramN slots use. A free-function generator (ThisTy == nil) skips
+	// this entirely.
+	if info.ThisTy != nil {
+		classTy := *info.ThisTy
+		thisVal := e.loadGeneratorField(genObjReg, info.GenTy, GeneratorThisField)
+		thisPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", thisPtr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", thisVal.Ref, thisPtr))
+		e.define("this", Symbol{Ptr: thisPtr, Ty: classTy})
+		e.define("__kml_enclosing_class", Symbol{Ty: classTy})
+		if classInfo, ok := e.classes[classTy.ClassName]; ok && classInfo.BaseClass != "" {
+			baseTy := e.classes[classInfo.BaseClass].Ty
+			e.define("super", Symbol{Ptr: thisPtr, Ty: baseTy})
+		}
+	}
 
 	for i, p := range decl.Params {
 		pty := info.ParamTypes[i]

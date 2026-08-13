@@ -488,6 +488,7 @@ const (
 	GeneratorDoneField      = "__done"      // true once the body has returned or fallen off the end
 	GeneratorYieldedField   = "__yielded"   // what the most recent yield/return produced
 	GeneratorSentField      = "__sent"      // what the current .next(value) call is passing in
+	GeneratorThisField      = "__this"      // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
 )
 
 // GeneratorType returns a `function* f(params): T {}`'s instance value type
@@ -496,7 +497,7 @@ const (
 // paramTypes is the generator function's own declared parameter types, in
 // order, stored as trailing fields so construction can populate them once
 // and the generator body can read them back on its own fiber stack.
-func GeneratorType(elem Type, paramTypes []Type) Type {
+func GeneratorType(elem Type, paramTypes []Type, thisTy *Type) Type {
 	elemCopy := elem
 	fields := []Field{
 		{Name: GeneratorCtxField, Ty: TypePtr},
@@ -506,6 +507,14 @@ func GeneratorType(elem Type, paramTypes []Type) Type {
 		{Name: GeneratorDoneField, Ty: TypeBool},
 		{Name: GeneratorYieldedField, Ty: elem},
 		{Name: GeneratorSentField, Ty: elem},
+	}
+	// A generator *method* (TDD-00063 Stage 2b) carries its receiver in a
+	// dedicated __this slot (a ptr to the class instance), stored at
+	// construction and read back once at the body's entry to bind `this` —
+	// the exact same fiber-stack-persistence story the __paramN slots use.
+	// nil for a free-function generator, which has no receiver.
+	if thisTy != nil {
+		fields = append(fields, Field{Name: GeneratorThisField, Ty: *thisTy})
 	}
 	for i, pt := range paramTypes {
 		fields = append(fields, Field{Name: fmt.Sprintf("__param%d", i), Ty: pt})

@@ -56,7 +56,7 @@ console.log(s.toLowerCase())
 console.log(s.includes('World'))
 console.log(s.startsWith('Hello'))
 console.log(s.indexOf('World'))
-`, "13\nHELLO, WORLD!\nhello, world!\n1\n1\n7")
+`, "13\nHELLO, WORLD!\nhello, world!\ntrue\ntrue\n7")
 }
 
 func TestE2EStringSlice(t *testing.T) {
@@ -265,7 +265,7 @@ func TestE2EStringCodePointAt(t *testing.T) {
 const s: string = 'hello'
 console.log(s.codePointAt(0))
 console.log(s.codePointAt(0) === s.charCodeAt(0))
-`, "104\n1")
+`, "104\ntrue")
 }
 
 func TestE2EStringSearch(t *testing.T) {
@@ -274,7 +274,7 @@ const s: string = 'hello world'
 console.log(s.search('world'))
 console.log(s.search('xyz'))
 console.log(s.search('world') === s.indexOf('world'))
-`, "6\n-1\n1")
+`, "6\n-1\ntrue")
 }
 
 func TestE2EStringLocaleCompare(t *testing.T) {

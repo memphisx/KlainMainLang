@@ -35,7 +35,7 @@ console.log(xhr.status)
 console.log(xhr.responseText.indexOf('"title":"hello"') > -1)
 console.log(xhr.response === xhr.responseText)
 `, srv.URL)
-	assertOutput(t, src, "0\n2\n1\n4\n200\n1\n1")
+	assertOutput(t, src, "0\n2\n1\n4\n200\ntrue\ntrue")
 }
 
 func TestE2EXHRPostWithHeadersAndBody(t *testing.T) {

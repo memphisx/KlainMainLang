@@ -150,7 +150,7 @@ const person = { name, age, active: true }
 console.log(person.name)
 console.log(person.age)
 console.log(person.active)
-`, "Alice\n30\n1")
+`, "Alice\n30\ntrue")
 }
 func TestE2EObjectShorthandPropsInFunction(t *testing.T) {
 	assertOutput(t, `
@@ -352,7 +352,7 @@ const p: Point = { x: 7, y: 8 }
 const same = Object.freeze(p)
 console.log(same.x)
 console.log(same === p)
-`, "7\n1")
+`, "7\ntrue")
 }
 
 func TestE2EObjectSealAllowsFieldMutation(t *testing.T) {
@@ -760,7 +760,7 @@ interface Point { x: number; y: number }
 const p: Point = { x: 1, y: 2 }
 console.log("x" in p)
 console.log("z" in p)
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2EInOperatorClassInstance(t *testing.T) {
@@ -772,7 +772,7 @@ class Foo {
 const f = new Foo()
 console.log("a" in f)
 console.log("b" in f)
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2EInOperatorInIfCondition(t *testing.T) {

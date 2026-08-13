@@ -15,7 +15,7 @@ function identity<T>(x: T): T {
 console.log(identity(5));
 console.log(identity("hello"));
 console.log(identity(true));
-`, "5\nhello\n1")
+`, "5\nhello\ntrue")
 }
 
 // A generic function called twice with the *same* concrete type must be

@@ -122,7 +122,7 @@ export function decoy(): string { return "not the real fs" }
 import fs from 'fs'
 console.log(fs.existsSync('/definitely/does/not/exist/kml_test'))
 `,
-	}, "main.ts", "0")
+	}, "main.ts", "false")
 }
 
 func TestE2EKlmpmMissingPackageRejected(t *testing.T) {

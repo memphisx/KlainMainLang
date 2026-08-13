@@ -186,7 +186,7 @@ func TestE2EImportGatedNamedImportValueMemberWorks(t *testing.T) {
 import { EOL } from 'os'
 console.log(EOL === "\n")
 `,
-	}, "main.ts", "1")
+	}, "main.ts", "true")
 }
 
 func TestE2EImportGatedNamedImportAliasedWorks(t *testing.T) {
@@ -211,7 +211,7 @@ fs.writeFileSync("kml_test_named_combined.txt", "combined")
 console.log(existsSync("kml_test_named_combined.txt"))
 fs.unlinkSync("kml_test_named_combined.txt")
 `,
-	}, "main.ts", "0\n1")
+	}, "main.ts", "false\ntrue")
 }
 
 func TestE2EImportGatedNamedImportShadowedByLocalWorks(t *testing.T) {

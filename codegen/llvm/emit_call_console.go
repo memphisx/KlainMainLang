@@ -61,6 +61,20 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
+		// A boolean prints as `true`/`false`, matching real JS/TS — not the
+		// raw i1's 0/1. emitValueToString already does exactly this conversion
+		// (template-literal interpolation of a bool has always printed
+		// true/false); console.log had simply never routed through it, using
+		// the numeric PrintfFmt directly instead. See ADR-00183.
+		if val.Ty.IR == "i1" {
+			strVal, err := e.emitValueToString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			fmtPtr := e.internString("%s\n")
+			e.emitConsolePrintVal(strVal, fmtPtr, fd)
+			continue
+		}
 		fmtPtr := e.internString(val.Ty.PrintfFmt() + "\n")
 		e.emitConsolePrintVal(val, fmtPtr, fd)
 	}

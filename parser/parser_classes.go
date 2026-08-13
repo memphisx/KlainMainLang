@@ -15,6 +15,35 @@ import (
 // non-empty, is used as the class's name if no IDENT immediately follows
 // `class` — the anonymous `export default class { ... }` form (TDD-00042);
 // every other caller passes "" and gets the ordinary "name required" check.
+// isClassMemberNameStart reports whether tok can begin a class member name
+// right after a contextual `async` modifier (TDD-00063 Stage 2) — a plain or
+// private identifier, or a generator `*` (for `async *gen()`). Used to tell
+// the modifier `async` apart from a method literally named `async`.
+func isClassMemberNameStart(tok lexer.Token) bool {
+	switch tok.Type {
+	case lexer.IDENT, lexer.PRIVATE_NAME, lexer.STAR:
+		return true
+	}
+	return false
+}
+
+// constMemberName resolves a computed class member key `[expr]` (TDD-00063
+// Stage 3) to its member-name text when the key is a compile-time constant —
+// a plain string literal (`['foo']` → "foo") or numeric literal (`[1]` →
+// "1"). Anything else (an identifier, a call, `Symbol.iterator`, a template
+// with interpolation) returns ok=false and is rejected at the call site,
+// since this compiler resolves member names statically and has no runtime
+// key evaluation.
+func constMemberName(expr ast.Expression) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.StringLiteral:
+		return e.Value, true
+	case *ast.NumberLiteral:
+		return e.Value, true
+	}
+	return "", false
+}
+
 func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.ClassDeclaration, error) {
 	tok := p.advance() // consume 'class'
 	pos := posOf(tok)
@@ -129,6 +158,21 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			break
 		}
 
+		// Async / generator method modifiers (TDD-00063 Stage 2). `async` is
+		// contextual (a method may itself be named `async`), so it's a modifier
+		// only when a real member name — or a generator `*` — follows; a bare
+		// `async(` is the method literally named `async`. `*` here is
+		// unambiguous: a generator method.
+		var isAsyncMethod, isGeneratorMethod bool
+		if p.peek().Type == lexer.ASYNC && isClassMemberNameStart(p.peekNth(1)) {
+			isAsyncMethod = true
+			p.advance()
+		}
+		if p.check(lexer.STAR) {
+			isGeneratorMethod = true
+			p.advance()
+		}
+
 		// Contextual `get`/`set` (TDD-00030): like `in` (ADR-00091), not a
 		// reserved keyword — a field/method/variable literally named
 		// `get`/`set` must keep working everywhere outside this one
@@ -140,9 +184,13 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// member name follows before committing to accessor parsing. The
 		// member name may be a private name too (`get #x()` — TDD-00021
 		// private accessors), not just IDENT.
+		// An `async`/generator modifier already precludes an accessor (`async
+		// get() {}` is an async method literally named `get`, not a getter), so
+		// this contextual detection is skipped once either is set.
 		var accessorKind string
-		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
-			(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.PRIVATE_NAME) {
+		if !isAsyncMethod && !isGeneratorMethod &&
+			p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
+			(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.PRIVATE_NAME || p.peekNth(1).Type == lexer.LBRACKET) {
 			accessorKind = p.peek().Literal
 			p.advance()
 		}
@@ -153,7 +201,27 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// rather than silently accepted or silently overridden, matching
 		// real TypeScript.
 		var memberTok lexer.Token
-		if p.check(lexer.PRIVATE_NAME) {
+		if p.check(lexer.LBRACKET) {
+			// Computed member name (TDD-00063 Stage 3): V1 supports only a
+			// compile-time-constant string or numeric literal, desugared to
+			// the equivalent named member — `['foo']() {}` is exactly `foo()
+			// {}`. A dynamic key (an identifier, a call like `[ID('d')]`, a
+			// `Symbol.*`, or a template with interpolation) is a clean
+			// rejection, not silently mishandled.
+			lb := p.advance() // '['
+			keyExpr, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RBRACKET); err != nil {
+				return nil, err
+			}
+			name, ok := constMemberName(keyExpr)
+			if !ok {
+				return nil, fmt.Errorf("%d:%d: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or interpolation) is not yet supported (see docs/tdd/TDD-00063.md Stage 3)", lb.Line, lb.Col)
+			}
+			memberTok = lexer.Token{Type: lexer.IDENT, Literal: name, Line: lb.Line, Col: lb.Col}
+		} else if p.check(lexer.PRIVATE_NAME) {
 			memberTok = p.advance()
 			if visibility != "" {
 				return nil, fmt.Errorf("%d:%d: an accessibility modifier cannot be used with a private identifier", memberTok.Line, memberTok.Col)
@@ -169,14 +237,32 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		if accessorKind != "" && memberTok.Literal == "constructor" {
 			return nil, fmt.Errorf("%d:%d: a constructor cannot be a getter/setter", memberTok.Line, memberTok.Col)
 		}
+		// A static class member named `prototype` is an early SyntaxError, for
+		// a method or a field alike (a non-static `prototype` member is fine).
+		if isStatic && memberTok.Literal == "prototype" {
+			return nil, fmt.Errorf("%d:%d: a static class member cannot be named 'prototype'", memberTok.Line, memberTok.Col)
+		}
 
 		// Method or constructor: `name(...) { ... }` (or, if isMemberAbstract,
 		// `name(...): T;` with no body).
 		if p.check(lexer.LPAREN) {
-			fn, err := p.parseFunctionRest(memberTok.Literal, false, isMemberAbstract)
+			if memberTok.Literal == "constructor" && (isAsyncMethod || isGeneratorMethod) {
+				return nil, fmt.Errorf("%d:%d: a constructor cannot be async or a generator", memberTok.Line, memberTok.Col)
+			}
+			fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract)
 			if err != nil {
 				return nil, err
 			}
+			// A class body is always strict mode, so `eval`/`arguments` can
+			// never be a method/constructor parameter name — an early error
+			// unconditionally here, unlike a plain function where it only
+			// applies under an explicit "use strict" directive.
+			for _, prm := range fn.Params {
+				if prm.Name == "eval" || prm.Name == "arguments" {
+					return nil, fmt.Errorf("%d:%d: '%s' cannot be a parameter name in a class method (strict mode)", memberTok.Line, memberTok.Col, prm.Name)
+				}
+			}
+			fn.IsGenerator = isGeneratorMethod
 			fn.IsStatic = isStatic
 			fn.Visibility = visibility
 			fn.AccessorKind = accessorKind
@@ -193,23 +279,42 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		if accessorKind != "" {
 			return nil, fmt.Errorf("%d:%d: '%s %s' must be a method (missing '()')", memberTok.Line, memberTok.Col, accessorKind, memberTok.Literal)
 		}
-
-		// Otherwise a typed field: `name: type;` (no initializer — see
-		// ast.ClassDeclaration's doc comment).
-		p.match(lexer.QUESTION)
-		if _, err := p.expect(lexer.COLON); err != nil {
-			return nil, err
+		if isAsyncMethod || isGeneratorMethod {
+			return nil, fmt.Errorf("%d:%d: '%s' is not a method (an async/generator modifier requires a '()' method body)", memberTok.Line, memberTok.Col, memberTok.Literal)
 		}
-		ft, err := p.parseTypeAnnotation("ts")
-		if err != nil {
-			return nil, err
+
+		// Otherwise a field: `name: type;`, `name: type = expr;`, or
+		// `name = expr;` (initializer, unannotated — type inferred at codegen,
+		// TDD-00063 Stage 1). The `: type` is optional only when an `= expr`
+		// initializer follows to give the field its type.
+		p.match(lexer.QUESTION)
+		var ft *ast.TypeAnnotation
+		if p.check(lexer.COLON) {
+			p.advance()
+			var err error
+			ft, err = p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
 		}
 		if doc != nil {
 			if t := doc.GetType(); t != "" {
 				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
 			}
 		}
-		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Static: isStatic, Visibility: visibility})
+		var initializer ast.Expression
+		if p.check(lexer.ASSIGN) {
+			p.advance()
+			var err error
+			initializer, err = p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if ft == nil && initializer == nil {
+			return nil, fmt.Errorf("%d:%d: class field '%s' requires a type annotation or an initializer", memberTok.Line, memberTok.Col, memberTok.Literal)
+		}
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {

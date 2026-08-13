@@ -81,7 +81,7 @@ async function main2(): Promise<void> {
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "200\n1\n"+`{"title":"hello","count":42,"active":true}`)
+	assertOutput(t, src, "200\ntrue\n"+`{"title":"hello","count":42,"active":true}`)
 }
 
 func TestE2EFetchNotFoundHasOkFalse(t *testing.T) {
@@ -94,7 +94,7 @@ async function main2(): Promise<void> {
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "404\n0")
+	assertOutput(t, src, "404\nfalse")
 }
 
 func TestE2EFetchServerErrorHasOkFalse(t *testing.T) {
@@ -107,7 +107,7 @@ async function main2(): Promise<void> {
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "500\n0")
+	assertOutput(t, src, "500\nfalse")
 }
 
 func TestE2EFetchFollowsRedirects(t *testing.T) {
@@ -135,7 +135,7 @@ async function main2(): Promise<void> {
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "hello\n42\n1")
+	assertOutput(t, src, "hello\n42\ntrue")
 }
 
 // --- fetch(url, init): custom method, headers, body (ADR-00074, TDD-00017) ---
@@ -314,7 +314,7 @@ console.log(h.has("x-missing"))
 h.delete("CONTENT-TYPE")
 console.log(h.has("content-type"))
 `
-	assertOutput(t, src, "application/json\napplication/json\n1\n0\n0")
+	assertOutput(t, src, "application/json\napplication/json\ntrue\nfalse\nfalse")
 }
 
 func TestE2EHeadersAppendCombinesWithComma(t *testing.T) {
@@ -344,7 +344,7 @@ console.log(req.url)
 console.log(req.method)
 console.log(req.headers.has("anything"))
 `
-	assertOutput(t, src, "http://example.com/x\nGET\n0")
+	assertOutput(t, src, "http://example.com/x\nGET\nfalse")
 }
 
 func TestE2ERequestInitOverridesMethodHeadersBody(t *testing.T) {

@@ -39,4 +39,4 @@
 
 | Limitation | Notes |
 |---|---|
-| `any`/`unknown` boxed booleans print as `"true"`/`"false"` | `console.log`ing a plain (non-`any`) `boolean` prints `1`/`0` in this compiler (an existing, unrelated quirk — see `examples/strings/string_methods.ts`'s comments), but an `any`-typed variable currently holding a boolean prints `"true"`/`"false"` instead, since the dynamic-value formatter shares one code path for both `console.log` and template literals and mirrors the template-literal convention (which already uses `"true"`/`"false"`) rather than special-casing `console.log`'s raw-boolean convention differently per call site. Deliberate, documented simplification — see [ADR-00008](../adr/ADR-00008.md). |
+| Booleans print as `"true"`/`"false"` | `console.log(bool)` prints `"true"`/`"false"`, matching real JS/TS — both for a plain `boolean` and for an `any`-typed variable holding one, now consistent with template-literal interpolation (which always used `"true"`/`"false"`). `console.log` had previously printed a plain boolean as the raw `1`/`0`; that divergence was a deferred shortcut, not intended behavior, and is fixed — see [ADR-00183](../adr/ADR-00183.md). |

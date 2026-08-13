@@ -55,7 +55,7 @@ console.log(u.searchParams.get("x"))
 console.log(u.searchParams.get("y"))
 console.log(u.searchParams.has("z"))
 console.log(u.searchParams.get("z"))
-`, "1\nhello world\n0\nnull")
+`, "1\nhello world\nfalse\nnull")
 }
 
 func TestE2EURLSearchParamsConstructor(t *testing.T) {
@@ -93,7 +93,7 @@ console.log(p.get("c"))
 p.delete("a")
 console.log(p.has("a"))
 console.log(p.toString())
-`, "3\n0\nc=3&b=2")
+`, "3\nfalse\nc=3&b=2")
 }
 
 func TestE2EURLSearchParamsDuplicateKeyLastWins(t *testing.T) {

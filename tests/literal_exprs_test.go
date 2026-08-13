@@ -152,7 +152,7 @@ function makeSet(): Set<number> {
 const s = makeSet();
 s.add(9);
 console.log(s.has(9));
-`, "1")
+`, "true")
 }
 
 func TestE2ENewEventEmitterAsReturnValue(t *testing.T) {

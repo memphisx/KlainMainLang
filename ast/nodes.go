@@ -1415,6 +1415,14 @@ type AnnotField struct {
 	// already established.
 	Static     bool
 	Visibility string // "private" / "protected" / "" (public, default)
+	// Initializer is a class field's `= expr` default (TDD-00063 Stage 1) —
+	// nil when the field has none (a bare `x: T;`) and always nil for every
+	// non-class reuse of this shared type (interface/object-type fields,
+	// which have no initializer syntax), same harmless-zero-value precedent
+	// Static/Visibility already established. When present, Type may be nil
+	// (an unannotated `x = expr`, whose field type is inferred from the
+	// initializer at registerClasses time).
+	Initializer Expression
 }
 
 // TypeAnnotation holds the resolved type name from TS syntax or JSDoc.

@@ -142,7 +142,7 @@ class Foo {
 	if err == nil {
 		t.Fatal("expected a compile error for a class with fields but no constructor")
 	}
-	if !strings.Contains(err.Error(), "has fields but no constructor") {
+	if !strings.Contains(err.Error(), "no constructor to initialize it") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -256,7 +256,7 @@ class Point {
 }
 const p = new Point(1);
 console.log(p instanceof Point)
-`, "1")
+`, "true")
 }
 
 func TestE2EInstanceOfStaticFalseDifferentClass(t *testing.T) {
@@ -275,7 +275,7 @@ class Circle {
 }
 const c = new Circle(2);
 console.log(c instanceof Point)
-`, "0")
+`, "false")
 }
 
 func TestE2EInstanceOfNullableClassReducesToNullCheck(t *testing.T) {
@@ -292,7 +292,7 @@ const tail = new Node(2, null);
 const head = new Node(1, tail);
 console.log(head.nextNode instanceof Node)
 console.log(tail.nextNode instanceof Node)
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2EInstanceOfAnyNarrowsBetweenClasses(t *testing.T) {
@@ -315,7 +315,7 @@ console.log(p instanceof Point)
 console.log(p instanceof Circle)
 console.log(c instanceof Circle)
 console.log(c instanceof Point)
-`, "1\n0\n1\n0")
+`, "true\nfalse\ntrue\nfalse")
 }
 
 // --- instanceof against built-in types (ADR-00162) ---
@@ -329,14 +329,14 @@ func TestE2EInstanceOfBuiltinArrayTrue(t *testing.T) {
 	assertOutput(t, `
 let arr: number[] = [1, 2, 3];
 console.log(arr instanceof Array);
-`, "1")
+`, "true")
 }
 
 func TestE2EInstanceOfBuiltinArrayFalseForNonArray(t *testing.T) {
 	assertOutput(t, `
 let n: number = 5;
 console.log(n instanceof Array);
-`, "0")
+`, "false")
 }
 
 func TestE2EInstanceOfBuiltinMapAndSet(t *testing.T) {
@@ -347,7 +347,7 @@ console.log(m instanceof Map);
 console.log(m instanceof Set);
 console.log(s instanceof Set);
 console.log(s instanceof Map);
-`, "1\n0\n1\n0")
+`, "true\nfalse\ntrue\nfalse")
 }
 
 func TestE2EInstanceOfBuiltinDate(t *testing.T) {
@@ -356,7 +356,7 @@ let d = new Date();
 console.log(d instanceof Date);
 let s: string = "x";
 console.log(s instanceof Date);
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2EInstanceOfBuiltinRegExp(t *testing.T) {
@@ -364,7 +364,7 @@ func TestE2EInstanceOfBuiltinRegExp(t *testing.T) {
 let r = /abc/;
 console.log(r instanceof RegExp);
 console.log(r instanceof Array);
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2EInstanceOfBuiltinEvaluatesSideEffects(t *testing.T) {
@@ -374,7 +374,7 @@ function makeArr(): number[] {
   return [1, 2, 3];
 }
 console.log(makeArr() instanceof Array);
-`, "called\n1")
+`, "called\ntrue")
 }
 
 func TestE2EInstanceOfBuiltinObjectStillRejected(t *testing.T) {
@@ -644,7 +644,7 @@ const c = new Circle();
 console.log(c instanceof Shape)
 console.log(c instanceof Circle)
 console.log(c instanceof Square)
-`, "1\n1\n0")
+`, "true\ntrue\nfalse")
 }
 
 // TestE2EInstanceOfStaticAncestorTypedHoldingDescendant guards against a
@@ -663,7 +663,7 @@ const s: Shape = new Circle();
 console.log(s instanceof Shape)
 console.log(s instanceof Circle)
 console.log(s instanceof Square)
-`, "1\n1\n0")
+`, "true\ntrue\nfalse")
 }
 
 func TestE2EInstanceOfDynamicThroughInheritance(t *testing.T) {
@@ -675,7 +675,7 @@ const anyVal: any = new Square();
 console.log(anyVal instanceof Shape)
 console.log(anyVal instanceof Square)
 console.log(anyVal instanceof Circle)
-`, "1\n1\n0")
+`, "true\ntrue\nfalse")
 }
 
 func TestE2EClassMissingSuperCallIsError(t *testing.T) {
@@ -970,7 +970,7 @@ class Box {
 const a = new Box(5);
 const b = new Box(5);
 console.log(a.equals(b));
-`, "1")
+`, "true")
 }
 
 // Reflection (JSON.stringify, Object.keys) never sees a private name at
@@ -1674,4 +1674,354 @@ class Check {
 Check.eq(1, undefined);
 Check.eq(2, 2);
 `, "diff\nsame")
+}
+
+// --- TDD-00063 Stage 1: class field initializers ---
+
+// A field with an `= expr` initializer and no constructor is now legal —
+// the initializers run at construction time (in declaration order).
+func TestE2EFieldInitializerNoConstructor(t *testing.T) {
+	assertOutput(t, `
+class C {
+  x = 5;
+  y = 10;
+  label = "pt";
+}
+const c = new C();
+console.log(c.x + c.y);
+console.log(c.label);
+`, "15\npt")
+}
+
+// An explicit type annotation may accompany the initializer (`x: number = v`).
+func TestE2EFieldInitializerAnnotated(t *testing.T) {
+	assertOutput(t, `
+class C {
+  n: number = 7;
+  s: string = "hi";
+}
+const c = new C();
+console.log(c.n);
+console.log(c.s);
+`, "7\nhi")
+}
+
+// A field initializer runs before the constructor body, so a constructor
+// assignment to the same field overrides it (spec order: init, then body).
+func TestE2EFieldInitializerThenConstructorOverrides(t *testing.T) {
+	assertOutput(t, `
+class C {
+  x = 1;
+  y = 2;
+  constructor(v: number) { this.y = v; }
+}
+const c = new C(50);
+console.log(c.x);
+console.log(c.y);
+`, "1\n50")
+}
+
+// In a derived class, own field initializers run right after super() returns.
+func TestE2EFieldInitializerAfterSuper(t *testing.T) {
+	assertOutput(t, `
+class B {
+  b: number;
+  constructor(n: number) { this.b = n; }
+}
+class D extends B {
+  d = 9;
+  constructor() { super(4); }
+}
+const o = new D();
+console.log(o.b);
+console.log(o.d);
+`, "4\n9")
+}
+
+// A derived class whose every own field initializes itself needs no explicit
+// constructor — the synthesized one forwards to super() then runs the inits.
+func TestE2EFieldInitializerDerivedSynthesizedConstructor(t *testing.T) {
+	assertOutput(t, `
+class B {
+  b: number;
+  constructor(n: number) { this.b = n; }
+}
+class D extends B {
+  d = 9;
+}
+const o = new D(5);
+console.log(o.b);
+console.log(o.d);
+`, "5\n9")
+}
+
+// A private field may carry an initializer too (TDD-00021 deferred this).
+func TestE2EPrivateFieldInitializer(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+  #n = 100;
+  value(): number { return this.#n; }
+}
+console.log(new Counter().value());
+`, "100")
+}
+
+// A field initializer may reference `this` (an earlier field / method result).
+func TestE2EFieldInitializerReferencesThis(t *testing.T) {
+	assertOutput(t, `
+class C {
+  x = 5;
+  y = this.x + 1;
+}
+console.log(new C().y);
+`, "6")
+}
+
+// A generic class supports field initializers, including across multiple
+// distinct instantiations of the same template.
+func TestE2EGenericClassFieldInitializer(t *testing.T) {
+	assertOutput(t, `
+class Box<T> {
+  count = 7;
+  value: T;
+  constructor(v: T) { this.value = v; }
+}
+console.log(new Box<string>("a").count);
+console.log(new Box<number>(3).count);
+`, "7\n7")
+}
+
+// A static field with an initializer is a clean, specific rejection (Stage 1
+// covers instance fields only).
+func TestE2EStaticFieldInitializerRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class C {
+  static x = 5;
+  constructor() {}
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a static field initializer")
+	}
+	if !strings.Contains(err.Error(), "static field initializer") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// --- TDD-00063 Stage 2a: async methods ---
+
+// An async instance method returning Promise<T>, awaited by the caller.
+func TestE2EAsyncInstanceMethod(t *testing.T) {
+	assertOutput(t, `
+class C {
+  async m(): Promise<number> { return 42; }
+}
+const v = await new C().m();
+console.log(v);
+`, "42")
+}
+
+// One async method awaiting another async method on the same instance (`this`).
+func TestE2EAsyncMethodAwaitsThisMethod(t *testing.T) {
+	assertOutput(t, `
+class Svc {
+  async fetchVal(): Promise<number> { return 7; }
+  async total(): Promise<number> {
+    const a = await this.fetchVal();
+    return a + 1;
+  }
+}
+console.log(await new Svc().total());
+`, "8")
+}
+
+// A static async method.
+func TestE2EStaticAsyncMethod(t *testing.T) {
+	assertOutput(t, `
+class M {
+  static async compute(): Promise<number> { return 9; }
+}
+console.log(await M.compute());
+`, "9")
+}
+
+// An async method returning Promise<void>.
+func TestE2EAsyncVoidMethod(t *testing.T) {
+	assertOutput(t, `
+class Logger {
+  async log(): Promise<void> { console.log("logged"); }
+}
+await new Logger().log();
+`, "logged")
+}
+
+// --- TDD-00063 Stage 2b: generator methods ---
+
+// A generator method iterated with for...of, yielding from a `this` field.
+func TestE2EGeneratorMethodForOf(t *testing.T) {
+	assertOutput(t, `
+class Range {
+  lo: number;
+  hi: number;
+  constructor(lo: number, hi: number) { this.lo = lo; this.hi = hi; }
+  *values(): number {
+    for (let i = this.lo; i < this.hi; i = i + 1) { yield i; }
+  }
+}
+for (const x of new Range(1, 5).values()) { console.log(x); }
+`, "1\n2\n3\n4")
+}
+
+// A generator method driven by explicit .next(), including the done flag.
+func TestE2EGeneratorMethodNext(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+  n: number;
+  constructor(start: number) { this.n = start; }
+  *count(): number { yield this.n; yield this.n + 1; }
+}
+const g = new Counter(10).count();
+const a = g.next();
+console.log(a.value);
+console.log(a.done);
+const b = g.next();
+console.log(b.value);
+const c = g.next();
+console.log(c.done);
+`, "10\nfalse\n11\ntrue")
+}
+
+// A generator method with its own parameter, alongside `this`.
+func TestE2EGeneratorMethodWithParam(t *testing.T) {
+	assertOutput(t, `
+class Stepper {
+  base: number;
+  constructor(base: number) { this.base = base; }
+  *upTo(limit: number): number {
+    let i = this.base;
+    while (i <= limit) { yield i; i = i + 1; }
+  }
+}
+for (const x of new Stepper(3).upTo(6)) { console.log(x); }
+`, "3\n4\n5\n6")
+}
+
+// A generator method inherited/used in a derived class (super + this fields).
+func TestE2EGeneratorMethodDerived(t *testing.T) {
+	assertOutput(t, `
+class Base {
+  label: string;
+  constructor(l: string) { this.label = l; }
+}
+class Seq extends Base {
+  n: number;
+  constructor(l: string, n: number) { super(l); this.n = n; }
+  *nums(): number { let i = 0; while (i < this.n) { yield i; i = i + 1; } }
+}
+const s = new Seq("x", 3);
+for (const v of s.nums()) { console.log(v); }
+console.log(s.label);
+`, "0\n1\n2\nx")
+}
+
+// A static generator method is a clean, specific rejection (V1 is instance
+// methods only).
+func TestE2EStaticGeneratorMethodRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class C {
+  static *g(): number { yield 1; }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a static generator method")
+	}
+	if !strings.Contains(err.Error(), "static generator method") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// An async generator method (async *) is a clean, specific rejection.
+func TestE2EAsyncGeneratorMethodRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class C {
+  async *g(): number { yield 1; }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an async generator method")
+	}
+	if !strings.Contains(err.Error(), "async generator method") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// A class constructor accepting an array argument (`new C([1,2,3])`) — a
+// pre-existing bug fixed alongside generator methods (ADR-00182).
+func TestE2EConstructorArrayArgument(t *testing.T) {
+	assertOutput(t, `
+class Acc {
+  items: number[];
+  constructor(items: number[]) { this.items = items; }
+  first(): number { return this.items[0]; }
+  count(): number { return this.items.length; }
+}
+const a = new Acc([10, 20, 30]);
+console.log(a.first());
+console.log(a.count());
+`, "10\n3")
+}
+
+// --- TDD-00063 Stage 3: computed member names (constant string/number) ---
+
+// A constant string computed method name desugars to a named method.
+func TestE2EComputedStringMethodName(t *testing.T) {
+	assertOutput(t, `
+class C {
+  a(): string { return "A"; }
+  ["b"](): string { return "B"; }
+  c(): string { return "C"; }
+}
+const o = new C();
+console.log(o.a() + o.b() + o.c());
+`, "ABC")
+}
+
+// A constant string computed field name, read back by its plain name.
+func TestE2EComputedStringFieldName(t *testing.T) {
+	assertOutput(t, `
+class C {
+  ["count"]: number = 5;
+  bump(): number { this.count = this.count + 1; return this.count; }
+}
+const o = new C();
+console.log(o.count);
+console.log(o.bump());
+`, "5\n6")
+}
+
+// A computed name on a getter (`get ["value"]()`).
+func TestE2EComputedGetterName(t *testing.T) {
+	assertOutput(t, `
+class C {
+  _v: number = 7;
+  get ["value"](): number { return this._v; }
+}
+console.log(new C().value);
+`, "7")
+}
+
+// A non-constant computed member name (identifier / call / Symbol) is a
+// clean, specific rejection in V1.
+func TestE2EComputedNonConstantNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class C {
+  [Symbol.iterator]() { return 1; }
+}
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-constant computed member name")
+	}
+	if !strings.Contains(err.Error(), "computed class member name must be a constant") {
+		t.Errorf("unexpected error message: %v", err)
+	}
 }

@@ -27,14 +27,14 @@ console.log(os.platform())`, want)
 
 func TestE2EOSEOL(t *testing.T) {
 	assertOutputImports(t, `import os from 'os'
-console.log(os.EOL === "\n")`, "1")
+console.log(os.EOL === "\n")`, "true")
 }
 
 func TestE2EOSHomedirMatchesEnvHOME(t *testing.T) {
 	assertOutputImports(t, `
 import os from 'os'
 console.log(os.homedir() === process.env.HOME)
-`, "1")
+`, "true")
 }
 
 func TestE2EOSTmpdirNonEmpty(t *testing.T) {
@@ -42,7 +42,7 @@ func TestE2EOSTmpdirNonEmpty(t *testing.T) {
 import os from 'os'
 const t = os.tmpdir()
 console.log(t.length > 0)
-`, "1")
+`, "true")
 }
 
 func TestE2EOSHostnameNonEmpty(t *testing.T) {
@@ -50,7 +50,7 @@ func TestE2EOSHostnameNonEmpty(t *testing.T) {
 import os from 'os'
 const h = os.hostname()
 console.log(h.length > 0)
-`, "1")
+`, "true")
 }
 
 func TestE2EOSTotalmemFreememPositive(t *testing.T) {
@@ -61,7 +61,7 @@ const free = os.freemem()
 console.log(total > 0)
 console.log(free > 0)
 console.log(free <= total)
-`, "1\n1\n1")
+`, "true\ntrue\ntrue")
 }
 
 func TestE2EOSCpusCountMatchesRuntime(t *testing.T) {
@@ -96,5 +96,5 @@ func TestE2EOSCpusSameModelAcrossCores(t *testing.T) {
 import os from 'os'
 const cpus = os.cpus()
 console.log(cpus[0].model === cpus[cpus.length - 1].model)
-`, "1")
+`, "true")
 }

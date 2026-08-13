@@ -40,14 +40,14 @@ func TestE2EInstanceOfMatchingKind(t *testing.T) {
 	assertOutput(t, `
 const e = new TypeError('bad')
 console.log(e instanceof TypeError)
-`, "1")
+`, "true")
 }
 
 func TestE2EInstanceOfMismatchedKind(t *testing.T) {
 	assertOutput(t, `
 const e = new TypeError('bad')
 console.log(e instanceof RangeError)
-`, "0")
+`, "false")
 }
 
 func TestE2EInstanceOfBaseErrorMatchesEveryKind(t *testing.T) {
@@ -59,7 +59,7 @@ console.log(new SyntaxError('x') instanceof Error)
 console.log(new EvalError('x') instanceof Error)
 console.log(new URIError('x') instanceof Error)
 console.log(new ReferenceError('x') instanceof Error)
-`, "1\n1\n1\n1\n1\n1\n1")
+`, "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue")
 }
 
 func TestE2ECatchNarrowingByInstanceOf(t *testing.T) {
@@ -101,7 +101,7 @@ try {
   console.log(e.message)
   console.log(e.name)
 }
-`, "1\n0\nplain string\nError")
+`, "true\nfalse\nplain string\nError")
 }
 
 func TestE2EUncaughtErrorSubtypePrintsMessage(t *testing.T) {

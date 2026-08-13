@@ -25,7 +25,7 @@ console.log(fs.readFileSync(path))
 fs.unlinkSync(path)
 console.log(fs.existsSync(path))
 `, path)
-	assertOutputImports(t, src, "0\n1\nhello\nhello world\n0")
+	assertOutputImports(t, src, "false\ntrue\nhello\nhello world\nfalse")
 }
 
 func TestE2EFsWriteFileSyncOverwritesExistingContent(t *testing.T) {
@@ -253,7 +253,7 @@ console.log(fs.existsSync(%q))
 fs.mkdirSync(%q)
 console.log(fs.existsSync(%q))
 `, sub, sub, sub)
-	assertOutputImports(t, src, "0\n1")
+	assertOutputImports(t, src, "false\ntrue")
 }
 
 func TestE2EFsMkdirSyncAlreadyExistsThrows(t *testing.T) {
@@ -271,7 +271,7 @@ try {
     console.log(e.message.startsWith("cannot create directory '%s': "))
 }
 `, sub, sub)
-	assertOutputImports(t, src, "1")
+	assertOutputImports(t, src, "true")
 }
 
 func TestE2EFsMkdirSyncWrongArgCountRejected(t *testing.T) {
@@ -294,7 +294,7 @@ console.log(fs.existsSync(%q))
 fs.rmdirSync(%q)
 console.log(fs.existsSync(%q))
 `, sub, sub, sub)
-	assertOutputImports(t, src, "1\n0")
+	assertOutputImports(t, src, "true\nfalse")
 }
 
 func TestE2EFsRmdirSyncNonEmptyThrows(t *testing.T) {
@@ -338,7 +338,7 @@ console.log(fs.existsSync(%q))
 console.log(fs.existsSync(%q))
 console.log(fs.readFileSync(%q))
 `, oldPath, oldPath, newPath, oldPath, newPath, newPath)
-	assertOutputImports(t, src, "0\n1\ncontent")
+	assertOutputImports(t, src, "false\ntrue\ncontent")
 }
 
 func TestE2EFsRenameSyncNonexistentThrows(t *testing.T) {
@@ -377,7 +377,7 @@ console.log(fs.existsSync(%q))
 console.log(fs.readFileSync(%q))
 console.log(fs.readFileSync(%q))
 `, src, src, dest, src, src, dest)
-	assertOutputImports(t, code, "1\ncopy me\ncopy me")
+	assertOutputImports(t, code, "true\ncopy me\ncopy me")
 }
 
 func TestE2EFsCopyFileSyncWrongArgCountRejected(t *testing.T) {

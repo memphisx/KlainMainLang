@@ -165,5 +165,5 @@ func TestE2EReservedGlobalPermissiveUnshadowedStillWorks(t *testing.T) {
 console.log(Math.floor(3.7))
 console.log(process.argv.length >= 1)
 `,
-	}, "main.ts", "3\n1")
+	}, "main.ts", "3\ntrue")
 }

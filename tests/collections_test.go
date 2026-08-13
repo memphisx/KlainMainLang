@@ -15,7 +15,7 @@ console.log(m.size)
 console.log(m.get('alice'))
 console.log(m.has('bob'))
 console.log(m.has('dave'))
-`, "2\n95\n1\n0")
+`, "2\n95\ntrue\nfalse")
 }
 
 func TestE2EMapDelete(t *testing.T) {
@@ -29,7 +29,7 @@ m.delete('y')
 console.log(m.size)
 console.log(m.has('y'))
 console.log(m.get('x'))
-`, "3\n2\n0\n1")
+`, "3\n2\nfalse\n1")
 }
 
 func TestE2EMapNumberKey(t *testing.T) {
@@ -41,7 +41,7 @@ m.set(3, 300)
 console.log(m.get(2))
 console.log(m.has(4))
 console.log(m.size)
-`, "200\n0\n3")
+`, "200\nfalse\n3")
 }
 
 func TestE2EMapOverwrite(t *testing.T) {
@@ -123,7 +123,7 @@ console.log(m.has('a'))
 m.set('c', 3)
 console.log(m.size)
 console.log(m.get('c'))
-`, "2\n0\n0\n1\n3")
+`, "2\n0\nfalse\n1\n3")
 }
 
 // --- Set<T> ---
@@ -137,7 +137,7 @@ s.add('apple')
 console.log(s.size)
 console.log(s.has('apple'))
 console.log(s.has('cherry'))
-`, "2\n1\n0")
+`, "2\ntrue\nfalse")
 }
 
 func TestE2ESetDelete(t *testing.T) {
@@ -150,7 +150,7 @@ console.log(s.size)
 s.delete('b')
 console.log(s.size)
 console.log(s.has('b'))
-`, "3\n2\n0")
+`, "3\n2\nfalse")
 }
 
 func TestE2ESetForEach(t *testing.T) {
@@ -175,7 +175,7 @@ s.add('y')
 s.forEach((v, v2) => {
     console.log(v === v2)
 })
-`, "1\n1")
+`, "true\ntrue")
 }
 
 func TestE2ESetClear(t *testing.T) {
@@ -190,7 +190,7 @@ console.log(s.has('a'))
 s.add('c')
 console.log(s.size)
 console.log(s.has('c'))
-`, "2\n0\n0\n1\n1")
+`, "2\n0\nfalse\n1\ntrue")
 }
 
 // --- for...of over Set/Map values ---
@@ -204,7 +204,7 @@ s.add(10)
 console.log(s.size)
 console.log(s.has(20))
 console.log(s.has(30))
-`, "2\n1\n0")
+`, "2\ntrue\nfalse")
 }
 
 // --- new Set(iterable) — ADR-00159 ---
@@ -215,7 +215,7 @@ const s = new Set([1, 2, 3, 2, 1])
 console.log(s.size)
 console.log(s.has(2))
 console.log(s.has(9))
-`, "3\n1\n0")
+`, "3\ntrue\nfalse")
 }
 func TestE2ENewSetFromArrayLiteralString(t *testing.T) {
 	assertOutput(t, `
@@ -235,7 +235,7 @@ const arr: number[] = [5, 6, 7]
 const s = new Set(arr)
 console.log(s.size)
 console.log(s.has(6))
-`, "3\n1")
+`, "3\ntrue")
 }
 func TestE2ENewSetFromArrayExplicitTypeArg(t *testing.T) {
 	assertOutput(t, `
@@ -267,7 +267,7 @@ function make(): () => boolean {
 }
 const fn = make()
 console.log(fn())
-`, "1")
+`, "true")
 }
 
 func TestE2EForOfSet(t *testing.T) {
@@ -366,7 +366,7 @@ function makeSet(): Set<string> {
 const s2 = makeSet()
 console.log(s2.has('x'))
 console.log(s2.size)
-`, "1\n1")
+`, "true\n1")
 }
 
 func TestE2EMapGenericTypeAnnotationNumberKey(t *testing.T) {
@@ -398,7 +398,7 @@ c.scores.set('a', 1)
 console.log(c.scores.get('a'))
 console.log(c.scores.has('a'))
 console.log(c.scores.size)
-`, "1\n1\n1")
+`, "1\ntrue\n1")
 }
 
 // TestE2ETernaryOnChainedMapFieldGet is a regression test for a bug found
@@ -437,7 +437,7 @@ const c: Container = { tags: s }
 c.tags.add('x')
 console.log(c.tags.has('x'))
 console.log(c.tags.size)
-`, "1\n1")
+`, "true\n1")
 }
 
 func TestE2EMapFieldAccessForEach(t *testing.T) {

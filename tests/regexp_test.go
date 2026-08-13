@@ -17,7 +17,7 @@ console.log(r.ignoreCase)
 console.log(r.multiline)
 console.log(r.dotAll)
 console.log(r.lastIndex)
-`, "a+b\ngim\n1\n1\n1\n0\n0")
+`, "a+b\ngim\ntrue\ntrue\ntrue\nfalse\n0")
 }
 
 func TestE2ERegExpConstructorNoFlags(t *testing.T) {
@@ -29,7 +29,7 @@ console.log(r.global)
 console.log(r.ignoreCase)
 console.log(r.multiline)
 console.log(r.dotAll)
-`, "abc\n\n0\n0\n0\n0")
+`, "abc\n\nfalse\nfalse\nfalse\nfalse")
 }
 
 func TestE2ERegExpDotAllFlag(t *testing.T) {
@@ -37,7 +37,7 @@ func TestE2ERegExpDotAllFlag(t *testing.T) {
 const r = new RegExp("a.b", "s")
 console.log(r.dotAll)
 console.log(r.global)
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2ERegExpLiteralSyntax(t *testing.T) {
@@ -46,7 +46,7 @@ const lit = /hello[0-9]+/i
 console.log(lit.source)
 console.log(lit.flags)
 console.log(lit.ignoreCase)
-`, "hello[0-9]+\ni\n1")
+`, "hello[0-9]+\ni\ntrue")
 }
 
 func TestE2ERegExpLiteralEscapedSlash(t *testing.T) {
@@ -106,7 +106,7 @@ func TestE2ERegExpUnknownFlagLetterIsPermissive(t *testing.T) {
 const r = new RegExp("abc", "z")
 console.log(r.flags)
 console.log(r.global)
-`, "z\n0")
+`, "z\nfalse")
 }
 
 // --- Stage 1: .test(str): boolean ---
@@ -116,7 +116,7 @@ func TestE2ERegExpTestMatchAndNoMatch(t *testing.T) {
 const r = new RegExp("[0-9]+", "")
 console.log(r.test("abc123"))
 console.log(r.test("abcdef"))
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2ERegExpTestCaseInsensitiveAndAnchored(t *testing.T) {
@@ -124,7 +124,7 @@ func TestE2ERegExpTestCaseInsensitiveAndAnchored(t *testing.T) {
 const r = /^hello/i
 console.log(r.test("Hello world"))
 console.log(r.test("say hello"))
-`, "1\n0")
+`, "true\nfalse")
 }
 
 func TestE2ERegExpTestUnannotatedConstInfersBoolean(t *testing.T) {
@@ -142,7 +142,7 @@ if (matched) {
   console.log("no match")
 }
 console.log(matched)
-`, "matched\n1")
+`, "matched\ntrue")
 }
 
 func TestE2ERegExpTestRepeatedCallsDoNotLeakOrCorrupt(t *testing.T) {
@@ -174,7 +174,7 @@ console.log(m.length)
 console.log(m[0])
 console.log(m[1])
 console.log(m[2])
-`, "1\n3\n12-34\n12\n34")
+`, "true\n3\n12-34\n12\n34")
 }
 
 func TestE2ERegExpExecNoMatchReturnsNull(t *testing.T) {
@@ -234,7 +234,7 @@ console.log(r.lastIndex)
 const m2 = r.exec("nope")
 console.log(m2 === null)
 console.log(r.lastIndex)
-`, "1\n4\n1\n0")
+`, "1\n4\ntrue\n0")
 }
 
 // --- General fixes found while wiring .exec()'s T[] | null (ADR-00116) ---
@@ -320,7 +320,7 @@ console.log(m.length)
 console.log(m[0])
 console.log(m[1])
 console.log(m[2])
-`, "1\n3\n12-34\n12\n34")
+`, "true\n3\n12-34\n12\n34")
 }
 
 func TestE2EStringMatchNonGlobalNoMatchReturnsNull(t *testing.T) {
@@ -328,7 +328,7 @@ func TestE2EStringMatchNonGlobalNoMatchReturnsNull(t *testing.T) {
 const r = /(\d+)-(\d+)/
 const m = "nothing here".match(r)
 console.log(m === null)
-`, "1")
+`, "true")
 }
 
 func TestE2EStringMatchGlobalCollectsFullMatchesOnly(t *testing.T) {
@@ -351,7 +351,7 @@ const g = /\d+/g
 const none = "no digits".match(g)
 console.log(none === null)
 console.log(g.lastIndex)
-`, "1\n0")
+`, "true\n0")
 }
 
 func TestE2EStringMatchAllReturnsMatchArrayPerMatch(t *testing.T) {

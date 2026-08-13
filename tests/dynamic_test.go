@@ -54,7 +54,7 @@ console.log(a !== c)
 let d: any = 5.0
 console.log(a === d)
 console.log(a === 5)
-`, "1\n0\n1\n1\n1")
+`, "true\nfalse\ntrue\ntrue\ntrue")
 }
 
 func TestE2EUnknownFloat(t *testing.T) {

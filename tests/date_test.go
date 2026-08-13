@@ -78,7 +78,7 @@ const now: number = Date.now()
 console.log(now > 1700000000000)
 const d: Date = new Date()
 console.log(d.getTime() > 1700000000000)
-`, "1\n1")
+`, "true\ntrue")
 }
 
 func TestE2EDateUntypedInference(t *testing.T) {

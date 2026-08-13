@@ -73,7 +73,7 @@ import path from 'path'
 console.log(path.isAbsolute("/foo/bar"))
 console.log(path.isAbsolute("foo/bar"))
 `
-	assertOutputImports(t, src, "1\n0")
+	assertOutputImports(t, src, "true\nfalse")
 }
 
 func TestE2EPathParseFormat(t *testing.T) {
