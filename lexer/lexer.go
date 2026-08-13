@@ -400,7 +400,18 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		}
 	}
-	// Regular decimal number
+	// Regular decimal number.
+	//
+	// A leading '0' directly followed by another decimal digit or a '_'
+	// (e.g. 010, 08, 0_0, 08_0) is a LegacyOctalIntegerLiteral or
+	// NonOctalDecimalIntegerLiteral — Annex B — which forbids numeric
+	// separators entirely, even in non-strict mode (`0_0`, `08_0`, … are
+	// SyntaxErrors). A lone `0`, or `0.`/`0e`, is an ordinary decimal and is
+	// unaffected. (This compiler doesn't otherwise model legacy-octal
+	// *value* semantics — `010` still reads as decimal 10 — but the
+	// separator rule is an unconditional early error worth catching.)
+	nextC := l.peekAt(1)
+	legacyLeadingZero := l.peek() == '0' && ((nextC >= '0' && nextC <= '9') || nextC == '_')
 	hasDot := false
 	lastWasDigit := false
 	for l.pos < len(l.src) {
@@ -413,6 +424,9 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			buf.WriteRune(l.advance())
 			lastWasDigit = false
 		} else if c == '_' {
+			if legacyLeadingZero {
+				return Token{}, fmt.Errorf("%d:%d: a numeric separator '_' is not allowed in a legacy octal or non-octal-decimal literal", line, col)
+			}
 			if !lastWasDigit || !unicode.IsDigit(l.peekAt(1)) {
 				return Token{}, fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
 			}
@@ -436,23 +450,8 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 		}
 		if c == '\\' {
 			l.advance()
-			esc := l.advance()
-			switch esc {
-			case 'n':
-				buf.WriteByte('\n')
-			case 't':
-				buf.WriteByte('\t')
-			case 'r':
-				buf.WriteByte('\r')
-			case '\\':
-				buf.WriteByte('\\')
-			case '"':
-				buf.WriteByte('"')
-			case '\'':
-				buf.WriteByte('\'')
-			default:
-				buf.WriteByte('\\')
-				buf.WriteRune(esc)
+			if err := l.scanStringEscape(&buf, line, col); err != nil {
+				return Token{}, err
 			}
 			continue
 		}
@@ -462,6 +461,129 @@ func (l *Lexer) readString(line, col int) (Token, error) {
 		buf.WriteRune(l.advance())
 	}
 	return l.tok(STRING, buf.String(), line, col), nil
+}
+
+// scanStringEscape decodes one string-literal escape sequence (the leading
+// backslash already consumed) and appends the result to buf. Implements the
+// ES EscapeSequence grammar (`\n \t \r \b \f \v`, `\xHH`, `\uHHHH`,
+// `\u{H…}`), the Annex B LegacyOctalEscapeSequence (`\0`–`\377`) and
+// NonOctalDecimalEscapeSequence (`\8`/`\9` → the digit), LineContinuation
+// (a backslash before any line terminator, including U+2028/U+2029, yields
+// nothing), and the NonEscapeCharacter fallback (`\A` → `A`, dropping the
+// backslash — the previous behavior of emitting `\A` verbatim was wrong).
+// Strings are this compiler's UTF-8 bytes, so a decoded code point is
+// written via WriteRune (its UTF-8 encoding), matching the UTF-8 string
+// model (see docs/tdd/TDD-00034.md).
+func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
+	esc := l.advance()
+	switch esc {
+	case 'n':
+		buf.WriteByte('\n')
+	case 't':
+		buf.WriteByte('\t')
+	case 'r':
+		buf.WriteByte('\r')
+	case 'b':
+		buf.WriteByte('\b')
+	case 'f':
+		buf.WriteByte('\f')
+	case 'v':
+		buf.WriteByte('\v')
+	case '\\', '"', '\'', '`':
+		buf.WriteRune(esc)
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		// LegacyOctalEscapeSequence (Annex B) — `\0` with no following octal
+		// digit is the ES NUL escape. Up to three octal digits, capped at
+		// \377 (255): a leading digit of 4–7 allows only one more.
+		val := int(esc - '0')
+		more := 2
+		if esc > '3' {
+			more = 1
+		}
+		for i := 0; i < more; i++ {
+			n := l.peek()
+			if n < '0' || n > '7' {
+				break
+			}
+			val = val*8 + int(l.advance()-'0')
+		}
+		buf.WriteRune(rune(val))
+	case 'x':
+		v, ok := l.readHexEscape(2)
+		if !ok {
+			return fmt.Errorf("%d:%d: invalid hexadecimal escape sequence", line, col)
+		}
+		buf.WriteRune(rune(v))
+	case 'u':
+		if l.peek() == '{' {
+			l.advance() // consume '{'
+			val, n := 0, 0
+			for l.peek() != '}' && l.pos < len(l.src) {
+				d, ok := hexDigitVal(l.peek())
+				if !ok {
+					return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+				}
+				l.advance()
+				val = val*16 + d
+				n++
+				if val > 0x10FFFF {
+					return fmt.Errorf("%d:%d: Unicode code point out of range", line, col)
+				}
+			}
+			if n == 0 || l.peek() != '}' {
+				return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+			}
+			l.advance() // consume '}'
+			buf.WriteRune(rune(val))
+		} else {
+			v, ok := l.readHexEscape(4)
+			if !ok {
+				return fmt.Errorf("%d:%d: invalid Unicode escape sequence", line, col)
+			}
+			buf.WriteRune(rune(v))
+		}
+	case '\n', '\u2028', '\u2029':
+		// LineContinuation — the escaped line terminator yields nothing.
+	case '\r':
+		// LineContinuation; a CRLF pair counts as one terminator.
+		if l.peek() == '\n' {
+			l.advance()
+		}
+	case 0:
+		return fmt.Errorf("%d:%d: unterminated string literal", line, col)
+	default:
+		// NonEscapeCharacter — the character itself, without the backslash.
+		buf.WriteRune(esc)
+	}
+	return nil
+}
+
+// readHexEscape reads exactly n hex digits and returns their value. Used by
+// the `\xHH` and `\uHHHH` escape forms.
+func (l *Lexer) readHexEscape(n int) (int, bool) {
+	val := 0
+	for i := 0; i < n; i++ {
+		d, ok := hexDigitVal(l.peek())
+		if !ok {
+			return 0, false
+		}
+		l.advance()
+		val = val*16 + d
+	}
+	return val, true
+}
+
+// hexDigitVal returns the numeric value of a single hex digit.
+func hexDigitVal(c rune) (int, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0'), true
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10, true
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10, true
+	}
+	return 0, false
 }
 
 // regexIllegalAfter lists the token types after which a `/` cannot start a
@@ -597,23 +719,13 @@ func (l *Lexer) readTemplateSegment() (string, bool, error) {
 		}
 		if c == '\\' {
 			l.advance()
-			esc := l.advance()
-			switch esc {
-			case 'n':
-				buf.WriteByte('\n')
-			case 't':
-				buf.WriteByte('\t')
-			case 'r':
-				buf.WriteByte('\r')
-			case '\\':
-				buf.WriteByte('\\')
-			case '`':
-				buf.WriteByte('`')
-			case '$':
-				buf.WriteByte('$')
-			default:
-				buf.WriteByte('\\')
-				buf.WriteRune(esc)
+			// Same escape grammar as a plain string literal — `\xHH`,
+			// `\uHHHH`/`\u{…}`, `\0`/octal, line continuations, and the
+			// NonEscapeCharacter fallback (which correctly turns `\$` into
+			// `$` and `` \` `` into a backtick without the leading
+			// backslash). See scanStringEscape.
+			if err := l.scanStringEscape(&buf, l.line, l.col); err != nil {
+				return "", false, err
 			}
 			continue
 		}

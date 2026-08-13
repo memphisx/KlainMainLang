@@ -726,6 +726,14 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, pos ast.Pos) (Va
 		if err != nil {
 			return Value{}, err
 		}
+		// The code units must be numeric. A non-number argument (e.g. a
+		// string, as in `String.fromCharCode("0")`) would otherwise reach
+		// the `trunc i64 <ptr> to i8` below and emit invalid IR — this
+		// compiler doesn't do JS's implicit string→number coercion, so
+		// reject it cleanly at compile time instead. See ADR-00195.
+		if !isNumberTy(val.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: String.fromCharCode/fromCodePoint expects numeric arguments, got a non-number (this compiler does not implicitly coerce)", arg.GetPos().Line, arg.GetPos().Col)
+		}
 		coerced := e.coerce(val, TypeI64)
 		ch := e.freshReg()
 		slot := e.freshReg()

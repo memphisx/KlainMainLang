@@ -335,90 +335,35 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		rest := p.match(lexer.ELLIPSIS)
 
-		// Destructured parameter (`{x, y}: T` / `[a, b]: T[]`) — a
-		// deliberately narrower V1 than a full binding pattern: no nesting,
-		// no per-field default values, and (checked below, after the type
-		// annotation) always requires an explicit type annotation, since
-		// unlike a plain scalar param there's no sensible unannotated
-		// default to fall back to (registerFunctions defaults a bare param
-		// to `number`; there's no "number" shape for a pattern). Combining
-		// a pattern with `...`/`?`/a whole-parameter `= default` is real,
-		// valid TS but adds real complexity (rest must bind a collector,
-		// not a nested pattern at all; a pattern default needs a null/
-		// undefined check on the whole incoming value before unpacking) —
-		// out of scope for V1, rejected below with a clear error rather
-		// than silently mishandled.
+		// Destructured parameter (`{x, y}: T` / `[a, b]: T[]`, and nested
+		// shapes like `[[a, b]]: number[][]` — TDD-00065 Stage 2) — always
+		// requires an explicit type annotation, since unlike a plain scalar
+		// param there's no sensible unannotated default to fall back to
+		// (registerFunctions defaults a bare param to `number`; there's no
+		// "number" shape for a pattern). Combining a pattern with `...`/`?`/a
+		// whole-parameter `= default` is real, valid TS but adds real
+		// complexity (rest must bind a collector, not a nested pattern at
+		// all; a pattern default needs a null/undefined check on the whole
+		// incoming value before unpacking) — out of scope, rejected below
+		// with a clear error rather than silently mishandled. Uses the same
+		// shared pattern-element grammar every other destructuring position
+		// does, so holes / renames / `...rest` / nesting stay identical.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
 			if rest {
 				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
 			}
-			isObject := p.check(lexer.LBRACE)
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
-			p.advance() // consume '{' or '['
-			if isObject {
-				for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
-					keyTok, err := p.expect(lexer.IDENT)
-					if err != nil {
-						return nil, err
-					}
-					local := keyTok.Literal
-					if p.check(lexer.COLON) {
-						p.advance()
-						aliasTok, err := p.expect(lexer.IDENT)
-						if err != nil {
-							return nil, err
-						}
-						local = aliasTok.Literal
-					}
-					var dflt ast.Expression
-					if p.match(lexer.ASSIGN) {
-						dflt, err = p.parseAssignment()
-						if err != nil {
-							return nil, err
-						}
-					}
-					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
-					if !p.match(lexer.COMMA) {
-						break
-					}
-				}
-				if _, err := p.expect(lexer.RBRACE); err != nil {
+			if p.check(lexer.LBRACE) {
+				var err error
+				objPat, err = p.parseObjectPatternProps()
+				if err != nil {
 					return nil, err
 				}
 			} else {
-				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
-					if p.check(lexer.ELLIPSIS) {
-						p.advance() // consume '...'
-						nameTok, err := p.expect(lexer.IDENT)
-						if err != nil {
-							return nil, err
-						}
-						arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
-						break
-					}
-					if p.check(lexer.COMMA) {
-						p.advance() // hole — consume comma, record skip
-						arrPat = append(arrPat, ast.ArrayPatternElem{})
-						continue
-					}
-					nameTok, err := p.expect(lexer.IDENT)
-					if err != nil {
-						return nil, err
-					}
-					var dflt ast.Expression
-					if p.match(lexer.ASSIGN) {
-						dflt, err = p.parseAssignment()
-						if err != nil {
-							return nil, err
-						}
-					}
-					arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
-					if !p.match(lexer.COMMA) {
-						break
-					}
-				}
-				if _, err := p.expect(lexer.RBRACKET); err != nil {
+				var err error
+				arrPat, err = p.parseArrayPatternElems()
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -555,6 +500,14 @@ func (p *Parser) parseForStatement() (ast.Statement, error) {
 		if p.peekNth(2).Type == lexer.IDENT && p.peekNth(2).Literal == "in" {
 			return p.parseForInBody(pos)
 		}
+		// Destructuring loop variable — `for (const [a, b] of …)` /
+		// `for (const { x, y } of …)` (TDD-00065 Stage 1). A pattern in
+		// for-*in* stays unsupported (falls through to the C-style path,
+		// which cleanly rejects it) — near-useless in practice, and this
+		// compiler's for-in is already narrow.
+		if p.peekNth(1).Type == lexer.LBRACKET || p.peekNth(1).Type == lexer.LBRACE {
+			return p.parseForOfPatternBody(pos)
+		}
 	}
 
 	// Init (optional)
@@ -644,6 +597,48 @@ func (p *Parser) parseForOfBody(pos ast.Pos) (*ast.ForOfStatement, error) {
 		return nil, err
 	}
 	return ast.NewForOfStatement(kindTok.Literal, nameTok.Literal, iterable, body, pos), nil
+}
+
+// parseForOfPatternBody parses a for-of whose loop variable is a
+// destructuring pattern — `for (const [a, b] of …)` /
+// `for (const { x, y } of …)` (TDD-00065 Stage 1). Reuses the same
+// pattern-element grammar the statement-declaration position uses, then
+// requires `of` (for-in with a pattern is not supported).
+func (p *Parser) parseForOfPatternBody(pos ast.Pos) (*ast.ForOfStatement, error) {
+	kindTok := p.advance() // let/const/var
+	stmt := ast.NewForOfStatement(kindTok.Literal, "", nil, nil, pos)
+	if p.check(lexer.LBRACKET) {
+		elems, err := p.parseArrayPatternElems()
+		if err != nil {
+			return nil, err
+		}
+		stmt.ArrayPattern = elems
+	} else {
+		props, err := p.parseObjectPatternProps()
+		if err != nil {
+			return nil, err
+		}
+		stmt.ObjectPattern = props
+	}
+	if !(p.check(lexer.IDENT) && p.peek().Literal == "of") {
+		tok := p.peek()
+		return nil, fmt.Errorf("%d:%d: expected 'of' after a for-of destructuring pattern, got %s", tok.Line, tok.Col, tok.Type)
+	}
+	p.advance() // consume 'of'
+	iterable, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlockOrStatement()
+	if err != nil {
+		return nil, err
+	}
+	stmt.Iterable = iterable
+	stmt.Body = body
+	return stmt, nil
 }
 
 func (p *Parser) parseForInBody(pos ast.Pos) (*ast.ForInStatement, error) {
@@ -875,9 +870,13 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 	return ast.NewTryStatement(body, catch, finally, pos), nil
 }
 
-func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
-	tok := p.advance() // let/const/var
-	pos := posOf(tok)
+// parseArrayPatternElems parses an array destructuring pattern's element
+// list — the opening `[` through the matching `]`, both consumed — and is
+// shared by every position an array pattern can appear: the statement
+// declaration (parseArrayDestructuring) and the for-of loop variable
+// (parseForOfPatternBody, TDD-00065). Kept in one place so the grammar of
+// holes / `= default` / `...rest` can't drift between positions.
+func (p *Parser) parseArrayPatternElems() ([]ast.ArrayPatternElem, error) {
 	p.advance() // [
 	var elems []ast.ArrayPatternElem
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
@@ -898,6 +897,18 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 		if p.check(lexer.COMMA) {
 			p.advance() // hole — consume comma, record skip
 			elems = append(elems, ast.ArrayPatternElem{})
+		} else if p.check(lexer.LBRACKET) || p.check(lexer.LBRACE) {
+			// Nested sub-pattern at this position (`[[a, b], c]` /
+			// `[{ x }, { y }]`, TDD-00065 Stage 2) — recurse, then allow
+			// an optional `= default` on the whole nested position.
+			elem, err := p.parseNestedPatternElem()
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, elem)
+			if !p.match(lexer.COMMA) {
+				break
+			}
 		} else {
 			nameTok, err := p.expect(lexer.IDENT)
 			if err != nil {
@@ -919,6 +930,101 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
 	}
+	return elems, nil
+}
+
+// parseNestedPatternElem parses a nested array/object sub-pattern sitting at
+// one array-pattern position (`[a, b]` or `{ x }` inside a bigger `[...]`),
+// plus an optional `= default` on the whole nested position. The caller has
+// already confirmed the current token is `[` or `{`.
+func (p *Parser) parseNestedPatternElem() (ast.ArrayPatternElem, error) {
+	var elem ast.ArrayPatternElem
+	if p.check(lexer.LBRACKET) {
+		sub, err := p.parseArrayPatternElems()
+		if err != nil {
+			return elem, err
+		}
+		elem.SubArray = sub
+	} else {
+		sub, err := p.parseObjectPatternProps()
+		if err != nil {
+			return elem, err
+		}
+		elem.SubObject = sub
+	}
+	if p.match(lexer.ASSIGN) {
+		dflt, err := p.parseAssignment()
+		if err != nil {
+			return elem, err
+		}
+		elem.Default = dflt
+	}
+	return elem, nil
+}
+
+// parseObjectPatternProps parses an object destructuring pattern's property
+// list — the opening `{` through the matching `}`, both consumed — the
+// object-pattern counterpart to parseArrayPatternElems, shared by the same
+// two positions.
+func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
+	p.advance() // {
+	var props []ast.DestructProp
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		keyTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		local := keyTok.Literal
+		var subArr []ast.ArrayPatternElem
+		var subObj []ast.DestructProp
+		if p.check(lexer.COLON) {
+			p.advance()
+			switch {
+			case p.check(lexer.LBRACKET):
+				// Nested array sub-pattern: `{ key: [a, b] }` (Stage 2).
+				subArr, err = p.parseArrayPatternElems()
+				if err != nil {
+					return nil, err
+				}
+			case p.check(lexer.LBRACE):
+				// Nested object sub-pattern: `{ key: { a } }` (Stage 2).
+				subObj, err = p.parseObjectPatternProps()
+				if err != nil {
+					return nil, err
+				}
+			default:
+				aliasTok, err := p.expect(lexer.IDENT)
+				if err != nil {
+					return nil, err
+				}
+				local = aliasTok.Literal
+			}
+		}
+		var dflt ast.Expression
+		if p.match(lexer.ASSIGN) {
+			dflt, err = p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+		}
+		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt, SubArray: subArr, SubObject: subObj})
+		if !p.match(lexer.COMMA) {
+			break
+		}
+	}
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+	return props, nil
+}
+
+func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
+	tok := p.advance() // let/const/var
+	pos := posOf(tok)
+	elems, err := p.parseArrayPatternElems()
+	if err != nil {
+		return nil, err
+	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
@@ -933,35 +1039,8 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 	tok := p.advance() // let/const/var
 	pos := posOf(tok)
-	p.advance() // {
-	var props []ast.DestructProp
-	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
-		keyTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
-		}
-		local := keyTok.Literal
-		if p.check(lexer.COLON) {
-			p.advance()
-			aliasTok, err := p.expect(lexer.IDENT)
-			if err != nil {
-				return nil, err
-			}
-			local = aliasTok.Literal
-		}
-		var dflt ast.Expression
-		if p.match(lexer.ASSIGN) {
-			dflt, err = p.parseAssignment()
-			if err != nil {
-				return nil, err
-			}
-		}
-		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
-		if !p.match(lexer.COMMA) {
-			break
-		}
-	}
-	if _, err := p.expect(lexer.RBRACE); err != nil {
+	props, err := p.parseObjectPatternProps()
+	if err != nil {
 		return nil, err
 	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {

@@ -457,6 +457,17 @@ func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
 // instead of the fallback zero literal.
 func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, elems []ast.ArrayPatternElem) error {
 	for i, elem := range elems {
+		// Nested sub-pattern at this position (`[[a, b], c]` /
+		// `[{ x }, { y }]`, TDD-00065 Stage 2) — Name is "" but the element
+		// is not a hole; destructure the element at index i with the
+		// sub-pattern. Checked before the hole test below, which keys on the
+		// same empty Name.
+		if elem.SubArray != nil || elem.SubObject != nil {
+			if err := e.unpackNestedArrayElem(dataPtr, lenVal, elemTy, i, elem); err != nil {
+				return err
+			}
+			continue
+		}
 		if elem.Name == "" {
 			continue
 		}
@@ -575,6 +586,91 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		e.define(elem.Name, Symbol{Ptr: localPtr, Ty: elemTy})
 	}
 	return nil
+}
+
+// unpackNestedArrayElem destructures the element at index i of an array
+// pattern with a nested sub-pattern (`[[a, b], c]` / `[{ x }, { y }]`,
+// TDD-00065 Stage 2). It resolves the element to a safe source — the real
+// element when index i is in bounds, a deterministic empty array / zeroed
+// object when it is past the source's length (real JS throws there; this
+// compiler keeps the same memory-safe "deterministic zero" convention
+// ADR-00157 established for a leaf position) — then re-enters the matching
+// unpack with the sub-pattern. A `= default` on a nested position isn't
+// supported yet (a clean rejection, not silently ignored).
+func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i int, elem ast.ArrayPatternElem) error {
+	if elem.Default != nil {
+		return fmt.Errorf("a default value on a nested destructuring pattern is not yet supported")
+	}
+	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBounds, i, lenVal))
+	okL := e.freshLabel("destr.nok")
+	oobL := e.freshLabel("destr.noob")
+	afterL := e.freshLabel("destr.nafter")
+
+	if elem.SubArray != nil {
+		if !elemTy.IsArray || elemTy.ElemType == nil {
+			return fmt.Errorf("cannot array-destructure a non-array element")
+		}
+		subPtrA := e.freshReg()
+		subLenA := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", subPtrA))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", subLenA))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+
+		e.emitLabel(okL)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
+		val := e.loadArrayElem(gep, elemTy)
+		p := e.freshReg()
+		l := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", p, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", l, val.Ref))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, subPtrA))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, subLenA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+		e.emitLabel(oobL)
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", subPtrA))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", subLenA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+		e.emitLabel(afterL)
+		subPtr := e.freshReg()
+		subLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", subPtr, subPtrA))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", subLen, subLenA))
+		return e.unpackArrayPatternInto(subPtr, subLen, *elemTy.ElemType, elem.SubArray)
+	}
+
+	// Nested object sub-pattern — the element must be an object/class type.
+	if !elemTy.IsObject {
+		return fmt.Errorf("cannot object-destructure a non-object element")
+	}
+	subObjA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", subObjA))
+	// A zeroed stand-in object for the out-of-bounds case, so the recursive
+	// unpack never dereferences null (memory-safe, reads deterministic zeros).
+	zeroObj := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", zeroObj, elemTy.StructIR()))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+
+	e.emitLabel(okL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
+	objp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objp, gep))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objp, subObjA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+	e.emitLabel(oobL)
+	e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", elemTy.StructIR(), zeroObj))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", zeroObj, subObjA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+	e.emitLabel(afterL)
+	subObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", subObj, subObjA))
+	return e.unpackObjectPatternInto(subObj, elemTy, elem.SubObject, ast.Pos{})
 }
 
 // resolveArrayDataPtr emits code to obtain the raw heap pointer and length

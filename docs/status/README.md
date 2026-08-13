@@ -205,4 +205,4 @@ The event loop existing now ([TDD-00006](../tdd/TDD-00006.md)) changes the shape
 
 ---
 
-*Last updated: 2026-08-13 — `finally` now runs on an early `return`/`break`/`continue` (labeled or not), not only on fall-through, with the return value captured before it and a `finally` return overriding, matching JS ([ADR-00191](../adr/ADR-00191.md)).*
+*Last updated: 2026-08-13 — string/template literals now decode the full ES escape grammar ([ADR-00194](../adr/ADR-00194.md)), plus two conformance-surfaced fixes: `String.fromCharCode` rejects a non-number argument instead of emitting invalid IR ([ADR-00196](../adr/ADR-00196.md)) and a numeric separator in a legacy-octal/non-octal-decimal literal (`0_0`) is now a clean error ([ADR-00197](../adr/ADR-00197.md)); Test262 corpus at 5180/53578 (9.7%).*

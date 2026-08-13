@@ -384,6 +384,43 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			return fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
 		}
 		fieldTy = e.canonicalizeClassTy(fieldTy)
+
+		// Nested sub-pattern at this key (`{ k: [a, b] }` / `{ k: { a } }`,
+		// TDD-00065 Stage 2) — destructure field k's own value with the
+		// sub-pattern rather than binding a leaf Local. A `= default`
+		// combined with a nested pattern isn't supported yet.
+		if prop.SubArray != nil || prop.SubObject != nil {
+			if prop.Default != nil {
+				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
+			}
+			fieldGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fieldGep, structIR, objPtr, idx))
+			if prop.SubArray != nil {
+				if !fieldTy.IsArray || fieldTy.ElemType == nil {
+					return fmt.Errorf("%d:%d: cannot array-destructure non-array field '%s'", pos.Line, pos.Col, prop.Key)
+				}
+				aggReg := e.freshReg()
+				dp := e.freshReg()
+				lv := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, fieldGep))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dp, aggReg))
+				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lv, aggReg))
+				if err := e.unpackArrayPatternInto(dp, lv, *fieldTy.ElemType, prop.SubArray); err != nil {
+					return err
+				}
+				continue
+			}
+			if !fieldTy.IsObject {
+				return fmt.Errorf("%d:%d: cannot object-destructure non-object field '%s'", pos.Line, pos.Col, prop.Key)
+			}
+			objp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objp, fieldGep))
+			if err := e.unpackObjectPatternInto(objp, fieldTy, prop.SubObject, pos); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if prop.Default != nil && !(fieldTy.Nullable && fieldTy.IR == "ptr") {
 			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
 		}

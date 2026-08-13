@@ -485,9 +485,18 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// the two-alloca "Named Symbol" representation (Ptr+LenPtr) instead of
 	// the single scalar alloca every other element type uses, so .length/
 	// indexing/etc. work on it inside the loop body.
+	//
+	// A destructuring loop variable (`for (const [a, b] of …)` /
+	// `for (const { x, y } of …)`, TDD-00065 Stage 1) defines no single
+	// binding here at all — the per-iteration element is unpacked in the
+	// body below, through the same unpack*PatternInto core every other
+	// destructuring position shares.
+	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	varPtr := e.freshReg()
 	var varLenPtr string
-	if elemTy.IsArray {
+	if isPattern {
+		// no pre-loop binding
+	} else if elemTy.IsArray {
 		varLenPtr = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
@@ -516,11 +525,32 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
 	elemVal := e.loadArrayElem(gepReg, elemTy)
-	if elemTy.IsArray {
+	switch {
+	case s.ObjectPattern != nil:
+		// The element is unpacked as an object — its fields become the
+		// loop-body bindings. Requires an object/class element type; a
+		// non-object element type is a clean rejection inside
+		// unpackObjectPatternInto's own FieldIndex lookup.
+		if err := e.unpackObjectPatternInto(elemVal.Ref, elemTy, s.ObjectPattern, s.GetPos()); err != nil {
+			return err
+		}
+	case s.ArrayPattern != nil:
+		// The element must itself be an array to array-destructure it.
+		if !elemTy.IsArray || elemTy.ElemType == nil {
+			return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-array type", s.GetPos().Line, s.GetPos().Col)
+		}
+		innerPtr := e.freshReg()
+		innerLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", innerPtr, elemVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", innerLen, elemVal.Ref))
+		if err := e.unpackArrayPatternInto(innerPtr, innerLen, *elemTy.ElemType, s.ArrayPattern); err != nil {
+			return err
+		}
+	case elemTy.IsArray:
 		if err := e.storeArrayAggregateInto(elemVal, varPtr, varLenPtr); err != nil {
 			return err
 		}
-	} else {
+	default:
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemVal.Ref, varPtr, elemTy.Align()))
 	}
 

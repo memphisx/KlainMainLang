@@ -229,3 +229,9 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00189](ADR-00189.md) | `JSON.parse` into an array-typed field is a clean rejection, not invalid IR | Fixes a bug tracked under [TDD-00015](../tdd/TDD-00015.md) |
 | [00190](ADR-00190.md) | Unannotated `let b = true` / `let n = !cond` / `let z = -3.5` infer their real type | Follows [ADR-00183](ADR-00183.md) (fixes the storage side of boolean printing) |
 | [00191](ADR-00191.md) | `finally` runs on `return`/`break`/`continue`, not only on fall-through | Fixes the finally-on-return bug flagged by [ADR-00166](ADR-00166.md) |
+| [00192](ADR-00192.md) | Destructuring the loop variable of a for-of (`for (const [a,b] of …)`) | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 1 |
+| [00193](ADR-00193.md) | Nested destructuring patterns (`[[a,b],c]`, `{ inner: { v } }`) across declarations, for-of, and parameters | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 2; extends [ADR-00192](ADR-00192.md) |
+| [00194](ADR-00194.md) | Full string-literal escape-sequence decoding (`\xHH`, `\uHHHH`, `\u{…}`, octal, line continuation, NonEscapeCharacter) | Found via a new conformance `-faillist`; corpus +101 |
+| [00195](ADR-00195.md) | Conformance report: category descriptions, pipeline-phase breakdown, per-reason example files | Extends [ADR-00153](ADR-00153.md) |
+| [00196](ADR-00196.md) | `String.fromCharCode`/`fromCodePoint` reject a non-number argument instead of emitting invalid IR | Surfaced by [ADR-00195](ADR-00195.md)'s phase breakdown |
+| [00197](ADR-00197.md) | Reject numeric separators in legacy-octal / non-octal-decimal literals (`0_0`, `08_0`) | Extends [ADR-00085](ADR-00085.md); surfaced by [ADR-00195](ADR-00195.md) |

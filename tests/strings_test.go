@@ -338,3 +338,55 @@ const empty: string[] = "".split("")
 console.log(empty.length)
 `, "3\na\nc\n0")
 }
+
+// --- String-literal escape sequences (ADR-00194) ---
+
+func TestE2EStringHexEscape(t *testing.T) {
+	assertOutput(t, `
+console.log("\x41\x42\x5A")
+`, "ABZ")
+}
+
+func TestE2EStringUnicodeEscape(t *testing.T) {
+	assertOutput(t, `
+console.log("AB")
+console.log("é")
+`, "AB\né")
+}
+
+func TestE2EStringUnicodeCodePointEscape(t *testing.T) {
+	assertOutput(t, `
+console.log("\u{48}\u{49}")
+`, "HI")
+}
+
+func TestE2EStringNonEscapeAndNonOctalDecimal(t *testing.T) {
+	// \A is a NonEscapeCharacter (→ "A"); \8 / \9 are NonOctalDecimalEscape (→ the digit).
+	assertOutput(t, `
+console.log("\A\B\%\8\9")
+`, "AB%89")
+}
+
+func TestE2EStringLegacyOctalEscape(t *testing.T) {
+	assertOutput(t, `
+console.log("\1\2\7" === "\x01\x02\x07")
+console.log("\08" === "\x008")
+`, "true\ntrue")
+}
+
+func TestE2EStringLineContinuation(t *testing.T) {
+	assertOutput(t, "console.log(\"hello \\\nworld\")", "hello world")
+}
+
+func TestE2ETemplateHexUnicodeEscape(t *testing.T) {
+	assertOutput(t, "console.log(`x=\\x41 u=\\u0042 d=\\$`)", "x=A u=B d=$")
+}
+
+func TestE2EStringFromCharCodeNonNumberRejected(t *testing.T) {
+	// A string argument must be a clean compile error, not invalid IR
+	// (ADR-00196) — this compiler doesn't do implicit string→number coercion.
+	_, err := parseAndCompile(`console.log(String.fromCharCode("0"))`)
+	if err == nil {
+		t.Fatal("expected a compile error for String.fromCharCode with a string argument, got none")
+	}
+}

@@ -413,14 +413,11 @@ func envStructSize(caps []CapturedVar) int64 {
 func addParamBoundNames(bound map[string]bool, params []ast.Param) {
 	for _, p := range params {
 		bound[p.Name] = true
-		for _, elem := range p.ArrayPattern {
-			if elem.Name != "" {
-				bound[elem.Name] = true
-			}
-		}
-		for _, prop := range p.ObjectPattern {
-			bound[prop.Local] = true
-		}
+		// Recurse into nested sub-patterns (TDD-00065 Stage 2) so a
+		// nested-bound name shadows an outer variable rather than being
+		// scanned as a capture of it.
+		collectArrayPatternNames(p.ArrayPattern, bound)
+		collectObjectPatternNames(p.ObjectPattern, bound)
 	}
 }
 
@@ -511,6 +508,38 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 	}
 }
 
+// collectArrayPatternNames records every leaf binding name introduced by an
+// array destructuring pattern, recursing into nested sub-patterns
+// (TDD-00065 Stage 2) so the free-variable scan doesn't misclassify a
+// nested-bound name as an outer capture.
+func collectArrayPatternNames(elems []ast.ArrayPatternElem, out map[string]bool) {
+	for _, el := range elems {
+		switch {
+		case el.SubArray != nil:
+			collectArrayPatternNames(el.SubArray, out)
+		case el.SubObject != nil:
+			collectObjectPatternNames(el.SubObject, out)
+		case el.Name != "":
+			out[el.Name] = true
+		}
+	}
+}
+
+// collectObjectPatternNames is collectArrayPatternNames' object-pattern
+// counterpart.
+func collectObjectPatternNames(props []ast.DestructProp, out map[string]bool) {
+	for _, pr := range props {
+		switch {
+		case pr.SubArray != nil:
+			collectArrayPatternNames(pr.SubArray, out)
+		case pr.SubObject != nil:
+			collectObjectPatternNames(pr.SubObject, out)
+		default:
+			out[pr.Local] = true
+		}
+	}
+}
+
 func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string]bool) {
 	// Copy bound so local declarations don't bleed back to the caller.
 	local := make(map[string]bool, len(bound))
@@ -589,7 +618,15 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 			for k, v := range local {
 				inner[k] = v
 			}
-			inner[s.VarName] = true
+			// A destructuring loop variable (TDD-00065) binds each of its
+			// pattern's (possibly nested) leaf names, not a single VarName.
+			if s.ArrayPattern != nil {
+				collectArrayPatternNames(s.ArrayPattern, inner)
+			} else if s.ObjectPattern != nil {
+				collectObjectPatternNames(s.ObjectPattern, inner)
+			} else {
+				inner[s.VarName] = true
+			}
 			if s.Body != nil {
 				scanStmtsFV(s.Body.Body, inner, result)
 			}

@@ -273,3 +273,47 @@ const restSource: number[] = [1, 2, 3]
 const [, ...restCopy] = restSource
 restSource.push(99)
 console.log(restCopy.length)  // 2
+
+// --- Destructuring the loop variable of a for...of (TDD-00065 Stage 1) ---
+
+// Object pattern: each element's fields become loop-body bindings.
+interface Vertex { x: number; y: number }
+const points: Vertex[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }]
+let coordSum = 0
+for (const { x, y } of points) {
+    coordSum = coordSum + x + y
+}
+console.log(coordSum)  // 10
+
+// Renaming works the same as in a declaration pattern.
+for (const { x: px, y: py } of points) {
+    console.log(px + '/' + py)  // 1/2 then 3/4
+}
+
+// Array pattern over an array-of-arrays, with a hole and a rest element.
+const rows: number[][] = [[1, 2, 3], [4, 5, 6]]
+for (const [first, , ...others] of rows) {
+    console.log(first + ':' + others.length)  // 1:1 then 4:1
+}
+
+// --- Nested patterns (TDD-00065 Stage 2) ---
+
+// Array inside array.
+const matrix: number[][] = [[1, 2], [3, 4]]
+const [[m00, m01], [m10, m11]] = matrix
+console.log(m00 + ' ' + m01 + ' ' + m10 + ' ' + m11)  // 1 2 3 4
+
+// Object inside object, and an array inside an object.
+interface Leaf { v: number }
+interface Tree { left: Leaf; span: number[] }
+const tree: Tree = { left: { v: 9 }, span: [100, 200] }
+const { left: { v: leafVal }, span: [lo, hi] } = tree
+console.log(leafVal + ' ' + lo + ' ' + hi)  // 9 100 200
+
+// A nested pattern also works as a for-of loop variable and a parameter.
+const cells: number[][] = [[1, 2], [3, 4]]
+for (const [lft, rgt] of cells) {
+    console.log(lft * rgt)  // 2 then 12
+}
+function sumPair([[p, q]]: number[][]): number { return p + q }
+console.log(sumPair([[8, 9]]))  // 17

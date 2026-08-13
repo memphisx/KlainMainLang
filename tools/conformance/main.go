@@ -101,6 +101,7 @@ func main() {
 	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for clang and for running each compiled test binary")
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
+	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	flag.Parse()
 
 	testDir := filepath.Join(*corpus, "test")
@@ -190,6 +191,18 @@ func main() {
 		sort.Strings(passing)
 		if err := os.WriteFile(*passList, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
 			fatal("writing passlist: %v", err)
+		}
+	}
+	if *failList != "" {
+		var failing []string
+		for _, r := range all {
+			if !r.Pass {
+				failing = append(failing, r.Path+"\t"+r.Reason)
+			}
+		}
+		sort.Strings(failing)
+		if err := os.WriteFile(*failList, []byte(strings.Join(failing, "\n")+"\n"), 0644); err != nil {
+			fatal("writing faillist: %v", err)
 		}
 	}
 	fmt.Fprintf(os.Stderr, "done. report written to %s\n", *out)
@@ -364,9 +377,84 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// categoryDesc describes what each Test262 top-level category covers, so the
+// per-category table reads without cross-referencing the corpus layout. Keyed
+// by the first path segment under <corpus>/test.
+var categoryDesc = map[string]string{
+	"language":  "Core language: statements, expressions, literals, classes, modules, ASI, scoping — the in-scope engine.",
+	"built-ins": "Standard library objects (Array, Object, String, Math, RegExp, Promise, TypedArrays, …) — many probe the dynamic object model.",
+	"intl402":   "ECMA-402 Internationalization (Intl.*) — out of scope for this compiler.",
+	"annexB":    "Annex B legacy/web-compat features (legacy octal, __proto__, escape/unescape, …) — mostly out of scope.",
+	"staging":   "Not-yet-standard proposals staged upstream — moving target, largely out of scope.",
+	"harness":   "Self-tests of Test262's own assertion harness (sta.js/assert.js/propertyHelper) — needs this repo's harness-shim.",
+}
+
+// phaseOf maps a normalized failure reason to the pipeline phase it died in,
+// so the report can separate genuine near-misses (compiled + ran, wrong
+// result) from front-end parse gaps, bad-IR codegen bugs, wrongly-accepted
+// negative tests, and unsupported-harness skips.
+func phaseOf(reason string) string {
+	switch {
+	case strings.HasPrefix(reason, "RUNTIME_NONZERO_EXIT") || strings.HasPrefix(reason, "CRASH"):
+		return "runtime (ran, wrong result — near-miss)"
+	case strings.HasPrefix(reason, "RUN_TIMEOUT"):
+		return "runtime (timeout)"
+	case strings.HasPrefix(reason, "CLANG_ERROR") || strings.HasPrefix(reason, "CLANG_TIMEOUT"):
+		return "clang (invalid IR — codegen bug)"
+	case strings.HasPrefix(reason, "COMPILE_ERROR"):
+		return "compile (front-end parse/resolve/codegen)"
+	case strings.HasPrefix(reason, "MISSING_HARNESS_INCLUDE"):
+		return "skipped (unsupported harness include)"
+	case strings.HasPrefix(reason, "expected a parse-phase rejection") || strings.HasPrefix(reason, "expected a runtime rejection"):
+		return "wrongly-accepted (negative test compiled/ran)"
+	case strings.HasPrefix(reason, "READ_ERROR") || strings.HasPrefix(reason, "WRITE_ERROR"):
+		return "infra (I/O)"
+	default:
+		return "other"
+	}
+}
+
+// phaseShort is the compact phase label used in the per-reason table's own
+// Phase column (the full phaseOf strings are too wide for a table cell).
+func phaseShort(phase string) string {
+	switch {
+	case strings.HasPrefix(phase, "runtime (ran"):
+		return "runtime"
+	case strings.HasPrefix(phase, "runtime (timeout"):
+		return "run-timeout"
+	case strings.HasPrefix(phase, "clang"):
+		return "clang"
+	case strings.HasPrefix(phase, "compile"):
+		return "compile"
+	case strings.HasPrefix(phase, "wrongly-accepted"):
+		return "neg-accepted"
+	case strings.HasPrefix(phase, "skipped"):
+		return "skipped"
+	case strings.HasPrefix(phase, "infra"):
+		return "infra"
+	default:
+		return "other"
+	}
+}
+
+// phaseOrder fixes the display order of the pipeline-phase summary, most
+// actionable first (near-misses and codegen bugs before out-of-scope skips).
+var phaseOrder = []string{
+	"runtime (ran, wrong result — near-miss)",
+	"clang (invalid IR — codegen bug)",
+	"wrongly-accepted (negative test compiled/ran)",
+	"compile (front-end parse/resolve/codegen)",
+	"runtime (timeout)",
+	"skipped (unsupported harness include)",
+	"infra (I/O)",
+	"other",
+}
+
 // writeReport renders the generated docs/testing/CONFORMANCE-RESULTS.md —
-// overall totals, per-top-level-category breakdown, and the most common
-// failure-reason buckets. Regenerated wholesale each run, never hand-edited.
+// overall totals, per-top-level-category breakdown, a pipeline-phase summary,
+// and the most common failure-reason buckets (each with the phase it died in
+// and a representative example file). Regenerated wholesale each run, never
+// hand-edited.
 func writeReport(path string, all []result) error {
 	var b strings.Builder
 	b.WriteString("# Test262 conformance results\n\n")
@@ -377,6 +465,8 @@ func writeReport(path string, all []result) error {
 	passed := 0
 	byCat := map[string]*struct{ total, pass int }{}
 	byReason := map[string]int{}
+	byPhase := map[string]int{}
+	reasonExample := map[string]string{} // lexicographically-smallest failing path per reason
 	for _, r := range all {
 		c, ok := byCat[r.Category]
 		if !ok {
@@ -389,6 +479,10 @@ func writeReport(path string, all []result) error {
 			c.pass++
 		} else {
 			byReason[r.Reason]++
+			byPhase[phaseOf(r.Reason)]++
+			if ex, seen := reasonExample[r.Reason]; !seen || r.Path < ex {
+				reasonExample[r.Reason] = r.Path
+			}
 		}
 	}
 
@@ -398,7 +492,7 @@ func writeReport(path string, all []result) error {
 	}
 	fmt.Fprintf(&b, "## Overall\n\n%d / %d passed (%.1f%%)\n\n", passed, total, pct)
 
-	b.WriteString("## By top-level category\n\n| Category | Passed | Total | % |\n|---|---|---|---|\n")
+	b.WriteString("## By top-level category\n\n| Category | Passed | Total | % | What it covers |\n|---|---|---|---|---|\n")
 	cats := make([]string, 0, len(byCat))
 	for c := range byCat {
 		cats = append(cats, c)
@@ -410,10 +504,26 @@ func writeReport(path string, all []result) error {
 		if s.total > 0 {
 			p = 100 * float64(s.pass) / float64(s.total)
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% |\n", c, s.pass, s.total, p)
+		desc := categoryDesc[c]
+		if desc == "" {
+			desc = "—"
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %s |\n", c, s.pass, s.total, p, desc)
 	}
 
-	b.WriteString("\n## Most common failure reasons\n\n| Count | Reason |\n|---|---|\n")
+	// Failures grouped by the pipeline phase they died in — the single most
+	// useful cut for deciding what to work on: "runtime … near-miss" files
+	// already compiled and ran (a correctness fix flips them directly),
+	// "clang … codegen bug" files are our own invalid IR, and
+	// "wrongly-accepted" are negative tests we should have rejected.
+	b.WriteString("\n## Failures by pipeline phase\n\nWhere each failing file died in the pipeline. Near-misses (already compiled and ran) and codegen bugs (invalid IR we emitted) are the most actionable; the rest are largely out-of-scope parse gaps or unsupported harness features.\n\n| Failing files | Phase |\n|---|---|\n")
+	for _, ph := range phaseOrder {
+		if n := byPhase[ph]; n > 0 {
+			fmt.Fprintf(&b, "| %d | %s |\n", n, ph)
+		}
+	}
+
+	b.WriteString("\n## Most common failure reasons\n\nThe `Reason` is normalized (position stripped, quoted identifiers collapsed to `'%s'`). `Phase` is the pipeline stage it died in; `Example` is one representative file (the lexicographically first) — pass it to the compiler directly to reproduce.\n\n| Count | Phase | Reason | Example |\n|---|---|---|---|\n")
 	type reasonCount struct {
 		reason string
 		count  int
@@ -422,13 +532,18 @@ func writeReport(path string, all []result) error {
 	for r, n := range byReason {
 		reasons = append(reasons, reasonCount{r, n})
 	}
-	sort.Slice(reasons, func(i, j int) bool { return reasons[i].count > reasons[j].count })
+	sort.Slice(reasons, func(i, j int) bool {
+		if reasons[i].count != reasons[j].count {
+			return reasons[i].count > reasons[j].count
+		}
+		return reasons[i].reason < reasons[j].reason
+	})
 	limit := 50
 	if len(reasons) < limit {
 		limit = len(reasons)
 	}
 	for _, rc := range reasons[:limit] {
-		fmt.Fprintf(&b, "| %d | %s |\n", rc.count, rc.reason)
+		fmt.Fprintf(&b, "| %d | %s | %s | `%s` |\n", rc.count, phaseShort(phaseOf(rc.reason)), rc.reason, reasonExample[rc.reason])
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

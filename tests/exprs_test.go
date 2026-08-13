@@ -432,6 +432,22 @@ func TestE2ENumericSeparatorMisplacedIsError(t *testing.T) {
 	}
 }
 
+func TestE2ENumericSeparatorInLegacyLeadingZeroIsError(t *testing.T) {
+	// A numeric separator is a SyntaxError inside a legacy octal / non-octal
+	// decimal literal (leading 0 then a digit or '_'), even in non-strict
+	// mode — ADR-00197. `1_000` and `0.5_5` stay valid.
+	for _, bad := range []string{`0_0`, `08_0`, `0_9`, `00_0`} {
+		if _, err := parser.Parse("const x = " + bad); err == nil {
+			t.Fatalf("expected a compile error for %q, got none", bad)
+		}
+	}
+	for _, ok := range []string{`1_000`, `0.5_5`, `0`, `0x1_F`} {
+		if _, err := parser.Parse("const x = " + ok); err != nil {
+			t.Fatalf("expected %q to parse, got %v", ok, err)
+		}
+	}
+}
+
 // --- Null coalescing ?? ---
 
 func TestE2ENullCoalescing(t *testing.T) {

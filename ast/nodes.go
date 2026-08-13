@@ -190,11 +190,19 @@ func NewForStatement(init Statement, test Expression, update []Expression, body 
 }
 
 type ForOfStatement struct {
-	Kind     string // "let", "const", "var"
-	VarName  string
-	Iterable Expression
-	Body     *BlockStatement
-	pos      Pos
+	Kind    string // "let", "const", "var"
+	VarName string
+	// ArrayPattern/ObjectPattern: non-nil exactly when the loop variable is
+	// a destructuring pattern (`for (const [a, b] of …)` /
+	// `for (const { x, y } of …)`) rather than a bare VarName — mirrors
+	// Param's own pattern carriers, and the per-iteration element is
+	// unpacked through the same unpack*PatternInto codegen core the
+	// declaration and parameter positions already share (TDD-00065 Stage 1).
+	ArrayPattern  []ArrayPatternElem
+	ObjectPattern []DestructProp
+	Iterable      Expression
+	Body          *BlockStatement
+	pos           Pos
 }
 
 func (*ForOfStatement) nodeMarker()   {}
@@ -340,6 +348,13 @@ type DestructProp struct {
 	// legitimate value for; rejected at compile time otherwise. See
 	// unpackObjectPatternInto's own doc comment.
 	Default Expression
+	// SubArray/SubObject is non-nil for a nested pattern at this key
+	// (`{ key: [a, b] }` / `{ key: { a } }`, TDD-00065 Stage 2) — Key's
+	// own value is itself destructured with the sub-pattern instead of
+	// bound to a leaf Local. Exactly one is ever set, and never alongside
+	// a Default. When set, Local is unused.
+	SubArray  []ArrayPatternElem
+	SubObject []DestructProp
 }
 
 // ArrayPatternElem is one binding in an array destructuring pattern —
@@ -360,6 +375,14 @@ type ArrayPatternElem struct {
 	// otherwise); Default is never set alongside it (real JS doesn't
 	// allow one either — `[...rest = []]` is invalid).
 	Rest bool
+	// SubArray/SubObject is non-nil for a nested pattern at this position
+	// (`[[a, b], c]` / `[{ x }, { y }]`, TDD-00065 Stage 2) — the element
+	// at this index is itself destructured with the sub-pattern instead of
+	// bound to a leaf Name. Exactly one is ever set; Name is "" when a
+	// sub-pattern is present, so a plain `Name == ""` no longer implies a
+	// hole (check the sub-pattern fields too).
+	SubArray  []ArrayPatternElem
+	SubObject []DestructProp
 }
 
 // ArrayDestructuring — const/let [a, b] = expr

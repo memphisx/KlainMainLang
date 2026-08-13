@@ -662,87 +662,30 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		rest := p.match(lexer.ELLIPSIS)
 
 		// Destructured parameter (`({x, y}: T) => ...` / `([a, b]: T[]) =>
-		// ...`) — same restricted V1 shape parseParamList's own destructured
-		// branch documents (no nesting, no per-field default, an explicit
-		// type annotation always required); a destructured *array* param is
-		// further rejected downstream in codegen (emit_func.go's
-		// emitClosureFunc) since array-typed closure parameters aren't
-		// supported at all yet, independent of destructuring. Arrow
-		// functions parse their own parameter list separately from
-		// parseParamList (used by named function declarations) rather than
-		// sharing it, so this mirrors that function's pattern-parsing
-		// branch rather than calling it directly.
+		// ...`, and nested shapes — TDD-00065 Stage 2) — same shape
+		// parseParamList's own destructured branch documents (an explicit
+		// type annotation always required, no whole-parameter default); a
+		// destructured *array* param is further rejected downstream in
+		// codegen (emit_func.go's emitClosureFunc) since array-typed closure
+		// parameters aren't supported at all yet, independent of
+		// destructuring. Shares the same pattern-element grammar every other
+		// destructuring position uses.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
 			if rest {
 				return nil, fmt.Errorf("%d:%d: a rest parameter cannot be a destructuring pattern", p.peek().Line, p.peek().Col)
 			}
-			isObject := p.check(lexer.LBRACE)
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
-			p.advance() // consume '{' or '['
-			if isObject {
-				for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
-					keyTok, err := p.expect(lexer.IDENT)
-					if err != nil {
-						return nil, err
-					}
-					local := keyTok.Literal
-					if p.check(lexer.COLON) {
-						p.advance()
-						aliasTok, err := p.expect(lexer.IDENT)
-						if err != nil {
-							return nil, err
-						}
-						local = aliasTok.Literal
-					}
-					var dflt ast.Expression
-					if p.match(lexer.ASSIGN) {
-						dflt, err = p.parseAssignment()
-						if err != nil {
-							return nil, err
-						}
-					}
-					objPat = append(objPat, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
-					if !p.match(lexer.COMMA) {
-						break
-					}
-				}
-				if _, err := p.expect(lexer.RBRACE); err != nil {
+			if p.check(lexer.LBRACE) {
+				var err error
+				objPat, err = p.parseObjectPatternProps()
+				if err != nil {
 					return nil, err
 				}
 			} else {
-				for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
-					if p.check(lexer.ELLIPSIS) {
-						p.advance() // consume '...'
-						nameTok, err := p.expect(lexer.IDENT)
-						if err != nil {
-							return nil, err
-						}
-						arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
-						break
-					}
-					if p.check(lexer.COMMA) {
-						p.advance() // hole — consume comma, record skip
-						arrPat = append(arrPat, ast.ArrayPatternElem{})
-						continue
-					}
-					nameTok, err := p.expect(lexer.IDENT)
-					if err != nil {
-						return nil, err
-					}
-					var dflt ast.Expression
-					if p.match(lexer.ASSIGN) {
-						dflt, err = p.parseAssignment()
-						if err != nil {
-							return nil, err
-						}
-					}
-					arrPat = append(arrPat, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
-					if !p.match(lexer.COMMA) {
-						break
-					}
-				}
-				if _, err := p.expect(lexer.RBRACKET); err != nil {
+				var err error
+				arrPat, err = p.parseArrayPatternElems()
+				if err != nil {
 					return nil, err
 				}
 			}

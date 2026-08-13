@@ -414,3 +414,94 @@ const nums: number[] = [10, 20, 30, 40, 50]
 for (const n of nums.slice(1, 4)) console.log(n)
 `, "20\n30\n40")
 }
+
+// --- Destructuring loop variable in for...of (TDD-00065 Stage 1) ---
+
+func TestE2EForOfObjectPattern(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const pts: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }]
+let sum = 0
+for (const { x, y } of pts) {
+  sum = sum + x + y
+}
+console.log(sum)
+`, "10")
+}
+
+func TestE2EForOfObjectPatternRenamed(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+const pts: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }]
+for (const { x: a, y: b } of pts) {
+  console.log(a + '/' + b)
+}
+`, "1/2\n3/4")
+}
+
+func TestE2EForOfArrayPattern(t *testing.T) {
+	assertOutput(t, `
+const pairs: number[][] = [[1, 2], [3, 4], [5, 6]]
+let tot = 0
+for (const [p, q] of pairs) {
+  tot = tot + p * q
+}
+console.log(tot)
+`, "44")
+}
+
+func TestE2EForOfArrayPatternHoleAndRest(t *testing.T) {
+	assertOutput(t, `
+const pairs: number[][] = [[1, 2, 9], [3, 4, 8]]
+for (const [, second, ...rest] of pairs) {
+  console.log(second + ':' + rest.length)
+}
+`, "2:1\n4:1")
+}
+
+// --- Nested destructuring patterns (TDD-00065 Stage 2) ---
+
+func TestE2ENestedArrayInArray(t *testing.T) {
+	assertOutput(t, `
+const m: number[][] = [[1, 2], [3, 4]]
+const [[a, b], [c, d]] = m
+console.log(a + '-' + b + '-' + c + '-' + d)
+`, "1-2-3-4")
+}
+
+func TestE2ENestedObjectInObject(t *testing.T) {
+	assertOutput(t, `
+interface Inner { v: number }
+interface Outer { inner: Inner; tag: number }
+const o: Outer = { inner: { v: 42 }, tag: 7 }
+const { inner: { v }, tag } = o
+console.log(v + '/' + tag)
+`, "42/7")
+}
+
+func TestE2ENestedArrayInObject(t *testing.T) {
+	assertOutput(t, `
+interface WithCoords { coords: number[]; name: number }
+const w: WithCoords = { coords: [10, 20], name: 5 }
+const { coords: [x, y], name } = w
+console.log(x + ',' + y + ',' + name)
+`, "10,20,5")
+}
+
+func TestE2ENestedPatternAsForOfLoopVar(t *testing.T) {
+	assertOutput(t, `
+const cube: number[][][] = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+for (const [[a, b], [c, d]] of cube) {
+  console.log(a + b + c + d)
+}
+`, "10\n26")
+}
+
+func TestE2ENestedDestructuredParam(t *testing.T) {
+	assertOutput(t, `
+function f([[a, b]]: number[][]): number { return a + b }
+console.log(f([[3, 4]]))
+const h = ([[a], [b, c]]: number[][]): number => a + b + c
+console.log(h([[1], [2, 3]]))
+`, "7\n6")
+}
