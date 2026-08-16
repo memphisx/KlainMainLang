@@ -475,6 +475,126 @@ console.log(r)
 `, "first")
 }
 
+// --- Nullable non-pointer scalars (TDD-00064 Stage 1) ---
+
+// A `number | null` local now carries a real presence bit rather than
+// collapsing null onto the value 0, so `x ?? d` and `x === null` distinguish a
+// genuine null from a legitimately-present 0 (the exact bugs #1 and its
+// `=== null` sibling this stage removes).
+func TestE2ENullableScalarCoalesce(t *testing.T) {
+	assertOutput(t, `
+let x: number | null = null
+console.log(x ?? 42)
+let y: number | null = 7
+console.log(y ?? 42)
+let z: number | null = 0
+console.log(z ?? 42)
+`, "42\n7\n0")
+}
+
+func TestE2ENullableScalarNullEquality(t *testing.T) {
+	assertOutput(t, `
+let z: number | null = 0
+console.log(z === null)
+let x: number | null = null
+console.log(x === null)
+console.log(x !== null)
+let y: number | null = 5
+console.log(y !== null)
+`, "false\ntrue\nfalse\ntrue")
+}
+
+func TestE2ENullableScalarBoolean(t *testing.T) {
+	assertOutput(t, `
+let a: boolean | null = null
+console.log(a ?? true)
+let b: boolean | null = false
+console.log(b ?? true)
+console.log(b === null)
+`, "true\nfalse\nfalse")
+}
+
+// Copying one nullable scalar to another preserves null-ness rather than
+// reading it back as a present 0.
+func TestE2ENullableScalarCopyPreservesNull(t *testing.T) {
+	assertOutput(t, `
+let a: number | null = null
+let b: number | null = a
+console.log(b ?? 99)
+a = 5
+let c: number | null = a
+console.log(c ?? 99)
+`, "99\n5")
+}
+
+func TestE2ENullableScalarReassignAndNullishAssign(t *testing.T) {
+	assertOutput(t, `
+let a: number | null = 5
+a = null
+console.log(a ?? 1)
+a = 8
+console.log(a ?? 1)
+let f: number | null = null
+f ??= 100
+console.log(f)
+let g: number | null = 3
+g ??= 100
+console.log(g)
+`, "1\n8\n100\n3")
+}
+
+// A nullable scalar prints its real JS rendering — `null` when absent, its
+// value when present (a present 0/false is not "null") — rather than the
+// payload 0 the bare representation used to surface (TDD-00064 Stage 2).
+func TestE2ENullableScalarPrint(t *testing.T) {
+	assertOutput(t, `
+let x: number | null = null
+console.log(x)
+let y: number | null = 5
+console.log(y)
+let z: number | null = 0
+console.log(z)
+let b: boolean | null = null
+console.log(b)
+let c: boolean | null = false
+console.log(c)
+`, "null\n5\n0\nnull\nfalse")
+}
+
+// Flow narrowing: inside `if (x !== null)` the local is known present, so
+// `x === null` folds to false and it prints as its value.
+func TestE2ENullableScalarNarrowingGuard(t *testing.T) {
+	assertOutput(t, `
+let m: number | null = 7
+if (m !== null) {
+  console.log(m)
+  console.log(m === null)
+}
+let n: number | null = null
+if (n === null) {
+  console.log("absent")
+} else {
+  console.log(n)
+}
+`, "7\nfalse\nabsent")
+}
+
+// Early-exit narrowing: after `if (w === null) return`, the boxed local is
+// proven present for the rest of the enclosing scope; a null assigned into it
+// mid-function is tracked and short-circuits at the guard.
+func TestE2ENullableScalarEarlyExitNarrowing(t *testing.T) {
+	assertOutput(t, `
+function f(n: number): number {
+  let w: number | null = 8
+  if (n < 0) { w = null }
+  if (w === null) { return -1 }
+  return w + 100
+}
+console.log(f(1))
+console.log(f(-1))
+`, "108\n-1")
+}
+
 // --- Optional chaining ?. ---
 
 func TestE2EOptionalChainingLength(t *testing.T) {

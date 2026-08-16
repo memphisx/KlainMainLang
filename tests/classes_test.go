@@ -211,6 +211,28 @@ for (const x of new Range(1, 6)) {
 `, "1\n2\n3\n4\n5")
 }
 
+// Bug #2 (TDD-00064): a class iterator whose first legitimate value is exactly
+// 0 must not terminate immediately. Before Stage 3/4 the `next(): number | null`
+// result used a bare 0 as both the value zero and the "done" sentinel, so this
+// loop produced nothing; now `next()` returns a presence-flagged aggregate and
+// 0 iterates normally.
+func TestE2EForOfClassIteratorZeroFirst(t *testing.T) {
+	assertOutput(t, `
+class CountTo3 {
+  current: number = 0;
+  next(): number | null {
+    if (this.current > 2) { return null; }
+    const v = this.current;
+    this.current = this.current + 1;
+    return v;
+  }
+}
+for (const x of new CountTo3()) {
+  console.log(x)
+}
+`, "0\n1\n2")
+}
+
 func TestE2EForOfClassIteratorObjectElement(t *testing.T) {
 	assertOutput(t, `
 class Node {

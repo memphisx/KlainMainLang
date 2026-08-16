@@ -4,6 +4,20 @@ import "fmt"
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// A nullable-scalar aggregate ({ i1, T }, TDD-00064 Stage 3) demotes to its
+	// bare payload whenever a plain scalar is wanted — the single point that
+	// lets arithmetic, stores, returns, and argument passing consume a boundary
+	// value (a T|null return/param/field) without knowing the aggregate shape.
+	// Keep it intact only when the target is itself a matching nullable scalar.
+	if isNullableScalar(v.Ty) && !(isNullableScalar(target) && target.IR == v.Ty.IR) {
+		v = e.nullableScalarPayloadOf(v)
+	}
+	// null/undefined coerced *to* a nullable scalar becomes an absent { i1, T }
+	// aggregate, keeping the invariant that a nullable-scalar-typed Value always
+	// carries the aggregate (never a bare zero) in its register.
+	if v.Ty.IsNull && isNullableScalar(target) {
+		return Value{Ref: e.makeNullableScalarAgg(target, "false", zeroRef(target.withoutNullable())), Ty: target}
+	}
 	// null/undefined assigned to an array-typed target becomes an empty-
 	// array aggregate ({ptr, i64}, not a bare `ptr` — see StructFieldIR's
 	// own doc comment for why an array field's real storage type differs

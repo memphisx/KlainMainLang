@@ -1015,6 +1015,12 @@ func StructFieldIR(ty Type) string {
 	if ty.IsArray {
 		return "{ptr, i64}"
 	}
+	// A nullable non-pointer scalar field carries its presence bit alongside
+	// the value (TDD-00064 Stage 3), so a null field is distinguishable from a
+	// real 0 — the same { i1, T } slot a nullable-scalar local/param/return uses.
+	if isNullableScalar(ty) {
+		return nullableScalarStorageIR(ty)
+	}
 	return ty.IR
 }
 
@@ -1026,7 +1032,53 @@ func StructFieldSize(ty Type) int64 {
 	if ty.IsArray {
 		return 16
 	}
+	// A nullable-scalar field's { i1, T } slot occupies the payload's alignment
+	// (for the leading i1 + padding) plus the payload itself — 2*align for every
+	// scalar T, since size == align holds for each (i8..i64, float, double).
+	if isNullableScalar(ty) {
+		return 2 * int64(ty.Align())
+	}
 	return int64(ty.Align())
+}
+
+// isNullableScalar reports whether ty is a `T | null` / `T | undefined` where
+// T is a *non-pointer scalar* (number/i64, boolean/i1, an annotated
+// float32/float64, Date/i64) — the one case a plain null pointer cannot stand
+// in for "absent," so TDD-00064 Option A gives it a presence-flagged
+// { i1 present, T value } storage slot instead. A Nullable *pointer* type
+// (string/object/array/class/Map/Set/... — IR "ptr") keeps its existing
+// null-pointer representation and is deliberately excluded here; so is a
+// Nullable constrained union (IsDynamic — its own { i8, i64 } box already
+// carries a null tag) and void.
+func isNullableScalar(ty Type) bool {
+	return ty.Nullable && !ty.IsDynamic && ty.IR != "ptr" && ty.IR != "void"
+}
+
+// nullableScalarStorageIR returns the LLVM storage type of a nullable-scalar
+// slot: a two-field { i1, T } presence-flagged aggregate. See isNullableScalar.
+func nullableScalarStorageIR(ty Type) string {
+	return fmt.Sprintf("{ i1, %s }", ty.IR)
+}
+
+// storageIR returns the LLVM type a value of ty occupies in its own storage
+// slot (a local alloca, and — from Stage 3 on — a parameter/field slot):
+// normally ty.IR, except a nullable scalar, which is the { i1, T } aggregate
+// above. Plain (non-nullable) scalars, pointers, and the union box are
+// unchanged, so nothing on the overwhelmingly common non-nullable path shifts.
+func storageIR(ty Type) string {
+	if isNullableScalar(ty) {
+		return nullableScalarStorageIR(ty)
+	}
+	return ty.IR
+}
+
+// storageAlign returns the alignment of ty's storage slot. A { i1, T }
+// nullable-scalar aggregate aligns to its payload T (i1 is align 1), so this
+// is just ty.Align() in every case — but named separately from Align() so
+// storage-slot call sites read intentionally and stay correct if the layout
+// ever gains a wider tag.
+func storageAlign(ty Type) int {
+	return ty.Align()
 }
 
 // StructIR returns the LLVM struct type string, e.g. "{ i64, i32 }".
@@ -1121,10 +1173,15 @@ func isSafeNumericArg(t Type) bool {
 }
 
 // LLVMRetType returns the LLVM IR type string used in function definitions and
-// call instructions. Arrays are returned as an aggregate {ptr, i64}.
+// call instructions. Arrays are returned as an aggregate {ptr, i64}; a nullable
+// non-pointer scalar as its presence-flagged { i1, T } aggregate (TDD-00064
+// Stage 3), so `T | null` survives a function boundary with its null-ness.
 func (t Type) LLVMRetType() string {
 	if t.IsArray {
 		return "{ptr, i64}"
+	}
+	if isNullableScalar(t) {
+		return nullableScalarStorageIR(t)
 	}
 	return t.IR
 }

@@ -279,6 +279,16 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if isLogicalAssignOp(ex.Op) {
 			return e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right)
 		}
+		// A plain `=` into a nullable-scalar field boxes straight from the RHS
+		// expression, preserving a null-valued source lvalue's null-ness
+		// (TDD-00064 Stage 3) — reading it back into a Value first would
+		// auto-unwrap to a present payload.
+		if ex.Op == "=" && isNullableScalar(fieldTy) {
+			if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, ex.Right); err != nil {
+				return Value{}, err
+			}
+			return e.loadScalarOrNullableField(gepReg, fieldTy), nil
+		}
 		var rhs Value
 		if ex.Op == "=" {
 			// Hint-aware (TDD-00028/TDD-00007): `obj.field = [1,2,3]`/`obj.field
@@ -288,9 +298,15 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				return Value{}, err
 			}
 		} else {
-			curReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
-			cur := Value{Ref: curReg, Ty: fieldTy}
+			// A nullable-scalar field's current value loads as its { i1, T }
+			// aggregate; compound arithmetic runs on the demoted payload (a
+			// null reads as its zero, lenient) and re-boxes on store.
+			cur := e.loadScalarOrNullableField(gepReg, fieldTy)
+			arithTy := fieldTy
+			if isNullableScalar(fieldTy) {
+				cur = e.nullableScalarPayloadOf(cur)
+				arithTy = fieldTy.withoutNullable()
+			}
 			rhsVal, err := e.emitExpr(ex.Right)
 			if err != nil {
 				return Value{}, err
@@ -298,14 +314,13 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if err := dateCompoundAssignGuard(ex.Op, fieldTy.IsDate, rhsVal.Ty.IsDate); err != nil {
 				return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 			}
-			rhsVal = e.coerce(rhsVal, fieldTy)
-			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, fieldTy, ex.GetPos())
+			rhsVal = e.coerce(rhsVal, arithTy)
+			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, arithTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
 		}
-		rhs = e.coerce(rhs, fieldTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), rhs.Ref, gepReg, fieldTy.Align()))
+		e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
 		return rhs, nil
 	}
 
@@ -468,6 +483,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 
 	if sym.IsConst {
 		return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
+	}
+
+	// A nullable-scalar local stores into its { i1, T } slot (TDD-00064) —
+	// intercepted before the bare-scalar load/store path below, which would
+	// mis-shape the aggregate. A bare-storage nullable scalar (param/field,
+	// Stage 3) is deliberately excluded and keeps the generic path.
+	if sym.isNullableScalarLocal() {
+		return e.emitNullableScalarAssign(sym, ex)
 	}
 
 	if sym.Ty.IsDynamic && ex.Op != "=" {

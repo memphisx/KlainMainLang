@@ -195,6 +195,11 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 				continue
 			}
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+		} else if isNullableScalar(pty) {
+			// A nullable-scalar parameter is passed and stored as its
+			// presence-flagged { i1, T } aggregate (TDD-00064 Stage 3).
+			llvmParams = append(llvmParams, nullableScalarParamDecl(p.Name, pty))
+			e.defineNullableScalarParam(p.Name, "%v_"+p.Name, pty)
 		} else {
 			llvmParams = append(llvmParams, fmt.Sprintf("%s %%p_%s", pty.IR, p.Name))
 			ptrName := "%v_" + p.Name
@@ -830,6 +835,12 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				continue
 			}
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			continue
+		}
+		if isNullableScalar(pty) {
+			// Nullable-scalar closure parameter (TDD-00064 Stage 3).
+			paramStr += ", " + nullableScalarParamDecl(p.Name, pty)
+			e.defineNullableScalarParam(p.Name, "%v_"+p.Name, pty)
 			continue
 		}
 		paramStr += fmt.Sprintf(", %s %%p_%s", pty.IR, p.Name)
@@ -1517,6 +1528,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
 			continue
 		}
+		if isNullableScalar(pty) {
+			// Nullable-scalar function-expression parameter (TDD-00064 Stage 3).
+			paramStr += ", " + nullableScalarParamDecl(p.Name, pty)
+			e.defineNullableScalarParam(p.Name, "%v_"+p.Name, pty)
+			continue
+		}
 		paramStr += fmt.Sprintf(", %s %%p_%s", pty.IR, p.Name)
 		ptrName := "%v_" + p.Name
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
@@ -1678,6 +1695,17 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	for i := 0; i < regularCount && i < len(args); i++ {
 		arg := args[i]
 		paramTy := ty.FuncParams[i]
+		// A nullable-scalar closure parameter takes its boxed { i1, T }
+		// aggregate (TDD-00064 Stage 3) — handled before the generic path so a
+		// null literal boxes as absent rather than round-tripping through coerce.
+		if isNullableScalar(paramTy) {
+			argStr, err := e.emitNullableScalarArg(arg, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, argStr)
+			continue
+		}
 		val, err := e.emitExprWithObjectHint(arg, paramTy)
 		if err != nil {
 			return Value{}, err
@@ -1758,7 +1786,10 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			paramTyStrs = append(paramTyStrs, "ptr", "i64")
 			continue
 		}
-		paramTyStrs = append(paramTyStrs, p.IR)
+		// A nullable-scalar parameter is passed as its { i1, T } aggregate
+		// (TDD-00064 Stage 3), so the indirect-call function type must name that
+		// storage shape, not the bare scalar.
+		paramTyStrs = append(paramTyStrs, storageIR(p))
 	}
 	fnTypePart := "(" + strings.Join(paramTyStrs, ", ") + ")"
 

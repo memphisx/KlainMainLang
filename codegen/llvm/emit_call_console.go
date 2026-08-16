@@ -36,9 +36,27 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 		if i > 0 {
 			e.emitConsoleGroupIndent(fd)
 		}
+		// An un-narrowed nullable-scalar local prints its value or the literal
+		// `null` (TDD-00064 Stage 2), rather than the payload 0 the bare
+		// representation used to surface for a null. A narrowed local is known
+		// present and falls through to the ordinary path below.
+		if sym, ok := e.nullableScalarLValue(arg); ok && !sym.NarrowedNonNull {
+			if err := e.emitConsoleNullableScalar(sym, fd); err != nil {
+				return Value{}, err
+			}
+			continue
+		}
 		val, err := e.emitExpr(arg)
 		if err != nil {
 			return Value{}, err
+		}
+		// A nullable-scalar aggregate value (a T|null return/field) prints
+		// null-aware, same as a boxed local (TDD-00064 Stage 3).
+		if isNullableScalar(val.Ty) {
+			if err := e.emitConsoleNullableScalarAgg(val, fd); err != nil {
+				return Value{}, err
+			}
+			continue
 		}
 		if val.Ty.IsArray {
 			return Value{}, fmt.Errorf("%d:%d: console output does not support arrays; iterate and print each element", arg.GetPos().Line, arg.GetPos().Col)

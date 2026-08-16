@@ -1485,6 +1485,12 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 				continue
 			}
 			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+		} else if isNullableScalar(pty) {
+			// Nullable-scalar method/constructor parameter (TDD-00064 Stage 3),
+			// same presence-flagged { i1, T } aggregate a top-level function's
+			// parameter uses.
+			llvmParams = append(llvmParams, nullableScalarParamDecl(p.Name, pty))
+			e.defineNullableScalarParam(p.Name, "%v_"+p.Name, pty)
 		} else {
 			llvmParams = append(llvmParams, fmt.Sprintf("%s %%p_%s", pty.IR, p.Name))
 			ptrName := "%v_" + p.Name
@@ -1657,6 +1663,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 				continue
 			}
+			// Nullable-scalar constructor parameter (TDD-00064 Stage 3).
+			if isNullableScalar(paramTy) {
+				argStr, err := e.emitNullableScalarArg(a, paramTy)
+				if err != nil {
+					return Value{}, err
+				}
+				argParts = append(argParts, argStr)
+				continue
+			}
 			val, err := e.emitExpr(a)
 			if err != nil {
 				return Value{}, err
@@ -1808,6 +1823,16 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 			continue
 		}
+		// A nullable-scalar method parameter takes its boxed { i1, T }
+		// aggregate (TDD-00064 Stage 3).
+		if isNullableScalar(paramTy) {
+			argStr, err := e.emitNullableScalarArg(a, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, argStr)
+			continue
+		}
 		val, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
@@ -1957,6 +1982,13 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, argVal.Ref))
 		argParts = []string{"ptr " + thisVal.Ref, "ptr " + ptrReg, "i64 " + lenReg}
 		fnTypePart = "(ptr, ptr, i64)"
+	} else if isNullableScalar(paramTy) {
+		// Nullable-scalar setter parameter (TDD-00064 Stage 3): its boxed
+		// { i1, T } aggregate, with the matching storage type in the fn type.
+		agg := e.boxNullableScalarFromValue(argVal, paramTy)
+		st := nullableScalarStorageIR(paramTy)
+		argParts = []string{"ptr " + thisVal.Ref, fmt.Sprintf("%s %s", st, agg)}
+		fnTypePart = fmt.Sprintf("(ptr, %s)", st)
 	} else {
 		v := e.coerce(argVal, paramTy)
 		argParts = []string{"ptr " + thisVal.Ref, fmt.Sprintf("%s %s", v.Ty.IR, v.Ref)}
@@ -2066,6 +2098,15 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 			continue
 		}
+		// Nullable-scalar parameter (TDD-00064 Stage 3): its boxed aggregate.
+		if isNullableScalar(paramTy) {
+			argStr, err := e.emitNullableScalarArg(a, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, argStr)
+			continue
+		}
 		val, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
@@ -2157,11 +2198,20 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
 	argParts := []string{"ptr " + thisReg}
 	for i, a := range ex.Args {
+		paramTy := baseInfo.CtorSig.ParamTypes[i]
+		if isNullableScalar(paramTy) {
+			argStr, err := e.emitNullableScalarArg(a, paramTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, argStr)
+			continue
+		}
 		val, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(val, baseInfo.CtorSig.ParamTypes[i])
+		val = e.coerce(val, paramTy)
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
 	e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", info.BaseClass, strings.Join(argParts, ", ")))
@@ -2201,8 +2251,13 @@ func (e *Emitter) emitSuperMethodCall(methodName string, args []ast.Expression, 
 // overridden next() dispatches correctly through the vtable when needed —
 // the one bug the pre-Stage-3 direct-call version would otherwise have had.
 func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, nextSig FuncSig, recvVal Value, condL, bodyL, incL, endL string) error {
-	elemTy := nextSig.RetType
-	elemTy.Nullable = false
+	elemTy := nextSig.RetType.withoutNullable()
+	// A `next(): T | null` whose T is a non-pointer scalar now returns a
+	// presence-flagged { i1, T } aggregate (TDD-00064 Stage 3), so "done" is a
+	// false presence bit, not a value collision — the exact fix for a
+	// legitimately-yielded 0/false ending iteration early (bug #2). A pointer
+	// element type keeps its null-pointer sentinel (no valid value is null).
+	scalarOptional := isNullableScalar(nextSig.RetType)
 
 	resultAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resultAlloca, elemTy.IR, elemTy.Align()))
@@ -2218,13 +2273,19 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, nextVal.Ref, resultAlloca, elemTy.Align()))
 	doneReg := e.freshReg()
-	zero := "null"
-	if elemTy.IR != "ptr" {
-		zero = "0"
+	if scalarOptional {
+		present, payload := e.nullableScalarAggParts(nextVal)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, payload.Ref, resultAlloca, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", doneReg, present))
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, nextVal.Ref, resultAlloca, elemTy.Align()))
+		zero := "null"
+		if elemTy.IR != "ptr" {
+			zero = "0"
+		}
+		e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", doneReg, elemTy.IR, nextVal.Ref, zero))
 	}
-	e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", doneReg, elemTy.IR, nextVal.Ref, zero))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
 
 	e.emitLabel(bodyL)

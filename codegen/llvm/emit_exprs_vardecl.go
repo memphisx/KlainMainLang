@@ -238,6 +238,13 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		}
 	}
 
+	// A nullable non-pointer scalar (`number | null`, `boolean | null`, ...)
+	// gets a presence-flagged { i1, T } slot rather than a bare scalar — see
+	// emit_nullable_scalar.go / TDD-00064.
+	if isNullableScalar(ty) {
+		return e.emitNullableScalarVarDecl(v, ty)
+	}
+
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, ty.IR, ty.Align()))
 	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})

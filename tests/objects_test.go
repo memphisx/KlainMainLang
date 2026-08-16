@@ -1096,3 +1096,55 @@ console.log(counter.increment());
 		t.Fatalf("expected the 'this' is only valid... error, got: %v", err)
 	}
 }
+
+// A nullable-scalar object/interface field (TDD-00064 Stage 3) carries a
+// presence bit, so a null field is distinguishable from a present 0 across
+// reads, `??`, `=== null`, assignment, JSON, and template interpolation.
+func TestE2ENullableScalarField(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string; age: number | null }
+const u: User = { name: "A", age: 0 }
+console.log(u.age)
+console.log(u.age ?? 99)
+console.log(u.age === null)
+console.log(` + "`age=${u.age}`" + `)
+const u2: User = { name: "B", age: null }
+console.log(u2.age)
+console.log(u2.age ?? 99)
+console.log(u2.age === null)
+console.log(JSON.stringify(u))
+console.log(JSON.stringify(u2))
+u2.age = 42
+console.log(u2.age ?? 0)
+u2.age = null
+console.log(u2.age ?? 7)
+`, "0\n0\nfalse\nage=0\nnull\n99\ntrue\n"+`{"name":"A","age":0}`+"\n"+`{"name":"B","age":null}`+"\n42\n7")
+}
+
+// A nullable-scalar field survives JSON.parse: a literal null stays null, a 0
+// stays a present 0.
+func TestE2ENullableScalarFieldJSONParse(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string; age: number | null }
+const a: User = JSON.parse('{"name":"P","age":null}')
+console.log(a.age === null)
+console.log(a.age ?? 7)
+const b: User = JSON.parse('{"name":"Q","age":0}')
+console.log(b.age === null)
+console.log(b.age ?? 7)
+`, "true\n7\nfalse\n0")
+}
+
+// A nullable-scalar class field, set from a nullable-scalar constructor
+// parameter, keeps its null-ness (not a present 0).
+func TestE2ENullableScalarClassField(t *testing.T) {
+	assertOutput(t, `
+class Account {
+  balance: number | null
+  constructor(b: number | null) { this.balance = b }
+}
+console.log(new Account(0).balance ?? -1)
+console.log(new Account(null).balance ?? -1)
+console.log(new Account(5).balance === null)
+`, "0\n-1\nfalse")
+}

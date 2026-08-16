@@ -113,11 +113,23 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
 		}
-		val = e.coerce(val, fieldTy)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+		e.storeScalarOrNullableField(gepReg, fieldTy, val)
 		return nil
+	}
+	// storeFieldExpr stores a property's value expression directly, so a
+	// nullable-scalar field keeps a null-valued source lvalue's null-ness (which
+	// would be lost if the value were pre-evaluated and auto-unwrapped to its
+	// payload first). See storeScalarOrNullableFieldExpr.
+	storeFieldExpr := func(name string, expr ast.Expression) error {
+		idx, fieldTy, ok := ty.FieldIndex(name)
+		if !ok {
+			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
+		}
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+		return e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, expr)
 	}
 
 	for _, prop := range lit.Properties {
@@ -146,15 +158,7 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		// ty, whichever applies) before evaluating the property's value, so
 		// a nested object-literal-typed field can have its own type
 		// threaded through as a hint too.
-		var fieldHint Type
-		if _, fieldTy, ok := ty.FieldIndex(prop.Key); ok {
-			fieldHint = fieldTy
-		}
-		val, err := e.emitExprWithObjectHint(prop.Value, fieldHint)
-		if err != nil {
-			return Value{}, err
-		}
-		if err := storeField(prop.Key, val); err != nil {
+		if err := storeFieldExpr(prop.Key, prop.Value); err != nil {
 			return Value{}, err
 		}
 	}
@@ -554,10 +558,9 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 			if err != nil {
 				return "", Type{}, err
 			}
-			val = e.coerce(val, fieldTy)
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+			e.storeScalarOrNullableField(gepReg, fieldTy, val)
 		}
 		return dataReg, ty, nil
 	}

@@ -774,6 +774,27 @@ for (const x of arr) {
 `, "5\n1\n2\n3\n4\n5")
 }
 
+// Bug #2 (TDD-00064): Array.from over an iterator whose first value is 0 must
+// collect it rather than stopping on the old 0-as-done sentinel.
+func TestE2EArrayFromClassIteratorZeroFirst(t *testing.T) {
+	assertOutput(t, `
+class ZeroUp {
+  private current: number = 0;
+  next(): number | null {
+    if (this.current > 2) { return null; }
+    const v = this.current;
+    this.current = this.current + 1;
+    return v;
+  }
+}
+const arr = Array.from(new ZeroUp())
+console.log(arr.length)
+console.log(arr[0])
+console.log(arr[1])
+console.log(arr[2])
+`, "3\n0\n1\n2")
+}
+
 func TestE2EArrayFromEmptyClassIterator(t *testing.T) {
 	assertOutput(t, `
 class Empty {

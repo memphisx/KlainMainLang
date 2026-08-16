@@ -126,6 +126,22 @@ console.log(m.get('c'))
 `, "2\n0\nfalse\n1\n3")
 }
 
+// Bug #3 (TDD-00064): a scalar-valued Map's get() distinguishes a missing key
+// (null) from a present value of 0 — it used to return a bare 0 for both.
+func TestE2EMapGetScalarMissingVsZero(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, number>()
+m.set('a', 0)
+m.set('b', 5)
+console.log(m.get('a'))
+console.log(m.get('missing'))
+console.log(m.get('a') ?? 99)
+console.log(m.get('missing') ?? 99)
+console.log(m.get('missing') === null)
+console.log(m.get('a') === null)
+`, "0\nnull\n0\n99\ntrue\nfalse")
+}
+
 // --- Set<T> ---
 
 func TestE2ESetString(t *testing.T) {

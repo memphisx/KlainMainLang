@@ -50,6 +50,19 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		}
 		return Value{Ref: e.internString(label), Ty: TypePtr}, nil
 	}
+	// A nullable-scalar aggregate (a T|null field/return value, TDD-00064 Stage
+	// 3) stringifies to its value's rendering when present, the literal "null"
+	// when absent.
+	if isNullableScalar(v.Ty) {
+		present, payload := e.nullableScalarAggParts(v)
+		payloadStr, err := e.emitValueToString(payload)
+		if err != nil {
+			return Value{}, err
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadStr.Ref, e.internString("null")))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
 	if v.Ty.IR == "ptr" && !v.Ty.IsObject && !v.Ty.IsArray && !v.Ty.IsFunc {
 		// Nullable string: at runtime select "null" string when ptr is null.
 		if v.Ty.Nullable {
@@ -782,7 +795,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "get":
 					if objTy.MapVal != nil {
-						return *objTy.MapVal
+						v := *objTy.MapVal
+						// A scalar value type's get() is `V | null` (bug #3);
+						// a pointer value keeps its own type (null-pointer miss).
+						if isNullableScalarMapValue(v) {
+							v.Nullable = true
+						}
+						return v
 					}
 				case "has", "delete":
 					return TypeBool

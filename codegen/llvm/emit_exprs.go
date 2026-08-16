@@ -215,6 +215,15 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
 		return Value{Ref: r1, Ty: sym.Ty}, nil
 	}
+	if sym.isNullableScalarLocal() {
+		// A nullable scalar is stored as { i1 present, T value }. Reading the
+		// identifier into an ordinary expression auto-unwraps to the bare
+		// payload (Nullable cleared) — the presence bit is consulted only at
+		// the null-aware operators (emitNullCoalesce / the `=== null` path),
+		// which read it straight from storage. See emit_nullable_scalar.go.
+		payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
+		return Value{Ref: payload, Ty: sym.Ty.withoutNullable()}, nil
+	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 	return Value{Ref: reg, Ty: sym.Ty}, nil

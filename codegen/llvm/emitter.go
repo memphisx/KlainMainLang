@@ -22,6 +22,33 @@ type Symbol struct {
 	Ty      Type
 	Boxed   bool // true once Ptr points to a heap cell shared with closures that capture it
 	IsConst bool // true for a `const`-declared binding; checked by emitAssign to reject plain `=` reassignment
+	// NullableBoxed marks a binding whose storage is the presence-flagged
+	// { i1, T } nullable-scalar aggregate (TDD-00064 Option A), as opposed to a
+	// bare scalar slot. Only local variable declarations set it so far; a
+	// nullable-scalar function parameter or object field still uses bare
+	// storage (with the Nullable flag set on Ty but no presence word) until
+	// Stage 3 converts those boundaries, so every null-aware site must gate on
+	// this rather than on isNullableScalar(Ty) alone — otherwise it would GEP a
+	// presence/payload field out of a plain scalar slot. See
+	// Symbol.isNullableScalarLocal.
+	NullableBoxed bool
+	// NarrowedNonNull marks a nullable-scalar binding (TDD-00064 Stage 2) that
+	// flow analysis has proven non-null in the current region — a shadow copy
+	// defined into the guarded block's own scope, sharing the outer binding's
+	// storage Ptr but known present. It lets null-aware sites (console.log's
+	// null-vs-value branch, `x ?? d`, `x === null`) skip the runtime presence
+	// test and treat the value as definitely a T. popScope discards the shadow,
+	// restoring the nullable view.
+	NarrowedNonNull bool
+}
+
+// isNullableScalarLocal reports whether this binding is a nullable non-pointer
+// scalar stored as the presence-flagged { i1, T } aggregate — the only shape
+// the Stage 1/2 null-aware code paths may GEP/load a presence bit from. A
+// nullable-scalar parameter/field (bare storage, Stage 3) returns false here
+// and keeps its pre-existing bare-scalar behavior.
+func (s Symbol) isNullableScalarLocal() bool {
+	return s.NullableBoxed && isNullableScalar(s.Ty)
 }
 
 type scope struct {

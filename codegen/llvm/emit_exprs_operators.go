@@ -13,6 +13,18 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return e.emitShortCircuit(ex)
 	}
 
+	// `nullableScalar === null` / `!== null` (and ==/!=) must be answered from
+	// the stored presence bit before either operand is evaluated — emitExpr on
+	// the scalar would auto-unwrap to its payload, reintroducing the 0-sentinel
+	// collision this representation removes. See emit_nullable_scalar.go.
+	if ex.Op == "==" || ex.Op == "!=" || ex.Op == "===" || ex.Op == "!==" {
+		if v, ok, err := e.emitNullableScalarNullCompare(ex); err != nil {
+			return Value{}, err
+		} else if ok {
+			return v, nil
+		}
+	}
+
 	left, err := e.emitExpr(ex.Left)
 	if err != nil {
 		return Value{}, err
@@ -20,6 +32,17 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	right, err := e.emitExpr(ex.Right)
 	if err != nil {
 		return Value{}, err
+	}
+
+	// A nullable-scalar aggregate operand (a T|null return/field value) that
+	// reached here is not a `=== null` comparison (those returned above) — it
+	// is ordinary arithmetic/comparison, which operates on the bare payload
+	// (a null reads as its zero, the same lenient collapse a local read does).
+	if isNullableScalar(left.Ty) {
+		left = e.nullableScalarPayloadOf(left)
+	}
+	if isNullableScalar(right.Ty) {
+		right = e.nullableScalarPayloadOf(right)
 	}
 
 	if left.Ty.IsDynamic || right.Ty.IsDynamic {
@@ -392,6 +415,10 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 		return Value{}, fmt.Errorf("undefined variable '%s'", ident.Name)
 	}
 
+	if sym.isNullableScalarLocal() {
+		return e.emitNullableScalarUpdate(sym, ex)
+	}
+
 	oldReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", oldReg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 
@@ -663,9 +690,29 @@ func zeroRef(ty Type) string {
 // so the right side is only evaluated when left is null. For non-ptr types left
 // can never be null, so right is never evaluated.
 func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
+	// Nullable non-pointer scalar left operand (TDD-00064): it carries no null
+	// pointer to test, so consult its stored presence bit and only fall
+	// through to the right side when it is absent. A value flow analysis has
+	// already narrowed to non-null (Stage 2) is known present, so the right
+	// side is skipped entirely.
+	if sym, ok := e.nullableScalarLValue(ex.Left); ok {
+		payloadReg := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
+		payload := Value{Ref: payloadReg, Ty: sym.Ty.withoutNullable()}
+		if sym.NarrowedNonNull {
+			return payload, nil
+		}
+		present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
+		return e.emitNullCoalesceScalar(present, payload, ex.Right)
+	}
 	left, err := e.emitExpr(ex.Left)
 	if err != nil {
 		return Value{}, err
+	}
+	// A nullable-scalar aggregate left operand (a T|null return/field value):
+	// branch on its presence bit, same as the lvalue path above.
+	if isNullableScalar(left.Ty) {
+		present, payload := e.nullableScalarAggParts(left)
+		return e.emitNullCoalesceScalar(present, payload, ex.Right)
 	}
 	if left.Ty.IR != "ptr" {
 		return left, nil

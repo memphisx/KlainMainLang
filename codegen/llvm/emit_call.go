@@ -947,6 +947,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
 					argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 				}
+			} else if isNullableScalar(paramTy) {
+				// A nullable-scalar parameter takes its boxed { i1, T }
+				// aggregate (TDD-00064 Stage 3).
+				argStr, err := e.emitNullableScalarArg(arg, paramTy)
+				if err != nil {
+					return Value{}, err
+				}
+				argParts = append(argParts, argStr)
 			} else {
 				val, err := e.emitExprWithObjectHint(arg, paramTy)
 				if err != nil {
@@ -1000,6 +1008,12 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
 				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
 				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			} else if isNullableScalar(paramTy) {
+				argStr, err := e.emitNullableScalarArg(sig.Defaults[i], paramTy)
+				if err != nil {
+					return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
+				}
+				argParts = append(argParts, argStr)
 			} else {
 				val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
 				if err != nil {
@@ -1020,8 +1034,12 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			// Array-typed params decompose into two LLVM params (ptr, i64
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
+			// A nullable scalar's omitted value is a genuinely absent
+			// { i1, T } aggregate (present = false).
 			if paramTy.IsArray {
 				argParts = append(argParts, "ptr null", "i64 0")
+			} else if isNullableScalar(paramTy) {
+				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 			}

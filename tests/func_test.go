@@ -1053,3 +1053,54 @@ console.log(gen());
 		t.Fatalf("expected 'yield* is not yet supported', got: %v", err)
 	}
 }
+
+// A `T | null` return value (TDD-00064 Stage 3) crosses the function boundary
+// as a presence-flagged aggregate, so the caller distinguishes a real value
+// (including 0) from null via `??` / `=== null`, and null prints as `null`.
+func TestE2ENullableScalarReturnValue(t *testing.T) {
+	assertOutput(t, `
+function maybe(n: number): number | null {
+  if (n < 0) { return null }
+  return n * 2
+}
+console.log(maybe(5))
+console.log(maybe(-1))
+console.log(maybe(0))
+console.log(maybe(5) ?? 99)
+console.log(maybe(-1) ?? 99)
+console.log(maybe(0) ?? 99)
+console.log(maybe(-1) === null)
+console.log(maybe(0) === null)
+let z: number = maybe(4) ?? 0
+console.log(z + 1)
+`, "10\nnull\n0\n10\n99\n0\ntrue\nfalse\n9")
+}
+
+// A `T | null` parameter (TDD-00064 Stage 3) is passed as a presence-flagged
+// aggregate, so a null argument and a present 0 are distinguishable inside the
+// callee — across a top-level function, a method, and a closure.
+func TestE2ENullableScalarParameter(t *testing.T) {
+	assertOutput(t, `
+function classify(v: number | null): string {
+  if (v === null) { return "none" }
+  return "some:" + v
+}
+console.log(classify(0))
+console.log(classify(5))
+console.log(classify(null))
+
+class Box {
+  base: number
+  constructor(base: number) { this.base = base }
+  add(v: number | null): number { return (v ?? 0) + this.base }
+}
+const b = new Box(10)
+console.log(b.add(0))
+console.log(b.add(null))
+console.log(b.add(5))
+
+const f = (v: number | null): number => v ?? -1
+console.log(f(0))
+console.log(f(null))
+`, "some:0\nsome:5\nnone\n10\n10\n15\n0\n-1")
+}

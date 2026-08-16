@@ -225,8 +225,11 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 			sig.RetType.IsArray || sig.RetType.IsMap || sig.RetType.IsSet {
 			return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable (class '%s' has no 'next(): T | null' method)", pos.Line, pos.Col, srcTy.ClassName)
 		}
-		elemTy := sig.RetType
-		elemTy.Nullable = false
+		elemTy := sig.RetType.withoutNullable()
+		// See emitForOfClassIterator: a non-pointer scalar `next(): T | null`
+		// now returns a { i1, T } aggregate whose false presence bit means
+		// done, so a legitimately-yielded 0 no longer ends iteration (bug #2).
+		scalarOptional := isNullableScalar(sig.RetType)
 
 		recvVal, err := e.emitExpr(args[0])
 		if err != nil {
@@ -251,11 +254,17 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 			return Value{}, err
 		}
 		doneReg := e.freshReg()
-		zero := "null"
-		if nextVal.Ty.IR != "ptr" {
-			zero = "0"
+		if scalarOptional {
+			var present string
+			present, nextVal = e.nullableScalarAggParts(nextVal)
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", doneReg, present))
+		} else {
+			zero := "null"
+			if nextVal.Ty.IR != "ptr" {
+				zero = "0"
+			}
+			e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", doneReg, nextVal.Ty.IR, nextVal.Ref, zero))
 		}
-		e.emitInstr(fmt.Sprintf("%s = icmp eq %s %s, %s", doneReg, nextVal.Ty.IR, nextVal.Ref, zero))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
 
 		e.emitLabel(bodyL)

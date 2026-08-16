@@ -8,7 +8,9 @@ function greet(name: string): string {
 const a: string = greet('hello') ?? 'default'
 console.log(a)     // hello!
 
-// ?? with number: non-ptr types always return left
+// ?? with a plain (non-nullable) number: a `number` can never be null, so ??
+// always yields it. A `number | null` instead carries a real presence bit —
+// see examples/nullable_scalars.
 const x: number = 42
 const y: number = x ?? 99
 console.log(y)     // 42

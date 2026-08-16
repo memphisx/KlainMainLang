@@ -185,6 +185,19 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 	if val.Ty.IsSymbol {
 		return Value{}, fmt.Errorf("JSON.stringify does not support symbol values")
 	}
+	// A nullable-scalar field/value (TDD-00064 Stage 3) serializes to its
+	// value's JSON when present, the literal `null` when absent — matching real
+	// JSON.stringify, which emits null for a null-valued property.
+	if isNullableScalar(val.Ty) {
+		present, payload := e.nullableScalarAggParts(val)
+		payloadJSON, err := e.emitJSONStringifyValue(payload)
+		if err != nil {
+			return Value{}, err
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadJSON.Ref, e.internString("null")))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
 	if val.Ty.IsObject {
 		return e.emitJSONStringifyObject(val)
 	}
@@ -312,10 +325,32 @@ func (e *Emitter) emitJSONParseObject(jsonVal Value, targetTy Type, pos ast.Pos)
 		mergeL := e.freshLabel("jsonobj.merge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isMissing, missingL, foundL))
 
+		// A nullable-scalar field parses its bare value then boxes into the
+		// { i1, T } slot (TDD-00064 Stage 3): a present value found in the JSON
+		// text, or an absent aggregate when the key is missing / the value is
+		// literally null.
+		parseTy := f.Ty
+		if isNullableScalar(f.Ty) {
+			parseTy = f.Ty.withoutNullable()
+		}
+
 		e.emitLabel(foundL)
-		parsedVal, err := e.emitJSONParseFieldValue(valStart, f.Ty)
+		parsedVal, err := e.emitJSONParseFieldValue(valStart, parseTy)
 		if err != nil {
 			return Value{}, err
+		}
+		foundRef := parsedVal.Ref
+		if isNullableScalar(f.Ty) {
+			// Present unless the JSON value found here is literally `null`
+			// (strncmp==0), so `"age":null` boxes as absent while `"age":0`
+			// stays a present 0. atoll("null") is 0, so the payload is safe to
+			// compute unconditionally regardless of which case applies.
+			e.ensureStrncmp()
+			cmp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @strncmp(ptr %s, ptr %s, i64 4)", cmp, valStart, e.internString("null")))
+			presentReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", presentReg, cmp))
+			foundRef = e.makeNullableScalarAgg(f.Ty, presentReg, parsedVal.Ref)
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -335,15 +370,19 @@ func (e *Emitter) emitJSONParseObject(jsonVal Value, targetTy Type, pos ast.Pos)
 		if f.Ty.IR == "ptr" && !f.Ty.IsObject && !f.Ty.IsArray && !f.Ty.IsFunc {
 			defaultRef = e.internString("")
 		}
+		if isNullableScalar(f.Ty) {
+			defaultRef = e.makeNullableScalarAgg(f.Ty, "false", zeroRef(f.Ty.withoutNullable()))
+		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
+		phiTy := StructFieldIR(f.Ty)
 		fieldReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", fieldReg, f.Ty.IR, parsedVal.Ref, foundL, defaultRef, missingL))
+		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", fieldReg, phiTy, foundRef, foundL, defaultRef, missingL))
 
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", f.Ty.IR, fieldReg, gepReg, f.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", phiTy, fieldReg, gepReg, f.Ty.Align()))
 	}
 
 	return Value{Ref: dataReg, Ty: targetTy}, nil

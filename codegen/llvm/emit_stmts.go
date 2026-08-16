@@ -155,11 +155,29 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if err := e.emitPendingFinallys(); err != nil {
 			return err
 		}
-		if e.currentRetType.IR == "void" {
+		switch {
+		case e.currentRetType.IR == "void":
 			e.emitTerminator("ret void")
-		} else {
+		case isNullableScalar(e.currentRetType):
+			// `return;` in a `T | null` function yields undefined -> absent.
+			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", nullableScalarStorageIR(e.currentRetType)))
+		default:
 			e.emitTerminator(fmt.Sprintf("ret %s 0", e.currentRetType.IR))
 		}
+		return nil
+	}
+
+	// A nullable-scalar return value (TDD-00064 Stage 3) is boxed into its
+	// { i1, T } aggregate so the caller can tell a real value from null.
+	if isNullableScalar(e.currentRetType) {
+		agg, err := e.emitNullableScalarBoxedValue(r.Value, e.currentRetType)
+		if err != nil {
+			return err
+		}
+		if err := e.emitPendingFinallys(); err != nil {
+			return err
+		}
+		e.emitTerminator(fmt.Sprintf("ret %s %s", nullableScalarStorageIR(e.currentRetType), agg))
 		return nil
 	}
 
@@ -332,15 +350,20 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 
 	e.emitLabel(thenL)
 	e.pushScope()
+	// Flow narrowing (TDD-00064 Stage 2): a nullable-scalar local proven
+	// present by the guard is treated as definitely-T inside the branch.
+	e.applyBranchNarrowing(s.Test, true)
 	if err := e.emitStmt(s.Consequent); err != nil {
 		return err
 	}
+	thenExits := e.blockDone
 	e.popScope()
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 
 	if s.Alternate != nil {
 		e.emitLabel(elseL)
 		e.pushScope()
+		e.applyBranchNarrowing(s.Test, false)
 		if err := e.emitStmt(s.Alternate); err != nil {
 			return err
 		}
@@ -349,6 +372,13 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 	}
 
 	e.emitLabel(endL)
+	// Early-exit narrowing: `if (x === null) return/throw/break/continue;` (no
+	// else) leaves x proven present for the remainder of the enclosing scope.
+	if thenExits && s.Alternate == nil {
+		if name, nonNullWhenTrue, ok := e.narrowingFromCondition(s.Test); ok && !nonNullWhenTrue {
+			e.narrowNonNullInCurrentScope(name)
+		}
+	}
 	return nil
 }
 

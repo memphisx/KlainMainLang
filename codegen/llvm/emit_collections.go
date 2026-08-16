@@ -207,6 +207,14 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 			return Value{}, err
 		}
 		kRef := e.valueToMapKey(kVal, keyTy)
+		// A non-pointer scalar value type returns `V | null` (TDD-00064 Stage
+		// 3, bug #3): a missing key is genuinely absent — a presence-flagged
+		// { i1, V } aggregate whose bit comes from has() — rather than the
+		// value 0 the raw i64 get returns for a miss. A pointer value type
+		// keeps its null-pointer miss (no scalar collision to disambiguate).
+		if isNullableScalarMapValue(valTy) {
+			return e.emitMapGetNullable(mapPtr, kRef, strKey, valTy), nil
+		}
 		raw := e.freshReg()
 		if strKey {
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapPtr, kRef))
@@ -671,6 +679,33 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy Type, cb Ca
 }
 
 // mapValFromI64 converts a raw i64 retrieved from the map back to the target value type.
+// isNullableScalarMapValue reports whether a Map's value type is a non-pointer
+// scalar, i.e. one whose `.get()` miss must be represented as a real absent
+// value rather than a raw 0 (TDD-00064 bug #3). A pointer value type is
+// excluded — its miss is already a distinguishable null pointer.
+func isNullableScalarMapValue(valTy Type) bool {
+	return valTy.IR != "ptr" && valTy.IR != "void" && !valTy.IsDynamic
+}
+
+// emitMapGetNullable returns a scalar Map value as a `V | null` aggregate: the
+// presence bit comes from has(), the payload from the raw get(). See bug #3.
+func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, strKey bool, valTy Type) Value {
+	present := e.freshReg()
+	raw := e.freshReg()
+	if strKey {
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", present, mapPtr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapPtr, kRef))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_num_has(ptr %s, i64 %s)", present, mapPtr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_num_get(ptr %s, i64 %s)", raw, mapPtr, kRef))
+	}
+	nty := valTy
+	nty.Nullable = true
+	payload := e.mapValFromI64(raw, valTy)
+	agg := e.makeNullableScalarAgg(nty, present, payload.Ref)
+	return Value{Ref: agg, Ty: nty}
+}
+
 func (e *Emitter) mapValFromI64(rawReg string, valTy Type) Value {
 	switch valTy.IR {
 	case "i64":
