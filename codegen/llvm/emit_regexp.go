@@ -21,6 +21,23 @@ type regexModeOpts struct {
 	baseOpt       int
 	dollarEndOnly bool
 	newline       int
+	// utf16Index makes every user-visible offset boundary (str.search's return,
+	// a replace callback's `offset` argument, and the RegExp's own lastIndex
+	// field) report/consume true UTF-16 code-unit positions instead of the
+	// PCRE2_8 byte offsets the rest of this compiler's string layer uses
+	// (es-utf16, TDD-00067 Stage 3). Matching itself is identical to
+	// es-unicode; only the offsets crossing back to user code are converted.
+	utf16Index bool
+	// utfMatching is true whenever PCRE2_UTF is on (es-unicode/es-utf16), so
+	// the global empty-match advance steps by a whole UTF-8 code point rather
+	// than a single byte (a mid-code-point start offset makes PCRE2_UTF reject
+	// the next match). es-ascii/pcre match raw bytes, so they advance by 1.
+	utfMatching bool
+	// normalize runs the ECMAScript source-normalization pass
+	// (__kml_regex_es_normalize) over the pattern before compiling it —
+	// ecmascript mode only (TDD-00067 Option C). The original pattern is still
+	// stored as `.source`; only the compiled form is normalized.
+	normalize bool
 }
 
 // regexModeOpts maps the resolved compile-wide RegExp dialect to its PCRE2
@@ -43,13 +60,126 @@ func (e *Emitter) regexModeOpts() regexModeOpts {
 	case "es-ascii":
 		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref, dollarEndOnly: true}
 	case "es-unicode":
-		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny}
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true}
+	case "es-utf16":
+		// Identical matching to es-unicode (same option bits, same newline
+		// convention), plus UTF-16 code-unit index reporting at every user-
+		// visible offset boundary — see regexModeOpts.utf16Index (TDD-00067
+		// Stage 3).
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, utf16Index: true}
+	case "ecmascript":
+		// es-unicode matching plus the Option C source normalization pass. Byte-
+		// indexed like es-unicode (NOT utf16Index): the normalization aligns the
+		// pattern *dialect*, while the index space stays consistent with the
+		// byte-indexed string layer (.charCodeAt/.slice). A program that also
+		// wants UTF-16 code-unit offsets selects es-utf16 explicitly — see
+		// TDD-00067 and ADR-00208 for why ecmascript keeps byte indices.
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, normalize: true}
 	default:
 		// resolveRegexMode only ever yields one of the above; a mode added
 		// without a matching case should fail loudly here rather than silently
 		// fall back to raw PCRE (which would be a wrong, hard-to-spot dialect).
 		panic("unhandled regex mode: " + e.resolveRegexMode())
 	}
+}
+
+// regexByteToUTF16 converts a non-negative PCRE2 byte offset into a UTF-16
+// code-unit offset when the resolved mode reports UTF-16 indices (es-utf16),
+// and is an identity passthrough in every other mode — so a single call site
+// stays correct across all dialects without a mode branch of its own. The
+// byte offset must be >= 0 (a match end offset, a match start offset, etc.);
+// use regexByteToUTF16Signed where the -1 "no match" sentinel can appear.
+func (e *Emitter) regexByteToUTF16(strRef, byteReg string) string {
+	if !e.regexModeOpts().utf16Index {
+		return byteReg
+	}
+	e.ensureRegexUTF16Convert()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_byte_to_utf16(ptr %s, i64 %s)", r, strRef, byteReg))
+	return r
+}
+
+// regexByteToUTF16Signed is regexByteToUTF16 that first passes the -1 "no
+// match" sentinel through unchanged (str.search returns -1 for no match, and
+// -1 is a code-unit-space-agnostic sentinel), converting only a real >= 0
+// offset. Identity passthrough in non-es-utf16 modes.
+func (e *Emitter) regexByteToUTF16Signed(strRef, byteReg string) string {
+	if !e.regexModeOpts().utf16Index {
+		return byteReg
+	}
+	e.ensureRegexUTF16Convert()
+	isNeg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, byteReg))
+	negL := e.freshLabel("regex.u16.neg")
+	convL := e.freshLabel("regex.u16.conv")
+	mergeL := e.freshLabel("regex.u16.merge")
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNeg, negL, convL))
+	e.emitLabel(negL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", byteReg, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(convL)
+	conv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_byte_to_utf16(ptr %s, i64 %s)", conv, strRef, byteReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", conv, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(mergeL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, slot))
+	return out
+}
+
+// regexUTF16ToByte converts a UTF-16 code-unit offset (the es-utf16 mode's
+// stored lastIndex space) back into the PCRE2 byte offset a match needs as
+// its start. Identity passthrough in every non-es-utf16 mode.
+func (e *Emitter) regexUTF16ToByte(strRef, u16Reg string) string {
+	if !e.regexModeOpts().utf16Index {
+		return u16Reg
+	}
+	e.ensureRegexUTF16Convert()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf16_to_byte(ptr %s, i64 %s)", r, strRef, u16Reg))
+	return r
+}
+
+// emitRegexAdvancePastEmpty is the global-iteration empty-match advance
+// real JS's String.prototype.match/matchAll/replace algorithms perform
+// (AdvanceStringIndex): after a *zero-length* match, the RegExp's lastIndex
+// must be bumped past the current position, or the next iteration re-finds
+// the same empty match at the same offset and the driver loop never
+// terminates. (A `.exec()` used by hand in a `while` loop has no such
+// advance — that footgun is real-JS-faithful — so this lives only in the
+// multi-match driver loops, not in emitRegexSingleMatchCore.) The step is a
+// whole UTF-8 code point in the UTF-matching modes (es-unicode/es-utf16),
+// keeping the next start offset off a mid-code-point byte PCRE2_UTF would
+// reject, and a single byte in the raw-byte modes (es-ascii/pcre). The
+// stored value is written back in the mode's own index space (UTF-16 units
+// for es-utf16, bytes otherwise). startByteReg/endByteReg are the match's
+// raw byte offsets from emitRegexSingleMatchCore.
+func (e *Emitter) emitRegexAdvancePastEmpty(objVal, strVal Value, startByteReg, endByteReg string) {
+	opts := e.regexModeOpts()
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", isEmpty, startByteReg, endByteReg))
+	advL := e.freshLabel("regex.empty.adv")
+	skipL := e.freshLabel("regex.empty.skip")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, advL, skipL))
+
+	e.emitLabel(advL)
+	width := "1"
+	if opts.utfMatching {
+		e.ensureRegexUTF8Width()
+		w := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width(ptr %s, i64 %s)", w, strVal.Ref, endByteReg))
+		width = w
+	}
+	newByte := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newByte, endByteReg, width))
+	stored := e.regexByteToUTF16(strVal.Ref, newByte)
+	e.emitRegexStoreLastIndex(objVal, stored)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
+
+	e.emitLabel(skipL)
 }
 
 // emitNewRegExpExpression implements `new RegExp(pattern, flags?)`.
@@ -131,6 +261,19 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 		compileCtx = ctxReg
 	}
 
+	// ecmascript mode (Option C): normalize the pattern source to the ES
+	// dialect before compiling, using the runtime-parsed dotAll flag. The
+	// original pattern is kept for `.source`; only the compiled form changes.
+	compilePatternRef := patternVal.Ref
+	if modeOpts.normalize {
+		e.ensureRegexESNormalize()
+		dotAllForNorm := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", dotAllForNorm, dotAllSlot))
+		normPat := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_es_normalize(ptr %s, i1 %s)", normPat, patternVal.Ref, dotAllForNorm))
+		compilePatternRef = normPat
+	}
+
 	errCodeSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errCodeSlot))
 	errOffSlot := e.freshReg()
@@ -138,7 +281,7 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 
 	handleReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_compile_8(ptr %s, i64 %d, i32 %s, ptr %s, ptr %s, ptr %s)",
-		handleReg, patternVal.Ref, pcre2ZeroTerminated, optReg, errCodeSlot, errOffSlot, compileCtx))
+		handleReg, compilePatternRef, pcre2ZeroTerminated, optReg, errCodeSlot, errOffSlot, compileCtx))
 	if modeOpts.newline != 0 {
 		e.emitInstr(fmt.Sprintf("call void @pcre2_compile_context_free_8(ptr %s)", ctxReg))
 	}
@@ -345,8 +488,12 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	globalReg := e.emitRegexLoadField(objVal, "global", "i1", 1)
 	lastIndexReg := e.emitRegexLoadField(objVal, "lastIndex", "i64", 8)
 
+	// lastIndex is stored in the mode's own index space (UTF-16 code units for
+	// es-utf16, bytes otherwise); PCRE2 always wants a byte start offset, so
+	// convert on the way in (identity in non-es-utf16 modes).
+	lastIndexByteReg := e.regexUTF16ToByte(strVal.Ref, lastIndexReg)
 	startOffsetReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, globalReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, globalReg, lastIndexByteReg))
 
 	captureSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", captureSlot))
@@ -396,8 +543,13 @@ func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, 
 	endOfMatchReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", endOfMatchReg, endOfMatchGep))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", endOfMatchReg, matchEndSlot))
+	// Write lastIndex back in the mode's own index space — the match end is a
+	// byte offset, so convert to UTF-16 code units for es-utf16 (identity
+	// elsewhere). The non-global branch keeps the original stored value
+	// verbatim (already in that space), so it is never converted.
+	endStoredReg := e.regexByteToUTF16(strVal.Ref, endOfMatchReg)
 	advancedLastIndexReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, globalReg, endOfMatchReg, lastIndexReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, globalReg, endStoredReg, lastIndexReg))
 	e.emitRegexStoreLastIndex(objVal, advancedLastIndexReg)
 
 	byteCountReg := e.freshReg()
@@ -535,7 +687,7 @@ func (e *Emitter) emitRegexCountGlobalMatches(regexVal, strVal Value) string {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", countBodyL))
 
 	e.emitLabel(countBodyL)
-	m1, _, _ := e.emitRegexSingleMatchCore(regexVal, strVal)
+	m1, m1Start, m1End := e.emitRegexSingleMatchCore(regexVal, strVal)
 	m1Ptr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", m1Ptr, m1.Ref))
 	m1IsNull := e.freshReg()
@@ -544,6 +696,7 @@ func (e *Emitter) emitRegexCountGlobalMatches(regexVal, strVal Value) string {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", m1IsNull, countDoneL, countContinueL))
 
 	e.emitLabel(countContinueL)
+	e.emitRegexAdvancePastEmpty(regexVal, strVal, m1Start, m1End)
 	curCount := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curCount, countAlloca))
 	nextCount := e.freshReg()
@@ -608,7 +761,7 @@ func (e *Emitter) emitRegexCollectGlobalMatches(regexVal, strVal Value, storeEle
 	e.emitTerminator(fmt.Sprintf("br label %%%s", fillBodyL))
 
 	e.emitLabel(fillBodyL)
-	m2, _, _ := e.emitRegexSingleMatchCore(regexVal, strVal)
+	m2, m2Start, m2End := e.emitRegexSingleMatchCore(regexVal, strVal)
 	m2Ptr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", m2Ptr, m2.Ref))
 	m2IsNull := e.freshReg()
@@ -617,6 +770,7 @@ func (e *Emitter) emitRegexCollectGlobalMatches(regexVal, strVal Value, storeEle
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", m2IsNull, fillDoneL, fillContinueL))
 
 	e.emitLabel(fillContinueL)
+	e.emitRegexAdvancePastEmpty(regexVal, strVal, m2Start, m2End)
 	curIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curIdx, idxAlloca))
 	destSlot := e.freshReg()

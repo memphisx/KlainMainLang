@@ -94,7 +94,9 @@ func (e *Emitter) emitRegexSearch(strVal, regexVal Value) Value {
 	e.emitRegexStoreLastIndex(regexVal, "0")
 	_, startReg, _ := e.emitRegexSingleMatchCore(regexVal, strVal)
 	e.emitRegexStoreLastIndex(regexVal, originalLastIndex)
-	return Value{Ref: startReg, Ty: TypeI64}
+	// startReg is a byte offset (or -1 for no match); report it in the mode's
+	// index space — UTF-16 code units for es-utf16, passing -1 through.
+	return Value{Ref: e.regexByteToUTF16Signed(strVal.Ref, startReg), Ty: TypeI64}
 }
 
 // emitRegexSplitScan runs str.split()'s own local search loop once,
@@ -148,8 +150,18 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isZero, zeroL, realL))
 
 	e.emitLabel(zeroL)
+	// Step past the zero-length match by a whole code point in the UTF-matching
+	// modes (a mid-code-point start offset makes PCRE2_UTF reject the next
+	// match and truncate the scan early), a single byte in the raw-byte modes.
+	zeroAdvWidth := "1"
+	if e.regexModeOpts().utfMatching {
+		e.ensureRegexUTF8Width()
+		w := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width(ptr %s, i64 %s)", w, strVal.Ref, mStart))
+		zeroAdvWidth = w
+	}
 	advanced := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", advanced, mStart))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", advanced, mStart, zeroAdvWidth))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", advanced, searchAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 

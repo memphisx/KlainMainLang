@@ -609,12 +609,129 @@ func TestE2ERegExpDialectModeMatrix(t *testing.T) {
 		{"utf-dot/es-unicode", "es-unicode", `console.log("café".replace(/./g, "X").length)`, "4"},
 		{"utf-dot/es-ascii", "es-ascii", `console.log("café".replace(/./g, "X").length)`, "5"},
 		// The default (unset) resolves to the highest implemented ES stage,
-		// es-unicode.
-		{"default-resolves-es-unicode", "", `console.log("café".replace(/./g, "X").length)`, "4"},
+		// now ecmascript (Option C). Code-point `.` still yields 4 here, same as
+		// es-unicode — see TestE2ERegExpEcmascriptMode for what the default's
+		// normalization pass changes (the exact `.` line-terminator semantics).
+		{"default-resolves-ecmascript", "", `console.log("café".replace(/./g, "X").length)`, "4"},
 		// NEWLINE_ANY (es-unicode) excludes `\r` from `.`; es-ascii, with no
 		// compile context, still matches it — the documented es-ascii caveat.
 		{"dot-cr/es-unicode", "es-unicode", `console.log("a\rb".replace(/./g, "X").charCodeAt(1))`, "13"},
 		{"dot-cr/es-ascii-caveat", "es-ascii", `console.log("a\rb".replace(/./g, "X").charCodeAt(1))`, "88"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileAndRunRegexMode(t, tc.src, tc.mode)
+			if got != tc.want {
+				t.Errorf("-regex=%q: got %q, want %q", tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestE2ERegExpEmptyGlobalMatchTerminates pins the fix for the global empty-
+// match infinite loop (TDD-00067 Stage 3): before the AdvanceStringIndex-
+// style empty-match advance landed, a zero-length-capable global pattern
+// (`/x*/g`, `/(?=a)/g`) drove match()/matchAll()/replaceAll() into an
+// infinite loop, since lastIndex never advanced past the empty match. Each
+// expected value is cross-checked against real Node — see the ADR. The
+// advance steps by a whole code point in the UTF-matching default mode, so
+// the multibyte case both terminates and counts by code point.
+func TestE2ERegExpEmptyGlobalMatchTerminates(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"match-star", `console.log("abc".match(/x*/g).length)`, "4"},
+		{"replaceAll-star", `console.log("abc".replaceAll(/x*/g, "-"))`, "-a-b-c-"},
+		{"matchAll-nonempty", `console.log("aXbXc".matchAll(/X/g).length)`, "2"},
+		{"lookahead-empty", `console.log("a".match(/(?=a)/g).length)`, "1"},
+		// Multibyte subject: the empty-match advance steps a whole UTF-8 code
+		// point, so iteration terminates and produces one empty match per code
+		// point (3 chars + the end position = 4), never landing mid-code-point.
+		{"multibyte-star", `console.log("aéb".match(/x*/g).length)`, "4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Default mode (es-unicode); the bug and fix are mode-independent.
+			got := compileAndRun(t, tc.src)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestE2ERegExpEcmascriptMode exercises the ecmascript dialect (TDD-00067
+// Option C v1) — the default mode — whose source-normalization pass rewrites
+// an unescaped top-level `.` (when the `s` flag is absent) to ECMAScript's
+// exact "any character except a line terminator" class, fixing the es-unicode
+// `NEWLINE_ANY` over-exclusion of `\x0b`/`\x0c`/`\x85`. Values cross-checked
+// against Node. The es-unicode counterpart shows the pre-normalization
+// divergence the pass repairs.
+func TestE2ERegExpEcmascriptMode(t *testing.T) {
+	cases := []struct{ name, mode, src, want string }{
+		// VT (\x0b): ES `.` matches it; es-unicode's NEWLINE_ANY excludes it.
+		{"dot-vt/ecmascript", "ecmascript", `console.log("a\x0bb".replace(/./g, "X"))`, "XXX"},
+		{"dot-vt/es-unicode-caveat", "es-unicode", `console.log("a\x0bb".replace(/./g, "X").length)`, "3"},
+		// FF (\x0c): same divergence.
+		{"dot-ff/ecmascript", "ecmascript", `console.log(/a.b/.test("a\x0cb"))`, "true"},
+		// `.` still excludes the true ES line terminator \n in both.
+		{"dot-newline/ecmascript", "ecmascript", `console.log(/a.b/.test("a\nb"))`, "false"},
+		// The normalization is faithful for escapes, classes, and dotAll:
+		{"escaped-dot/ecmascript", "ecmascript", `console.log("a.b.c".split(/\./).length)`, "3"},
+		{"class-dot/ecmascript", "ecmascript", `console.log(/[.]/.test("."))`, "true"},
+		{"dotall/ecmascript", "ecmascript", `console.log(/x.y/s.test("x\ny"))`, "true"},
+		// The A+B fixes still hold under ecmascript (it is es-unicode + the pass).
+		{"dollar-endonly/ecmascript", "ecmascript", `console.log(/foo$/.test("foo\n"))`, "false"},
+		{"unset-backref/ecmascript", "ecmascript", `console.log(/(a)?b\1/.test("b"))`, "true"},
+		{"u-escape/ecmascript", "ecmascript", `console.log(/A/.test("A"))`, "true"},
+		// `.source` reports the ORIGINAL pattern, not the normalized form.
+		{"source-unchanged/ecmascript", "ecmascript", `console.log(new RegExp("a.b").source)`, "a.b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileAndRunRegexMode(t, tc.src, tc.mode)
+			if got != tc.want {
+				t.Errorf("-regex=%q: got %q, want %q", tc.mode, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestE2ERegExpUTF16IndexMode exercises the es-utf16 dialect (TDD-00067
+// Stage 3): identical matching to es-unicode, but every user-visible offset
+// boundary — str.search's return, the RegExp's lastIndex field, and a
+// replace callback's `offset` argument — reports true UTF-16 code-unit
+// positions instead of PCRE2's UTF-8 byte offsets. Each case is paired with
+// its es-unicode (byte-space) counterpart so the conversion, not just a
+// coincidentally-equal number, is what's being pinned. Test subjects use
+// 'é' (U+00E9, 2 UTF-8 bytes / 1 UTF-16 unit) and '😀' (U+1F600, 4 bytes /
+// 2 units — a surrogate pair).
+func TestE2ERegExpUTF16IndexMode(t *testing.T) {
+	cases := []struct{ name, mode, src, want string }{
+		// str.search: byte offset of the match start vs UTF-16 code-unit offset.
+		{"search/es-unicode-bytes", "es-unicode", `console.log("é1".search(/1/))`, "2"},
+		{"search/es-utf16-units", "es-utf16", `console.log("é1".search(/1/))`, "1"},
+		{"search-astral/es-unicode-bytes", "es-unicode", `console.log("😀1".search(/1/))`, "4"},
+		{"search-astral/es-utf16-units", "es-utf16", `console.log("😀1".search(/1/))`, "2"},
+		// No-match sentinel (-1) passes through unconverted in both modes.
+		{"search-nomatch/es-utf16", "es-utf16", `console.log("xé".search(/z/))`, "-1"},
+		// lastIndex after a global .exec(): byte end offset vs UTF-16 units.
+		{"lastindex/es-unicode-bytes", "es-unicode", `const r=/1/g; r.exec("é1"); console.log(r.lastIndex)`, "3"},
+		{"lastindex/es-utf16-units", "es-utf16", `const r=/1/g; r.exec("é1"); console.log(r.lastIndex)`, "2"},
+		// A hand-set UTF-16 lastIndex is converted back to a byte start offset,
+		// so the next global match resumes at the right code point.
+		{"lastindex-roundtrip/es-utf16", "es-utf16", `const r=/\d/g; r.lastIndex=2; console.log(r.exec("é1é2")[0])`, "2"},
+		// Empty-capable global match terminates in es-utf16 too: an empty match
+		// at end-of-string advances to a byte start > strlen (utf16_to_byte
+		// extends past the terminator), so PCRE2 rejects it and the loop ends
+		// rather than re-finding the same end-of-string empty match forever. The
+		// advance steps a whole code point, so an astral char (PCRE2_UTF sees it
+		// as one code point) yields one empty match, not two.
+		{"empty-at-end/es-utf16", "es-utf16", `console.log("aéb".match(/x*/g).length)`, "4"},
+		{"empty-astral/es-utf16", "es-utf16", `console.log("😀x".match(/y*/g).length)`, "3"},
+		// replace callback offset argument: byte vs UTF-16 units. replace keeps
+		// the unmatched "é" prefix and substitutes the matched "1" with the
+		// callback result "#<offset>".
+		{"callback-offset/es-unicode", "es-unicode", `console.log("é1".replace(/1/, (m: string, o: number) => "#" + o.toString()))`, "é#2"},
+		{"callback-offset/es-utf16", "es-utf16", `console.log("é1".replace(/1/, (m: string, o: number) => "#" + o.toString()))`, "é#1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

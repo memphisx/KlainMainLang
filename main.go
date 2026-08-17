@@ -18,7 +18,7 @@ func main() {
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management mode: manual (default, Memory.free(x) only) or gc (Boehm GC — see docs/tdd/TDD-00001.md)")
 	globals := flag.String("globals", "strict", "ambient built-in global names (Math/JSON/console/process/fetch/...): strict (default, a colliding declaration is a compile error) or permissive (real JS/browser shadowing — see docs/tdd/TDD-00050.md). Constructor-style built-ins (Map/Date/RegExp/...) stay reserved either way")
-	regex := flag.String("regex", "", "RegExp dialect (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF/UCP + NEWLINE_ANY), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping). es-utf16/ecmascript are scoped but not implemented yet")
+	regex := flag.String("regex", "", "RegExp dialect (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus the Option C source-normalization pass — exact `.` line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -47,12 +47,10 @@ func main() {
 	}
 
 	switch *regex {
-	case "", "pcre", "es-ascii", "es-unicode":
+	case "", "pcre", "es-ascii", "es-unicode", "es-utf16", "ecmascript":
 		// ok ("" == default, resolves to es-unicode)
-	case "es-utf16", "ecmascript":
-		fatal("-regex=%s is scoped but not implemented yet (see docs/tdd/TDD-00067.md) — the default (unset) already selects es-unicode, the most ES-faithful mode currently available", *regex)
 	default:
-		fatal("unrecognized -regex value %q — must be one of: es-unicode (default), es-ascii, pcre (see docs/tdd/TDD-00067.md)", *regex)
+		fatal("unrecognized -regex value %q — must be one of: ecmascript, es-unicode (default), es-utf16, es-ascii, pcre (see docs/tdd/TDD-00067.md)", *regex)
 	}
 
 	inFile := flag.Arg(0)

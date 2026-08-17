@@ -311,6 +311,9 @@ type Emitter struct {
 	usedRegexCompileContext  bool
 	usedRegexParseFlags      bool
 	usedRegexMatch           bool
+	usedRegexUTF16Convert    bool
+	usedRegexUTF8Width       bool
+	usedRegexESNormalize     bool
 	breakStack               []string // end labels for enclosing loops / switch
 	continueStack            []string // continue-target labels for enclosing loops
 	// pendingFinallys is the stack of enclosing `finally` block bodies, innermost
@@ -369,8 +372,9 @@ func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
 
 // SetRegexMode selects the compile-wide RegExp dialect mode (TDD-00067's
 // `-regex=` flag): "pcre" (raw PCRE2, today's behavior), "es-ascii" (Option
-// A compile-option alignment), or "es-unicode" (Option B, + PCRE2_UTF/UCP
-// and NEWLINE_ANY). The zero value "" means "unset" and resolves to the
+// A compile-option alignment), "es-unicode" (Option B, + PCRE2_UTF and
+// NEWLINE_ANY), or "es-utf16" (es-unicode matching + UTF-16 code-unit offset
+// reporting, Stage 3). The zero value "" means "unset" and resolves to the
 // highest implemented ES stage — see resolveRegexMode. Called by main.go
 // right after NewEmitter(), like SetMemMode, so zero-arg NewEmitter() call
 // sites (tests) keep the default without threading a mode through.
@@ -378,12 +382,15 @@ func (e *Emitter) SetRegexMode(mode string) { e.regexMode = mode }
 
 // resolveRegexMode maps the raw flag (including "" for unset) to the
 // concrete mode actually used for codegen. The default resolves to the
-// highest ES stage implemented so far — "es-unicode" as of Options A + B
-// (TDD-00067). This is the single place the default is defined, so
-// advancing it once "es-utf16"/"ecmascript" land is a one-line change.
+// highest ES stage implemented so far — "ecmascript" as of Option C
+// (TDD-00067): es-unicode matching plus the source-normalization pass, byte-
+// indexed so it stays consistent with the string layer. es-utf16 is NOT the
+// default (its UTF-16 index space intentionally diverges from .charCodeAt/
+// .slice — ADR-00208); a program wanting spec-exact offsets selects it
+// explicitly. This is the single place the default is defined.
 func (e *Emitter) resolveRegexMode() string {
 	if e.regexMode == "" {
-		return "es-unicode"
+		return "ecmascript"
 	}
 	return e.regexMode
 }

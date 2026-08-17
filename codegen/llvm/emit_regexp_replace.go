@@ -75,7 +75,10 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 
 	cbArgs := []Value{{Ref: fullMatch, Ty: TypePtr}}
 	if replacer.cb.arity() >= 2 {
-		cbArgs = append(cbArgs, Value{Ref: matchStartReg, Ty: TypeI64})
+		// The `offset` argument is user-visible, so report it in the mode's
+		// index space — UTF-16 code units for es-utf16 (identity elsewhere).
+		offsetReg := e.regexByteToUTF16(strVal.Ref, matchStartReg)
+		cbArgs = append(cbArgs, Value{Ref: offsetReg, Ty: TypeI64})
 	}
 	if replacer.cb.arity() >= 3 {
 		cbArgs = append(cbArgs, strVal)
@@ -462,6 +465,12 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	replLenGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", replLenGep, replLens, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", replLenReg, replLenGep))
+
+	// Advance past a zero-length match so this fill pass iterates in lockstep
+	// with emitRegexCountGlobalMatches's count pass (both share the same
+	// AdvanceStringIndex-style empty-match advance) and never re-finds the
+	// same empty match forever — see emitRegexAdvancePastEmpty.
+	e.emitRegexAdvancePastEmpty(regexVal, strVal, startReg, endReg)
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
