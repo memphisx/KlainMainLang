@@ -355,6 +355,11 @@ type DestructProp struct {
 	// a Default. When set, Local is unused.
 	SubArray  []ArrayPatternElem
 	SubObject []DestructProp
+	// Rest marks `{ ...rest }` (TDD-00065 Stage 3b) — Local collects every
+	// source field not named by an earlier property into a fresh residual
+	// object. Must be the last property; never carries a Key, Default, or
+	// sub-pattern. When true, Key is unused.
+	Rest bool
 }
 
 // ArrayPatternElem is one binding in an array destructuring pattern —

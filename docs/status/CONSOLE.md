@@ -4,9 +4,11 @@
 
 **Coverage**: ~92% (11/12).
 
-**Strict Coverage**: 5/11, ~45% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the two new caveats below.
+**Strict Coverage**: 5/12, ~42% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the two new caveats below.
 
-**Caveats**: `console.table()` is the one gap — deliberately deferred, needs a genuinely new algorithm (dynamic per-column width computation, box-drawing rows), not a quick extension of existing print machinery.
+**Caveats**:
+
+- `console.table()` is the one gap — deferred; needs a new algorithm (dynamic per-column width computation, box-drawing rows), not an extension of existing print machinery.
 
 | Feature | Status |
 |---|---|

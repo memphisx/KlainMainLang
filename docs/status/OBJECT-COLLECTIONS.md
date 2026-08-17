@@ -6,7 +6,11 @@
 
 **Strict Coverage**: 12/27, ~44% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above. The `Map` row's own `.get()`-returns-`0`-on-a-miss bug is now fixed (it returns `V | null`, [ADR-00199](../adr/ADR-00199.md)), though the absent value is this compiler's `null` stand-in rather than a distinct `undefined`, so the row is not yet counted here.
 
-**Caveats**: Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this since it's already structurally impossible). `Object.create()`/`Object.fromEntries()` aren't implemented. `WeakMap`/`WeakSet`/`WeakRef` aren't implemented (no weak-reference/finalization machinery).
+**Caveats**:
+
+- Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this, it's already structurally impossible).
+- `Object.create()`/`Object.fromEntries()` aren't implemented.
+- `WeakMap`/`WeakSet`/`WeakRef` aren't implemented (no weak-reference/finalization machinery).
 
 | Feature | Status |
 |---|---|

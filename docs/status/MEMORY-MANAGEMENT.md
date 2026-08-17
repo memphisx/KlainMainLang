@@ -4,9 +4,13 @@
 
 **Coverage**: 2 of 3 modes shipped (`manual`, `gc`); `auto` is design-only.
 
-**Strict Coverage**: 0/2, 0% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — both shipped modes carry real, already-disclosed caveats (manual never auto-frees; gc needs a system library installed).
+**Strict Coverage**: 0/3, 0% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — both shipped modes carry real, already-disclosed caveats (manual never auto-frees; gc needs a system library installed).
 
-**Caveats**: `manual` mode never frees anything on its own — a program's memory footprint is a monotonically increasing function of its runtime unless the programmer calls `Memory.free(x)` by hand. `manual` is still the default (fine for short-lived CLI tools), even though `gc` now exists and is strictly safer for long-running processes — no decision has been made yet to flip the default. `auto` mode (compiler-inserted frees via static escape/liveness analysis, no runtime collector at all) is a bigger risk to get right than `gc` was: a wrong escape analysis there is a real use-after-free, not just a missed/delayed free, so it's deliberately sequenced last.
+**Caveats**:
+
+- `manual` mode never frees anything on its own — a program's memory footprint grows monotonically with its runtime unless the programmer calls `Memory.free(x)` by hand.
+- `manual` is still the default (fine for short-lived CLI tools); `gc` exists and is strictly safer for long-running processes, but the default hasn't been flipped.
+- `auto` mode (compiler-inserted frees via static escape/liveness analysis, no runtime collector) is riskier than `gc` was — a wrong escape analysis is a use-after-free, not just a missed/delayed free — so it's sequenced last.
 
 ## The three modes
 

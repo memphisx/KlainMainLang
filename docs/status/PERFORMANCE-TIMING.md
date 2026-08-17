@@ -6,7 +6,9 @@
 
 **Strict Coverage**: 1/9, ~11% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here was already honestly caveated (chiefly the UTC-only deviation above) before the audit.
 
-**Caveats**: `Date` is UTC-only everywhere (construction, getters, formatting), a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone.
+**Caveats**:
+
+- `Date` is UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone.
 
 | API | Status | Notes |
 |---|---|---|

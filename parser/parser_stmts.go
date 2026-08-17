@@ -970,11 +970,36 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 	p.advance() // {
 	var props []ast.DestructProp
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
-		keyTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
+		// Object rest element `{ ...rest }` (TDD-00065 Stage 3b) — binds every
+		// source field not named by an earlier property. Must be the last
+		// element (real JS forbids anything after it) and a plain identifier
+		// (no rename, default, or nested sub-pattern).
+		if p.check(lexer.ELLIPSIS) {
+			p.advance() // ...
+			restTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			props = append(props, ast.DestructProp{Local: restTok.Literal, Rest: true})
+			if !p.check(lexer.RBRACE) {
+				return nil, fmt.Errorf("%d:%d: a rest element must be the last property in an object pattern, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+			}
+			break
 		}
+		// PropertyName: IDENT, or a STRING/NUMBER literal used as the key text
+		// (`{ "k": v }`, `{ 0: v }`, TDD-00065 Stage 3a) — matching the
+		// object-literal key grammar (parseObjectLiteral). Only the identifier
+		// form supports shorthand (`{ x }`); a string/number key has no
+		// shorthand, so it must bind through an explicit `: local` (or a nested
+		// pattern). Codegen keys off DestructProp.Key = keyTok.Literal, the same
+		// field name the object-literal side stores, so no codegen change.
+		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+			return nil, fmt.Errorf("%d:%d: expected property name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+		}
+		keyTok := p.advance()
+		nonIdentKey := keyTok.Type != lexer.IDENT
 		local := keyTok.Literal
+		var err error
 		var subArr []ast.ArrayPatternElem
 		var subObj []ast.DestructProp
 		if p.check(lexer.COLON) {
@@ -999,6 +1024,8 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 				}
 				local = aliasTok.Literal
 			}
+		} else if nonIdentKey {
+			return nil, fmt.Errorf("%d:%d: a string or numeric destructuring key ('%s') must be bound with `: name`, got %s", p.peek().Line, p.peek().Col, keyTok.Literal, p.peek().Type)
 		}
 		var dflt ast.Expression
 		if p.match(lexer.ASSIGN) {

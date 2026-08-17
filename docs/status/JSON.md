@@ -4,9 +4,13 @@
 
 **Coverage**: ~82% (9/11).
 
-**Strict Coverage**: 7/9, ~78% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveat above.
+**Strict Coverage**: 7/11, ~64% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveat above.
 
-**Caveats**: `JSON.parse(s)` into an object with *nested* object fields is a clean compile error (flat objects, primitive fields only work) — design scoped in [TDD-00015](../tdd/TDD-00015.md). `JSON.stringify` on a mixed-type array isn't supported (array literals are uniform-type only). See Known Limitations below for a related, sharper-edged parse gap.
+**Caveats**:
+
+- `JSON.parse(s)` into an object with *nested* object fields is a clean compile error — only flat objects with primitive fields work. Scoped in [TDD-00015](../tdd/TDD-00015.md).
+- `JSON.stringify` on a mixed-type array isn't supported (array literals are uniform-type only).
+- See Known Limitations below for a related, sharper-edged parse gap.
 
 | Feature | Status |
 |---|---|

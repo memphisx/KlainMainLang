@@ -403,7 +403,23 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 // deterministic, not distinguishable) has no signal to check at all.
 func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast.DestructProp, pos ast.Pos) error {
 	structIR := objTy.StructIR()
+
+	// Named keys consumed by non-rest properties — the residual `{ ...rest }`
+	// element (Stage 3b) collects every visible source field except these.
+	named := make(map[string]bool)
 	for _, prop := range props {
+		if !prop.Rest {
+			named[prop.Key] = true
+		}
+	}
+
+	for _, prop := range props {
+		if prop.Rest {
+			if err := e.bindObjectRest(objPtr, objTy, structIR, named, prop.Local, pos); err != nil {
+				return err
+			}
+			continue
+		}
 		idx, fieldTy, ok := objTy.FieldIndex(prop.Key)
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
@@ -535,6 +551,54 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 		}
 		e.define(prop.Local, Symbol{Ptr: localPtr, Ty: fieldTy})
 	}
+	return nil
+}
+
+// bindObjectRest implements `{ ...rest }` (TDD-00065 Stage 3b): it synthesizes
+// a fresh residual object holding every VISIBLE source field not already named
+// by an earlier property, and binds it to `local`. The residual's type is a
+// plain structural ObjectType of those remaining fields (no hidden/class
+// fields — a class's `{ ...rest }` yields a plain object, matching JS's
+// own-enumerable-property copy), so every downstream consumer (field access,
+// JSON, console.log, a further spread) rides the existing object machinery
+// unchanged. The copy is shallow — a field whose value is itself a pointer
+// (string, array header, nested object) is copied by pointer, like object
+// spread (emitObjectLiteralWithHint) and JS's own `{ ...x }`.
+func (e *Emitter) bindObjectRest(objPtr string, objTy Type, srcStructIR string, named map[string]bool, local string, pos ast.Pos) error {
+	var residual []Field
+	for _, f := range objTy.VisibleFields() {
+		if named[f.Name] {
+			continue
+		}
+		residual = append(residual, Field{Name: f.Name, Ty: f.Ty})
+	}
+	restTy := ObjectType(residual)
+
+	// calloc, not malloc — an empty residual (`{ a, ...rest }` over `{ a }`)
+	// still needs a valid zero-sized-safe allocation, and any field the copy
+	// below doesn't reach must read back zero, matching object-literal
+	// construction (ADR-00157).
+	e.ensureCalloc()
+	destReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", destReg, restTy.StructSize()))
+	destStructIR := restTy.StructIR()
+
+	for destIdx, f := range residual {
+		srcIdx, _, _ := objTy.FieldIndex(f.Name)
+		fieldIR := StructFieldIR(f.Ty)
+		srcGep := e.freshReg()
+		loadReg := e.freshReg()
+		destGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, objPtr, srcIdx))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, fieldIR, srcGep, f.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", destGep, destStructIR, destReg, destIdx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, loadReg, destGep, f.Ty.Align()))
+	}
+
+	localPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", localPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", destReg, localPtr))
+	e.define(local, Symbol{Ptr: localPtr, Ty: restTy})
 	return nil
 }
 

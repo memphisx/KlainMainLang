@@ -962,6 +962,179 @@ let { x = 5 } = p;
 	}
 }
 
+// --- Object destructuring with string/numeric-literal keys (TDD-00065 Stage 3a) ---
+
+func TestE2EObjectDestructuringStringKeyOrdinaryField(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+let p: Point = { x: 3, y: 4 };
+let { "x": px, "y": py } = p;
+console.log(px, py);
+`, "3\n4")
+}
+
+func TestE2EObjectDestructuringStringKeyNonIdentifierField(t *testing.T) {
+	// A field whose name isn't a valid identifier is reachable only through a
+	// string-literal key on both the literal and the pattern side.
+	assertOutput(t, `
+let p = { "first-name": "Ada", "age": 36 };
+let { "first-name": fn, "age": a } = p;
+console.log(fn, a);
+`, "Ada\n36")
+}
+
+func TestE2EObjectDestructuringNumericKey(t *testing.T) {
+	assertOutput(t, `
+let p = { 0: "zero", 1: "one" };
+let { 0: first, 1: second } = p;
+console.log(first, second);
+`, "zero\none")
+}
+
+func TestE2EObjectDestructuringStringKeyInForOf(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; label: string }
+let pts: Point[] = [{ x: 1, label: "a" }, { x: 2, label: "b" }];
+for (const { "x": vx, label } of pts) {
+  console.log(vx, label);
+}
+`, "1\na\n2\nb")
+}
+
+func TestE2EObjectDestructuringStringKeyNestedPattern(t *testing.T) {
+	assertOutput(t, `
+interface Inner { a: number; b: number }
+interface Wrap { inner: Inner }
+let w: Wrap = { inner: { a: 10, b: 20 } };
+let { "inner": { a, b } } = w;
+console.log(a, b);
+`, "10\n20")
+}
+
+func TestE2EObjectDestructuringStringKeyWithoutBindingRejected(t *testing.T) {
+	// A non-identifier key has no shorthand form, so it must bind through an
+	// explicit `: name`.
+	_, err := parseAndCompile(`
+let p = { x: 1 };
+let { "x" } = p;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a string key with no `: name` binding")
+	}
+	if !strings.Contains(err.Error(), "must be bound with") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// --- Object destructuring rest `{ ...rest }` (TDD-00065 Stage 3b) ---
+
+func TestE2EObjectDestructuringRestBasic(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: string }
+let r: Rec = { a: 1, b: 2, c: "three" };
+let { a, ...rest } = r;
+console.log(a);
+console.log(rest.b, rest.c);
+`, "1\n2\nthree")
+}
+
+func TestE2EObjectDestructuringRestExcludesRenamedSourceKey(t *testing.T) {
+	// The rest excludes the source *key* (b), not the local name (bb).
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: number }
+let r: Rec = { a: 1, b: 2, c: 3 };
+let { b: bb, ...others } = r;
+console.log(bb);
+console.log(others.a, others.c);
+`, "2\n1\n3")
+}
+
+func TestE2EObjectDestructuringRestWithStringKey(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number }
+let r: Rec = { a: 1, b: 2 };
+let { "a": aa, ...tail } = r;
+console.log(aa, tail.b);
+`, "1\n2")
+}
+
+func TestE2EObjectDestructuringRestInForOf(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: string }
+let recs: Rec[] = [{ a: 1, b: 2, c: "x" }, { a: 10, b: 20, c: "y" }];
+for (const { a, ...more } of recs) {
+  console.log(a, more.b, more.c);
+}
+`, "1\n2\nx\n10\n20\ny")
+}
+
+func TestE2EObjectDestructuringRestInParameter(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: number }
+function f({ a, ...rest }: Rec): void {
+  console.log(a);
+  console.log(rest.b, rest.c);
+}
+f({ a: 1, b: 2, c: 3 });
+`, "1\n2\n3")
+}
+
+func TestE2EObjectDestructuringRestEmptyResidual(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number }
+let r: Rec = { a: 1, b: 2 };
+let { a, b, ...rest } = r;
+console.log(JSON.stringify(rest));
+`, "{}")
+}
+
+func TestE2EObjectDestructuringRestShallowCopiesArrayField(t *testing.T) {
+	assertOutput(t, `
+interface WithArr { id: number; tags: number[] }
+let w: WithArr = { id: 7, tags: [1, 2, 3] };
+let { id, ...more } = w;
+console.log(more.tags.length, more.tags[0]);
+`, "3\n1")
+}
+
+func TestE2EObjectDestructuringRestIsRealObject(t *testing.T) {
+	// The residual is a first-class object: spreadable and JSON-serializable.
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: string }
+let r: Rec = { a: 1, b: 2, c: "three" };
+let { a, ...rest } = r;
+let copy = { ...rest };
+console.log(copy.c);
+console.log(JSON.stringify(rest));
+`, "three\n{\"b\":2,\"c\":\"three\"}")
+}
+
+func TestE2EObjectDestructuringRestOfClassInstanceIsPlainObject(t *testing.T) {
+	// A class instance's rest yields a plain object of its visible fields only
+	// (hidden class metadata stripped), matching JS's own-enumerable copy.
+	assertOutput(t, `
+class P { x: number; y: number; constructor(x: number, y: number) { this.x = x; this.y = y; } }
+let p = new P(3, 4);
+let { x, ...rest } = p;
+console.log(x);
+console.log(rest.y);
+console.log(JSON.stringify(rest));
+`, "3\n4\n{\"y\":4}")
+}
+
+func TestE2EObjectDestructuringRestNotLastRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+let r = { a: 1, b: 2 };
+let { ...rest, a } = r;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest element that isn't last")
+	}
+	if !strings.Contains(err.Error(), "must be the last property") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
 // --- Object destructuring assignment (`({ a, b } = expr)`, ADR-00160) ---
 
 func TestE2EObjectDestructuringAssignmentShorthand(t *testing.T) {

@@ -4,7 +4,10 @@
 
 **Coverage**: 0% (0/5 WHATWG + 0/4 Node) — neither surface is started.
 
-**Caveats**: Full backpressure model, not yet scoped in a TDD. Listed under the "High effort" tier of the [Roadmap](README.md#roadmap)'s Web Platform backlog. The Node `stream` module below is a distinct, EventEmitter-based API (`Readable`/`Writable`/`Duplex`/`Transform`, `.pipe()`, `'data'`/`'end'`/`'error'` events) — not a subset or superset of the WHATWG streams above, and wasn't tracked anywhere until now. It also depends on Node's `EventEmitter` (see [EVENT-EMITTER.md](EVENT-EMITTER.md)), itself untracked until now.
+**Caveats**:
+
+- WHATWG streams are not implemented; the full backpressure model isn't yet scoped in a TDD. Listed under the "High effort" tier of the [Roadmap](README.md#roadmap)'s Web Platform backlog.
+- Node's own `stream` module is a distinct, EventEmitter-based API (`Readable`/`Writable`/`Duplex`/`Transform`, `.pipe()`, `'data'`/`'end'`/`'error'` events) — not a subset or superset of the WHATWG streams — and depends on Node's `EventEmitter` (see [EVENT-EMITTER.md](EVENT-EMITTER.md)).
 
 ## WHATWG Streams (browser-standard)
 

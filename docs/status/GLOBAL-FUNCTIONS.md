@@ -4,9 +4,13 @@
 
 **Coverage**: ~82% (14/17).
 
-**Strict Coverage**: 3/14, ~21% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveats above.
+**Strict Coverage**: 3/17, ~18% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveats above.
 
-**Caveats**: `globalThis` isn't meaningful in a native single-file context (not planned). `queueMicrotask` isn't implemented. `eval` now has a static subset — a compile-time-constant `eval("<expression>")` is compiled in place through this compiler's own pipeline (no engine) — see [ADR-00198](../adr/ADR-00198.md); the general dynamic case still needs the opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), deliberately low priority and not started.
+**Caveats**:
+
+- `globalThis` isn't meaningful in a native single-file context (not planned).
+- `queueMicrotask` isn't implemented.
+- `eval` handles only a static subset — a compile-time-constant `eval("<expression>")` compiled in place through this compiler's own pipeline (no engine, [ADR-00198](../adr/ADR-00198.md)). The general dynamic case needs the opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md) — low priority, not started.
 
 | Feature | Status | Notes |
 |---|---|---|

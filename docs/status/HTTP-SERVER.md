@@ -6,7 +6,10 @@
 
 **Strict Coverage**: 8/11, ~73% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every real-server/multi-process/binary-safety test (clustering, `bodyBytes`, optional response headers) came back genuinely working.
 
-**Caveats**: `http.close()` ([TDD-00027](../tdd/TDD-00027.md)) stops accepting new connections immediately and lets already-open ones finish naturally before the event loop actually returns control to the rest of the program. In a `{ workers: N }` cluster, `.close()` only affects the calling process's own copy of the listener — a full-cluster shutdown still requires an external signal to the whole process group (as the test harness's `startHTTPClusterServer` cleanup already does).
+**Caveats**:
+
+- `http.close()` ([TDD-00027](../tdd/TDD-00027.md)) stops accepting new connections immediately and lets already-open ones finish naturally — it does not force-close in-flight connections.
+- In a `{ workers: N }` cluster, `.close()` only affects the calling process's own copy of the listener; a full-cluster shutdown still requires an external signal to the whole process group.
 
 | API | Status | Notes |
 |---|---|---|

@@ -4,9 +4,14 @@
 
 **Coverage**: ~93% (14/15).
 
-**Strict Coverage**: 8/14, ~57% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here was already honestly caveated before the audit.
+**Strict Coverage**: 8/15, ~53% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page — every excluded row here was already honestly caveated before the audit.
 
-**Caveats**: Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` parses the entry file plus everything it transitively imports and merges them into one `*ast.Program` before codegen runs. There is no linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md), [ADR-00134](../adr/ADR-00134.md), [ADR-00135](../adr/ADR-00135.md), and `resolver/resolver.go`'s package doc for the full design. Every top-level declaration now has true per-file scope and import aliasing works (see below); an acyclic imported file's top-level statements now run once, in dependency order (see the table row below) — a file that participates in an import cycle still may not run arbitrary top-level side-effecting code. A namespace import (`import * as ns`) is a compile-time-only construct — `ns` is never a real runtime value, only usable as the object of a dotted member access (see the table below). **Node-style built-ins (`fs`/`path`/`os`/`querystring`/`assert`/`http`/`cluster`/`Memory`) now require a default, namespace, or named import** (`import fs from 'fs'`, `import * as fs from 'fs'`, or `import { readFileSync } from 'fs'`) — see the table row below and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` deliberately stay ambient, matching real Node.
+**Caveats**:
+
+- Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` merges the entry file plus every transitive import into one `*ast.Program` before codegen. No linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md)/[ADR-00134](../adr/ADR-00134.md)/[ADR-00135](../adr/ADR-00135.md).
+- A file that participates in an import cycle may not run arbitrary top-level side-effecting code (an acyclic imported file's top-level statements do run once, in dependency order — see the table below).
+- A namespace import (`import * as ns`) is compile-time-only — `ns` is never a real runtime value, only usable as the object of a dotted member access.
+- Node-style built-ins (`fs`/`path`/`os`/`querystring`/`assert`/`http`/`cluster`/`Memory`) require a default, namespace, or named import — see [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, matching real Node.
 
 | Feature | Status | Notes |
 |---|---|---|

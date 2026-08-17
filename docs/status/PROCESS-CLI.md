@@ -4,9 +4,14 @@
 
 **Coverage**: ~57% (13/23).
 
-**Strict Coverage**: 10/13, ~77% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page.
+**Strict Coverage**: 10/23, ~43% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; no false ✅ claims found on this page.
 
-**Caveats**: `process.env` is read-only (`getenv()` only, no `setenv()`/`unsetenv()` path). `process.on(...)` now exists, but only for `'SIGINT'`/`'SIGTERM'` — `'exit'`/`'uncaughtException'`/`'unhandledRejection'` are a separate, still-untracked mechanism (no real signal involved). `child_process` coverage is one synchronous helper (`execFileSync`) only — no async spawning. Interactive `readline` (prompt-driven, not just one blocking line) isn't implemented either.
+**Caveats**:
+
+- `process.env` is read-only (`getenv()` only, no `setenv()`/`unsetenv()` path).
+- `process.on(...)` covers only `'SIGINT'`/`'SIGTERM'` — `'exit'`/`'uncaughtException'`/`'unhandledRejection'` are a separate, still-untracked mechanism (no real signal involved).
+- `child_process` is one synchronous helper (`execFileSync`) only — no async spawning.
+- Interactive `readline` (prompt-driven, not just one blocking line) isn't implemented.
 
 | API | Status | Notes |
 |---|---|---|

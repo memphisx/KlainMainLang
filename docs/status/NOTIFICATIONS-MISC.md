@@ -1,16 +1,15 @@
 # Notifications & Misc (Low priority / browser-specific)
 
-> Part of the [Implementation Status](README.md) index. Mostly browser-specific and unlikely to be useful in a native CLI context. Tracked here for completeness, not because any of it is planned.
+> Part of the [Implementation Status](README.md) index. Most of this is genuinely browser-specific and N/A in a native CLI context. A few entries, though, are browser API *shapes* with a real native reinterpretation — the same idea as the IndexedDB-shaped native storage API in [TDD-00011](../tdd/TDD-00011.md): keep the familiar browser surface, back it with an OS-native implementation. Those are marked **Differentiator (deferred)** below — deliberately not a V1 target and not yet scoped in a TDD, but not ignored either.
 
-**Coverage**: Not tracked (out of scope by design, not a gap).
+**Coverage**: Not tracked — these are browser APIs, out of scope *as such*, not a gap. The **Differentiator (deferred)** rows note where a native reinterpretation would be genuinely useful outside a browser, in the same spirit as [TDD-00011](../tdd/TDD-00011.md); none is a committed target yet.
 
 | API | Notes |
 |---|---|
-| Notifications API | Browser-only desktop notifications; `node-notifier` equivalent not in scope |
-| Push API | Requires Service Worker and browser push infrastructure |
-| Service Worker API | Browser-only background script; N/A for native |
-| Storage API (`localStorage` / `sessionStorage`) | Browser session concept; N/A for native |
-| IndexedDB | Browser embedded database; out of scope as a *browser* API — but see [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md)'s sibling idea of an IndexedDB-*shaped* native storage API, tracked separately in [TDD-00011](../tdd/TDD-00011.md) |
-| Clipboard API | Requires desktop GUI; N/A for native |
-| Geolocation API | Hardware sensor; N/A for native CLI |
-| Canvas / WebGL / WebGPU | Graphics; N/A for native CLI |
+| Notifications API | **Differentiator (deferred).** The `Notification` shape maps cleanly onto real OS notifications — macOS Notification Center, Linux `libnotify`/`notify-send` — a genuinely useful CLI capability (`node-notifier`-style). Browser desktop-notification semantics (permission prompts, service-worker delivery) are the part that stays out of scope. Not scoped in a TDD yet. |
+| Storage API (`localStorage` / `sessionStorage`) | **Differentiator (deferred).** `localStorage`'s synchronous `getItem`/`setItem`/`removeItem` shape backs naturally onto a file-persisted native key/value store (and `sessionStorage` onto an in-process one) — a lighter-weight sibling of the IndexedDB-shaped idea in [TDD-00011](../tdd/TDD-00011.md), handy for CLI config/state persistence. Not scoped in a TDD yet. |
+| Clipboard API | **Differentiator (deferred).** `navigator.clipboard` read/write maps onto the OS clipboard (macOS `pbcopy`/`pbpaste`, Linux `xclip`/`wl-copy`) — useful for CLI tooling. The async-permission model is the browser-specific part left behind. Not scoped in a TDD yet. |
+| Push API | Requires a Service Worker plus browser push infrastructure — no meaningful native reinterpretation. Out of scope. |
+| Service Worker API | Browser-only background-script/lifecycle model; N/A for native. |
+| Geolocation API | Hardware sensor tied to a browser permission model; N/A for native CLI. |
+| Canvas / WebGL / WebGPU | Graphics; N/A for native CLI. Direct framebuffer/hardware output is a separate track — see [TDD-00033](../tdd/TDD-00033.md). |

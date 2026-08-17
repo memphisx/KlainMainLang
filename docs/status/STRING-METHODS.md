@@ -6,7 +6,11 @@
 
 **Strict Coverage**: 15/33, ~45% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveats below; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above.
 
-**Caveats**: `.normalize()` is the one real remaining gap (needs actual Unicode normalization tables — deliberately not faked). `RegExp` (see [REGEXP.md](REGEXP.md)) is now fully implemented — `.match()`/`.matchAll()` are real (Unicode-normalization-table-free, PCRE2-backed) regex methods, and `.replace()`/`.replaceAll()`/`.split()`/`.search()` are all genuinely regex-aware when passed a `RegExp` argument, per [TDD-00035](../tdd/TDD-00035.md)'s 7 stages ([ADR-00114](../adr/ADR-00114.md), [ADR-00115](../adr/ADR-00115.md), [ADR-00116](../adr/ADR-00116.md), [ADR-00117](../adr/ADR-00117.md), [ADR-00118](../adr/ADR-00118.md), [ADR-00119](../adr/ADR-00119.md)) — see [REGEXP.md](REGEXP.md) for that feature's own caveats (backreference/callback scope, no implicit string-to-RegExp coercion, etc.), not repeated here. `.codePointAt()`/`.search()`/`.localeCompare()` are all real methods but scope-narrowed to this compiler's byte-sequence strings and lack of `Intl`/locale infrastructure — see the notes below.
+**Caveats**:
+
+- `.normalize()` is the one real remaining gap — needs actual Unicode normalization tables, deliberately not faked.
+- `.codePointAt()`/`.search()`/`.localeCompare()` are real methods but scope-narrowed to this compiler's byte-sequence strings and lack of `Intl`/locale infrastructure — see the notes below.
+- The regex-accepting methods (`.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`) carry their own caveats in [REGEXP.md](REGEXP.md) (backreference/callback scope, no implicit string-to-RegExp coercion, etc.), not repeated here.
 
 | Method | Status |
 |---|---|

@@ -236,3 +236,10 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00196](ADR-00196.md) | `String.fromCharCode`/`fromCodePoint` reject a non-number argument instead of emitting invalid IR | Surfaced by [ADR-00195](ADR-00195.md)'s phase breakdown |
 | [00197](ADR-00197.md) | Reject numeric separators in legacy-octal / non-octal-decimal literals (`0_0`, `08_0`) | Extends [ADR-00085](ADR-00085.md); surfaced by [ADR-00195](ADR-00195.md) |
 | [00198](ADR-00198.md) | Static-string `eval` fast path — compile a constant expression in place, no embedded engine | Implements a subset of [TDD-00046](../tdd/TDD-00046.md); corpus +45 |
+| [00199](ADR-00199.md) | Presence-flagged `{ i1, T }` representation for nullable non-pointer scalars (`number \| null`, …) | Implements [TDD-00064](../tdd/TDD-00064.md) |
+| [00200](ADR-00200.md) | Named functions as first-class values, via an env-dropping trampoline | |
+| [00201](ADR-00201.md) | Tuple types `[T0, T1, ...]` — fixed-shape positional struct | Implements [TDD-00066](../tdd/TDD-00066.md) |
+| [00202](ADR-00202.md) | Fix invalid SSA in the WebSocket frame-decode and client-scan runtime templates | Extends [ADR-00125](ADR-00125.md), [ADR-00128](ADR-00128.md) |
+| [00203](ADR-00203.md) | String/numeric-literal keys in object destructuring patterns (`{ "k": v }`, `{ 0: v }`) | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 3a; extends [ADR-00193](ADR-00193.md) |
+| [00204](ADR-00204.md) | Object rest `{ ...rest }` over a statically-known source shape | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 3b; extends [ADR-00203](ADR-00203.md) |
+| [00205](ADR-00205.md) | One denominator for Strict Coverage — always the page's total feature count | Extends [ADR-00166](ADR-00166.md) |

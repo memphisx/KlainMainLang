@@ -317,3 +317,45 @@ for (const [lft, rgt] of cells) {
 }
 function sumPair([[p, q]]: number[][]): number { return p + q }
 console.log(sumPair([[8, 9]]))  // 17
+
+// --- String / numeric-literal keys (TDD-00065 Stage 3a) ---
+
+// A string-literal key is equivalent to the identifier key of the same name;
+// it always binds through an explicit `: local` (no shorthand for a
+// non-identifier key).
+interface Sized { width: number; height: number }
+const sizedBox: Sized = { width: 20, height: 10 }
+const { "width": bw, "height": bh } = sizedBox
+console.log(bw + 'x' + bh)  // 20x10
+
+// A field whose name isn't a valid identifier is reachable only this way.
+const named = { "first-name": 'Ada', "last-name": 'Lovelace' }
+const { "first-name": firstName, "last-name": lastName } = named
+console.log(firstName + ' ' + lastName)  // Ada Lovelace
+
+// Numeric-literal keys, and a string key as a for-of loop variable.
+const scores = [{ 1: 'gold', 2: 'silver' }, { 1: 'first', 2: 'second' }]
+for (const { 1: primary } of scores) {
+    console.log(primary)  // gold then first
+}
+
+// --- Object rest `{ ...rest }` (TDD-00065 Stage 3b) ---
+
+// The rest binding collects every source field not named earlier into a fresh,
+// first-class object (usable for field access, a further spread, or JSON).
+interface Account { id: number; name: string; balance: number }
+const account: Account = { id: 42, name: 'Ada', balance: 100 }
+const { id: accountId, ...accountRest } = account
+console.log(accountId)                       // 42
+console.log(accountRest.name + ' ' + accountRest.balance)  // Ada 100
+console.log(JSON.stringify(accountRest))     // {"name":"Ada","balance":100}
+
+// Rest works as a for-of loop variable and a destructured parameter too.
+const accounts: Account[] = [account, { id: 7, name: 'Alan', balance: 50 }]
+for (const { id, ...info } of accounts) {
+    console.log(id + ':' + info.name)        // 42:Ada then 7:Alan
+}
+function describeAccount({ name, ...numbers }: Account): string {
+    return name + ' #' + numbers.id
+}
+console.log(describeAccount(account))        // Ada #42

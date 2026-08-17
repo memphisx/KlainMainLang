@@ -6,7 +6,9 @@
 
 **Strict Coverage**: 22/35, ~63% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveats below; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above.
 
-**Caveats**: None open — `Number.prototype.toString(radix)`/`toPrecision`/`toExponential` are `sprintf`-based with a couple of cosmetic deviations from real JS (exponent padding, e.g. `e+05` vs `e+5`) — see [ADR-00065](../adr/ADR-00065.md).
+**Caveats**:
+
+- `Number.prototype.toString(radix)`/`toPrecision`/`toExponential` are `sprintf`-based, with minor cosmetic deviations from real JS (exponent padding, e.g. `e+05` vs `e+5`) — see [ADR-00065](../adr/ADR-00065.md). Per-method caveats found by the 2026-08-11 audit are in the table below.
 
 | Feature | Status |
 |---|---|

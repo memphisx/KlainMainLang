@@ -6,7 +6,13 @@
 
 **Strict Coverage**: 0/6, 0% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new `Response` caveat above; every row on this page already carried real, honestly-disclosed V1 scope narrowings before the audit, so all six were already excluded regardless of the one new bug found.
 
-**Caveats**: `Headers` normalizes names to lowercase on `get`/`set`/`has`/`delete`/`append`, but `XMLHttpRequest.setRequestHeader()` does not (a separate, documented narrowing — see the `XMLHttpRequest` row below). `XMLHttpRequest.send()` is modeled as the real spec's legacy *synchronous* mode (script blocks — but not the whole event loop — until the transfer completes; there is no default-async, callback-interleaved mode). `WebSocket` has no binary `.send()`, no `wss://`/TLS, and the client's `new WebSocket(url)` connects synchronously (see the `WebSocket` row below). `EventSource`'s `Content-Type` check on connect is a case-sensitive `"text/event-stream"` prefix match, and a `retry:`-driven reconnect always replays the *full* stored `Last-Event-ID`, not a per-listener value (see the `EventSource` row below). `.text()`/`.json()` stay `strlen`-based by design (fine for JSON/text, which aren't expected to contain embedded nulls) — use `.arrayBuffer()` for binary bodies, see Known Limitations below.
+**Caveats**:
+
+- `Headers` normalizes names to lowercase on `get`/`set`/`has`/`delete`/`append`, but `XMLHttpRequest.setRequestHeader()` does not (see the `XMLHttpRequest` row below).
+- `XMLHttpRequest.send()` models the spec's legacy *synchronous* mode — the script blocks (not the whole event loop) until the transfer completes; there is no default-async, callback-interleaved mode.
+- `WebSocket` has no binary `.send()`, no `wss://`/TLS, and the client's `new WebSocket(url)` connects synchronously (see the `WebSocket` row below).
+- `EventSource`'s `Content-Type` check on connect is a case-sensitive `"text/event-stream"` prefix match, and a `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value (see the `EventSource` row below).
+- `.text()`/`.json()` are `strlen`-based by design (fine for JSON/text) — use `.arrayBuffer()` for binary bodies, see Known Limitations below.
 
 | API | Status | Notes |
 |---|---|---|
