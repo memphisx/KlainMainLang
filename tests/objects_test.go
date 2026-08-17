@@ -258,8 +258,8 @@ func TestE2EObjectEntries(t *testing.T) {
 interface Config { host: string; port: number }
 const c: Config = { host: 'localhost', port: 8080 }
 const entries = Object.entries(c)
-for (const e of entries) {
-  console.log(e.key + '=' + e.value)
+for (const [k, v] of entries) {
+  console.log(k + '=' + v)
 }
 `, "host=localhost\nport=8080")
 }
@@ -630,8 +630,8 @@ for (const key of Object.keys(obj)) {
 for (const v of Object.values(obj)) {
   console.log(v)
 }
-for (const e of Object.entries(obj)) {
-  console.log(e.key + "=" + e.value)
+for (const [k, v] of Object.entries(obj)) {
+  console.log(k + "=" + v)
 }
 `, "a\nb\nc\n1\n2\n3\na=1\nb=2\nc=3")
 }

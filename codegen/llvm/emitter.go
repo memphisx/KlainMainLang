@@ -109,6 +109,10 @@ type Emitter struct {
 	currentRetType Type                        // return type of the function being emitted
 	blockDone      bool                        // true after a terminator (ret/br) in the current block
 	closureCtr     int                         // monotonically increasing counter for unique closure names
+	// fnValueTrampolines memoizes the env-dropping trampoline emitted for each
+	// named function taken by value (`const g = f`), keyed by its mangled LLVM
+	// name — see emit_func_value.go.
+	fnValueTrampolines map[string]bool
 	// nestedFuncScopes/nestedFuncCtr — TDD-00057. One nestedFuncScope frame
 	// per enclosing function/closure body currently being emitted, pushed
 	// by pushNestedFuncScope and popped once that body finishes; searched
@@ -346,6 +350,7 @@ func NewEmitter() *Emitter {
 		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
 		genericClasses:      make(map[string]*ast.ClassDeclaration),
 		generators:          make(map[string]*GeneratorInfo),
+		fnValueTrampolines:  make(map[string]bool),
 		currentRetType:      TypeI32, // main returns i32
 	}
 	e.pushScope()
@@ -585,6 +590,15 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	}
 	if ta.Name == "EventEmitter" && ta.ElemType != nil {
 		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
+	}
+	// Tuple type `[T0, T1, ...]` (TDD-00066) — checked before the generic
+	// ElemType/array fallback below.
+	if len(ta.TupleElems) > 0 {
+		elems := make([]Type, len(ta.TupleElems))
+		for i, et := range ta.TupleElems {
+			elems[i] = e.resolveType(et)
+		}
+		return TupleType(elems)
 	}
 	if ta.ElemType != nil {
 		return ArrayOf(e.resolveType(ta.ElemType))

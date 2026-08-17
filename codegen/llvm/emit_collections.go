@@ -517,7 +517,10 @@ func (e *Emitter) mapKeysAndVals(mapPtr string, strKey bool) (keysPtr, keysLen, 
 func (e *Emitter) emitMapEntries(mapPtr string, strKey bool, keyTy, valTy Type) (Value, error) {
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, strKey)
 
-	entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+	// Each entry is a real [K, V] tuple (TDD-00066) — field 0 is the key, field
+	// 1 the value, the same struct layout the previous {key,value} object used,
+	// now positionally destructurable as `for (const [k, v] of m.entries())`.
+	entryTy := TupleType([]Type{keyTy, valTy})
 	entrySize := entryTy.StructSize()
 
 	e.ensureMalloc()

@@ -401,8 +401,8 @@ for (const v of Object.values(p)) console.log(v)
 func TestE2EForOfObjectEntries(t *testing.T) {
 	assertOutput(t, `
 const p = { name: 'Alice', age: 30 }
-for (const e of Object.entries(p)) {
-  console.log(e.key + '=' + e.value)
+for (const [k, v] of Object.entries(p)) {
+  console.log(k + '=' + v)
 }
 `, "name=Alice\nage=30")
 }

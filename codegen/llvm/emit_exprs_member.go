@@ -293,6 +293,13 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 			return e.emitStringCharAt(strPtr, ex.Index)
 		}
 	}
+	// Tuple constant-index access: t[0] -> field "0" (TDD-00066). A tuple is a
+	// struct with no array backing buffer, so a compile-time-constant index
+	// maps to the matching field; checked before array indexing since a tuple's
+	// Ty is ptr-shaped and would otherwise fall into emitIndexPtr.
+	if objTy := e.inferExprType(ex.Object); objTy.IsTuple {
+		return e.emitTupleIndex(ex, objTy)
+	}
 	// Array indexing.
 	gepReg, elemTy, err := e.emitIndexPtr(ex)
 	if err != nil {

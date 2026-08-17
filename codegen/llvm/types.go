@@ -21,6 +21,14 @@ type Type struct {
 	ElemType *Type // non-nil when IsArray
 	IsObject bool
 	Fields   []Field // non-nil when IsObject
+	// IsTuple marks a tuple type `[T0, T1, ...]` (TDD-00066). Storage-wise it
+	// IS an IsObject struct with synthetic positional field names "0","1",...
+	// (so StructIR/StructSize/FieldIndex/GEP, object-literal construction,
+	// object param/return/field passing, spread, and structuredClone all apply
+	// unchanged). IsTuple only additionally: maps a constant index `t[i]` to
+	// field "i", lets an array-destructuring pattern bind positionally, and
+	// renders/serializes as an array literal rather than an object.
+	IsTuple bool
 	// Function/closure type: all closures are passed as ptr.
 	IsFunc      bool
 	FuncParams  []Type
@@ -319,6 +327,18 @@ func ArrayOf(elem Type) Type {
 // ObjectType returns an object type with the given fields.
 func ObjectType(fields []Field) Type {
 	return Type{IR: "ptr", IsObject: true, Fields: fields}
+}
+
+// TupleType returns a tuple type `[T0, T1, ...]` (TDD-00066): an object struct
+// with synthetic positional field names "0","1",..., flagged IsTuple.
+func TupleType(elems []Type) Type {
+	fields := make([]Field, len(elems))
+	for i, ety := range elems {
+		fields[i] = Field{Name: fmt.Sprintf("%d", i), Ty: ety}
+	}
+	ty := ObjectType(fields)
+	ty.IsTuple = true
+	return ty
 }
 
 // MapType returns a Map<key,val> type.

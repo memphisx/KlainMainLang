@@ -558,8 +558,8 @@ for (const v of a.values()) {
 func TestE2EArrayEntries(t *testing.T) {
 	assertOutput(t, `
 const a: string[] = ['a', 'b', 'c']
-for (const e of a.entries()) {
-    console.log(e.index + ':' + e.value)
+for (const [i, v] of a.entries()) {
+    console.log(i + ':' + v)
 }
 `, "0:a\n1:b\n2:c")
 }

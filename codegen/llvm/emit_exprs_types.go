@@ -50,6 +50,12 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		}
 		return Value{Ref: e.internString(label), Ty: TypePtr}, nil
 	}
+	// A tuple stringifies to its elements joined by commas (TDD-00066),
+	// matching real JS's `String([a, b])` / `${tuple}` — checked before the
+	// generic ptr/object handling below (a tuple is structurally an object).
+	if v.Ty.IsTuple {
+		return e.emitTupleToString(v)
+	}
 	// A nullable-scalar aggregate (a T|null field/return value, TDD-00064 Stage
 	// 3) stringifies to its value's rendering when present, the literal "null"
 	// when absent.
@@ -287,6 +293,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		if isStringTy(objTy) {
 			return TypePtr
+		}
+		// Tuple constant-index (TDD-00066): `t[i]` has the type of field "i".
+		if objTy.IsTuple {
+			if idx, ok := tupleConstIndex(ex.Index); ok && idx < int64(len(objTy.Fields)) {
+				return objTy.Fields[idx].Ty
+			}
 		}
 		if objTy.IsArray && objTy.ElemType != nil {
 			return *objTy.ElemType
@@ -754,13 +766,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 							case "values":
 								return ArrayOf(valTy)
 							case "entries":
-								entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+								entryTy := TupleType([]Type{keyTy, valTy})
 								return ArrayOf(entryTy)
 							}
 						}
 					}
 					if mem.Property == "entries" {
-						entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
+						entryTy := TupleType([]Type{TypePtr, TypePtr})
 						return ArrayOf(entryTy)
 					}
 					return ArrayOf(TypePtr)
@@ -821,7 +833,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if objTy.MapVal != nil {
 						valTy = *objTy.MapVal
 					}
-					entryTy := ObjectType([]Field{{Name: "key", Ty: keyTy}, {Name: "value", Ty: valTy}})
+					entryTy := TupleType([]Type{keyTy, valTy})
 					return ArrayOf(entryTy)
 				case "set":
 					return objTy
@@ -947,7 +959,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			case "entries":
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray && objTy.ElemType != nil {
-					entryTy := ObjectType([]Field{{Name: "index", Ty: TypeI64}, {Name: "value", Ty: *objTy.ElemType}})
+					entryTy := TupleType([]Type{TypeI64, *objTy.ElemType})
 					return ArrayOf(entryTy)
 				}
 			case "slice":

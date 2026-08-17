@@ -58,6 +58,17 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			}
 			continue
 		}
+		// A tuple prints as its comma-joined elements (TDD-00066) — checked
+		// before the array rejection, since a tuple is a fixed-shape value with
+		// a well-defined rendering, unlike a general homogeneous array.
+		if val.Ty.IsTuple {
+			strVal, err := e.emitValueToString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			continue
+		}
 		if val.Ty.IsArray {
 			return Value{}, fmt.Errorf("%d:%d: console output does not support arrays; iterate and print each element", arg.GetPos().Line, arg.GetPos().Col)
 		}

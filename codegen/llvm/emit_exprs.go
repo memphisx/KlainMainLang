@@ -191,6 +191,13 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		case "Infinity":
 			return Value{Ref: "0x7FF0000000000000", Ty: TypeF64}, nil
 		}
+		// A bare reference to a named function in a value position (`const g =
+		// f`, `apply(f, ...)`) — materialize a closure value wrapping it via an
+		// env-dropping trampoline. A direct call `f(...)` never reaches here
+		// (emitCall dispatches a named callee straight to a direct call).
+		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
+			return e.emitNamedFuncValue(mangled, sig), nil
+		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
 	if sym.Ty.IsArray {

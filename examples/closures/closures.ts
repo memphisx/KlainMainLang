@@ -151,3 +151,24 @@ function logAnnotated(msg: string): void {
     console.log(msg)
 }
 logAnnotated("hello")  // hello
+
+// --- Named functions as first-class values ---
+// A named function can be used as a value — bound to a variable, passed as an
+// argument, or returned — not just called directly. Under the hood it becomes a
+// closure with an empty environment (ADR-00200).
+function increment(v: number): number { return v + 1 }
+
+const inc = increment           // bind a function to a variable
+console.log(inc(5))             // 6
+console.log(increment(5))       // 6 — a direct call still works
+
+// Pass a named function where a function-typed parameter is expected.
+function applyTwice(fn: (x: number) => number, v: number): number {
+    return fn(fn(v))
+}
+console.log(applyTwice(increment, 10))  // 12
+
+// Return a named function from another function.
+function chooseOp(): (n: number) => number { return increment }
+const op = chooseOp()
+console.log(op(41))             // 42

@@ -565,7 +565,15 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			return err
 		}
 	case s.ArrayPattern != nil:
-		// The element must itself be an array to array-destructure it.
+		// A tuple element (`for (const [k, v] of pairs)` over `[K, V][]`,
+		// TDD-00066) binds positionally to the tuple's fields.
+		if elemTy.IsTuple {
+			if err := e.unpackTuplePatternInto(elemVal.Ref, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
+				return err
+			}
+			break
+		}
+		// Otherwise the element must itself be an array to array-destructure it.
 		if !elemTy.IsArray || elemTy.ElemType == nil {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-array type", s.GetPos().Line, s.GetPos().Col)
 		}

@@ -169,6 +169,32 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		return parseTrailingArrayBrackets(p, source, ta)
 	}
 
+	// Tuple type annotation: [T0, T1, ...] (TDD-00066). A '[' at the start of a
+	// type position is unambiguously a tuple — an array type `T[]` carries its
+	// brackets as a suffix (parseTrailingArrayBrackets), never at the front.
+	if tok.Type == lexer.LBRACKET {
+		p.advance() // consume '['
+		var elems []*ast.TypeAnnotation
+		for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
+			et, err := p.parseTypeAnnotation(source)
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, et)
+			if !p.match(lexer.COMMA) {
+				break
+			}
+		}
+		if _, err := p.expect(lexer.RBRACKET); err != nil {
+			return nil, err
+		}
+		if len(elems) == 0 {
+			return nil, fmt.Errorf("%d:%d: an empty tuple type '[]' is not supported", tok.Line, tok.Col)
+		}
+		ta := &ast.TypeAnnotation{Source: source, TupleElems: elems}
+		return parseTrailingArrayBrackets(p, source, ta)
+	}
+
 	// Accept identifier OR keyword-as-type (void, null, undefined, …)
 	isTypeName := tok.Type == lexer.IDENT ||
 		tok.Type == lexer.VOID ||

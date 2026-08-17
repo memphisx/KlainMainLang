@@ -94,8 +94,8 @@ func TestE2EMapEntries(t *testing.T) {
 const m = new Map<string, number>()
 m.set('a', 1)
 m.set('b', 2)
-for (const e of m.entries()) {
-    console.log(e.key + ':' + e.value)
+for (const [k, v] of m.entries()) {
+    console.log(k + ':' + v)
 }
 `, "a:1\nb:2")
 }
@@ -105,8 +105,8 @@ func TestE2EMapEntriesNumberKey(t *testing.T) {
 const m = new Map<number, number>()
 m.set(1, 100)
 m.set(2, 200)
-for (const e of m.entries()) {
-    console.log(e.key + '=' + e.value)
+for (const [k, v] of m.entries()) {
+    console.log(k + '=' + v)
 }
 `, "1=100\n2=200")
 }

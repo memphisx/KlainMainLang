@@ -41,6 +41,9 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
 		return e.emitObjectLiteralWithHint(lit, &hint)
 	}
+	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsTuple {
+		return e.emitTupleLiteral(lit.Elements, hint)
+	}
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsArray {
 		return e.emitArrayLiteralAggregate(lit, hint.ElemType)
 	}
@@ -279,6 +282,24 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	switch init := v.Init.(type) {
 	case *ast.ObjectLiteral:
 		val, err := e.emitObjectLiteralWithHint(init, &ty)
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+
+	case *ast.ArrayLiteral:
+		// A tuple-typed declaration initialized by an array literal
+		// (`const t: [string, number] = ["a", 1]`) builds the tuple struct.
+		if ty.IsTuple {
+			val, err := e.emitTupleLiteral(init.Elements, ty)
+			if err != nil {
+				return err
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+			return nil
+		}
+		val, err := e.emitExpr(init)
 		if err != nil {
 			return err
 		}
@@ -789,7 +810,11 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.entries requires an object with known fields", pos.Line, pos.Col)
 	}
-	entryTy := ObjectType([]Field{{Name: "key", Ty: TypePtr}, {Name: "value", Ty: TypePtr}})
+	// Each entry is a real [string, string] tuple (TDD-00066) — values are
+	// still stringified (a heterogeneous object's value type is a union this
+	// compiler can't yet form), but the tuple shape is what makes
+	// `for (const [k, v] of Object.entries(obj))` work.
+	entryTy := TupleType([]Type{TypePtr, TypePtr})
 	entrySize := int64(entryTy.StructSize())
 	n := int64(len(visFields))
 	e.ensureMalloc()

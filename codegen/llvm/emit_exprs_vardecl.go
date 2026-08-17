@@ -43,6 +43,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.Identifier:
 			if sym, ok := e.lookup(init.Name); ok {
 				ty = sym.Ty
+			} else if _, sig, found := e.resolveFuncRef(init.Name); found {
+				// A named function taken by value (`const g = f`) is a closure
+				// value — a ptr — so the slot must be sized as one.
+				ty = funcTypeFromSig(sig)
 			} else {
 				switch init.Name {
 				case "NaN", "Infinity":

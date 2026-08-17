@@ -38,22 +38,22 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | Count | Phase | Reason | Example |
 |---|---|---|---|
 | 6136 | compile | COMPILE_ERROR: expected (, got . | `annexB/built-ins/Date/prototype/getYear/not-a-constructor.js` |
-| 5279 | compile | COMPILE_ERROR: only simple function calls are supported | `annexB/built-ins/Date/prototype/getYear/nan.js` |
-| 4801 | compile | COMPILE_ERROR: undefined variable '%s' | `annexB/built-ins/Date/prototype/getYear/this-not-date.js` |
+| 5297 | compile | COMPILE_ERROR: only simple function calls are supported | `annexB/built-ins/Date/prototype/getYear/nan.js` |
+| 4601 | compile | COMPILE_ERROR: undefined variable '%s' | `annexB/built-ins/Date/prototype/getYear/this-not-date.js` |
 | 4015 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Date/prototype/getYear/B.2.4.js` |
 | 3329 | compile | COMPILE_ERROR: a destructured parameter requires an explicit type annotation | `built-ins/Function/prototype/toString/function-declaration-non-simple-parameter-list.js` |
 | 2448 | compile | COMPILE_ERROR: expected ), got , | `annexB/built-ins/TypedArrayConstructors/from/iterator-method-emulates-undefined.js` |
 | 2056 | compile | COMPILE_ERROR: expected (, got * | `built-ins/Array/from/iter-set-elem-prop-non-writable.js` |
-| 1747 | compile | COMPILE_ERROR: unknown class '%s' | `built-ins/AggregateError/message-undefined-no-prop.js` |
+| 1805 | compile | COMPILE_ERROR: unknown class '%s' | `built-ins/AggregateError/message-undefined-no-prop.js` |
 | 1476 | compile | COMPILE_ERROR: unexpected character '%s' | `built-ins/Function/prototype/toString/unicode.js` |
-| 707 | compile | COMPILE_ERROR: field access on non-object (no field '%s') | `built-ins/ArrayBuffer/prototype/maxByteLength/return-maxbytelength-non-resizable.js` |
+| 800 | compile | COMPILE_ERROR: field access on non-object (no field '%s') | `built-ins/ArrayBuffer/prototype/maxByteLength/return-maxbytelength-non-resizable.js` |
 | 702 | compile | COMPILE_ERROR: expected (, got await | `built-ins/AsyncFromSyncIteratorPrototype/next/for-await-iterator-next-rejected-promise-close.js` |
 | 674 | neg-accepted | expected a parse-phase rejection but this compiled | `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` |
 | 552 | compile | COMPILE_ERROR: expected }, got [ | `annexB/language/statements/for-await-of/iterator-close-return-emulates-undefined-throws-when-called.js` |
+| 547 | compile | COMPILE_ERROR: field assignment on non-object | `annexB/built-ins/RegExp/RegExp-decimal-escape-class-range.js` |
 | 544 | compile | COMPILE_ERROR: '%s' is only valid inside a method or constructor body | `built-ins/Array/from/Array.from_forwards-length-for-array-likes.js` |
 | 534 | compile | COMPILE_ERROR: expected ), got IDENT | `annexB/built-ins/escape/argument_bigint.js` |
 | 528 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-decimal-escape-not-capturing.js` |
-| 512 | compile | COMPILE_ERROR: field assignment on non-object | `annexB/built-ins/RegExp/RegExp-decimal-escape-class-range.js` |
 | 473 | compile | COMPILE_ERROR: dynamic import() is not yet supported | `language/expressions/dynamic-import/always-create-new-promise.js` |
 | 444 | compile | COMPILE_ERROR: generator function '%s' requires an explicit return type annotation (the element type yield/return produce) — inferrin… | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
 | 437 | compile | COMPILE_ERROR: expected }, got IDENT | `built-ins/Array/fromAsync/asyncitems-arraylike-length-accessor-throws.js` |
@@ -65,17 +65,17 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 312 | compile | COMPILE_ERROR: expected IDENT, got [ | `language/expressions/class/dstr/async-gen-meth-ary-ptrn-rest-ary-elem.js` |
 | 271 | compile | COMPILE_ERROR: expected property name, got async | `built-ins/AsyncDisposableStack/prototype/disposeAsync/disposes-resources-in-reverse-order.js` |
 | 265 | compile | COMPILE_ERROR: unexpected token + in expression | `built-ins/Array/prototype/every/15.4.4.16-3-4.js` |
+| 251 | compile | COMPILE_ERROR: no field '%s' | `built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js` |
 | 250 | compile | COMPILE_ERROR: class '%s' extends unknown class '%s' | `annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js` |
-| 250 | compile | COMPILE_ERROR: no field '%s' | `built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js` |
 | 240 | compile | COMPILE_ERROR: '%s' is not an array | `annexB/built-ins/Array/from/iterator-method-emulates-undefined.js` |
 | 238 | compile | COMPILE_ERROR: expected property name, got * | `built-ins/Function/prototype/toString/generator-method.js` |
 | 212 | compile | COMPILE_ERROR: Test262Error constructor expects 1 argument(s), got 0 | `annexB/built-ins/Date/prototype/setYear/year-to-number-err.js` |
 | 206 | compile | COMPILE_ERROR: expected IDENT, got ... | `language/expressions/class/dstr/async-gen-meth-dflt-obj-ptrn-rest-getter.js` |
 | 200 | compile | COMPILE_ERROR: expected '%s' after a for-of destructuring pattern, got = | `language/statements/for/dstr/const-ary-init-iter-get-err-array-prototype.js` |
-| 198 | compile | COMPILE_ERROR: cannot convert type ptr to string in template literal | `built-ins/Array/prototype/reverse/S15.4.4.8_A1_T2.js` |
+| 199 | compile | COMPILE_ERROR: cannot convert type ptr to string in template literal | `built-ins/Array/prototype/reverse/S15.4.4.8_A1_T2.js` |
+| 195 | compile | COMPILE_ERROR: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/fo… | `annexB/language/eval-code/direct/global-block-decl-eval-global-existing-block-fn-update.js` |
 | 194 | compile | COMPILE_ERROR: unexpected token ) in expression | `built-ins/Array/S15.4.2.1_A1.1_T1.js` |
 | 187 | compile | COMPILE_ERROR: eval of a static string only supports a single expression (got 2 statements) | `annexB/language/eval-code/direct/func-block-decl-eval-func-update.js` |
-| 187 | compile | COMPILE_ERROR: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/fo… | `annexB/language/eval-code/direct/global-block-decl-eval-global-existing-block-fn-update.js` |
 | 187 | compile | COMPILE_ERROR: unexpected token void in expression | `built-ins/Array/prototype/concat/Array.prototype.concat_array-like-string-length.js` |
 | 179 | compile | COMPILE_ERROR: expected property name, got default | `intl402/BigInt/prototype/toLocaleString/taint-Intl-NumberFormat.js` |
 | 175 | compile | COMPILE_ERROR: expected ], got IDENT | `built-ins/Array/fromAsync/asyncitems-asynciterator-not-callable.js` |

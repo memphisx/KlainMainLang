@@ -428,6 +428,15 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 }
 
 func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
+	// A tuple source (`const [a, b] = someTuple`, TDD-00066) binds positionally
+	// to the tuple's fields rather than indexing an array backing buffer.
+	if srcTy := e.inferExprType(s.Init); srcTy.IsTuple {
+		objVal, err := e.emitExpr(s.Init)
+		if err != nil {
+			return err
+		}
+		return e.unpackTuplePatternInto(objVal.Ref, srcTy, s.Elems, s.GetPos())
+	}
 	dataPtr, lenVal, elemTy, err := e.resolveArrayDataPtr(s.Init, s.GetPos())
 	if err != nil {
 		return err

@@ -32,8 +32,8 @@ for (const v of Object.values(person)) {
 // London
 
 // ── Object.entries ────────────────────────────────────────────────────────────
-// Returns {key: string; value: string}[] — key/value pairs for each field.
-// Access with .key and .value on each entry.
+// Returns a real [key, value] tuple array (values stringified) — destructure
+// each entry positionally.
 
 const dims: { width: number; height: number; depth: number } = {
   width: 100,
@@ -41,8 +41,8 @@ const dims: { width: number; height: number; depth: number } = {
   depth: 50,
 }
 
-for (const entry of Object.entries(dims)) {
-  console.log(entry.key + ': ' + entry.value)
+for (const [key, value] of Object.entries(dims)) {
+  console.log(key + ': ' + value)
 }
 // width: 100
 // height: 200

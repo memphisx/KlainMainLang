@@ -1497,4 +1497,8 @@ type TypeAnnotation struct {
 	// the first member for backward compatibility with code that hasn't been
 	// updated to look at UnionMembers.
 	UnionMembers []*TypeAnnotation
+	// TupleElems holds the element type annotations of a tuple type
+	// (`[T0, T1, ...]`), in order — non-nil (and non-empty) exactly for a
+	// tuple. See TDD-00066.
+	TupleElems []*TypeAnnotation
 }

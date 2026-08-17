@@ -127,6 +127,32 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	return e.emitJSONStringifyValue(val)
 }
 
+// emitJSONStringifyTuple builds [v0,v1,...] for a tuple value (TDD-00066),
+// matching real JSON.stringify, which serializes a tuple as a JSON array.
+func (e *Emitter) emitJSONStringifyTuple(val Value) (Value, error) {
+	acc := Value{Ref: e.internString("["), Ty: TypePtr}
+	structIR := val.Ty.StructIR()
+	for i, field := range val.Ty.Fields {
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, val.Ref, i))
+		fieldVal := e.loadScalarOrNullableField(gepReg, field.Ty)
+		if i > 0 {
+			var err error
+			if acc, err = e.emitStringConcat(acc, Value{Ref: e.internString(","), Ty: TypePtr}); err != nil {
+				return Value{}, err
+			}
+		}
+		jsonVal, err := e.emitJSONStringifyValue(fieldVal)
+		if err != nil {
+			return Value{}, err
+		}
+		if acc, err = e.emitStringConcat(acc, jsonVal); err != nil {
+			return Value{}, err
+		}
+	}
+	return e.emitStringConcat(acc, Value{Ref: e.internString("]"), Ty: TypePtr})
+}
+
 // emitJSONStringifyObject builds {"k1":v1,"k2":v2,...} inline by walking the
 // known fields of a statically-typed object. Handles nested objects recursively.
 func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
@@ -197,6 +223,11 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadJSON.Ref, e.internString("null")))
 		return Value{Ref: r, Ty: TypePtr}, nil
+	}
+	if val.Ty.IsTuple {
+		// A tuple serializes as a JSON array, not an object — checked before
+		// the generic IsObject branch (a tuple is structurally an object).
+		return e.emitJSONStringifyTuple(val)
 	}
 	if val.Ty.IsObject {
 		return e.emitJSONStringifyObject(val)

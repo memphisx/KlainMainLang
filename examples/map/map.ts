@@ -44,10 +44,9 @@ scores.forEach((v, k) => {
 // alice -> 95
 // carol -> 92
 
-// ── .entries(): {key, value}[] — this compiler has no tuple type, so a real ─
-// [key, value] pair isn't representable; iterate and read .key/.value ───────
-for (const e of lookup.entries()) {
-  console.log(e.key + " = " + e.value);
+// ── .entries(): a real [key, value] tuple — destructure it directly ─────────
+for (const [key, value] of lookup.entries()) {
+  console.log(key + " = " + value);
 }
 // 1 = 100
 // 2 = 200

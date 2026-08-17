@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: Type primitives ~64% · Type system features ~74%.
+**Coverage**: Type primitives ~64% · Type system features ~78%.
 
 **Strict Coverage**: 13/20, 65% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveat below; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above.
 
@@ -26,7 +26,7 @@
 | `Set<T>` | ✅ | |
 | Union types beyond `T \| null` | ✅ (V1: scalar members only — `number`/`string`/`boolean`, plus `null`/`undefined`; same Staged-V1 read/write restrictions as `any`/`unknown` below, since it's the same runtime box with a checked member set on top) | No object/interface/array members yet, and not yet supported nested inside an array element or object field (only at the top level of a var declaration/function param/return); no flow-based narrowing. See [TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md). |
 | Intersection types | ❌ | |
-| Tuple types | ❌ | |
+| Tuple types | ✅ | `[T0, T1, ...]` — a fixed-arity, heterogeneous, positional value stored as a fixed-shape struct ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)). Declaration + tuple literal, constant-index read (`t[0]`), destructuring (`const [a, b] = t`, `for (const [a, b] of tuples)`, nested), tuple parameters/returns/fields, and array-shaped rendering (JSON/`String()`/`console.log`) all work; `Map`/`Array`/`Object.entries()` now return real `[K, V]` tuples. V1 excludes tuple element *assignment* (`t[0] = x`), rest/optional/named elements, a non-constant index, and array methods/`.length` on a tuple. |
 | Mapped / conditional types | ❌ | |
 | `any` | ✅ (Staged: declare/assign/reassign/print/`typeof`/`===` + bare `any` param/return on every function shape, [TDD-00062](../tdd/TDD-00062.md); objects and arrays box by reference; ❌ with a clean compile error for arithmetic and `any[]`/`{x:any}` nested positions — see [ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md)) | A boxed array's toString is the `[object Array]` tag, not its contents |
 | `never` | ✅ | A function typed `(): never` that always throws works correctly |

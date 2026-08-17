@@ -1104,3 +1104,48 @@ console.log(f(0))
 console.log(f(null))
 `, "some:0\nsome:5\nnone\n10\n10\n15\n0\n-1")
 }
+
+// A named function used as a value (`const g = f`, passing `f` as an argument,
+// returning `f`) works via an env-dropping closure trampoline (ADR-00200).
+func TestE2ENamedFunctionAsValue(t *testing.T) {
+	assertOutput(t, `
+function inc(v: number): number { return v + 1 }
+const g = inc
+console.log(g(5))
+console.log(inc(5))
+
+function apply(fn: (x: number) => number, v: number): number { return fn(v) }
+console.log(apply(inc, 10))
+
+function twice(fn: (x: number) => number, v: number): number { return fn(fn(v)) }
+console.log(twice(inc, 10))
+
+function pick(): (n: number) => number { return inc }
+const h = pick()
+console.log(h(41))
+`, "6\n6\n11\n12\n42")
+}
+
+// A named function value round-trips array/rest/void parameter and return
+// shapes through the trampoline unchanged.
+func TestE2ENamedFunctionAsValueShapes(t *testing.T) {
+	assertOutput(t, `
+function firstTwo(xs: number[]): number[] { return [xs[0], xs[1]] }
+const ft = firstTwo
+const r = ft([9, 8, 7])
+console.log(r[0])
+console.log(r[1])
+
+function sum(...ns: number[]): number {
+  let t = 0
+  for (const n of ns) { t = t + n }
+  return t
+}
+const s = sum
+console.log(s(1, 2, 3, 4))
+
+function log(msg: string): void { console.log("LOG: " + msg) }
+const lg = log
+lg("hi")
+`, "9\n8\n10\nLOG: hi")
+}

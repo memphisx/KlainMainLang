@@ -84,7 +84,10 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 		return Value{}, err
 	}
 
-	entryTy := ObjectType([]Field{{Name: "index", Ty: TypeI64}, {Name: "value", Ty: elemTy}})
+	// Each entry is a real [number, T] tuple (TDD-00066) — field 0 the index,
+	// field 1 the value — positionally destructurable as
+	// `for (const [i, v] of arr.entries())`.
+	entryTy := TupleType([]Type{TypeI64, elemTy})
 	entrySize := entryTy.StructSize()
 
 	e.ensureMalloc()

@@ -239,10 +239,9 @@ for (const k of letters.keys()) {
 for (const v of letters.values()) {
     console.log(v)             // a, b, c
 }
-// entries() returns {index, value}[] — this compiler has no tuple type, so
-// a real JS [index, value] pair isn't representable.
-for (const e of letters.entries()) {
-    console.log(e.index + ':' + e.value)   // 0:a, 1:b, 2:c
+// entries() returns a real [index, value] tuple — destructure it directly.
+for (const [index, value] of letters.entries()) {
+    console.log(index + ':' + value)   // 0:a, 1:b, 2:c
 }
 
 // =============================================================================

@@ -35,8 +35,8 @@ for (const key of Object.keys(obj)) {
 for (const v of Object.values(obj)) {
     console.log(v)   // 10, 7, 99
 }
-for (const e of Object.entries(obj)) {
-    console.log(e.key + '=' + e.value)   // a=10, b=7, c=99
+for (const [k, v] of Object.entries(obj)) {
+    console.log(k + '=' + v)   // a=10, b=7, c=99
 }
 
 // A dynamic object is also a real Map<string,V> under the hood, so its own
