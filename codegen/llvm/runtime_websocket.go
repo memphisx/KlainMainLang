@@ -489,13 +489,16 @@ func (e *Emitter) ensureWSFrameDecode() {
 	b.WriteString("readmask:\n")
 	b.WriteString("  %maskkeyptr = getelementptr i8, ptr %buf, i64 %hdrbase\n")
 	maskkey := bigEndianLoad(&b, "maskkey", "%maskkeyptr", 0, 4, "i32")
-	fmt.Fprintf(&b, "  %%maskkey = add i32 %s, 0\n", maskkey)
+	fmt.Fprintf(&b, "  %%maskkey_r = add i32 %s, 0\n", maskkey)
 	b.WriteString("  %payloadstart_m = add i64 %hdrbase, 4\n")
 	b.WriteString("  br label %afterhdr\n")
 	b.WriteString("nomaskhdr:\n")
 	b.WriteString("  br label %afterhdr\n")
 	b.WriteString("afterhdr:\n")
 	b.WriteString("  %payloadstart = phi i64 [ %payloadstart_m, %readmask ], [ %hdrbase, %nomaskhdr ]\n")
+	// %maskkey is defined only on the %readmask path; phi it here (0 on the
+	// unmasked path, never consumed) so it dominates its use in %dounmask.
+	b.WriteString("  %maskkey = phi i32 [ %maskkey_r, %readmask ], [ 0, %nomaskhdr ]\n")
 	b.WriteString("  %needtotal = add i64 %payloadstart, %plen\n")
 	b.WriteString("  %havefull = icmp uge i64 %avail, %needtotal\n")
 	b.WriteString("  br i1 %havefull, label %havefullframe, label %incomplete\n")

@@ -482,6 +482,8 @@ scanloop:
 scanbody:
   %%slot = getelementptr ptr, ptr %%data, i64 %%i
   %%entryp = load ptr, ptr %%slot, align 8
+  %%dninstance_p = getelementptr %[1]s, ptr %%entryp, i32 0, i32 5
+  %%dninstance = load ptr, ptr %%dninstance_p, align 8
   %%pending_p = getelementptr %[1]s, ptr %%entryp, i32 0, i32 2
   %%pending = load i64, ptr %%pending_p, align 8
   %%needsnotify = icmp eq i64 %%pending, 1
@@ -491,8 +493,6 @@ donotify:
   store i64 0, ptr %%pending_p, align 8
   %%dnstate_p = getelementptr %[1]s, ptr %%entryp, i32 0, i32 1
   %%dnstate = load i64, ptr %%dnstate_p, align 8
-  %%dninstance_p = getelementptr %[1]s, ptr %%entryp, i32 0, i32 5
-  %%dninstance = load ptr, ptr %%dninstance_p, align 8
   %%dnrs_p = getelementptr %[2]s, ptr %%dninstance, i32 0, i32 %[3]d
   store i64 %%dnstate, ptr %%dnrs_p, align 8
   %%dnisopen = icmp eq i64 %%dnstate, 1
