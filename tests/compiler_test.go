@@ -591,6 +591,55 @@ func compileAndRun(t *testing.T, src string) string {
 	return strings.TrimRight(string(result), "\n")
 }
 
+// buildBinaryRegexMode is buildBinary with an explicit `-regex` dialect mode
+// (TDD-00067: "", "pcre", "es-ascii", or "es-unicode"). Mirrors main.go's
+// em.SetRegexMode() so the mode-matrix RegExp tests exercise each dialect
+// without threading a mode through every other call site (which keeps the
+// default, empty == es-unicode).
+func buildBinaryRegexMode(t *testing.T, src, mode string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	em := llvm.NewEmitter()
+	em.SetRegexMode(mode)
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// compileAndRunRegexMode compiles src under a given `-regex` mode, runs it,
+// and returns trimmed stdout.
+func compileAndRunRegexMode(t *testing.T, src, mode string) string {
+	t.Helper()
+	binFile := buildBinaryRegexMode(t, src, mode)
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return strings.TrimRight(string(result), "\n")
+}
+
 // compileAndRunWithStdin is like compileAndRun but feeds stdin to the binary.
 func compileAndRunWithStdin(t *testing.T, src, stdin string) string {
 	t.Helper()

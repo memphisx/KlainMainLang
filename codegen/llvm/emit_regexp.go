@@ -11,6 +11,47 @@ import (
 // is docs/tdd/TDD-00035.md's Stage 0: methods (.test/.exec/...) are later
 // stages, not implemented here.
 
+// regexModeOpts is the per-mode PCRE2 compile configuration derived from the
+// resolved `-regex` mode (TDD-00067). baseOpt is OR-ed unconditionally into
+// the compiled options word; dollarEndOnly adds PCRE2_DOLLAR_ENDONLY only when
+// the `m` flag is absent (with `m`, ES and PCRE2 already agree `$` matches at
+// line boundaries); newline (0 == leave PCRE2's build-time default untouched)
+// is a pcre2_set_newline value applied via a compile context.
+type regexModeOpts struct {
+	baseOpt       int
+	dollarEndOnly bool
+	newline       int
+}
+
+// regexModeOpts maps the resolved compile-wide RegExp dialect to its PCRE2
+// compile configuration. es-ascii is Option A (compile-option alignment only,
+// no context); es-unicode is Option B (adds code-point matching via PCRE2_UTF
+// and the NEWLINE_ANY convention); pcre is today's raw behavior. The mode is a
+// whole-program compile-time constant, so this is resolved once per RegExp
+// construction with no runtime branching on the mode itself.
+//
+// PCRE2_UCP is deliberately NOT set here (TDD-00067): it makes \w/\s/\b use
+// PCRE2's Unicode-property tables, which diverge from ECMAScript's — e.g. UCP
+// \s matches U+180E, which ES dropped as whitespace in Unicode 6.3, failing
+// Test262's built-ins/RegExp/u180e.js and netting a conformance loss. The ES
+// Unicode class semantics belong to Option C's normalization pass; es-unicode
+// keeps \w/\s/\b non-Unicode for now (documented caveat in REGEXP.md).
+func (e *Emitter) regexModeOpts() regexModeOpts {
+	switch e.resolveRegexMode() {
+	case "pcre":
+		return regexModeOpts{}
+	case "es-ascii":
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref, dollarEndOnly: true}
+	case "es-unicode":
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny}
+	default:
+		// resolveRegexMode only ever yields one of the above; a mode added
+		// without a matching case should fail loudly here rather than silently
+		// fall back to raw PCRE (which would be a wrong, hard-to-spot dialect).
+		panic("unhandled regex mode: " + e.resolveRegexMode())
+	}
+}
+
 // emitNewRegExpExpression implements `new RegExp(pattern, flags?)`.
 // Compiles the pattern once via PCRE2 into an opaque pcre2_code* handle
 // stored in the RegExp object's hidden RegexHandleField, decomposes the
@@ -57,14 +98,50 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 	optReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", optReg, optSlot))
 
+	// Apply the compile-wide RegExp dialect mode (TDD-00067): OR in the mode's
+	// base option bits (a compile-time immediate) and, when the mode calls for
+	// it, PCRE2_DOLLAR_ENDONLY gated on the runtime-parsed `m` flag.
+	modeOpts := e.regexModeOpts()
+	if modeOpts.baseOpt != 0 {
+		withBase := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i32 %s, %d", withBase, optReg, modeOpts.baseOpt))
+		optReg = withBase
+	}
+	if modeOpts.dollarEndOnly {
+		mForOpt := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", mForOpt, multilineSlot))
+		dollarBit := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 0, i32 %d", dollarBit, mForOpt, pcre2DollarEndOnly))
+		withDollar := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i32 %s, %s", withDollar, optReg, dollarBit))
+		optReg = withDollar
+	}
+
+	// es-unicode sets the newline convention, which lives on a compile context
+	// rather than in the options word — build/configure one, pass it in place
+	// of the `ptr null` the other modes use, and free it right after compiling
+	// (the compiled pattern copies out what it needs; see ensureRegexCompileContext).
+	compileCtx := "null"
+	var ctxReg string
+	if modeOpts.newline != 0 {
+		e.ensureRegexCompileContext()
+		ctxReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_compile_context_create_8(ptr null)", ctxReg))
+		e.emitInstr(fmt.Sprintf("call i32 @pcre2_set_newline_8(ptr %s, i32 %d)", ctxReg, modeOpts.newline))
+		compileCtx = ctxReg
+	}
+
 	errCodeSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errCodeSlot))
 	errOffSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", errOffSlot))
 
 	handleReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_compile_8(ptr %s, i64 %d, i32 %s, ptr %s, ptr %s, ptr null)",
-		handleReg, patternVal.Ref, pcre2ZeroTerminated, optReg, errCodeSlot, errOffSlot))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_compile_8(ptr %s, i64 %d, i32 %s, ptr %s, ptr %s, ptr %s)",
+		handleReg, patternVal.Ref, pcre2ZeroTerminated, optReg, errCodeSlot, errOffSlot, compileCtx))
+	if modeOpts.newline != 0 {
+		e.emitInstr(fmt.Sprintf("call void @pcre2_compile_context_free_8(ptr %s)", ctxReg))
+	}
 
 	badReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", badReg, handleReg))

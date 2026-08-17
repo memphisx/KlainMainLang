@@ -68,6 +68,7 @@ type Emitter struct {
 	strIdx              int
 	linkLibs            map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
 	memMode             string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	regexMode           string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
 	usedPrintf          bool
 	usedDprintf         bool
 	usedMalloc          bool
@@ -307,6 +308,7 @@ type Emitter struct {
 	usedPathBasename         bool
 	usedPathExtname          bool
 	usedRegexCompile         bool
+	usedRegexCompileContext  bool
 	usedRegexParseFlags      bool
 	usedRegexMatch           bool
 	breakStack               []string // end labels for enclosing loops / switch
@@ -364,6 +366,27 @@ func NewEmitter() *Emitter {
 func (e *Emitter) SetMemMode(mode string) { e.memMode = mode }
 
 func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
+
+// SetRegexMode selects the compile-wide RegExp dialect mode (TDD-00067's
+// `-regex=` flag): "pcre" (raw PCRE2, today's behavior), "es-ascii" (Option
+// A compile-option alignment), or "es-unicode" (Option B, + PCRE2_UTF/UCP
+// and NEWLINE_ANY). The zero value "" means "unset" and resolves to the
+// highest implemented ES stage — see resolveRegexMode. Called by main.go
+// right after NewEmitter(), like SetMemMode, so zero-arg NewEmitter() call
+// sites (tests) keep the default without threading a mode through.
+func (e *Emitter) SetRegexMode(mode string) { e.regexMode = mode }
+
+// resolveRegexMode maps the raw flag (including "" for unset) to the
+// concrete mode actually used for codegen. The default resolves to the
+// highest ES stage implemented so far — "es-unicode" as of Options A + B
+// (TDD-00067). This is the single place the default is defined, so
+// advancing it once "es-utf16"/"ecmascript" land is a one-line change.
+func (e *Emitter) resolveRegexMode() string {
+	if e.regexMode == "" {
+		return "es-unicode"
+	}
+	return e.regexMode
+}
 
 // --- Scope ---
 

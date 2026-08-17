@@ -18,6 +18,7 @@ func main() {
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management mode: manual (default, Memory.free(x) only) or gc (Boehm GC — see docs/tdd/TDD-00001.md)")
 	globals := flag.String("globals", "strict", "ambient built-in global names (Math/JSON/console/process/fetch/...): strict (default, a colliding declaration is a compile error) or permissive (real JS/browser shadowing — see docs/tdd/TDD-00050.md). Constructor-style built-ins (Map/Date/RegExp/...) stay reserved either way")
+	regex := flag.String("regex", "", "RegExp dialect (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF/UCP + NEWLINE_ANY), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping). es-utf16/ecmascript are scoped but not implemented yet")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -45,6 +46,15 @@ func main() {
 		fatal("unrecognized -globals value %q — must be one of: strict, permissive (see docs/tdd/TDD-00050.md)", *globals)
 	}
 
+	switch *regex {
+	case "", "pcre", "es-ascii", "es-unicode":
+		// ok ("" == default, resolves to es-unicode)
+	case "es-utf16", "ecmascript":
+		fatal("-regex=%s is scoped but not implemented yet (see docs/tdd/TDD-00067.md) — the default (unset) already selects es-unicode, the most ES-faithful mode currently available", *regex)
+	default:
+		fatal("unrecognized -regex value %q — must be one of: es-unicode (default), es-ascii, pcre (see docs/tdd/TDD-00067.md)", *regex)
+	}
+
 	inFile := flag.Arg(0)
 	prog, err := resolver.ResolveProgramWithOptions(inFile, *globals == "permissive")
 	if err != nil {
@@ -53,6 +63,7 @@ func main() {
 
 	em := llvm.NewEmitter()
 	em.SetMemMode(*mm)
+	em.SetRegexMode(*regex)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		fatal("codegen error: %v", err)

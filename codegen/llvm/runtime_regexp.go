@@ -21,6 +21,19 @@ const (
 	pcre2Dotall           = 32
 	pcre2InfoCaptureCount = 4  // pcre2_pattern_info()'s request-type enum, not an option bit
 	pcre2Unset            = -1 // PCRE2_UNSET, ~(PCRE2_SIZE)0 — same bit pattern as pcre2ZeroTerminated but a distinct meaning (an ovector pair that didn't participate in the match, e.g. an optional capture group), kept as its own named constant for clarity at call sites
+
+	// ECMAScript-alignment compile options (TDD-00067 Options A/B). Same
+	// hardcoded-macro convention and re-verification rule as the block above:
+	// these values were read directly from the real pcre2.h (Homebrew
+	// libpcre2 10.47, /opt/homebrew/include/pcre2.h) on the Apple Silicon Mac
+	// — re-verify against the linked pcre2.h before relying on them on the
+	// x86-64 Linux machine, per the project's platform-sensitive-claim rule.
+	pcre2AltBSUX           = 2      // PCRE2_ALT_BSUX (0x00000002) — ECMAScript \uXXXX/\xXX/\0 escapes (Option A)
+	pcre2DollarEndOnly     = 16     // PCRE2_DOLLAR_ENDONLY (0x00000010) — $ anchors at true end, applied only when the `m` flag is absent (Option A)
+	pcre2MatchUnsetBackref = 512    // PCRE2_MATCH_UNSET_BACKREF (0x00000200) — backref to an unset group matches empty (Option A)
+	pcre2UCP               = 131072 // PCRE2_UCP (0x00020000) — Unicode properties for \w/\s/\b. Reserved for Option C: NOT used by es-unicode, since PCRE2's UCP class tables diverge from ES (e.g. UCP \s matches U+180E, which ES dropped in Unicode 6.3) — see regexModeOpts / TDD-00067
+	pcre2UTF               = 524288 // PCRE2_UTF (0x00080000) — match on code points, not raw bytes (Option B)
+	pcre2NewlineAny        = 4      // PCRE2_NEWLINE_ANY — pcre2_set_newline() value, not an option bit; closest convention to ES's line terminators (Option B)
 )
 
 // ensureRegexCompile declares PCRE2's pattern-compilation API — used by
@@ -39,6 +52,27 @@ func (e *Emitter) ensureRegexCompile() {
 	e.emitGlobal("declare ptr @pcre2_compile_8(ptr noundef, i64 noundef, i32 noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @pcre2_get_error_message_8(i32 noundef, ptr noundef, i64 noundef)")
 	e.ensureRegexParseFlags()
+}
+
+// ensureRegexCompileContext declares the PCRE2 compile-context API used by
+// the `es-unicode` mode (TDD-00067 Option B) to set PCRE2_NEWLINE_ANY before
+// compiling — the newline convention is a compile-context property, not one
+// of the option bits threaded through pcre2_compile_8's options argument. A
+// context is created, configured, passed as pcre2_compile_8's final (context)
+// argument in place of the `ptr null` the other modes pass, and freed right
+// after the compile (the compiled pcre2_code copies whatever it needs out of
+// the context, so it need not outlive the compile call). Only reached when
+// the resolved regex mode actually needs a context, so a program compiled in
+// `pcre`/`es-ascii` mode never emits these decls.
+func (e *Emitter) ensureRegexCompileContext() {
+	if e.usedRegexCompileContext {
+		return
+	}
+	e.usedRegexCompileContext = true
+	e.requireLink("pcre2-8")
+	e.emitGlobal("declare ptr @pcre2_compile_context_create_8(ptr noundef)")
+	e.emitGlobal("declare i32 @pcre2_set_newline_8(ptr noundef, i32 noundef)")
+	e.emitGlobal("declare void @pcre2_compile_context_free_8(ptr noundef)")
 }
 
 // ensureRegexMatch declares PCRE2's match-time API — used by `.test(str)`

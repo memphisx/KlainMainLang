@@ -573,3 +573,55 @@ func TestE2EStringSearchPlainStringArgumentStillWorks(t *testing.T) {
 console.log("hello world".search("world"))
 `, "6")
 }
+
+// TestE2ERegExpDialectModeMatrix exercises the -regex dialect modes
+// (TDD-00067 Options A + B): es-ascii (compile-option alignment), es-unicode
+// (adds PCRE2_UTF/UCP code-point matching + NEWLINE_ANY), and pcre (raw
+// PCRE2, today's legacy behavior kept as an explicit opt-in). The default
+// (empty mode) resolves to es-unicode. Each case pins a behavior that
+// differs by mode, so a regression in the option/context wiring surfaces
+// here rather than only in the conformance aggregate.
+func TestE2ERegExpDialectModeMatrix(t *testing.T) {
+	cases := []struct {
+		name, mode, src, want string
+	}{
+		// PCRE2_DOLLAR_ENDONLY (gated on absent `m`): `$` anchors at true
+		// end in the ES modes; raw PCRE2 matches before a trailing newline.
+		{"dollar-endonly/es-unicode", "es-unicode", `console.log(/foo$/.test("foo\n"))`, "false"},
+		{"dollar-endonly/es-ascii", "es-ascii", `console.log(/foo$/.test("foo\n"))`, "false"},
+		{"dollar-endonly/pcre-legacy", "pcre", `console.log(/foo$/.test("foo\n"))`, "true"},
+		// With `m`, ES and PCRE2 agree `$` matches at line boundaries, so
+		// DOLLAR_ENDONLY must NOT be applied — a true-end-only `$` here would
+		// be a regression.
+		{"dollar-multiline-still-lineboundary/es-unicode", "es-unicode", `console.log(/foo$/m.test("foo\nbar"))`, "true"},
+		// PCRE2_MATCH_UNSET_BACKREF: a backref to a group that didn't
+		// participate matches empty in ES; raw PCRE2 fails the match.
+		{"unset-backref/es-unicode", "es-unicode", `console.log(/(a)?b\1/.test("b"))`, "true"},
+		{"unset-backref/es-ascii", "es-ascii", `console.log(/(a)?b\1/.test("b"))`, "true"},
+		{"unset-backref/pcre-legacy", "pcre", `console.log(/(a)?b\1/.test("b"))`, "false"},
+		// PCRE2_ALT_BSUX: `\uXXXX` is a valid ECMAScript escape in the ES
+		// modes (raw PCRE2 without ALT_BSUX rejects `\u` and would throw a
+		// SyntaxError at construction).
+		{"u-escape/es-unicode", "es-unicode", `console.log(/\u0041/.test("A"))`, "true"},
+		{"u-escape/es-ascii", "es-ascii", `console.log(/\u0041/.test("A"))`, "true"},
+		// PCRE2_UTF: `.` and classes span whole code points in es-unicode,
+		// raw bytes in es-ascii — "café" is 4 code points / 5 UTF-8 bytes.
+		{"utf-dot/es-unicode", "es-unicode", `console.log("café".replace(/./g, "X").length)`, "4"},
+		{"utf-dot/es-ascii", "es-ascii", `console.log("café".replace(/./g, "X").length)`, "5"},
+		// The default (unset) resolves to the highest implemented ES stage,
+		// es-unicode.
+		{"default-resolves-es-unicode", "", `console.log("café".replace(/./g, "X").length)`, "4"},
+		// NEWLINE_ANY (es-unicode) excludes `\r` from `.`; es-ascii, with no
+		// compile context, still matches it — the documented es-ascii caveat.
+		{"dot-cr/es-unicode", "es-unicode", `console.log("a\rb".replace(/./g, "X").charCodeAt(1))`, "13"},
+		{"dot-cr/es-ascii-caveat", "es-ascii", `console.log("a\rb".replace(/./g, "X").charCodeAt(1))`, "88"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileAndRunRegexMode(t, tc.src, tc.mode)
+			if got != tc.want {
+				t.Errorf("-regex=%q: got %q, want %q", tc.mode, got, tc.want)
+			}
+		})
+	}
+}

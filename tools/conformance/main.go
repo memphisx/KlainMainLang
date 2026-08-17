@@ -49,6 +49,13 @@ var (
 	reQuoted   = regexp.MustCompile(`'[^']*'`)
 )
 
+// regexModeFlag mirrors klainmain's -regex flag (TDD-00067) for the compiled
+// test binaries, so a conformance run can measure a specific RegExp dialect
+// (e.g. -regex=pcre to compare against the pre-alignment baseline). Empty ==
+// the compiler's default (es-unicode). Set once in main() before the workers
+// start, read-only thereafter.
+var regexModeFlag string
+
 func parseFrontmatter(src string) frontmatter {
 	start := strings.Index(src, "/*---")
 	end := strings.Index(src, "---*/")
@@ -102,7 +109,9 @@ func main() {
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
+	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): es-unicode (default), es-ascii, or pcre — for measuring a specific dialect's conformance")
 	flag.Parse()
+	regexModeFlag = *regexMode
 
 	testDir := filepath.Join(*corpus, "test")
 	harnessDir := filepath.Join(*corpus, "harness")
@@ -287,6 +296,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	var linkLibs []string
 	if perr == nil {
 		em := llvm.NewEmitter()
+		em.SetRegexMode(regexModeFlag)
 		ir, cerr = em.EmitProgram(prog)
 		linkLibs = em.LinkLibs()
 	}
