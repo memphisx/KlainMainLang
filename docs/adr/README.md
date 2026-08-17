@@ -243,3 +243,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00203](ADR-00203.md) | String/numeric-literal keys in object destructuring patterns (`{ "k": v }`, `{ 0: v }`) | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 3a; extends [ADR-00193](ADR-00193.md) |
 | [00204](ADR-00204.md) | Object rest `{ ...rest }` over a statically-known source shape | Implements [TDD-00065](../tdd/TDD-00065.md) Stage 3b; extends [ADR-00203](ADR-00203.md) |
 | [00205](ADR-00205.md) | One denominator for Strict Coverage — always the page's total feature count | Extends [ADR-00166](ADR-00166.md) |
+| [00206](ADR-00206.md) | RegExp ECMAScript-dialect alignment (Options A + B) and the `-regex` mode selector | Implements [TDD-00067](../tdd/TDD-00067.md); extends [ADR-00114](ADR-00114.md) |
+| [00207](ADR-00207.md) | RegExp `es-utf16` index mode and the global empty-match advance | Implements [TDD-00067](../tdd/TDD-00067.md) Stage 3; extends [ADR-00206](ADR-00206.md) |
+| [00208](ADR-00208.md) | RegExp `ecmascript` mode — the Option C source-normalization pass (v1) and the default advance | Implements [TDD-00067](../tdd/TDD-00067.md) Stage 4; extends [ADR-00206](ADR-00206.md), [ADR-00207](ADR-00207.md) |
+| [00209](ADR-00209.md) | `const` requires an initializer; `eval`/`arguments` reserved as strict-mode binding names | Extends [ADR-00181](ADR-00181.md), [ADR-00168](ADR-00168.md) |

@@ -2,6 +2,11 @@
 // itself (arr = ... / obj = ... / x = ...). Mutating array elements or object
 // fields through a const-bound reference is still allowed — only rebinding
 // the variable itself is rejected.
+//
+// A const must always be initialized: `const x;` (no `= value`) is a compile
+// error, matching JS. Every const below therefore has an initializer; the only
+// initializer-less const form is a for-of/for-in loop variable, which binds a
+// fresh value each iteration (see examples/basics/for_of.ts).
 
 // --- Basic scalar consts ---
 const MAX: number = 100

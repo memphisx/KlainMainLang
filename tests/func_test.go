@@ -902,6 +902,74 @@ console.log(f(2, 3));
 `, "5")
 }
 
+func TestE2EUseStrictEvalBindingNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = function(): number { "use strict"; var eval = 1; return eval; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'eval' as a strict-mode binding name, got none")
+	}
+	if !strings.Contains(err.Error(), "cannot be used as a binding name in strict mode") {
+		t.Fatalf("expected 'cannot be used as a binding name in strict mode', got: %v", err)
+	}
+}
+
+func TestE2EUseStrictArgumentsBindingNameInNestedBlockRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = function(): number { "use strict"; if (true) { let arguments = 2; return arguments; } return 0; };
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'arguments' as a strict-mode binding name in a nested block, got none")
+	}
+	if !strings.Contains(err.Error(), "cannot be used as a binding name in strict mode") {
+		t.Fatalf("expected 'cannot be used as a binding name in strict mode', got: %v", err)
+	}
+}
+
+func TestE2EClassMethodEvalBindingNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class C { m(): number { const eval = 1; return eval; } }
+console.log(new C().m());
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'eval' as a binding name in an always-strict class method, got none")
+	}
+	if !strings.Contains(err.Error(), "cannot be used as a binding name in strict mode") {
+		t.Fatalf("expected 'cannot be used as a binding name in strict mode', got: %v", err)
+	}
+}
+
+func TestE2ESloppyEvalBindingNameAllowed(t *testing.T) {
+	// Outside strict mode, `eval`/`arguments` are ordinary identifiers — this
+	// compiler treats a plain function body (no "use strict" directive) as
+	// sloppy, so binding them there stays legal, matching JS.
+	assertOutput(t, `
+const f = function(): number { var eval = 7; return eval; };
+console.log(f());
+`, "7")
+}
+
+func TestE2EConstMissingInitializerRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const x;
+console.log(1);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a 'const' with no initializer, got none")
+	}
+	if !strings.Contains(err.Error(), "must be initialized") {
+		t.Fatalf("expected 'must be initialized', got: %v", err)
+	}
+}
+
+func TestE2EConstForOfLoopVariableStillAllowed(t *testing.T) {
+	// The for-of loop-variable `const` form legitimately has no initializer
+	// and must keep compiling despite the missing-initializer rejection above.
+	assertOutput(t, `
+for (const y of [1, 2, 3]) { console.log(y); }
+`, "1\n2\n3")
+}
+
 func TestE2EFunctionExpressionVoid(t *testing.T) {
 	assertOutput(t, `
 let count = 0;

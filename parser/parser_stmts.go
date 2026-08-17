@@ -182,6 +182,12 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 		if err != nil {
 			return nil, err
 		}
+	} else if kind == "const" {
+		// A `const` with no initializer is an early SyntaxError in JS
+		// (strict or sloppy alike). The for-of/for-in loop-variable forms
+		// (`for (const x of …)`), which legitimately have no `= init`, go
+		// through their own dedicated parsers and never reach here.
+		return nil, fmt.Errorf("%d:%d: 'const' declaration '%s' must be initialized", nameTok.Line, nameTok.Col, nameTok.Literal)
 	}
 
 	return ast.NewVarDeclaration(kind, nameTok.Literal, ta, init, pos), nil
@@ -306,6 +312,11 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 				return nil, fmt.Errorf("%d:%d: '%s' cannot be a parameter name in strict mode", pos.Line, pos.Col, prm.Name)
 			}
 		}
+		// ...and neither may a let/const/var (or for-of/for-in loop variable)
+		// inside the body bind those two names.
+		if err := strictBindingError(body.Body); err != nil {
+			return nil, err
+		}
 	}
 
 	fd := &ast.FunctionDeclaration{
@@ -328,6 +339,102 @@ func bodyStartsWithUseStrict(body *ast.BlockStatement) bool {
 	}
 	sl, ok := es.Expr.(*ast.StringLiteral)
 	return ok && sl.Value == "use strict"
+}
+
+// strictReservedBinding reports whether name is one of the two identifiers a
+// strict-mode BindingIdentifier may not bind — `eval` / `arguments` (an early
+// SyntaxError, ES BindingIdentifier static semantics). Checked only inside a
+// context this parser has already established as strict (a "use strict"
+// function body or an always-strict class body), matching the same narrow,
+// no-global-strict-context subset the parameter-name check already covers —
+// see docs/status/LANGUAGE-CONSTRUCTS.md.
+func strictReservedBinding(name string) bool {
+	return name == "eval" || name == "arguments"
+}
+
+// strictBindingError walks the statements of a strict-mode function/method body
+// and returns an early SyntaxError if any let/const/var declaration (or a
+// for-of/for-in loop variable) binds `eval` or `arguments`. It recurses through
+// the ordinary control-flow statements that share the body's own lexical scope,
+// but stops at a nested function/class boundary: this parser tracks strictness
+// per function locally (no inherited global strict context — see the status
+// doc), so a nested function is re-checked on its own terms when it is parsed.
+func strictBindingError(stmts []ast.Statement) error {
+	for _, s := range stmts {
+		if err := strictBindingErrorStmt(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func strictBindingReject(name string, pos ast.Pos) error {
+	return fmt.Errorf("%d:%d: '%s' cannot be used as a binding name in strict mode", pos.Line, pos.Col, name)
+}
+
+func strictBindingErrorStmt(s ast.Statement) error {
+	switch n := s.(type) {
+	case nil:
+		return nil
+	case *ast.VarDeclaration:
+		if strictReservedBinding(n.Name) {
+			return strictBindingReject(n.Name, n.GetPos())
+		}
+	case *ast.VarDeclarationList:
+		for _, d := range n.Decls {
+			if strictReservedBinding(d.Name) {
+				return strictBindingReject(d.Name, d.GetPos())
+			}
+		}
+	case *ast.BlockStatement:
+		if n == nil {
+			return nil
+		}
+		return strictBindingError(n.Body)
+	case *ast.IfStatement:
+		if err := strictBindingErrorStmt(n.Consequent); err != nil {
+			return err
+		}
+		return strictBindingErrorStmt(n.Alternate)
+	case *ast.ForStatement:
+		if err := strictBindingErrorStmt(n.Init); err != nil {
+			return err
+		}
+		return strictBindingErrorStmt(n.Body)
+	case *ast.ForOfStatement:
+		if strictReservedBinding(n.VarName) {
+			return strictBindingReject(n.VarName, n.GetPos())
+		}
+		return strictBindingErrorStmt(n.Body)
+	case *ast.ForInStatement:
+		if strictReservedBinding(n.VarName) {
+			return strictBindingReject(n.VarName, n.GetPos())
+		}
+		return strictBindingErrorStmt(n.Body)
+	case *ast.WhileStatement:
+		return strictBindingErrorStmt(n.Body)
+	case *ast.DoWhileStatement:
+		return strictBindingErrorStmt(n.Body)
+	case *ast.SwitchStatement:
+		for _, c := range n.Cases {
+			if err := strictBindingError(c.Body); err != nil {
+				return err
+			}
+		}
+	case *ast.TryStatement:
+		if err := strictBindingErrorStmt(n.Body); err != nil {
+			return err
+		}
+		if n.Catch != nil {
+			if err := strictBindingErrorStmt(n.Catch.Body); err != nil {
+				return err
+			}
+		}
+		return strictBindingErrorStmt(n.Finally)
+	case *ast.LabeledStatement:
+		return strictBindingErrorStmt(n.Body)
+	}
+	return nil
 }
 
 func (p *Parser) parseParamList() ([]ast.Param, error) {

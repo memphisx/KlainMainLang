@@ -267,6 +267,15 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return nil, fmt.Errorf("%d:%d: '%s' cannot be a parameter name in a class method (strict mode)", memberTok.Line, memberTok.Col, prm.Name)
 				}
 			}
+			// A class body is always strict, so a let/const/var (or for-of/
+			// for-in loop variable) in the method body may not bind
+			// `eval`/`arguments` either — same rule the use-strict function
+			// path enforces.
+			if fn.Body != nil {
+				if err := strictBindingError(fn.Body.Body); err != nil {
+					return nil, err
+				}
+			}
 			fn.IsGenerator = isGeneratorMethod
 			fn.IsStatic = isStatic
 			fn.Visibility = visibility
