@@ -97,10 +97,23 @@ void *__kml_bigint_mod(void *a, void *b) {
 }
 
 void *__kml_bigint_pow(void *a, void *b) {
-	long long e = (long long)mp_get_i64((const mp_int *)b);
-	if (e < 0) bi_die("Exponent must be non-negative");
+	if (mp_cmp_d((const mp_int *)b, 0) == MP_LT) bi_die("Exponent must be non-negative");
 	mp_int *r = bi_new();
-	mp_expt_n((const mp_int *)a, (int)e, r);
+	mp_set(r, 1);
+	// Square-and-multiply over the exponent's own bits, using only APIs stable
+	// across libtommath 1.x. Avoids mp_expt_n, which was added in 1.3.0 (Ubuntu
+	// 24.04 ships 1.2.1, where it's mp_expt_u32) — and, unlike an int exponent,
+	// this handles an arbitrarily large bigint exponent directly.
+	mp_int base, exp;
+	mp_init_copy(&base, (const mp_int *)a);
+	mp_init_copy(&exp, (const mp_int *)b);
+	while (mp_cmp_d(&exp, 0) == MP_GT) {
+		if (mp_isodd(&exp)) mp_mul(r, &base, r);
+		mp_sqr(&base, &base);
+		mp_div_2(&exp, &exp);
+	}
+	mp_clear(&base);
+	mp_clear(&exp);
 	return r;
 }
 
