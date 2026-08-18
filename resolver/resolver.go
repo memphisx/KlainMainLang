@@ -112,8 +112,8 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 }
 
 // ResolveProgramWithOptions is ResolveProgram plus allowGlobalShadowing
-// (TDD-00050, `-globals=permissive` in main.go — default false, i.e.
-// `-globals=strict`): whether a program may declare its own binding named
+// (TDD-00050, `-compat=js` in main.go — default false, i.e.
+// `-compat=strict`): whether a program may declare its own binding named
 // the same as a Tier 1 ambient global (`Math`/`process`/`fetch`/… — see
 // resolver/reserved_names.go). Tier 2 names (`Map`/`Date`/`RegExp`/… —
 // parser-level `new`-form built-ins) are rejected either way; there is no
@@ -335,6 +335,24 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// — an importing file needs the *target's* mangled names already computed.
 	for _, path := range allPaths {
 		info := files[path]
+		// Block-scoped redeclaration early-errors (nested scopes only;
+		// top-level is mangleFileDecls's job) — run pre-mangle so messages
+		// carry the original binding name. See TDD-00070.
+		if err := checkLexicalScopes(path, info.prog); err != nil {
+			return nil, err
+		}
+		// Temporal-dead-zone early error (TDD-00071): a read of a let/const
+		// before its declaration, incl. the block-shadowing form. Sound-only —
+		// cross-function reads are exempt, so no valid program is rejected.
+		if err := checkTDZ(info.prog); err != nil {
+			return nil, err
+		}
+		// Definite-assignment early error (TDD-00071 Stage 2): a typed var/let
+		// read on a path where it wasn't assigned. Sound-only — conservative
+		// merges and cross-function exemption keep it free of false positives.
+		if err := checkDefiniteAssignment(info.prog); err != nil {
+			return nil, err
+		}
 		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing)
 		if err != nil {
 			return nil, err
@@ -469,14 +487,26 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// Defensive: mangled names are constructed to already be unique (each
 	// file's own suffix), but assert it directly rather than trusting the
 	// scheme blindly — this should never actually fire.
-	declaredIn := map[string]string{}
+	type declSite struct {
+		path string
+		kind string
+	}
+	declaredIn := map[string]declSite{}
 	for _, path := range allPaths {
 		for _, stmt := range files[path].prog.Body {
 			for _, ref := range declRefsOf(stmt) {
 				if prev, dup := declaredIn[ref.Name]; dup {
-					return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", ref.Name, prev, path)
+					// A repeated `var`/`function` in one file legitimately maps
+					// two source declarations to the same mangled name (see
+					// mangleFileDecls) — that's the one expected duplicate, not
+					// a mangling-scheme failure. Any cross-file or lexical-kind
+					// duplicate still means the invariant broke.
+					if prev.path == path && isVarOrFuncKind(prev.kind) && isVarOrFuncKind(ref.Kind) {
+						continue
+					}
+					return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", ref.Name, prev.path, path)
 				}
-				declaredIn[ref.Name] = path
+				declaredIn[ref.Name] = declSite{path: path, kind: ref.Kind}
 			}
 		}
 	}
@@ -585,8 +615,20 @@ func isLiteralExpr(expr ast.Expression) bool {
 // a single name.
 type declRef struct {
 	Name string
+	// Kind is the binding kind — one of "let", "const", "var", "function",
+	// "class", "enum", "interface", "type" — used by mangleFileDecls to apply
+	// the right redeclaration rule: a repeated "var"/"function" of the same
+	// name is legal JS (var re-declaration and var/function hoisting collapse
+	// into one binding), while any lexical kind colliding with anything is a
+	// real duplicate-declaration error.
+	Kind string
 	Set  func(string)
 }
+
+// isVarOrFuncKind reports whether a declaration kind is one that legally
+// permits a same-name redeclaration in the same scope: `var` (repeatable) and
+// `function` (hoisted; a var and a same-named function coexist as one binding).
+func isVarOrFuncKind(kind string) bool { return kind == "var" || kind == "function" }
 
 // declRefsOf returns every top-level name stmt introduces, unwrapping
 // ExportDeclaration first. Empty (not nil) for a statement that introduces
@@ -598,24 +640,24 @@ func declRefsOf(stmt ast.Statement) []declRef {
 	}
 	switch s := stmt.(type) {
 	case *ast.FunctionDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, "function", func(n string) { s.Name = n }}}
 	case *ast.VarDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, s.Kind, func(n string) { s.Name = n }}}
 	case *ast.VarDeclarationList:
 		refs := make([]declRef, len(s.Decls))
 		for i, d := range s.Decls {
 			d := d
-			refs[i] = declRef{d.Name, func(n string) { d.Name = n }}
+			refs[i] = declRef{d.Name, d.Kind, func(n string) { d.Name = n }}
 		}
 		return refs
 	case *ast.InterfaceDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, "interface", func(n string) { s.Name = n }}}
 	case *ast.TypeAliasDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, "type", func(n string) { s.Name = n }}}
 	case *ast.EnumDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, "enum", func(n string) { s.Name = n }}}
 	case *ast.ClassDeclaration:
-		return []declRef{{s.Name, func(n string) { s.Name = n }}}
+		return []declRef{{s.Name, "class", func(n string) { s.Name = n }}}
 	}
 	return nil
 }
@@ -647,6 +689,7 @@ func mangleName(name string, fileIdx int) string {
 // and so wouldn't be caught by the loop's own duplicate check above.
 func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalShadowing bool) (map[string]string, error) {
 	mangled := map[string]string{}
+	seenKind := map[string]string{} // name -> kind of the first declaration of it
 	sawDefault := false
 	for _, stmt := range prog.Body {
 		refs := declRefsOf(stmt)
@@ -655,11 +698,27 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 			if err := checkReservedBinding(ref.Name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
 				return nil, err
 			}
-			if _, dup := mangled[ref.Name]; dup {
-				return nil, fmt.Errorf("'%s' is declared more than once in %s", ref.Name, path)
+			if prevKind, dup := seenKind[ref.Name]; dup {
+				// A repeated `var` or `function` of the same name is legal JS
+				// (var re-declaration, and var/function hoisting collapse into
+				// a single binding) — only a lexical kind (let/const/class/…)
+				// colliding with anything, or a var/function colliding with a
+				// lexical kind, is a real redeclaration error. Codegen already
+				// tolerates the duplicate: each top-level `var x = …` gets its
+				// own freshReg alloca and re-points the symbol, so the second
+				// declaration is observably just an assignment.
+				if !isVarOrFuncKind(prevKind) || !isVarOrFuncKind(ref.Kind) {
+					return nil, fmt.Errorf("'%s' is declared more than once in %s", ref.Name, path)
+				}
+				// Idempotent: re-point to the existing mangled name rather than
+				// minting a second one for the same binding.
+				ref.Set(mangled[ref.Name])
+				lastNewName = mangled[ref.Name]
+				continue
 			}
 			newName := mangleName(ref.Name, fileIdx)
 			mangled[ref.Name] = newName
+			seenKind[ref.Name] = ref.Kind
 			ref.Set(newName)
 			lastNewName = newName
 		}

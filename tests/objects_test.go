@@ -63,22 +63,17 @@ console.log(p.score)
 `, "1\n9.5")
 }
 
-// TestE2EJSONParseArrayFieldRejected: an array-typed interface field is a clean
-// codegen rejection, not invalid LLVM IR. Before this fix it fell through to
-// the scalar per-field parse path and emitted a type-mismatched phi that failed
-// at the clang stage.
-func TestE2EJSONParseArrayFieldRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// TestE2EJSONParseArrayField: an array-typed interface field is now parsed via
+// the tree projection (TDD-00077 P3), where it was previously a clean rejection
+// ([ADR-00189]) and before that invalid LLVM IR.
+func TestE2EJSONParseArrayField(t *testing.T) {
+	assertOutput(t, `
 interface Item { name: string; tags: string[] }
-const it: Item = JSON.parse('{"name":"x","tags":["a","b"]}')
+const it: Item = JSON.parse('{"name":"x","tags":["a","b","c"]}')
 console.log(it.name)
-`)
-	if err == nil {
-		t.Fatal("expected a clean rejection for JSON.parse into an array-typed field, got none")
-	}
-	if !strings.Contains(err.Error(), "array-typed field") {
-		t.Fatalf("expected the array-typed-field rejection, got: %v", err)
-	}
+console.log(it.tags.length)
+console.log(it.tags[0] + it.tags[2])
+`, "x\n3\nac")
 }
 
 func TestE2EInterfaceReturnType(t *testing.T) {

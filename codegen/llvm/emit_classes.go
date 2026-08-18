@@ -523,6 +523,21 @@ func classHasOwnFieldInit(cd *ast.ClassDeclaration) (any, all bool) {
 //	  Virtual) and assign slot indices to every Virtual slot.
 //	Pass 3: finalize each class's real Ty (field layout now depends on
 //	  Pass 2's HasVTable decision) and publish it into e.interfaces.
+// registerClassNamePlaceholders records the same name-only ClassType placeholder
+// registerClasses' Pass 0 does, but a step earlier — before registerInterfaces —
+// so a class used as an interface/type-alias field type is already resolvable as
+// a ptr (canonicalized to its full field-bearing type on access). Generic
+// classes are skipped (they go to e.genericClasses, instantiated on demand).
+func (e *Emitter) registerClassNamePlaceholders(prog *ast.Program) {
+	for _, stmt := range prog.Body {
+		cd, ok := stmt.(*ast.ClassDeclaration)
+		if !ok || len(cd.TypeParams) > 0 {
+			continue
+		}
+		e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
+	}
+}
+
 func (e *Emitter) registerClasses(prog *ast.Program) error {
 	classDeclByName := make(map[string]*ast.ClassDeclaration)
 	for _, stmt := range prog.Body {
@@ -2371,7 +2386,7 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	}
 	// A registered user-defined class always takes precedence over a
 	// built-in name below, even one that happens to reuse a built-in's own
-	// name (only reachable at all under `-globals=permissive` — ambient
+	// name (only reachable at all under `-compat=js` — ambient
 	// global names are reserved by default) — the more specific, real
 	// class registration a user explicitly wrote should never be silently
 	// shadowed by this compiler's own fallback built-in handling.

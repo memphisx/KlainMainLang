@@ -872,6 +872,10 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		p.advance()
 		return ast.NewNumberLiteral(tok.Literal, posOf(tok)), nil
 
+	case lexer.BIGINT:
+		p.advance()
+		return ast.NewBigIntLiteral(tok.Literal, posOf(tok)), nil
+
 	case lexer.STRING:
 		p.advance()
 		return ast.NewStringLiteral(tok.Literal, posOf(tok)), nil

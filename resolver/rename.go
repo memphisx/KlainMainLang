@@ -70,7 +70,7 @@ type builtinMemberRef struct {
 // local alias -> {exported member's original name -> its mangled name},
 // one entry per `import * as ns from '...'`), builtinMembers (TDD-00049
 // Stage 2: local alias -> which virtual module member it names), and
-// allowGlobalShadowing/reservedErr (TDD-00050: `-globals=strict|permissive`
+// allowGlobalShadowing/reservedErr (TDD-00050: `-compat=strict|permissive`
 // — see checkBinding's own doc comment). All are built once by the caller
 // (resolver.go) and passed down unchanged through the whole walk.
 type lookupTable struct {

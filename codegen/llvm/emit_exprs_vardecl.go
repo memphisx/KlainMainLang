@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// emitVarSlotDefault pre-initializes a scalar or dynamic `var` slot in the
+// entry block to a deterministic default (an any-typed var to the `undefined`
+// box `{ i8 5, i64 0 }`, a typed scalar to its zero literal). Only scalar and
+// dynamic types reach this — array/object/map/set var declarations are handled
+// by their own sub-emitters before the scalar path. The store is a compile-time
+// constant, so it is valid to place in the entry (alloca) block. See TDD-00070.
+func (e *Emitter) emitVarSlotDefault(ptrName string, ty Type) {
+	if ty.IsDynamic {
+		e.emitAlloca(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, ptrName, ty.Align()))
+		return
+	}
+	e.emitAlloca(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), ptrName, ty.Align()))
+}
+
 // emitVarDecl handles variable declarations (scalar, array, and object).
 func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if init, ok := v.Init.(*ast.NewMapExpression); ok {
@@ -141,6 +155,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					}
 				case "Symbol":
 					ty = SymbolType()
+				case "BigInt":
+					ty = BigIntType()
 				default:
 					// A plain `ptr`-shaped return (a string — see isStringTy)
 					// was missing from this condition entirely alongside
@@ -235,10 +251,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		return e.emitObjectVarDecl(v, ty)
 	}
 
-	// If init is a float literal and no explicit type, use f64.
+	// With no explicit type, a numeric-literal initializer refines the i64
+	// default: a `123n` BigInt literal → bigint, a `3.14` float literal → f64.
 	if v.TypeAnnot == nil {
-		if nl, ok := v.Init.(*ast.NumberLiteral); ok && strings.ContainsRune(nl.Value, '.') {
-			ty = TypeF64
+		if nl, ok := v.Init.(*ast.NumberLiteral); ok {
+			switch {
+			case nl.IsBigInt:
+				ty = BigIntType()
+			case strings.ContainsRune(nl.Value, '.'):
+				ty = TypeF64
+			}
 		}
 	}
 
@@ -251,6 +273,22 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, ty.IR, ty.Align()))
+	if v.Kind == "var" || v.Init == nil {
+		// Pre-initialize the slot in the entry block to a deterministic default
+		// (`undefined` for an any-typed slot, zero for a typed scalar) whenever a
+		// read could reach it before a store:
+		//   - a `var` is function-scoped (promoteVarToFuncScope), so its slot can
+		//     be read on a path where its own initializer never ran (e.g.
+		//     `if (c) { var r = 1 } use(r)` with c false); and
+		//   - a `let`/`const` with no initializer (`let x: number;`) can be read
+		//     on a path the definite-assignment analysis soundly misses (a var
+		//     assigned only inside a maybe-skipped loop, ADR-00214). Without this
+		//     that read would be uninitialized memory rather than a defined value.
+		// A read textually *before* the declaration is still a clean
+		// undefined-variable/TDZ error, since the binding isn't visible until its
+		// declaration point. See TDD-00070/TDD-00071.
+		e.emitVarSlotDefault(ptrName, ty)
+	}
 	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	if v.Init != nil {

@@ -180,7 +180,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00140](ADR-00140.md) | `assert` module | |
 | [00141](ADR-00141.md) | Import-gated built-in bindings, Stage 1 (default/namespace form) | Implements [TDD-00049](../tdd/TDD-00049.md) |
 | [00142](ADR-00142.md) | Import-gated built-in bindings, Stage 2 (named per-member imports) | Extends [ADR-00141](ADR-00141.md). Implements [TDD-00049](../tdd/TDD-00049.md) |
-| [00143](ADR-00143.md) | Reserved ambient-global names — `-globals=strict\|permissive` | Implements [TDD-00050](../tdd/TDD-00050.md) |
+| [00143](ADR-00143.md) | Reserved ambient-global names — `-globals=strict\|permissive` | Implements [TDD-00050](../tdd/TDD-00050.md). Extended by [ADR-00217](ADR-00217.md) (the `-globals` flag was later absorbed into `-compat`) |
 | [00144](ADR-00144.md) | Re-exports (`export { a } from './x'`, `export * from './x'`) | Implements [TDD-00051](../tdd/TDD-00051.md) |
 | [00145](ADR-00145.md) | Top-level side-effecting code in imported files (dependency-ordered, cycle-guarded) | Implements [TDD-00052](../tdd/TDD-00052.md) |
 | [00146](ADR-00146.md) | klmpm Stage 1 — compiler-side `klain_modules` resolution | Implements [TDD-00054](../tdd/TDD-00054.md) (Stage 1 only) |
@@ -247,3 +247,18 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00207](ADR-00207.md) | RegExp `es-utf16` index mode and the global empty-match advance | Implements [TDD-00067](../tdd/TDD-00067.md) Stage 3; extends [ADR-00206](ADR-00206.md) |
 | [00208](ADR-00208.md) | RegExp `ecmascript` mode — the Option C source-normalization pass (v1) and the default advance | Implements [TDD-00067](../tdd/TDD-00067.md) Stage 4; extends [ADR-00206](ADR-00206.md), [ADR-00207](ADR-00207.md) |
 | [00209](ADR-00209.md) | `const` requires an initializer; `eval`/`arguments` reserved as strict-mode binding names | Extends [ADR-00181](ADR-00181.md), [ADR-00168](ADR-00168.md) |
+| [00210](ADR-00210.md) | `let`/`const`/`var` scope semantics — function-scoped `var`, block-scoped redeclaration early-errors | Implements [TDD-00070](../tdd/TDD-00070.md); extends [ADR-00209](ADR-00209.md) |
+| [00211](ADR-00211.md) | Cross-block `var`/lexical redeclaration early-error (`let x; { var x }`) | Extends [ADR-00210](ADR-00210.md); implements [TDD-00070](../tdd/TDD-00070.md) |
+| [00212](ADR-00212.md) | Temporal-dead-zone early error, and the block-shadowing bug behind it | Implements [TDD-00071](../tdd/TDD-00071.md) (Stage 1); extends [ADR-00210](ADR-00210.md) |
+| [00213](ADR-00213.md) | Definite-assignment early error for a typed `var`/`let` | Implements [TDD-00071](../tdd/TDD-00071.md) (Stage 2); extends [ADR-00210](ADR-00210.md) |
+| [00214](ADR-00214.md) | Definite-assignment precision for `do/while` and `switch` | Extends [ADR-00213](ADR-00213.md); implements [TDD-00071](../tdd/TDD-00071.md) |
+| [00215](ADR-00215.md) | Zero-initialize an uninitialized `let`/`const` slot (deterministic default for definite-assignment escapes) | Extends [ADR-00210](ADR-00210.md), [ADR-00214](ADR-00214.md) |
+| [00216](ADR-00216.md) | `bigint` V1 — arbitrary-precision integers behind a selectable `-bigint=libtommath\|gmp` backend | Implements [TDD-00074](../tdd/TDD-00074.md) |
+| [00217](ADR-00217.md) | `-compat` compatibility axis (step 1) — absorb `-globals`, add bigint cross-type comparison | Implements [TDD-00075](../tdd/TDD-00075.md); extends [ADR-00143](ADR-00143.md), [ADR-00216](ADR-00216.md) |
+| [00218](ADR-00218.md) | Object-to-string — Node-style `console.log` inspection + `-compat`-gated `[object Object]` coercion | Implements [TDD-00075](../tdd/TDD-00075.md); extends [ADR-00217](ADR-00217.md) |
+| [00219](ADR-00219.md) | Fix a class-typed interface/type-alias field resolving to `i64` (placeholder-registration ordering) | Extends [ADR-00218](ADR-00218.md) |
+| [00220](ADR-00220.md) | `&&` / `\|\|` value-preserving under `-compat=js` | Implements [TDD-00075](../tdd/TDD-00075.md); extends [ADR-00186](ADR-00186.md), [ADR-00217](ADR-00217.md) |
+| [00221](ADR-00221.md) | Bound the object inspector's recursion (fix compile-time infinite loop on recursive types) | Extends [ADR-00218](ADR-00218.md) |
+| [00222](ADR-00222.md) | `JSON.stringify` `space` pretty-printing and generic `toJSON()` | Implements [TDD-00077](../tdd/TDD-00077.md) (Track S) |
+| [00223](ADR-00223.md) | A validating JSON parse-tree (P1) — `JSON.parse` throws `SyntaxError` on malformed input | Implements [TDD-00077](../tdd/TDD-00077.md) (Track P, P1); extends [ADR-00189](ADR-00189.md), [ADR-00007](ADR-00007.md) |
+| [00224](ADR-00224.md) | Type-directed JSON projection off the parse tree (P3) — nested objects, array fields, top-level `T[]` | Implements [TDD-00077](../tdd/TDD-00077.md) (Track P, P3); extends [ADR-00223](ADR-00223.md); supersedes [ADR-00007](ADR-00007.md), [ADR-00189](ADR-00189.md), [ADR-00166](ADR-00166.md) |

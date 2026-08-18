@@ -8,12 +8,12 @@ import (
 // --- TDD-00050: reserved ambient-global names ---
 //
 // Real browsers/Node genuinely let a program do `const Math = {}`. This
-// compiler's default (`-globals=strict`) is deliberately stricter: a
+// compiler's default (`-compat=strict`) is deliberately stricter: a
 // binding colliding with an ambient global name is a compile error,
 // closing the same class of silent-miscompile bug TDD-00049 fixed for
 // import-gated built-ins, but for the names that stay ambient by design
 // (Math/JSON/console/process/... — Category A/C in TDD-00049's own split).
-// `-globals=permissive` opts back into real JS/browser semantics for Tier 1
+// `-compat=js` opts back into real JS/browser semantics for Tier 1
 // (plain-identifier globals); Tier 2 (Map/Date/RegExp/... — parser-level
 // `new`-form built-ins) stays reserved either way, see ADR-00143.
 
@@ -27,8 +27,8 @@ console.log(Math.random());
 	if err == nil {
 		t.Fatal("expected a compile error for redeclaring 'Math', got none")
 	}
-	if !strings.Contains(err.Error(), "Math") || !strings.Contains(err.Error(), "-globals=permissive") {
-		t.Fatalf("expected the error to mention 'Math' and the -globals=permissive escape hatch, got: %v", err)
+	if !strings.Contains(err.Error(), "Math") || !strings.Contains(err.Error(), "-compat=js") {
+		t.Fatalf("expected the error to mention 'Math' and the -compat=js escape hatch, got: %v", err)
 	}
 }
 
@@ -131,7 +131,7 @@ console.log(Math.random());
 // TestE2EReservedGlobalPermissiveAllowsLocalMathShadow is the direct
 // regression test for the gap TDD-00050 closed: a *function-local* shadow
 // (never protected by TDD-00041's incidental top-level-mangling coincidence)
-// must correctly call the user's own value under -globals=permissive,
+// must correctly call the user's own value under -compat=js,
 // exactly matching real JS/browser lexical scoping.
 func TestE2EReservedGlobalPermissiveAllowsLocalMathShadow(t *testing.T) {
 	assertMultiFileOutputPermissive(t, map[string]string{

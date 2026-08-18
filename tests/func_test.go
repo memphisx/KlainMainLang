@@ -1217,3 +1217,557 @@ const lg = log
 lg("hi")
 `, "9\n8\n10\nLOG: hi")
 }
+
+// --- let/const/var scope semantics (TDD-00070 / ADR-00210) ---
+
+func TestE2EVarRedeclarationTopLevelAllowed(t *testing.T) {
+	// A repeated top-level `var` is legal JS (var re-declaration) — the second
+	// declaration is observably just an assignment. Previously the kind-agnostic
+	// duplicate check wrongly rejected this. (Stage A) — routed through the
+	// resolver (assertOutputImports), where the kind-aware check actually lives.
+	assertOutputImports(t, `
+var x = 1;
+var x = 2;
+console.log(x);
+`, "2")
+}
+
+func TestE2EVarThenFunctionSameNameTopLevelAllowed(t *testing.T) {
+	// A `var` and a same-named `function` coexist as one binding in JS.
+	assertOutputImports(t, `
+var g = 1;
+function g(): void {}
+console.log(g);
+`, "1")
+}
+
+func TestE2ELetRedeclarationTopLevelRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+let x = 1;
+let x = 2;
+console.log(x);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a duplicate top-level 'let', got none")
+	}
+	if !strings.Contains(err.Error(), "declared more than once") {
+		t.Fatalf("expected 'declared more than once', got: %v", err)
+	}
+}
+
+func TestE2ELetVarCrossKindTopLevelRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+let x = 1;
+var x = 2;
+console.log(x);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a let/var cross-kind collision, got none")
+	}
+	if !strings.Contains(err.Error(), "declared more than once") {
+		t.Fatalf("expected 'declared more than once', got: %v", err)
+	}
+}
+
+func TestE2EVarFunctionScopedLeaksBlock(t *testing.T) {
+	// A `var` declared inside a block stays visible after the block, unlike a
+	// block-scoped `let`/`const`. (Stage C)
+	assertOutput(t, `
+function f(): void {
+  { var x = 5; }
+  console.log(x);
+}
+f();
+`, "5")
+}
+
+func TestE2EForVarLeaksToFunctionScope(t *testing.T) {
+	assertOutput(t, `
+function g(): void {
+  for (var i = 0; i < 3; i = i + 1) {}
+  console.log(i);
+}
+g();
+`, "3")
+}
+
+func TestE2ELetDoesNotLeakBlock(t *testing.T) {
+	// The counterpart to the var-leak test: a block-scoped `let` is not visible
+	// after its block.
+	_, err := parseAndCompile(`
+function h(): void {
+  { let y = 5; }
+  console.log(y);
+}
+h();
+`)
+	if err == nil {
+		t.Fatal("expected a compile error reading a block-scoped 'let' after its block, got none")
+	}
+	if !strings.Contains(err.Error(), "undefined variable") {
+		t.Fatalf("expected 'undefined variable', got: %v", err)
+	}
+}
+
+func TestE2EConditionalAnyVarReadsUndefined(t *testing.T) {
+	// An `any`-typed `var` whose initializer runs on a not-taken path reads back
+	// as `undefined` (JS-faithful hoist-to-undefined), not uninitialized memory.
+	assertOutput(t, `
+function f(cond: boolean): void {
+  if (cond) { var r: any = 42; }
+  console.log(r);
+}
+f(false);
+`, "undefined")
+}
+
+func TestE2EConditionalTypedVarReadsZeroDeterministic(t *testing.T) {
+	// A typed `var` on a not-taken path reads a deterministic zero default
+	// rather than garbage (V1: full TS definite-assignment errors are deferred).
+	assertOutput(t, `
+function f(cond: boolean): void {
+  if (cond) { var r = 42; }
+  console.log(r);
+}
+f(false);
+`, "0")
+}
+
+func TestE2EBlockScopedLetRedeclarationRejected(t *testing.T) {
+	// A duplicate `let` in the same nested block is a redeclaration early-error
+	// — previously this compiled and silently used the second value. (Stage B)
+	_, err := parseAndCompileImports(t, `
+function f(): void {
+  let y = 1;
+  let y = 2;
+  console.log(y);
+}
+f();
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a duplicate block-scoped 'let', got none")
+	}
+	if !strings.Contains(err.Error(), "already been declared") {
+		t.Fatalf("expected 'already been declared', got: %v", err)
+	}
+}
+
+func TestE2EBlockScopedLetConstCrossKindRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+function f(): void { let a = 1; const a = 2; console.log(a); }
+f();
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a let/const collision in a block, got none")
+	}
+	if !strings.Contains(err.Error(), "already been declared") {
+		t.Fatalf("expected 'already been declared', got: %v", err)
+	}
+}
+
+func TestE2ESiblingBlockLetReuseAllowed(t *testing.T) {
+	// The same name declared in two independent sibling blocks is fine.
+	assertOutput(t, `
+{ let z = 1; console.log(z); }
+{ let z = 2; console.log(z); }
+`, "1\n2")
+}
+
+func TestE2EForHeadAndBodyLetSameNameAllowed(t *testing.T) {
+	// The loop-head binding and a body binding of the same name are separate
+	// scopes — not a redeclaration.
+	assertOutput(t, `
+for (let i = 0; i < 2; i = i + 1) { let i = 99; console.log(i); }
+`, "99\n99")
+}
+
+func TestE2EVarRedeclarationInBlockAllowed(t *testing.T) {
+	assertOutput(t, `
+function f(): void { var a = 1; var a = 2; console.log(a); }
+f();
+`, "2")
+}
+
+// --- cross-block var/lexical intersection (TDD-00070 caveat #3, ADR-00210 follow-up) ---
+
+func TestE2ELetThenNestedVarSameNameRejected(t *testing.T) {
+	// `let x; { var x }` — the block's var hoists to function scope and collides
+	// with the enclosing block-scoped let. SyntaxError in JS.
+	_, err := parseAndCompileImports(t, `
+function f(): void {
+  let x = 1;
+  { var x = 2; }
+  console.log(x);
+}
+f();
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested var colliding with an outer let, got none")
+	}
+	if !strings.Contains(err.Error(), "already been declared") {
+		t.Fatalf("expected 'already been declared', got: %v", err)
+	}
+}
+
+func TestE2ETopLevelLetThenNestedVarRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+let x = 1;
+{ var x = 2; }
+console.log(x);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested var colliding with a top-level let, got none")
+	}
+	if !strings.Contains(err.Error(), "already been declared") {
+		t.Fatalf("expected 'already been declared', got: %v", err)
+	}
+}
+
+func TestE2ELetThenForVarSameNameRejected(t *testing.T) {
+	// `let i; for (var i ...)` — the for's var is function-scoped and collides.
+	_, err := parseAndCompileImports(t, `
+let i = 99;
+for (var i = 0; i < 2; i = i + 1) {}
+console.log(i);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a for-var colliding with an outer let, got none")
+	}
+	if !strings.Contains(err.Error(), "already been declared") {
+		t.Fatalf("expected 'already been declared', got: %v", err)
+	}
+}
+
+func TestE2EVarThenNestedLetShadowAllowed(t *testing.T) {
+	// The legal inverse: an outer `var` with an inner block `let` of the same
+	// name is a normal shadow, not a redeclaration.
+	assertOutput(t, `
+function f(): void {
+  var x = 1;
+  { let x = 2; console.log(x); }
+  console.log(x);
+}
+f();
+`, "2\n1")
+}
+
+func TestE2ENestedLetThenVarNonOverlappingAllowed(t *testing.T) {
+	// A block-scoped `let` that has already gone out of scope before a later
+	// `var` of the same name is declared is legal (non-overlapping scopes).
+	assertOutput(t, `
+function f(): void {
+  { let x = 2; console.log(x); }
+  var x = 1;
+  console.log(x);
+}
+f();
+`, "2\n1")
+}
+
+func TestE2EOuterLetThenForLetShadowAllowed(t *testing.T) {
+	// A block-scoped for-`let` loop variable may reuse an outer `let` name.
+	assertOutput(t, `
+let i = 99;
+for (let i = 0; i < 2; i = i + 1) { console.log(i); }
+console.log(i);
+`, "0\n1\n99")
+}
+
+// --- temporal dead zone (TDD-00071 Stage 1, caveat #2) ---
+
+func TestE2ETDZUseBeforeDeclaration(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+function g(): void {
+  console.log(y);
+  let y = 3;
+}
+g();
+`)
+	if err == nil {
+		t.Fatal("expected a TDZ compile error for a let read before its declaration, got none")
+	}
+	if !strings.Contains(err.Error(), "before initialization") {
+		t.Fatalf("expected 'before initialization', got: %v", err)
+	}
+}
+
+func TestE2ETDZShadowingReadsInnerBinding(t *testing.T) {
+	// The shadowing correctness bug: inside the block, `x` binds to the block's
+	// own hoisted (TDZ) `let x`, so the read before it is an error — previously
+	// this silently read the outer x and printed 1.
+	_, err := parseAndCompileImports(t, `
+let x = 1;
+{ console.log(x); let x = 2; }
+`)
+	if err == nil {
+		t.Fatal("expected a TDZ compile error for a shadowing let read before its declaration, got none")
+	}
+	if !strings.Contains(err.Error(), "before initialization") {
+		t.Fatalf("expected 'before initialization', got: %v", err)
+	}
+}
+
+func TestE2ETDZSelfInitializerRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+function h(): void { let z = z + 1; console.log(z); }
+h();
+`)
+	if err == nil {
+		t.Fatal("expected a TDZ compile error for a self-referential let initializer, got none")
+	}
+	if !strings.Contains(err.Error(), "before initialization") {
+		t.Fatalf("expected 'before initialization', got: %v", err)
+	}
+}
+
+func TestE2ELexicalReadAfterDeclarationAllowed(t *testing.T) {
+	assertOutputImports(t, `
+const a = 7;
+console.log(a);
+`, "7")
+}
+
+func TestE2EEnumReadAfterDeclarationAllowed(t *testing.T) {
+	// Regression guard: an enum name is a lexical binding; without flipping it
+	// out of TDZ at its declaration, a later E.A read would be a false positive.
+	assertOutputImports(t, `
+enum E { A = 1, B = 2 }
+const v = E.A;
+console.log(v);
+`, "1")
+}
+
+func TestE2EClosureReadingLaterOuterBindingNotFalsePositive(t *testing.T) {
+	// A closure that reads an outer binding declared later must NOT be a TDZ
+	// error (real TDZ is a runtime check; the closure runs after the binding
+	// initializes). We only assert the analysis doesn't reject it — no distinct
+	// TDZ error is produced.
+	_, err := parseAndCompileImports(t, `
+function outer(): void {
+  const log = (): void => { console.log(msg); };
+  const msg = "hi";
+  log();
+}
+outer();
+`)
+	if err != nil && strings.Contains(err.Error(), "before initialization") {
+		t.Fatalf("closure reading a later outer binding was wrongly flagged as TDZ: %v", err)
+	}
+}
+
+// --- definite assignment (TDD-00071 Stage 2, caveat #1) ---
+
+func TestE2EDefiniteAssignConditionalVarRejected(t *testing.T) {
+	// The flagship: a typed var assigned only on one branch, read after.
+	_, err := parseAndCompileImports(t, `
+function f(c: boolean): void {
+  if (c) { var r = 42; }
+  console.log(r);
+}
+f(false);
+`)
+	if err == nil {
+		t.Fatal("expected a definite-assignment error, got none")
+	}
+	if !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected 'used before being assigned', got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignTypedLetNoInitRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+function g(): void { let x: number; console.log(x); }
+g();
+`)
+	if err == nil {
+		t.Fatal("expected a definite-assignment error, got none")
+	}
+	if !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected 'used before being assigned', got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignBothBranchesAllowed(t *testing.T) {
+	assertOutputImports(t, `
+function h(c: boolean): void {
+  var r: number;
+  if (c) { r = 5; } else { r = 9; }
+  console.log(r);
+}
+h(true);
+`, "5")
+}
+
+func TestE2EDefiniteAssignElseDivergesAllowed(t *testing.T) {
+	assertOutputImports(t, `
+function k(c: boolean): number {
+  var r: number;
+  if (c) { r = 1; } else { return -1; }
+  return r;
+}
+console.log(k(true));
+`, "1")
+}
+
+func TestE2EDefiniteAssignAnyTypedExempt(t *testing.T) {
+	assertOutputImports(t, `
+function m(c: boolean): void {
+  if (c) { var r: any = 1; }
+  console.log(r);
+}
+m(false);
+`, "undefined")
+}
+
+func TestE2EDefiniteAssignLoopCarriedAllowed(t *testing.T) {
+	// A loop-carried assignment must not be a false positive.
+	assertOutputImports(t, `
+function f(): void {
+  let x: number;
+  for (let i = 0; i < 3; i = i + 1) {
+    if (i === 0) { x = 1; } else { x = x + 1; }
+  }
+  console.log(x);
+}
+f();
+`, "3")
+}
+
+func TestE2EDefiniteAssignSwitchDefaultAllowed(t *testing.T) {
+	// A switch assigning in every case (with default) must not be flagged.
+	assertOutputImports(t, `
+function g(n: number): void {
+  let x: number;
+  switch (n) {
+    case 1: x = 10; break;
+    default: x = 20;
+  }
+  console.log(x);
+}
+g(5);
+`, "20")
+}
+
+func TestE2EDefiniteAssignForVarInitReadAfterAllowed(t *testing.T) {
+	// The for-init runs unconditionally, so a var it assigns is readable after.
+	assertOutputImports(t, `
+function c(): void {
+  for (var i = 0; i < 3; i = i + 1) {}
+  console.log(i);
+}
+c();
+`, "3")
+}
+
+// --- definite assignment, tightened do/while + switch (ADR-00214) ---
+
+func TestE2EDefiniteAssignDoWhileUnconditionalAllowed(t *testing.T) {
+	// A do/while body runs at least once, so an unconditional assignment in it
+	// IS definite afterward.
+	assertOutputImports(t, `
+function f(c: boolean): void { let x: number; do { x = 5; } while (c); console.log(x); }
+f(false);
+`, "5")
+}
+
+func TestE2EDefiniteAssignDoWhileConditionalRejected(t *testing.T) {
+	// The precision win: a conditionally-assigned binding in a do/while body is
+	// still caught (over-seeding would have missed it).
+	_, err := parseAndCompileImports(t, `
+function f(c: boolean): void { let x: number; do { if (c) { x = 5; } } while (c); console.log(x); }
+f(false);
+`)
+	if err == nil || !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected 'used before being assigned', got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignDoWhileIfElseAllowed(t *testing.T) {
+	assertOutputImports(t, `
+function f(c: boolean): void { let x: number; do { if (c) { x = 5; } else { x = 9; } } while (c); console.log(x); }
+f(false);
+`, "9")
+}
+
+func TestE2EDefiniteAssignSwitchDefaultAllCasesAllowed(t *testing.T) {
+	assertOutputImports(t, `
+function g(n: number): void { let x: number; switch (n) { case 1: x = 10; break; default: x = 20; } console.log(x); }
+g(1);
+`, "10")
+}
+
+func TestE2EDefiniteAssignSwitchDefaultMissingAssignRejected(t *testing.T) {
+	// A default that doesn't assign the binding is now caught.
+	_, err := parseAndCompileImports(t, `
+function g(n: number): void { let x: number; switch (n) { case 1: x = 10; break; default: console.log("d"); } console.log(x); }
+g(1);
+`)
+	if err == nil || !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected 'used before being assigned', got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignSwitchNoDefaultRejected(t *testing.T) {
+	// No default => an unmatched discriminant leaves the binding unassigned.
+	_, err := parseAndCompileImports(t, `
+function g(n: number): void { let x: number; switch (n) { case 1: x = 10; break; case 2: x = 20; break; } console.log(x); }
+g(1);
+`)
+	if err == nil || !strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("expected 'used before being assigned', got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignSwitchFallthroughAllowed(t *testing.T) {
+	// case 1 falls through to case 2, which assigns — must not be a false positive.
+	assertOutputImports(t, `
+function g(n: number): void { let x: number; switch (n) { case 1: case 2: x = 10; break; default: x = 20; } console.log(x); }
+g(2);
+`, "10")
+}
+
+// --- documented escapes (sound gaps): these COMPILE by design; the analysis
+// deliberately does not flag them (TDD-00071's no-false-positives trade). Kept
+// as tests so a future tightening's effect is visible. ---
+
+func TestE2EDefiniteAssignWhileOnlyEscapes(t *testing.T) {
+	// A binding assigned only in a for/while body that might not run is NOT
+	// caught (the body is over-seeded). Sound but incomplete — the read would be
+	// unsafe if the loop runs zero times. Compiles today.
+	_, err := parseAndCompileImports(t, `
+function f(n: number): void { let x: number; while (n > 0) { x = n; n = n - 1; } console.log(x); }
+f(5);
+`)
+	if err != nil && strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("while-only assignment is a documented escape (should compile today), got: %v", err)
+	}
+}
+
+func TestE2EDefiniteAssignTryEscapes(t *testing.T) {
+	// A try body that may throw before its assignment is not caught (try is
+	// over-seeded). Sound but incomplete. Compiles today.
+	_, err := parseAndCompileImports(t, `
+function f(): void { let x: number; try { x = 7; } catch (e) { } console.log(x); }
+f();
+`)
+	if err != nil && strings.Contains(err.Error(), "used before being assigned") {
+		t.Fatalf("try-body assignment is a documented escape (should compile today), got: %v", err)
+	}
+}
+
+func TestE2EWhileEscapeReadsDeterministicDefault(t *testing.T) {
+	// A definite-assignment escape (a let assigned only in a maybe-skipped loop)
+	// now reads its deterministic zero default rather than uninitialized memory
+	// — ADR-00215. Here the loop runs zero times.
+	assertOutputImports(t, `
+function f(n: number): void { let x: number; while (n > 0) { x = n; n = n - 1; } console.log(x); }
+f(0);
+`, "0")
+}
+
+func TestE2EAnyTypedLetNoInitReadsUndefined(t *testing.T) {
+	assertOutputImports(t, `
+function h(): void { let x: any; console.log(x); }
+h();
+`, "undefined")
+}

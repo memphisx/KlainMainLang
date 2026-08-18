@@ -3,16 +3,74 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strconv"
+	"strings"
 )
+
+// jsonIndent carries JSON.stringify's pretty-print state (TDD-00077 Track S).
+// An empty unit means compact mode — byte-identical to the pre-pretty output —
+// so an absent `space` argument leaves every existing call path unchanged.
+type jsonIndent struct {
+	unit  string // one indentation level ("" ⇒ compact, no whitespace)
+	depth int    // current nesting depth
+}
+
+func (ji jsonIndent) pretty() bool      { return ji.unit != "" }
+func (ji jsonIndent) child() jsonIndent { return jsonIndent{ji.unit, ji.depth + 1} }
+func (ji jsonIndent) pad() string       { return strings.Repeat(ji.unit, ji.depth) }
+func (ji jsonIndent) childPad() string  { return strings.Repeat(ji.unit, ji.depth+1) }
+
+// colon is the key/value separator: ": " in pretty mode, ":" compact.
+func (ji jsonIndent) colon() string {
+	if ji.pretty() {
+		return ": "
+	}
+	return ":"
+}
+
+// itemPrefix returns the whitespace/comma that precedes element/member number i
+// (0-based): compact uses "" then ","; pretty puts each item on its own line
+// indented one level deeper than the bracket.
+func (ji jsonIndent) itemPrefix(i int) string {
+	if !ji.pretty() {
+		if i == 0 {
+			return ""
+		}
+		return ","
+	}
+	if i == 0 {
+		return "\n" + ji.childPad()
+	}
+	return ",\n" + ji.childPad()
+}
+
+// closeBracket returns the closing bracket for a container that held nItems:
+// pretty puts a non-empty container's close on its own line at the parent
+// indent, while an empty container (and all compact output) closes inline.
+func (ji jsonIndent) closeBracket(bracket string, nItems int) string {
+	if ji.pretty() && nItems > 0 {
+		return "\n" + ji.pad() + bracket
+	}
+	return bracket
+}
+
+// jsonAppend concatenates a compile-time-constant string onto acc, skipping the
+// concat entirely for the empty string (compact mode's common no-op case).
+func (e *Emitter) jsonAppend(acc Value, s string) (Value, error) {
+	if s == "" {
+		return acc, nil
+	}
+	return e.emitStringConcat(acc, Value{Ref: e.internString(s), Ty: TypePtr})
+}
 
 // emitJSONStringifyArray resolves arrExpr and delegates to
 // emitJSONStringifyArrayData — see that function's doc comment.
-func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos, ind jsonIndent) (Value, error) {
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(arrExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	return e.emitJSONStringifyArrayData(ptrReg, lenReg, elemTy)
+	return e.emitJSONStringifyArrayData(ptrReg, lenReg, elemTy, ind)
 }
 
 // emitJSONStringifyArrayValue is emitJSONStringifyArray's counterpart for an
@@ -21,12 +79,12 @@ func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos) (V
 // branch below to recurse into a nested-array element (TDD-00029), which
 // loadArrayElem has already unboxed into exactly this shape by the time it
 // gets here.
-func (e *Emitter) emitJSONStringifyArrayValue(val Value) (Value, error) {
+func (e *Emitter) emitJSONStringifyArrayValue(val Value, ind jsonIndent) (Value, error) {
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-	return e.emitJSONStringifyArrayData(ptrReg, lenReg, *val.Ty.ElemType)
+	return e.emitJSONStringifyArrayData(ptrReg, lenReg, *val.Ty.ElemType, ind)
 }
 
 // emitJSONStringifyArrayData is emitJSONStringifyArray/
@@ -37,7 +95,7 @@ func (e *Emitter) emitJSONStringifyArrayValue(val Value) (Value, error) {
 // emitJSONStringifyArrayValue — nested arrays) — the same runtime
 // accumulator-loop shape emitArrayJoin uses, just bracketed and JSON-
 // encoding each element instead of plain-string-joining.
-func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type) (Value, error) {
+func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type, ind jsonIndent) (Value, error) {
 	accAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("["), accAlloca))
@@ -65,7 +123,7 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type)
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inElem := e.loadArrayElem(inGep, elemTy)
-	elemJSONVal, err := e.emitJSONStringifyValue(inElem)
+	elemJSONVal, err := e.emitJSONStringifyValue(inElem, ind.child())
 	if err != nil {
 		return Value{}, err
 	}
@@ -76,7 +134,11 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type)
 	e.emitLabel(firstL)
 	accAtFirst := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accAtFirst, accAlloca))
-	firstAcc, err := e.emitStringConcat(Value{Ref: accAtFirst, Ty: TypePtr}, elemJSONVal)
+	firstPre, err := e.jsonAppend(Value{Ref: accAtFirst, Ty: TypePtr}, ind.itemPrefix(0))
+	if err != nil {
+		return Value{}, err
+	}
+	firstAcc, err := e.emitStringConcat(firstPre, elemJSONVal)
 	if err != nil {
 		return Value{}, err
 	}
@@ -86,7 +148,7 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type)
 	e.emitLabel(restL)
 	accCur := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accCur, accAlloca))
-	withComma, err := e.emitStringConcat(Value{Ref: accCur, Ty: TypePtr}, Value{Ref: e.internString(","), Ty: TypePtr})
+	withComma, err := e.jsonAppend(Value{Ref: accCur, Ty: TypePtr}, ind.itemPrefix(1))
 	if err != nil {
 		return Value{}, err
 	}
@@ -106,6 +168,17 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type)
 	e.emitLabel(doneL)
 	preClose := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
+	if ind.pretty() {
+		// Whether to put the closing bracket on its own indented line depends on
+		// whether the array had any elements — a runtime fact for a dynamic-length
+		// array, so select between the two closes on lenReg == 0.
+		isEmpty := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, lenReg))
+		closeSel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeSel, isEmpty,
+			e.internString("]"), e.internString("\n"+ind.pad()+"]")))
+		return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: closeSel, Ty: TypePtr})
+	}
 	return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("]"), Ty: TypePtr})
 }
 
@@ -113,10 +186,32 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	if len(args) < 1 {
 		return Value{}, fmt.Errorf("%d:%d: JSON.stringify expects at least 1 argument", pos.Line, pos.Col)
 	}
+
+	// Optional replacer (arg 2): V1 supports only a null/undefined replacer.
+	// A function or array replacer is a separate, far less common feature
+	// (TDD-00077 Track S) — reject it cleanly rather than silently ignore it.
+	if len(args) >= 2 {
+		if _, isNull := args[1].(*ast.NullLiteral); !isNull {
+			return Value{}, fmt.Errorf("%d:%d: JSON.stringify replacer argument is not supported (only null)", pos.Line, pos.Col)
+		}
+	}
+
+	// Optional space (arg 3): a compile-time literal number (N spaces, capped at
+	// 10) or string (used literally, first 10 chars), matching JSON.stringify.
+	// An empty unit keeps compact mode, byte-identical to the pre-pretty output.
+	ind := jsonIndent{}
+	if len(args) >= 3 {
+		unit, err := e.jsonSpaceUnit(args[2], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		ind.unit = unit
+	}
+
 	argTy := e.inferExprType(args[0])
 
 	if argTy.IsArray && argTy.ElemType != nil {
-		return e.emitJSONStringifyArray(args[0], pos)
+		return e.emitJSONStringifyArray(args[0], pos, ind)
 	}
 
 	val, err := e.emitExpr(args[0])
@@ -124,25 +219,62 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return Value{}, err
 	}
 
-	return e.emitJSONStringifyValue(val)
+	return e.emitJSONStringifyValue(val, ind)
+}
+
+// jsonSpaceUnit resolves JSON.stringify's compile-time `space` argument to one
+// indentation unit: a numeric literal becomes that many spaces (clamped to
+// [0,10] per the spec), a string literal is used literally (first 10 chars),
+// null/undefined or a non-positive count means compact (""). A runtime (non-
+// literal) space is rejected in V1 — pretty-print units are resolved at compile
+// time so the indent strings can be interned as constants.
+func (e *Emitter) jsonSpaceUnit(arg ast.Expression, pos ast.Pos) (string, error) {
+	switch a := arg.(type) {
+	case *ast.NullLiteral:
+		return "", nil
+	case *ast.NumberLiteral:
+		if a.IsBigInt {
+			return "", fmt.Errorf("%d:%d: JSON.stringify space argument must be a number or string, not a bigint", pos.Line, pos.Col)
+		}
+		n := 0
+		if iv, err := strconv.ParseInt(a.Value, 0, 64); err == nil {
+			n = int(iv)
+		} else if fv, err := strconv.ParseFloat(a.Value, 64); err == nil {
+			n = int(fv)
+		}
+		if n < 0 {
+			n = 0
+		}
+		if n > 10 {
+			n = 10
+		}
+		return strings.Repeat(" ", n), nil
+	case *ast.StringLiteral:
+		s := a.Value
+		if len(s) > 10 {
+			s = s[:10]
+		}
+		return s, nil
+	default:
+		return "", fmt.Errorf("%d:%d: JSON.stringify space argument must be a literal number or string (a runtime value is not yet supported)", pos.Line, pos.Col)
+	}
 }
 
 // emitJSONStringifyTuple builds [v0,v1,...] for a tuple value (TDD-00066),
 // matching real JSON.stringify, which serializes a tuple as a JSON array.
-func (e *Emitter) emitJSONStringifyTuple(val Value) (Value, error) {
+func (e *Emitter) emitJSONStringifyTuple(val Value, ind jsonIndent) (Value, error) {
 	acc := Value{Ref: e.internString("["), Ty: TypePtr}
 	structIR := val.Ty.StructIR()
+	n := len(val.Ty.Fields)
 	for i, field := range val.Ty.Fields {
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, val.Ref, i))
 		fieldVal := e.loadScalarOrNullableField(gepReg, field.Ty)
-		if i > 0 {
-			var err error
-			if acc, err = e.emitStringConcat(acc, Value{Ref: e.internString(","), Ty: TypePtr}); err != nil {
-				return Value{}, err
-			}
+		var err error
+		if acc, err = e.jsonAppend(acc, ind.itemPrefix(i)); err != nil {
+			return Value{}, err
 		}
-		jsonVal, err := e.emitJSONStringifyValue(fieldVal)
+		jsonVal, err := e.emitJSONStringifyValue(fieldVal, ind.child())
 		if err != nil {
 			return Value{}, err
 		}
@@ -150,14 +282,15 @@ func (e *Emitter) emitJSONStringifyTuple(val Value) (Value, error) {
 			return Value{}, err
 		}
 	}
-	return e.emitStringConcat(acc, Value{Ref: e.internString("]"), Ty: TypePtr})
+	return e.jsonAppend(acc, ind.closeBracket("]", n))
 }
 
 // emitJSONStringifyObject builds {"k1":v1,"k2":v2,...} inline by walking the
 // known fields of a statically-typed object. Handles nested objects recursively.
-func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
+func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, error) {
 	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
-	for i, field := range val.Ty.VisibleFields() {
+	fields := val.Ty.VisibleFields()
+	for i, field := range fields {
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		// Load the field value via GEP.
 		gepReg := e.freshReg()
@@ -175,20 +308,17 @@ func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 			loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
 		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
 
-		// Key segment: `"name":` with a leading comma after the first field.
-		keyStr := `"` + field.Name + `":`
-		if i > 0 {
-			keyStr = "," + keyStr
-		}
-		keyPart := Value{Ref: e.internString(keyStr), Ty: TypePtr}
+		// Key segment: the item prefix (compact comma, or pretty newline+indent),
+		// then `"name"` and the colon separator (":" compact, ": " pretty).
+		keyStr := ind.itemPrefix(i) + `"` + field.Name + `"` + ind.colon()
 		var err error
-		acc, err = e.emitStringConcat(acc, keyPart)
+		acc, err = e.jsonAppend(acc, keyStr)
 		if err != nil {
 			return Value{}, err
 		}
 
 		// JSON-encode the field value.
-		jsonVal, err := e.emitJSONStringifyValue(fieldVal)
+		jsonVal, err := e.emitJSONStringifyValue(fieldVal, ind.child())
 		if err != nil {
 			return Value{}, err
 		}
@@ -197,12 +327,12 @@ func (e *Emitter) emitJSONStringifyObject(val Value) (Value, error) {
 			return Value{}, err
 		}
 	}
-	return e.emitStringConcat(acc, Value{Ref: e.internString("}"), Ty: TypePtr})
+	return e.jsonAppend(acc, ind.closeBracket("}", len(fields)))
 }
 
 // emitJSONStringifyValue returns a ptr string with the JSON encoding of val.
 // Handles strings (quoted), numbers, booleans, and nested objects recursively.
-func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
+func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, error) {
 	// Must be checked before the generic IsObject branch below — Symbol
 	// reuses IsObject's struct representation (see IsSymbol's doc comment,
 	// types.go), so without this it would silently serialize as
@@ -211,12 +341,16 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 	if val.Ty.IsSymbol {
 		return Value{}, fmt.Errorf("JSON.stringify does not support symbol values")
 	}
+	// Real JS throws "Do not know how to serialize a BigInt" — TDD-00074.
+	if val.Ty.IsBigInt {
+		return Value{}, fmt.Errorf("JSON.stringify does not support BigInt values (TypeError in JS)")
+	}
 	// A nullable-scalar field/value (TDD-00064 Stage 3) serializes to its
 	// value's JSON when present, the literal `null` when absent — matching real
 	// JSON.stringify, which emits null for a null-valued property.
 	if isNullableScalar(val.Ty) {
 		present, payload := e.nullableScalarAggParts(val)
-		payloadJSON, err := e.emitJSONStringifyValue(payload)
+		payloadJSON, err := e.emitJSONStringifyValue(payload, ind)
 		if err != nil {
 			return Value{}, err
 		}
@@ -224,16 +358,44 @@ func (e *Emitter) emitJSONStringifyValue(val Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadJSON.Ref, e.internString("null")))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
+	// A user-defined class toJSON() is honored: real JSON.stringify calls
+	// toJSON() when present and serializes its *result* instead of the object's
+	// own fields (TDD-00077 Track S). Mirrors emitValueToString's toString()
+	// override dispatch. The jsonToJSONActive guard prevents a toJSON() that
+	// returns its own (or a mutually-referencing) type from recursing forever
+	// at compile time (cf. ADR-00221) — a re-entry serializes the object's
+	// fields directly instead of re-dispatching toJSON.
+	if canon := e.canonicalizeClassTy(val.Ty); canon.IsClass {
+		if info, ok := e.classes[canon.ClassName]; ok {
+			if _, has := info.MethodSigs["toJSON"]; has && !e.jsonToJSONActive[canon.ClassName] {
+				// Keep the class marked active for the *whole* serialization of
+				// toJSON's result, not just the call: a result of the same type
+				// (e.g. `toJSON() { return this }`) must re-enter with the guard
+				// still set so it serializes the object's fields instead of
+				// re-dispatching toJSON forever (matches JS, which applies toJSON
+				// once then serializes the returned value's own properties).
+				e.jsonToJSONActive[canon.ClassName] = true
+				res, err := e.emitClassCall(canon, Value{Ref: val.Ref, Ty: canon}, "toJSON", nil, ast.Pos{}, false)
+				if err != nil {
+					delete(e.jsonToJSONActive, canon.ClassName)
+					return Value{}, err
+				}
+				out, err := e.emitJSONStringifyValue(res, ind)
+				delete(e.jsonToJSONActive, canon.ClassName)
+				return out, err
+			}
+		}
+	}
 	if val.Ty.IsTuple {
 		// A tuple serializes as a JSON array, not an object — checked before
 		// the generic IsObject branch (a tuple is structurally an object).
-		return e.emitJSONStringifyTuple(val)
+		return e.emitJSONStringifyTuple(val, ind)
 	}
 	if val.Ty.IsObject {
-		return e.emitJSONStringifyObject(val)
+		return e.emitJSONStringifyObject(val, ind)
 	}
 	if val.Ty.IsArray {
-		return e.emitJSONStringifyArrayValue(val)
+		return e.emitJSONStringifyArrayValue(val, ind)
 	}
 	switch val.Ty.IR {
 	case "i1":
@@ -295,158 +457,16 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 	if val.Ty.IR != "ptr" {
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse expects a string argument", pos.Line, pos.Col)
 	}
-	if targetTy.IsObject {
-		return e.emitJSONParseObject(val, targetTy, pos)
+	// TDD-00077 Track P: parse into a validated tree (throwing a catchable
+	// SyntaxError on malformed input), project it onto the target type, then
+	// release it. This type-directed projection replaced the old lenient strstr
+	// extraction, and handles nested objects, array/object-array fields, and
+	// top-level `T[]` in the one path (P3).
+	tree := e.emitJSONParseTree(val)
+	result, err := e.emitJSONProject(tree, targetTy, pos)
+	if err != nil {
+		return Value{}, err
 	}
-	if targetTy.IR == TypeI64.IR && !targetTy.IsArray && !targetTy.IsObject {
-		e.ensureAtoll()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @atoll(ptr %s)", r, val.Ref))
-		return Value{Ref: r, Ty: TypeI64}, nil
-	}
-	e.ensureJSONParseStr()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_parse_str(ptr %s)", r, val.Ref))
-	return Value{Ref: r, Ty: TypePtr}, nil
-}
-
-// emitJSONParseObject parses a flat JSON object text into a heap-allocated
-// struct matching targetTy's field layout, known fully at compile time from
-// the type annotation. Per field: find "name": in the text (or use a
-// zero-value default if the key is missing), parse the value according to
-// the field's compile-time type, and GEP+store it — the same "malloc struct,
-// then per-field GEP+store" shape emitObjectLiteral/emitJSONStringifyObject
-// already use, just sourcing each value from the runtime JSON text instead of
-// a literal expression. Nested object fields are not supported (would need
-// brace-matched substring isolation to avoid a field-finder incorrectly
-// matching a same-named key belonging to a later sibling object) — a clean
-// error here instead of silently producing wrong reads for that shape.
-func (e *Emitter) emitJSONParseObject(jsonVal Value, targetTy Type, pos ast.Pos) (Value, error) {
-	if targetTy.IsClass {
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
-	}
-	for _, f := range targetTy.Fields {
-		if f.Ty.IsObject {
-			return Value{}, fmt.Errorf("%d:%d: JSON.parse into a nested object field ('%s') is not yet supported", pos.Line, pos.Col, f.Name)
-		}
-		// An array-typed field falls through to the scalar-only per-field parse
-		// path below, which would emit a type-mismatched phi (a scalar value
-		// where the field's `ptr` array type is expected) and fail at the clang
-		// stage. Reject cleanly instead — array-valued fields aren't parsed yet.
-		if f.Ty.IsArray {
-			return Value{}, fmt.Errorf("%d:%d: JSON.parse into an array-typed field ('%s') is not yet supported", pos.Line, pos.Col, f.Name)
-		}
-	}
-
-	e.ensureMalloc()
-	structIR := targetTy.StructIR()
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, targetTy.StructSize()))
-
-	e.ensureJSONFindValue()
-	for i, f := range targetTy.Fields {
-		pattern := e.internString(`"` + f.Name + `":`)
-		valStart := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_find_value(ptr %s, ptr %s)", valStart, jsonVal.Ref, pattern))
-		isMissing := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isMissing, valStart))
-
-		foundL := e.freshLabel("jsonobj.found")
-		missingL := e.freshLabel("jsonobj.missing")
-		mergeL := e.freshLabel("jsonobj.merge")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isMissing, missingL, foundL))
-
-		// A nullable-scalar field parses its bare value then boxes into the
-		// { i1, T } slot (TDD-00064 Stage 3): a present value found in the JSON
-		// text, or an absent aggregate when the key is missing / the value is
-		// literally null.
-		parseTy := f.Ty
-		if isNullableScalar(f.Ty) {
-			parseTy = f.Ty.withoutNullable()
-		}
-
-		e.emitLabel(foundL)
-		parsedVal, err := e.emitJSONParseFieldValue(valStart, parseTy)
-		if err != nil {
-			return Value{}, err
-		}
-		foundRef := parsedVal.Ref
-		if isNullableScalar(f.Ty) {
-			// Present unless the JSON value found here is literally `null`
-			// (strncmp==0), so `"age":null` boxes as absent while `"age":0`
-			// stays a present 0. atoll("null") is 0, so the payload is safe to
-			// compute unconditionally regardless of which case applies.
-			e.ensureStrncmp()
-			cmp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @strncmp(ptr %s, ptr %s, i64 4)", cmp, valStart, e.internString("null")))
-			presentReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", presentReg, cmp))
-			foundRef = e.makeNullableScalarAgg(f.Ty, presentReg, parsedVal.Ref)
-		}
-		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-		e.emitLabel(missingL)
-		// A missing plain-string field must default to an empty string, not
-		// zeroRef's general ptr default of `null` — every other string
-		// operation in this compiler (concatenation, .length, console.log,
-		// etc.) assumes a `string`-typed value is never null, unlike an
-		// object/array/closure field, where null genuinely is the only
-		// sensible zero value. Storing `null` here and later printing or
-		// concatenating it is undefined behavior (passing NULL to printf's
-		// "%s") — confirmed directly: `JSON.parse` into an object whose
-		// string field's key is absent from the source text crashed
-		// (SIGTRAP/SIGSEGV, depending on how aggressively the optimizer
-		// exploited the resulting UB) before this fix.
-		defaultRef := zeroRef(f.Ty)
-		if f.Ty.IR == "ptr" && !f.Ty.IsObject && !f.Ty.IsArray && !f.Ty.IsFunc {
-			defaultRef = e.internString("")
-		}
-		if isNullableScalar(f.Ty) {
-			defaultRef = e.makeNullableScalarAgg(f.Ty, "false", zeroRef(f.Ty.withoutNullable()))
-		}
-		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
-		e.emitLabel(mergeL)
-		phiTy := StructFieldIR(f.Ty)
-		fieldReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", fieldReg, phiTy, foundRef, foundL, defaultRef, missingL))
-
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", phiTy, fieldReg, gepReg, f.Ty.Align()))
-	}
-
-	return Value{Ref: dataReg, Ty: targetTy}, nil
-}
-
-// emitJSONParseFieldValue parses the JSON value text starting at valStart
-// (already past whitespace) according to fieldTy: boolean via strncmp
-// against "true", float via strtod, integer via atoll (matching the existing
-// JSON.parse(s) -> number behavior), string via __kml_json_parse_field_str.
-func (e *Emitter) emitJSONParseFieldValue(valStart string, fieldTy Type) (Value, error) {
-	switch {
-	case fieldTy.IR == "i1":
-		e.ensureStrncmp()
-		trueStr := e.internString("true")
-		cmp := e.freshReg()
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strncmp(ptr %s, ptr %s, i64 4)", cmp, valStart, trueStr))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", result, cmp))
-		return Value{Ref: result, Ty: TypeBool}, nil
-	case fieldTy.Float:
-		e.ensureStrtod()
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr null)", result, valStart))
-		return Value{Ref: result, Ty: fieldTy}, nil
-	case fieldTy.IR == "ptr" && !fieldTy.IsObject && !fieldTy.IsArray && !fieldTy.IsFunc:
-		e.ensureJSONParseFieldStr()
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_parse_field_str(ptr %s)", result, valStart))
-		return Value{Ref: result, Ty: TypePtr}, nil
-	default:
-		e.ensureAtoll()
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @atoll(ptr %s)", result, valStart))
-		return e.coerce(Value{Ref: result, Ty: TypeI64}, fieldTy), nil
-	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_json_free(ptr %s)", tree))
+	return result, nil
 }

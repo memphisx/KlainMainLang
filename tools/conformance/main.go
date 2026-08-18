@@ -179,11 +179,20 @@ func main() {
 
 	var all []result
 	done := 0
+	start := time.Now()
 	for r := range results {
 		all = append(all, r)
 		done++
-		if done%1000 == 0 {
-			fmt.Fprintf(os.Stderr, "%d/%d done\n", done, len(files))
+		// Report often (every 250) with elapsed time and throughput, so a stall
+		// (e.g. a codegen infinite loop, which runs in-process and so isn't
+		// caught by the per-file subprocess timeout) shows up as the count
+		// freezing rather than a silent multi-minute hang.
+		if done%250 == 0 {
+			el := time.Since(start).Seconds()
+			rate := float64(done) / el
+			eta := time.Duration(float64(len(files)-done)/rate) * time.Second
+			fmt.Fprintf(os.Stderr, "%d/%d done — %.0fs elapsed, %.0f/s, ETA %s\n",
+				done, len(files), el, rate, eta.Round(time.Second))
 		}
 	}
 

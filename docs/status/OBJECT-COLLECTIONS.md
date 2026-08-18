@@ -2,43 +2,41 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: ~89% (24/27).
+**Coverage**: 25/28 (~89%) · **Strict Coverage**: 17/28 (~61%).
 
-**Strict Coverage**: 12/27, ~44% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number; every caveat found by that audit excludes the row from this count even though the row stays ✅ in the Coverage column above. The `Map` row's own `.get()`-returns-`0`-on-a-miss bug is now fixed (it returns `V | null`, [ADR-00199](../adr/ADR-00199.md)), though the absent value is this compiler's `null` stand-in rather than a distinct `undefined`, so the row is not yet counted here.
+This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
 
-**Caveats**:
+| Feature | Status | Caveats | Notes |
+|---|---|---|---|
+| Object literals `{ a: 1 }` | ✅ | | |
+| Field access `obj.field` | ✅ | | |
+| Object destructuring | ✅ | | |
+| `Object.keys(obj)` | ✅ | | |
+| `Object.values(obj)` | ✅ | | |
+| `Object.entries(obj)` | ✅ | • Values are stringified — a heterogeneous object's value type is a union not yet representable ([TDD-00066](../tdd/TDD-00066.md)) | • Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))` |
+| `Object.groupBy(arr, fn)` | ✅ | | |
+| `Object.assign(target, ...src)` | ✅ | • Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md)) | • Mutates and returns `target` |
+| `Object.create()` | ❌ | | • Not implemented |
+| `Object.freeze(obj)` | ✅ | | • Real runtime enforcement, not a no-op: tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter ([ADR-00055](../adr/ADR-00055.md)) |
+| `Object.seal(obj)` | ✅ | | • A genuine no-op, not a scope-narrowed approximation: seal's guarantee ("no new/deleted fields") is already structurally impossible for this compiler's fixed-shape objects, so there's nothing further to enforce ([ADR-00055](../adr/ADR-00055.md)) |
+| `Object.hasOwn()` / `.hasOwnProperty()` | ✅ | • The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against) ([ADR-00065](../adr/ADR-00065.md)) | • Object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan |
+| `Object.fromEntries()` | ❌ | | • Not implemented |
+| Object spread `{ ...obj, key: val }` | ✅ | | |
+| Computed property keys `{ [expr]: value }` | ✅ | • `V` is inferred from the first property only<br>• `...spread` combined with a computed key isn't supported yet<br>• The declared-type form (`{ [key: string]: T }`) isn't supported yet | • A *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s runtime, with `.field`/`[expr]` sugar layered on top ([TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md)) |
+| Shorthand property `{ x }` | ✅ | | |
+| Method shorthand `{ foo() {...} }` | ✅ | • No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong<br>• No `async`/generator method shorthand either, matching this compiler's class methods ([ADR-00169](../adr/ADR-00169.md)) | • Desugars to `{ foo: function() {...} }` — a plain anonymous function value, reusing the same closure machinery ([TDD-00060](../tdd/TDD-00060.md)) |
+| `Map.set/get/has/delete/keys/values` | ✅ | • A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `"null"` stand-in on a miss ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md)) | • `.get()` on a scalar-valued map returns `V \| null` — a missing key is distinguishable from a stored `0`/`false` via a presence-flagged nullable-scalar representation; fixes the original in-band-zero-sentinel bug found by the audit ([ADR-00166](../adr/ADR-00166.md)) |
+| `Map.size` | ✅ | | |
+| `Map.entries()` | ✅ | | • Returns a real `[K, V][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)); iterate with `for (const [k, v] of m.entries())`; replaced the earlier object-shaped stand-in ([ADR-00053](../adr/ADR-00053.md)) |
+| `Map.forEach()` | ✅ | • The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes) ([ADR-00053](../adr/ADR-00053.md)) | • Calls `fn(value, key)`, matching real JS's argument order |
+| `Map.clear()` | ✅ | | • Resets size to 0 in place — doesn't free/reallocate the backing arrays ("leak by design" memory model); immediately reusable afterward ([ADR-00053](../adr/ADR-00053.md)) |
+| `new Set(iterable)` | ✅ | • Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here ([ADR-00159](../adr/ADR-00159.md)) | • `new Map(entries)` doesn't yet accept an initial-entries argument, though the `[K, V]` tuple type it needs now exists ([TDD-00066](../tdd/TDD-00066.md)) — a separately-shippable follow-on |
+| `Set.add/has/delete/values` | ✅ | | |
+| `Set.size` | ✅ | | |
+| `Set.forEach()` | ✅ | | • Calls `fn(element[, element])` — real JS's `Set.prototype.forEach` passes the value twice (`(value, value, set)`) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter ([ADR-00053](../adr/ADR-00053.md)) |
+| `Set.clear()` | ✅ | | • Same in-place reset as `Map.clear()` ([ADR-00053](../adr/ADR-00053.md)) |
+| `WeakMap` / `WeakSet` / `WeakRef` | ❌ | | • Not implemented — no weak-reference/finalization machinery |
 
-- Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this, it's already structurally impossible).
-- `Object.create()`/`Object.fromEntries()` aren't implemented.
-- `WeakMap`/`WeakSet`/`WeakRef` aren't implemented (no weak-reference/finalization machinery).
+## Known limitations
 
-| Feature | Status |
-|---|---|
-| Object literals `{ a: 1 }` | ✅ |
-| Field access `obj.field` | ✅ |
-| Object destructuring | ✅ |
-| `Object.keys(obj)` | ✅ |
-| `Object.values(obj)` | ✅ |
-| `Object.entries(obj)` | ✅ (a real `[string, string][]` tuple array — values stringified, since a heterogeneous object's value type is a union not yet representable; destructure with `for (const [k, v] of Object.entries(obj))`. See [TDD-00066](../tdd/TDD-00066.md).) |
-| `Object.groupBy(arr, fn)` | ✅ |
-| `Object.assign(target, ...src)` | ✅ (mutates and returns `target`; every field a source contributes must already exist on `target`'s own struct type — this compiler's objects are fixed-shape heap structs, not a dynamic property bag, so a source field target's type doesn't have is a clean compile error, not silently dropped or grafted on. See [ADR-00054](../adr/ADR-00054.md).) |
-| `Object.create()` | ❌ |
-| `Object.freeze(obj)` | ✅ (real runtime enforcement, not a no-op — tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter, not just through the variable that called `freeze`. See [ADR-00055](../adr/ADR-00055.md).) |
-| `Object.seal(obj)` | ✅ (a genuine no-op, not a scope-narrowed approximation of one — seal's real guarantee is "no new/deleted fields," which this compiler's fixed-shape objects already can't do at all, frozen or not, so there's nothing further to enforce. See [ADR-00055](../adr/ADR-00055.md).) |
-| `Object.hasOwn()` / `.hasOwnProperty()` | ✅ (object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan — the key must be a string literal; a runtime-computed key is a clean compile error, since there's no field-name table at runtime to check it against. See [ADR-00065](../adr/ADR-00065.md).) |
-| `Object.fromEntries()` | ❌ |
-| Object spread `{ ...obj, key: val }` | ✅ |
-| Computed property keys `{ [expr]: value }` | ✅ (a *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s own runtime, with `.field`/`[expr]` sugar layered on top; `V` inferred from the first property only. `...spread` combined with a computed key, and a declared-type form (`{ [key: string]: T }`), aren't supported yet. See [TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md) for full scope.) |
-| Shorthand property `{ x }` | ✅ |
-| Method shorthand `{ foo() {...} }` | ✅ (desugars to `{ foo: function() {...} }` — a plain anonymous function value, reusing the same closure machinery [TDD-00060](../tdd/TDD-00060.md) already built. No `this` binding at all: a class method's `this` has a known static type from its enclosing class; an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists — `this` inside a method-shorthand body is a clean compile-time rejection, not silently wrong. No `async`/generator method shorthand either, matching this compiler's own class methods (neither is supported there yet). See [ADR-00169](../adr/ADR-00169.md).) |
-| `Map.set/get/has/delete/keys/values` | ✅ (`.get()` on a scalar-valued map now returns `V \| null` — a missing key reads as null (the compiler's `undefined` stand-in), distinguishable from a real stored `0`/`false`, via the presence-flagged nullable-scalar representation. See [TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md); the original in-band-zero-sentinel bug was found by the 2026-08-11 audit, [ADR-00166](../adr/ADR-00166.md). A reference-typed `V` (string/object) returns the `"null"` stand-in on a miss as before.) |
-| `Map.size` | ✅ |
-| `Map.entries()` | ✅ (a real `[K, V][]` tuple array since [TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md); iterate with `for (const [k, v] of m.entries())`. See [ADR-00053](../adr/ADR-00053.md) for the original object-shaped stand-in this replaced.) |
-| `Map.forEach()` | ✅ (calls `fn(value, key)`, matching real JS's argument order — the 3rd `map` argument real JS also passes is dropped, the same simplification `Array.forEach`'s `(elem, index)` already makes. See [ADR-00053](../adr/ADR-00053.md).) |
-| `Map.clear()` | ✅ (resets size to 0 in place — doesn't free/reallocate the backing arrays, matching this compiler's "leak by design" memory model; the map is immediately reusable afterward. See [ADR-00053](../adr/ADR-00053.md).) |
-| `new Set(iterable)` | ✅ (an array expression, narrowed from the real spec's `Iterable<T>` — the only iterable concept a general expression has here; `new Map(entries)` doesn't yet accept an initial-entries argument, though the `[K, V]` tuple type it needs now exists ([TDD-00066](../tdd/TDD-00066.md)) — a separately-shippable follow-on. See [ADR-00159](../adr/ADR-00159.md).) |
-| `Set.add/has/delete/values` | ✅ |
-| `Set.size` | ✅ |
-| `Set.forEach()` | ✅ (calls `fn(element[, element])` — real JS's own `Set.prototype.forEach` passes the value twice, `(value, value, set)`, for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter. See [ADR-00053](../adr/ADR-00053.md).) |
-| `Set.clear()` | ✅ (same in-place reset as `Map.clear()`. See [ADR-00053](../adr/ADR-00053.md).) |
-| `WeakMap` / `WeakSet` / `WeakRef` | ❌ |
+- Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this; it's already structurally impossible).

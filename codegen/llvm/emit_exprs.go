@@ -164,6 +164,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 }
 
 func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
+	if n.IsBigInt {
+		return e.emitBigIntLiteral(n)
+	}
 	v := n.Value
 	if strings.ContainsRune(v, '.') {
 		return Value{Ref: v, Ty: TypeF64}, nil

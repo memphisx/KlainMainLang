@@ -161,6 +161,14 @@ type Type struct {
 	// operators, console.log/template-literal formatting) can special-case
 	// it instead. See emit_symbol.go.
 	IsSymbol bool
+	// IsBigInt marks a `bigint` value (TDD-00074): an opaque `ptr` handle to a
+	// heap-allocated arbitrary-precision integer owned by the selected backend
+	// library (libtommath/gmp/…), reached only through the __kml_bigint_* ABI —
+	// never field-accessed, so deliberately NOT IsObject. The flag exists so the
+	// dispatch sites that must treat it specially (operators, typeof,
+	// stringification, JSON) branch on it instead of the generic ptr path. See
+	// emit_bigint.go.
+	IsBigInt bool
 	// IsURLSearchParams marks `new URLSearchParams(...)` and `URL`'s own
 	// `.searchParams` field: storage-wise it IS a real Map<string,string>
 	// (IsMap is also set, MapKey/MapVal both TypePtr) — get/set/has/delete/
@@ -419,6 +427,14 @@ func SymbolType() Type {
 	ty := ObjectType([]Field{{Name: "description", Ty: TypePtr}})
 	ty.IsSymbol = true
 	return ty
+}
+
+// BigIntType returns a `bigint` value's type (TDD-00074): an opaque `ptr` handle
+// to a backend-owned arbitrary-precision integer. Unlike SymbolType this is NOT
+// an IsObject struct — nothing reads fields off it; every operation goes through
+// the __kml_bigint_* ABI in emit_bigint.go.
+func BigIntType() Type {
+	return Type{IR: "ptr", IsBigInt: true}
 }
 
 // HeadersType returns `new Headers(...)`'s result type (TDD-00040) — see
@@ -1291,6 +1307,8 @@ func ResolveTypeName(name string) Type {
 		return TypeUndefined
 	case "symbol":
 		return SymbolType()
+	case "bigint":
+		return BigIntType()
 	case "any", "unknown":
 		return TypeAny
 	case "Date":

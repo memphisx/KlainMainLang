@@ -69,6 +69,22 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 	}
 
+	// BigInt (TDD-00074): its own operator set, and deliberately NOT
+	// interoperable with number — mixing them in an arithmetic/bitwise operator
+	// is a TypeError in JS, here a clean compile error. Across types only
+	// ===/!== are defined (a bigint is never === a non-bigint), so those resolve
+	// to a constant; everything else with exactly one bigint operand is rejected.
+	// `string + bigint` / `bigint + string` is concatenation (the bigint
+	// stringifies to its digits), handled by the string-concat path below — not
+	// bigint arithmetic. Everything else with a bigint operand is.
+	bigintConcat := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
+	if (left.Ty.IsBigInt || right.Ty.IsBigInt) && !bigintConcat {
+		if left.Ty.IsBigInt != right.Ty.IsBigInt {
+			return e.emitBigIntMixed(ex.Op, left, right, ex.GetPos())
+		}
+		return e.emitBigIntBinary(ex.Op, left, right, ex.GetPos())
+	}
+
 	// An array compared against null/undefined (e.g. RegExp.exec()'s
 	// `T[] | null` — emitRegexExec's null-array sentinel, {ptr: null,
 	// len: 0}) needs its own path: an array value is a {ptr,i64}
@@ -350,6 +366,8 @@ func typeofString(ty Type) string {
 	switch {
 	case ty.IsFunc:
 		return "function"
+	case ty.IsBigInt:
+		return "bigint"
 	case ty.IsSymbol:
 		return "symbol"
 	case ty.IsObject, ty.IsArray:
@@ -383,6 +401,18 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 	arg, err := e.emitExpr(ex.Arg)
 	if err != nil {
 		return Value{}, err
+	}
+	if arg.Ty.IsBigInt {
+		switch ex.Op {
+		case "-":
+			return e.emitBigIntUnary("neg", arg), nil
+		case "~":
+			return e.emitBigIntUnary("not", arg), nil
+		case "+":
+			return Value{}, fmt.Errorf("%d:%d: unary + is not defined on BigInt (a TypeError in JS) — use Number(x)", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		// "!" falls through to the generic path below, whose toBool now handles
+		// bigint truthiness (0n falsy, else truthy).
 	}
 	reg := e.freshReg()
 	switch ex.Op {
@@ -421,6 +451,23 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 
 	oldReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", oldReg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+
+	if sym.Ty.IsBigInt {
+		e.ensureBigInt()
+		one := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 1)", one))
+		fn := "add"
+		if ex.Op == "--" {
+			fn = "sub"
+		}
+		nr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_%s(ptr %s, ptr %s)", nr, fn, oldReg, one))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nr, sym.Ptr))
+		if ex.Prefix {
+			return Value{Ref: nr, Ty: sym.Ty}, nil
+		}
+		return Value{Ref: oldReg, Ty: sym.Ty}, nil
+	}
 
 	newReg := e.freshReg()
 	if ex.Op == "++" {
@@ -475,6 +522,16 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 	// operator on a string target still gets emitStringBinary's own clean
 	// "operator '%s' is not supported for strings" rejection instead of
 	// silently emitting invalid IR the way "+" itself used to.
+	if ty.IsBigInt {
+		// Compound assignment on a bigint target (acc += 100n, x <<= 4n, …).
+		// A non-bigint RHS would have been coerced to bigint by the caller,
+		// producing an invalid handle — guard against that mixed case, which is
+		// a TypeError in JS.
+		if !right.Ty.IsBigInt {
+			return Value{}, fmt.Errorf("%d:%d: cannot mix BigInt and other types in compound assignment '%s=' — convert explicitly", pos.Line, pos.Col, op)
+		}
+		return e.emitBigIntBinary(op, left, right, pos)
+	}
 	if isStringTy(ty) {
 		l, r := left, right
 		if op == "+" {
@@ -587,6 +644,18 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 // emitNullCoalesce) to avoid hand-tracking phi predecessor blocks — the left or
 // right operand may itself span multiple blocks (a nested `&&`/`||`/ternary).
 func (e *Emitter) emitShortCircuit(ex *ast.BinaryExpression) (Value, error) {
+	// -compat=js (TDD-00075): `&&`/`||` are value-preserving — `a && b` yields
+	// `b` (or the falsy `a`), `a || b` yields `a` (or `b`) — not a bool. Only
+	// when both operands share a simple type, since a different-typed result
+	// would be a union this compiler can't represent; mixed types fall through
+	// to the bool form below. inferExprType already returns the left operand's
+	// type for `&&`/`||`, which is exactly this value-preserving result type.
+	if e.compatJS() {
+		lt := e.inferExprType(ex.Left)
+		if sameShortCircuitType(lt, e.inferExprType(ex.Right)) {
+			return e.emitShortCircuitValue(ex, lt)
+		}
+	}
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
 
@@ -622,6 +691,64 @@ func (e *Emitter) emitShortCircuit(ex *ast.BinaryExpression) (Value, error) {
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resPtr))
 	return Value{Ref: result, Ty: TypeBool}, nil
+}
+
+// sameShortCircuitType reports whether two operands share a simple, single-slot
+// type that -compat=js value-preserving `&&`/`||` can store either of into one
+// alloca. Excludes aggregates (arrays/tuples/nullable-scalar/dynamic) and
+// requires the same kind, so the value-preserving result (typed as the left
+// operand) is sound.
+func sameShortCircuitType(a, b Type) bool {
+	if a.IR != b.IR {
+		return false
+	}
+	if len(a.IR) > 0 && a.IR[0] == '{' { // an aggregate struct IR ({ptr,i64}, {i1,T}, …)
+		return false
+	}
+	if a.IsArray || a.IsTuple || a.IsDynamic || isNullableScalar(a) {
+		return false
+	}
+	return a.IsBigInt == b.IsBigInt && isStringTy(a) == isStringTy(b) &&
+		a.IsObject == b.IsObject && a.Float == b.Float && a.ClassName == b.ClassName
+}
+
+// emitShortCircuitValue is emitShortCircuit's -compat=js value-preserving form:
+// the result is the actual left or right operand value (type ty), not a bool,
+// with the right operand still evaluated only on the non-short-circuit path.
+func (e *Emitter) emitShortCircuitValue(ex *ast.BinaryExpression, ty Type) (Value, error) {
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, ty.IR, ty.Align()))
+
+	left, err := e.emitExpr(ex.Left)
+	if err != nil {
+		return Value{}, err
+	}
+	left = e.coerce(left, ty)
+	l := e.toBool(left)
+	// Result defaults to the left value; overwritten only when the right runs.
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, left.Ref, resPtr, ty.Align()))
+
+	rhsL := e.freshLabel("scv.rhs")
+	mergeL := e.freshLabel("scv.merge")
+	if ex.Op == "&&" {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", l.Ref, rhsL, mergeL))
+	} else {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", l.Ref, mergeL, rhsL))
+	}
+
+	e.emitLabel(rhsL)
+	right, err := e.emitExpr(ex.Right)
+	if err != nil {
+		return Value{}, err
+	}
+	right = e.coerce(right, ty)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, right.Ref, resPtr, ty.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, resPtr, ty.Align()))
+	return Value{Ref: result, Ty: ty}, nil
 }
 
 // emitConditional emits a ternary expression cond ? consequent : alternate.

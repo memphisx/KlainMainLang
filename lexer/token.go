@@ -6,6 +6,7 @@ type TokenType int
 
 const (
 	NUMBER TokenType = iota
+	BIGINT // integer literal with a trailing `n` suffix (123n) — TDD-00074
 	STRING
 	IDENT
 	PRIVATE_NAME // #foo — a class private field/method name (TDD-00021)
@@ -134,7 +135,7 @@ const (
 )
 
 var tokenNames = map[TokenType]string{
-	NUMBER: "NUMBER", STRING: "STRING", IDENT: "IDENT", PRIVATE_NAME: "PRIVATE_NAME",
+	NUMBER: "NUMBER", BIGINT: "BIGINT", STRING: "STRING", IDENT: "IDENT", PRIVATE_NAME: "PRIVATE_NAME",
 	LET: "let", CONST: "const", VAR: "var", FUNCTION: "function",
 	RETURN: "return", FOR: "for", WHILE: "while", IF: "if", ELSE: "else",
 	TRUE: "true", FALSE: "false", NULL: "null", UNDEFINED: "undefined",

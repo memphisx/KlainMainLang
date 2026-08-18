@@ -56,8 +56,13 @@ func buildBinary(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -71,6 +76,45 @@ func buildBinary(t *testing.T, src string) string {
 // vs. main.go). Skips (doesn't fail) if clang or the Boehm GC dev package
 // aren't available, so `go test ./...` stays green on a machine that hasn't
 // installed bdw-gc/libgc-dev.
+// appendBigIntBackend compiles+links the selected bigint backend C file into the
+// clang invocation when the program used bigint, mirroring main.go so the test
+// build and the real build can't drift (the same rationale ADR-00020 applies to
+// the gc path). Returns whether bigint was used, so a caller can Skip (not Fail)
+// when the backend library isn't installed on the machine.
+func appendBigIntBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) ([]string, bool) {
+	t.Helper()
+	if !em.UsesBigInt() {
+		return clangArgs, false
+	}
+	backend := em.BigIntBackend()
+	src, _ := llvm.BigIntBackendSource(backend)
+	biFile := filepath.Join(dir, "bigint.c")
+	if err := os.WriteFile(biFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write bigint backend: %v", err)
+	}
+	clangArgs = append(clangArgs, biFile)
+	cflags, libs := llvm.LocateBigInt(backend)
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	return clangArgs, true
+}
+
+// appendJSONParseTree compiles the JSON parse-tree C file (__kml_json_* ABI,
+// libc only) into the clang invocation when the program used JSON.parse/
+// Response.json(), mirroring main.go so the test build and the real build can't
+// drift (TDD-00077 Track P; same rationale as appendBigIntBackend).
+func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesJSONParse() {
+		return clangArgs
+	}
+	jsonFile := filepath.Join(dir, "jsontree.c")
+	if err := os.WriteFile(jsonFile, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {
+		t.Fatalf("write JSON parse-tree source: %v", err)
+	}
+	return append(clangArgs, jsonFile)
+}
+
 func buildBinaryGC(t *testing.T, src string) string {
 	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -111,6 +155,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -163,8 +208,13 @@ func buildBinaryImports(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -219,6 +269,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -352,6 +403,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -424,6 +476,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -505,8 +558,13 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -548,8 +606,13 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
@@ -621,11 +684,69 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
+}
+
+// buildBinaryCompatJS is buildBinary with -compat=js (TDD-00075), mirroring
+// main.go's em.SetCompatMode("js") — for the emitter-side compat inhabitants
+// such as bigint↔float comparison. (Global shadowing is resolver-side, so this
+// helper does not opt into permissive shadowing.)
+func buildBinaryCompatJS(t *testing.T, src string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	em := llvm.NewEmitter()
+	em.SetCompatMode("js")
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// assertOutputCompatJS compiles src under -compat=js, runs it, and compares
+// stdout line-by-line against want.
+func assertOutputCompatJS(t *testing.T, src, want string) {
+	t.Helper()
+	binFile := buildBinaryCompatJS(t, src)
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
 
 // compileAndRunRegexMode compiles src under a given `-regex` mode, runs it,

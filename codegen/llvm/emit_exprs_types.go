@@ -37,6 +37,11 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return e.emitDynamicToString(v)
 	}
+	if v.Ty.IsBigInt {
+		// String(10n) / `${10n}` render the bare digits, no `n` suffix (that
+		// suffix is console.log-only — see emit_call_console.go).
+		return e.emitBigIntToString(v, false)
+	}
 	if v.Ty.IsSymbol {
 		// V1 deliberately treats template-literal interpolation the same as
 		// .toString()/console.log (both format as "Symbol(desc)"); real JS
@@ -80,6 +85,24 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			return Value{Ref: result, Ty: TypePtr}, nil
 		}
 		return v, nil
+	}
+	if isInspectableObject(v.Ty) {
+		// A user-defined class `toString()` is honored in both modes — the
+		// developer chose it (matching real JS's ToString).
+		canon := e.canonicalizeClassTy(v.Ty)
+		if canon.IsClass {
+			if info, ok := e.classes[canon.ClassName]; ok {
+				if _, has := info.MethodSigs["toString"]; has {
+					return e.emitClassCall(canon, Value{Ref: v.Ref, Ty: canon}, "toString", nil, ast.Pos{}, false)
+				}
+			}
+		}
+		// No user toString(): -compat=js gives JS's primitive `[object Object]`;
+		// -compat=strict (default) gives the useful util.inspect view.
+		if e.compatJS() {
+			return Value{Ref: e.internString("[object Object]"), Ty: TypePtr}, nil
+		}
+		return e.emitInspectObject(v, 0)
 	}
 	e.ensureSprintf()
 	e.ensureMalloc()
@@ -244,6 +267,9 @@ func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
+		if ex.IsBigInt {
+			return BigIntType()
+		}
 		if strings.ContainsRune(ex.Value, '.') {
 			return TypeF64
 		}
@@ -304,6 +330,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return *objTy.ElemType
 		}
 	case *ast.BinaryExpression:
+		// A bigint operand makes an arithmetic/bitwise result a bigint (a
+		// comparison stays a bool) — so `const x = 2n ** 53n + 1n` types as
+		// bigint, not the i64/string the generic cases below would infer.
+		if e.inferExprType(ex.Left).IsBigInt || e.inferExprType(ex.Right).IsBigInt {
+			switch ex.Op {
+			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
+				return TypeBool
+			default:
+				return BigIntType()
+			}
+		}
 		switch ex.Op {
 		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof", "in":
 			return TypeBool
@@ -1268,6 +1305,18 @@ func isPlainStringTy(ty Type) bool {
 func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IR == "i1" {
 		return v
+	}
+	if v.Ty.IsBigInt {
+		// 0n is falsy, every other bigint truthy — a bigint handle is never
+		// null, so the generic ptr!=null path below would wrongly call 0n truthy.
+		e.ensureBigInt()
+		zero := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 0)", zero))
+		cmpReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp(ptr %s, ptr %s)", cmpReg, v.Ref, zero))
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", reg, cmpReg))
+		return Value{Ref: reg, Ty: TypeBool}
 	}
 	if v.Ty.IsArray {
 		if !v.Ty.Nullable {

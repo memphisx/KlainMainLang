@@ -57,28 +57,34 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals             strings.Builder // global declarations (string constants, printf decl, …)
-	functions           strings.Builder // emitted user-defined function bodies
-	allocas             strings.Builder // alloca instructions for the current function
-	body                strings.Builder // body instructions for the current function
-	scopes              []scope
-	regCtr              int
-	labelCtr            int
-	strConsts           map[string]string // Go string value → @.s<n> name
-	strIdx              int
-	linkLibs            map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
-	memMode             string          // "" (== "manual", the default) or "gc" — see SetMemMode
-	regexMode           string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
-	usedPrintf          bool
-	usedDprintf         bool
-	usedMalloc          bool
-	usedCalloc          bool
-	usedRealloc         bool
-	usedMemmove         bool
-	funcs               map[string]FuncSig            // registered function signatures
-	interfaces          map[string]Type               // named interface, type alias, and class registry
-	interfaceMethodSigs map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
-	classes             map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
+	globals               strings.Builder // global declarations (string constants, printf decl, …)
+	functions             strings.Builder // emitted user-defined function bodies
+	allocas               strings.Builder // alloca instructions for the current function
+	body                  strings.Builder // body instructions for the current function
+	scopes                []scope
+	regCtr                int
+	labelCtr              int
+	strConsts             map[string]string // Go string value → @.s<n> name
+	strIdx                int
+	linkLibs              map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
+	memMode               string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
+	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
+	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
+	usesBigInt            bool            // set the first time any bigint operation is emitted (drives backend compile+link in main.go)
+	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
+	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
+	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
+	usedPrintf            bool
+	usedDprintf           bool
+	usedMalloc            bool
+	usedCalloc            bool
+	usedRealloc           bool
+	usedMemmove           bool
+	funcs                 map[string]FuncSig            // registered function signatures
+	interfaces            map[string]Type               // named interface, type alias, and class registry
+	interfaceMethodSigs   map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
+	classes               map[string]ClassInfo          // named class registry (fields/ctor/methods) — see emit_classes.go
 	// genericFuncs/genericInterfaces/genericClasses hold the raw declaration
 	// for every `<T>`-parameterized function/interface/class (TDD-00010 V1),
 	// keyed by its bare source name — deliberately *not* also entered into
@@ -121,30 +127,33 @@ type Emitter struct {
 	// visible throughout its own enclosing body (hoisted, self-recursive,
 	// visible to its own further-nested descendants) without ever being
 	// entered into the flat, whole-program e.funcs map.
-	nestedFuncScopes         []nestedFuncScope
-	nestedFuncCtr            int
-	usedStrlen               bool
-	usedMemcpy               bool
-	usedMemset               bool
-	usedStrcmp               bool
-	usedSprintf              bool
-	usedStrstr               bool
-	usedStrncmp              bool
-	usedStringTrim           bool
-	usedStringTrimStart      bool
-	usedStringTrimEnd        bool
-	usedStringToUpper        bool
-	usedStringToLower        bool
-	usedStringReplace        bool
-	usedStringReplaceAll     bool
-	usedStringSplit          bool
-	usedAtoll                bool
-	usedIPow                 bool
-	usedJSONStringifyNum     bool
-	usedJSONStringifyStr     bool
-	usedJSONParseStr         bool
-	usedJSONFindValue        bool
-	usedJSONParseFieldStr    bool
+	nestedFuncScopes     []nestedFuncScope
+	nestedFuncCtr        int
+	usedStrlen           bool
+	usedMemcpy           bool
+	usedMemset           bool
+	usedStrcmp           bool
+	usedSprintf          bool
+	usedStrstr           bool
+	usedStrncmp          bool
+	usedStringTrim       bool
+	usedStringTrimStart  bool
+	usedStringTrimEnd    bool
+	usedStringToUpper    bool
+	usedStringToLower    bool
+	usedStringReplace    bool
+	usedStringReplaceAll bool
+	usedStringSplit      bool
+	usedAtoll            bool
+	usedIPow             bool
+	usedJSONStringifyNum bool
+	usedJSONStringifyStr bool
+	// jsonToJSONActive guards JSON.stringify's toJSON() dispatch against a
+	// class whose toJSON() returns its own (or a mutually-referencing) type,
+	// which would recurse forever at compile time (cf. ADR-00221). A class
+	// name present here is mid-serialization; re-entry serializes it as a
+	// plain object instead of re-dispatching toJSON.
+	jsonToJSONActive         map[string]bool
 	usedAnyEq                bool
 	usedClockGettime         bool
 	usedDateNow              bool
@@ -351,6 +360,7 @@ func NewEmitter() *Emitter {
 		interfaceMethodSigs: make(map[string]map[string]FuncSig),
 		classes:             make(map[string]ClassInfo),
 		enums:               make(map[string]map[string]Value),
+		jsonToJSONActive:    make(map[string]bool),
 		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
 		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
 		genericClasses:      make(map[string]*ast.ClassDeclaration),
@@ -380,6 +390,33 @@ func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
 // sites (tests) keep the default without threading a mode through.
 func (e *Emitter) SetRegexMode(mode string) { e.regexMode = mode }
 
+// SetBigIntBackend selects the compile-wide bigint backend library (TDD-00074),
+// called by main.go from the -bigint flag. "" resolves to the default,
+// libtommath (public domain); "gmp" opts into GMP.
+func (e *Emitter) SetBigIntBackend(mode string) { e.bigintBackend = mode }
+
+// BigIntBackend returns the resolved backend name ("" → the libtommath default).
+func (e *Emitter) BigIntBackend() string {
+	if e.bigintBackend == "" {
+		return "libtommath"
+	}
+	return e.bigintBackend
+}
+
+// UsesBigInt reports whether the emitted program actually used bigint, so
+// main.go only compiles+links a backend for programs that need one.
+func (e *Emitter) UsesBigInt() bool { return e.usesBigInt }
+
+// SetCompatMode selects the whole-program compatibility axis (TDD-00075):
+// "" / "strict" (default — the compiler's opinionated, safer-than-JS
+// semantics) or "js" (best-effort JS-faithful). Governs behaviors with a
+// genuine strict-vs-JS tradeoff; global-shadowing (the old -globals flag) is
+// handled resolver-side, so this drives the emitter-side inhabitants.
+func (e *Emitter) SetCompatMode(mode string) { e.compatMode = mode }
+
+// compatJS reports whether JS-faithful compatibility mode is active.
+func (e *Emitter) compatJS() bool { return e.compatMode == "js" }
+
 // resolveRegexMode maps the raw flag (including "" for unset) to the
 // concrete mode actually used for codegen. The default resolves to the
 // highest ES stage implemented so far — "ecmascript" as of Option C
@@ -404,6 +441,35 @@ func (e *Emitter) define(name string, sym Symbol) {
 	e.scopes[len(e.scopes)-1].syms[name] = sym
 }
 
+// promoteVarToFuncScope moves a just-defined `var` binding from the innermost
+// (block) scope up to the enclosing function's own scope (scopes[0]) — the
+// function-scoping half of JS `var` semantics: a `var` declared inside a
+// block, loop, or `if` body stays visible after that block exits, unlike a
+// block-scoped `let`/`const`. Every function-like body resets e.scopes to a
+// single fresh frame (emit_func.go), so scopes[0] is always the current
+// function boundary and popScope only ever tears down block scopes; moving the
+// binding down to scopes[0] therefore survives every intervening popScope.
+// The binding is moved (not copied) so it has a single home, keeping
+// updateSymbolInPlace (closure-capture boxing) correct. A `var` declared
+// directly at function scope (len(scopes)==1) needs no move.
+//
+// This is deliberately promotion-at-declaration, not full hoisting: the
+// binding becomes visible from its declaration onward, not before it. A read
+// strictly before the declaration still fails as an undefined variable rather
+// than yielding `undefined` (typed `var`) — matching the TypeScript
+// definite-assignment view rather than sloppy-JS hoist-to-undefined. See
+// ADR-00210 / TDD-00070.
+func (e *Emitter) promoteVarToFuncScope(name string) {
+	if len(e.scopes) <= 1 {
+		return
+	}
+	inner := len(e.scopes) - 1
+	if sym, ok := e.scopes[inner].syms[name]; ok {
+		delete(e.scopes[inner].syms, name)
+		e.scopes[0].syms[name] = sym
+	}
+}
+
 func (e *Emitter) lookup(name string) (Symbol, bool) {
 	for i := len(e.scopes) - 1; i >= 0; i-- {
 		if s, ok := e.scopes[i].syms[name]; ok {
@@ -419,7 +485,7 @@ func (e *Emitter) lookup(name string) (Symbol, bool) {
 // before falling back to that name's built-in meaning, the same
 // lookup-first-then-fallback pattern this file's identifier-evaluation path
 // already used for NaN/Infinity before TDD-00050 generalized it. Only ever
-// true under `-globals=permissive`: `-globals=strict` (the default)
+// true under `-compat=js`: `-compat=strict` (the default)
 // structurally guarantees no such binding can exist, since the resolver
 // rejects the declaration outright — so this check is a provably-safe
 // no-op in strict-mode builds, not a runtime mode switch of its own.
@@ -700,6 +766,14 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 
 	// Pass -1: register enums so members are available as constants everywhere.
 	e.registerEnums(prog)
+
+	// Pass -0.5: register a name-only placeholder type for every non-generic
+	// class BEFORE interfaces resolve their fields, so an interface/type-alias
+	// field typed as a class (`interface W { p: Point }`) resolves to the class's
+	// ptr type rather than the i64 unknown-name default (which silently
+	// mis-stored the instance pointer). The full class type is filled in by
+	// registerClasses below; field access canonicalizes the placeholder to it.
+	e.registerClassNamePlaceholders(prog)
 
 	// Pass 0: register interfaces and type aliases so they're available to function signatures.
 	e.registerInterfaces(prog)

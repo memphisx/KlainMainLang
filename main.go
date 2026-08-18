@@ -17,12 +17,19 @@ func main() {
 	output := flag.String("o", "", "output binary name (default: input name without extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management mode: manual (default, Memory.free(x) only) or gc (Boehm GC — see docs/tdd/TDD-00001.md)")
-	globals := flag.String("globals", "strict", "ambient built-in global names (Math/JSON/console/process/fetch/...): strict (default, a colliding declaration is a compile error) or permissive (real JS/browser shadowing — see docs/tdd/TDD-00050.md). Constructor-style built-ins (Map/Date/RegExp/...) stay reserved either way")
-	regex := flag.String("regex", "", "RegExp dialect (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus the Option C source-normalization pass — exact `.` line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
+	compat := flag.String("compat", "strict", "compatibility mode (see docs/tdd/TDD-00075.md): strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing). Governs the strict-vs-JS behaviors that used to live behind -globals")
+	regex := flag.String("regex", "", "RegExp `dialect` (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus the Option C source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
+	bigint := flag.String("bigint", "libtommath", "bigint backend library (see docs/tdd/TDD-00074.md), linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: klainmain [flags] <file.ts>")
+		fmt.Fprintln(os.Stderr, "\nCompiles a TypeScript file to a native binary (TypeScript → LLVM IR → clang).")
+		fmt.Fprintln(os.Stderr, "\nFlags:")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: klainmain [flags] <file.ts>")
+		flag.Usage()
 		os.Exit(1)
 	}
 
@@ -39,11 +46,11 @@ func main() {
 		fatal("unrecognized -mm value %q — must be one of: manual, gc (auto is scoped but not implemented yet, see docs/tdd/TDD-00001.md)", *mm)
 	}
 
-	switch *globals {
-	case "strict", "permissive":
+	switch *compat {
+	case "strict", "js":
 		// ok
 	default:
-		fatal("unrecognized -globals value %q — must be one of: strict, permissive (see docs/tdd/TDD-00050.md)", *globals)
+		fatal("unrecognized -compat value %q — must be one of: strict (default), js (see docs/tdd/TDD-00075.md)", *compat)
 	}
 
 	switch *regex {
@@ -53,8 +60,15 @@ func main() {
 		fatal("unrecognized -regex value %q — must be one of: ecmascript, es-unicode (default), es-utf16, es-ascii, pcre (see docs/tdd/TDD-00067.md)", *regex)
 	}
 
+	switch *bigint {
+	case "libtommath", "gmp":
+		// ok
+	default:
+		fatal("unrecognized -bigint value %q — must be one of: libtommath (default), gmp (see docs/tdd/TDD-00074.md)", *bigint)
+	}
+
 	inFile := flag.Arg(0)
-	prog, err := resolver.ResolveProgramWithOptions(inFile, *globals == "permissive")
+	prog, err := resolver.ResolveProgramWithOptions(inFile, *compat == "js")
 	if err != nil {
 		fatal("parse error: %v", err)
 	}
@@ -62,6 +76,8 @@ func main() {
 	em := llvm.NewEmitter()
 	em.SetMemMode(*mm)
 	em.SetRegexMode(*regex)
+	em.SetBigIntBackend(*bigint)
+	em.SetCompatMode(*compat)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		fatal("codegen error: %v", err)
@@ -105,6 +121,35 @@ func main() {
 	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	// bigint: compile the selected backend's C file (which implements the
+	// __kml_bigint_* ABI) alongside the program and link its library — only when
+	// the program actually used bigint. Same shape as the -mm=gc shim above.
+	if em.UsesBigInt() {
+		backend := em.BigIntBackend()
+		src, ok := llvm.BigIntBackendSource(backend)
+		if !ok {
+			fatal("bigint: unknown backend %q", backend)
+		}
+		biPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".bigint.c"
+		if err := os.WriteFile(biPath, []byte(src), 0644); err != nil {
+			fatal("cannot write bigint backend source: %v", err)
+		}
+		clangArgs = append(clangArgs, biPath)
+		cflags, libs := llvm.LocateBigInt(backend)
+		clangArgs = append(clangArgs, cflags...)
+		clangArgs = append(clangArgs, libs...)
+	}
+	// JSON parse-tree (TDD-00077 Track P): compile the self-contained JSON
+	// parser (implementing the __kml_json_* ABI, libc only) alongside the program
+	// — only when it uses JSON.parse/Response.json(). Same shape as bigint above,
+	// minus any external library to link.
+	if em.UsesJSONParse() {
+		jsonPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".jsontree.c"
+		if err := os.WriteFile(jsonPath, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {
+			fatal("cannot write JSON parse-tree source: %v", err)
+		}
+		clangArgs = append(clangArgs, jsonPath)
 	}
 	cmd := exec.Command("clang", clangArgs...)
 	cmd.Stdout = os.Stdout

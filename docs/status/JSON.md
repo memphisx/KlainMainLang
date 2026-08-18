@@ -2,32 +2,24 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: ~82% (9/11).
+**Coverage**: 13/15 (~87%) · **Strict Coverage**: 10/15 (~67%).
 
-**Strict Coverage**: 7/11, ~64% — a row only counts here if it was independently repro-verified with zero known caveats or bugs, of any severity. See the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)) that produced this number and the new caveat above.
+This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
 
-**Caveats**:
-
-- `JSON.parse(s)` into an object with *nested* object fields is a clean compile error — only flat objects with primitive fields work. Scoped in [TDD-00015](../tdd/TDD-00015.md).
-- `JSON.stringify` on a mixed-type array isn't supported (array literals are uniform-type only).
-- See Known Limitations below for a related, sharper-edged parse gap.
-
-| Feature | Status |
-|---|---|
-| `JSON.stringify(number)` | ✅ |
-| `JSON.stringify(string)` | ✅ |
-| `JSON.stringify(number[])` | ✅ |
-| `JSON.stringify(string[])` | ✅ |
-| `JSON.stringify(object)` | ✅ |
-| `JSON.stringify(boolean[])` | ✅ |
-| `JSON.stringify(object[])` | ✅ |
-| `JSON.parse(s)` → number | ✅ (into a plain, default-`i64` `number` variable only — parsing into a `/** @type {float64} */`/`float32`-annotated `number` fails to *compile*: `emitJSONParseValue` special-cases only `IsObject` and the plain-`i64` case, so a float target falls through to the generic branch, which returns a `ptr`-typed value that gets `store`d into the `double`/`float`-typed alloca the annotation allocated — a hard `clang` type-mismatch error. Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md).) |
-| `JSON.parse(s)` → object | ✅ (flat objects, primitive fields only — nested object fields give a clean compile error; see [ADR-00007](../adr/ADR-00007.md)) — a missing *string* field's default was fixed from a crash-causing `null` to an empty string; see [ADR-00024](../adr/ADR-00024.md) |
-| `JSON.parse(s)` → object with *nested* object fields | ❌ (clean compile error today, not silent corruption — see [ADR-00007](../adr/ADR-00007.md); design scoped in [TDD-00015](../tdd/TDD-00015.md)) |
-| `JSON.stringify(mixedTypeArray)` | ❌ (array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against) |
-
-## Known Limitations
-
-| Limitation | Notes |
-|---|---|
-| `JSON.parse` into an array-typed interface field is not yet parsed — a clean compile-time rejection | `interface Bag { tags: string[] }; const b: Bag = JSON.parse('{"tags":["a","b"]}')` now raises `JSON.parse into an array-typed field ('tags') is not yet supported`, the same clean rejection nested-object fields already get, rather than the invalid LLVM IR it produced before ([ADR-00189](../adr/ADR-00189.md) added the missing `f.Ty.IsArray` branch to `emitJSONParseObject`'s upfront rejection loop). Actually parsing a JSON array into the field stays out of scope, alongside nested-object fields ([TDD-00015](../tdd/TDD-00015.md)). |
+| Feature | Status | Caveats | Notes |
+|---|---|---|---|
+| `JSON.stringify(number)` | ✅ | | |
+| `JSON.stringify(string)` | ✅ | | |
+| `JSON.stringify(number[])` | ✅ | | |
+| `JSON.stringify(string[])` | ✅ | | |
+| `JSON.stringify(object)` | ✅ | | |
+| `JSON.stringify(boolean[])` | ✅ | | |
+| `JSON.stringify(object[])` | ✅ | | |
+| `JSON.stringify(value, null, space)` (pretty-printing) | ✅ | • `space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error ([ADR-00222](../adr/ADR-00222.md))<br>• The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored | • A `jsonIndent{unit,depth}` threaded through the serializer; empty containers stay inline (`{}`/`[]`), an array's empty-vs-non-empty close is a runtime `select` on its length ([TDD-00077](../tdd/TDD-00077.md) Track S) |
+| `JSON.stringify` honors a class `toJSON()` | ✅ | | • A class with a `toJSON()` method serializes its result instead of its own fields, matching JS — same override dispatch as `toString()`. A `toJSON()` returning its own type is bounded against compile-time infinite recursion (cf. [ADR-00221](../adr/ADR-00221.md)). `Date` keeps its own `toISOString`-based path rather than being unified ([ADR-00222](../adr/ADR-00222.md)) |
+| `JSON.stringify(mixedTypeArray)` | ❌ | | • Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against |
+| `JSON.parse(s)` → number | ✅ | | • Integer via `atoll`, float (incl. a `/** @type {float64} */`/`float32` variable) via `strtod` on the node's raw lexeme — the float-variable compile failure the 2026-08-11 audit found ([ADR-00166](../adr/ADR-00166.md)) is fixed by P3's type-directed projection ([ADR-00224](../adr/ADR-00224.md)) |
+| `JSON.parse(s)` → object (nested objects, array & object-array fields) | ✅ | | • P3 type-directed projection off the parse tree ([TDD-00077](../tdd/TDD-00077.md)/[ADR-00224](../adr/ADR-00224.md)): nested objects, array-typed fields, and object-array fields (`Item[]`) all project through one path, superseding the old flat-only extractor ([ADR-00007](../adr/ADR-00007.md)) and the array-field rejection ([ADR-00189](../adr/ADR-00189.md)). A nullable-scalar field keeps its null-vs-value boxing; a missing field falls back to its type's default |
+| `JSON.parse(s)` → top-level `T[]` (incl. object & nested arrays) | ✅ | • Only in a type-annotated position (`const xs: T[] = …`, or a field) — a bare reassignment `xs = JSON.parse(...)` has no target type to project against and isn't supported | • Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md)) |
+| `JSON.parse(s)` validates input (throws `SyntaxError` on malformed JSON) | ✅ | • The `SyntaxError` message is position-based (`Unexpected token in JSON at position N`), not Node/V8's exact per-token wording | • P1 of the parse rewrite ([TDD-00077](../tdd/TDD-00077.md)/[ADR-00223](../adr/ADR-00223.md)): a real recursive-descent parser (embedded C, `__kml_json_*` ABI) builds+validates a tagged value tree. Strict JSON (double quotes, no trailing commas/leading zeros/trailing junk), `\uXXXX`+surrogate decoding, a 512-deep runtime depth guard on untrusted input. `Response.json()` inherits it |
+| `JSON.parse(s)` → `any`/`unknown` (dynamic shape) | ❌ | | • Needs the tree kept as a dynamic value — [TDD-00077](../tdd/TDD-00077.md) Track P P4, coupled to the dynamic object model ([TDD-00068](../tdd/TDD-00068.md)) |

@@ -38,6 +38,43 @@ interface Point { x: number; y: number }
 const points: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }]
 console.log(JSON.stringify(points))  // [{"x":1,"y":2},{"x":3,"y":4}]
 
+// ── stringify pretty-printed (the `space` argument) ───────────────────────────
+interface Addr { city: string; zip: number }
+interface User { name: string; active: boolean; addr: Addr; tags: string[] }
+const user: User = { name: 'bob', active: true, addr: { city: 'Thessaloniki', zip: 54600 }, tags: ['a', 'b'] }
+
+// A numeric space indents with N spaces and puts a space after each colon.
+console.log(JSON.stringify(user, null, 2))
+// {
+//   "name": "bob",
+//   "active": true,
+//   "addr": {
+//     "city": "Thessaloniki",
+//     "zip": 54600
+//   },
+//   "tags": [
+//     "a",
+//     "b"
+//   ]
+// }
+
+// A string space is used literally as the indent unit (here a tab).
+console.log(JSON.stringify({ x: 1, y: [1, 2] }, null, '\t'))
+
+// Empty containers stay inline even when pretty-printing.
+console.log(JSON.stringify({ e: {}, arr: [] }, null, 2))  // { "e": {}, "arr": [] } across lines
+
+// ── stringify with a custom toJSON() ──────────────────────────────────────────
+// If a class defines toJSON(), JSON.stringify serializes its result instead of
+// the object's own fields — exactly as in real JS.
+class Money {
+  amount: number = 42
+  currency: string = 'EUR'
+  toJSON(): string { return this.amount + this.currency }
+}
+console.log(JSON.stringify(new Money()))              // "42EUR"
+console.log(JSON.stringify({ price: new Money() }))   // {"price":"42EUR"}
+
 // ── parse number ──────────────────────────────────────────────────────────────
 const parsed: number = JSON.parse('123')
 console.log(parsed)                  // 123
@@ -46,8 +83,16 @@ const neg2: number = JSON.parse('-99')
 console.log(neg2)                    // -99
 
 // ── parse string ──────────────────────────────────────────────────────────────
-const str: string = JSON.parse("'world'")
+const str: string = JSON.parse('"world"')
 console.log(str)                     // world
+
+// ── malformed JSON throws a catchable SyntaxError (strict, like real JS) ───────
+try {
+  const bad: number = JSON.parse("{oops}")
+  console.log(bad)
+} catch (e) {
+  console.log(e.name)                // SyntaxError
+}
 
 // ── round-trip ────────────────────────────────────────────────────────────────
 const orig: number = 999
@@ -78,3 +123,15 @@ interface Pair { a: number; b: number }
 const pair: Pair = JSON.parse('{"a":5}')
 console.log(pair.a)                 // 5
 console.log(pair.b)                 // 0
+
+// ── parse nested objects, array fields, and top-level arrays ──────────────────
+// (Addr is declared above, in the pretty-printing section.)
+interface Member { name: string; addr: Addr; tags: string[] }
+const m: Member = JSON.parse('{"name":"Nikos","addr":{"city":"Thessaloniki","zip":54600},"tags":["admin","dev"]}')
+console.log(m.addr.city)            // Thessaloniki  (nested object field)
+console.log(m.tags[1])              // dev           (array-typed field)
+
+// a top-level array of objects
+const members: Member[] = JSON.parse('[{"name":"A","addr":{"city":"X","zip":1},"tags":[]},{"name":"B","addr":{"city":"Y","zip":2},"tags":["x"]}]')
+console.log(members.length)         // 2
+console.log(members[1].addr.city)  // Y

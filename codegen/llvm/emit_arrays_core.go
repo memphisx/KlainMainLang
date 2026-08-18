@@ -55,6 +55,22 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		return e.storeArrayAggregateInto(val, ptrName, lenName)
 	}
 
+	// JSON.parse into an array type (`const xs: T[] = JSON.parse(...)`): pass the
+	// array type through so projection builds a T[] aggregate (TDD-00077 P3),
+	// mirroring the scalar/object var-decl's own JSON.parse type-context branch.
+	// The generic emitExpr path below calls JSON.parse with no type context.
+	if ce, ok := v.Init.(*ast.CallExpression); ok {
+		if mem, ok2 := ce.Callee.(*ast.MemberExpression); ok2 {
+			if id, ok3 := mem.Object.(*ast.Identifier); ok3 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
+				val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
+				if err != nil {
+					return err
+				}
+				return e.storeArrayAggregateInto(val, ptrName, lenName)
+			}
+		}
+	}
+
 	// Any other expression that produces a {ptr, i64} array aggregate — a
 	// function call, an index expression (e.g. groupMap["key"]), a Map/Set
 	// method result, etc.

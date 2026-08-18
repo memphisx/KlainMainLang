@@ -383,6 +383,10 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			if err := l.readDigitRun(&buf, isHexDigit, line, col); err != nil {
 				return Token{}, err
 			}
+			if l.peek() == 'n' {
+				l.advance()
+				return l.tok(BIGINT, buf.String(), line, col), nil
+			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		case 'b', 'B':
 			buf.WriteRune(l.advance()) // '0'
@@ -390,12 +394,20 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			if err := l.readDigitRun(&buf, isBinDigit, line, col); err != nil {
 				return Token{}, err
 			}
+			if l.peek() == 'n' {
+				l.advance()
+				return l.tok(BIGINT, buf.String(), line, col), nil
+			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		case 'o', 'O':
 			buf.WriteRune(l.advance()) // '0'
 			buf.WriteRune(l.advance()) // 'o'
 			if err := l.readDigitRun(&buf, isOctDigit, line, col); err != nil {
 				return Token{}, err
+			}
+			if l.peek() == 'n' {
+				l.advance()
+				return l.tok(BIGINT, buf.String(), line, col), nil
 			}
 			return l.tok(NUMBER, buf.String(), line, col), nil
 		}
@@ -435,6 +447,16 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 		} else {
 			break
 		}
+	}
+	if l.peek() == 'n' {
+		if hasDot {
+			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot contain a decimal point", line, col)
+		}
+		if legacyLeadingZero {
+			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot use a legacy-octal / non-octal-decimal form", line, col)
+		}
+		l.advance() // consume the 'n' suffix
+		return l.tok(BIGINT, buf.String(), line, col), nil
 	}
 	return l.tok(NUMBER, buf.String(), line, col), nil
 }
@@ -602,7 +624,7 @@ func hexDigitVal(c rune) (int, bool) {
 // parser-level context back into the lexer, a much bigger change than this
 // feature justifies.
 var regexIllegalAfter = map[TokenType]bool{
-	IDENT: true, NUMBER: true, STRING: true, PRIVATE_NAME: true,
+	IDENT: true, NUMBER: true, BIGINT: true, STRING: true, PRIVATE_NAME: true,
 	TEMPLATE_NO_SUB: true, TEMPLATE_TAIL: true,
 	TRUE: true, FALSE: true, NULL: true, UNDEFINED: true,
 	THIS: true, SUPER: true,

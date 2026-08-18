@@ -113,11 +113,13 @@ console.log(p.b)
 // other string operation in this compiler assumes a `string` value is never
 // null) — found while investigating an unrelated, real-world crash in the
 // fetch example against a degraded (non-JSON, 503-page) response body.
-// Fixed to default to an empty string instead.
+// Fixed to default to an empty string instead. (That non-JSON body itself now
+// throws a SyntaxError under P1's validation — TDD-00077/ADR-00223 — so this
+// exercises the missing-field default with a valid object that lacks the key.)
 func TestE2EJSONParseObjectMissingStringField(t *testing.T) {
 	assertOutput(t, `
 interface Ip { origin: string }
-const p: Ip = JSON.parse('<html>503 Service Unavailable</html>')
+const p: Ip = JSON.parse('{"other":"x"}')
 console.log("[" + p.origin + "]")
 console.log(p.origin.length)
 `, "[]\n0")

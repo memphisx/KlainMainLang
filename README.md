@@ -10,7 +10,14 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/README.md)**: a feature-by-feature matrix, one page per feature area, with coverage percentages kept current as things ship — trust it over any claim here if the two ever disagree. It also has a "Fidelity Gaps" section for features marked done that still have real, non-cosmetic differences from actual JS/TS behavior worth knowing before you rely on them.
 
-Broad strokes: core TypeScript language features (control flow, operators, closures, classes — including inheritance, `static`/`private`/`protected`/`abstract`/`implements`, getters/setters — generics, enums, interfaces) are mostly there; Node.js-style APIs (`fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`) are substantial; WHATWG Web Platform APIs (`fetch`, `URL`, `WebSocket`, `ArrayBuffer`/TypedArrays) are a mixed bag. The compiler also fuzzes itself (lexer, parser, and the full parse-through-binary pipeline) via `make fuzz`/`make fuzz-codegen`/`make fuzz-all`.
+Broad strokes:
+
+- **Core TypeScript — solid.** Control flow, operators, closures, full classes (inheritance, access modifiers, getters/setters), generics, enums, interfaces, destructuring, generators, tuples, unions, `bigint`, `RegExp`.
+- **Node.js APIs — substantial.** `fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`.
+- **Web Platform APIs — a mixed bag.** `fetch`, `URL`, `WebSocket`, `ArrayBuffer`/TypedArrays are in; plenty around them isn't.
+- **Gaps you'll trip over first.** Async is mostly synchronous under the hood except `await fetch`; no `Proxy` or dynamic property bags, by design.
+
+Oh, and it fuzzes itself — lexer, parser, and the whole parse-to-binary pipeline (`make fuzz` / `fuzz-codegen` / `fuzz-all`).
 
 Every feature and bug fix comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Both indexes are cross-linked from `docs/status/` wherever relevant, rather than repeated here.
 
@@ -25,6 +32,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - `libcurl`, needed if the compiled program calls `fetch` **or** `http.listen` — the HTTP server's event loop links libcurl unconditionally so it can merge `fetch`'s non-blocking transfers into the same `select()` loop, even in a server that never calls `fetch` itself. Every other program stays plain-libc, no extra install needed
 - `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
 - `libpcre2-8`/`libpcre2-dev`, needed if the compiled program uses `RegExp` (either `new RegExp(...)` or a `/pattern/flags` literal) — `apt-get install libpcre2-dev` on Debian/Ubuntu, `brew install pcre2` on macOS, `apk add pcre2-dev` on Alpine. Same conditional-linking convention as `libcurl`: every other program stays plain-libc. See [docs/status/REGEXP.md](docs/status/REGEXP.md)
+- a bigint backend library, needed only if the compiled program uses `bigint` — `libtommath` by default (`brew install libtommath` / `apt-get install libtommath-dev` / `apk add libtommath-dev`), or GMP with `-bigint=gmp` (`brew install gmp` / `apt-get install libgmp-dev`). Same conditional-linking convention: a program without bigint stays plain-libc. See [docs/tdd/TDD-00074.md](docs/tdd/TDD-00074.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
@@ -97,29 +105,32 @@ klainmain [flags] <file.ts>
                 needs bdw-gc/libgc installed — see Requirements above).
                 Works identically on Linux and macOS, no special linker
                 flags needed either way.
+  -bigint <lib> BigInt backend library, linked only when a program uses
+                bigint: libtommath (default, public domain) or gmp (LGPL,
+                faster). Both give identical arbitrary-precision semantics —
+                the flag only trades license/speed. See docs/tdd/TDD-00074.md.
+  -compat <m>   Compatibility mode (see docs/tdd/TDD-00075.md): strict
+                (default — the compiler's opinionated, safer-than-JS
+                semantics; e.g. a declaration colliding with an ambient
+                built-in like Math/fetch is a compile error) or js (best-
+                effort JS-faithful — e.g. real-JS/browser global shadowing).
+                Constructor-style Map/Date/RegExp stay reserved either way.
+  -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
+                es-ascii / pcre. See docs/tdd/TDD-00067.md.
 ```
 
-Every other compiled binary here is dynamically linked (against libSystem on
-macOS, glibc on Linux, plus `libcurl` if the program calls `fetch` or
-`http.listen`, plus `libpcre2-8` if it uses `RegExp`), closer
-to typical C/C++ toolchain output than a normal Go binary's usual
-self-contained default. `--static` closes that gap on Linux, verified
-end-to-end against real Docker builds: see `docker/Dockerfile` for a plain
-example, `docker/Dockerfile.fetch-test` for one using `fetch`, and
-`docker/Dockerfile.regexp-test` for one using `RegExp`.
-A `fetch`-using program needs curl's *entire* static dependency chain listed
-explicitly at link time (static archives don't auto-pull their own
-dependencies the way shared libraries do), and (on Alpine/musl, at least)
-a two-step `clang`-then-`gcc` link rather than a single `clang` invocation,
-since some of Alpine's static archives are LTO-built in a format clang's
-linker can't consume but gcc's can. See `docs/adr/README.md` for the full
-recipe and investigation; this compiler doesn't attempt to automate it
-itself, since the exact package list/workaround is specific to one distro's
-build choices, not a portable fact this compiler could bake in safely.
-`RegExp`'s `libpcre2-8` has none of that complexity — no TLS backend, no
-transitive dependency chain — so `--static` just works for it with zero
-extra flags, on both a bare Linux build and inside `Dockerfile.regexp-test`'s
-`scratch` container.
+Run `klainmain` with no file (or `klainmain --help`) to print this list with
+the full per-flag descriptions.
+
+Every other compiled binary is dynamically linked (libSystem on macOS, glibc
+on Linux, plus `libcurl` for `fetch`/`http.listen` and `libpcre2-8` for
+`RegExp`) — closer to typical C/C++ toolchain output than a self-contained Go
+binary. `--static` closes that gap on Linux, verified end-to-end in real
+`scratch` Docker builds (`docker/Dockerfile*`). One caveat: a `fetch`-using
+static binary needs curl's *entire* dependency chain spelled out at link time,
+plus a `clang`-then-`gcc` two-step on Alpine/musl — too distro-specific to
+safely automate, so the full recipe lives in `docs/adr/` rather than in the
+compiler. `RegExp`'s pcre2 has none of that drama and just links statically.
 
 ## Test262 conformance
 
@@ -138,56 +149,18 @@ Both targets are safe to re-run on a fresh machine (a new dev machine, after `gi
 Lexer → Parser (recursive descent, Pratt precedence climbing) → Module resolver → LLVM IR emitter → clang -O2 → a binary that runs on your machine, unsupervised
 ```
 
-`import`/`export` exist, but don't expect a real linker anywhere in there. The module resolver parses every file your entry file imports, merges them all into one AST, and hands *that* to the emitter. One `.ll`, one `clang` call, one generated `main()` either way. Imported files may only contain declarations (functions, types, that sort of thing): no top-level side effects yet. Only the file you actually pointed the compiler at gets to have opinions at runtime.
+`import`/`export` exist, but don't expect a real linker anywhere in there. The module resolver parses every file your entry file imports, merges them all into one AST, and hands *that* to the emitter — one `.ll`, one `clang` call, one generated `main()`. An imported file's top-level code now actually runs (once, in dependency order, before whatever imported it); only files tangled up in an import *cycle* are still held to declarations-only, on the theory that circular modules reading each other's half-built state is a horror best left to languages with therapists on staff.
 
 ## Project layout
 
 ```
 ast/                AST node definitions
 codegen/
-  llvm/             LLVM IR emitter — split into ~60 small domain files rather
-                     than a handful of huge ones; the full file-by-file map
-                     lives in the project's own instructions, condensed
-                     here by domain:
-    emitter.go, types.go   core Emitter struct/scope stack/EmitProgram; the
-                     IR type system (Type, ArrayOf, ObjectOf, StructIR)
-    emit_stmts.go     statements: for/while/do-while/if/switch/try/labeled break…
-    emit_exprs*.go    expression dispatch, operators, assignment (incl.
-                     &&=/||=/??=), member/index access, static type
-                     inference, scalar coercion, var declarations
-    emit_strings.go   string operations (concat, methods, template literals)
-    emit_arrays_*.go  array mutation/HOF/sort/search/transform/iteration
-                     (push/pop/map/filter/reduce/sort/slice/Array.from/…)
-    emit_objects.go   objects, Object.keys/values/entries/groupBy, spread
-    emit_func.go      functions, closures, callbacks
-    emit_call*.go     call dispatch router + console/JSON/Math/Number/
-                     encoding-crypto statics
-    emit_classes.go   class fields/constructors/methods/this/new/instanceof,
-                     inheritance (extends/super, static+vtable dispatch),
-                     static members, private/protected, abstract, implements,
-                     class-based for...of
-    emit_collections.go  Map<K,V> and Set<T>
-    emit_exceptions.go   try/catch/throw (setjmp/longjmp)
-    emit_process.go   process.argv/env/exit/readLineSync/execFileSync/cwd/chdir/pid/platform/kill/on(SIGINT/SIGTERM)
-    emit_date.go      Date: construction, getters/setters, parse, arithmetic, formatting
-    emit_dynamic.go   any/unknown as a runtime-tagged {tag, payload} value
-    emit_async.go, emit_promise.go   async/await, Promise<T> (real non-blocking
-                     await on fetch()'s Promise<Response>; every other
-                     Promise<T> is a resolved-slot read), Promise.all/race/allSettled
-    emit_fetch.go     fetch(url[, init]) and Response, backed by libcurl's
-                     multi-interface — non-blocking, driven by the same
-                     select()-based event loop as http.listen
-    emit_fs.go        fs.readFileSync/writeFileSync/appendFileSync/existsSync/unlinkSync/mkdirSync/rmdirSync/renameSync/copyFileSync/readdirSync
-    emit_path.go      path.join/resolve/dirname/basename/extname/isAbsolute/parse/format
-    emit_url.go       URL/URLSearchParams (backed by libcurl's URL API)
-    emit_arraybuffer.go  ArrayBuffer + TypedArrays (Int8Array…Float64Array)
-    emit_http.go      http.listen(port, handler): request dispatch, Request/Response wiring on top of the event loop/fiber scheduler
-    emit_timers.go    setTimeout/clearTimeout/setInterval/clearInterval
-    emit_memory.go    Memory.free(x): manual heap release (Stage 1 of the memory-management plan)
-    runtime_*.go      ensure* C-runtime declarations (malloc, printf, sscanf, …) and the hand-written select()-based event loop + ucontext.h fiber scheduler backing http.listen and non-blocking fetch, split by domain to pair with the emit_*.go file that uses them
-    gcshim.go         //go:embed of gcsrc/gcshim.c, the -mm=gc allocator shim's source
-    gclocate.go       LocateGC(): portable pkg-config-based Boehm GC discovery for -mm=gc builds
-    gcsrc/gcshim.c    -mm=gc's C shim: malloc/calloc/realloc/free forwarding to GC_malloc/GC_realloc/GC_free (its own subdirectory since a .c file directly in a Go package dir makes `go build` demand cgo)
+  llvm/             LLVM IR emitter — ~60 small domain files, not a handful of
+                     giant ones: emit_*.go per feature area, runtime_*.go for
+                     the C-runtime decls + the select()/ucontext fiber engine,
+                     gc* for the -mm=gc shim. Full file-by-file map lives in
+                     docs/ARCHITECTURE.md (not re-typed here to go stale)
 docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
@@ -226,7 +199,7 @@ Makefile            Build, test, and example targets
 ## Things this compiler will cheerfully never do
 
 - Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see [`docs/status/MEMORY-MANAGEMENT.md`](docs/status/MEMORY-MANAGEMENT.md)) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
-- Let an imported file run side-effecting top-level code. `import`/`export` exist (including true per-file scoping and aliasing), but an imported file may only contain declarations; everything still boils down to one merged AST and one `main()` behind the scenes.
-- Judge you for using `var`. (It'll just quietly treat it like `let`. We've all been there.)
+- Grow a real linker. `import`/`export` exist (true per-file scoping, aliasing, and imported files now run their top-level code in dependency order), but there is no separate compilation and no link step: every module you touch gets flattened into one AST and one `main()` behind the scenes. Turtles all the way down, except it's one big turtle.
+- Judge you for using `var`. It even does `var` *properly* now — function-scoped, hoisted, re-declarable — instead of the old cop-out of quietly pretending it was `let`. Personal growth.
 
 If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, [`docs/status/`](docs/status/README.md) has the receipts.

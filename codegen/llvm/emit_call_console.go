@@ -69,11 +69,38 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
 			continue
 		}
+		// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
+		// a hard rejection; now rendered via the inspector (TDD-00075/ADR-00218).
 		if val.Ty.IsArray {
-			return Value{}, fmt.Errorf("%d:%d: console output does not support arrays; iterate and print each element", arg.GetPos().Line, arg.GetPos().Col)
+			strVal, err := e.emitInspectArray(val, 0)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			continue
+		}
+		// A class instance / object literal prints Node-style: `Foo { x: 1 }`
+		// (util.inspect), in both -compat modes. See TDD-00075/emit_inspect.go.
+		if isInspectableObject(val.Ty) {
+			strVal, err := e.emitInspectObject(val, 0)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			continue
 		}
 		if val.Ty.IsDynamic {
 			strVal, err := e.emitDynamicToString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			fmtPtr := e.internString("%s\n")
+			e.emitConsolePrintVal(strVal, fmtPtr, fd)
+			continue
+		}
+		if val.Ty.IsBigInt {
+			// console.log(10n) shows the trailing `n` (String(10n) does not).
+			strVal, err := e.emitBigIntToString(val, true)
 			if err != nil {
 				return Value{}, err
 			}

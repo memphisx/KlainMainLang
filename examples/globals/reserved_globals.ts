@@ -1,4 +1,4 @@
-// -globals=strict|permissive (TDD-00050, default strict) — whether a
+// -compat=strict|js (TDD-00050, default strict) — whether a
 // program may declare its own binding named the same as an ambient global
 // (Math/JSON/console/process/fetch/parseInt/... — "Tier 1"). Real
 // browsers/Node genuinely allow `const Math = {}`; this compiler's default
@@ -18,13 +18,13 @@
 //   }
 //   console.log(useFakeMath())
 //
-// then: `klainmain -globals=permissive shadow_demo.ts && ./shadow_demo`
+// then: `klainmain -compat=js shadow_demo.ts && ./shadow_demo`
 // prints 42 (the user's own value, not a real random number) — versus the
-// same file compiled with no flag at all (or explicit -globals=strict):
+// same file compiled with no flag at all (or explicit -compat=strict):
 // `klainmain shadow_demo.ts` fails with:
 //
 //   klainmain: parse error: 2:3: 'Math' is a reserved built-in name —
-//   pass -globals=permissive to allow shadowing it (matches real
+//   pass -compat=js to allow shadowing it (matches real
 //   JS/browser behavior)
 //
 // Constructor-style built-ins (Map/Set/Date/RegExp/URL/EventEmitter/... —
@@ -34,7 +34,7 @@
 // information exists, so there's no notion of "shadow it" to opt into.
 
 // Ordinary, unshadowed use of a reserved name is completely unaffected by
-// -globals=strict being the default — only *declaring* a colliding binding
+// -compat=strict being the default — only *declaring* a colliding binding
 // is ever rejected.
 console.log(Math.floor(3.7))          // 3
 console.log(parseInt('42') + 1)       // 43

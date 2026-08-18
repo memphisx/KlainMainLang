@@ -438,8 +438,9 @@ func NewExpressionStatement(expr Expression, pos Pos) *ExpressionStatement {
 // --- Expressions ---
 
 type NumberLiteral struct {
-	Value string // raw literal, e.g. "42" or "3.14"
-	pos   Pos
+	Value    string // raw literal digits, e.g. "42", "3.14", "0x1f" (a BigInt keeps its prefix but never the trailing `n`)
+	IsBigInt bool   // true for a `123n` BigInt literal (TDD-00074)
+	pos      Pos
 }
 
 func (*NumberLiteral) nodeMarker()   {}
@@ -447,6 +448,13 @@ func (*NumberLiteral) exprMarker()   {}
 func (n *NumberLiteral) GetPos() Pos { return n.pos }
 
 func NewNumberLiteral(v string, pos Pos) *NumberLiteral { return &NumberLiteral{Value: v, pos: pos} }
+
+// NewBigIntLiteral builds the `123n` form — the same node with IsBigInt set, so
+// every existing NumberLiteral code path keeps working and only the handful of
+// bigint-aware sites (inferExprType, literal codegen) branch on the flag.
+func NewBigIntLiteral(v string, pos Pos) *NumberLiteral {
+	return &NumberLiteral{Value: v, IsBigInt: true, pos: pos}
+}
 
 type StringLiteral struct {
 	Value string

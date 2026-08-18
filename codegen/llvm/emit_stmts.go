@@ -51,11 +51,20 @@ func (e *Emitter) lookupNamedLabel(name string) (namedLabel, bool) {
 func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:
-		return e.emitVarDecl(s)
+		if err := e.emitVarDecl(s); err != nil {
+			return err
+		}
+		if s.Kind == "var" {
+			e.promoteVarToFuncScope(s.Name)
+		}
+		return nil
 	case *ast.VarDeclarationList:
 		for _, d := range s.Decls {
 			if err := e.emitVarDecl(d); err != nil {
 				return err
+			}
+			if d.Kind == "var" {
+				e.promoteVarToFuncScope(d.Name)
 			}
 		}
 		return nil

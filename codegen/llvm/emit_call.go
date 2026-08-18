@@ -114,6 +114,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			return e.emitSymbolToString(objVal)
 		}
+		if mem.Property == "toString" && e.inferExprType(mem.Object).IsBigInt {
+			return e.emitBigIntToStringMethod(mem.Object, ex.Args, ex.GetPos())
+		}
 		if isResponseMethodName(mem.Property) && e.inferExprType(mem.Object).IsResponse {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -768,6 +771,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		case "Symbol":
 			return e.emitSymbolConstructor(ex.Args, ex.GetPos())
+		case "BigInt":
+			return e.emitBigIntConstructor(ex.Args, ex.GetPos())
 		case "assert__kml_builtin":
 			// Bare `assert(cond, msg?)` — real Node's assert module is
 			// itself callable, equivalent to assert.ok.

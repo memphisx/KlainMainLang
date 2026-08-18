@@ -10,7 +10,7 @@ import (
 
 // isStringTy returns true for a plain string (ptr, not object/array/closure).
 func isStringTy(ty Type) bool {
-	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc
+	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !ty.IsBigInt
 }
 
 // isNumberTy returns true for a plain numeric scalar (any int/float width,
