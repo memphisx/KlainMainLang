@@ -20,13 +20,49 @@ func parseTrailingArrayBrackets(p *Parser, source string, ta *ast.TypeAnnotation
 	return ta, nil
 }
 
-// parseTypeAnnotation parses a full type annotation, including a trailing
-// T | U | ... union (TDD-00043): every non-null/undefined member is kept
-// (TypeAnnotation.UnionMembers), not just the first, unlike before. Delegates
-// the actual per-member parsing to parseTypeAnnotationAtom so each `|`-side
-// is parsed once, not re-entered into this same union-collecting loop.
+// parseTypeAnnotation parses a full type annotation. It is the union level plus
+// an outer conditional-type level (`T extends U ? X : Y`, TDD-00079 Stage 3):
+// the check and extends operands are union-level, while the two branches are
+// full annotations (so conditionals nest right-associatively).
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
-	ta, err := p.parseTypeAnnotationAtom(source)
+	left, err := p.parseUnionType(source)
+	if err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.EXTENDS) {
+		return left, nil
+	}
+	p.advance() // consume 'extends'
+	ext, err := p.parseUnionType(source)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.QUESTION); err != nil {
+		return nil, err
+	}
+	trueT, err := p.parseTypeAnnotation(source)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+	falseT, err := p.parseTypeAnnotation(source)
+	if err != nil {
+		return nil, err
+	}
+	return &ast.TypeAnnotation{
+		Source: source, IsConditional: true,
+		CheckType: left, ExtendsType: ext, TrueType: trueT, FalseType: falseT,
+	}, nil
+}
+
+// parseUnionType parses a trailing T | U | ... union (TDD-00043): every
+// non-null/undefined member is kept (TypeAnnotation.UnionMembers), not just the
+// first. Delegates per-member parsing to the intersection level so each `|`-side
+// is parsed once, not re-entered into this same union-collecting loop.
+func (p *Parser) parseUnionType(source string) (*ast.TypeAnnotation, error) {
+	ta, err := p.parseTypeAnnotationIntersection(source)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +79,7 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	}
 	for p.check(lexer.BITOR) {
 		p.advance() // consume '|'
-		right, err := p.parseTypeAnnotationAtom(source)
+		right, err := p.parseTypeAnnotationIntersection(source)
 		if err != nil {
 			return nil, err
 		}
@@ -80,6 +116,40 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 	}
 }
 
+// parseTypeAnnotationIntersection parses one intersection level, A & B & ...
+// (TDD-00078). It sits between the union loop above (| binds looser) and the
+// atom parser below (& binds tighter), so `A & B | C` parses as `(A & B) | C`
+// and `A | B & C` as `A | (B & C)`, matching TypeScript. A single atom with no
+// trailing `&` is returned unchanged, so the common non-intersection path is
+// untouched.
+func (p *Parser) parseTypeAnnotationIntersection(source string) (*ast.TypeAnnotation, error) {
+	ta, err := p.parseTypeAnnotationAtom(source)
+	if err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.BITAND) {
+		return ta, nil
+	}
+	members := []*ast.TypeAnnotation{ta}
+	for p.check(lexer.BITAND) {
+		p.advance() // consume '&'
+		right, err := p.parseTypeAnnotationAtom(source)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, right)
+	}
+	// Same head-copy trick as the union loop above: a distinct copy whose
+	// IntersectionMembers points at the list, while every entry in that list —
+	// including members[0] itself — keeps its own IntersectionMembers nil.
+	// Setting the slice on members[0] in place would make it its own first
+	// element, the self-referential cycle that sent the union path into
+	// infinite recursion when it was first written.
+	head := *members[0]
+	head.IntersectionMembers = members
+	return &head, nil
+}
+
 // parseTypeAnnotationAtom parses a single union member: everything
 // parseTypeAnnotation used to handle directly before TDD-00043 split the
 // trailing `| U | ...` handling out into its own loop above. Note the
@@ -89,6 +159,35 @@ func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error)
 // pre-existing scope rather than expanding it.
 func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, error) {
 	tok := p.peek()
+
+	// String-literal type: "north" (TDD-00079). Primarily the key argument of
+	// Pick/Omit/Record (`Pick<T, "a" | "b">`, a union of these); usable as a
+	// standalone value type too, where it resolves to `string`.
+	if tok.Type == lexer.STRING {
+		p.advance()
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{
+			Source: source, IsStringLiteral: true, LiteralValue: tok.Literal,
+		})
+	}
+
+	// keyof T (TDD-00079): the operand's key set. `keyof` is a contextual
+	// identifier, not a reserved word (same convention as for-in/of).
+	if tok.Type == lexer.IDENT && tok.Literal == "keyof" {
+		p.advance() // consume 'keyof'
+		operand, err := p.parseTypeAnnotationAtom(source)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.TypeAnnotation{Source: source, IsKeyof: true, KeyofOperand: operand}, nil
+	}
+
+	// infer R (TDD-00079 Stage 3): a capture placeholder inside a conditional's
+	// extends clause. Contextual identifier.
+	if tok.Type == lexer.IDENT && tok.Literal == "infer" && p.peekNth(1).Type == lexer.IDENT {
+		p.advance() // 'infer'
+		nameTok := p.advance()
+		return &ast.TypeAnnotation{Source: source, IsInfer: true, InferName: nameTok.Literal}, nil
+	}
 
 	// Function type annotation: (param: type, ...) => retType
 	if tok.Type == lexer.LPAREN {
@@ -146,6 +245,54 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 	// Object type annotation: { field: type; field: type }
 	if tok.Type == lexer.LBRACE {
 		p.advance() // consume '{'
+
+		// Mapped type: { [K in Source]: V }, optionally `readonly` and/or `?`
+		// (TDD-00079). `readonly`/`in` are contextual identifiers. Detected by
+		// lookahead so a plain object type `{ field: T }` is unaffected.
+		roOff := 0
+		if p.check(lexer.IDENT) && p.peek().Literal == "readonly" && p.peekNth(1).Type == lexer.LBRACKET {
+			roOff = 1
+		}
+		if p.peekNth(roOff).Type == lexer.LBRACKET &&
+			p.peekNth(roOff+1).Type == lexer.IDENT &&
+			p.peekNth(roOff+2).Type == lexer.IDENT && p.peekNth(roOff+2).Literal == "in" {
+			mappedReadonly := roOff == 1
+			if mappedReadonly {
+				p.advance() // 'readonly'
+			}
+			p.advance()                   // '['
+			keyVar := p.advance().Literal // K
+			p.advance()                   // 'in'
+			mappedSrc, err := p.parseTypeAnnotation(source)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RBRACKET); err != nil {
+				return nil, err
+			}
+			mappedOptional := false
+			if p.check(lexer.QUESTION) {
+				p.advance()
+				mappedOptional = true
+			}
+			if _, err := p.expect(lexer.COLON); err != nil {
+				return nil, err
+			}
+			value, err := p.parseTypeAnnotation(source)
+			if err != nil {
+				return nil, err
+			}
+			p.match(lexer.SEMICOLON, lexer.COMMA)
+			if _, err := p.expect(lexer.RBRACE); err != nil {
+				return nil, err
+			}
+			return &ast.TypeAnnotation{
+				Source: source, IsMapped: true, MappedKeyVar: keyVar,
+				MappedSource: mappedSrc, MappedValue: value,
+				MappedOptional: mappedOptional, MappedReadonly: mappedReadonly,
+			}, nil
+		}
+
 		var fields []ast.AnnotField
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 			nameTok, err := p.expect(lexer.IDENT)
@@ -272,16 +419,28 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		return &ast.TypeAnnotation{Name: name, ElemType: args[0], TypeArgs: args, Source: source}, nil
 	}
 
-	// Array suffix: T[]  (may repeat for multi-dimensional, future use)
-	for p.check(lexer.LBRACKET) {
+	// Array suffix: T[]  (empty brackets; may repeat for multi-dimensional).
+	for p.check(lexer.LBRACKET) && p.peekNth(1).Type == lexer.RBRACKET {
 		p.advance() // consume [
-		if _, err := p.expect(lexer.RBRACKET); err != nil {
-			return nil, fmt.Errorf("expected ] in array type annotation")
-		}
+		p.advance() // consume ]
 		name += "[]"
 	}
 
 	ta := &ast.TypeAnnotation{Name: name, Source: source}
+	// Indexed access: T[K] (non-empty brackets, TDD-00079). The key is a string-
+	// literal type (`T["name"]`) or a bare mapped key variable (`T[K]`, resolved
+	// per key during mapped-type expansion).
+	for p.check(lexer.LBRACKET) {
+		p.advance() // consume [
+		idx, err := p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RBRACKET); err != nil {
+			return nil, fmt.Errorf("expected ] in indexed access type")
+		}
+		ta = &ast.TypeAnnotation{Source: source, IsIndexedAccess: true, IndexObject: ta, IndexKey: idx}
+	}
 	return ta, nil
 }
 
@@ -378,6 +537,15 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Optional `<T>` type-parameter list — a generic type alias (TDD-00079).
+	var typeParams []string
+	if p.check(lexer.LT) {
+		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		if err != nil {
+			return nil, err
+		}
+		typeParams = tp
+	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
@@ -386,7 +554,9 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 		return nil, err
 	}
 	p.consumeSemicolon()
-	return ast.NewTypeAliasDeclaration(nameTok.Literal, ta, pos), nil
+	decl := ast.NewTypeAliasDeclaration(nameTok.Literal, ta, pos)
+	decl.TypeParams = typeParams
+	return decl, nil
 }
 
 // parseEnumDeclaration parses `[const] enum Name { A [= expr], ... }`.

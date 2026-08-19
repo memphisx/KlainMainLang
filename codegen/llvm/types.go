@@ -99,6 +99,15 @@ type Type struct {
 	// (ADR-00008); IsDynamic with a non-nil UnionMembers is allowed in those
 	// positions instead, since the member set makes it fully checkable there.
 	UnionMembers []Type
+	// IntersectionMembers carries the resolved members of an A & B & ...
+	// intersection (TDD-00078). Unlike UnionMembers, this is NOT a runtime
+	// shape: an object-type intersection is already collapsed into this Type's
+	// own IsObject/Fields (the merged struct), so downstream object machinery
+	// uses it as an ordinary object type and ignores this field. It is retained
+	// only so validateIntersectionMembers can re-check the members (all-object,
+	// no field conflicts) at each use site, mirroring how UnionMembers is
+	// validated — resolveType itself has no error return.
+	IntersectionMembers []Type
 	// IsDate marks Date: a plain i64 milliseconds-since-epoch timestamp, same
 	// storage as number, distinguished only so method dispatch (getFullYear,
 	// toISOString, etc.) can recognize it. See emit_date.go.

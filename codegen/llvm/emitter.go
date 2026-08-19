@@ -75,6 +75,8 @@ type Emitter struct {
 	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
 	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
 	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
+	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
+	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
 	usedPrintf            bool
 	usedDprintf           bool
 	usedMalloc            bool
@@ -92,6 +94,10 @@ type Emitter struct {
 	// usage/construction site supplies a concrete type. See emit_generics.go.
 	genericFuncs      map[string]*ast.FunctionDeclaration
 	genericInterfaces map[string]*ast.InterfaceDeclaration
+	// genericTypeAliases holds `type Name<T> = ...` declarations (TDD-00079
+	// Stage 3), instantiated on demand at each use site by substituting concrete
+	// type arguments into the alias body, then resolving the result.
+	genericTypeAliases map[string]*ast.TypeAliasDeclaration
 	genericClasses    map[string]*ast.ClassDeclaration
 	// generators holds one entry per top-level `function*` declaration
 	// (TDD-00061/ADR-00172), keyed by its bare source name — deliberately
@@ -363,6 +369,7 @@ func NewEmitter() *Emitter {
 		jsonToJSONActive:    make(map[string]bool),
 		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
 		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
+		genericTypeAliases:  make(map[string]*ast.TypeAliasDeclaration),
 		genericClasses:      make(map[string]*ast.ClassDeclaration),
 		generators:          make(map[string]*GeneratorInfo),
 		fnValueTrampolines:  make(map[string]bool),
@@ -627,6 +634,26 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta == nil {
 		return TypeI64 // default for untyped numeric variables
 	}
+	// String-literal type (`"north"`, TDD-00079): as a value type it is just a
+	// string; the literal value is only consumed at the AST level by
+	// Pick/Omit/Record key collection, not here.
+	if ta.IsStringLiteral {
+		return TypePtr
+	}
+	// keyof / indexed access / mapped types (TDD-00079 Stage 2) — each evaluates
+	// to a concrete type off a concrete operand.
+	if ta.IsKeyof {
+		return e.resolveKeyof(ta)
+	}
+	if ta.IsIndexedAccess {
+		return e.resolveIndexedAccess(ta)
+	}
+	if ta.IsMapped {
+		return e.resolveMappedType(ta)
+	}
+	if ta.IsConditional {
+		return e.resolveConditionalType(ta)
+	}
 	// General union (T | U | ..., TDD-00043): reuses any/unknown's runtime
 	// { i8, i64 } box (TypeAny's IR) but additionally carries the resolved
 	// member set, so it stays distinguishable from — and, unlike — bare
@@ -643,6 +670,26 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 			members[i] = e.resolveType(m)
 		}
 		return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: members, Nullable: ta.Nullable}
+	}
+	// Intersection (A & B & ..., TDD-00078): collapses to one ObjectType whose
+	// fields are the merged fields of every member — no runtime tag, unlike a
+	// union. Checked here (before the Fields/Name branches below) because the
+	// head-copy an intersection carries still has the first member's Name and
+	// possibly its Fields set. mergeIntersectionFields can fail (a non-object
+	// member, or a conflicting field type); resolveType has no error return, so
+	// the failure is re-detected at each use site by validateIntersectionMembers
+	// — here the merge just yields whatever fields it produced (nil on error),
+	// keeping the result a well-formed object type that never crashes codegen.
+	if ta.IntersectionMembers != nil {
+		members := make([]Type, len(ta.IntersectionMembers))
+		for i, m := range ta.IntersectionMembers {
+			members[i] = e.resolveType(m)
+		}
+		fields, _ := mergeIntersectionFields(members)
+		obj := ObjectType(fields)
+		obj.IntersectionMembers = members
+		obj.Nullable = ta.Nullable
+		return obj
 	}
 	if ta.IsFuncType {
 		params := make([]Type, len(ta.FuncParams))
@@ -680,6 +727,25 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) > 0 {
 		subs := e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs)
 		return e.instantiateGenericInterface(genDecl, subs)
+	}
+	// Generic type alias `type Name<T> = ...` (TDD-00079 Stage 3): substitute the
+	// concrete type arguments into the alias body annotation, then resolve it.
+	if aliasDecl, ok := e.genericTypeAliases[ta.Name]; ok && len(ta.TypeArgs) > 0 {
+		subs := make(map[string]*ast.TypeAnnotation, len(aliasDecl.TypeParams))
+		for i, param := range aliasDecl.TypeParams {
+			if i < len(ta.TypeArgs) {
+				subs[param] = ta.TypeArgs[i]
+			}
+		}
+		return e.resolveType(substituteAnnotation(aliasDecl.Type, subs))
+	}
+	// Built-in utility types (TDD-00079) — after the user-generic registry so a
+	// user-defined type of the same name still wins, before the generic ElemType
+	// fallback below (which would otherwise misread `Partial<User>` as `User[]`).
+	if len(ta.TypeArgs) > 0 && utilityTypeNames[ta.Name] {
+		if ty, ok := e.resolveUtilityType(ta.Name, ta.TypeArgs); ok {
+			return ty
+		}
 	}
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
@@ -1012,7 +1078,13 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				e.interfaceMethodSigs[s.Name] = sigs
 			}
 		case *ast.TypeAliasDeclaration:
-			e.interfaces[s.Name] = e.resolveType(s.Type)
+			// A generic alias can't be resolved eagerly (its type parameters are
+			// unbound); defer to on-demand instantiation at each use site.
+			if len(s.TypeParams) > 0 {
+				e.genericTypeAliases[s.Name] = s
+			} else {
+				e.interfaces[s.Name] = e.resolveType(s.Type)
+			}
 		}
 	}
 }

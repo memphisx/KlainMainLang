@@ -262,3 +262,12 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00222](ADR-00222.md) | `JSON.stringify` `space` pretty-printing and generic `toJSON()` | Implements [TDD-00077](../tdd/TDD-00077.md) (Track S) |
 | [00223](ADR-00223.md) | A validating JSON parse-tree (P1) — `JSON.parse` throws `SyntaxError` on malformed input | Implements [TDD-00077](../tdd/TDD-00077.md) (Track P, P1); extends [ADR-00189](ADR-00189.md), [ADR-00007](ADR-00007.md) |
 | [00224](ADR-00224.md) | Type-directed JSON projection off the parse tree (P3) — nested objects, array fields, top-level `T[]` | Implements [TDD-00077](../tdd/TDD-00077.md) (Track P, P3); extends [ADR-00223](ADR-00223.md); supersedes [ADR-00007](ADR-00007.md), [ADR-00189](ADR-00189.md), [ADR-00166](ADR-00166.md) |
+| [00225](ADR-00225.md) | Intersection types (`A & B`) via field-merge into one struct | Implements [TDD-00078](../tdd/TDD-00078.md) |
+| [00226](ADR-00226.md) | Fix exponential-time `inferExprType` on deep binary expressions (a whole-corpus conformance hang) | — |
+| [00227](ADR-00227.md) | User-facing output — drop doc references, wrap `--help` | — |
+| [00228](ADR-00228.md) | Built-in utility types, stage 1a — Partial/Required/Readonly/NonNullable | Implements [TDD-00079](../tdd/TDD-00079.md) (Stage 1a) |
+| [00229](ADR-00229.md) | Utility types, stage 1b — Pick/Omit/Record + string-literal types | Implements [TDD-00079](../tdd/TDD-00079.md) (Stage 1b); extends [ADR-00228](ADR-00228.md) |
+| [00230](ADR-00230.md) | General mapped types — keyof, indexed access, `{ [K in …]: V }` | Implements [TDD-00079](../tdd/TDD-00079.md) (Stage 2); extends [ADR-00229](ADR-00229.md) |
+| [00231](ADR-00231.md) | Conditional types + infer + generic type aliases + structural assignability | Implements [TDD-00079](../tdd/TDD-00079.md) (Stage 3); extends [ADR-00230](ADR-00230.md) |
+| [00232](ADR-00232.md) | Type-system caveat reductions — tuple `.length` + element assignment; `A \| B \| null`; intersection same-name object fields | Extends [ADR-00201](ADR-00201.md), [ADR-00225](ADR-00225.md) |
+| [00233](ADR-00233.md) | JS-faithful float-to-string (shortest round-trip) | Implements [TDD-00080](../tdd/TDD-00080.md); supersedes [ADR-00166](ADR-00166.md) |

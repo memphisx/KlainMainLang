@@ -551,25 +551,25 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// class can't be an `extends` base or target here.
 			if len(cd.TypeParams) > 0 {
 				if cd.BaseClass != "" {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'extends' — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'extends' — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 				}
 				if cd.IsAbstract {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot be abstract — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return fmt.Errorf("%d:%d: generic class '%s' cannot be abstract — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 				}
 				if len(cd.Implements) > 0 {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'implements' — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'implements' — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 				}
 				if len(cd.StaticBlocks) > 0 {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot have a static {} block — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return fmt.Errorf("%d:%d: generic class '%s' cannot have a static {} block — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 				}
 				for _, f := range cd.Fields {
 					if f.Static {
-						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static field ('%s') — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
+						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static field ('%s') — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
 					}
 				}
 				for _, m := range cd.Methods {
 					if m.IsStatic {
-						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static method ('%s') — not yet supported (see docs/tdd/TDD-00010.md)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, m.Name)
+						return fmt.Errorf("%d:%d: generic class '%s' cannot have a static method ('%s') — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name, m.Name)
 					}
 				}
 				e.genericClasses[cd.Name] = cd
@@ -834,7 +834,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// V1 scope: instance methods only.
 			if m.IsGenerator {
 				if m.IsStatic {
-					return fmt.Errorf("%d:%d: a static generator method ('%s' on class '%s') is not yet supported (TDD-00063 Stage 2b covers instance methods)", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					return fmt.Errorf("%d:%d: a static generator method ('%s' on class '%s') is not yet supported (a non-static generator method is)", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
 				}
 				if m.Body == nil {
 					return fmt.Errorf("%d:%d: an abstract generator method ('%s' on class '%s') is not supported", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
@@ -1251,7 +1251,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		// are out of scope (see the async-iteration ceiling in TDD-00063).
 		if m.IsGenerator {
 			if m.IsAsync {
-				return fmt.Errorf("%d:%d: async generator method '%s' on class '%s' is not yet supported (see docs/tdd/TDD-00063.md Stage 2)", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+				return fmt.Errorf("%d:%d: async generator method '%s' on class '%s' is not yet supported", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
 			}
 			genInfo := info.GenMethodInfo[m.Name]
 			genInfo.ThisTy = &info.Ty // final class type (registration used the pre-vtable provisional)
@@ -1473,7 +1473,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		if containsDynamicElement(pty) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object method parameter type", pos.Line, pos.Col)
 		}
-		if err := validateUnionMembers(pty, pos.Line, pos.Col); err != nil {
+		if err := validateCompositeType(pty, pos.Line, pos.Col); err != nil {
 			return err
 		}
 		if pty.IsArray {
@@ -1595,7 +1595,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		// name always misses the lookup above on its first-ever use.
 		if genDecl, isGeneric := e.genericClasses[ex.ClassName]; isGeneric {
 			if len(ex.TypeArgs) != len(genDecl.TypeParams) {
-				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly %d explicit type argument(s) (e.g. new %s<%s>(...)) — inference isn't supported for class construction (see docs/tdd/TDD-00010.md)", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(genDecl.TypeParams), ex.ClassName, strings.Join(genDecl.TypeParams, ", "))
+				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly %d explicit type argument(s) (e.g. new %s<%s>(...)) — inference isn't supported for class construction", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(genDecl.TypeParams), ex.ClassName, strings.Join(genDecl.TypeParams, ", "))
 			}
 			subs := e.buildTypeArgSubs(genDecl.TypeParams, ex.TypeArgs)
 			mangled, err := e.instantiateGenericClass(genDecl, subs)

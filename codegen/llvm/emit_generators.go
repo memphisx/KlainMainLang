@@ -282,7 +282,7 @@ func (e *Emitter) emitGeneratorSwapToCaller(gctx *generatorEmitCtx, val Value, d
 func (e *Emitter) emitYieldExpression(ex *ast.YieldExpression) (Value, error) {
 	gctx := e.currentGenerator
 	if ex.Delegate {
-		return Value{}, fmt.Errorf("%d:%d: yield* is not yet supported (see TDD-00061)", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, fmt.Errorf("%d:%d: yield* is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	var val Value
 	if ex.Argument != nil {

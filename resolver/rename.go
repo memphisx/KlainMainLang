@@ -712,6 +712,35 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta.FuncRetType != nil {
 		rewriteType(ta.FuncRetType, sc, lu)
 	}
+	// Composite-member descent. These were all previously skipped: a named type
+	// used *only* inside a union (`A | B`), tuple (`[A, B]`), or intersection
+	// (`A & B`, TDD-00078) never had its member names rewritten, so a mangled
+	// declaration (any cross-file/renamed interface) went unresolved at that
+	// member position. rewriteTypeName is idempotent (a mangled name is never
+	// itself a lookup key), so the union/intersection head-copy sharing
+	// members[0]'s Name/Fields with this node is harmless — each name resolves
+	// once and a redundant second pass is a no-op.
+	for _, m := range ta.UnionMembers {
+		rewriteType(m, sc, lu)
+	}
+	for _, t := range ta.TupleElems {
+		rewriteType(t, sc, lu)
+	}
+	for _, m := range ta.IntersectionMembers {
+		rewriteType(m, sc, lu)
+	}
+	// keyof / indexed access / mapped types (TDD-00079). A named type referenced
+	// only inside one of these would otherwise stay unrenamed while its
+	// declaration got mangled — the same gap the composite members above had.
+	rewriteType(ta.KeyofOperand, sc, lu)
+	rewriteType(ta.IndexObject, sc, lu)
+	rewriteType(ta.IndexKey, sc, lu)
+	rewriteType(ta.MappedSource, sc, lu)
+	rewriteType(ta.MappedValue, sc, lu)
+	rewriteType(ta.CheckType, sc, lu)
+	rewriteType(ta.ExtendsType, sc, lu)
+	rewriteType(ta.TrueType, sc, lu)
+	rewriteType(ta.FalseType, sc, lu)
 }
 
 // rewriteTypeName rewrites ta.Name, accounting for parser_types.go's flat

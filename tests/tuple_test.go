@@ -54,6 +54,41 @@ console.log(a + "," + b + "," + c)
 `, "1\nx\ntrue\n1,x,true")
 }
 
+// Tuple .length (a compile-time constant) and constant-index element assignment
+// (TDD-00066 caveat reductions).
+func TestE2ETupleLengthAndElementAssign(t *testing.T) {
+	assertOutput(t, `
+const t: [string, number] = ["a", 1]
+console.log(t.length)
+t[0] = "b"
+t[1] = 99
+console.log(t[0])
+console.log(t[1])
+`, "2\nb\n99")
+}
+
+// Assigning past the tuple's arity is a clean compile error.
+func TestE2ETupleElementAssignOutOfRange(t *testing.T) {
+	mustCompileError(t, `
+const t: [string, number] = ["a", 1]
+t[5] = "x"
+`, "out of range")
+}
+
+// A named interface as a tuple element. Regression for the rewriteType gap
+// (fixed alongside TDD-00078): TupleElems was never descended into during the
+// resolver's type-name rename pass, so a named member of a tuple stayed
+// unmangled while its interface registered under a mangled key — resolving the
+// element to the unknown-name default instead of the object type.
+func TestE2ETupleNamedElement(t *testing.T) {
+	assertOutput(t, `
+interface User { name: string }
+const pair: [User, number] = [{ name: "Zoe" }, 5]
+console.log(pair[0].name)
+console.log(pair[1])
+`, "Zoe\n5")
+}
+
 // A tuple element may itself be an array or a nullable scalar.
 func TestE2ETupleArrayAndNullableElements(t *testing.T) {
 	assertOutput(t, `

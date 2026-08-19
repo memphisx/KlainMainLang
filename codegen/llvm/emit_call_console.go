@@ -122,7 +122,11 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 		// (template-literal interpolation of a bool has always printed
 		// true/false); console.log had simply never routed through it, using
 		// the numeric PrintfFmt directly instead. See ADR-00183.
-		if val.Ty.IR == "i1" {
+		// A boolean prints true/false, and a float prints via the JS-faithful
+		// shortest-round-trip formatter (TDD-00080) — both live in
+		// emitValueToString, so route through it rather than PrintfFmt's raw
+		// i1/%g. (%g truncated to 6 significant digits.)
+		if val.Ty.IR == "i1" || val.Ty.Float {
 			strVal, err := e.emitValueToString(val)
 			if err != nil {
 				return Value{}, err

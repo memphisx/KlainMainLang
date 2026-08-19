@@ -87,11 +87,13 @@ make ir FILE=examples/basics/basics.ts
 
 ## CLI flags
 
-```sh
+```text
 klainmain [flags] <file.ts>
 
   --emit-llvm   Emit LLVM IR to stdout and stop (do not compile)
+  
   -o <name>     Output binary name (default: input path without .ts)
+  
   --static      Statically link the output binary, for a scratch/distroless
                 Docker image with nothing else in it. Linux only: run
                 klainmain itself on Linux to use this. macOS's linker has
@@ -99,22 +101,26 @@ klainmain [flags] <file.ts>
                 libSystem/crt0.o, by design), so klainmain refuses --static
                 immediately with an explanation rather than surfacing a
                 confusing linker error.
+  
   -mm <mode>    Memory management mode: manual (default, Memory.free(x)
                 only — see docs/status/MEMORY-MANAGEMENT.md) or gc
                 (Boehm GC: every allocation gets collected automatically,
                 needs bdw-gc/libgc installed — see Requirements above).
                 Works identically on Linux and macOS, no special linker
                 flags needed either way.
+  
   -bigint <lib> BigInt backend library, linked only when a program uses
                 bigint: libtommath (default, public domain) or gmp (LGPL,
                 faster). Both give identical arbitrary-precision semantics —
                 the flag only trades license/speed. See docs/tdd/TDD-00074.md.
+  
   -compat <m>   Compatibility mode (see docs/tdd/TDD-00075.md): strict
                 (default — the compiler's opinionated, safer-than-JS
                 semantics; e.g. a declaration colliding with an ambient
                 built-in like Math/fetch is a compile error) or js (best-
                 effort JS-faithful — e.g. real-JS/browser global shadowing).
                 Constructor-style Map/Date/RegExp stay reserved either way.
+  
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
 ```

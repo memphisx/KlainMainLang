@@ -14,17 +14,32 @@ import (
 
 func main() {
 	emitLLVM := flag.Bool("emit-llvm", false, "emit LLVM IR and stop")
-	output := flag.String("o", "", "output binary name (default: input name without extension)")
+	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
-	mm := flag.String("mm", "manual", "memory management mode: manual (default, Memory.free(x) only) or gc (Boehm GC — see docs/tdd/TDD-00001.md)")
-	compat := flag.String("compat", "strict", "compatibility mode (see docs/tdd/TDD-00075.md): strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing). Governs the strict-vs-JS behaviors that used to live behind -globals")
-	regex := flag.String("regex", "", "RegExp `dialect` (see docs/tdd/TDD-00067.md): es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus the Option C source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
-	bigint := flag.String("bigint", "libtommath", "bigint backend library (see docs/tdd/TDD-00074.md), linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
+	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only) or gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed)")
+	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
+	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
+	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: klainmain [flags] <file.ts>")
-		fmt.Fprintln(os.Stderr, "\nCompiles a TypeScript file to a native binary (TypeScript → LLVM IR → clang).")
-		fmt.Fprintln(os.Stderr, "\nFlags:")
-		flag.PrintDefaults()
+		out := flag.CommandLine.Output()
+		fmt.Fprintln(out, "usage: klainmain [flags] <file.ts>")
+		fmt.Fprintln(out, "\nCompiles a TypeScript file to a native binary (TypeScript → LLVM IR → clang).")
+		fmt.Fprintln(out, "\nFlags:")
+		// Custom rendering instead of flag.PrintDefaults(): each description is
+		// word-wrapped and indented under its flag name, so the long mode/dialect
+		// explanations read as an aligned block rather than one runaway line.
+		flag.VisitAll(func(f *flag.Flag) {
+			placeholder, usage := flag.UnquoteUsage(f)
+			head := "  -" + f.Name
+			if placeholder != "" {
+				head += " <" + placeholder + ">"
+			}
+			fmt.Fprintln(out, head)
+			for _, line := range wrapText(usage, 74) {
+				fmt.Fprintln(out, "      "+line)
+			}
+			fmt.Fprintln(out)
+		})
 	}
 	flag.Parse()
 
@@ -41,30 +56,30 @@ func main() {
 	case "manual", "gc":
 		// ok
 	case "auto":
-		fatal("-mm=auto is not implemented yet (see docs/tdd/TDD-00001.md) — use -mm=manual or -mm=gc")
+		fatal("-mm=auto is not implemented yet — use -mm=manual or -mm=gc")
 	default:
-		fatal("unrecognized -mm value %q — must be one of: manual, gc (auto is scoped but not implemented yet, see docs/tdd/TDD-00001.md)", *mm)
+		fatal("unrecognized -mm value %q — must be one of: manual, gc (auto is not implemented yet)", *mm)
 	}
 
 	switch *compat {
 	case "strict", "js":
 		// ok
 	default:
-		fatal("unrecognized -compat value %q — must be one of: strict (default), js (see docs/tdd/TDD-00075.md)", *compat)
+		fatal("unrecognized -compat value %q — must be one of: strict (default), js", *compat)
 	}
 
 	switch *regex {
 	case "", "pcre", "es-ascii", "es-unicode", "es-utf16", "ecmascript":
 		// ok ("" == default, resolves to es-unicode)
 	default:
-		fatal("unrecognized -regex value %q — must be one of: ecmascript, es-unicode (default), es-utf16, es-ascii, pcre (see docs/tdd/TDD-00067.md)", *regex)
+		fatal("unrecognized -regex value %q — must be one of: ecmascript, es-unicode (default), es-utf16, es-ascii, pcre", *regex)
 	}
 
 	switch *bigint {
 	case "libtommath", "gmp":
 		// ok
 	default:
-		fatal("unrecognized -bigint value %q — must be one of: libtommath (default), gmp (see docs/tdd/TDD-00074.md)", *bigint)
+		fatal("unrecognized -bigint value %q — must be one of: libtommath (default), gmp", *bigint)
 	}
 
 	inFile := flag.Arg(0)
@@ -151,6 +166,15 @@ func main() {
 		}
 		clangArgs = append(clangArgs, jsonPath)
 	}
+	// Float formatter (TDD-00080): the JS-faithful shortest-round-trip dtoa,
+	// compiled alongside the program only when it prints a float (libc only).
+	if em.UsesFloatFmt() {
+		dtoaPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".dtoa.c"
+		if err := os.WriteFile(dtoaPath, []byte(llvm.DtoaSource()), 0644); err != nil {
+			fatal("cannot write dtoa source: %v", err)
+		}
+		clangArgs = append(clangArgs, dtoaPath)
+	}
 	cmd := exec.Command("clang", clangArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -164,4 +188,26 @@ func main() {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "klainmain: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// wrapText greedily word-wraps s into lines no wider than width columns, for the
+// flag help. Width is measured in bytes, so a line with multi-byte runes (the
+// — and → in some descriptions) wraps a touch early — harmless for help text.
+func wrapText(s string, width int) []string {
+	var lines []string
+	var cur strings.Builder
+	for _, w := range strings.Fields(s) {
+		if cur.Len() > 0 && cur.Len()+1+len(w) > width {
+			lines = append(lines, cur.String())
+			cur.Reset()
+		}
+		if cur.Len() > 0 {
+			cur.WriteByte(' ')
+		}
+		cur.WriteString(w)
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, cur.String())
+	}
+	return lines
 }

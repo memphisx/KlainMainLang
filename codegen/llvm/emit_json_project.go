@@ -21,7 +21,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	case targetTy.IsClass:
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
 	case targetTy.IsDynamic:
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into any/unknown is not yet supported (TDD-00077 Track P P4)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: JSON.parse into any/unknown is not yet supported", pos.Line, pos.Col)
 	case targetTy.IsTuple:
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a tuple type is not yet supported", pos.Line, pos.Col)
 	case targetTy.IsArray:

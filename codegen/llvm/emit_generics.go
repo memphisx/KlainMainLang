@@ -38,7 +38,7 @@ func mangleTypeArg(t Type) (string, error) {
 		return "bool", nil
 	}
 	if t.IsObject || t.IsMap || t.IsSet || t.IsPromise || t.IsFunc || t.IsDynamicObject || t.IsGroupMap || t.IsClass || t.IsDynamic {
-		return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these — see docs/tdd/TDD-00010.md)")
+		return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these)")
 	}
 	if isNumberTy(t) {
 		return "num", nil
@@ -46,7 +46,7 @@ func mangleTypeArg(t Type) (string, error) {
 	if isStringTy(t) {
 		return "str", nil
 	}
-	return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these — see docs/tdd/TDD-00010.md)")
+	return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these)")
 }
 
 // mangleTypeArgs joins one mangleTypeArg suffix per entry of typeParams, in
@@ -223,7 +223,7 @@ func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, a
 func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, pos ast.Pos) (Value, error) {
 	subs, missing, ok := e.inferGenericCallConcreteTypes(decl, args)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from (explicit call-site type arguments aren't supported yet, see docs/tdd/TDD-00010.md)", pos.Line, pos.Col, missing, decl.Name, missing, missing)
+		return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from (explicit call-site type arguments aren't supported yet)", pos.Line, pos.Col, missing, decl.Name, missing, missing)
 	}
 	mangled, sig, err := e.instantiateGenericFunc(decl, subs)
 	if err != nil {
@@ -493,7 +493,7 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 		// TDD-00063 Stage 2: generator methods aren't wired through codegen
 		// yet — clean rejection rather than a silently-wrong plain method.
 		if m.IsGenerator {
-			return fmt.Errorf("%d:%d: generator method '%s' on class '%s' is not yet supported (see docs/tdd/TDD-00063.md Stage 2b)", m.GetPos().Line, m.GetPos().Col, m.Name, decl.Name)
+			return fmt.Errorf("%d:%d: generator method '%s' on class '%s' is not yet supported", m.GetPos().Line, m.GetPos().Col, m.Name, decl.Name)
 		}
 		sig := info.MethodSigs[m.Name]
 		memberName := llvmSafeSymbol(llvmName + "_" + m.Name)

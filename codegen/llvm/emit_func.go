@@ -34,7 +34,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// silently mishandled" failure mode this project's own conventions
 	// treat as worse than a clean rejection.
 	if decl.IsGenerator {
-		return fmt.Errorf("%d:%d: a nested generator function declaration is not yet supported (see TDD-00061)", decl.GetPos().Line, decl.GetPos().Col)
+		return fmt.Errorf("%d:%d: a nested generator function declaration is not yet supported", decl.GetPos().Line, decl.GetPos().Col)
 	}
 	// Save current function context.
 	savedAllocas := e.allocas
@@ -128,7 +128,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	if containsDynamicElement(retType) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", decl.GetPos().Line, decl.GetPos().Col)
 	}
-	if err := validateUnionMembers(retType, decl.GetPos().Line, decl.GetPos().Col); err != nil {
+	if err := validateCompositeType(retType, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 		return err
 	}
 
@@ -164,7 +164,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		if containsDynamicElement(pty) {
 			return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", decl.GetPos().Line, decl.GetPos().Col)
 		}
-		if err := validateUnionMembers(pty, decl.GetPos().Line, decl.GetPos().Col); err != nil {
+		if err := validateCompositeType(pty, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 			return err
 		}
 		if pty.IsArray {
@@ -1193,7 +1193,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		if containsDynamicElement(paramTypes[i]) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", af.GetPos().Line, af.GetPos().Col)
 		}
-		if err := validateUnionMembers(paramTypes[i], af.GetPos().Line, af.GetPos().Col); err != nil {
+		if err := validateCompositeType(paramTypes[i], af.GetPos().Line, af.GetPos().Col); err != nil {
 			return Value{}, err
 		}
 	}
@@ -1205,7 +1205,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		if containsDynamicElement(retTy) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", af.GetPos().Line, af.GetPos().Col)
 		}
-		if err := validateUnionMembers(retTy, af.GetPos().Line, af.GetPos().Col); err != nil {
+		if err := validateCompositeType(retTy, af.GetPos().Line, af.GetPos().Col); err != nil {
 			return Value{}, err
 		}
 	} else if af.Body != nil {
@@ -1349,7 +1349,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if containsDynamicElement(paramTypes[i]) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object parameter type", fe.GetPos().Line, fe.GetPos().Col)
 		}
-		if err := validateUnionMembers(paramTypes[i], fe.GetPos().Line, fe.GetPos().Col); err != nil {
+		if err := validateCompositeType(paramTypes[i], fe.GetPos().Line, fe.GetPos().Col); err != nil {
 			return Value{}, err
 		}
 	}
@@ -1363,7 +1363,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if containsDynamicElement(retTy) {
 			return Value{}, fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object return type", fe.GetPos().Line, fe.GetPos().Col)
 		}
-		if err := validateUnionMembers(retTy, fe.GetPos().Line, fe.GetPos().Col); err != nil {
+		if err := validateCompositeType(retTy, fe.GetPos().Line, fe.GetPos().Col); err != nil {
 			return Value{}, err
 		}
 	} else if blockHasReturn(fe.Body) {

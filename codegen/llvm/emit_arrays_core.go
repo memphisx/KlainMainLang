@@ -227,7 +227,7 @@ func (e *Emitter) emitScalarZero(t Type) Value {
 // supported for nested arrays. See docs/tdd/TDD-00029.md.
 func (e *Emitter) rejectNestedArrayElem(elemTy Type, opName string, pos ast.Pos) error {
 	if elemTy.IsArray {
-		return fmt.Errorf("%d:%d: .%s() does not yet support an array-of-arrays element type — see docs/tdd/TDD-00029.md", pos.Line, pos.Col, opName)
+		return fmt.Errorf("%d:%d: .%s() does not yet support an array-of-arrays element type", pos.Line, pos.Col, opName)
 	}
 	return nil
 }
@@ -426,7 +426,7 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 	// nested arrays anyway, this is deliberately out of scope for now — use
 	// an array literal (`[[1,2],[3,4]]`) instead, which never has this gap.
 	if elemTy.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: new Array<T>(n) does not yet support an array-typed element (nested arrays) — use an array literal instead. See docs/tdd/TDD-00029.md", na.GetPos().Line, na.GetPos().Col)
+		return Value{}, fmt.Errorf("%d:%d: new Array<T>(n) does not yet support an array-typed element (nested arrays) — use an array literal instead.", na.GetPos().Line, na.GetPos().Col)
 	}
 	sizeVal, err := e.emitExpr(na.Size)
 	if err != nil {

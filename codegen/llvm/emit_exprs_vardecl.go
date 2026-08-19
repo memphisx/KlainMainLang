@@ -238,7 +238,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if containsDynamicElement(ty) {
 		return fmt.Errorf("%d:%d: any/unknown is not yet supported as an array element or object field type", v.GetPos().Line, v.GetPos().Col)
 	}
-	if err := validateUnionMembers(ty, v.GetPos().Line, v.GetPos().Col); err != nil {
+	if err := validateCompositeType(ty, v.GetPos().Line, v.GetPos().Col); err != nil {
 		return err
 	}
 	if ty.UnionMembers != nil && !ty.Nullable && v.Init == nil {

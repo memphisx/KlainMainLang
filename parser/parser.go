@@ -115,7 +115,7 @@ func (p *Parser) parseTypeParamList(context string) ([]string, error) {
 		names = append(names, nameTok.Literal)
 		if p.check(lexer.EXTENDS) {
 			t := p.peek()
-			return nil, fmt.Errorf("%d:%d: type parameter constraints on %s are not yet supported (see docs/tdd/TDD-00010.md)", t.Line, t.Col, context)
+			return nil, fmt.Errorf("%d:%d: type parameter constraints on %s are not yet supported", t.Line, t.Col, context)
 		}
 		if !p.match(lexer.COMMA) {
 			break

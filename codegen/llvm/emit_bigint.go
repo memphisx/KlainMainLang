@@ -140,7 +140,7 @@ func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Va
 			if e.compatJS() {
 				return e.emitBigIntFloatCompare(op, left, right, pos)
 			}
-			return Value{}, fmt.Errorf("%d:%d: comparing a bigint with a floating-point number is rejected by default (it is almost always a bug) — convert explicitly with BigInt(x)/Number(x), or use -compat=js for JS's exact comparison (TDD-00075)", pos.Line, pos.Col)
+			return Value{}, fmt.Errorf("%d:%d: comparing a bigint with a floating-point number is rejected by default (it is almost always a bug) — convert explicitly with BigInt(x)/Number(x), or use -compat=js for JS's exact comparison", pos.Line, pos.Col)
 		}
 		if !isIntegerNumberTy(other.Ty) {
 			return Value{}, fmt.Errorf("%d:%d: a bigint can only be compared with another bigint or an integer number, not this type", pos.Line, pos.Col)

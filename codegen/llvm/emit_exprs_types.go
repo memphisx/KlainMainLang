@@ -122,8 +122,10 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", r, v.Ref))
 			val = Value{Ref: r, Ty: TypeF64}
 		}
-		fmtPtr := e.internString("%g")
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, double %s)", scratch, fmtPtr, val.Ref))
+		// Shortest round-trip, JS-faithful formatting (TDD-00080) instead of
+		// bare %g's 6-significant-digit truncation.
+		e.ensureDtoa()
+		e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", scratch, val.Ref))
 	case v.Ty.IsInteger():
 		val := v
 		if v.Ty.IR != "i64" {
@@ -330,10 +332,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return *objTy.ElemType
 		}
 	case *ast.BinaryExpression:
+		// Infer each operand's type exactly once, up front, and reuse it in
+		// every branch below. Re-calling inferExprType(ex.Left/Right) separately
+		// in the bigint check AND again in each operator branch made inference
+		// cost O(2^depth) on a left-associative chain like `a + b + c + ...`
+		// (each node re-inferred both children, which re-inferred theirs …) —
+		// enough to peg a core for minutes on a deep expression, found as an
+		// in-process hang while running the Test262 corpus. inferExprType does
+		// no codegen and has no side effects, so inferring both operands eagerly
+		// — even for `&&`/`||`/`??`, which may not need the right one — is free;
+		// the bigint check already forced both anyway.
+		lt := e.inferExprType(ex.Left)
+		rt := e.inferExprType(ex.Right)
 		// A bigint operand makes an arithmetic/bitwise result a bigint (a
 		// comparison stays a bool) — so `const x = 2n ** 53n + 1n` types as
 		// bigint, not the i64/string the generic cases below would infer.
-		if e.inferExprType(ex.Left).IsBigInt || e.inferExprType(ex.Right).IsBigInt {
+		if lt.IsBigInt || rt.IsBigInt {
 			switch ex.Op {
 			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
 				return TypeBool
@@ -345,8 +359,6 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof", "in":
 			return TypeBool
 		case "+":
-			lt := e.inferExprType(ex.Left)
-			rt := e.inferExprType(ex.Right)
 			if isStringTy(lt) || isStringTy(rt) {
 				return TypePtr
 			}
@@ -357,8 +369,6 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			return TypeI64
 		case "-":
-			lt := e.inferExprType(ex.Left)
-			rt := e.inferExprType(ex.Right)
 			// Date - Date: a plain number (ms difference). Date - number:
 			// subtract a duration, stays a Date. number - Date is rejected
 			// by emitBinary, so its inferred type here is moot.
@@ -373,18 +383,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			// Exponentiation promotes to float if either operand is float,
 			// otherwise stays this compiler's default i64 `number` — matching
 			// emitBinary's own `**` result type.
-			lt := e.inferExprType(ex.Left)
-			rt := e.inferExprType(ex.Right)
 			if lt.Float || rt.Float {
 				return TypeF64
 			}
 			return TypeI64
 		case "&&", "||":
-			return e.inferExprType(ex.Left)
+			return lt
 		case "??":
-			lt := e.inferExprType(ex.Left)
 			if lt.IR == "ptr" {
-				return e.inferExprType(ex.Right)
+				return rt
 			}
 			return lt
 		case "&", "|", "^", "<<", ">>", ">>>":

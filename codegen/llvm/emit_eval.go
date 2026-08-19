@@ -33,7 +33,7 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 	}
 	src, ok := staticStringValue(args[0])
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: eval is only supported with a compile-time-constant string argument; a dynamic eval needs an embedded JS engine (see docs/tdd/TDD-00046.md)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: eval is only supported with a compile-time-constant string argument; a dynamic eval needs an embedded JS engine", pos.Line, pos.Col)
 	}
 	prog, err := parser.Parse(src)
 	if err != nil {

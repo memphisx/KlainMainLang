@@ -1344,11 +1344,13 @@ func (s *SuperExpression) GetPos() Pos { return s.pos }
 
 func NewSuperExpression(pos Pos) *SuperExpression { return &SuperExpression{pos: pos} }
 
-// TypeAliasDeclaration — `type Name = TypeAnnotation`
+// TypeAliasDeclaration — `type Name = TypeAnnotation`, optionally generic
+// (`type Name<T> = ...`, TDD-00079 Stage 3).
 type TypeAliasDeclaration struct {
-	Name string
-	Type *TypeAnnotation
-	pos  Pos
+	Name       string
+	TypeParams []string
+	Type       *TypeAnnotation
+	pos        Pos
 }
 
 func (*TypeAliasDeclaration) nodeMarker()   {}
@@ -1514,4 +1516,53 @@ type TypeAnnotation struct {
 	// (`[T0, T1, ...]`), in order — non-nil (and non-empty) exactly for a
 	// tuple. See TDD-00066.
 	TupleElems []*TypeAnnotation
+	// IntersectionMembers holds every member of an A & B & ... intersection
+	// with 2+ members (TDD-00078). nil for the common non-intersection case.
+	// Directly parallels UnionMembers, and follows the same head-copy
+	// convention: when set, this TypeAnnotation's own Name/other fields
+	// describe the first member, while every entry in this list — including
+	// that first member — keeps its own IntersectionMembers nil. Unlike a
+	// union (a runtime-tagged value that is one of its members), an
+	// object-type intersection collapses at resolveType into a single merged
+	// ObjectType, so this field is metadata for validation, not a runtime
+	// shape.
+	IntersectionMembers []*TypeAnnotation
+	// IsStringLiteral marks a string-literal type (`"north"`), with its value in
+	// LiteralValue (TDD-00079). Its primary use is the key argument of
+	// Pick/Omit/Record (`Pick<T, "a" | "b">`), collected at the AST level before
+	// resolveType; as a standalone value type it resolves to `string` (the
+	// literal value is not narrowed/enforced — a disclosed V1 simplification).
+	IsStringLiteral bool
+	LiteralValue    string
+	// keyof T (TDD-00079 Stage 2): the operand's key set. As a standalone value
+	// type it resolves to string; its main use is a mapped-type source.
+	IsKeyof      bool
+	KeyofOperand *TypeAnnotation
+	// Indexed access T[K] (TDD-00079 Stage 2). IndexKey is a string-literal type
+	// (`T["name"]`) or a bare reference to a mapped key variable (`T[K]`, resolved
+	// per-key during mapped-type expansion).
+	IsIndexedAccess bool
+	IndexObject     *TypeAnnotation
+	IndexKey        *TypeAnnotation
+	// Mapped type { [K in Source]: Value } (TDD-00079 Stage 2). Source is
+	// `keyof T` or a string-literal union; Value may be `T[K]` (homomorphic) or a
+	// concrete type. MappedOptional/MappedReadonly record the `?`/`readonly`
+	// modifiers (accepted; near-no-ops in the current object model).
+	IsMapped       bool
+	MappedKeyVar   string
+	MappedSource   *TypeAnnotation
+	MappedValue    *TypeAnnotation
+	MappedOptional bool
+	MappedReadonly bool
+	// Conditional type `CheckType extends ExtendsType ? TrueType : FalseType`
+	// (TDD-00079 Stage 3). ExtendsType may contain `infer` placeholders.
+	IsConditional bool
+	CheckType     *TypeAnnotation
+	ExtendsType   *TypeAnnotation
+	TrueType      *TypeAnnotation
+	FalseType     *TypeAnnotation
+	// `infer R` inside a conditional's ExtendsType — binds InferName to the
+	// structurally-matched sub-type.
+	IsInfer   bool
+	InferName string
 }

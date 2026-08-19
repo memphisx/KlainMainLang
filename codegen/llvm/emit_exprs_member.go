@@ -256,6 +256,33 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 	return gepReg, elemTy, nil
 }
 
+// emitTupleElemAssign implements `t[i] = val` for a constant i (TDD-00066): GEP
+// the matching struct field and store, reusing the object-field store path (so
+// scalar, nullable, and array element types all work). Only plain `=` for V1.
+func (e *Emitter) emitTupleElemAssign(ex *ast.IndexExpression, tupleTy Type, op string, rhs ast.Expression) (Value, error) {
+	idx, ok := tupleConstIndex(ex.Index)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: a tuple can only be indexed by a constant integer literal", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	if idx < 0 || idx >= int64(len(tupleTy.Fields)) {
+		return Value{}, fmt.Errorf("%d:%d: tuple index %d is out of range (the tuple has %d element(s))", ex.GetPos().Line, ex.GetPos().Col, idx, len(tupleTy.Fields))
+	}
+	if op != "=" {
+		return Value{}, fmt.Errorf("%d:%d: compound assignment to a tuple element is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	fieldTy := tupleTy.Fields[idx].Ty
+	objVal, err := e.emitExpr(ex.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	gepReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, tupleTy.StructIR(), objVal.Ref, idx))
+	if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, rhs); err != nil {
+		return Value{}, err
+	}
+	return e.loadScalarOrNullableField(gepReg, fieldTy), nil
+}
+
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	// process.env["KEY"]: dynamic-key environment variable lookup.
 	if e.isProcessEnvExpr(ex.Object) {
@@ -443,16 +470,26 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Property == "length" {
 		// Named array variable: load length from its LenPtr alloca.
 		if id, ok := ex.Object.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
-				reg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.LenPtr))
-				return Value{Ref: reg, Ty: TypeI64}, nil
+			if sym, found := e.lookup(id.Name); found {
+				// A tuple has a fixed, compile-time-known arity (TDD-00066).
+				if sym.Ty.IsTuple {
+					return Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}, nil
+				}
+				if sym.Ty.IsArray {
+					reg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.LenPtr))
+					return Value{Ref: reg, Ty: TypeI64}, nil
+				}
 			}
 		}
 		// Any other expression: evaluate it, then dispatch on the result type.
 		objVal, err := e.emitExpr(ex.Object)
 		if err != nil {
 			return Value{}, err
+		}
+		// Tuple value (fixed arity).
+		if objVal.Ty.IsTuple {
+			return Value{Ref: fmt.Sprintf("%d", len(objVal.Ty.Fields)), Ty: TypeI64}, nil
 		}
 		// Array aggregate (e.g. from Object.keys(), arr.slice(), call result): extract field 1.
 		if objVal.Ty.IsArray {

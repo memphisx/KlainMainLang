@@ -58,6 +58,7 @@ func buildBinary(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -115,6 +116,21 @@ func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 	return append(clangArgs, jsonFile)
 }
 
+// appendDtoa compiles the JS-faithful float formatter C file (__kml_dtoa, libc
+// only) into the clang invocation when the program printed a float, mirroring
+// main.go so the test build and the real build can't drift (TDD-00080).
+func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesFloatFmt() {
+		return clangArgs
+	}
+	dtoaFile := filepath.Join(dir, "dtoa.c")
+	if err := os.WriteFile(dtoaFile, []byte(llvm.DtoaSource()), 0644); err != nil {
+		t.Fatalf("write dtoa source: %v", err)
+	}
+	return append(clangArgs, dtoaFile)
+}
+
 func buildBinaryGC(t *testing.T, src string) string {
 	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -156,6 +172,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -210,6 +227,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -270,6 +288,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -404,6 +423,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -477,6 +497,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -560,6 +581,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -608,6 +630,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -686,6 +709,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -727,6 +751,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {

@@ -164,6 +164,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, idxEx.Index, ex.Op, ex.Right, ex.GetPos())
 		}
 	}
+	// Tuple element assignment: t[0] = val (TDD-00066). A tuple is a fixed-shape
+	// struct, so a constant index maps to that field — checked before array
+	// indexing, whose {ptr,i64} storage a tuple doesn't have.
+	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		if tupleTy := e.inferExprType(idxEx.Object); tupleTy.IsTuple {
+			return e.emitTupleElemAssign(idxEx, tupleTy, ex.Op, ex.Right)
+		}
+	}
 	// Array element assignment: arr[i] = val  or  arr[i] += val
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)

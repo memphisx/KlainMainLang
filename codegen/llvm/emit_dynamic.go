@@ -290,8 +290,8 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", fscratch))
 	fdouble := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", fdouble, payload))
-	fmtFloat := e.internString("%g")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, double %s)", fscratch, fmtFloat, fdouble))
+	e.ensureDtoa() // JS-faithful shortest round-trip (TDD-00080)
+	e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", fscratch, fdouble))
 	store(fscratch)
 	e.emitLabel(nextL)
 
