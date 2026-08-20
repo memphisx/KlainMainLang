@@ -267,6 +267,98 @@ func (e *Emitter) ensureCtlz32() {
 	e.emitGlobal("declare i32 @llvm.ctlz.i32(i32, i1)")
 }
 
+// ensureCbrt emits a correctly-rounded cbrt (the public-domain fdlibm/musl
+// algorithm) as @__kml_cbrt, so Math.cbrt is deterministic across platforms.
+// Platform libm cbrt is NOT reliably correctly-rounded — glibc's runtime
+// cbrt(27) returns 3.0000000000000004 (~1 ULP high) where macOS/BSD, V8, and
+// fdlibm all give exactly 3 — which failed a cross-platform E2E test on Linux
+// CI. A single Newton/Halley refinement of the libm result is not a fix (it
+// merely moves the ULP error to other inputs, e.g. cbrt(0.001)); the fdlibm
+// path below is correctly rounded to < 0.667 ULP. Self-contained bit math, no
+// libm dependency. Comments key each step to the reference C.
+func (e *Emitter) ensureCbrt() {
+	if e.usedCbrt {
+		return
+	}
+	e.usedCbrt = true
+	// Constants: B1/B2 magic biases; P0..P4 the degree-4 1/cbrt approximation.
+	// Doubles are given as LLVM's exact-bit hex form (the fdlibm hex comments).
+	e.emitGlobal(`define double @__kml_cbrt(double %x) {
+entry:
+  %xi = bitcast double %x to i64
+  %hxsh = lshr i64 %xi, 32
+  %hxand = and i64 %hxsh, 2147483647
+  %hx = trunc i64 %hxand to i32
+  ; cbrt(NaN,Inf) is itself: hx >= 0x7ff00000
+  %isnaninf = icmp uge i32 %hx, 2146435072
+  br i1 %isnaninf, label %naninf, label %chksub
+naninf:
+  %sum = fadd double %x, %x
+  ret double %sum
+chksub:
+  ; zero or subnormal: hx < 0x00100000
+  %issub = icmp ult i32 %hx, 1048576
+  br i1 %issub, label %subn, label %normal
+subn:
+  ; scale by 2^54, re-extract hx; hx==0 means x is (signed) zero -> return x
+  %xs = fmul double %x, 0x4350000000000000
+  %xsi = bitcast double %xs to i64
+  %hxssh = lshr i64 %xsi, 32
+  %hxsand = and i64 %hxssh, 2147483647
+  %hxs = trunc i64 %hxsand to i32
+  %iszero = icmp eq i32 %hxs, 0
+  br i1 %iszero, label %retx, label %subcont
+retx:
+  ret double %x
+subcont:
+  %hxsdiv = udiv i32 %hxs, 3
+  %hxsb = add i32 %hxsdiv, 696219795
+  br label %recon
+normal:
+  %hxdiv = udiv i32 %hx, 3
+  %hxb = add i32 %hxdiv, 715094163
+  br label %recon
+recon:
+  %newhx = phi i32 [ %hxsb, %subcont ], [ %hxb, %normal ]
+  %sign = and i64 %xi, -9223372036854775808
+  %newhx64 = zext i32 %newhx to i64
+  %newhxsh = shl i64 %newhx64, 32
+  %t0i = or i64 %sign, %newhxsh
+  %t0 = bitcast i64 %t0i to double
+  ; r = (t*t)*(t/x)
+  %tt = fmul double %t0, %t0
+  %tx = fdiv double %t0, %x
+  %r = fmul double %tt, %tx
+  ; t = t*((P0 + r*(P1 + r*P2)) + ((r*r)*r)*(P3 + r*P4))
+  %rP2 = fmul double %r, 0x3FF9F1604A49D6C2
+  %P1p = fadd double 0xBFFE28E092F02420, %rP2
+  %rP1p = fmul double %r, %P1p
+  %poly1 = fadd double 0x3FFE03E60F61E692, %rP1p
+  %rr = fmul double %r, %r
+  %rrr = fmul double %rr, %r
+  %rP4 = fmul double %r, 0x3FC2B000D4E4EDD7
+  %P3p = fadd double 0xBFE844CBBEE751D9, %rP4
+  %term2 = fmul double %rrr, %P3p
+  %polysum = fadd double %poly1, %term2
+  %t1 = fmul double %t0, %polysum
+  ; round t to 23 bits: u.i = (u.i + 0x80000000) & 0xffffffffc0000000
+  %t1i = bitcast double %t1 to i64
+  %t1add = add i64 %t1i, 2147483648
+  %t1msk = and i64 %t1add, -1073741824
+  %t2 = bitcast i64 %t1msk to double
+  ; one Newton step to 53 bits: s=t*t; r=x/s; w=t+t; r=(r-t)/(w+r); t=t+t*r
+  %s = fmul double %t2, %t2
+  %rn = fdiv double %x, %s
+  %w = fadd double %t2, %t2
+  %rmt = fsub double %rn, %t2
+  %wpr = fadd double %w, %rn
+  %rfin = fdiv double %rmt, %wpr
+  %ttr = fmul double %t2, %rfin
+  %res = fadd double %t2, %ttr
+  ret double %res
+}`)
+}
+
 func (e *Emitter) ensureArc4Random() {
 	if !e.usedArc4Random {
 		e.emitGlobal("declare i32 @arc4random()")

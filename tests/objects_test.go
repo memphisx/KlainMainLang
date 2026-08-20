@@ -457,6 +457,35 @@ console.log(Suit.Spades)
 `, "H\nS")
 }
 
+// A string enum's member assigned to a variable/param/field/array *explicitly
+// typed with the enum* must allocate a string (ptr) slot, not the numeric-enum
+// i64 default — otherwise storing the member's string-constant pointer into an
+// i64 slot is a hard clang error. ADR-00247: the enum name (and its `[]` array
+// form) as a type annotation resolves to the enum's backing type. Covers typed var,
+// comparison, param+return, interface field, switch, and a typed array.
+func TestE2EStringEnumTypedVariable(t *testing.T) {
+	assertOutput(t, `
+enum Color { Red = "RED", Green = "GREEN", Blue = "BLUE" }
+const c: Color = Color.Green
+console.log(c)
+console.log(c === Color.Green)
+console.log(c === Color.Red)
+function pick(): Color { return Color.Blue }
+const p: Color = pick()
+console.log(p)
+function label(x: Color): string {
+  switch (x) { case Color.Red: return "R"; case Color.Green: return "G"; default: return "?" }
+}
+console.log(label(Color.Green))
+console.log(label(Color.Blue))
+interface Shape { color: Color }
+const s: Shape = { color: Color.Red }
+console.log(s.color)
+const cs: Color[] = [Color.Red, Color.Blue]
+console.log(cs[1])
+`, "GREEN\ntrue\nfalse\nBLUE\nG\n?\nRED\nBLUE")
+}
+
 func TestE2EConstEnum(t *testing.T) {
 	assertOutput(t, `
 const enum Color { Red = 0, Green = 1, Blue = 2 }

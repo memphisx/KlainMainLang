@@ -117,6 +117,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "toString" && e.inferExprType(mem.Object).IsBigInt {
 			return e.emitBigIntToStringMethod(mem.Object, ex.Args, ex.GetPos())
 		}
+		if (mem.Property == "then" || mem.Property == "catch" || mem.Property == "finally") && e.inferExprType(mem.Object).IsPromise {
+			return e.emitPromiseThen(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if isResponseMethodName(mem.Property) && e.inferExprType(mem.Object).IsResponse {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -144,6 +147,33 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "removeEventListener" && e.inferExprType(mem.Object).IsEventSource {
 			return e.emitEventSourceRemoveListener(mem.Object, ex.Args, ex.GetPos())
+		}
+		// Event/CustomEvent methods (TDD-00081): preventDefault / stop*.
+		if e.inferExprType(mem.Object).IsEvent &&
+			(mem.Property == "preventDefault" || mem.Property == "stopPropagation" || mem.Property == "stopImmediatePropagation") {
+			return e.emitEventMethod(mem.Object, mem.Property, ex.GetPos())
+		}
+		// EventTarget bus methods (TDD-00081 Stage 2) — an AbortSignal is an
+		// EventTarget too (Stage 3), reached via its hidden listeners map.
+		if objTy := e.inferExprType(mem.Object); objTy.IsEventTarget || objTy.IsAbortSignal {
+			switch mem.Property {
+			case "addEventListener":
+				return e.emitEventTargetAddListener(mem.Object, ex.Args, ex.GetPos())
+			case "removeEventListener":
+				return e.emitEventTargetRemoveListener(mem.Object, ex.Args, ex.GetPos())
+			case "dispatchEvent":
+				return e.emitEventTargetDispatch(mem.Object, ex.Args, ex.GetPos())
+			}
+		}
+		// AbortController.abort(reason?) (TDD-00081 Stage 3).
+		if mem.Property == "abort" && e.inferExprType(mem.Object).IsAbortController {
+			return e.emitAbortControllerAbort(mem.Object, ex.Args, ex.GetPos())
+		}
+		// AbortSignal.timeout(ms) — static (TDD-00081 Stage 3c).
+		if mem.Property == "timeout" {
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" && !e.isShadowedByLocal(id.Name) {
+				return e.emitAbortSignalTimeout(ex.Args, ex.GetPos())
+			}
 		}
 		if mem.Property == "send" && e.inferExprType(mem.Object).IsWSConnection {
 			return e.emitWSConnectionSend(mem.Object, ex.Args, ex.GetPos())
@@ -235,6 +265,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPromiseRace(ex.Args, ex.GetPos())
 			case "allSettled":
 				return e.emitPromiseAllSettled(ex.Args, ex.GetPos())
+			case "any":
+				return e.emitPromiseAny(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
@@ -755,6 +787,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "encodeURI", "@__kml_encode_uri", e.ensureEncodeURI)
 		case "decodeURI":
 			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "decodeURI", "@__kml_decode_uri", e.ensureDecodeURI)
+		case "queueMicrotask":
+			return e.emitQueueMicrotask(ex.Args, ex.GetPos())
 		case "setTimeout":
 			return e.emitSetTimeout(ex.Args, ex.GetPos())
 		case "setInterval":
@@ -901,6 +935,11 @@ var builtinModuleSpecifiers = map[string]string{
 // default-expression fallback for a missing trailing argument, and rest-
 // parameter packing into a temporary heap array.
 func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// A may-suspend async function is not called directly — it is spawned as a
+	// coroutine task, returning a pending promise (TDD-00083 Stage 2).
+	if sig.MaySuspend {
+		return e.emitMaySuspendCall(name, sig, args, pos)
+	}
 	var argParts []string
 	// How many args map to regular (non-rest) params.
 	regularCount := len(sig.ParamTypes)
@@ -1091,5 +1130,12 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), name, argsStr))
-	return Value{Ref: reg, Ty: sig.RetType}, nil
+	retTy := sig.RetType
+	// A non-suspending async fn (didn't take the MaySuspend fiber path above)
+	// now returns a settled task-shaped promise (TDD-00084 Part A) — tag it so
+	// `await`/`.then` take the task path, matching the may-suspend result.
+	if sig.IsAsync && retTy.IsPromise {
+		retTy.PromiseTask = true
+	}
+	return Value{Ref: reg, Ty: retTy}, nil
 }

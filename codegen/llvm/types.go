@@ -86,6 +86,14 @@ type Type struct {
 	// symptom varied run to run, per garbage read from whatever bytes landed
 	// where the pending struct's `result` field would be).
 	PromiseResolved bool
+
+	// PromiseTask marks a Promise<T> returned by a may-suspend async function
+	// (TDD-00083 Stage 2): its slot is a { i64 resolved, ptr waiter, i64 v0, i64
+	// v1 } pending-promise object driven by the task scheduler (runtime_task.go),
+	// not a bare value slot. emitAwait uses this to wait via
+	// @__kml_task_await_ready and then read v0/v1, rather than the plain
+	// load-and-free path.
+	PromiseTask bool
 	// IsDynamic marks any/unknown: a runtime-tagged { i8, i64 } box (tag +
 	// payload) instead of one fixed concrete storage type. See emit_dynamic.go.
 	IsDynamic bool
@@ -279,6 +287,23 @@ type Type struct {
 	// scan (__kml_eventsource_scan, runtime_eventsource.go) needs to write
 	// readyState transitions back into this object. See emit_eventsource.go.
 	IsEventSource bool
+	// IsEvent marks a WHATWG Event/CustomEvent object (TDD-00081): a plain
+	// fixed-shape object (type/detail/defaultPrevented fields) plus the
+	// preventDefault/stop* method surface. CustomEvent carries an extra `detail`
+	// field whose type varies, so the object type itself is the source of truth
+	// for its fields; this flag only enables method dispatch.
+	IsEvent bool
+	// IsEventTarget marks a WHATWG EventTarget (TDD-00081 Stage 2): under the
+	// hood a `Map<string, listener-list>` pointer (the same registry EventEmitter
+	// uses), reached only through addEventListener/removeEventListener/
+	// dispatchEvent.
+	IsEventTarget bool
+	// IsAbortSignal / IsAbortController mark the WHATWG cancellation token
+	// (TDD-00081 Stage 3). An AbortSignal is an object with `aborted`/`reason`
+	// fields plus a hidden `listeners` map (so it behaves as an EventTarget that
+	// fires "abort"); an AbortController wraps one in its `signal` field.
+	IsAbortSignal     bool
+	IsAbortController bool
 	// IsWSConnection marks the object passed to an `http.listen(port,
 	// handler, { ws })` upgrade handler (TDD-00039 Stage 1) — a real heap
 	// object like EventSource, with a hidden field (WSConnFdField) holding
@@ -688,6 +713,63 @@ func MessageEventType() Type {
 		{Name: "type", Ty: TypePtr},
 		{Name: "lastEventId", Ty: TypePtr},
 	})
+}
+
+// EventType is the WHATWG Event object (TDD-00081): a fixed-shape object with a
+// type string, a defaultPrevented flag, and an internal stopImmediate flag,
+// tagged IsEvent so preventDefault/stop* dispatch on it.
+func EventType() Type {
+	t := ObjectType([]Field{
+		{Name: "type", Ty: TypePtr},
+		{Name: "defaultPrevented", Ty: TypeBool},
+		{Name: "stopImmediate", Ty: TypeBool},
+	})
+	t.IsEvent = true
+	return t
+}
+
+// EventTargetType is a WHATWG EventTarget: a bare `Map<string, listener-list>`
+// pointer, tagged IsEventTarget (TDD-00081 Stage 2).
+func EventTargetType() Type {
+	return Type{IR: "ptr", IsEventTarget: true}
+}
+
+// AbortSignalType is a WHATWG AbortSignal (TDD-00081 Stage 3): an object with an
+// aborted flag, a reason, and a hidden listener registry so it dispatches "abort"
+// like an EventTarget.
+func AbortSignalType() Type {
+	t := ObjectType([]Field{
+		{Name: "aborted", Ty: TypeBool},
+		{Name: "reason", Ty: TypePtr},
+		{Name: "listeners", Ty: TypePtr},
+		// deadlineNs: a monotonic-ns deadline for AbortSignal.timeout(ms) (0 =
+		// none). The fetch await loop / event loop fold this in via
+		// __kml_signal_aborted so a slow request is cancelled at the deadline.
+		{Name: "deadlineNs", Ty: TypeI64},
+	})
+	t.IsAbortSignal = true
+	return t
+}
+
+// AbortControllerType wraps an AbortSignal in its `signal` field.
+func AbortControllerType() Type {
+	t := ObjectType([]Field{
+		{Name: "signal", Ty: AbortSignalType()},
+	})
+	t.IsAbortController = true
+	return t
+}
+
+// CustomEventType is EventType plus a `detail` field of the given type.
+func CustomEventType(detailTy Type) Type {
+	t := ObjectType([]Field{
+		{Name: "type", Ty: TypePtr},
+		{Name: "detail", Ty: detailTy},
+		{Name: "defaultPrevented", Ty: TypeBool},
+		{Name: "stopImmediate", Ty: TypeBool},
+	})
+	t.IsEvent = true
+	return t
 }
 
 // WSConnFdField is the name of the hidden i64 field every WSConnection
@@ -1281,7 +1363,21 @@ type FuncSig struct {
 	ParamTypes []Type
 	ParamNames []string // for error messages only (e.g. an inferred-parameter type mismatch)
 	RetType    Type
-	HasRest    bool             // last param is a rest (variadic) parameter
+	// MaySuspend marks an async function that can actually suspend at an await
+	// (it awaits a fetch, a Promise combinator over fetch, or another
+	// may-suspend async function — transitively). Such functions are compiled as
+	// coroutine tasks (runtime_task.go / TDD-00083 Stage 2) rather than the
+	// inlined synchronous malloc-slot model. A purely-synchronous async function
+	// (no such await) keeps the fast path unchanged, so non-suspending programs
+	// are byte-for-byte identical.
+	MaySuspend bool
+	// IsAsync marks an `async` function (declaration or arrow). Every async
+	// function returns a real task-shaped promise now (TDD-00084 Part A): a
+	// may-suspend one via a coroutine fiber, a non-suspending one via an inline
+	// catch-and-settle wrapper that settles the promise on return / rejects it on
+	// throw. Used to tag a call's result type PromiseTask regardless of MaySuspend.
+	IsAsync bool
+	HasRest bool             // last param is a rest (variadic) parameter
 	Defaults   []ast.Expression // per-param default expression; nil entry means no default
 	// Optional marks a `param?: T` parameter (ADR-00164) — a call site
 	// omitting it (and with no Defaults[i] expression either) gets T's own
@@ -1308,6 +1404,18 @@ func ResolveTypeName(name string) Type {
 		return TypePtr
 	case "boolean":
 		return TypeBool
+	case "EventTarget":
+		return EventTargetType()
+	case "AbortController":
+		return AbortControllerType()
+	case "AbortSignal":
+		return AbortSignalType()
+	case "Event":
+		return EventType()
+	case "CustomEvent":
+		// A bare `CustomEvent` annotation types detail as a ptr; `CustomEvent<T>`
+		// (with a resolved detail type) is handled by the generic path (TDD-00081).
+		return CustomEventType(TypePtr)
 	case "void":
 		return TypeVoid
 	case "null":

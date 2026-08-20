@@ -10,7 +10,26 @@ import (
 // index into this slice is the runtime kind tag stored in every Error
 // object's hidden field 0. "Error" is always kind 0, the base every other
 // kind is unconditionally `instanceof` (see emitErrorInstanceOf).
-var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "EvalError", "URIError", "ReferenceError"}
+// DOMException is included so `x instanceof DOMException` is decidable and the
+// abort/timeout errors fetch throws carry a real DOMException kind tag. Per the
+// current WebIDL spec DOMException inherits from Error, so `instanceof Error`
+// stays true for it too (emitErrorInstanceOf treats "Error" as the base every
+// kind matches). Its runtime `.name` (unlike the other kinds) is not fixed to
+// the kind name — it is "AbortError"/"TimeoutError"/etc. per construction site.
+var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "EvalError", "URIError", "ReferenceError", "DOMException", "AggregateError"}
+
+// aggregateErrorStructIR is AggregateError's extended runtime layout: the shared
+// 3-field errorObjType prefix (kind/message/name, byte-identical offsets so
+// .message/.name/kind reads work through errorObjType.StructIR() unchanged) plus
+// a trailing `{ errData ptr, errLen i64 }` carrying the aggregated errors array
+// (TDD-00083). Only an AggregateError is allocated at this 40-byte size; every
+// other error stays the 24-byte errorObjType, and `.errors` access (see
+// emitErrorErrorsAccess) is kind-guarded so those trailing fields are never read
+// on a non-aggregate object.
+const (
+	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
+	aggregateErrorStructSize = 40
+)
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
 // package init. Every case in parser_literals.go's parseNew Error-kind
@@ -73,6 +92,30 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	return dataReg
 }
 
+// buildAggregateErrorObj mallocs and fills an AggregateError (the extended
+// 40-byte aggregateErrorStructIR): kind tag, message, name ("AggregateError"),
+// and the aggregated errors as a { ptr data, i64 len } array in the trailing two
+// fields. Returned as a plain ptr; callers type it errorObjType (the shared
+// error type) — `.errors` reads the trailing fields via a kind guard.
+func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string) string {
+	e.ensureExceptionHelpers()
+	e.ensureMalloc()
+	kindID := errorKindIDs["AggregateError"]
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", data, aggregateErrorStructSize))
+	store := func(idx int, ty, ref string) {
+		gp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR, data, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty, ref, gp))
+	}
+	store(0, "i64", fmt.Sprintf("%d", kindID))
+	store(1, "ptr", msgPtr)
+	store(2, "ptr", namePtr)
+	store(3, "ptr", dataPtr)
+	store(4, "i64", lenRef)
+	return data
+}
+
 // emitInternalThrow throws a base-Error-shaped errorObjType instance (kind
 // 0) carrying msgPtr as both message and (via the interned "Error" literal)
 // name, then emits `unreachable` — the shared tail every internally
@@ -92,6 +135,13 @@ func (e *Emitter) emitInternalThrow(msgPtr string) {
 func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	e.ensureExceptionHelpers()
 
+	// AggregateError(errors, message?) carries the aggregated errors array in its
+	// extended layout; message defaults to the empty string (real JS), name is
+	// the fixed "AggregateError".
+	if ne.Kind == "AggregateError" {
+		return e.emitNewAggregateError(ne)
+	}
+
 	var msgPtr string
 	if ne.Message != nil {
 		msgVal, err := e.emitExpr(ne.Message)
@@ -100,12 +150,103 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 		}
 		msgVal = e.coerce(msgVal, TypePtr)
 		msgPtr = msgVal.Ref
+	} else if ne.Kind == "DOMException" {
+		// `new DOMException()` defaults message to the empty string, not the
+		// kind name (the other kinds default to their own name as the message).
+		msgPtr = e.internString("")
 	} else {
 		msgPtr = e.internString(ne.Kind)
 	}
 
-	dataReg := e.buildErrorObj(errorKindIDs[ne.Kind], msgPtr, e.internString(ne.Kind))
+	// DOMException's `.name` is the second constructor argument (default
+	// "Error"), unlike the fixed-name kinds whose name is the kind itself.
+	namePtr := e.internString(ne.Kind)
+	if ne.Kind == "DOMException" {
+		namePtr = e.internString("Error")
+		if ne.Name != nil {
+			nameVal, err := e.emitExpr(ne.Name)
+			if err != nil {
+				return Value{}, err
+			}
+			nameVal = e.coerce(nameVal, TypePtr)
+			namePtr = nameVal.Ref
+		}
+	}
+
+	dataReg := e.buildErrorObj(errorKindIDs[ne.Kind], msgPtr, namePtr)
 	return Value{Ref: dataReg, Ty: errorObjType}, nil
+}
+
+// emitNewAggregateError emits `new AggregateError(errors, message?)`. The errors
+// array resolves to a { data ptr, len } pair stored in the extended layout; the
+// value is typed errorObjType (the shared error type) so it flows through
+// catch/throw and `instanceof` exactly like every other error kind, with
+// `.errors` reading the trailing fields (emitErrorErrorsAccess).
+func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, error) {
+	dataPtr, lenReg := "null", "0"
+	if ne.Errors != nil {
+		p, l, _, err := e.resolveArrayForHOF(ne.Errors, ne.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		dataPtr, lenReg = p, l
+	}
+	msgPtr := e.internString("")
+	if ne.Message != nil {
+		msgVal, err := e.emitExpr(ne.Message)
+		if err != nil {
+			return Value{}, err
+		}
+		msgVal = e.coerce(msgVal, TypePtr)
+		msgPtr = msgVal.Ref
+	}
+	namePtr := e.internString("AggregateError")
+	data := e.buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenReg)
+	return Value{Ref: data, Ty: errorObjType}, nil
+}
+
+// emitErrorErrorsAccess reads `err.errors` (AggregateError). Kind-guarded: an
+// actual AggregateError yields its stored { data, len } array; any other error
+// kind yields an empty array — a non-aggregate is only 24 bytes, so its trailing
+// fields are never read. Returns an `errorObjType[]` array value (the aggregated
+// errors are error objects, so `err.errors[i].message` works).
+func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
+	aggID := errorKindIDs["AggregateError"]
+	kp := e.freshReg()
+	k := e.freshReg()
+	isAgg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kp, errorObjType.StructIR(), errPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kp))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, k, aggID))
+	aggL := e.freshLabel("aggerr.errors")
+	emptyL := e.freshLabel("aggerr.empty")
+	mergeL := e.freshLabel("aggerr.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAgg, aggL, emptyL))
+
+	e.emitLabel(aggL)
+	dp := e.freshReg()
+	d := e.freshReg()
+	lp := e.freshReg()
+	l := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", dp, aggregateErrorStructIR, errPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", lp, aggregateErrorStructIR, errPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lp))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(emptyL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	data := e.freshReg()
+	length := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", data, d, aggL, emptyL))
+	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", length, l, aggL, emptyL))
+	a0 := e.freshReg()
+	a1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, data))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", a1, a0, length))
+	return Value{Ref: a1, Ty: ArrayOf(errorObjType)}
 }
 
 // emitThrow emits a throw statement: calls @__kml_throw then unreachable.

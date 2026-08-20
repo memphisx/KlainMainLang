@@ -63,6 +63,26 @@ const id = setInterval(() => {
 `, "tick 1\ntick 2\ntick 3")
 }
 
+// The same self-cancelling-interval bug via a plain *assignment* to a
+// pre-declared `let` (`id = setInterval(...)`) rather than a `const` var-decl
+// init — a distinct codegen path (emitAssign) that also stored into the
+// variable's pre-promotion alloca while the callback's capture had been boxed
+// to a different cell, so the closure saw a stale id and clearInterval never
+// matched. Fixed by re-resolving the variable's storage after the RHS runs.
+func TestE2ESetIntervalSelfCancelsViaAssignment(t *testing.T) {
+	assertOutput(t, `
+let count: number = 0
+let id: number = 0
+id = setInterval(() => {
+    count = count + 1
+    console.log("tick " + count)
+    if (count >= 3) {
+        clearInterval(id)
+    }
+}, 5)
+`, "tick 1\ntick 2\ntick 3")
+}
+
 func TestE2EProcessExitSkipsPendingTimers(t *testing.T) {
 	assertOutput(t, `
 setTimeout(() => {

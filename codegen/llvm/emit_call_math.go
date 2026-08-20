@@ -13,8 +13,13 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 	case "abs":
 		return e.emitMathAbs(args, pos)
 	case "sqrt", "log", "log2", "log10", "sin", "cos", "tan",
-		"asin", "acos", "atan", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p":
+		"asin", "acos", "atan", "sinh", "cosh", "tanh", "expm1", "log1p":
 		return e.emitMathUnaryFloat(property, args, pos)
+	case "cbrt":
+		// Not the platform libm cbrt — that isn't reliably correctly-rounded
+		// (glibc's runtime cbrt(27) is 3.0000000000000004, where macOS/V8/fdlibm
+		// give exactly 3). @__kml_cbrt is the deterministic fdlibm algorithm.
+		return e.emitMathCbrt(args, pos)
 	case "pow":
 		return e.emitMathBinaryFloat("pow", args, pos)
 	case "hypot":
@@ -163,6 +168,23 @@ func (e *Emitter) emitMathUnaryFloat(fn string, args []ast.Expression, pos ast.P
 	e.ensureMathFuncs()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s)", r, fn, fval.Ref))
+	return Value{Ref: r, Ty: TypeF64}, nil
+}
+
+// emitMathCbrt routes Math.cbrt through @__kml_cbrt (ensureCbrt), the
+// correctly-rounded fdlibm implementation, instead of the platform libm cbrt.
+func (e *Emitter) emitMathCbrt(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Math.cbrt expects 1 argument", pos.Line, pos.Col)
+	}
+	val, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fval := e.coerce(val, TypeF64)
+	e.ensureCbrt()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_cbrt(double %s)", r, fval.Ref))
 	return Value{Ref: r, Ty: TypeF64}, nil
 }
 

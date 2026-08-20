@@ -198,6 +198,20 @@ func LookupIdent(s string) TokenType {
 	return IDENT
 }
 
+var keywordTypes = func() map[TokenType]bool {
+	m := make(map[TokenType]bool, len(keywords))
+	for _, t := range keywords {
+		m[t] = true
+	}
+	return m
+}()
+
+// IsKeyword reports whether t is a reserved-word token type. Reserved words are
+// valid property names after `.` (e.g. `promise.catch`, `promise.finally`), so
+// the parser accepts them in that position — a keyword token carries the word
+// itself as its Literal (see readIdent).
+func IsKeyword(t TokenType) bool { return keywordTypes[t] }
+
 type Token struct {
 	Type    TokenType
 	Literal string

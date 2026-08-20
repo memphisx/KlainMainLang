@@ -45,6 +45,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	savedRetType := e.currentRetType
 	savedIsAsync := e.isAsync
 	savedCoroHdl := e.coroHdl
+	savedAsyncPromiseReg := e.asyncPromiseReg
+	savedAsyncCatchLabel := e.asyncCatchLabel
 	savedPromiseTy := e.currentPromiseTy
 	savedCoroRetLabel := e.coroRetLabel
 
@@ -99,6 +101,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.blockDone = false
 	e.isAsync = decl.IsAsync
 	e.coroHdl = ""
+	e.asyncPromiseReg = ""
+	e.asyncCatchLabel = ""
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
@@ -132,17 +136,31 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		return err
 	}
 
+	// A may-suspend async function (TDD-00083 Stage 2) is compiled as a coroutine
+	// task: signature `void @f(ptr %__taskargs)`, params read from an args bundle,
+	// and a return that resolves the running task's promise. It still uses the
+	// coroHdl return-value slot, so the body/return machinery is unchanged.
+	taskBody := decl.IsAsync && sig.MaySuspend
+
 	// For async functions, the IR return type is always ptr (the coro handle).
 	// The logical return type (Promise<T>) is stored; T is tracked in currentPromiseTy.
 	if decl.IsAsync {
 		if retType.IsPromise && retType.PromiseType != nil {
 			e.currentPromiseTy = *retType.PromiseType
 		}
-		// IR return type is ptr (the coroutine handle).
+		// IR return type is ptr (the coroutine handle); a task body returns void.
 		e.currentRetType = TypePtr
 		e.coroRetLabel = e.freshLabel("coro.ret")
-		// Emit the coroutine prologue into e.allocas (entry block).
-		e.emitAsyncPrologue()
+		if taskBody {
+			// A may-suspend body: coroHdl slot only; emitTaskEpilogue marshals it
+			// into the running task's promise, the trampoline settles/rejects it.
+			e.ensureTaskRuntime()
+			e.emitAsyncPrologue()
+		} else {
+			// A non-suspending body: returns a settled task promise via the inline
+			// catch-and-settle wrapper (TDD-00084 Part A).
+			e.emitInlineAsyncPrologue()
+		}
 	} else {
 		e.currentRetType = retType
 	}
@@ -155,7 +173,18 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// Array parameters expand to two LLVM params: (ptr, i64 length).
 	// Object and scalar parameters are each one ptr/scalar LLVM param.
 	var llvmParams []string
+	if taskBody {
+		// Params come from the args bundle, not LLVM parameters; the only LLVM
+		// parameter is the bundle pointer.
+		llvmParams = []string{"ptr %__taskargs"}
+		if err := e.bindTaskParamsFromBundle(decl, sig); err != nil {
+			return err
+		}
+	}
 	for i, p := range decl.Params {
+		if taskBody {
+			break
+		}
 		pty := sig.ParamTypes[i]
 		// TDD-00062 (Staged V2): a bare `any`/`unknown` parameter is now
 		// allowed (same box round-trip as the return type above). Only a
@@ -228,9 +257,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	}
 
 	// Add implicit terminator and assemble the function IR.
-	if decl.IsAsync {
-		// Async: emit coro.ret block (includes the implicit br + coro.end + ret ptr).
-		e.emitAsyncEpilogue()
+	if taskBody {
+		// May-suspend task body: coro.ret resolves the task promise; signature
+		// is `void @f(ptr %__taskargs)`.
+		e.emitTaskEpilogue()
+		e.functions.WriteString(fmt.Sprintf("\ndefine void @%s(%s) {\nentry:\n",
+			llvmName, strings.Join(llvmParams, ", ")))
+	} else if decl.IsAsync {
+		// Non-suspending async: coro.ret fulfills the settled promise, plus a
+		// catch block that rejects it on a thrown error (TDD-00084 Part A).
+		e.emitInlineAsyncEpilogue()
 		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
 			llvmName, strings.Join(llvmParams, ", ")))
 	} else {
@@ -256,6 +292,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.currentRetType = savedRetType
 	e.isAsync = savedIsAsync
 	e.coroHdl = savedCoroHdl
+	e.asyncPromiseReg = savedAsyncPromiseReg
+	e.asyncCatchLabel = savedAsyncCatchLabel
 	e.currentPromiseTy = savedPromiseTy
 	e.coroRetLabel = savedCoroRetLabel
 	e.blockDone = false // main body starts unterminated
@@ -726,6 +764,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	savedBlockDone := e.blockDone
 	savedIsAsync := e.isAsync
 	savedCoroHdl := e.coroHdl
+	savedAsyncPromiseReg := e.asyncPromiseReg
+	savedAsyncCatchLabel := e.asyncCatchLabel
 	savedPromiseTy := e.currentPromiseTy
 	savedCoroRetLabel := e.coroRetLabel
 	// A closure's own break/continue/named-label context starts empty, not
@@ -768,6 +808,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.currentRetType = retTy
 	e.isAsync = af.IsAsync
 	e.coroHdl = ""
+	e.asyncPromiseReg = ""
+	e.asyncCatchLabel = ""
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
@@ -797,7 +839,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.currentPromiseTy = *retTy.PromiseType
 		}
 		e.coroRetLabel = e.freshLabel("coro.ret")
-		e.emitAsyncPrologue()
+		// An async arrow is never may-suspend-classified — inline settled path.
+		e.emitInlineAsyncPrologue()
 	}
 
 	// Build the LLVM parameter list string and alloca+store each regular param.
@@ -886,7 +929,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			// async function falling off the end. Every explicit `return`
 			// inside the block already branched to coroRetLabel itself
 			// (emitReturn's async-aware path).
-			e.emitAsyncEpilogue()
+			e.emitInlineAsyncEpilogue()
 		} else if retTy.IR == "void" {
 			e.emitTerminator("ret void")
 		} else {
@@ -904,7 +947,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
 					StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
 			}
-			e.emitAsyncEpilogue()
+			e.emitInlineAsyncEpilogue()
 		} else if retTy.IR == "void" {
 			if _, err := e.emitExpr(af.Body); err != nil {
 				return err
@@ -994,6 +1037,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.blockDone = savedBlockDone
 	e.isAsync = savedIsAsync
 	e.coroHdl = savedCoroHdl
+	e.asyncPromiseReg = savedAsyncPromiseReg
+	e.asyncCatchLabel = savedAsyncCatchLabel
 	e.currentPromiseTy = savedPromiseTy
 	e.coroRetLabel = savedCoroRetLabel
 	return nil
@@ -1446,6 +1491,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	savedBlockDone := e.blockDone
 	savedIsAsync := e.isAsync
 	savedCoroHdl := e.coroHdl
+	savedAsyncPromiseReg := e.asyncPromiseReg
+	savedAsyncCatchLabel := e.asyncCatchLabel
 	savedPromiseTy := e.currentPromiseTy
 	savedCoroRetLabel := e.coroRetLabel
 	// Same reset emitClosureFunc gives an arrow function's own break/
@@ -1482,6 +1529,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.currentRetType = retTy
 	e.isAsync = fe.IsAsync
 	e.coroHdl = ""
+	e.asyncPromiseReg = ""
+	e.asyncCatchLabel = ""
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
@@ -1495,7 +1544,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.currentPromiseTy = *retTy.PromiseType
 		}
 		e.coroRetLabel = e.freshLabel("coro.ret")
-		e.emitAsyncPrologue()
+		// A function expression is never may-suspend-classified — inline path.
+		e.emitInlineAsyncPrologue()
 	}
 
 	// Build the LLVM parameter list string and alloca+store each regular param.
@@ -1568,7 +1618,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		}
 	}
 	if fe.IsAsync {
-		e.emitAsyncEpilogue()
+		e.emitInlineAsyncEpilogue()
 	} else if retTy.IR == "void" {
 		e.emitTerminator("ret void")
 	} else {
@@ -1593,6 +1643,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.blockDone = savedBlockDone
 	e.isAsync = savedIsAsync
 	e.coroHdl = savedCoroHdl
+	e.asyncPromiseReg = savedAsyncPromiseReg
+	e.asyncCatchLabel = savedAsyncCatchLabel
 	e.currentPromiseTy = savedPromiseTy
 	e.coroRetLabel = savedCoroRetLabel
 

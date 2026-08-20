@@ -79,7 +79,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			return e.emitFetchAsyncCall(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref)
+			return e.emitFetchAsyncCall(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref, "null")
 		}
 	}
 
@@ -89,7 +89,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 	}
 	urlVal = e.coerce(urlVal, TypePtr)
 
-	methodRef, headersRef, bodyRef := "null", "null", "null"
+	methodRef, headersRef, bodyRef, signalRef := "null", "null", "null", "null"
 	if len(args) == 2 {
 		initVal, err := e.emitExpr(args[1])
 		if err != nil {
@@ -97,6 +97,12 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		}
 		if !initVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("%d:%d: fetch's second argument must be an object with an optional method/headers/body field", pos.Line, pos.Col)
+		}
+		if idx, fieldTy, ok := initVal.Ty.FieldIndex("signal"); ok {
+			if !fieldTy.IsAbortSignal {
+				return Value{}, fmt.Errorf("%d:%d: fetch's init.signal must be an AbortSignal", pos.Line, pos.Col)
+			}
+			signalRef = e.loadFieldValue(initVal, idx, fieldTy).Ref
 		}
 		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok {
 			if !isPlainStringType(fieldTy) {
@@ -123,18 +129,18 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		}
 	}
 
-	return e.emitFetchAsyncCall(urlVal.Ref, methodRef, headersRef, bodyRef)
+	return e.emitFetchAsyncCall(urlVal.Ref, methodRef, headersRef, bodyRef, signalRef)
 }
 
 // emitFetchAsyncCall is the shared tail every fetch() call form (bare url,
 // url+init, or a Request object) reduces to once url/method/headers/body
 // refs are resolved: call __kml_fetch_async, box the returned pending
 // handle into a fresh Promise<Response> slot.
-func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef string) (Value, error) {
+func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef, signalRef string) (Value, error) {
 	e.ensureFetchAsync()
 	pendingReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s)",
-		pendingReg, urlRef, methodRef, headersRef, bodyRef))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
+		pendingReg, urlRef, methodRef, headersRef, bodyRef, signalRef))
 
 	e.ensureMalloc()
 	slotReg := e.freshReg()

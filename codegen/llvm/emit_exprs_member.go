@@ -538,6 +538,12 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 	}
+	// AggregateError.errors — the shared errorObjType has no `errors` field, so
+	// this is intercepted before FieldIndex. Kind-guarded: only an actual
+	// AggregateError carries the trailing errors array (TDD-00083).
+	if objVal.Ty.IsError && ex.Property == "errors" {
+		return e.emitErrorErrorsAccess(objVal.Ref), nil
+	}
 	// TDD-00030: a class accessor (getter/setter) is checked before the
 	// plain-field FieldIndex path below — an accessor-only property name
 	// is never a real Field, so FieldIndex would otherwise report "no

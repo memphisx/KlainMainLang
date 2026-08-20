@@ -271,3 +271,22 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00231](ADR-00231.md) | Conditional types + infer + generic type aliases + structural assignability | Implements [TDD-00079](../tdd/TDD-00079.md) (Stage 3); extends [ADR-00230](ADR-00230.md) |
 | [00232](ADR-00232.md) | Type-system caveat reductions — tuple `.length` + element assignment; `A \| B \| null`; intersection same-name object fields | Extends [ADR-00201](ADR-00201.md), [ADR-00225](ADR-00225.md) |
 | [00233](ADR-00233.md) | JS-faithful float-to-string (shortest round-trip) | Implements [TDD-00080](../tdd/TDD-00080.md); supersedes [ADR-00166](ADR-00166.md) |
+| [00234](ADR-00234.md) | Event / CustomEvent objects (Events & Cancellation, stage 1) | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 1) |
+| [00235](ADR-00235.md) | EventTarget bus (Events & Cancellation, stage 2) | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 2); extends [ADR-00234](ADR-00234.md) |
+| [00236](ADR-00236.md) | AbortController / AbortSignal (Events & Cancellation, stage 3a) | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 3); extends [ADR-00235](ADR-00235.md) |
+| [00237](ADR-00237.md) | Wire AbortSignal into fetch (Events & Cancellation, stage 3b) | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 3b); extends [ADR-00236](ADR-00236.md), [ADR-00050](ADR-00050.md) |
+| [00238](ADR-00238.md) | AbortSignal.timeout + mid-flight fetch cancellation (stage 3c) | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 3c); extends [ADR-00237](ADR-00237.md) |
+| [00239](ADR-00239.md) | Fold fetch AbortSignal.timeout deadlines into event-loop select() | Implements [TDD-00081](../tdd/TDD-00081.md) (Stage 3c); extends [ADR-00238](ADR-00238.md) |
+| [00240](ADR-00240.md) | Abort/timeout errors are DOMException; instanceof + new DOMException | Implements [TDD-00081](../tdd/TDD-00081.md); extends [ADR-00238](ADR-00238.md), [ADR-00239](ADR-00239.md) |
+| [00241](ADR-00241.md) | `await` of a non-thenable is identity — fixes Response body-accessor crash | Fixes [ADR-00166](ADR-00166.md) audit bug; touches [ADR-00021](ADR-00021.md), [ADR-00094](ADR-00094.md), [ADR-00224](ADR-00224.md) |
+| [00242](ADR-00242.md) | Deterministic correctly-rounded Math.cbrt (fdlibm), not platform libm | Fixes a cross-platform CI failure; [ADR-00166](ADR-00166.md) context |
+| [00243](ADR-00243.md) | CI robustness — link libpcre2, de-flake performance.mark overwrite test | Surfaced while replicating [ADR-00242](ADR-00242.md)'s cbrt CI failure |
+| [00244](ADR-00244.md) | True async-function suspension (coroutine tasks) + concurrent combinators | Implements [TDD-00083](../tdd/TDD-00083.md) (Stage 2); builds on [ADR-00050](ADR-00050.md), [ADR-00073](ADR-00073.md) |
+| [00245](ADR-00245.md) | Microtasks — queueMicrotask + Promise.prototype.then/.catch/.finally | Implements [TDD-00083](../tdd/TDD-00083.md) (Stage 3); builds on [ADR-00244](ADR-00244.md) |
+| [00246](ADR-00246.md) | Presence-aware logical compound assignment on a nullable-scalar field | Implements [TDD-00064](../tdd/TDD-00064.md); closes the [ADR-00199](ADR-00199.md) remainder |
+| [00247](ADR-00247.md) | A string enum's name resolves to its string backing type as an annotation | Fixes an [ADR-00166](ADR-00166.md) audit find |
+| [00248](ADR-00248.md) | Promise.any skip-rejected + AggregateError, and .then/.catch/.finally value-chaining | Implements [TDD-00083](../tdd/TDD-00083.md) (Stage 3 follow-on); builds on [ADR-00244](ADR-00244.md), [ADR-00245](ADR-00245.md) |
+| [00249](ADR-00249.md) | Every async function returns a real promise — inline catch-and-settle | Implements [TDD-00084](../tdd/TDD-00084.md) (Part A); builds on [ADR-00244](ADR-00244.md), [ADR-00248](ADR-00248.md) |
+| [00250](ADR-00250.md) | One task-aware event loop — unifying the two program-exit loops | Implements [TDD-00084](../tdd/TDD-00084.md) (Part B); builds on [ADR-00249](ADR-00249.md), [TDD-00006](../tdd/TDD-00006.md) |
+| [00251](ADR-00251.md) | Promise.any over raw fetches, and destructured/nullable params in a suspending fn | Implements [TDD-00084](../tdd/TDD-00084.md) (Part C, completing it); builds on [ADR-00248](ADR-00248.md), [ADR-00073](ADR-00073.md), [ADR-00199](ADR-00199.md) |
+| [00252](ADR-00252.md) | Re-resolve an assigned variable's storage after the RHS runs (closure-capture promotion) | Fixes a latent bug; complements [ADR-00001](ADR-00001.md) |

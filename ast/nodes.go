@@ -991,9 +991,13 @@ type CatchClause struct {
 // NewErrorExpression — `new Error("message")`, or one of its built-in
 // subtypes (`new TypeError("message")`, etc. — TDD-00013 Option A). Kind is
 // always one of the registered names in codegen/llvm's errorKinds table.
+// Name is set only for `new DOMException(message, name)`, whose runtime name
+// is the second constructor argument rather than fixed to Kind (nil → "Error").
 type NewErrorExpression struct {
 	Kind    string
 	Message Expression // nil if no argument
+	Name    Expression // DOMException's 2nd arg; nil for the fixed-name kinds
+	Errors  Expression // AggregateError's 1st arg (the aggregated errors); nil otherwise
 	pos     Pos
 }
 
@@ -1113,6 +1117,64 @@ func (n *NewHeadersExpression) GetPos() Pos { return n.pos }
 
 func NewNewHeadersExpression(init Expression, pos Pos) *NewHeadersExpression {
 	return &NewHeadersExpression{Init: init, pos: pos}
+}
+
+// NewAbortControllerExpression is `new AbortController()` (TDD-00081 Stage 3).
+type NewAbortControllerExpression struct {
+	pos Pos
+}
+
+func (*NewAbortControllerExpression) nodeMarker()   {}
+func (*NewAbortControllerExpression) exprMarker()   {}
+func (n *NewAbortControllerExpression) GetPos() Pos { return n.pos }
+
+func NewNewAbortControllerExpression(pos Pos) *NewAbortControllerExpression {
+	return &NewAbortControllerExpression{pos: pos}
+}
+
+// NewEventTargetExpression is `new EventTarget()` (WHATWG event bus, TDD-00081
+// Stage 2).
+type NewEventTargetExpression struct {
+	pos Pos
+}
+
+func (*NewEventTargetExpression) nodeMarker()   {}
+func (*NewEventTargetExpression) exprMarker()   {}
+func (n *NewEventTargetExpression) GetPos() Pos { return n.pos }
+
+func NewNewEventTargetExpression(pos Pos) *NewEventTargetExpression {
+	return &NewEventTargetExpression{pos: pos}
+}
+
+// NewEventExpression is `new Event(type)` (WHATWG Event, TDD-00081 Stage 1).
+type NewEventExpression struct {
+	TypeArg Expression // the event type string
+	pos     Pos
+}
+
+func (*NewEventExpression) nodeMarker()   {}
+func (*NewEventExpression) exprMarker()   {}
+func (n *NewEventExpression) GetPos() Pos { return n.pos }
+
+func NewNewEventExpression(typeArg Expression, pos Pos) *NewEventExpression {
+	return &NewEventExpression{TypeArg: typeArg, pos: pos}
+}
+
+// NewCustomEventExpression is `new CustomEvent(type, { detail })` (TDD-00081
+// Stage 1). Detail is the value of the init object's `detail` property (nil if
+// absent), extracted at parse time so codegen doesn't re-inspect the literal.
+type NewCustomEventExpression struct {
+	TypeArg Expression
+	Detail  Expression // nil if the init object omitted `detail`
+	pos     Pos
+}
+
+func (*NewCustomEventExpression) nodeMarker()   {}
+func (*NewCustomEventExpression) exprMarker()   {}
+func (n *NewCustomEventExpression) GetPos() Pos { return n.pos }
+
+func NewNewCustomEventExpression(typeArg, detail Expression, pos Pos) *NewCustomEventExpression {
+	return &NewCustomEventExpression{TypeArg: typeArg, Detail: detail, pos: pos}
 }
 
 // NewRequestExpression is `new Request(url)` or `new Request(url, init)`

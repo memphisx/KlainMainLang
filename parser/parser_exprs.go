@@ -413,6 +413,11 @@ func (p *Parser) expectPropertyName() (lexer.Token, error) {
 	if p.check(lexer.PRIVATE_NAME) {
 		return p.advance(), nil
 	}
+	// A reserved word is a valid property name after `.` (e.g. `promise.catch`,
+	// `promise.finally`) — the keyword token carries the word as its Literal.
+	if lexer.IsKeyword(p.peek().Type) {
+		return p.advance(), nil
+	}
 	return p.expect(lexer.IDENT)
 }
 

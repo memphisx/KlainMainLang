@@ -107,6 +107,18 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = RegExpType()
 		case *ast.NewEventSourceExpression:
 			ty = EventSourceType()
+		case *ast.NewEventTargetExpression:
+			ty = EventTargetType()
+		case *ast.NewAbortControllerExpression:
+			ty = AbortControllerType()
+		case *ast.NewEventExpression:
+			ty = EventType()
+		case *ast.NewCustomEventExpression:
+			detailTy := TypePtr
+			if init.Detail != nil {
+				detailTy = e.inferExprType(init.Detail)
+			}
+			ty = CustomEventType(detailTy)
 		case *ast.NewWebSocketExpression:
 			ty = WebSocketClientType()
 		case *ast.NewHeadersExpression:
@@ -212,6 +224,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					}
 				}
 			}
+			// A may-suspend async fn returns a task promise (TDD-00083 Stage 2):
+			// a ptr with PromiseTask so a later `await` on this variable takes the
+			// task path. Applied last so the string/ptr default above (which drops
+			// PromiseTask) can't overwrite it.
+			if id, ok := init.Callee.(*ast.Identifier); ok {
+				if _, sig, found := e.resolveFuncRef(id.Name); found && sig.MaySuspend && sig.RetType.IsPromise {
+					ty = e.inferExprType(init)
+				}
+			}
 		case *ast.NewArrayExpression:
 			if init.ElemType != nil {
 				ty = ArrayOf(e.resolveType(init.ElemType))
@@ -292,31 +313,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 
 	if v.Init != nil {
-		// JSON.parse needs the target type to choose number vs string deserialization.
-		if ce, ok := v.Init.(*ast.CallExpression); ok {
-			if mem, ok2 := ce.Callee.(*ast.MemberExpression); ok2 {
-				if id, ok3 := mem.Object.(*ast.Identifier); ok3 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
-					val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
-					if err != nil {
-						return err
-					}
-					e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, val.Ref, ptrName, ty.Align()))
-					return nil
-				}
+		// JSON.parse / Response.json() (optionally awaited) need the target type
+		// for correct deserialization — shared with the object/array var-decl
+		// emitters via emitDeclJSONProjection (emit_objects.go).
+		if val, ok, err := e.emitDeclJSONProjection(v.Init, ty); ok {
+			if err != nil {
+				return err
 			}
-			// response.json() needs the same target-type context as JSON.parse
-			// itself, for exactly the same reason (emitResponseJSON delegates
-			// to emitJSONParseValue once it has the buffered body string).
-			if mem, ok2 := ce.Callee.(*ast.MemberExpression); ok2 {
-				if mem.Property == "json" && e.inferExprType(mem.Object).IsResponse {
-					val, err := e.emitResponseJSON(mem.Object, ty, ce.GetPos())
-					if err != nil {
-						return err
-					}
-					e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, val.Ref, ptrName, ty.Align()))
-					return nil
-				}
-			}
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, val.Ref, ptrName, ty.Align()))
+			return nil
 		}
 		val, err := e.emitExprWithObjectHint(v.Init, ty)
 		if err != nil {

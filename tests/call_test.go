@@ -321,6 +321,22 @@ console.log(Math.log1p(0.0))
 `, "3\n0\n0")
 }
 
+// Math.cbrt must be correctly rounded and identical across platforms: the
+// platform libm cbrt is not (glibc's runtime cbrt(27) is 3.0000000000000004,
+// cbrt(2) is ...34 not ...32), so these use the deterministic fdlibm @__kml_cbrt
+// (ADR-00241...). Values chosen because raw glibc cbrt gets several of them
+// wrong in the last ULP; all match V8/Node exactly (ADR-00242).
+func TestE2EMathCbrtCorrectlyRounded(t *testing.T) {
+	assertOutput(t, `
+console.log(Math.cbrt(2.0))
+console.log(Math.cbrt(0.001))
+console.log(Math.cbrt(123.456))
+console.log(Math.cbrt(-0.5))
+console.log(Math.cbrt(-27.0))
+console.log(Math.cbrt(0.0))
+`, "1.2599210498948732\n0.1\n4.979327984674048\n-0.7937005259840998\n-3\n0")
+}
+
 func TestE2EMathClz32Imul(t *testing.T) {
 	assertOutput(t, `
 console.log(Math.clz32(1))
@@ -453,12 +469,38 @@ console.log(d2 >= d1)
 
 func TestE2EPerformanceMarkOverwrite(t *testing.T) {
 	// Re-marking "m" overwrites its timestamp (last-write-wins, documented
-	// V1 scope) — a measure taken right after the second mark() should be
-	// much smaller than one spanning the whole loop before it.
+	// V1 scope) — a measure taken right after the second mark() spans ~no time,
+	// while one spanning the whole loop before it spans the loop's duration, so
+	// d2 must not exceed d1. Uses `<=`, not `<`: on a coarse monotonic clock
+	// (some virtualized/CI environments) a fast loop can measure as 0, making
+	// d1 == d2 == 0 — with `<` that flaked (~1 in 5 runs in a Docker VM). `<=`
+	// still catches a real regression: without the overwrite, d2 would span the
+	// whole loop *plus* the two measure calls, so d2 > d1 on any clock fine
+	// enough to measure the loop at all.
 	assertOutput(t, `
 performance.mark("m")
 let arr: number[] = []
 for (let i = 0; i < 200000; i++) { arr.push(i) }
+const d1: number = performance.measure("first", "m")
+performance.mark("m")
+const d2: number = performance.measure("second", "m")
+console.log(d2 <= d1)
+`, "true")
+}
+
+// The stricter companion to TestE2EPerformanceMarkOverwrite: instead of relying
+// on a loop being slower than the monotonic clock's resolution (which fails on a
+// coarse virtualized clock — see that test), it busy-waits on performance.now()
+// until a guaranteed-measurable interval (~8ms, well above any plausible
+// monotonic-clock resolution) has elapsed before the first measure. So d1 spans
+// a real interval and a measure taken right after re-marking is *strictly*
+// smaller — the assertion the overwrite is really about. Costs a few ms of spin
+// and, unlike the pure test above, leans on performance.now() to build the span.
+func TestE2EPerformanceMarkOverwriteMeasuredSpan(t *testing.T) {
+	assertOutput(t, `
+performance.mark("m")
+const spinStart: number = performance.now()
+while (performance.now() - spinStart < 8.0) { }
 const d1: number = performance.measure("first", "m")
 performance.mark("m")
 const d2: number = performance.measure("second", "m")
@@ -541,4 +583,15 @@ console.log(id1[18])
 console.log(id1[23])
 console.log(id1[14])
 `, "36\ntrue\n-\n-\n-\n-\n4")
+}
+
+// queueMicrotask runs its callbacks after the current synchronous script, FIFO,
+// including microtasks a microtask itself enqueues (TDD-00083 Stage 3).
+func TestE2EQueueMicrotask(t *testing.T) {
+	assertOutput(t, `
+console.log("s1")
+queueMicrotask(() => { console.log("m1"); queueMicrotask(() => { console.log("m3") }) })
+queueMicrotask(() => { console.log("m2") })
+console.log("s2")
+`, "s1\ns2\nm1\nm2\nm3")
 }

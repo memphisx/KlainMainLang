@@ -212,7 +212,7 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 
 	e.ensureFetchAwaitSettled()
 	pendingReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s)",
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s, ptr null)",
 		pendingReg, urlVal.Ref, methodVal.Ref, headersRef, bodyRef))
 
 	resultReg := e.freshReg()

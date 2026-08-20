@@ -39,7 +39,7 @@ This page follows the shared status-page format ([Status page format](README.md#
 | `Math.sign` | ✅ | • `Math.sign(NaN)` produces non-deterministic garbage instead of `NaN` — unconditionally coerces to `i64` via `fptosi`, undefined behavior for a NaN double ([ADR-00166](../adr/ADR-00166.md)) | |
 | `Math.random()` | ✅ | | |
 | `Math.PI/E/LN2/LN10/SQRT2/LOG2E/LOG10E` | ✅ | | |
-| `Math.cbrt/expm1/log1p` | ✅ | | |
+| `Math.cbrt/expm1/log1p` | ✅ | | • `cbrt` uses a deterministic, correctly-rounded fdlibm implementation (`@__kml_cbrt`) rather than platform libm, whose runtime `cbrt` is not reliably correctly-rounded and diverged by OS (glibc `cbrt(27)` → `3.0000000000000004`); `expm1`/`log1p` delegate to libm ([ADR-00242](../adr/ADR-00242.md)) |
 | `Math.asin/acos/atan/atan2` | ✅ | | |
 | `Math.sinh/cosh/tanh` | ✅ | | |
 | `Math.clz32/fround/imul` | ✅ | | • `clz32` via LLVM's own `llvm.ctlz.i32` intrinsic; `fround` via an `fptrunc`/`fpext` float32 round-trip; `imul` via 32-bit `mul` + sign-extend, giving real 32-bit-wraparound integer multiplication distinct from plain `*`'s double-precision result ([ADR-00065](../adr/ADR-00065.md)) |

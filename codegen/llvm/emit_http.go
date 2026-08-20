@@ -67,7 +67,14 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	}
 	portVal = e.coerce(portVal, TypeI64)
 
+	// The handler runs on a connection fiber and returns its response object
+	// straight out of the bare async slot — it is NOT a task promise. Keep the
+	// old inline async model for it (no settled-promise/setjmp wrapper), TDD-00084
+	// Part A. A handler defined as a separate top-level function that awaits fetch
+	// is a may-suspend body and untouched by that wrapper anyway.
+	e.emittingHTTPHandler = true
 	handlerVal, err := e.emitExpr(args[1])
+	e.emittingHTTPHandler = false
 	if err != nil {
 		return Value{}, err
 	}

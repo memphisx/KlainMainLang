@@ -892,6 +892,9 @@ entry:
   %runningp2 = alloca i32, align 4
   %rsi = alloca i64, align 8
   %forcezero = alloca i1, align 1
+  %fdsi = alloca i64, align 8
+  %havefetchdl = alloca i1, align 1
+  %hasactivetasks_slot = alloca i1, align 1
   br label %outerloop
 
 outerloop:
@@ -939,6 +942,17 @@ sigtermcall:
   br label %timerscan
 
 timerscan:
+  ; TDD-00084 Part B: drive the coroutine task scheduler + microtasks each
+  ; iteration so a program mixing tasks with timers/SSE/WS/http.listen runs both
+  ; under this one loop. These three symbols are always defined — real when the
+  ; program uses tasks/microtasks, no-op stubs otherwise (emitted at finalization,
+  ; see emitLoopTaskStubs).
+  call void @__kml_drain_microtasks()
+  call void @__kml_task_sched_step()
+  call void @__kml_drain_microtasks()
+  %tact_el = load i64, ptr @__kml_task_active, align 8
+  %hasactivetasks_el = icmp sgt i64 %tact_el, 0
+  store i1 %hasactivetasks_el, ptr %hasactivetasks_slot, align 1
   %len = load i64, ptr @__kml_timer_len, align 8
   %data = load ptr, ptr @__kml_timer_data, align 8
   store i64 -1, ptr %besti, align 8
@@ -1050,9 +1064,19 @@ afteresreconnect:
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
   %anywork = or i1 %anywork2, %hasopenwsc
-  br i1 %anywork, label %dowork, label %alldone
+  ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
+  %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
+  %anyworkt = or i1 %anywork, %hasactivetasks_aw
+  br i1 %anyworkt, label %dowork, label %alldone
 
 dowork:
+  ; TDD-00084 Part B: while a task is in flight, poll (zero select timeout) so a
+  ; task made runnable by another task's completion is stepped promptly rather
+  ; than blocked behind select() — the same busy-drive task_run_all does.
+  %ht_dw = load i1, ptr %hasactivetasks_slot, align 1
+  %fz_cur = load i1, ptr %forcezero, align 1
+  %fz_new = or i1 %fz_cur, %ht_dw
+  store i1 %fz_new, ptr %forcezero, align 1
   call ptr @memset(ptr %fdset, i32 0, i64 128)
   call ptr @memset(ptr %wfdset, i32 0, i64 128)
   call ptr @memset(ptr %efdset, i32 0, i64 128)
@@ -1225,8 +1249,64 @@ esafterforce:
   ; never overwritten when no real timer exists) makes timeoutpath's wait
   ; computation naturally collapse to zero in that case, so no other change
   ; is needed there.
+  ; Fold any live fetch AbortSignal.timeout deadline into %bestfire so select()
+  ; wakes by the soonest deadline (TDD-00081 Stage 3c) — the resume scan then
+  ; aborts the timed-out fetch. Mirrors the EventSource-reconnect fold above.
+  store i1 0, ptr %havefetchdl, align 1
+  store i64 0, ptr %fdsi, align 8
+  br label %fdfoldloop
+
+fdfoldloop:
+  %fdi = load i64, ptr %fdsi, align 8
+  %fdclen = load i64, ptr @__kml_conn_len, align 8
+  %fdinb = icmp slt i64 %fdi, %fdclen
+  br i1 %fdinb, label %fdfoldbody, label %fdfolddone
+
+fdfoldbody:
+  %fdcdata = load ptr, ptr @__kml_conn_data, align 8
+  %fdslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %fdcdata, i64 %fdi
+  %fdpf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %fdslot, i32 0, i32 3
+  %fdpf = load ptr, ptr %fdpf_p, align 8
+  %fdhaspf = icmp ne ptr %fdpf, null
+  br i1 %fdhaspf, label %fdchksig, label %fdfoldnext
+
+fdchksig:
+  %fdsig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %fdpf, i32 0, i32 5
+  %fdsig = load ptr, ptr %fdsig_p, align 8
+  %fdhassig = icmp ne ptr %fdsig, null
+  br i1 %fdhassig, label %fdchkdl, label %fdfoldnext
+
+fdchkdl:
+  %fddl_p = getelementptr { i1, ptr, ptr, i64 }, ptr %fdsig, i32 0, i32 3
+  %fddl = load i64, ptr %fddl_p, align 8
+  %fdhasdl = icmp ne i64 %fddl, 0
+  br i1 %fdhasdl, label %fdfold, label %fdfoldnext
+
+fdfold:
+  %fdanysofar = load i1, ptr %havefetchdl, align 1
+  %fdanytimer = or i1 %havetimer, %fdanysofar
+  store i1 1, ptr %havefetchdl, align 1
+  br i1 %fdanytimer, label %fdcompare, label %fdtake
+
+fdcompare:
+  %fdcurbest = load i64, ptr %bestfire, align 8
+  %fdbetter = icmp slt i64 %fddl, %fdcurbest
+  br i1 %fdbetter, label %fdtake, label %fdfoldnext
+
+fdtake:
+  store i64 %fddl, ptr %bestfire, align 8
+  br label %fdfoldnext
+
+fdfoldnext:
+  %fdnext = add i64 %fdi, 1
+  store i64 %fdnext, ptr %fdsi, align 8
+  br label %fdfoldloop
+
+fdfolddone:
   %needimmediate = load i1, ptr %forcezero, align 1
-  %usetimer = or i1 %havetimer, %needimmediate
+  %usetimer0 = or i1 %havetimer, %needimmediate
+  %havefetchdlv = load i1, ptr %havefetchdl, align 1
+  %usetimer = or i1 %usetimer0, %havefetchdlv
   br i1 %usetimer, label %timeoutpath, label %notimeoutpath
 
 timeoutpath:
@@ -1361,7 +1441,14 @@ rcheckpending:
 rcheckfetchdone:
   %rpf_done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %rpf, i32 0, i32 2
   %rpf_done = load i64, ptr %rpf_done_p, align 8
-  %rfetchready = icmp ne i64 %rpf_done, 0
+  %rfetchdone = icmp ne i64 %rpf_done, 0
+  ; Also resume a parked fetch whose AbortSignal is aborted or whose
+  ; AbortSignal.timeout deadline has elapsed (TDD-00081 Stage 3c) — the resumed
+  ; fiber's await loop then tears the transfer down and throws AbortError.
+  %rpf_sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %rpf, i32 0, i32 5
+  %rpf_sig = load ptr, ptr %rpf_sig_p, align 8
+  %rpf_ab = call i1 @__kml_signal_aborted(ptr %rpf_sig)
+  %rfetchready = or i1 %rfetchdone, %rpf_ab
   br i1 %rfetchready, label %rresume, label %rscannext
 
 rcheckgroup:

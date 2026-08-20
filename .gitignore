@@ -17,11 +17,17 @@ examples/**
 !examples/**/*.ts
 !examples/**/klain.json
 
-# Build artifacts left behind by compiling docker/*.ts directly on the host
-# (e.g. while iterating on a Dockerfile) — the Dockerfiles themselves always
-# compile inside the container, these are only ever stray local leftovers.
-docker/*.ll
-docker/*.gcshim.c
+# Emitted compiler sidecar artifacts — the .ll IR and the embedded-C helpers
+# (dtoa/JSON-tree/bigint/GC-shim) the compiler writes next to any output. These
+# are always regenerated and never committed; compiling a .ts anywhere in the
+# repo (root, docker/, a scratch test, …) leaves them. The real embedded-C
+# *sources* are codegen/llvm/*src/{dtoa,gcshim,json_parse,bigint_tommath}.c —
+# none of the form `X.<suffix>.c`, so these globs never match them.
+*.ll
+*.dtoa.c
+*.jsontree.c
+*.bigint.c
+*.gcshim.c
 
 # Fetched Test262 corpus (TDD-00008 Design V2, tools/conformance/fetch.sh) —
 # ~263MB, pinned by commit SHA in fetch.sh itself, not vendored into git.

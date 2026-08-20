@@ -269,6 +269,39 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	return rhs, nil
 }
 
+// emitDeclJSONProjection detects a var-decl initializer that needs the
+// declaration's target type for correct field projection (TDD-00077 P3): a
+// `JSON.parse(...)` or a `Response.json()` call, optionally wrapped in `await`.
+// `await` is identity over these synchronous calls, so `await res.json()` must
+// project into ty exactly as `res.json()` does rather than fall through to the
+// generic, type-context-free path (which yields a null/default value). Returns
+// (value, true, nil) when expr was such a call — already projected into ty — and
+// (_, false, nil) otherwise, so the caller uses its own generic path. The three
+// var-decl emitters (scalar/object/array) share this one detector and each store
+// the returned value in their own slot format.
+func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, bool, error) {
+	if aw, ok := expr.(*ast.AwaitExpression); ok {
+		expr = aw.Argument
+	}
+	ce, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return Value{}, false, nil
+	}
+	mem, ok := ce.Callee.(*ast.MemberExpression)
+	if !ok {
+		return Value{}, false, nil
+	}
+	if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
+		val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
+		return val, true, err
+	}
+	if mem.Property == "json" && e.inferExprType(mem.Object).IsResponse {
+		val, err := e.emitResponseJSON(mem.Object, ty, ce.GetPos())
+		return val, true, err
+	}
+	return Value{}, false, nil
+}
+
 func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
@@ -276,6 +309,15 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
+		return nil
+	}
+
+	// JSON.parse / Response.json() (optionally awaited) projected into ty.
+	if val, ok, err := e.emitDeclJSONProjection(v.Init, ty); ok {
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 		return nil
 	}
 
@@ -315,31 +357,9 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		return nil
 
 	case *ast.CallExpression:
-		// JSON.parse needs the target object type to parse fields correctly;
-		// the generic emitExpr path would otherwise dispatch through
-		// emitCall's JSON.parse case, which has no declaration context and
-		// hardcodes TypePtr as the target (correct only for JSON.parse used
-		// outside a typed declaration, e.g. as a bare expression).
-		if mem, ok := init.Callee.(*ast.MemberExpression); ok {
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
-				val, err := e.emitJSONParse(init.Args, ty, init.GetPos())
-				if err != nil {
-					return err
-				}
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
-				return nil
-			}
-			// response.json() needs the same target-object-type context, for
-			// the same reason.
-			if mem.Property == "json" && e.inferExprType(mem.Object).IsResponse {
-				val, err := e.emitResponseJSON(mem.Object, ty, init.GetPos())
-				if err != nil {
-					return err
-				}
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
-				return nil
-			}
-		}
+		// The JSON.parse / Response.json() type-context projections are handled
+		// up front by emitDeclJSONProjection above; anything else is a generic
+		// object-producing call.
 		val, err := e.emitExpr(init)
 		if err != nil {
 			return err

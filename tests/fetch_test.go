@@ -26,6 +26,10 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"title":"hello","count":42,"active":true}`)
 	})
+	mux.HandleFunc("/jsonarray", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[10,20,30]`)
+	})
 	mux.HandleFunc("/notfound", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, "not found")
@@ -82,6 +86,244 @@ async function main2(): Promise<void> {
 main2()
 `, srv.URL)
 	assertOutput(t, src, "200\ntrue\n"+`{"title":"hello","count":42,"active":true}`)
+}
+
+// Awaiting the (synchronous) body accessors used to hard compile-crash and free
+// the live buffer — `await` treated the string/buffer as a Promise slot. `await`
+// of a non-thenable is identity, so these must work exactly as the un-awaited
+// forms and preserve the buffer (ADR-00241).
+func TestE2EFetchAwaitText(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    const body: string = await r.text()
+    console.log(body)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, `{"title":"hello","count":42,"active":true}`)
+}
+
+func TestE2EFetchAwaitJSONProjection(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+interface Payload { title: string; count: number; active: boolean }
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    const p: Payload = await r.json()
+    console.log(p.title + " " + p.count + " " + p.active)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "hello 42 true")
+}
+
+func TestE2EFetchAwaitJSONArray(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/jsonarray")
+    const xs: number[] = await r.json()
+    console.log(xs[0] + " " + xs[1] + " " + xs[2] + " len=" + xs.length)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "10 20 30 len=3")
+}
+
+func TestE2EFetchAwaitArrayBufferAndReuse(t *testing.T) {
+	srv := newFetchTestServer(t)
+	// Also reuses the response after the awaited accessor — a regression guard
+	// against the old free-the-live-buffer behavior.
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    const buf = await r.arrayBuffer()
+    console.log(buf.byteLength)
+    const body: string = await r.text()
+    console.log(body)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "42\n"+`{"title":"hello","count":42,"active":true}`)
+}
+
+// A may-suspend async function (one that awaits a fetch) is compiled as a
+// coroutine task (TDD-00083 Stage 2): calling it spawns a task that runs to its
+// first await and returns a pending promise, so two such calls made before
+// either is awaited run their fetches concurrently and compose correctly.
+func TestE2EAsyncFnComposition(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function grabStatus(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+async function grabBody(u: string): Promise<string> {
+    const r = await fetch(u)
+    return await r.text()
+}
+async function main2(): Promise<void> {
+    const p1 = grabStatus("%s/flat")
+    const p2 = grabStatus("%s/notfound")
+    const a: number = await p1
+    const b: number = await p2
+    console.log(a + " " + b)
+    const body: string = await grabBody("%s/flat")
+    console.log(body)
+}
+main2()
+`, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "200 404\n"+`{"title":"hello","count":42,"active":true}`)
+}
+
+// Promise.all/.race/.allSettled over an array of task promises (may-suspend
+// async fns) — the combinators drive the shared scheduler, so the members run
+// concurrently and are collected/picked correctly (TDD-00083 Stage 2).
+func TestE2EPromiseCombinatorsOverTasks(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function grab(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+async function main2(): Promise<void> {
+    const all: number[] = await Promise.all([grab("%s/flat"), grab("%s/notfound"), grab("%s/flat")])
+    console.log(all[0] + " " + all[1] + " " + all[2] + " len=" + all.length)
+    const first: number = await Promise.race([grab("%s/flat"), grab("%s/notfound")])
+    console.log("race>=200:" + (first >= 200))
+}
+main2()
+`, srv.URL, srv.URL, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "200 404 200 len=3\nrace>=200:true")
+}
+
+// A may-suspend async fn that throws rejects its promise; awaiting it re-throws
+// at the awaiter (so try/catch works), and Promise.all rejects on the first
+// rejection — including under concurrency, which exercises the per-task jmpbuf
+// stacks (TDD-00083 Stage 2, fiber-safe exceptions).
+func TestE2ETaskRejection(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function bad(tag: string): Promise<number> {
+    const r = await fetch("%s/flat")
+    throw new Error("nope-" + tag)
+}
+async function grab(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+async function main2(): Promise<void> {
+    const p1 = bad("A")
+    const p2 = grab("%s/flat")
+    try { const s = await p1; console.log("no throw " + s) } catch (e) { console.log("caught: " + e.message) }
+    console.log("sibling ok: " + (await p2))
+    try {
+        const xs: number[] = await Promise.all([grab("%s/flat"), bad("B")])
+        console.log("all no throw")
+    } catch (e) { console.log("all caught: " + e.message) }
+}
+main2()
+`, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "caught: nope-A\nsibling ok: 200\nall caught: nope-B")
+}
+
+// Promise.any over task promises resolves to the first fulfilled member
+// (TDD-00083 Stage 2).
+func TestE2EPromiseAnyOverTasks(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function grab(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+async function main2(): Promise<void> {
+    const s: number = await Promise.any([grab("%s/flat"), grab("%s/notfound")])
+    console.log("any>=200:" + (s >= 200))
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "any>=200:true")
+}
+
+// Promise.any skips rejected members and resolves to the first *fulfilled* one;
+// when every member rejects it throws an AggregateError whose `.errors` carries
+// each rejection reason (TDD-00083). Both over real suspending task promises.
+func TestE2EPromiseAnySkipRejectedAndAggregateError(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function bad(u: string): Promise<number> {
+    const r = await fetch(u)
+    throw new Error("nope")
+}
+async function good(u: string): Promise<number> {
+    const r = await fetch(u)
+    return r.status
+}
+async function main2(): Promise<void> {
+    const s: number = await Promise.any([bad("%s/flat"), good("%s/flat"), bad("%s/flat")])
+    console.log("skip:" + (s >= 200))
+    try {
+        const t: number = await Promise.any([bad("%s/flat"), bad("%s/flat")])
+        console.log("no throw")
+    } catch (e) {
+        console.log("name:" + e.name)
+        console.log("count:" + e.errors.length)
+        console.log("first:" + e.errors[0].message)
+    }
+}
+main2()
+`, srv.URL, srv.URL, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "skip:true\nname:AggregateError\ncount:2\nfirst:nope")
+}
+
+// Promise.prototype.then/.catch/.finally over task promises run their callbacks
+// as microtasks after the current synchronous run (TDD-00083 Stage 3). Each is
+// checked in isolation — the relative order of reactions across *independent*
+// promises is scheduler-timing-dependent, so only one reaction per program here.
+func TestE2EPromiseThenCatchFinally(t *testing.T) {
+	srv := newFetchTestServer(t)
+	assertOutput(t, fmt.Sprintf(`
+async function grab(u: string): Promise<number> { const r = await fetch(u); return r.status }
+grab("%s/flat").then((s: number) => { console.log("then " + s) })
+console.log("sync")
+`, srv.URL), "sync\nthen 200")
+	assertOutput(t, fmt.Sprintf(`
+async function bad(u: string): Promise<number> { const r = await fetch(u); throw new Error("x") }
+bad("%s/flat").catch((e) => { console.log("catch ran") })
+console.log("sync")
+`, srv.URL), "sync\ncatch ran")
+	assertOutput(t, fmt.Sprintf(`
+async function grab(u: string): Promise<number> { const r = await fetch(u); return r.status }
+grab("%s/flat").finally(() => { console.log("finally ran") })
+console.log("sync")
+`, srv.URL), "sync\nfinally ran")
+}
+
+// .then(f).then(g) chains f's return value into the next promise; .catch(h)
+// recovers a rejection into a value the following .then sees; .finally passes the
+// source value straight through (TDD-00083 value-chaining).
+func TestE2EPromiseThenValueChaining(t *testing.T) {
+	srv := newFetchTestServer(t)
+	// then→then value chain
+	assertOutput(t, fmt.Sprintf(`
+async function grab(u: string): Promise<number> { const r = await fetch(u); return r.status }
+grab("%s/flat").then((n: number) => n * 2).then((m: number) => { console.log("chain " + m) })
+console.log("sync")
+`, srv.URL), "sync\nchain 400")
+	// catch recovers into a value the next then observes
+	assertOutput(t, fmt.Sprintf(`
+async function bad(u: string): Promise<number> { const r = await fetch(u); throw new Error("x") }
+bad("%s/flat").catch((e) => 99).then((n: number) => { console.log("recovered " + n) })
+console.log("sync")
+`, srv.URL), "sync\nrecovered 99")
+	// finally passes the fulfilled value through unchanged
+	assertOutput(t, fmt.Sprintf(`
+async function grab(u: string): Promise<number> { const r = await fetch(u); return r.status }
+grab("%s/flat").finally(() => { console.log("fin") }).then((n: number) => { console.log("after " + n) })
+console.log("sync")
+`, srv.URL), "sync\nfin\nafter 200")
 }
 
 func TestE2EFetchNotFoundHasOkFalse(t *testing.T) {

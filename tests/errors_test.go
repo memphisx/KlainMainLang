@@ -16,6 +16,29 @@ console.log(e.name)
 `, "bad type\nTypeError")
 }
 
+// AggregateError construction (both an array literal and an array variable — the
+// latter exercises the resolver rewriting the new `Errors` argument), its
+// .name/.message/.errors surface, instanceof, and catch round-trip (ADR-00248).
+func TestE2EAggregateErrorConstruction(t *testing.T) {
+	assertOutput(t, `
+const errs = [new Error("a"), new Error("b")]
+const agg = new AggregateError(errs, "boom")
+console.log(agg.name)
+console.log(agg.message)
+console.log(agg.errors.length)
+console.log(agg.errors[0].message)
+console.log(agg instanceof AggregateError)
+console.log(agg instanceof Error)
+const plain = new Error("p")
+console.log(plain instanceof AggregateError)
+try {
+  throw new AggregateError([new Error("x")], "w")
+} catch (e) {
+  console.log(e.name + ":" + e.errors[0].message)
+}
+`, "AggregateError\nboom\n2\na\ntrue\ntrue\nfalse\nAggregateError:x")
+}
+
 func TestE2EErrorSubtypeDefaultMessage(t *testing.T) {
 	// No-arg new XError() defaults .message to the kind's own name, the same
 	// way plain new Error() has always defaulted .message to "Error".

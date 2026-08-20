@@ -543,6 +543,37 @@ console.log(g)
 `, "1\n8\n100\n3")
 }
 
+// A logical compound assignment (??=/&&=/||=) on a nullable-scalar *field* must
+// route through the presence-flagged { i1, T } path, not the generic
+// emitLogicalCompoundAssign that reads the aggregate as a non-ptr value and
+// no-op'd `??=` (a null field could never compare equal to null). Covers all
+// three operators, the present-value-preserved case for each, and a class
+// field — the read side already worked; this is the write side.
+func TestE2ENullableScalarFieldLogicalAssign(t *testing.T) {
+	assertOutput(t, `
+interface Box { v: number | null; n: number | null }
+const b: Box = { v: null, n: 42 }
+b.v ??= 5
+b.n ??= 99
+console.log(b.v)
+console.log(b.n)
+let b2: Box = { v: 3, n: 0 }
+b2.v &&= 7
+b2.n &&= 7
+console.log(b2.v)
+console.log(b2.n)
+let b3: Box = { v: 0, n: 8 }
+b3.v ||= 11
+b3.n ||= 11
+console.log(b3.v)
+console.log(b3.n)
+class C { x: number | null = null }
+const c = new C()
+c.x ??= 20
+console.log(c.x)
+`, "5\n42\n7\n0\n11\n8\n20")
+}
+
 // A nullable scalar prints its real JS rendering — `null` when absent, its
 // value when present (a present 0/false is not "null") — rather than the
 // payload 0 the bare representation used to surface (TDD-00064 Stage 2).

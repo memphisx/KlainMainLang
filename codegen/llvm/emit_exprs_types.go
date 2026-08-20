@@ -227,6 +227,24 @@ func (e *Emitter) inferDynamicObjectType(lit *ast.ObjectLiteral) Type {
 // returning a plain number — the result was mistyped as number[][]
 // instead of number[]). Not a general callback-type inference utility;
 // only handles what .map()/.flatMap() need.
+// asyncClosureRetType normalizes an async arrow/function-expression's inferred
+// return type into the task-shaped `Promise<T>` a call through the closure yields
+// (TDD-00084 Part A): a non-async closure keeps ret; an async one wraps ret's
+// inner type in a PromiseTask promise (unwrapping an already-`Promise<T>`
+// annotation first), so `await`/`.then` on the result take the task path.
+func asyncClosureRetType(isAsync bool, ret Type) Type {
+	if !isAsync {
+		return ret
+	}
+	inner := ret
+	if ret.IsPromise && ret.PromiseType != nil {
+		inner = *ret.PromiseType
+	}
+	pt := PromiseOf(inner)
+	pt.PromiseTask = true
+	return pt
+}
+
 func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
 	switch cb := arg.(type) {
 	case *ast.ArrowFunction:
@@ -296,7 +314,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			return TypeVoid
 		}
-		return TypeI64
+		// `await` of a non-thenable is identity — its type is the argument's
+		// own (e.g. Response.text() → string), matching emitAwait's pass-through.
+		return argTy
 	case *ast.Identifier:
 		if sym, ok := e.lookup(ex.Name); ok {
 			return sym.Ty
@@ -536,6 +556,39 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 		}
+		// EventTarget bus (TDD-00081): dispatchEvent returns bool; add/remove
+		// return void.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if e.inferExprType(mem.Object).IsEventTarget {
+				switch mem.Property {
+				case "dispatchEvent":
+					return TypeBool
+				case "addEventListener", "removeEventListener":
+					return TypeVoid
+				}
+			}
+		}
+		// AbortController.abort() returns void (TDD-00081 Stage 3).
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if mem.Property == "abort" && e.inferExprType(mem.Object).IsAbortController {
+				return TypeVoid
+			}
+			// AbortSignal.timeout(ms) → AbortSignal (Stage 3c).
+			if mem.Property == "timeout" {
+				if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" {
+					return AbortSignalType()
+				}
+			}
+		}
+		// Event/CustomEvent methods (TDD-00081) all return void — matters so an
+		// expression-body arrow `(e) => e.preventDefault()` infers a void return
+		// rather than the i64 default (which emits a malformed `ret i64`).
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if e.inferExprType(mem.Object).IsEvent &&
+				(mem.Property == "preventDefault" || mem.Property == "stopPropagation" || mem.Property == "stopImmediatePropagation") {
+				return TypeVoid
+			}
+		}
 		// Generator construction (TDD-00061/ADR-00172) — `gen(args)`'s own
 		// type is the constructed instance's GenTy, not ElemTy (that's
 		// `.next()`'s own result's `value` field type instead, handled by
@@ -556,6 +609,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// If calling a named function, use its registered return type (handles async too).
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
 			if _, sig, found := e.resolveFuncRef(id.Name); found {
+				// Every async fn returns a real task-shaped promise (TDD-00084
+				// Part A): a may-suspend one via a fiber, a non-suspending one via
+				// the inline catch-and-settle wrapper. Tag the type so a later
+				// `await`/`.then` (including through a variable) takes the task path.
+				if sig.IsAsync && sig.RetType.IsPromise {
+					rt := sig.RetType
+					rt.PromiseTask = true
+					return rt
+				}
 				return sig.RetType
 			}
 			// A generic function (TDD-00010 V1) is never itself in e.funcs
@@ -774,8 +836,40 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 							return raceTy
 						case "allSettled":
 							return PromiseOf(ArrayOf(SettlementType(innerTy)))
+						case "any":
+							// .any resolves to the first fulfilled member's value
+							// (TDD-00083 Stage 2), same shape as .race.
+							anyTy := PromiseOf(innerTy)
+							if innerTy.IsResponse && anyTy.PromiseType != nil {
+								anyTy.PromiseType.PromiseResolved = true
+							}
+							return anyTy
 						}
 					}
+				}
+			}
+			// .then/.catch/.finally on a promise return a task Promise<U> where U
+			// is the value the returned promise settles to (TDD-00083 Stage 3 +
+			// value-chaining, ADR-00248): the callback's return type for then/catch,
+			// the source's own inner type for finally (pass-through).
+			if mem.Property == "then" || mem.Property == "catch" || mem.Property == "finally" {
+				if srcTy := e.inferExprType(mem.Object); srcTy.IsPromise {
+					retTy := TypeVoid
+					switch mem.Property {
+					case "then", "catch":
+						if len(ex.Args) >= 1 {
+							if t, ok := e.callbackReturnType(ex.Args[0]); ok {
+								retTy = t
+							}
+						}
+					case "finally":
+						if srcTy.PromiseType != nil {
+							retTy = *srcTy.PromiseType
+						}
+					}
+					vt := PromiseOf(retTy)
+					vt.PromiseTask = true
+					return vt
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
@@ -1222,7 +1316,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		} else {
 			ret = TypeVoid
 		}
-		fty := FuncType(params, ret)
+		fty := FuncType(params, asyncClosureRetType(ex.IsAsync, ret))
 		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
 			fty.FuncHasRest = true
 		}
@@ -1260,7 +1354,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		} else {
 			ret = TypeVoid
 		}
-		fty := FuncType(params, ret)
+		fty := FuncType(params, asyncClosureRetType(ex.IsAsync, ret))
 		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
 			fty.FuncHasRest = true
 		}

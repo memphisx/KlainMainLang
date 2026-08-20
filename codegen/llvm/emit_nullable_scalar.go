@@ -466,17 +466,27 @@ func (e *Emitter) emitNullableScalarAssign(sym Symbol, ex *ast.AssignmentExpress
 // how the bare representation already behaved for those two. The right side is
 // evaluated only down the branch that actually stores.
 func (e *Emitter) emitNullableScalarNullishOrLogicalAssign(sym Symbol, op string, rhsExpr ast.Expression) (Value, error) {
-	ty := sym.Ty
+	return e.emitNullableScalarNullishOrLogicalAssignAt(sym.Ptr, sym.Ty, op, rhsExpr)
+}
+
+// emitNullableScalarNullishOrLogicalAssignAt is the storage-generic core of the
+// above: it drives ??=/&&=/||= against any `{ i1, T }` presence-flagged slot
+// addressed by ptr, whether that is a local's alloca or an object/interface/
+// class field's getelementptr (TDD-00064 Stage 3 — the field case was
+// previously mis-routed through the generic emitLogicalCompoundAssign, which
+// reads the whole aggregate as a non-`ptr` value and so no-op'd `??=`). ptr must
+// point at the `{ i1, T }` aggregate; ty is the nullable type.
+func (e *Emitter) emitNullableScalarNullishOrLogicalAssignAt(ptr string, ty Type, op string, rhsExpr ast.Expression) (Value, error) {
 	base := ty.withoutNullable()
 
 	var cond Value // true => store the right side
 	if op == "??=" {
-		present := e.loadNullableScalarPresent(sym.Ptr, ty)
+		present := e.loadNullableScalarPresent(ptr, ty)
 		absent := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i1 %s, false", absent, present))
 		cond = Value{Ref: absent, Ty: TypeBool}
 	} else {
-		curPayload := e.loadNullableScalarPayload(sym.Ptr, ty)
+		curPayload := e.loadNullableScalarPayload(ptr, ty)
 		truthy := e.toBool(Value{Ref: curPayload, Ty: base})
 		if op == "&&=" {
 			cond = truthy
@@ -497,11 +507,11 @@ func (e *Emitter) emitNullableScalarNullishOrLogicalAssign(sym Symbol, op string
 		return Value{}, err
 	}
 	rhs = e.coerce(rhs, base)
-	e.storeNullableScalarPresent(sym.Ptr, ty, rhs.Ref)
+	e.storeNullableScalarPresent(ptr, ty, rhs.Ref)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
-	payload := e.loadNullableScalarPayload(sym.Ptr, ty)
+	payload := e.loadNullableScalarPayload(ptr, ty)
 	return Value{Ref: payload, Ty: base}, nil
 }
 

@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 14/17 (~82%) · **Strict Coverage**: 7/17 (~41%).
+**Coverage**: 15/17 (~88%) · **Strict Coverage**: 7/17 (~41%).
 
 This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
 
@@ -23,5 +23,5 @@ This page follows the shared status-page format ([Status page format](README.md#
 | `atob(s)` | ✅ | • Permissive: malformed length/characters decode as best-effort rather than throwing | • Base64 decode<br>• Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate "binary string" type needed). See [ADR-00024](../adr/ADR-00024.md). |
 | `btoa(s)` | ✅ | | • Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/ADR-00024.md). |
 | `structuredClone(obj)` | ✅ | • `Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased | • Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, and plain objects recurse; scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md) |
-| `queueMicrotask(fn)` | ❌ | | • Needs event loop |
+| `queueMicrotask(fn)` | ✅ | • Drained at the reachable checkpoints (end of the top-level script, each scheduler step); a program with neither timers nor async tasks drains once at exit | • A FIFO of callback closures, run after the current synchronous script and before timers ([TDD-00083](../tdd/TDD-00083.md) Stage 3 / [ADR-00245](../adr/ADR-00245.md)) |
 | `eval(s)` | ❌ | | • General/dynamic `eval` is unimplemented (needs the opt-in embedded engine, [TDD-00046](../tdd/TDD-00046.md), not started). A narrow **static subset** does work: a compile-time-constant `eval("<expression>")` is compiled in place through this compiler's own parser+codegen, no engine — see [ADR-00198](../adr/ADR-00198.md). A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw (so it can't false-pass a negative test) |

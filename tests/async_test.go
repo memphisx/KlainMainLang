@@ -4,6 +4,53 @@ import (
 	"testing"
 )
 
+// --- TDD-00084 Part A: a non-suspending async fn returns a real (settled) task
+// promise, so .then/.catch/.finally and Promise combinators work on it, and a
+// throwing async fn rejects instead of throwing synchronously — all without a
+// fetch/fiber runtime (these programs never touch the network). ---
+
+func TestE2EPartANonSuspendingThenChain(t *testing.T) {
+	assertOutput(t, `
+async function v(): Promise<number> { return 21 }
+v().then((n: number) => n * 2).then((m: number) => { console.log(m) })
+console.log("sync")
+`, "sync\n42")
+}
+
+func TestE2EPartANonSuspendingThrowRejects(t *testing.T) {
+	// A throwing non-suspending async fn rejects its promise; .catch recovers,
+	// and (separately) await re-throws into a surrounding try/catch.
+	assertOutput(t, `
+async function bad(): Promise<number> { throw new Error("boom") }
+bad().catch((e) => { console.log("caught") })
+console.log("sync")
+`, "sync\ncaught")
+	assertOutput(t, `
+async function bad(): Promise<number> { throw new Error("nope") }
+async function run(): Promise<void> {
+  try { const x = await bad(); console.log("got " + x) }
+  catch (e) { console.log("caught " + e.message) }
+}
+run()
+`, "caught nope")
+}
+
+func TestE2EPartANonSuspendingCombinators(t *testing.T) {
+	// Promise.any skip-rejected and Promise.all over non-suspending async fns —
+	// the previously-broken case (their results are now settled task promises).
+	assertOutput(t, `
+async function bad(n: number): Promise<number> { throw new Error("f" + n) }
+async function good(): Promise<number> { return 42 }
+async function run(): Promise<void> {
+  const r: number = await Promise.any([bad(1), good(), bad(2)])
+  console.log(r)
+  const xs: number[] = await Promise.all([good(), good()])
+  console.log(xs[0] + xs[1])
+}
+run()
+`, "42\n84")
+}
+
 // --- async/await ---
 
 func TestE2EAsyncAwaitNumber(t *testing.T) {

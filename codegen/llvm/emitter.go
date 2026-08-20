@@ -77,6 +77,7 @@ type Emitter struct {
 	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
 	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
 	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
+	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
 	usedPrintf            bool
 	usedDprintf           bool
 	usedMalloc            bool
@@ -119,6 +120,7 @@ type Emitter struct {
 	// runtime identity tag.
 	nextClassTagID int64
 	enums          map[string]map[string]Value // enum name → member name → constant value
+	enumBacking    map[string]Type             // enum name → backing value type (i64 numeric, ptr string)
 	currentRetType Type                        // return type of the function being emitted
 	blockDone      bool                        // true after a terminator (ret/br) in the current block
 	closureCtr     int                         // monotonically increasing counter for unique closure names
@@ -293,6 +295,13 @@ type Emitter struct {
 	usedGeneratorRuntime     bool
 	generatorBodyCtr         int
 	usedMathFuncs            bool
+	usedTaskRuntime          bool
+	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
+	usedMicrotasks           bool
+	thenCtr                  int // unique-name counter for .then/.catch/.finally reaction runners
+	usedCurrentTaskGlobal    bool
+	hasMaySuspend            bool // any async fn classified may-suspend (TDD-00083 Stage 2)
+	usedCbrt                 bool
 	usedCtlz32               bool
 	usedArc4Random           bool
 	usedStrtoll              bool
@@ -354,6 +363,9 @@ type Emitter struct {
 	// Async function state (reset per function, like currentRetType).
 	isAsync          bool
 	coroHdl          string // register holding the malloc'd promise slot
+	asyncPromiseReg  string // non-suspending async fn: the settled task promise it returns (TDD-00084 Part A)
+	asyncCatchLabel  string // non-suspending async fn: the catch-and-reject block label
+	emittingHTTPHandler bool // an http.listen handler arrow is being emitted — keep the old bare-slot async model (connection-fiber-driven, not task-promise), TDD-00084 Part A
 	currentPromiseTy Type   // T in Promise<T>; void if Promise<void>
 	coroRetLabel     string // label for the async-return block
 }
@@ -366,6 +378,7 @@ func NewEmitter() *Emitter {
 		interfaceMethodSigs: make(map[string]map[string]FuncSig),
 		classes:             make(map[string]ClassInfo),
 		enums:               make(map[string]map[string]Value),
+		enumBacking:         make(map[string]Type),
 		jsonToJSONActive:    make(map[string]bool),
 		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
 		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
@@ -775,11 +788,16 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 
 	// Named type: check interface registry before falling back to built-ins.
 	name := ta.Name
-	// Handle T[] where T is a named interface (e.g. "User[]").
+	// Handle T[] where T is a named interface (e.g. "User[]") or enum
+	// ("Color[]") — the parser hands a named-type array as a single "[]"-suffix
+	// name, so ElemType is nil and the enum-backing lookup below wouldn't fire.
 	if len(name) > 2 && name[len(name)-2:] == "[]" {
 		base := name[:len(name)-2]
 		if ty, ok := e.interfaces[base]; ok {
 			return ArrayOf(ty)
+		}
+		if backing, ok := e.enumBacking[base]; ok {
+			return ArrayOf(backing)
 		}
 	}
 	if ty, ok := e.interfaces[name]; ok {
@@ -787,6 +805,16 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 			ty.Nullable = true
 		}
 		return ty
+	}
+	// A named enum used as a type annotation resolves to its backing value type
+	// — i64 for a numeric enum, ptr for a string enum. Without this a string
+	// enum annotation fell through to the i64 unknown-name default, so storing
+	// a member's string pointer into the i64 slot was a clang type error.
+	if backing, ok := e.enumBacking[name]; ok {
+		if ta.Nullable {
+			backing.Nullable = true
+		}
+		return backing
 	}
 	ty := ResolveTypeName(ta.Name)
 	if ta.Nullable {
@@ -856,6 +884,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	if err := e.registerFunctions(prog); err != nil {
 		return "", err
 	}
+	// Mark async functions that can actually suspend (TDD-00083 Stage 2), so the
+	// emitter compiles them as coroutine tasks; the rest keep the synchronous
+	// malloc-slot fast path. Must run after registerFunctions (needs e.funcs).
+	e.classifyAsyncSuspension(prog)
 
 	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
 	// function is never emitted here — it has no single concrete signature
@@ -977,11 +1009,29 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// check) if the last top-level statement already terminated the block,
 	// e.g. process.exit() — matching real Node, which also never drains
 	// pending timers after an explicit exit.
-	if e.usedEventSource || e.usedWSClient {
+	// Microtasks run after the top-level synchronous script, before any timer or
+	// task macrotask (TDD-00083 Stage 3).
+	if e.usedMicrotasks {
+		e.emitInstr("call void @__kml_drain_microtasks()")
+	}
+	// TDD-00084 Part B: a program mixing coroutine tasks with timers or
+	// EventSource/WebSocket drives all of them under the single task-aware event
+	// loop (__kml_event_loop_run). A pure-task program (fetch only) keeps the
+	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers)
+	if useFullLoop {
+		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
+	} else if e.usedTaskRuntime {
+		// A may-suspend async program with no timers/SSE/WS: drain the coroutine
+		// scheduler until all spawned tasks complete.
+		e.emitInstr("call void @__kml_task_run_all()")
 	} else if e.usedTimers {
 		e.emitInstr("call void @__kml_timer_drain()")
 	}
+	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
+	// runtimes were not, define no-op stubs for the symbols it references.
+	e.emitLoopTaskStubs()
 	e.emitTerminator("ret i32 0")
 
 	var out strings.Builder
@@ -1022,6 +1072,7 @@ func (e *Emitter) registerEnums(prog *ast.Program) {
 		}
 
 		if isString {
+			e.enumBacking[ed.Name] = TypePtr
 			for _, m := range ed.Members {
 				if sl, ok := m.Value.(*ast.StringLiteral); ok {
 					ptr := e.internString(sl.Value)
@@ -1029,6 +1080,7 @@ func (e *Emitter) registerEnums(prog *ast.Program) {
 				}
 			}
 		} else {
+			e.enumBacking[ed.Name] = TypeI64
 			var counter int64
 			for _, m := range ed.Members {
 				if m.Value != nil {
@@ -1231,7 +1283,7 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	if fd.ReturnType != nil {
 		retType = e.resolveType(fd.ReturnType)
 	}
-	sig := FuncSig{RetType: retType}
+	sig := FuncSig{RetType: retType, IsAsync: fd.IsAsync}
 	for _, p := range fd.Params {
 		var pty Type
 		if p.Type != nil {

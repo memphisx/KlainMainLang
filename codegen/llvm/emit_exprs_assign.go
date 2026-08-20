@@ -285,6 +285,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		if isLogicalAssignOp(ex.Op) {
+			// A nullable-scalar field's { i1, T } presence-flagged slot needs the
+			// dedicated present-bit path (TDD-00064 Stage 3); the generic
+			// emitLogicalCompoundAssign reads the whole aggregate as a non-`ptr`
+			// value and would no-op `??=` (it can never equal null). Every other
+			// field type uses the generic path unchanged.
+			if isNullableScalar(fieldTy) {
+				return e.emitNullableScalarNullishOrLogicalAssignAt(gepReg, fieldTy, ex.Op, ex.Right)
+			}
 			return e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right)
 		}
 		// A plain `=` into a nullable-scalar field boxes straight from the RHS
@@ -552,6 +560,15 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 	} else {
 		rhs = e.coerce(rhs, sym.Ty)
+	}
+	// Evaluating the RHS may have promoted `ident` to a heap cell for closure
+	// capture (updateSymbolInPlace changes its storage pointer) — re-resolve it so
+	// the store targets the cell the closure now reads. Fixes the self-referential
+	// `id = setInterval(() => { ... clearInterval(id) ... }, ...)`, where the
+	// closure captured id during RHS evaluation and the assignment otherwise wrote
+	// to the stale pre-promotion slot, leaving the closure's id at its old value.
+	if fresh, ok := e.lookup(ident.Name); ok {
+		sym = fresh
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, rhs.Ref, sym.Ptr, sym.Ty.Align()))
 	return rhs, nil

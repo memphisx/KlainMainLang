@@ -159,12 +159,24 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewErrorBody(pos, "URIError")
 	case "ReferenceError":
 		return p.parseNewErrorBody(pos, "ReferenceError")
+	case "DOMException":
+		return p.parseNewDOMExceptionBody(pos)
+	case "AggregateError":
+		return p.parseNewAggregateErrorBody(pos)
 	case "Date":
 		return p.parseNewDateBody(pos)
 	case "URL":
 		return p.parseNewURLBody(pos)
 	case "EventSource":
 		return p.parseNewEventSourceBody(pos)
+	case "EventTarget":
+		return p.parseNewEventTargetBody(pos)
+	case "AbortController":
+		return p.parseNewAbortControllerBody(pos)
+	case "Event":
+		return p.parseNewEventBody(pos)
+	case "CustomEvent":
+		return p.parseNewCustomEventBody(pos)
 	case "WebSocket":
 		return p.parseNewWebSocketBody(pos)
 	case "URLSearchParams":
@@ -308,6 +320,66 @@ func (p *Parser) parseNewErrorBody(pos ast.Pos, kind string) (*ast.NewErrorExpre
 	return ast.NewNewErrorExpression(kind, msg, pos), nil
 }
 
+// parseNewDOMExceptionBody parses `new DOMException(message?, name?)` — unlike
+// the fixed-name Error kinds, its runtime `.name` is the optional second
+// argument (defaulting to "Error"), so the parsed name expression rides on the
+// node's Name field (TDD-00081).
+func (p *Parser) parseNewDOMExceptionBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
+	p.advance() // consume 'DOMException'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var msg, name ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		if msg, err = p.parseAssignment(); err != nil {
+			return nil, err
+		}
+		if p.check(lexer.COMMA) {
+			p.advance()
+			if name, err = p.parseAssignment(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	ne := ast.NewNewErrorExpression("DOMException", msg, pos)
+	ne.Name = name
+	return ne, nil
+}
+
+// parseNewAggregateErrorBody parses `new AggregateError(errors, message?)` — the
+// first argument is the aggregated errors (an array), the optional second is the
+// message. Mirrors real JS's `AggregateError(errors, message?)` signature; also
+// what `Promise.any` throws on all-reject (TDD-00083).
+func (p *Parser) parseNewAggregateErrorBody(pos ast.Pos) (*ast.NewErrorExpression, error) {
+	p.advance() // consume 'AggregateError'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var errors, msg ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		if errors, err = p.parseAssignment(); err != nil {
+			return nil, err
+		}
+		if p.check(lexer.COMMA) {
+			p.advance()
+			if msg, err = p.parseAssignment(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	ne := ast.NewNewErrorExpression("AggregateError", msg, pos)
+	ne.Errors = errors
+	return ne, nil
+}
+
 func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
 	p.advance() // consume 'URL'
 	if _, err := p.expect(lexer.LPAREN); err != nil {
@@ -321,6 +393,84 @@ func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
 		return nil, err
 	}
 	return ast.NewNewURLExpression(url, pos), nil
+}
+
+// parseNewAbortControllerBody parses `new AbortController()` (TDD-00081 Stage 3).
+func (p *Parser) parseNewAbortControllerBody(pos ast.Pos) (*ast.NewAbortControllerExpression, error) {
+	p.advance() // consume 'AbortController'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewAbortControllerExpression(pos), nil
+}
+
+// parseNewEventTargetBody parses `new EventTarget()` (TDD-00081 Stage 2).
+func (p *Parser) parseNewEventTargetBody(pos ast.Pos) (*ast.NewEventTargetExpression, error) {
+	p.advance() // consume 'EventTarget'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewEventTargetExpression(pos), nil
+}
+
+// parseNewEventBody parses `new Event(type)` (TDD-00081). A second init argument
+// (`{ cancelable, bubbles }`) is accepted but ignored in V1.
+func (p *Parser) parseNewEventBody(pos ast.Pos) (*ast.NewEventExpression, error) {
+	p.advance() // consume 'Event'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	typeArg, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	for p.match(lexer.COMMA) {
+		if _, err := p.parseAssignment(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewEventExpression(typeArg, pos), nil
+}
+
+// parseNewCustomEventBody parses `new CustomEvent(type, { detail })` (TDD-00081).
+// The `detail` property is pulled from the init object literal at parse time; any
+// other init properties are accepted but ignored in V1.
+func (p *Parser) parseNewCustomEventBody(pos ast.Pos) (*ast.NewCustomEventExpression, error) {
+	p.advance() // consume 'CustomEvent'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	typeArg, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	var detail ast.Expression
+	if p.match(lexer.COMMA) {
+		initExpr, err := p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		if obj, ok := initExpr.(*ast.ObjectLiteral); ok {
+			for _, prop := range obj.Properties {
+				if prop.Key == "detail" {
+					detail = prop.Value
+				}
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewCustomEventExpression(typeArg, detail, pos), nil
 }
 
 func (p *Parser) parseNewEventSourceBody(pos ast.Pos) (*ast.NewEventSourceExpression, error) {

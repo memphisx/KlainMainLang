@@ -623,6 +623,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.Message != nil {
 			e.Message = rewriteExpr(e.Message, sc, lu)
 		}
+		if e.Name != nil {
+			e.Name = rewriteExpr(e.Name, sc, lu)
+		}
+		if e.Errors != nil {
+			e.Errors = rewriteExpr(e.Errors, sc, lu)
+		}
 	case *ast.NewDateExpression:
 		if e.Millis != nil {
 			e.Millis = rewriteExpr(e.Millis, sc, lu)

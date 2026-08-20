@@ -143,6 +143,14 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewRegExpExpression(ex)
 	case *ast.NewEventSourceExpression:
 		return e.emitNewEventSourceExpression(ex)
+	case *ast.NewEventTargetExpression:
+		return e.emitNewEventTargetExpression()
+	case *ast.NewAbortControllerExpression:
+		return e.emitNewAbortControllerExpression()
+	case *ast.NewEventExpression:
+		return e.emitNewEventExpression(ex)
+	case *ast.NewCustomEventExpression:
+		return e.emitNewCustomEventExpression(ex)
 	case *ast.NewWebSocketExpression:
 		return e.emitNewWebSocketClientExpression(ex)
 	case *ast.NewHeadersExpression:

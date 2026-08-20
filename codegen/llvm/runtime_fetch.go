@@ -151,8 +151,41 @@ func (e *Emitter) ensureFetchAsync() {
 	e.usedFetchAsync = true
 	e.ensureFetch()
 	e.ensureFiberRuntime()
+	e.ensureCurrentTaskGlobal() // @__kml_current_task, read by the may-suspend task-park path below
 	e.ensureExceptionHelpers()
+	e.ensureSignalAborted() // __kml_signal_aborted, used by the await abort check (TDD-00081)
+
+	// Task-park path (TDD-00083 Stage 2): when a fetch is awaited inside a
+	// coroutine task (not a connection fiber), park the task on the fetch and
+	// swap to its resumer, so the scheduler can drive other tasks concurrently.
+	// Only emitted when the program actually has a may-suspend async fn; without
+	// it, maybeyield keeps its original connection-fiber-or-busyspin behavior
+	// byte-for-byte.
+	// NOTE: these are Sprintf *arguments* (%s), not part of the format string, so
+	// LLVM's '%' is written as a single '%' here, not '%%'.
+	awfTaskCheck := "\n  br label %maybeconn"
+	awfTaskYield := ""
+	if e.hasMaySuspend {
+		awfGCRestore := ""
+		if e.isGCMode() {
+			awfGCRestore = "\n  call void @__kml_task_gc_restore()"
+		}
+		awfTaskCheck = "\n  %awf_task = load ptr, ptr @__kml_current_task, align 8\n  %awf_ontask = icmp ne ptr %awf_task, null\n  br i1 %awf_ontask, label %taskyield, label %maybeconn"
+		awfTaskYield = "\ntaskyield:" +
+			"\n  %ty_pf_p = getelementptr " + taskStructIR + ", ptr %awf_task, i32 0, i32 " + fmt.Sprintf("%d", taskPendingFetch) + "\n  store ptr %pending, ptr %ty_pf_p, align 8" +
+			"\n  %ty_st_p = getelementptr " + taskStructIR + ", ptr %awf_task, i32 0, i32 " + fmt.Sprintf("%d", taskState) + "\n  store i64 1, ptr %ty_st_p, align 8" +
+			"\n  %ty_rc_p = getelementptr " + taskStructIR + ", ptr %awf_task, i32 0, i32 " + fmt.Sprintf("%d", taskResumerCtx) + "\n  %ty_rc = load ptr, ptr %ty_rc_p, align 8" +
+			"\n  %ty_ctx_p = getelementptr " + taskStructIR + ", ptr %awf_task, i32 0, i32 " + fmt.Sprintf("%d", taskCtx) + "\n  %ty_ctx = load ptr, ptr %ty_ctx_p, align 8" +
+			"\n  %ty_sjt_p = getelementptr " + taskStructIR + ", ptr %awf_task, i32 0, i32 " + fmt.Sprintf("%d", taskSavedJmpTop) + "\n  %ty_top = load i32, ptr @__kml_jmp_top, align 4\n  %ty_top64 = zext i32 %ty_top to i64\n  store i64 %ty_top64, ptr %ty_sjt_p, align 8" +
+			"\n  %ty_sw = call i32 @swapcontext(ptr %ty_ctx, ptr %ty_rc)" + awfGCRestore +
+			"\n  br label %checkloop"
+	}
 	errNamePtr := e.internString("Error")
+	abortNamePtr := e.internString("AbortError")
+	abortMsgPtr := e.internString("The operation was aborted")
+	timeoutNamePtr := e.internString("TimeoutError")
+	timeoutMsgPtr := e.internString("The operation timed out")
+	domExcKind := errorKindIDs["DOMException"]
 
 	e.emitGlobal("declare ptr @curl_multi_init()")
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
@@ -163,7 +196,7 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("@__kml_curl_multi = internal global ptr null, align 8")
 
 	e.emitGlobal(`
-define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body) {
+define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {
 entry:
   %inited = load i1, ptr @__kml_curl_inited, align 1
   br i1 %inited, label %skipinit, label %doinit
@@ -226,7 +259,7 @@ setbody:
   br label %skipbody
 
 skipbody:
-  %pending = call ptr @malloc(i64 40)
+  %pending = call ptr @malloc(i64 48)
   %p_easy = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
   store ptr %curl, ptr %p_easy, align 8
   %p_buf = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
@@ -237,6 +270,8 @@ skipbody:
   store i64 0, ptr %p_status, align 8
   %p_result = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
   store i64 0, ptr %p_result, align 8
+  %p_signal = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %pending, i32 0, i32 5
+  store ptr %signal, ptr %p_signal, align 8
 
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10103, ptr %pending)
   call i32 @curl_multi_add_handle(ptr %multi2, ptr %curl)
@@ -360,15 +395,52 @@ retdone:
 define { i64, ptr, i64 } @__kml_await_fetch(ptr %%pending) {
 entry:
   %%runningp = alloca i32, align 4
+  %%sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %%pending, i32 0, i32 5
+  %%sig = load ptr, ptr %%sig_p, align 8
   br label %%checkloop
 
 checkloop:
+  ; AbortSignal check each spin (TDD-00081 Stage 3c): the aborted flag or an
+  ; elapsed AbortSignal.timeout deadline tears the transfer down and throws,
+  ; so a mid-flight abort or a timeout cancels the in-flight request.
+  %%isaborted = call i1 @__kml_signal_aborted(ptr %%sig)
+  br i1 %%isaborted, label %%doabort, label %%chkdone
+
+doabort:
+  %%ab_easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 0
+  %%ab_easy = load ptr, ptr %%ab_easy_p, align 8
+  %%ab_multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_remove_handle(ptr %%ab_multi, ptr %%ab_easy)
+  call void @curl_easy_cleanup(ptr %%ab_easy)
+  ; A non-zero deadline means this signal came from AbortSignal.timeout, whose
+  ; abort is a "TimeoutError" DOMException; a manual controller.abort() (no
+  ; deadline) is an "AbortError" DOMException. Both carry the DOMException kind
+  ; tag so 'e instanceof DOMException' (and, since DOMException inherits Error,
+  ; 'e instanceof Error') both hold in the catch handler.
+  %%ab_dl_p = getelementptr { i1, ptr, ptr, i64 }, ptr %%sig, i32 0, i32 3
+  %%ab_dl = load i64, ptr %%ab_dl_p, align 8
+  %%ab_istimeout = icmp ne i64 %%ab_dl, 0
+  %%ab_name = select i1 %%ab_istimeout, ptr %s, ptr %s
+  %%ab_msg = select i1 %%ab_istimeout, ptr %s, ptr %s
+  %%aberr = call ptr @malloc(i64 24)
+  %%aberr.kind = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 0
+  store i64 %d, ptr %%aberr.kind, align 8
+  %%aberr.msg = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 1
+  store ptr %%ab_msg, ptr %%aberr.msg, align 8
+  %%aberr.name = getelementptr { i64, ptr, ptr }, ptr %%aberr, i32 0, i32 2
+  store ptr %%ab_name, ptr %%aberr.name, align 8
+  call void @__kml_throw(ptr %%aberr)
+  unreachable
+
+chkdone:
   %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
   %%done = load i64, ptr %%done_p, align 8
   %%isdone = icmp ne i64 %%done, 0
   br i1 %%isdone, label %%finish, label %%maybeyield
 
-maybeyield:
+maybeyield:%s
+
+maybeconn:
   %%curidx = load i64, ptr @__kml_current_conn_idx, align 8
   %%onfiber = icmp sge i64 %%curidx, 0
   br i1 %%onfiber, label %%doyield, label %%busyspin
@@ -388,12 +460,12 @@ busyspin:
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   call i32 @curl_multi_perform(ptr %%multi, ptr %%runningp)
   call void @__kml_curl_drain_messages()
-  br label %%checkloop
+  br label %%checkloop%s
 
 finish:
   %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
   ret { i64, ptr, i64 } %%raw
-}`))
+}`, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, awfTaskCheck, awfTaskYield))
 }
 
 // ensureCurlSlist declares curl_slist_append (ADR-00074/TDD-00017) —
@@ -435,11 +507,12 @@ func (e *Emitter) ensurePromiseCombinators() {
 	e.ensureFetchAsync()
 	e.ensureMalloc()
 
-	// __kml_group_satisfied(ptr group) -> i1: mode 0 (all) is satisfied once
-	// every member's done flag is set; mode 1 (race) is satisfied as soon as
-	// any one member's done flag is set. Called both by
-	// __kml_await_group_wait's own poll loop below and by the event loop's
-	// rcheckgroup resume-scan (__kml_event_loop_run).
+	// __kml_group_satisfied(ptr group) -> i1: mode 0 (all) is satisfied once every
+	// member's done flag is set; mode 1 (race) as soon as any member is done; mode
+	// 2 (any, TDD-00084 Part C) as soon as any member is done *and transport-
+	// succeeded* (result == 0), or once every member is done (all failed → the
+	// caller throws an AggregateError). Called by __kml_await_group_wait's poll
+	// loop below and by the event loop's rcheckgroup resume-scan.
 	e.emitGlobal(`
 define i1 @__kml_group_satisfied(ptr %group) {
 entry:
@@ -450,10 +523,12 @@ entry:
   %mode_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 2
   %mode = load i64, ptr %mode_p, align 8
   %allmode = icmp eq i64 %mode, 0
+  %anymode = icmp eq i64 %mode, 2
   br label %loop
 
 loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %i = phi i64 [ 0, %entry ], [ %inext, %nextmerge ]
+  %anynotdone = phi i1 [ false, %entry ], [ %anynotdone2, %nextmerge ]
   %reachedend = icmp sge i64 %i, %count
   br i1 %reachedend, label %loopend, label %body
 
@@ -463,13 +538,25 @@ body:
   %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 2
   %done = load i64, ptr %done_p, align 8
   %isdone = icmp ne i64 %done, 0
+  br i1 %anymode, label %anybody, label %notany
+
+notany:
   br i1 %allmode, label %checkall, label %checkrace
 
 checkall:
-  br i1 %isdone, label %next, label %notsatisfied
+  br i1 %isdone, label %next_keep, label %notsatisfied
 
 checkrace:
-  br i1 %isdone, label %satisfied, label %next
+  br i1 %isdone, label %satisfied, label %next_keep
+
+anybody:
+  br i1 %isdone, label %anydone, label %next_notdone
+
+anydone:
+  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 4
+  %result = load i64, ptr %result_p, align 8
+  %success = icmp eq i64 %result, 0
+  br i1 %success, label %satisfied, label %next_keep
 
 satisfied:
   ret i1 1
@@ -477,12 +564,22 @@ satisfied:
 notsatisfied:
   ret i1 0
 
-next:
+next_keep:
+  br label %nextmerge
+
+next_notdone:
+  br label %nextmerge
+
+nextmerge:
+  %anynotdone2 = phi i1 [ %anynotdone, %next_keep ], [ true, %next_notdone ]
   %inext = add i64 %i, 1
   br label %loop
 
 loopend:
-  ret i1 %allmode
+  %notanynotdone = xor i1 %anynotdone, true
+  %anyresult = select i1 %anymode, i1 %notanynotdone, i1 0
+  %result_final = select i1 %allmode, i1 1, i1 %anyresult
+  ret i1 %result_final
 }`)
 
 	// __kml_first_done_index(ptr group) -> i64: only used by .race, after
@@ -521,6 +618,104 @@ next:
 notfound:
   ret i64 -1
 }`)
+
+	// __kml_first_success_index(ptr group) -> i64: for Promise.any over fetches
+	// (TDD-00084 Part C) — the first member that is done and transport-succeeded
+	// (result == 0), or -1 if none succeeded (all failed → the caller throws an
+	// AggregateError). Called after __kml_await_group_wait (mode = 2) returns.
+	e.emitGlobal(`
+define i64 @__kml_first_success_index(ptr %group) {
+entry:
+  %members_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 0
+  %members = load ptr, ptr %members_p, align 8
+  %count_p = getelementptr { ptr, i64, i64 }, ptr %group, i32 0, i32 1
+  %count = load i64, ptr %count_p, align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %inext, %next ]
+  %reached = icmp sge i64 %i, %count
+  br i1 %reached, label %notfound, label %body
+body:
+  %member_p = getelementptr ptr, ptr %members, i64 %i
+  %member = load ptr, ptr %member_p, align 8
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 2
+  %done = load i64, ptr %done_p, align 8
+  %isdone = icmp ne i64 %done, 0
+  br i1 %isdone, label %chkres, label %next
+chkres:
+  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %member, i32 0, i32 4
+  %result = load i64, ptr %result_p, align 8
+  %success = icmp eq i64 %result, 0
+  br i1 %success, label %found, label %next
+found:
+  ret i64 %i
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+notfound:
+  ret i64 -1
+}`)
+
+	// __kml_group_throw_aggregate(ptr group): Promise.any's all-rejected path
+	// (TDD-00084 Part C) — build an AggregateError whose `.errors` are one Error
+	// per member carrying that fetch's transport-failure message, then throw it.
+	{
+		e.ensureExceptionHelpers()
+		errName := e.internString("Error")
+		aggName := e.internString("AggregateError")
+		aggMsg := e.internString("All promises were rejected")
+		aggID := errorKindIDs["AggregateError"]
+		e.emitGlobal(fmt.Sprintf(`
+define void @__kml_group_throw_aggregate(ptr %%group) {
+entry:
+  %%members_p = getelementptr { ptr, i64, i64 }, ptr %%group, i32 0, i32 0
+  %%members = load ptr, ptr %%members_p, align 8
+  %%count_p = getelementptr { ptr, i64, i64 }, ptr %%group, i32 0, i32 1
+  %%count = load i64, ptr %%count_p, align 8
+  %%bytes = mul i64 %%count, 8
+  %%errArr = call ptr @malloc(i64 %%bytes)
+  br label %%loop
+loop:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%cont ]
+  %%go = icmp slt i64 %%i, %%count
+  br i1 %%go, label %%body, label %%done
+body:
+  %%mg = getelementptr ptr, ptr %%members, i64 %%i
+  %%m = load ptr, ptr %%mg, align 8
+  %%res_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%m, i32 0, i32 4
+  %%res = load i64, ptr %%res_p, align 8
+  %%res32 = trunc i64 %%res to i32
+  %%errstr = call ptr @curl_easy_strerror(i32 %%res32)
+  %%eo = call ptr @malloc(i64 24)
+  %%eo_k = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
+  store i64 0, ptr %%eo_k, align 8
+  %%eo_m = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
+  store ptr %%errstr, ptr %%eo_m, align 8
+  %%eo_n = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
+  store ptr %s, ptr %%eo_n, align 8
+  %%dst = getelementptr ptr, ptr %%errArr, i64 %%i
+  store ptr %%eo, ptr %%dst, align 8
+  br label %%cont
+cont:
+  %%inext = add i64 %%i, 1
+  br label %%loop
+done:
+  %%agg = call ptr @malloc(i64 %d)
+  %%a_k = getelementptr %s, ptr %%agg, i32 0, i32 0
+  store i64 %d, ptr %%a_k, align 8
+  %%a_m = getelementptr %s, ptr %%agg, i32 0, i32 1
+  store ptr %s, ptr %%a_m, align 8
+  %%a_n = getelementptr %s, ptr %%agg, i32 0, i32 2
+  store ptr %s, ptr %%a_n, align 8
+  %%a_d = getelementptr %s, ptr %%agg, i32 0, i32 3
+  store ptr %%errArr, ptr %%a_d, align 8
+  %%a_l = getelementptr %s, ptr %%agg, i32 0, i32 4
+  store i64 %%count, ptr %%a_l, align 8
+  call void @__kml_throw(ptr %%agg)
+  unreachable
+}`, errName, aggregateErrorStructSize, aggregateErrorStructIR, aggID,
+			aggregateErrorStructIR, aggMsg, aggregateErrorStructIR, aggName, aggregateErrorStructIR, aggregateErrorStructIR))
+	}
 
 	e.ensurePendingFinishSettled()
 

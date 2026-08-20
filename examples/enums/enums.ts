@@ -69,3 +69,30 @@ console.log(c)  // 1
 
 // const enums are erased; values are substituted directly at compile time
 if (Color.Red === 0) console.log('red is 0')  // red is 0
+
+// ── String enum (members are string values) ──────────────────────────────────
+enum Suit {
+  Clubs = 'C',
+  Diamonds = 'D',
+  Hearts = 'H',
+  Spades = 'S',
+}
+
+// A variable/param/field/array explicitly typed with the enum stores the
+// member's string value.
+const picked: Suit = Suit.Hearts
+console.log(picked)                 // H
+console.log(picked === Suit.Hearts) // true
+
+function suitName(s: Suit): string {
+  switch (s) {
+    case Suit.Clubs:    return 'clubs'
+    case Suit.Diamonds: return 'diamonds'
+    case Suit.Hearts:   return 'hearts'
+    default:            return 'spades'
+  }
+}
+console.log(suitName(Suit.Spades))  // spades
+
+const hand: Suit[] = [Suit.Clubs, Suit.Spades]
+console.log(hand[1])                // S

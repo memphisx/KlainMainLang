@@ -36,6 +36,17 @@ interface Ip { origin: string }
 const ipInfo: Ip = (await fetch('http://127.0.0.1:8765/ip')).json()
 console.log(ipInfo.origin.length > 0)  // true — some IP address string came back
 
+// ── awaiting the body accessors also works ─────────────────────────────────
+// .text()/.json()/.arrayBuffer() are synchronous here (they return the value
+// directly, not a Promise), but the instinctive `await res.text()` — how a TS
+// developer reflexively writes them — is a safe no-op: awaiting a non-thenable
+// is identity, and the type-directed .json() projection carries through it.
+const ipRes = await fetch('http://127.0.0.1:8765/ip')
+const ipText: string = await ipRes.text()
+console.log(ipText.length > 0)         // true
+const ipAwaited: Ip = await ipRes.json()
+console.log(ipAwaited.origin.length > 0)  // true
+
 // ── a network-level failure throws, same as any other Error ────────────────
 try {
     await fetch('https://this-domain-absolutely-does-not-exist-12345.invalid/')
