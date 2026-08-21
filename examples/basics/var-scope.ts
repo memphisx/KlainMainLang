@@ -43,3 +43,21 @@ function blockScoped(): void {
     console.log(a)       // 10  (outer a is unchanged)
 }
 blockScoped()
+
+// --- top-level scalar/string const/let are module globals: a named function
+// (not just a capturing arrow) can read and write them (TDD-00093) ---
+const APP = "demo"
+let hits = 0
+
+function greet(): void {
+    hits = hits + 1              // a named function mutates the module let
+    console.log("hello from " + APP)
+}
+
+const report = (): void => {
+    console.log("hits=" + hits)  // an arrow sees the same global, live
+}
+
+greet()
+greet()
+report()                         // hits=2  (the mutation is shared, not a copy)

@@ -595,6 +595,15 @@ func (p *Parser) parseForStatement() (ast.Statement, error) {
 	tok := p.advance() // 'for'
 	pos := posOf(tok)
 
+	// `for await (const x of asyncIter)` — async iteration (TDD-00085). The
+	// `await` keyword sits between `for` and `(`; it is only meaningful on a
+	// for-of loop, so a `for await` that isn't a for-of is a clean error below.
+	isAwait := false
+	if p.check(lexer.AWAIT) {
+		p.advance()
+		isAwait = true
+	}
+
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -602,9 +611,16 @@ func (p *Parser) parseForStatement() (ast.Statement, error) {
 	// Detect for-of and for-in: for (let/const/var name of/in ...)
 	if p.check(lexer.LET) || p.check(lexer.CONST) || p.check(lexer.VAR) {
 		if p.peekNth(2).Type == lexer.IDENT && p.peekNth(2).Literal == "of" {
-			return p.parseForOfBody(pos)
+			f, err := p.parseForOfBody(pos)
+			if f != nil {
+				f.Await = isAwait
+			}
+			return f, err
 		}
 		if p.peekNth(2).Type == lexer.IDENT && p.peekNth(2).Literal == "in" {
+			if isAwait {
+				return nil, fmt.Errorf("%d:%d: 'for await' requires a for-of loop, not for-in", pos.Line, pos.Col)
+			}
 			return p.parseForInBody(pos)
 		}
 		// Destructuring loop variable — `for (const [a, b] of …)` /
@@ -613,8 +629,16 @@ func (p *Parser) parseForStatement() (ast.Statement, error) {
 		// which cleanly rejects it) — near-useless in practice, and this
 		// compiler's for-in is already narrow.
 		if p.peekNth(1).Type == lexer.LBRACKET || p.peekNth(1).Type == lexer.LBRACE {
-			return p.parseForOfPatternBody(pos)
+			f, err := p.parseForOfPatternBody(pos)
+			if f != nil {
+				f.Await = isAwait
+			}
+			return f, err
 		}
+	}
+
+	if isAwait {
+		return nil, fmt.Errorf("%d:%d: 'for await' requires a for-of loop over an async iterable (TDD-00085)", pos.Line, pos.Col)
 	}
 
 	// Init (optional)

@@ -267,6 +267,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPromiseAllSettled(ex.Args, ex.GetPos())
 			case "any":
 				return e.emitPromiseAny(ex.Args, ex.GetPos())
+			case "resolve":
+				return e.emitPromiseResolve(ex.Args, ex.GetPos())
+			case "reject":
+				return e.emitPromiseReject(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
@@ -722,6 +726,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "next" && e.inferExprType(mem.Object).IsGenerator {
 			return e.emitGeneratorNext(mem.Object, e.inferExprType(mem.Object), ex.Args, ex.GetPos())
 		}
+		// gen.throw(e) / gen.return(v) (TDD-00086) — the rest of the iterator
+		// protocol, dispatched the same way as .next above.
+		if mem.Property == "throw" && e.inferExprType(mem.Object).IsGenerator {
+			return e.emitGeneratorThrow(mem.Object, e.inferExprType(mem.Object), ex.Args, ex.GetPos())
+		}
+		if mem.Property == "return" && e.inferExprType(mem.Object).IsGenerator {
+			return e.emitGeneratorReturnMethod(mem.Object, e.inferExprType(mem.Object), ex.Args, ex.GetPos())
+		}
 		if mem.Property == "forEach" {
 			return e.emitArrayForEach(mem, ex.Args, ex.GetPos())
 		}
@@ -839,7 +851,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// below, since a generator is never entered into e.funcs/
 		// resolveFuncRef at all: calling one doesn't emit an ordinary
 		// `call`, it builds a fiber-backed instance struct instead.
-		if info, found := e.generators[id.Name]; found {
+		if info, found := e.lookupGenerator(id.Name); found {
 			return e.emitGeneratorConstruction(info, ex.Args, ex.GetPos())
 		}
 		// Named function — a nested one (TDD-00057) shadows an outer/

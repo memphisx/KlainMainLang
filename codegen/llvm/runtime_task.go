@@ -153,6 +153,7 @@ func (e *Emitter) ensureTaskRuntime() {
 	e.ensureFiberRuntime()      // getcontext/makecontext/swapcontext + @__kml_main_ctx
 	e.ensureCurrentTaskGlobal() // @__kml_current_task
 	e.ensureExceptionHelpers()  // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
+	e.usedAwaitTimerDrive = true // __kml_task_await_ready's top-level drive fires timers (TDD-00088)
 	e.ensureMicrotasks()        // .then/.catch/.finally reactions drain here
 	// The top-level scheduler drive pumps libcurl; a may-suspend program always
 	// uses fetch, so pull in that runtime (idempotent) for @__kml_curl_multi /
@@ -514,9 +515,14 @@ done:
 
 	// @__kml_task_await_any_of(ptr %members, i64 %count) -> i64: wait until any
 	// member task-promise resolves, returning its index (Promise.race/any over
-	// task-promises). At top level it drives the scheduler; on a task it parks
-	// with no specific reason and is re-polled by the scheduler each step (a
-	// correct-but-busy multi-wait; a waiter-list refinement is future work).
+	// task-promises). At top level it drives the scheduler; on a task it registers
+	// itself as the waiter on every member and sets a non-null pendingProm sentinel
+	// (members[0], known pending since the scan above found none settled), so the
+	// scheduler resumes it only when a member settles — a settling promise clears
+	// its waiter's pendingProm (__kml_task_finish/__kml_promise_settle) — instead of
+	// busy-repolling every step. A stale waiter left after this returns can only
+	// cause a harmless spurious wake (the resumed wait re-checks its condition and
+	// re-parks).
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_task_await_any_of(ptr %%members, i64 %%count) {
 entry:
@@ -547,6 +553,25 @@ drive:
   call void @__kml_task_sched_step()
   br label %%scan
 park:
+  %%m0gep = getelementptr ptr, ptr %%members, i64 0
+  %%m0 = load ptr, ptr %%m0gep, align 8
+  %%pp_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  store ptr %%m0, ptr %%pp_p, align 8
+  br label %%wreg
+wreg:
+  %%wi = phi i64 [ 0, %%park ], [ %%winext, %%wregnext ]
+  %%wgo = icmp slt i64 %%wi, %%count
+  br i1 %%wgo, label %%wregbody, label %%wregdone
+wregbody:
+  %%wmgep = getelementptr ptr, ptr %%members, i64 %%wi
+  %%wm = load ptr, ptr %%wmgep, align 8
+  %%wwp = getelementptr %s, ptr %%wm, i32 0, i32 1
+  store ptr %%ct, ptr %%wwp, align 8
+  br label %%wregnext
+wregnext:
+  %%winext = add i64 %%wi, 1
+  br label %%wreg
+wregdone:
   %%st_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   store i64 1, ptr %%st_p, align 8
   %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
@@ -559,7 +584,7 @@ park:
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8
   %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
   br label %%scan
-}`, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
+}`, promiseStructIR, taskStructIR, taskPendingProm, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
 		taskStructIR, taskCtx, gcRestoreAfterSwap))
 
 	// @__kml_task_await_first_fulfilled(ptr %members, i64 %count) -> i64: wait for
@@ -608,6 +633,25 @@ drive:
   call void @__kml_task_sched_step()
   br label %%scan
 park:
+  %%m0gep = getelementptr ptr, ptr %%members, i64 0
+  %%m0 = load ptr, ptr %%m0gep, align 8
+  %%pp_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  store ptr %%m0, ptr %%pp_p, align 8
+  br label %%wreg
+wreg:
+  %%wi = phi i64 [ 0, %%park ], [ %%winext, %%wregnext ]
+  %%wgo = icmp slt i64 %%wi, %%count
+  br i1 %%wgo, label %%wregbody, label %%wregdone
+wregbody:
+  %%wmgep = getelementptr ptr, ptr %%members, i64 %%wi
+  %%wm = load ptr, ptr %%wmgep, align 8
+  %%wwp = getelementptr %s, ptr %%wm, i32 0, i32 1
+  store ptr %%ct, ptr %%wwp, align 8
+  br label %%wregnext
+wregnext:
+  %%winext = add i64 %%wi, 1
+  br label %%wreg
+wregdone:
   %%st_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   store i64 1, ptr %%st_p, align 8
   %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
@@ -620,7 +664,7 @@ park:
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8
   %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
   br label %%scan
-}`, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
+}`, promiseStructIR, taskStructIR, taskPendingProm, promiseStructIR, taskStructIR, taskState, taskStructIR, taskResumerCtx,
 		taskStructIR, taskCtx, gcRestoreAfterSwap))
 
 	// @__kml_task_run_all(): drive the scheduler until no task is still active —
@@ -643,45 +687,103 @@ done:
   ret void
 }`)
 
-	// @__kml_task_await_ready(ptr %promise): wait until the promise resolves. At
-	// top level (current_task == null) it drives the scheduler; on a task it
-	// parks (pendingPromise = promise, promise.waiter = task, state = suspended)
-	// and swaps to its resumer. Emit code loads the value (v0/v1) afterward.
+	// @__kml_task_resume(ptr %t): resume a parked task from the microtask-drain
+	// context (a task's `await` continuation IS a microtask — TDD-00088). Mirrors
+	// the scheduler's own resume prologue but standalone, pivoting on @__kml_main_ctx
+	// (microtasks drain from main): clear pendingProm, mark running, set resumerCtx
+	// = main, swap in the task's jmpbuf stack + gc + current_task, swapcontext into
+	// it; when it parks/finishes it swaps back here.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_task_resume(ptr %%t) {
+entry:
+  %%pp = getelementptr %s, ptr %%t, i32 0, i32 6
+  store ptr null, ptr %%pp, align 8
+  %%st = getelementptr %s, ptr %%t, i32 0, i32 3
+  store i64 0, ptr %%st, align 8
+  %%rc = getelementptr %s, ptr %%t, i32 0, i32 9
+  store ptr @__kml_main_ctx, ptr %%rc, align 8
+  %%mstk = load ptr, ptr @__kml_cur_jmp_stk, align 8
+  %%mtop = load i32, ptr @__kml_jmp_top, align 4
+  %%tjstk_p = getelementptr %s, ptr %%t, i32 0, i32 10
+  %%tjstk = load ptr, ptr %%tjstk_p, align 8
+  store ptr %%tjstk, ptr @__kml_cur_jmp_stk, align 8
+  %%sjt_p = getelementptr %s, ptr %%t, i32 0, i32 11
+  %%sjt = load i64, ptr %%sjt_p, align 8
+  %%sjt32 = trunc i64 %%sjt to i32
+  store i32 %%sjt32, ptr @__kml_jmp_top, align 4
+  store ptr %%t, ptr @__kml_current_task, align 8
+  %%dr_stk_p = getelementptr %s, ptr %%t, i32 0, i32 1
+  %%ctx_p = getelementptr %s, ptr %%t, i32 0, i32 0
+  %%ctx = load ptr, ptr %%ctx_p, align 8%s
+  %%sw = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %%ctx)
+  store ptr null, ptr @__kml_current_task, align 8%s
+  store ptr %%mstk, ptr @__kml_cur_jmp_stk, align 8
+  store i32 %%mtop, ptr @__kml_jmp_top, align 4
+  ret void
+}`, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcSetTaskStack, gcRestoreAfterSwap))
+
+	// @__kml_task_await_ready(ptr %promise): on a task, register a resume reaction
+	// on the promise and park — so `await` always yields a microtask tick and the
+	// resume is a microtask ordered in FIFO with `.then`/`queueMicrotask` (TDD-00088).
+	// A settled promise enqueues the resume now; a pending one attaches it to the
+	// promise's reaction list (drained when it settles). The task parks in state 3
+	// ("parked on a reaction") which the scheduler ignores — only the resume
+	// microtask wakes it. At top level (no current task) it can't park, so it drives
+	// the microtask FIFO + scheduler + timers until settled. Emit code reads the
+	// value/rejection afterward.
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_await_ready(ptr %%promise) {
 entry:
-  br label %%loop
-loop:
+  %%ct = load ptr, ptr @__kml_current_task, align 8
+  %%topq = icmp eq ptr %%ct, null
+  br i1 %%topq, label %%toploop, label %%ontask
+toploop:
+  %%tres_p = getelementptr %s, ptr %%promise, i32 0, i32 0
+  %%tres = load i64, ptr %%tres_p, align 8
+  %%tdone = icmp ne i64 %%tres, 0
+  br i1 %%tdone, label %%ret, label %%tdrive
+tdrive:
+  call void @__kml_drain_microtasks()
+  call void @__kml_task_sched_step()
+  %%tf = call i1 @__kml_timer_fire_next()
+  br label %%toploop
+ontask:
+  %%clo = call ptr @malloc(i64 16)
+  %%clo_fp = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 0
+  store ptr @__kml_task_resume, ptr %%clo_fp, align 8
+  %%clo_ep = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 1
+  store ptr %%ct, ptr %%clo_ep, align 8
   %%res_p = getelementptr %s, ptr %%promise, i32 0, i32 0
   %%res = load i64, ptr %%res_p, align 8
-  %%done = icmp ne i64 %%res, 0
-  br i1 %%done, label %%ret, label %%notdone
-notdone:
-  %%ct = load ptr, ptr @__kml_current_task, align 8
-  %%top = icmp eq ptr %%ct, null
-  br i1 %%top, label %%drive, label %%park
-drive:
-  call void @__kml_task_sched_step()
-  br label %%loop
-park:
-  %%pp_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  store ptr %%promise, ptr %%pp_p, align 8
-  %%w_p = getelementptr %s, ptr %%promise, i32 0, i32 1
-  store ptr %%ct, ptr %%w_p, align 8
-  %%st_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
-  store i64 1, ptr %%st_p, align 8
-  %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  %%settled = icmp ne i64 %%res, 0
+  br i1 %%settled, label %%enqnow, label %%attach
+enqnow:
+  call void @__kml_microtask_enqueue(ptr %%clo)
+  br label %%parkit
+attach:
+  %%node = call ptr @malloc(i64 16)
+  %%rx_p = getelementptr %s, ptr %%promise, i32 0, i32 4
+  %%oldhead = load ptr, ptr %%rx_p, align 8
+  %%node_clo = getelementptr { ptr, ptr }, ptr %%node, i32 0, i32 0
+  store ptr %%clo, ptr %%node_clo, align 8
+  %%node_next = getelementptr { ptr, ptr }, ptr %%node, i32 0, i32 1
+  store ptr %%oldhead, ptr %%node_next, align 8
+  store ptr %%node, ptr %%rx_p, align 8
+  br label %%parkit
+parkit:
+  %%st_p = getelementptr %s, ptr %%ct, i32 0, i32 3
+  store i64 3, ptr %%st_p, align 8
+  %%sjt_p = getelementptr %s, ptr %%ct, i32 0, i32 11
+  %%curtop = load i32, ptr @__kml_jmp_top, align 4
+  %%curtop64 = zext i32 %%curtop to i64
+  store i64 %%curtop64, ptr %%sjt_p, align 8
+  %%rc_p = getelementptr %s, ptr %%ct, i32 0, i32 9
   %%rc = load ptr, ptr %%rc_p, align 8
-  %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
+  %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 0
   %%ctx = load ptr, ptr %%ctx_p, align 8
-  %%ar_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%ct, i32 0, i32 11
-  %%ar_top = load i32, ptr @__kml_jmp_top, align 4
-  %%ar_top64 = zext i32 %%ar_top to i64
-  store i64 %%ar_top64, ptr %%ar_sjt_p, align 8
-  %%r = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
-  br label %%loop
+  %%sw = call i32 @swapcontext(ptr %%ctx, ptr %%rc)%s
+  br label %%ret
 ret:
   ret void
-}`, promiseStructIR, taskStructIR, taskPendingProm, promiseStructIR, taskStructIR, taskState,
-		taskStructIR, taskResumerCtx, taskStructIR, taskCtx, gcRestoreAfterSwap))
+}`, promiseStructIR, promiseStructIR, promiseStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcRestoreAfterSwap))
 }

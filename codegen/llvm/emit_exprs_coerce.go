@@ -35,6 +35,18 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 	if v.Ty.IsNull && target.IR != "ptr" {
 		return Value{Ref: zeroRef(target), Ty: target}
 	}
+	// `never` (a Promise.reject's value type — Promise<never>) assigns to any
+	// target: the value is never produced (await re-throws before it's read), so a
+	// zero of the target type keeps the IR well-typed and stays dead.
+	if v.Ty.IsNever && !target.IsNever {
+		if target.IsArray {
+			return Value{Ref: "{ ptr null, i64 0 }", Ty: target}
+		}
+		if isNullableScalar(target) {
+			return Value{Ref: e.makeNullableScalarAgg(target, "false", zeroRef(target.withoutNullable())), Ty: target}
+		}
+		return Value{Ref: zeroRef(target), Ty: target}
+	}
 	if v.Ty.IR == target.IR {
 		return v
 	}

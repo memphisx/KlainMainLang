@@ -7,12 +7,22 @@ import (
 
 func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	elemTy := *ty.ElemType
-	ptrName := e.freshReg()
-	lenName := e.freshReg()
-
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
-	e.define(v.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: ty, IsConst: v.Kind == "const"})
+	var ptrName, lenName string
+	// Module-global promotion (TDD-00093): a top-level array binding is backed by
+	// two pre-registered globals (data ptr + length) so a named function can read
+	// it; store into those rather than fresh local allocas. Already in
+	// e.moduleGlobals (lookup resolves it) and zero-initialized, so no local
+	// define/default is needed.
+	if e.promotedGlobalDecls[v] {
+		g := e.moduleGlobals[v.Name]
+		ptrName, lenName = g.Ptr, g.LenPtr
+	} else {
+		ptrName = e.freshReg()
+		lenName = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
+		e.define(v.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: ty, IsConst: v.Kind == "const"})
+	}
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))

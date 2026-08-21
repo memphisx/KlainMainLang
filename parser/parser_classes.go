@@ -24,7 +24,9 @@ func isClassMemberNameStart(tok lexer.Token) bool {
 	case lexer.IDENT, lexer.PRIVATE_NAME, lexer.STAR:
 		return true
 	}
-	return false
+	// A reserved word is a valid member name (IdentifierName), so `async throw`
+	// / `async return` etc. read as an async method, not a field named `async`.
+	return lexer.IsKeyword(tok.Type)
 }
 
 // constMemberName resolves a computed class member key `[expr]` (TDD-00063
@@ -40,6 +42,29 @@ func constMemberName(expr ast.Expression) (string, bool) {
 		return e.Value, true
 	case *ast.NumberLiteral:
 		return e.Value, true
+	}
+	return "", false
+}
+
+// wellKnownSymbolMemberName recognizes a computed class-member key that is a
+// well-known symbol (`[Symbol.asyncIterator]`) and desugars it to a reserved
+// internal member name (`@@asyncIterator`, the spec's `@@`-prefix convention).
+// The `@@` prefix is not a lexable identifier, so it can never collide with a
+// user-declared method — the same trick the accessor keys (`"get x"`) use
+// (TDD-00089). Only `Symbol.asyncIterator` is recognized; `Symbol.iterator`
+// (the sync protocol) is deliberately still rejected, since sync `for...of`
+// already dispatches structurally on a `next(): T | null` method.
+func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
+	me, ok := expr.(*ast.MemberExpression)
+	if !ok {
+		return "", false
+	}
+	obj, ok := me.Object.(*ast.Identifier)
+	if !ok || obj.Name != "Symbol" {
+		return "", false
+	}
+	if me.Property == "asyncIterator" {
+		return "@@asyncIterator", true
 	}
 	return "", false
 }
@@ -218,7 +243,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			}
 			name, ok := constMemberName(keyExpr)
 			if !ok {
-				return nil, fmt.Errorf("%d:%d: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or interpolation) is not yet supported (see docs/tdd/TDD-00063.md Stage 3)", lb.Line, lb.Col)
+				// A well-known symbol key (`[Symbol.asyncIterator]`) desugars to a
+				// reserved internal member name (TDD-00089); any other dynamic key
+				// stays a clean rejection.
+				if wk, wkOk := wellKnownSymbolMemberName(keyExpr); wkOk {
+					name = wk
+				} else {
+					return nil, fmt.Errorf("%d:%d: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or interpolation) is not yet supported (see docs/tdd/TDD-00063.md Stage 3)", lb.Line, lb.Col)
+				}
 			}
 			memberTok = lexer.Token{Type: lexer.IDENT, Literal: name, Line: lb.Line, Col: lb.Col}
 		} else if p.check(lexer.PRIVATE_NAME) {
@@ -232,6 +264,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				return nil, fmt.Errorf("%d:%d: '#constructor' is a reserved class member name", memberTok.Line, memberTok.Col)
 			}
 			visibility = "private"
+		} else if lexer.IsKeyword(p.peek().Type) {
+			// A class member name is an IdentifierName — any reserved word is a
+			// valid method/property name (JS PropertyName), the same way a reserved
+			// word is a valid member after `.` (`promise.catch`). This is what lets a
+			// user async iterator declare the iterator-protocol methods `throw`/
+			// `return` (delegated to by `yield*`), among others.
+			kw := p.advance()
+			memberTok = lexer.Token{Type: lexer.IDENT, Literal: kw.Literal, Line: kw.Line, Col: kw.Col}
 		} else {
 			var err error
 			memberTok, err = p.expect(lexer.IDENT)

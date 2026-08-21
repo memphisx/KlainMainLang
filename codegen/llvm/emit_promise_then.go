@@ -20,6 +20,31 @@ import (
 	"fmt"
 )
 
+// emitRejectCallback emits a `.catch`/onRejected callback, hinting an
+// arrow-function parameter to the shared error object shape so `e.message`/
+// `e.name` (and `AggregateError`'s `.errors`) work inside it without the caller
+// having to annotate the parameter (an `Error`-family annotation resolves to the
+// same shape either way). A non-arrow callback (a named function reference) is
+// emitted unchanged.
+func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
+	if af, ok := arg.(*ast.ArrowFunction); ok {
+		return e.emitArrowFunctionWithHints(af, []Type{errorObjType})
+	}
+	return e.emitExpr(arg)
+}
+
+// emitFulfillCallback emits a `.then` onFulfilled callback, hinting an
+// arrow-function parameter with no annotation to the source promise's value type
+// (e.g. a fetch chain's `Response`), so `.then(r => r.status)` works without the
+// caller annotating `r`. An annotated param, or a non-arrow callback, is emitted
+// unchanged.
+func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, error) {
+	if af, ok := arg.(*ast.ArrowFunction); ok && valueTy.IR != "void" && valueTy.IR != "" {
+		return e.emitArrowFunctionWithHints(af, []Type{valueTy})
+	}
+	return e.emitExpr(arg)
+}
+
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
 func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	pVal, err := e.emitExpr(objExpr)
@@ -29,8 +54,17 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	if !pVal.Ty.IsPromise {
 		return Value{}, fmt.Errorf("%d:%d: .%s is only supported on a Promise", pos.Line, pos.Col, kind)
 	}
+	// A raw fetch()'s Promise<Response> is a still-pending fetch handle, not a
+	// task-shaped promise. Drive it to a settled task promise so the reaction
+	// machinery below can attach to it (ADR-00258). The !PromiseTask guard is
+	// essential: a chained `.finally`/`.then` that itself settles to a Response
+	// (e.g. `fetch(u).finally(f).then(g)`) returns a *task* promise that also
+	// looks IsResponse — it must not be re-driven as a fetch handle.
+	if !pVal.Ty.PromiseTask && pVal.Ty.PromiseType != nil && pVal.Ty.PromiseType.IsResponse && !pVal.Ty.PromiseResolved {
+		pVal = e.emitFetchHandleToSettledPromise(pVal.Ref)
+	}
 	if !pVal.Ty.PromiseTask {
-		return Value{}, fmt.Errorf("%d:%d: .%s is currently supported only on a promise from a may-suspend async function (TDD-00083 Stage 3)", pos.Line, pos.Col, kind)
+		return Value{}, fmt.Errorf("%d:%d: .%s is currently supported only on a promise from a may-suspend async function or a fetch (TDD-00083 Stage 3)", pos.Line, pos.Col, kind)
 	}
 	innerTy := TypeVoid
 	if pVal.Ty.PromiseType != nil {
@@ -50,7 +84,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		if len(args) < 1 {
 			return Value{}, fmt.Errorf("%d:%d: then expects at least 1 argument", pos.Line, pos.Col)
 		}
-		v, err := e.emitExpr(args[0])
+		v, err := e.emitFulfillCallback(args[0], innerTy)
 		if err != nil {
 			return Value{}, err
 		}
@@ -59,7 +93,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 			retTy = t
 		}
 		if len(args) >= 2 {
-			v2, err := e.emitExpr(args[1])
+			v2, err := e.emitRejectCallback(args[1])
 			if err != nil {
 				return Value{}, err
 			}
@@ -69,7 +103,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		if len(args) < 1 {
 			return Value{}, fmt.Errorf("%d:%d: catch expects 1 argument", pos.Line, pos.Col)
 		}
-		v, err := e.emitExpr(args[0])
+		v, err := e.emitRejectCallback(args[0])
 		if err != nil {
 			return Value{}, err
 		}
@@ -158,6 +192,79 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	qt := PromiseOf(retTy)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, nil
+}
+
+// emitFetchHandleToSettledPromise drives a raw fetch()'s Promise<Response> handle
+// (slotRef points at the malloc'd slot holding the pending curl handle) to
+// completion and boxes the result into a settled, task-shaped promise so
+// `.then`/`.catch`/`.finally` work on a raw fetch (ADR-00258). A transport-level
+// failure is caught via setjmp and *rejects* the promise (so `fetch(u).catch(…)`
+// recovers it) rather than throwing; an HTTP 4xx/5xx is a fulfilled Response, per
+// WHATWG. The drive is synchronous at the call site — the fetch's real
+// concurrency lives in Promise.all/.any over an array of fetches, not here.
+func (e *Emitter) emitFetchHandleToSettledPromise(slotRef string) Value {
+	e.ensurePromiseRuntime()
+	e.ensureFetchAsync()
+	e.ensureExceptionHelpers()
+	e.ensureMalloc()
+	e.ensureFree()
+
+	prom := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+	setResolved := func(state int) {
+		rp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", state, rp))
+	}
+
+	tryL := e.freshLabel("fetchthen.try")
+	catchL := e.freshLabel("fetchthen.catch")
+	doneL := e.freshLabel("fetchthen.done")
+	jb := e.freshReg()
+	sj := e.freshReg()
+	threw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sj, jb))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
+
+	// try: drive the fetch, build the Response, fulfill.
+	e.emitLabel(tryL)
+	pendingPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, slotRef))
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
+	status := e.freshReg()
+	body := e.freshReg()
+	bodyLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
+	respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
+	e.emitInstr("call void @__kml_pop_jmpbuf()")
+	e.storePromiseValue(prom, respVal)
+	setResolved(1)
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", slotRef))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	// catch: transport failure → reject with the thrown error. __kml_throw already
+	// popped the jmpbuf (matching emitTry / the inline catch-and-settle path).
+	e.emitLabel(catchL)
+	errReg := e.freshReg()
+	errBits := e.freshReg()
+	v0P := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errReg))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBits, v0P))
+	setResolved(2)
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", slotRef))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	rt := PromiseOf(ResponseType())
+	rt.PromiseTask = true
+	return Value{Ref: prom, Ty: rt}
 }
 
 // thenValLoadIR returns the IR reconstructing `%val` (of ty.IR) from the source

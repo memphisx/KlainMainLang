@@ -245,6 +245,19 @@ func asyncClosureRetType(isAsync bool, ret Type) Type {
 	return pt
 }
 
+// taskTaggedRet tags a method/function signature's return type PromiseTask when
+// it's an async `Promise<T>`, so a later `await`/`.then` on the call takes the
+// task path — the same treatment the plain-function call path applies (TDD-00087
+// follow-up: async methods now emit task-struct promises like async functions).
+func taskTaggedRet(sig FuncSig) Type {
+	if sig.IsAsync && sig.RetType.IsPromise {
+		rt := sig.RetType
+		rt.PromiseTask = true
+		return rt
+	}
+	return sig.RetType
+}
+
 func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
 	switch cb := arg.(type) {
 	case *ast.ArrowFunction:
@@ -495,6 +508,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return sym.Ty
 		}
 	case *ast.NewExpression:
+		// new Promise<T>(executor) → task Promise<T> (default number) — TDD-00087.
+		if ex.ClassName == "Promise" {
+			valTy := TypeI64
+			if len(ex.TypeArgs) == 1 {
+				valTy = e.resolveType(ex.TypeArgs[0])
+			}
+			pt := PromiseOf(valTy)
+			pt.PromiseTask = true
+			return pt
+		}
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
 		}
@@ -520,7 +543,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok := mem.Object.(*ast.Identifier); ok {
 				if info, found := e.classes[id.Name]; found {
 					if sig, ok := info.StaticMethodSigs[mem.Property]; ok {
-						return sig.RetType
+						return taskTaggedRet(sig)
 					}
 				}
 			}
@@ -535,7 +558,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if objTy := e.inferExprType(mem.Object); objTy.IsClass {
 				if info, ok := e.classes[objTy.ClassName]; ok {
 					if sig, ok := info.MethodSigs[mem.Property]; ok {
-						return sig.RetType
+						return taskTaggedRet(sig)
 					}
 					// EventEmitter-embedded chainable methods (TDD-00023)
 					// return the *class* type (not a bare EventEmitterType),
@@ -594,16 +617,24 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// `.next()`'s own result's `value` field type instead, handled by
 		// the member-expression case just below).
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
-			if info, found := e.generators[id.Name]; found {
+			if info, found := e.lookupGenerator(id.Name); found {
 				return info.GenTy
 			}
 		}
 		// gen.next(value)'s own result type ({value: T, done: bool}) —
 		// checked before the generic member-expression dispatch further
 		// down, same as every other type-tag-gated case there.
-		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "next" {
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && (mem.Property == "next" || mem.Property == "throw" || mem.Property == "return") {
 			if objTy := e.inferExprType(mem.Object); objTy.IsGenerator {
-				return genNextResultType(*objTy.GeneratorElemType)
+				res := genNextResultType(*objTy.GeneratorElemType)
+				// An async generator's .next() returns Promise<{value,done}> (TDD-00085);
+				// .throw()/.return() share the same {value,done} shape (TDD-00086).
+				if objTy.GeneratorIsAsync {
+					pt := PromiseOf(res)
+					pt.PromiseTask = true
+					return pt
+				}
+				return res
 			}
 		}
 		// If calling a named function, use its registered return type (handles async too).
@@ -812,6 +843,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Promise" {
+				// Promise.resolve(v) → task Promise<typeof v> (an already-promise arg
+				// passes through); Promise.reject(e) → task Promise<number> (the value
+				// type is never observed — await re-throws). TDD-00086 follow-on.
+				if mem.Property == "resolve" {
+					if len(ex.Args) == 0 {
+						pt := PromiseOf(TypeVoid)
+						pt.PromiseTask = true
+						return pt
+					}
+					argTy := e.inferExprType(ex.Args[0])
+					if argTy.IsPromise {
+						return argTy
+					}
+					pt := PromiseOf(argTy)
+					pt.PromiseTask = true
+					return pt
+				}
+				if mem.Property == "reject" {
+					pt := PromiseOf(TypeNever)
+					pt.PromiseTask = true
+					return pt
+				}
 				if len(ex.Args) == 1 {
 					if innerTy, err := e.promiseArrayElemType(ex.Args[0], mem.Property, ex.GetPos()); err == nil {
 						switch mem.Property {

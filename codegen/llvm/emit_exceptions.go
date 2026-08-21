@@ -249,6 +249,22 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	return Value{Ref: a1, Ty: ArrayOf(errorObjType)}
 }
 
+// errorPtrFromValue turns an evaluated throw / `.throw()` argument into an error
+// object pointer: an object value is used directly; a primitive is wrapped in a
+// base-Error-shaped errorObjType struct with a stringified message, so
+// `.message`/`.name`/`instanceof Error` against the caught value work as if
+// `new Error(...)` had been thrown.
+func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
+	if val.Ty.IsObject {
+		return val.Ref, nil
+	}
+	strVal, err := e.emitValueToString(val)
+	if err != nil {
+		return "", err
+	}
+	return e.buildErrorObj(0, strVal.Ref, e.internString("Error")), nil
+}
+
 // emitThrow emits a throw statement: calls @__kml_throw then unreachable.
 func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	e.ensureExceptionHelpers()
@@ -257,22 +273,10 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	if err != nil {
 		return err
 	}
-
-	var errPtr string
-	if val.Ty.IsObject {
-		errPtr = val.Ref
-	} else {
-		// Wrap the value in a base-Error-shaped errorObjType struct with a
-		// stringified message, so `.message`/`.name`/`instanceof Error`
-		// against the caught value all still work as if `new Error(...)` had
-		// been thrown instead of a bare primitive.
-		strVal, err := e.emitValueToString(val)
-		if err != nil {
-			return err
-		}
-		errPtr = e.buildErrorObj(0, strVal.Ref, e.internString("Error"))
+	errPtr, err := e.errorPtrFromValue(val)
+	if err != nil {
+		return err
 	}
-
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
 	e.emitTerminator("unreachable")
 	return nil

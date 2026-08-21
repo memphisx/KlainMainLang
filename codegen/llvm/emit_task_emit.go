@@ -19,9 +19,9 @@ func (e *Emitter) bindTaskParamsFromBundle(decl *ast.FunctionDeclaration, sig Fu
 	for i, p := range decl.Params {
 		pty := sig.ParamTypes[i]
 		fi := paramStart[i]
-		if p.Rest {
-			return fmt.Errorf("%d:%d: rest parameters in a suspending async function are not yet supported (TDD-00083 Stage 2)", decl.GetPos().Line, decl.GetPos().Col)
-		}
+		// A rest parameter is an ordinary array parameter here: its type is the
+		// array the trailing args were packed into (emitRestArgsArray), so it
+		// binds through the IsArray case below like any other array param.
 		switch {
 		case pty.IsArray:
 			ptrAlloca := "%v_" + p.Name + "_ptr"
@@ -278,11 +278,15 @@ func (e *Emitter) loadPromiseValue(promiseReg string, ty Type) Value {
 // emitMaySuspendCall evaluates the arguments to a may-suspend async function and
 // spawns it as a task (TDD-00083 Stage 2).
 func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if sig.HasRest {
-		return Value{}, fmt.Errorf("%d:%d: rest parameters in a suspending async function are not yet supported (TDD-00083 Stage 2)", pos.Line, pos.Col)
-	}
 	argVals := make([]Value, len(sig.ParamTypes))
-	for i := range sig.ParamTypes {
+	regularCount := len(sig.ParamTypes)
+	if sig.HasRest {
+		// The trailing args collect into the rest parameter's array (TDD-00085
+		// caveat cleanup); once packed it is an ordinary array param, marshalled
+		// through the task bundle by the existing IsArray path.
+		regularCount--
+	}
+	for i := 0; i < regularCount; i++ {
 		if i >= len(args) {
 			return Value{}, fmt.Errorf("%d:%d: missing argument to '%s'", pos.Line, pos.Col, name)
 		}
@@ -292,7 +296,49 @@ func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expres
 		}
 		argVals[i] = v
 	}
+	if sig.HasRest {
+		restTy := sig.ParamTypes[len(sig.ParamTypes)-1]
+		rest := args[regularCount:]
+		v, err := e.emitRestArgsArray(rest, restTy)
+		if err != nil {
+			return Value{}, err
+		}
+		argVals[len(sig.ParamTypes)-1] = v
+	}
 	return e.emitSpawnCall(name, sig, argVals)
+}
+
+// emitRestArgsArray packs the trailing (rest) arguments of a suspending-fn call
+// into an `{ ptr, i64 }` array aggregate Value typed restTy — the same shape a
+// named-array argument already flows through the task bundle as.
+func (e *Emitter) emitRestArgsArray(restArgs []ast.Expression, restTy Type) (Value, error) {
+	elemTy := TypeI64
+	if restTy.ElemType != nil {
+		elemTy = *restTy.ElemType
+	}
+	dataRef := "null"
+	n := int64(len(restArgs))
+	if n > 0 {
+		e.ensureMalloc()
+		dataReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+		for i, arg := range restArgs {
+			val, err := e.emitExprWithObjectHint(arg, elemTy)
+			if err != nil {
+				return Value{}, err
+			}
+			val = e.coerce(val, elemTy)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataReg, i))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gep, elemTy.Align()))
+		}
+		dataRef = dataReg
+	}
+	agg0 := e.freshReg()
+	agg1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, dataRef))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %d, 1", agg1, agg0, n))
+	return Value{Ref: agg1, Ty: restTy}, nil
 }
 
 // emitSpawnCall emits a call to a may-suspend async function `name` as a task

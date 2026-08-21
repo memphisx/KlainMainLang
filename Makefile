@@ -5,7 +5,7 @@ EXAMPLES     := $(shell find examples -name '*.ts' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance help
+.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance help
 
 ## all: build the compiler
 all: build
@@ -21,6 +21,40 @@ install:
 ## test: run Go unit tests
 test:
 	$(GO) test ./...
+
+## test-par: run the tests/ suite sharded across SHARDS parallel processes
+## (~1.5-2x faster than serial — the suite is subprocess/IO-bound, not CPU-bound,
+## so 4 shards is the sweet spot; more just thrashes memory/IO). Compiles the test
+## binary once, then runs disjoint name-shards of it concurrently. Any failure is
+## re-run *serially*, so a parallel-unsafe test (signal-disposition timing, a
+## fixed-port server) that only flakes under concurrency doesn't fail the run —
+## only a test that also fails alone does. Serial `make test` stays the source of
+## truth; this is a fast local pre-check.
+SHARDS ?= 4
+test-par: build
+	@tb=$$(mktemp -d)/kml_tests.test; sd=$$(mktemp -d); \
+	$(GO) test ./tests/ -c -o "$$tb"; \
+	$(GO) test ./tests/ -list '.*' 2>/dev/null | grep '^Test' | \
+	  awk -v d="$$sd" -v n=$(SHARDS) '{print > (d "/s_" (NR % n) ".txt")}'; \
+	for i in $$(seq 0 $$(($(SHARDS)-1))); do \
+	  rx=$$(paste -sd'|' "$$sd/s_$$i.txt"); \
+	  ( "$$tb" -test.run "^($$rx)$$" -test.timeout 20m >"$$sd/o_$$i.txt" 2>&1; echo $$? >"$$sd/c_$$i.txt" ) & \
+	done; wait; \
+	anyfail=0; fails=""; \
+	for i in $$(seq 0 $$(($(SHARDS)-1))); do \
+	  if [ "$$(cat $$sd/c_$$i.txt)" != "0" ]; then \
+	    anyfail=1; \
+	    n=$$(grep '^--- FAIL' "$$sd/o_$$i.txt" | sed 's/^--- FAIL: //; s/ (.*$$//'); \
+	    if [ -z "$$n" ]; then echo "shard $$i failed with no test-level FAIL (panic/timeout) — full output:"; cat "$$sd/o_$$i.txt"; exit 1; fi; \
+	    fails="$$fails $$n"; \
+	  fi; \
+	done; \
+	if [ "$$anyfail" = "0" ]; then echo "ok  tests (parallel, $(SHARDS) shards)"; \
+	else \
+	  echo "parallel run had failures; re-running serially to rule out concurrency flakes:$$fails"; \
+	  rx=$$(echo $$fails | tr ' ' '|'); \
+	  "$$tb" -test.run "^($$rx)$$" -test.v; \
+	fi
 
 ## examples: compile every example .ts file and run it
 ## examples/fetch/*.ts and examples/async/promise_all.ts talk to a local

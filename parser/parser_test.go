@@ -496,3 +496,65 @@ func TestParseError(t *testing.T) {
 		})
 	}
 }
+
+// TDD-00085 Stage 1: `for await (const x of it)` parses to a ForOfStatement with
+// Await set; the destructuring form carries it too, and a `for await` that isn't
+// a for-of is a parse error.
+func TestParseForAwaitOf(t *testing.T) {
+	prog := mustParse(t, "async function m(): Promise<void> { for await (const x of it) { g(x); } }")
+	// Descend into the async function body's first statement.
+	fn, ok := prog.Body[0].(*ast.FunctionDeclaration)
+	if !ok {
+		t.Fatalf("expected FunctionDeclaration, got %T", prog.Body[0])
+	}
+	fo, ok := fn.Body.Body[0].(*ast.ForOfStatement)
+	if !ok {
+		t.Fatalf("expected ForOfStatement, got %T", fn.Body.Body[0])
+	}
+	if !fo.Await {
+		t.Fatalf("expected ForOfStatement.Await to be true")
+	}
+	if fo.VarName != "x" || fo.Kind != "const" {
+		t.Fatalf("unexpected loop var: kind=%q name=%q", fo.Kind, fo.VarName)
+	}
+
+	// A plain for-of has Await == false.
+	prog2 := mustParse(t, "for (const y of ys) { g(y); }")
+	fo2 := prog2.Body[0].(*ast.ForOfStatement)
+	if fo2.Await {
+		t.Fatalf("plain for-of should not have Await set")
+	}
+
+	// `for await` on a C-style loop is a parse error.
+	if _, err := parser.Parse("for await (let i = 0; i < 3; i = i + 1) {}"); err == nil {
+		t.Fatalf("expected a parse error for 'for await' on a C-style loop")
+	}
+}
+
+// A reserved word is a valid class member name (IdentifierName / JS PropertyName)
+// — plain, async, and after `.` — which is what lets a user async iterator declare
+// the iterator-protocol `throw`/`return` methods that `yield*` delegates into.
+func TestReservedWordClassMemberNames(t *testing.T) {
+	prog := mustParse(t, `
+class C {
+  throw(): number { return 1 }
+  return(): number { return 2 }
+  async catch(): Promise<number> { return 3 }
+}`)
+	cd, ok := prog.Body[0].(*ast.ClassDeclaration)
+	if !ok {
+		t.Fatalf("expected a ClassDeclaration, got %T", prog.Body[0])
+	}
+	want := map[string]bool{"throw": false, "return": false, "catch": false}
+	seen := map[string]bool{}
+	for _, m := range cd.Methods {
+		if _, ok := want[m.Name]; ok {
+			seen[m.Name] = true
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Fatalf("method %q not parsed as a class member", name)
+		}
+	}
+}

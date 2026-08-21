@@ -87,3 +87,47 @@ run()
 `, srv.URL)
 	assertOutput(t, src, "212")
 }
+
+// A genuinely-suspending async fn can take a rest parameter — the trailing args
+// collect into an array that is marshalled through the coroutine task's args
+// bundle like any other array param (former TDD-00085 caveat).
+func TestE2ESuspendingRestParam(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function sum(...ns: number[]): Promise<number> {
+  const r = await fetch("%s/flat")
+  let total = 0
+  for (const n of ns) { total = total + n }
+  return total + r.status
+}
+async function run(): Promise<void> {
+  console.log(await sum(1, 2, 3))
+  console.log(await sum())
+}
+run()
+`, srv.URL)
+	assertOutput(t, src, "206\n200")
+}
+
+// Promise.race over may-suspend task promises resolves to the first to settle
+// (the fast fetch beats the slow timer) via the event-driven waiter list, not a
+// busy poll (ADR-00266).
+func TestE2ERaceTaskPromisesWaiterList(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function viaFetch(): Promise<number> {
+  const r = await fetch("%s/flat")
+  return r.status
+}
+async function viaTimer(): Promise<number> {
+  await new Promise<void>((resolve) => { setTimeout(() => { resolve() }, 400) })
+  return 7
+}
+async function main2(): Promise<void> {
+  const w: number = await Promise.race([viaFetch(), viaTimer()])
+  console.log(w)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "200")
+}

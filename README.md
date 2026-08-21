@@ -70,6 +70,7 @@ make ir FILE=examples/basics/basics.ts
 | `make build` | Compile the KlainMainLang compiler to `./klainmain` |
 | `make install` | Install to `$GOPATH/bin` |
 | `make test` | Run Go unit tests |
+| `make test-par` | Same tests, sharded across `SHARDS` (default 4) parallel processes for a faster local pre-check — ~1.5–2× (the E2E suite is subprocess/IO-bound, so more shards just thrash); any failure is re-run serially so a parallel-unsafe test doesn't flake the run. `make test` stays the source of truth |
 | `make examples` | Compile and run every example file (the closest thing this project has to a regression suite you can read) |
 | `make compile FILE=f.ts` | Compile a `.ts` file to a native binary (does not run it) |
 | `make compile-o FILE=f.ts OUT=name` | Compile to a named output binary |

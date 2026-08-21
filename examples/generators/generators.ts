@@ -106,3 +106,65 @@ console.log(total);   // 0 + 2 + 8 = 10
 // already gets elsewhere in this compiler, not a generator-specific case.
 const g3r = g3.next();
 console.log(g3r.value, g3r.done);   // null 1
+
+// --- Generator protocol: .throw(), .return(), yield* (TDD-00086) ---
+
+// .throw(e) injects an error at the suspension point; a body try/catch handles it.
+function* guarded(): number {
+    try {
+        yield 1;
+        yield 2;
+    } catch (e) {
+        console.log("caught " + e.message);   // caught boom
+        yield 99;
+    }
+}
+const gg = guarded();
+console.log(gg.next().value);                  // 1
+console.log(gg.throw(new Error("boom")).value); // 99 (resumed in the catch)
+
+// .return(v) completes a generator early, running any enclosing finally block.
+function* withCleanup(): number {
+    try {
+        yield 1;
+        yield 2;
+        yield 3;
+    } finally {
+        console.log("cleanup");                // runs on .return()
+    }
+}
+const wc = withCleanup();
+console.log(wc.next().value);                  // 1
+const wr = wc.return(42);
+console.log(wr.value, wr.done);                // 42 1
+
+// yield* delegates to an inner generator and evaluates to its return value;
+// sent values, .throw(), and .return() all forward into the inner.
+function* range(n: number): number {
+    let i = 0;
+    while (i < n) { yield i; i = i + 1; }
+    return n;
+}
+function* delegating(): number {
+    const count = yield* range(3);
+    console.log("range produced " + count + " values");  // 3
+}
+for (const x of delegating()) {
+    console.log(x);                            // 0, 1, 2
+}
+
+// A nested generator (TDD-00094) closes over enclosing state by reference: a
+// running total declared in the enclosing function is shared with the generator,
+// so its mutations are visible after iterating.
+function makeCounter(): void {
+    let total = 0;
+    function* accumulate(n: number): number {
+        let i = 1;
+        while (i <= n) { total = total + i; yield total; i = i + 1; }  // running sum
+    }
+    for (const running of accumulate(3)) {
+        console.log(running);                  // 1, 3, 6
+    }
+    console.log("final total " + total);       // 6 (shared with the generator)
+}
+makeCounter();

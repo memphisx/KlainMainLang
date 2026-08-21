@@ -40,6 +40,14 @@ async function run(): Promise<void> {
   } catch (e) {
     console.log("awaited reject: " + e.message) // awaited reject: computation failed
   }
+
+  // Promise.resolve / Promise.reject build settled promises directly — awaitable
+  // and chainable like any task promise.
+  console.log("resolved: " + (await Promise.resolve(7)))          // resolved: 7
+  const doubled: number = await Promise.resolve(20).then((n: number) => n * 2)
+  console.log("chained: " + doubled)                              // chained: 40
+  const recovered: number = await Promise.reject(new Error("x")).catch((e) => 99)
+  console.log("recovered: " + recovered)                          // recovered: 99
 }
 run()
 

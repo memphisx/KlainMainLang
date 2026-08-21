@@ -298,6 +298,16 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 		return
 	}
 	sc.push()
+	// Hoist: bind every directly-nested function declaration's name into this
+	// block's frame before walking any statement, so a reference to a nested
+	// function (a forward call, or a mutual sibling call) resolves as a local
+	// binding rather than being mis-renamed to a top-level mangled name — matching
+	// the emitter's own pre-scan of nested functions (TDD-00094).
+	for _, st := range b.Body {
+		if fd, ok := st.(*ast.FunctionDeclaration); ok {
+			sc.bind(fd.Name)
+		}
+	}
 	for _, st := range b.Body {
 		rewriteStmt(st, sc, lu)
 	}
@@ -305,14 +315,17 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 }
 
 // rewriteStmt handles every statement kind that can appear nested inside a
-// block. FunctionDeclaration/ClassDeclaration/InterfaceDeclaration/
-// EnumDeclaration/TypeAliasDeclaration/ImportDeclaration/ExportDeclaration
-// never appear here — this language only allows those at Program top level
-// (nested function declarations, and the same restriction for the other
-// declaration kinds, aren't supported) — so there is no case for them
-// below; they're handled solely by rewriteTopLevelStmt.
+// block. A nested *function declaration* is walked here (its name is already
+// hoisted into the block frame by rewriteBlock, so a reference to it stays local
+// — TDD-00094; its body's own top-level references still get renamed). The other
+// declaration kinds (Class/Interface/Enum/TypeAlias/Import/Export) only appear at
+// Program top level and are handled solely by rewriteTopLevelStmt.
 func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	switch s := stmt.(type) {
+	case *ast.FunctionDeclaration:
+		// The name is already bound by rewriteBlock's hoist pass; walk the
+		// params/return type/body so a top-level reference inside gets mangled.
+		rewriteFunctionLike(s, sc, lu)
 	case *ast.BlockStatement:
 		rewriteBlock(s, sc, lu)
 	case *ast.VarDeclaration:

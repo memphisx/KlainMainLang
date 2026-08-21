@@ -160,7 +160,11 @@ func exprSuspend(ex ast.Expression, ms map[string]bool) bool {
 	case nil:
 		return false
 	case *ast.AwaitExpression:
-		return isSuspendingAwaitArg(e.Argument, ms) || exprSuspend(e.Argument, ms)
+		// Any `await` suspends: even awaiting an already-settled promise yields a
+		// microtask tick (TDD-00088), so the enclosing async fn must run as a task
+		// (fiber) to have a suspension point. (The argument may itself suspend too,
+		// but a bare `await settledPromise` is enough on its own now.)
+		return true
 	case *ast.CallExpression:
 		if exprSuspend(e.Callee, ms) {
 			return true

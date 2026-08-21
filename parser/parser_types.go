@@ -367,7 +367,9 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		if err := p.expectGT(name + "<T>"); err != nil {
 			return nil, err
 		}
-		return &ast.TypeAnnotation{Name: name, ElemType: inner, Source: source}, nil
+		// A trailing `[]` makes an array of it (`Promise<number>[]`) — wrap like
+		// every other `T[]` form (this branch's early return previously dropped it).
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{Name: name, ElemType: inner, Source: source})
 	}
 
 	// Map<K,V>: two type parameters.
@@ -387,7 +389,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		if err := p.expectGT("Map<K,V>"); err != nil {
 			return nil, err
 		}
-		return &ast.TypeAnnotation{Name: "Map", KeyType: keyTy, ElemType: valTy, Source: source}, nil
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{Name: "Map", KeyType: keyTy, ElemType: valTy, Source: source})
 	}
 
 	// A user-defined generic type usage (Box<T> or Box<K, V>, TDD-00010 V1 /
@@ -416,7 +418,12 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		if err := p.expectGT(name + "<T>"); err != nil {
 			return nil, err
 		}
-		return &ast.TypeAnnotation{Name: name, ElemType: args[0], TypeArgs: args, Source: source}, nil
+		gen := &ast.TypeAnnotation{Name: name, ElemType: args[0], TypeArgs: args, Source: source}
+		// A trailing `[]` makes an array of the generic (`Promise<number>[]`,
+		// `Map<string, number>[]`) — previously dropped by this branch's early
+		// return, so `const ps: Promise<number>[] = …` failed to parse the `[]`
+		// and reported the initializer missing. Wrap like every other `T[]` form.
+		return parseTrailingArrayBrackets(p, source, gen)
 	}
 
 	// Array suffix: T[]  (empty brackets; may repeat for multi-dimensional).

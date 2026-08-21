@@ -306,10 +306,13 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 // =============================================================================
 
 // nestedFuncEntry is one pre-registered nested function declaration's
-// mangled LLVM name and signature.
+// mangled LLVM name and signature. Gen is non-nil for a nested *generator*
+// declaration (TDD-00094): its GeneratorInfo replaces the ordinary Sig, and the
+// call site constructs a generator instance rather than making a plain call.
 type nestedFuncEntry struct {
 	Mangled string
 	Sig     FuncSig
+	Gen     *GeneratorInfo
 }
 
 // nestedFuncScope is the set of function declarations found directly (not
@@ -361,6 +364,26 @@ func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
 			e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
 			return fmt.Errorf("%d:%d: '%s' is already declared in this scope", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
 		}
+		// A nested generator (TDD-00094) registers its GeneratorInfo instead of an
+		// ordinary Sig; the `g()` call site (lookupGenerator) then constructs an
+		// instance. Sub-step 1: a capturing nested generator needs the __env work
+		// (sub-step 2), so it's a clean rejection for now rather than a body that
+		// can't see the capture.
+		if fd.IsGenerator {
+			e.nestedFuncCtr++
+			info, err := e.buildGeneratorSig(fd)
+			if err != nil {
+				e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+				return err
+			}
+			entry := nestedFuncEntry{
+				Mangled: fmt.Sprintf("%s__nested%d", fd.Name, e.nestedFuncCtr),
+				Gen:     info,
+			}
+			scope.byName[fd.Name] = entry
+			scope.byDecl[fd] = entry
+			continue
+		}
 		e.nestedFuncCtr++
 		entry := nestedFuncEntry{
 			Mangled: fmt.Sprintf("%s__nested%d", fd.Name, e.nestedFuncCtr),
@@ -409,6 +432,24 @@ func (e *Emitter) resolveFuncRef(name string) (string, FuncSig, bool) {
 		return name, sig, true
 	}
 	return "", FuncSig{}, false
+}
+
+// lookupGenerator resolves a generator by name, checking nested-generator scopes
+// innermost-first (a nested `function*` — TDD-00094) before the flat top-level
+// e.generators map, mirroring resolveFuncRef for ordinary functions.
+func (e *Emitter) lookupGenerator(name string) (*GeneratorInfo, bool) {
+	for i := len(e.nestedFuncScopes) - 1; i >= 0; i-- {
+		if entry, ok := e.nestedFuncScopes[i].byName[name]; ok {
+			if entry.Gen != nil {
+				return entry.Gen, true
+			}
+			return nil, false // shadowed by a nested non-generator function
+		}
+	}
+	if info, ok := e.generators[name]; ok {
+		return info, true
+	}
+	return nil, false
 }
 
 // =============================================================================
@@ -478,6 +519,13 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		scanExprFV(x.Right, bound, result)
 	case *ast.UnaryExpression:
 		scanExprFV(x.Arg, bound, result)
+	case *ast.YieldExpression:
+		// `yield e` / `yield* e` — the operand is a free-variable position (a bare
+		// `yield` has a nil argument). Needed so a nested generator's captures are
+		// detected (TDD-00094).
+		scanExprFV(x.Argument, bound, result)
+	case *ast.AwaitExpression:
+		scanExprFV(x.Argument, bound, result)
 	case *ast.UpdateExpression:
 		scanExprFV(x.Arg, bound, result)
 	case *ast.AssignmentExpression:
@@ -727,6 +775,14 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 
 	var caps []CapturedVar
 	for name := range refs {
+		// A module global (TDD-00093) is accessible from inside any function —
+		// including a closure body — directly via e.moduleGlobals, exactly like a
+		// top-level function name. Capturing it would box a *second* copy, so a
+		// mutation made through the global elsewhere wouldn't be seen; skip it and
+		// let the body resolve the name to the one global.
+		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+			continue
+		}
 		sym, found := e.lookup(name)
 		if !found {
 			continue // built-in, function name, etc.
@@ -745,6 +801,37 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 		}
 	}
 	return caps, nil
+}
+
+// gatherGeneratorCaptures returns the enclosing-scope variables a nested generator
+// declaration's body references free (TDD-00094) — its free identifiers minus its
+// own params, minus module globals and top-level functions (both resolvable from
+// anywhere). Deterministically sorted. Used to decide capture handling; a
+// non-empty result means the generator closes over enclosing state.
+func (e *Emitter) gatherGeneratorCaptures(fd *ast.FunctionDeclaration) []CapturedVar {
+	bound := make(map[string]bool, len(fd.Params))
+	addParamBoundNames(bound, fd.Params)
+	refs := make(map[string]bool)
+	if fd.Body != nil {
+		scanStmtsFV(fd.Body.Body, bound, refs)
+	}
+	var caps []CapturedVar
+	for name := range refs {
+		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+			continue
+		}
+		if sym, found := e.lookup(name); found {
+			caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
+		}
+	}
+	for i := 0; i < len(caps); i++ {
+		for j := i + 1; j < len(caps); j++ {
+			if caps[i].Name > caps[j].Name {
+				caps[i], caps[j] = caps[j], caps[i]
+			}
+		}
+	}
+	return caps
 }
 
 // --- closure function emission ---
@@ -1357,6 +1444,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if name == fe.Name {
 			continue
 		}
+		// A module global (TDD-00093) is referenced directly, never captured —
+		// otherwise a mutation the body makes (`count++`) would hit a boxed copy
+		// instead of the one global (same reasoning as gatherCaptures).
+		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+			continue
+		}
 		sym, found := e.lookup(name)
 		if !found {
 			continue
@@ -1730,6 +1823,21 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	epVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, closurePtr))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", epVal, epSlot))
+
+	// Thenable adoption (TDD-00091): `resolve(aPromise)` on a `new Promise`
+	// resolve closure doesn't coerce the promise to the value type — it settles
+	// the target (the resolve closure's env) when the argument promise settles.
+	// The resolve closure carries IsPromiseResolver; adoption fires only when the
+	// single argument is actually a Promise (a plain value falls through to the
+	// normal settle path below).
+	if ty.IsPromiseResolver && len(args) == 1 && e.inferExprType(args[0]).IsPromise {
+		argVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitPromiseAdopt(epVal, argVal.Ref)
+		return Value{Ty: TypeVoid}, nil
+	}
 
 	// regularCount excludes the rest slot itself (FuncHasRest, added
 	// alongside this fix — TDD-00059/ADR-00151 — since a closure *value*'s

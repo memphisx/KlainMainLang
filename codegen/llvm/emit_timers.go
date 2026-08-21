@@ -158,6 +158,105 @@ func (e *Emitter) emitClearTimer(args []ast.Expression, fnName string, pos ast.P
 // 32 bytes, no padding): every field is i64 or ptr, both naturally 8-byte
 // aligned, so the struct's total size and field order are unambiguous
 // without needing LLVM's sizeof-via-GEP idiom.
+// emitTimerFireNext emits @__kml_timer_fire_next() -> i1: fire the single
+// earliest-due pending timer (sleeping until it is due), returning 1, or 0 when
+// the timer queue is empty/all-done. Unlike __kml_timer_drain (a run-to-empty
+// loop used at program exit), this is one step, so an `await` on a promise a
+// timer will settle can drive timers incrementally and re-check the promise after
+// each fire (TDD-00087). Signal handling is left to __kml_timer_drain's own loop.
+func (e *Emitter) emitTimerFireNext() {
+	e.emitGlobal(`
+define i1 @__kml_timer_fire_next() {
+entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  %ts = alloca { i64, i64 }, align 8
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  store i64 -1, ptr %besti, align 8
+  store i64 0, ptr %bestfire, align 8
+  store i64 0, ptr %scani, align 8
+  br label %scanloop
+scanloop:
+  %si = load i64, ptr %scani, align 8
+  %ib = icmp slt i64 %si, %len
+  br i1 %ib, label %scanbody, label %scandone
+scanbody:
+  %slot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %si
+  %int_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 2
+  %int = load i64, ptr %int_p, align 8
+  %isdone = icmp eq i64 %int, -1
+  br i1 %isdone, label %scannext, label %consider
+consider:
+  %fire_p = getelementptr { i64, i64, i64, ptr }, ptr %slot, i32 0, i32 1
+  %fire = load i64, ptr %fire_p, align 8
+  %bi = load i64, ptr %besti, align 8
+  %noneyet = icmp eq i64 %bi, -1
+  br i1 %noneyet, label %takebest, label %compare
+compare:
+  %bf = load i64, ptr %bestfire, align 8
+  %better = icmp slt i64 %fire, %bf
+  br i1 %better, label %takebest, label %scannext
+takebest:
+  store i64 %si, ptr %besti, align 8
+  store i64 %fire, ptr %bestfire, align 8
+  br label %scannext
+scannext:
+  %sn = add i64 %si, 1
+  store i64 %sn, ptr %scani, align 8
+  br label %scanloop
+scandone:
+  %fb = load i64, ptr %besti, align 8
+  %none = icmp eq i64 %fb, -1
+  br i1 %none, label %retfalse, label %havebest
+havebest:
+  %tf = load i64, ptr %bestfire, align 8
+  %now = call i64 @__kml_monotonic_ns()
+  %need = icmp sgt i64 %tf, %now
+  br i1 %need, label %dosleep, label %dofire
+dosleep:
+  %wait = sub i64 %tf, %now
+  %sec = sdiv i64 %wait, 1000000000
+  %nsr = srem i64 %wait, 1000000000
+  %ts_s = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 0
+  %ts_n = getelementptr { i64, i64 }, ptr %ts, i32 0, i32 1
+  store i64 %sec, ptr %ts_s, align 8
+  store i64 %nsr, ptr %ts_n, align 8
+  %src = call i32 @nanosleep(ptr %ts, ptr null)
+  br label %dofire
+dofire:
+  %data2 = load ptr, ptr @__kml_timer_data, align 8
+  %fi = load i64, ptr %besti, align 8
+  %fslot = getelementptr { i64, i64, i64, ptr }, ptr %data2, i64 %fi
+  %fc_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 3
+  %fc = load ptr, ptr %fc_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %fc, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %fc, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+  %fint_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 2
+  %fint = load i64, ptr %fint_p, align 8
+  %rep = icmp sgt i64 %fint, 0
+  br i1 %rep, label %resched, label %markdone
+resched:
+  %now2 = call i64 @__kml_monotonic_ns()
+  %intns = mul i64 %fint, 1000000
+  %nf = add i64 %now2, %intns
+  %ff_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 1
+  store i64 %nf, ptr %ff_p, align 8
+  br label %rettrue
+markdone:
+  store i64 -1, ptr %fint_p, align 8
+  br label %rettrue
+rettrue:
+  ret i1 1
+retfalse:
+  ret i1 0
+}`)
+}
+
 func (e *Emitter) ensureTimerRuntime() {
 	if e.usedTimers {
 		return

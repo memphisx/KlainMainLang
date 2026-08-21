@@ -30,9 +30,7 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 	if err != nil {
 		return err
 	}
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	ptrName := e.moduleGlobalPtrOrLocal(v, val.Ty)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 	return nil
 }
@@ -61,9 +59,7 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 	if err != nil {
 		return err
 	}
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	ptrName := e.moduleGlobalPtrOrLocal(v, val.Ty)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
 	return nil
 }

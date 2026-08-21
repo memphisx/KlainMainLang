@@ -270,13 +270,15 @@ func accessorMethodName(kind, prop string) string {
 	return "__kml_" + kind + "_" + prop
 }
 
-// llvmSafeSymbol replaces a private name's `#` prefix (TDD-00021) with an
-// LLVM-legal substitute before it's used to build a function symbol — `#`
-// itself isn't a legal character in a bare (unquoted) LLVM identifier. The
-// `__kml_` prefix follows the same reserved-namespace convention as
-// accessorMethodName/ClassTagField above, so it can't collide with a real
-// user-declared name. A no-op for any symbol with no private name in it.
+// llvmSafeSymbol replaces characters that are illegal in a bare (unquoted) LLVM
+// identifier before a name is used to build a function symbol: a private name's
+// `#` prefix (TDD-00021), and the `@@` of a well-known-symbol method key
+// (`@@asyncIterator`, TDD-00089). Both substitutes use the `__kml_` reserved
+// namespace (like accessorMethodName/ClassTagField), so they can't collide with
+// a real user-declared name; the un-substituted key stays the dispatch key in
+// MethodSigs. A no-op for any symbol with neither in it.
 func llvmSafeSymbol(s string) string {
+	s = strings.ReplaceAll(s, "@@", "__kml_wks_")
 	return strings.ReplaceAll(s, "#", "__kml_priv_")
 }
 
@@ -805,6 +807,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by EventEmitter<T>", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
 			}
 			sig := e.buildParamSig(m.Params)
+			sig.IsAsync = m.IsAsync
 			if m.ReturnType != nil {
 				sig.RetType = e.resolveType(m.ReturnType)
 			} else if m.Body == nil {
@@ -1246,13 +1249,11 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		}
 		// TDD-00063 Stage 2b: a generator method emits its own fiber-backed
 		// body (via the shared generator machinery), binding `this` from the
-		// receiver stored at construction — not an ordinary method function.
-		// Async generators (async *) stay rejected: their runtime semantics
-		// are out of scope (see the async-iteration ceiling in TDD-00063).
+		// receiver stored at construction — not an ordinary method function. An
+		// `async *m()` (TDD-00085 Stage 4) rides the same path: emitGeneratorFunctionDecl
+		// handles the async fiber (yield + await + Promise<{value,done}> .next())
+		// off the method's GeneratorInfo.IsAsync flag.
 		if m.IsGenerator {
-			if m.IsAsync {
-				return fmt.Errorf("%d:%d: async generator method '%s' on class '%s' is not yet supported", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
-			}
 			genInfo := info.GenMethodInfo[m.Name]
 			genInfo.ThisTy = &info.Ty // final class type (registration used the pre-vtable provisional)
 			if err := e.emitGeneratorFunctionDecl(m, genInfo); err != nil {
@@ -1431,7 +1432,13 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		}
 		e.currentRetType = TypePtr
 		e.coroRetLabel = e.freshLabel("coro.ret")
-		e.emitAsyncPrologue()
+		// Async methods emit the same inline catch-and-settle task-struct promise
+		// async functions do (TDD-00087 follow-up), so a value typed `Promise<T>`
+		// has one representation regardless of whether it came from a function or a
+		// method — its `await`/`.then` reads the right slot. (Previously methods used
+		// the pre-TDD-00084 bare-slot model, which stored the value at offset 0 and
+		// broke any code that awaited through a `Promise<T>`-typed binding.)
+		e.emitInlineAsyncPrologue()
 	} else {
 		e.currentRetType = retType
 	}
@@ -1530,7 +1537,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	}
 
 	if isAsync {
-		e.emitAsyncEpilogue()
+		e.emitInlineAsyncEpilogue()
 		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
 			llvmName, strings.Join(llvmParams, ", ")))
 	} else {
@@ -1586,6 +1593,11 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	// name for a generic one (TDD-00010 V1); user-facing error messages
 	// below still reference ex.ClassName, the name the source actually
 	// wrote.
+	// new Promise((resolve, reject) => …) — the executor constructor (TDD-00087),
+	// not a user class.
+	if ex.ClassName == "Promise" {
+		return e.emitNewPromise(ex)
+	}
 	className := ex.ClassName
 	info, ok := e.classes[ex.ClassName]
 	if !ok {
@@ -1909,7 +1921,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		}
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), llvmName, argsIR))
-		return Value{Ref: reg, Ty: sig.RetType}, nil
+		return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 	}
 
 	vtGep := e.freshReg()
@@ -1936,7 +1948,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", reg, sig.RetType.LLVMRetType(), fnTypePart, fnPtr, argsIR))
-	return Value{Ref: reg, Ty: sig.RetType}, nil
+	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 }
 
 // emitClassMethodCall emits `objExpr.methodName(args)` — objExpr is
@@ -2183,7 +2195,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	}
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), llvmName, argsIR))
-	return Value{Ref: reg, Ty: sig.RetType}, nil
+	return Value{Ref: reg, Ty: taskTaggedRet(sig)}, nil
 }
 
 // emitSuperCall handles `super(args)` inside a derived class's constructor

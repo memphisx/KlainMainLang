@@ -6,6 +6,235 @@ import (
 	"strings"
 )
 
+// registerModuleGlobals promotes each top-level `const`/`let`/`var` of a simple
+// scalar/string type to an LLVM module global (TDD-00093), so a named `function`
+// declaration — emitted with its own fresh scope, unlike an arrow/closure that
+// captures — can read it. Run before function bodies are emitted (they resolve
+// the name through e.moduleGlobals). The global is zero-initialized; the actual
+// initializer runs in `main()` at the declaration's position (emitVarDecl stores
+// into the same global). Only reliably-simple types are promoted (annotated, or a
+// literal initializer) — an array/object/Map/complex value stays a `main()` local
+// (the pre-existing behavior), never miscompiled.
+func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
+	promote := func(v *ast.VarDeclaration) {
+		if _, exists := e.moduleGlobals[v.Name]; exists {
+			return
+		}
+		ty, ok := e.reliableGlobalType(v)
+		if !ok {
+			return
+		}
+		safe := llvmSafeSymbol(v.Name)
+		if ty.IsArray {
+			// An array binding is two slots (data ptr + length) — two globals,
+			// matching the Ptr/LenPtr Named-Symbol shape emitArrayVarDecl uses.
+			dataG := "@__kml_global_" + safe + "_data"
+			lenG := "@__kml_global_" + safe + "_len"
+			e.emitGlobal(fmt.Sprintf("%s = internal global ptr null, align 8", dataG))
+			e.emitGlobal(fmt.Sprintf("%s = internal global i64 0, align 8", lenG))
+			e.moduleGlobals[v.Name] = Symbol{Ptr: dataG, LenPtr: lenG, Ty: ty, IsConst: v.Kind == "const"}
+		} else {
+			gname := "@__kml_global_" + safe
+			e.emitGlobal(fmt.Sprintf("%s = internal global %s %s, align %d", gname, ty.IR, ty.zeroLiteral(), ty.Align()))
+			e.moduleGlobals[v.Name] = Symbol{Ptr: gname, Ty: ty, IsConst: v.Kind == "const"}
+		}
+		e.promotedGlobalDecls[v] = true
+	}
+	for _, stmt := range prog.Body {
+		switch s := stmt.(type) {
+		case *ast.VarDeclaration:
+			promote(s)
+		case *ast.VarDeclarationList:
+			for _, d := range s.Decls {
+				promote(d)
+			}
+		}
+	}
+}
+
+// reliableGlobalType returns a top-level declaration's type only when it can be
+// determined unambiguously *and* occupies a promotable shape — a simple
+// scalar/string slot, or an array (Ptr/LenPtr) — from an explicit annotation
+// (resolveType is authoritative) or a literal initializer whose type is fixed.
+// This deliberately matches what emitVarDecl computes for the same cases, so the
+// pre-declared global's IR type can never disagree with the store emitVarDecl
+// later emits. Anything else (object/`Map`/`Set`/`bigint`/un-annotated call)
+// returns ok=false and stays a local.
+func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
+	// Map/Set: emitMapVarDecl/emitSetVarDecl derive the type from the initializer
+	// (not any annotation), so compute it the same way to match their store. Both
+	// are a single ptr slot. A `new Set([…])` whose element type comes from the
+	// initializer array is skipped — replicating that inference risks an IR-type
+	// mismatch; a `new Set<T>()`/`new Set()` is unambiguous.
+	switch init := v.Init.(type) {
+	case *ast.NewMapExpression:
+		keyTy := TypePtr
+		valTy := TypeI64
+		if init.KeyType != nil {
+			keyTy = e.resolveType(init.KeyType)
+		}
+		if init.ValType != nil {
+			valTy = e.resolveType(init.ValType)
+		}
+		return MapType(keyTy, valTy), true
+	case *ast.NewSetExpression:
+		if init.Init != nil {
+			return Type{}, false
+		}
+		elemTy := TypePtr
+		if init.ElemType != nil {
+			elemTy = e.resolveType(init.ElemType)
+		}
+		return SetType(elemTy), true
+	}
+	if v.TypeAnnot != nil {
+		ty := e.resolveType(v.TypeAnnot)
+		if ty.IsArray && ty.ElemType != nil {
+			return ty, true
+		}
+		// A fixed-shape object (or tuple) is a single ptr slot, stored the same way
+		// as a string; its field layout rides on the Symbol's Ty, not the global's
+		// IR. A dynamic (`any`) object is excluded — it isn't a fixed slot.
+		if ty.IsObject && !ty.IsDynamicObject {
+			return ty, true
+		}
+		if isSimpleGlobalType(ty) {
+			return ty, true
+		}
+		return Type{}, false
+	}
+	// Un-annotated: promote only when the type is fully determinable in the
+	// pre-pass context (see promotableInitInPrePass), then compute it the *same
+	// way* emitVarDecl does — using the same lookup/resolveFuncRef/inferX helpers
+	// in the same source-ordered context — so the pre-declared global's IR type
+	// can never disagree with the store emitVarDecl later emits.
+	if !e.promotableInitInPrePass(v.Init) {
+		return Type{}, false
+	}
+	switch init := v.Init.(type) {
+	case *ast.NumberLiteral:
+		if strings.ContainsRune(init.Value, '.') {
+			return TypeF64, true
+		}
+		return TypeI64, true
+	case *ast.StringLiteral, *ast.TemplateLiteral:
+		return TypePtr, true // a string is a plain ptr slot
+	case *ast.BooleanLiteral:
+		return TypeBool, true
+	case *ast.Identifier:
+		// Guaranteed an earlier module global; its type is exactly what
+		// emitVarDecl's Identifier case reads via the same lookup.
+		return e.moduleGlobals[init.Name].Ty, true
+	case *ast.CallExpression:
+		// A named non-generic non-async function returning a composite — the call
+		// shape emitVarDecl sets ty = sig.RetType for.
+		if id, ok := init.Callee.(*ast.Identifier); ok {
+			if _, sig, found := e.resolveFuncRef(id.Name); found {
+				return sig.RetType, true
+			}
+		}
+		return Type{}, false
+	case *ast.ArrayLiteral:
+		ty := e.inferArrayType(init)
+		if ty.IsArray && ty.ElemType != nil {
+			return ty, true
+		}
+	case *ast.ObjectLiteral:
+		ty := e.inferObjectType(init)
+		if ty.IsObject && !ty.IsDynamicObject {
+			return ty, true
+		}
+	}
+	return Type{}, false
+}
+
+// promotableInitInPrePass reports whether an un-annotated initializer's type is
+// fully determinable in registerModuleGlobals' context. That pass runs before
+// main()'s body, so only things resolvable then may appear: literals, an *earlier
+// module global* (registered in source order, so visible via lookup exactly as in
+// emitVarDecl), and a named non-generic non-async function's composite return
+// type. An identifier bound to a runtime local (a destructuring target, a block
+// local), a spread, a computed key, a generic/async call, or a scalar-returning
+// call (which hits emitVarDecl's i64 default) would let the pre-pass type diverge
+// from emitVarDecl's — so it is not promoted. This is the invariant the whole
+// feature rests on ("promote iff the type cannot drift"), not a per-symptom gate.
+func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
+	switch ex := expr.(type) {
+	case *ast.NumberLiteral:
+		return !ex.IsBigInt
+	case *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.TemplateLiteral:
+		return true
+	case *ast.Identifier:
+		_, ok := e.moduleGlobals[ex.Name]
+		return ok
+	case *ast.CallExpression:
+		id, ok := ex.Callee.(*ast.Identifier)
+		if !ok {
+			return false
+		}
+		if _, isGeneric := e.genericFuncs[id.Name]; isGeneric {
+			return false
+		}
+		_, sig, found := e.resolveFuncRef(id.Name)
+		if !found || sig.MaySuspend {
+			return false
+		}
+		rt := sig.RetType
+		return rt.IsArray || rt.IsObject || rt.IsMap || rt.IsSet || rt.IsDate || rt.IsFunc || isStringTy(rt)
+	case *ast.ArrayLiteral:
+		for _, el := range ex.Elements {
+			if _, isSpread := el.(*ast.SpreadElement); isSpread {
+				return false
+			}
+			if !e.promotableInitInPrePass(el) {
+				return false
+			}
+		}
+		return true
+	case *ast.ObjectLiteral:
+		for _, prop := range ex.Properties {
+			// A computed key, or a spread (Key=="" with a SpreadElement value),
+			// depends on scope.
+			if prop.KeyExpr != nil || prop.Key == "" {
+				return false
+			}
+			if !e.promotableInitInPrePass(prop.Value) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// moduleGlobalPtrOrLocal returns the storage pointer for a single-ptr binding v
+// (object/`Map`/`Set`): the pre-registered module global (TDD-00093) for a
+// promoted decl — already in e.moduleGlobals and zero-initialized — or a fresh
+// local ptr alloca with the Symbol defined, the prior behavior.
+func (e *Emitter) moduleGlobalPtrOrLocal(v *ast.VarDeclaration, ty Type) string {
+	if e.promotedGlobalDecls[v] {
+		return e.moduleGlobals[v.Name].Ptr
+	}
+	ptrName := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
+	return ptrName
+}
+
+// isSimpleGlobalType reports whether a type occupies a single scalar/string slot —
+// the only shapes registerModuleGlobals promotes, since they reach emitVarDecl's
+// plain alloca path (never the array/object/Map/nullable-scalar sub-emitters).
+func isSimpleGlobalType(ty Type) bool {
+	if ty.IsArray || ty.IsObject || ty.IsDynamicObject || ty.IsMap || ty.IsSet || ty.IsDynamic || ty.IsFunc || ty.IsBigInt || isNullableScalar(ty) {
+		return false
+	}
+	switch ty.IR {
+	case "i1", "i8", "i16", "i32", "i64", "float", "double":
+		return true
+	}
+	return isStringTy(ty)
+}
+
 // emitVarSlotDefault pre-initializes a scalar or dynamic `var` slot in the
 // entry block to a deterministic default (an any-typed var to the `undefined`
 // box `{ i8 5, i64 0 }`, a typed scalar to its zero literal). Only scalar and
@@ -151,7 +380,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			// generator instance, a hard clang-stage type mismatch, not
 			// just a wrong result).
 			if id, ok := init.Callee.(*ast.Identifier); ok {
-				if info, found := e.generators[id.Name]; found {
+				if info, found := e.lookupGenerator(id.Name); found {
 					ty = info.GenTy
 				}
 			}
@@ -238,7 +467,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				ty = ArrayOf(e.resolveType(init.ElemType))
 			}
 		case *ast.NewExpression:
-			if info, ok := e.classes[init.ClassName]; ok {
+			if init.ClassName == "Promise" {
+				// new Promise<T>(executor) → task Promise<T> (default number) — TDD-00087.
+				valTy := TypeI64
+				if len(init.TypeArgs) == 1 {
+					valTy = e.resolveType(init.TypeArgs[0])
+				}
+				pt := PromiseOf(valTy)
+				pt.PromiseTask = true
+				ty = pt
+			} else if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
 			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == len(genDecl.TypeParams) {
 				// Pure lookup only (see genericClassInstanceType's doc
@@ -292,25 +530,37 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		return e.emitNullableScalarVarDecl(v, ty)
 	}
 
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, ty.IR, ty.Align()))
-	if v.Kind == "var" || v.Init == nil {
-		// Pre-initialize the slot in the entry block to a deterministic default
-		// (`undefined` for an any-typed slot, zero for a typed scalar) whenever a
-		// read could reach it before a store:
-		//   - a `var` is function-scoped (promoteVarToFuncScope), so its slot can
-		//     be read on a path where its own initializer never ran (e.g.
-		//     `if (c) { var r = 1 } use(r)` with c false); and
-		//   - a `let`/`const` with no initializer (`let x: number;`) can be read
-		//     on a path the definite-assignment analysis soundly misses (a var
-		//     assigned only inside a maybe-skipped loop, ADR-00214). Without this
-		//     that read would be uninitialized memory rather than a defined value.
-		// A read textually *before* the declaration is still a clean
-		// undefined-variable/TDZ error, since the binding isn't visible until its
-		// declaration point. See TDD-00070/TDD-00071.
-		e.emitVarSlotDefault(ptrName, ty)
+	// Module-global promotion (TDD-00093): at module scope, a top-level
+	// const/let/var of a simple scalar/string type is backed by a pre-registered
+	// LLVM global (registerModuleGlobals) so a named `function` can read it. Store
+	// into that global rather than a fresh local alloca; it's already zero-init'd
+	// (the global's own initializer) and already in e.moduleGlobals (so lookup
+	// resolves it), so neither the default-init nor a local define is needed.
+	var ptrName string
+	if e.promotedGlobalDecls[v] {
+		ptrName = e.moduleGlobals[v.Name].Ptr
 	}
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
+	if ptrName == "" {
+		ptrName = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, ty.IR, ty.Align()))
+		if v.Kind == "var" || v.Init == nil {
+			// Pre-initialize the slot in the entry block to a deterministic default
+			// (`undefined` for an any-typed slot, zero for a typed scalar) whenever a
+			// read could reach it before a store:
+			//   - a `var` is function-scoped (promoteVarToFuncScope), so its slot can
+			//     be read on a path where its own initializer never ran (e.g.
+			//     `if (c) { var r = 1 } use(r)` with c false); and
+			//   - a `let`/`const` with no initializer (`let x: number;`) can be read
+			//     on a path the definite-assignment analysis soundly misses (a var
+			//     assigned only inside a maybe-skipped loop, ADR-00214). Without this
+			//     that read would be uninitialized memory rather than a defined value.
+			// A read textually *before* the declaration is still a clean
+			// undefined-variable/TDZ error, since the binding isn't visible until its
+			// declaration point. See TDD-00070/TDD-00071.
+			e.emitVarSlotDefault(ptrName, ty)
+		}
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
+	}
 
 	if v.Init != nil {
 		// JSON.parse / Response.json() (optionally awaited) need the target type

@@ -286,3 +286,659 @@ for (const name of names()) {
 }
 `, "alice\nbob")
 }
+
+// --- TDD-00085: async generators (`async function*`) + `for await...of` ---
+
+// A basic async generator consumed by for await...of.
+func TestE2EAsyncGeneratorForAwait(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number { yield 1; yield 2; yield 3 }
+async function main2(): Promise<void> {
+  for await (const x of g()) { console.log(x) }
+  console.log("done")
+}
+main2()
+`, "1\n2\n3\ndone")
+}
+
+// An async generator that awaits inside its body between yields.
+func TestE2EAsyncGeneratorAwaitsInBody(t *testing.T) {
+	assertOutput(t, `
+async function double(n: number): Promise<number> { return n * 2 }
+async function* g(): number {
+  const xs: number[] = [1, 2, 3]
+  for (const n of xs) { yield await double(n) }
+}
+async function main2(): Promise<void> {
+  for await (const x of g()) { console.log(x) }
+}
+main2()
+`, "2\n4\n6")
+}
+
+// Manual .next() returns a Promise<{value,done}>; a throw in the body rejects the
+// outstanding .next() promise (re-thrown at the awaiting consumer).
+func TestE2EAsyncGeneratorThrowRejects(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number { yield 1; throw new Error("boom") }
+async function main2(): Promise<void> {
+  const it = g()
+  const a = await it.next()
+  console.log(a.value)
+  console.log(a.done)
+  try {
+    await it.next()
+    console.log("no throw")
+  } catch (e) {
+    console.log("caught " + e.message)
+  }
+}
+main2()
+`, "1\nfalse\ncaught boom")
+}
+
+// A destructuring loop variable in `for await...of`: the yielded object's fields
+// (or a tuple's positions) bind in the body, reusing the same unpack core the
+// sync for-of destructuring uses (ADR-00257).
+func TestE2EForAwaitObjectDestructure(t *testing.T) {
+	assertOutput(t, `
+async function* pts(): { x: number; y: number } {
+  yield { x: 1, y: 2 }
+  yield { x: 3, y: 4 }
+}
+async function main2(): Promise<void> {
+  for await (const { x, y } of pts()) { console.log(x + y) }
+}
+main2()
+`, "3\n7")
+}
+
+func TestE2EForAwaitTupleDestructure(t *testing.T) {
+	assertOutput(t, `
+async function* pairs(): [number, number] {
+  yield [1, 2]
+  yield [3, 4]
+}
+async function main2(): Promise<void> {
+  for await (const [a, b] of pairs()) { console.log(a * b) }
+}
+main2()
+`, "2\n12")
+}
+
+// --- TDD-00089: Symbol.asyncIterator — user-defined async iterables ---
+
+// A class implementing the async-iteration protocol by hand: a
+// [Symbol.asyncIterator]() returning a separate iterator object whose async
+// next() yields {value,done}. Consumed by for await...of.
+func TestE2EAsyncIterableSeparateIterator(t *testing.T) {
+	assertOutput(t, `
+class RangeIter {
+  private cur: number
+  private end: number
+  constructor(end: number) { this.cur = 0; this.end = end }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.cur >= this.end) { return { value: 0, done: true } }
+    const v = this.cur
+    this.cur = this.cur + 1
+    return { value: v, done: false }
+  }
+}
+class Range {
+  private end: number
+  constructor(end: number) { this.end = end }
+  [Symbol.asyncIterator](): RangeIter { return new RangeIter(this.end) }
+}
+async function main2(): Promise<void> {
+  for await (const x of new Range(4)) { console.log(x) }
+  console.log("done")
+}
+main2()
+`, "0\n1\n2\n3\ndone")
+}
+
+// The [Symbol.asyncIterator]() returns `this` (the object is its own iterator),
+// and next() awaits between elements — the common self-iterator pattern.
+func TestE2EAsyncIterableSelfWithAwait(t *testing.T) {
+	assertOutput(t, `
+async function delay(v: number): Promise<number> { return v }
+class Ticker {
+  private i: number
+  private n: number
+  constructor(n: number) { this.i = 0; this.n = n }
+  [Symbol.asyncIterator](): Ticker { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.i >= this.n) { return { value: -1, done: true } }
+    const cur = await delay(this.i * 10)
+    this.i = this.i + 1
+    return { value: cur, done: false }
+  }
+}
+async function main2(): Promise<void> {
+  for await (const t of new Ticker(3)) { console.log(t) }
+}
+main2()
+`, "0\n10\n20")
+}
+
+// A rejection from the iterator's next() (a throw) re-throws at the awaiting
+// for-await, catchable with try/catch.
+func TestE2EAsyncIterableThrowPropagates(t *testing.T) {
+	assertOutput(t, `
+class Boom {
+  [Symbol.asyncIterator](): Boom { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    throw new Error("kaboom")
+  }
+}
+async function main2(): Promise<void> {
+  try {
+    for await (const b of new Boom()) { console.log(b) }
+  } catch (e) {
+    console.log("caught " + e.message)
+  }
+  console.log("done")
+}
+main2()
+`, "caught kaboom\ndone")
+}
+
+// A destructuring loop variable over a user async iterable reuses the same
+// unpack core the async-generator for-await path uses.
+func TestE2EAsyncIterableDestructure(t *testing.T) {
+	assertOutput(t, `
+class PairIter {
+  private i: number
+  constructor() { this.i = 0 }
+  [Symbol.asyncIterator](): PairIter { return this }
+  async next(): Promise<{ value: { a: number; b: number }; done: boolean }> {
+    if (this.i >= 3) { return { value: { a: 0, b: 0 }, done: true } }
+    const j = this.i
+    this.i = this.i + 1
+    return { value: { a: j, b: j * j }, done: false }
+  }
+}
+async function main2(): Promise<void> {
+  for await (const { a, b } of new PairIter()) { console.log(a + b) }
+}
+main2()
+`, "0\n2\n6")
+}
+
+// The same destructuring loop variable over a *sync* generator — previously the
+// pattern was ignored and its bindings were undefined (fixed alongside for-await,
+// ADR-00257). The tuple form also exercises the yield-with-tuple-hint fix: a
+// `yield [a, b]` into a tuple slot now builds the tuple directly.
+func TestE2EForOfGeneratorObjectDestructure(t *testing.T) {
+	assertOutput(t, `
+function* pts(): { x: number; y: number } {
+  yield { x: 5, y: 6 }
+  yield { x: 7, y: 8 }
+}
+for (const { x, y } of pts()) { console.log(x * y) }
+`, "30\n56")
+}
+
+func TestE2EForOfGeneratorTupleDestructure(t *testing.T) {
+	assertOutput(t, `
+function* pairs(): [number, number] {
+  yield [1, 2]
+  yield [3, 4]
+}
+for (const [a, b] of pairs()) { console.log(a + b) }
+`, "3\n7")
+}
+
+// for await...of accepts an async generator, a Symbol.asyncIterator class, and a
+// sync array (TDD-00092); a sync Map/Set is still a clean rejection (V1 scope).
+func TestE2EForAwaitRejectsSyncMap(t *testing.T) {
+	src := `
+async function main2(): Promise<void> {
+  const m = new Map<string, number>()
+  m.set("a", 1)
+  for await (const v of m) { console.log(v) }
+}
+main2()
+`
+	if _, err := parseAndCompile(src); err == nil {
+		t.Fatalf("expected a compile error for 'for await' over a sync Map, got none")
+	}
+}
+
+// TDD-00085 Stage 4: an async generator *method* (`async *m()`) — the sync
+// generator-method machinery (this-binding via the __this slot) fused with the
+// async-generator fiber. Covers `this` access, await in the body, for-await
+// consumption, and throw->reject on a later .next().
+func TestE2EAsyncGeneratorMethod(t *testing.T) {
+	assertOutput(t, `
+async function inc(n: number): Promise<number> { return n + 1 }
+class Counter {
+  base: number = 10
+  async *gen(): number {
+    yield await inc(this.base)
+    yield await inc(this.base + 1)
+  }
+}
+async function main2(): Promise<void> {
+  const c = new Counter()
+  for await (const x of c.gen()) { console.log(x) }
+}
+main2()
+`, "11\n12")
+}
+
+func TestE2EAsyncGeneratorMethodThrowRejects(t *testing.T) {
+	assertOutput(t, `
+class Pager {
+  items: number[] = [5, 6]
+  async *pages(): number {
+    for (const x of this.items) { yield x }
+    throw new Error("end")
+  }
+}
+async function main2(): Promise<void> {
+  const p = new Pager()
+  const it = p.pages()
+  console.log((await it.next()).value)
+  console.log((await it.next()).value)
+  try { await it.next() } catch (e) { console.log("caught " + e.message) }
+}
+main2()
+`, "5\n6\ncaught end")
+}
+
+// --- Generator protocol completion: .throw() / .return() / yield* (TDD-00086) ---
+
+// .throw(e) injects the error at the suspension point; a body try/catch handles
+// it and the generator resumes there.
+func TestE2EGeneratorThrowCaughtInBody(t *testing.T) {
+	assertOutput(t, `
+function* g(): number {
+  try { yield 1; yield 2 }
+  catch (e) { console.log("caught " + e.message); yield 99 }
+}
+const it = g()
+console.log(it.next().value)
+console.log(it.throw(new Error("boom")).value)
+console.log(it.next().done)
+`, "1\ncaught boom\n99\ntrue")
+}
+
+// An uncaught .throw() propagates to the .throw() caller and finishes the generator.
+func TestE2EGeneratorThrowUncaughtPropagates(t *testing.T) {
+	assertOutput(t, `
+function* g(): number { yield 1; yield 2 }
+const it = g()
+console.log(it.next().value)
+try { it.throw(new Error("nope")); console.log("no throw") }
+catch (e) { console.log("propagated " + e.message) }
+console.log(it.next().done)
+`, "1\npropagated nope\ntrue")
+}
+
+// A return inside a generator's try/finally runs the finally (previously skipped).
+func TestE2EGeneratorReturnStatementRunsFinally(t *testing.T) {
+	assertOutput(t, `
+function* g(): number {
+  try { yield 1; return 2 } finally { console.log("finally ran") }
+}
+const it = g()
+console.log(it.next().value)
+console.log(it.next().value)
+`, "1\nfinally ran\n2")
+}
+
+// .return(v) completes the generator, running enclosing finally blocks, and
+// yields {value: v, done: true}.
+func TestE2EGeneratorReturnMethodRunsFinally(t *testing.T) {
+	assertOutput(t, `
+function* g(): number {
+  try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
+}
+const it = g()
+console.log(it.next().value)
+const r = it.return(42)
+console.log(r.value + " done=" + r.done)
+console.log(it.next().done)
+`, "1\ncleanup\n42 done=true\ntrue")
+}
+
+// .return(v) on a not-yet-started generator completes it without running the body.
+func TestE2EGeneratorReturnNotStarted(t *testing.T) {
+	assertOutput(t, `
+function* g(): number { yield 1; yield 2 }
+const it = g()
+const r = it.return(99)
+console.log(r.value + " done=" + r.done)
+console.log(it.next().done)
+`, "99 done=true\ntrue")
+}
+
+// yield* delegates to an inner generator: it re-yields each inner value and
+// evaluates to the inner's return value.
+func TestE2EYieldStarDelegation(t *testing.T) {
+	assertOutput(t, `
+function* inner(): number { yield 1; yield 2; return 3 }
+function* outer(): number {
+  const r = yield* inner()
+  console.log("inner returned " + r)
+  yield 10
+}
+for (const x of outer()) { console.log(x) }
+`, "1\n2\ninner returned 3\n10")
+}
+
+// yield* forwards each .next(v) sent value into the inner generator.
+func TestE2EYieldStarForwardsSent(t *testing.T) {
+	assertOutput(t, `
+function* inner(): number {
+  const a = yield 1
+  const b = yield a + 10
+  return b
+}
+function* outer(): number { const r = yield* inner(); yield r }
+const it = outer()
+console.log(it.next().value)
+console.log(it.next(100).value)
+console.log(it.next(200).value)
+console.log(it.next().done)
+`, "1\n110\n200\ntrue")
+}
+
+// yield* forwards a .throw() into the inner generator, which can catch it.
+func TestE2EYieldStarForwardsThrow(t *testing.T) {
+	assertOutput(t, `
+function* inner(): number {
+  try { yield 1; yield 2 }
+  catch (e) { console.log("inner caught " + e.message); yield 99 }
+}
+function* outer(): number { yield* inner(); yield 100 }
+const it = outer()
+console.log(it.next().value)
+console.log(it.throw(new Error("boom")).value)
+console.log(it.next().value)
+`, "1\ninner caught boom\n99\n100")
+}
+
+// yield* forwards a .return() into the inner (running its finally) and completes
+// the outer generator too.
+func TestE2EYieldStarForwardsReturn(t *testing.T) {
+	assertOutput(t, `
+function* inner(): number {
+  try { yield 1; yield 2 } finally { console.log("inner cleanup") }
+}
+function* outer(): number { yield* inner(); yield 100 }
+const it = outer()
+console.log(it.next().value)
+const r = it.return(42)
+console.log(r.value + " done=" + r.done)
+console.log(it.next().done)
+`, "1\ninner cleanup\n42 done=true\ntrue")
+}
+
+// --- Async generator .throw() / .return() (TDD-00086 async extension) ---
+
+// .throw(e) on an async generator injects at the suspension point; a body
+// try/catch (which may await) handles it and the .throw() promise fulfils.
+func TestE2EAsyncGeneratorThrowCaught(t *testing.T) {
+	assertOutput(t, `
+async function inc(n: number): Promise<number> { return n + 1 }
+async function* g(): number {
+  try { yield await inc(0); yield await inc(1) }
+  catch (e) { console.log("caught " + e.message); yield 99 }
+}
+async function main2(): Promise<void> {
+  const it = g()
+  console.log((await it.next()).value)
+  console.log((await it.throw(new Error("boom"))).value)
+  console.log((await it.next()).done)
+}
+main2()
+`, "1\ncaught boom\n99\ntrue")
+}
+
+// An uncaught .throw() rejects the returned promise and finishes the generator.
+func TestE2EAsyncGeneratorThrowUncaughtRejects(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number { yield 1; yield 2 }
+async function main2(): Promise<void> {
+  const it = g()
+  console.log((await it.next()).value)
+  try { await it.throw(new Error("nope")); console.log("no throw") }
+  catch (e) { console.log("rejected " + e.message) }
+  console.log((await it.next()).done)
+}
+main2()
+`, "1\nrejected nope\ntrue")
+}
+
+// .return(v) completes an async generator, running enclosing finally blocks, and
+// fulfils with {value: v, done: true}.
+func TestE2EAsyncGeneratorReturnRunsFinally(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number {
+  try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
+}
+async function main2(): Promise<void> {
+  const it = g()
+  console.log((await it.next()).value)
+  const r = await it.return(42)
+  console.log(r.value + " done=" + r.done)
+  console.log((await it.next()).done)
+}
+main2()
+`, "1\ncleanup\n42 done=true\ntrue")
+}
+
+// .return(v) on a not-yet-started async generator completes it without running
+// the body.
+func TestE2EAsyncGeneratorReturnNotStarted(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number { yield 1; yield 2 }
+async function main2(): Promise<void> {
+  const it = g()
+  const r = await it.return(7)
+  console.log(r.value + " done=" + r.done)
+}
+main2()
+`, "7 done=true")
+}
+
+// --- Async yield* delegation (TDD-00086 / ADR-00260 follow-on) ---
+
+// An async generator can yield* another async generator: each inner step's
+// Promise<{value,done}> is awaited, values re-yielded, and the inner's return
+// value becomes the yield* expression's value.
+func TestE2EAsyncYieldStarDelegation(t *testing.T) {
+	assertOutput(t, `
+async function inc(n: number): Promise<number> { return n + 1 }
+async function* inner(): number { yield await inc(0); yield await inc(1); return 100 }
+async function* outer(): number {
+  const r = yield* inner()
+  console.log("inner returned " + r)
+  yield 10
+}
+async function main2(): Promise<void> {
+  for await (const x of outer()) { console.log(x) }
+}
+main2()
+`, "1\n2\ninner returned 100\n10")
+}
+
+// Sent values and .throw() forward through an async yield* into the inner.
+func TestE2EAsyncYieldStarForwardsSentAndThrow(t *testing.T) {
+	assertOutput(t, `
+async function* inner(): number {
+  try { const a = yield 1; yield a + 10 }
+  catch (e) { console.log("inner caught " + e.message); yield 99 }
+}
+async function* outer(): number { yield* inner(); yield 100 }
+async function main2(): Promise<void> {
+  const it = outer()
+  console.log((await it.next()).value)
+  console.log((await it.next(50)).value)
+  console.log((await it.throw(new Error("boom"))).value)
+  console.log((await it.next()).value)
+}
+main2()
+`, "1\n60\ninner caught boom\n99\n100")
+}
+
+// .return() forwards through an async yield*, running the inner's finally and
+// completing the outer.
+func TestE2EAsyncYieldStarForwardsReturn(t *testing.T) {
+	assertOutput(t, `
+async function* inner(): number {
+  try { yield 1; yield 2 } finally { console.log("inner cleanup") }
+}
+async function* outer(): number { yield* inner(); yield 100 }
+async function main2(): Promise<void> {
+  const it = outer()
+  console.log((await it.next()).value)
+  const r = await it.return(42)
+  console.log(r.value + " done=" + r.done)
+  console.log((await it.next()).done)
+}
+main2()
+`, "1\ninner cleanup\n42 done=true\ntrue")
+}
+
+// yield* over a user Symbol.asyncIterator iterable inside an async generator
+// (TDD-00094 stage 3): each awaited element is re-yielded, then the outer
+// continues past the delegation.
+func TestE2EAsyncYieldStarOverAsyncIterable(t *testing.T) {
+	assertOutput(t, `
+async function d(v: number): Promise<number> { return v }
+class Range {
+  private i: number
+  private n: number
+  constructor(n: number) { this.i = 0; this.n = n }
+  [Symbol.asyncIterator](): Range { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.i >= this.n) { return { value: -1, done: true } }
+    const cur = await d(this.i)
+    this.i = this.i + 1
+    return { value: cur, done: false }
+  }
+}
+async function* outer(): number { yield* new Range(3); yield 100 }
+async function main2(): Promise<void> {
+  for await (const x of outer()) { console.log(x) }
+}
+main2()
+`, "0\n1\n2\n100")
+}
+
+// .return(v) on an async generator suspended at `yield* asyncIterable` completes
+// the outer (running its finallys) instead of silently resuming the inner — the
+// V1 own-path behavior (no delegation into the inner's optional .return).
+func TestE2EAsyncYieldStarIterableReturnCompletesOuter(t *testing.T) {
+	assertOutput(t, `
+async function d(v: number): Promise<number> { return v }
+class Range {
+  private i: number
+  private n: number
+  constructor(n: number) { this.i = 0; this.n = n }
+  [Symbol.asyncIterator](): Range { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.i >= this.n) { return { value: -1, done: true } }
+    const cur = await d(this.i)
+    this.i = this.i + 1
+    return { value: cur, done: false }
+  }
+}
+async function* outer(): number {
+  try { yield* new Range(5) } finally { console.log("outer cleanup") }
+  yield 100
+}
+async function main2(): Promise<void> {
+  const it = outer()
+  console.log((await it.next()).value)
+  const r = await it.return(42)
+  console.log(r.value + " done=" + r.done)
+  console.log((await it.next()).done)
+}
+main2()
+`, "0\nouter cleanup\n42 done=true\ntrue")
+}
+
+// .throw(e) on an async generator suspended at `yield* asyncIterable` propagates
+// the error into the outer body (catchable there) instead of being swallowed by
+// another inner step — the V1 own-path behavior.
+func TestE2EAsyncYieldStarIterableThrowPropagatesToOuter(t *testing.T) {
+	assertOutput(t, `
+async function d(v: number): Promise<number> { return v }
+class Range {
+  private i: number
+  private n: number
+  constructor(n: number) { this.i = 0; this.n = n }
+  [Symbol.asyncIterator](): Range { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.i >= this.n) { return { value: -1, done: true } }
+    const cur = await d(this.i)
+    this.i = this.i + 1
+    return { value: cur, done: false }
+  }
+}
+async function* outer(): number {
+  try { yield* new Range(5) } catch (e) { console.log("outer caught " + e.message); yield 77 }
+}
+async function main2(): Promise<void> {
+  const it = outer()
+  console.log((await it.next()).value)
+  console.log((await it.throw(new Error("bang"))).value)
+}
+main2()
+`, "0\nouter caught bang\n77")
+}
+
+// When the inner async-iterable has its own .throw/.return methods, a yield*
+// delegates into them: .throw(e) forwards into inner.throw (which may recover and
+// keep yielding), and .return(v) forwards into inner.return (which completes).
+func TestE2EAsyncYieldStarIterableDelegatesThrowReturn(t *testing.T) {
+	assertOutput(t, `
+async function d(v: number): Promise<number> { return v }
+class Range {
+  private i: number
+  private n: number
+  constructor(n: number) { this.i = 0; this.n = n }
+  [Symbol.asyncIterator](): Range { return this }
+  async next(): Promise<{ value: number; done: boolean }> {
+    if (this.i >= this.n) { return { value: -1, done: true } }
+    const cur = await d(this.i); this.i = this.i + 1
+    return { value: cur, done: false }
+  }
+  async throw(e: Error): Promise<{ value: number; done: boolean }> {
+    console.log("inner throw " + e.message)
+    return { value: 99, done: false }
+  }
+  async return(v: number): Promise<{ value: number; done: boolean }> {
+    console.log("inner return " + v)
+    return { value: v, done: true }
+  }
+}
+async function* outer(): number { yield* new Range(5); yield 100 }
+async function main2(): Promise<void> {
+  const it = outer()
+  console.log((await it.next()).value)
+  console.log((await it.throw(new Error("x"))).value)
+  const r = await it.return(7)
+  console.log(r.value + " done=" + r.done)
+  console.log((await it.next()).done)
+}
+main2()
+`, "0\ninner throw x\n99\ninner return 7\n7 done=true\ntrue")
+}
+
+// yield* over an async generator inside a *sync* generator is a clean rejection
+// (awaiting each step needs an async context).
+func TestE2EYieldStarAsyncInSyncRejected(t *testing.T) {
+	src := `
+async function* inner(): number { yield 1 }
+function* outer(): number { yield* inner() }
+console.log(outer())
+`
+	if _, err := parseAndCompile(src); err == nil {
+		t.Fatal("expected a compile error for yield* over an async generator in a sync generator, got none")
+	}
+}

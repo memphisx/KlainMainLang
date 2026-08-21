@@ -77,6 +77,20 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		// silently mishandled.
 		if len(e.nestedFuncScopes) > 0 {
 			if entry, ok := e.nestedFuncScopes[len(e.nestedFuncScopes)-1].byDecl[s]; ok {
+				// A nested generator (TDD-00094) emits its fiber body here, where
+				// the enclosing scope is fully populated — so its captures are
+				// resolved now (not at pre-scan time) and recorded on the shared
+				// GeneratorInfo the g() call site reads to build the instance's env.
+				if entry.Gen != nil {
+					caps := e.gatherGeneratorCaptures(s)
+					for _, c := range caps {
+						if c.Ty.IsArray {
+							return fmt.Errorf("%d:%d: a nested generator capturing an array variable ('%s') is not yet supported", s.GetPos().Line, s.GetPos().Col, c.Name)
+						}
+					}
+					entry.Gen.Captures = caps
+					return e.emitGeneratorFunctionDecl(s, entry.Gen)
+				}
 				return e.emitFunctionDeclAs(s, entry.Mangled, entry.Sig)
 			}
 		}
@@ -150,6 +164,16 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			val, err := e.emitExpr(r.Value)
 			if err != nil {
 				return err
+			}
+			// Async-return flattening (ADR-00265): `return <promise>` from an async
+			// fn adopts that promise's state — await it, settle with its value (or
+			// re-throw its rejection into this fn's own settle). Only when the fn's
+			// own value type isn't itself a promise (no double-unwrap).
+			if val.Ty.IsPromise && val.Ty.PromiseTask && !e.currentPromiseTy.IsPromise {
+				val, err = e.emitAwaitTaskPromise(val.Ref, e.currentPromiseTy)
+				if err != nil {
+					return err
+				}
 			}
 			val = e.coerce(val, e.currentPromiseTy)
 			align := e.currentPromiseTy.Align()
@@ -424,6 +448,41 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	defer e.pushBreakTarget(endL)()
 	defer e.pushContinueTarget(incL)()
 	defer e.pushPendingLabel(endL, incL)()
+
+	// `for await...of` (TDD-00085): consumes an async-generator instance,
+	// awaiting each `.next()` promise. A user class implementing the
+	// async-iteration protocol by hand — a `[Symbol.asyncIterator]()` method
+	// returning an iterator with `async next(): Promise<{value,done}>` — is the
+	// second accepted shape (TDD-00089). Any other iterable is a clean rejection.
+	if s.Await {
+		objTy := e.inferExprType(s.Iterable)
+		if objTy.IsGenerator && objTy.GeneratorIsAsync {
+			genVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			return e.emitForAwaitOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
+		}
+		if objTy.IsClass {
+			if info, ok := e.classes[objTy.ClassName]; ok {
+				if _, ok := info.MethodSigs[asyncIteratorMethodName]; ok {
+					iterableVal, err := e.emitExpr(s.Iterable)
+					if err != nil {
+						return err
+					}
+					return e.emitForAwaitOfAsyncIterable(s, objTy, iterableVal, condL, bodyL, incL, endL)
+				}
+			}
+		}
+		// `for await` over a sync array (TDD-00092): JS awaits each element, so an
+		// array of promises is consumed sequentially and an array of plain values
+		// awaits each as a harmless identity. Reuses the array for-of loop shape,
+		// awaiting each element before binding.
+		if objTy.IsArray {
+			return e.emitForAwaitOfArray(s, objTy, condL, bodyL, incL, endL)
+		}
+		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a class with a [Symbol.asyncIterator]() method, or an array (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
+	}
 
 	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
 	// `next(): T | null` method iterates via repeated next() calls rather

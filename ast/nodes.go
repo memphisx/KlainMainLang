@@ -202,7 +202,10 @@ type ForOfStatement struct {
 	ObjectPattern []DestructProp
 	Iterable      Expression
 	Body          *BlockStatement
-	pos           Pos
+	// Await marks a `for await (const x of asyncIter)` loop (async iteration,
+	// TDD-00085) — the per-iteration `.next()` yields a Promise the loop awaits.
+	Await bool
+	pos   Pos
 }
 
 func (*ForOfStatement) nodeMarker()   {}

@@ -400,11 +400,23 @@ entry:
   br label %%checkloop
 
 checkloop:
+  ; Done is checked *before* the abort signal so a re-await of an
+  ; already-finished fetch (a Promise<Response> is a reusable value —
+  ; TDD-00090) goes straight to the non-destructive finish and never
+  ; re-enters the abort teardown on its already-cleaned easy handle (a
+  ; second curl_easy_cleanup would be a double free). A still-pending
+  ; transfer falls through to the per-spin abort check below.
+  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
+  %%done = load i64, ptr %%done_p, align 8
+  %%isdone = icmp ne i64 %%done, 0
+  br i1 %%isdone, label %%finish, label %%chksignal
+
+chksignal:
   ; AbortSignal check each spin (TDD-00081 Stage 3c): the aborted flag or an
   ; elapsed AbortSignal.timeout deadline tears the transfer down and throws,
   ; so a mid-flight abort or a timeout cancels the in-flight request.
   %%isaborted = call i1 @__kml_signal_aborted(ptr %%sig)
-  br i1 %%isaborted, label %%doabort, label %%chkdone
+  br i1 %%isaborted, label %%doabort, label %%maybeyield
 
 doabort:
   %%ab_easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 0
@@ -431,12 +443,6 @@ doabort:
   store ptr %%ab_name, ptr %%aberr.name, align 8
   call void @__kml_throw(ptr %%aberr)
   unreachable
-
-chkdone:
-  %%done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pending, i32 0, i32 2
-  %%done = load i64, ptr %%done_p, align 8
-  %%isdone = icmp ne i64 %%done, 0
-  br i1 %%isdone, label %%finish, label %%maybeyield
 
 maybeyield:%s
 

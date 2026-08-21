@@ -42,6 +42,13 @@ type Type struct {
 	// trailing call arguments," the same distinction FuncSig.HasRest
 	// already lets a named function's call sites make.
 	FuncHasRest bool
+	// IsPromiseResolver marks the `resolve` closure `new Promise`'s executor
+	// receives (emit_promise_new.go). It carries the closure's `{fnptr, env}`
+	// shape like any callback, but a call site passing a Promise argument
+	// (`resolve(anotherPromise)`) adopts that thenable — settling the target
+	// when the argument settles — instead of coercing a promise to the value
+	// type (TDD-00091). The target promise is the closure's env.
+	IsPromiseResolver bool
 	// IsGroupMap marks the result of Object.groupBy: a heap ptr to a dynamic
 	// string-keyed map of typed sub-arrays. ElemType is the element type of
 	// each bucket. Bracket-notation access returns ArrayOf(*ElemType).
@@ -65,6 +72,11 @@ type Type struct {
 	// Nullable marks T | null / T | undefined type annotations.
 	IsNull      bool
 	IsUndefined bool
+	// IsNever marks the bottom type — the value type of a `Promise.reject(...)`
+	// (`Promise<never>`), which never actually produces a value (await re-throws).
+	// It assigns to any target: coerce turns it into a zero of the target type,
+	// keeping the IR well-typed while it stays dead (TDD-00087 follow-up).
+	IsNever     bool
 	Nullable    bool
 	// IsPromise marks Promise<T> types (the coroutine handle, IR type ptr).
 	// PromiseType is the T in Promise<T>; nil means Promise<void>.
@@ -224,6 +236,7 @@ type Type struct {
 	// yield/`.next()` call site needs it to know the yielded/sent value's
 	// own IR shape.
 	IsGenerator       bool
+	GeneratorIsAsync  bool // an `async function*` — .next() returns Promise<{value,done}> (TDD-00085)
 	GeneratorElemType *Type
 	// HasEventEmitter marks a class whose instances carry a hidden
 	// listener-map-handle field (TDD-00023) — set for a class that directly
@@ -557,8 +570,14 @@ const (
 	GeneratorStartedField   = "__started"   // false until the first .next() call
 	GeneratorDoneField      = "__done"      // true once the body has returned or fallen off the end
 	GeneratorYieldedField   = "__yielded"   // what the most recent yield/return produced
-	GeneratorSentField      = "__sent"      // what the current .next(value) call is passing in
+	GeneratorSentField      = "__sent"      // what the current .next(value)/.return(value) call is passing in
+	GeneratorResumeModeField = "__resumeMode" // how the current resume behaves: 0 next (return __sent), 1 throw __thrown, 2 return __sent (TDD-00086)
+	GeneratorThrownField     = "__thrown"     // the error object a .throw(e) injects at the suspension point (ptr, TDD-00086)
+	GeneratorJmpStkField     = "__jmpStk"     // this generator's own isolated jmpbuf stack (ptr, so caller/body try-frames never interleave — TDD-00086)
+	GeneratorJmpTopField     = "__jmpTop"     // the generator's jmpbuf-stack top saved across suspension (i64, TDD-00086)
+	GeneratorGenErrorField   = "__genError"   // an uncaught body throw the outer catch-all captured, re-thrown on the caller side (ptr, TDD-00086)
 	GeneratorThisField      = "__this"      // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
+	GeneratorEnvField       = "__env"       // a nested generator's closure environment (ptr to the captured-cell struct, null when it captures nothing) — TDD-00094
 )
 
 // GeneratorType returns a `function* f(params): T {}`'s instance value type
@@ -567,7 +586,7 @@ const (
 // paramTypes is the generator function's own declared parameter types, in
 // order, stored as trailing fields so construction can populate them once
 // and the generator body can read them back on its own fiber stack.
-func GeneratorType(elem Type, paramTypes []Type, thisTy *Type) Type {
+func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Type {
 	elemCopy := elem
 	fields := []Field{
 		{Name: GeneratorCtxField, Ty: TypePtr},
@@ -577,6 +596,12 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type) Type {
 		{Name: GeneratorDoneField, Ty: TypeBool},
 		{Name: GeneratorYieldedField, Ty: elem},
 		{Name: GeneratorSentField, Ty: elem},
+		{Name: GeneratorResumeModeField, Ty: TypeI64},
+		{Name: GeneratorThrownField, Ty: TypePtr},
+		{Name: GeneratorJmpStkField, Ty: TypePtr},
+		{Name: GeneratorJmpTopField, Ty: TypeI64},
+		{Name: GeneratorGenErrorField, Ty: TypePtr},
+		{Name: GeneratorEnvField, Ty: TypePtr},
 	}
 	// A generator *method* (TDD-00063 Stage 2b) carries its receiver in a
 	// dedicated __this slot (a ptr to the class instance), stored at
@@ -592,6 +617,7 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type) Type {
 	ty := ObjectType(fields)
 	ty.IsObject = false
 	ty.IsGenerator = true
+	ty.GeneratorIsAsync = isAsync
 	ty.GeneratorElemType = &elemCopy
 	return ty
 }
@@ -1336,6 +1362,7 @@ func (t Type) PrintfFmt() string {
 
 var (
 	TypeVoid      = Type{IR: "void"}
+	TypeNever     = Type{IR: "i64", IsNever: true}
 	TypeBool      = Type{IR: "i1", Signed: false}
 	TypeI8        = Type{IR: "i8", Signed: true}
 	TypeI16       = Type{IR: "i16", Signed: true}

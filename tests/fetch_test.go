@@ -838,3 +838,106 @@ main2()
 `, srv.URL)
 	assertOutput(t, src, "fulfilled\n6")
 }
+
+// TDD-00085: an async generator that awaits fetch inside its body, consumed by
+// for await...of — the primary use case (paginating over network responses).
+func TestE2EAsyncGeneratorOverFetch(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function* statuses(): number {
+  const urls: string[] = ["%s/flat", "%s/notfound", "%s/flat"]
+  for (const u of urls) {
+    const r = await fetch(u)
+    yield r.status
+  }
+}
+async function main2(): Promise<void> {
+  for await (const s of statuses()) { console.log(s) }
+}
+main2()
+`, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "200\n404\n200")
+}
+
+// ADR-00258: .then/.catch/.finally directly on a raw fetch()'s Promise<Response>
+// (no async fn, no await). The fetch is driven to a settled task promise and the
+// chain runs as a microtask; the unannotated `r` parameter is hinted to Response.
+func TestE2EFetchThenChain(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+fetch("%s/flat")
+  .then((r) => r.status)
+  .then((s: number) => { console.log("status " + s) })
+console.log("sync")
+`, srv.URL)
+	assertOutput(t, src, "sync\nstatus 200")
+}
+
+// An HTTP 4xx is a fulfilled Response (per WHATWG) — .then sees it, .catch does not.
+func TestE2EFetchThenNotFoundIsFulfilled(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+fetch("%s/notfound")
+  .then((r) => { console.log(r.status + " ok=" + r.ok) })
+console.log("sync")
+`, srv.URL)
+	assertOutput(t, src, "sync\n404 ok=false")
+}
+
+// A transport-level failure (connection refused) rejects the chain — .catch recovers.
+func TestE2EFetchThenTransportFailureRejects(t *testing.T) {
+	src := `
+fetch("http://127.0.0.1:1/x")
+  .then((r) => { console.log("no throw " + r.status) })
+  .catch((e) => { console.log("caught") })
+console.log("sync")
+`
+	assertOutput(t, src, "sync\ncaught")
+}
+
+// .finally passes the source Response through unchanged after running for effect.
+func TestE2EFetchThenFinally(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+fetch("%s/flat")
+  .finally(() => { console.log("cleanup") })
+  .then((r) => { console.log(r.status) })
+console.log("sync")
+`, srv.URL)
+	assertOutput(t, src, "sync\ncleanup\n200")
+}
+
+// TDD-00090: a fetch Promise<Response> is a reusable value too — its pending
+// struct is never freed and __kml_await_fetch short-circuits an already-done
+// handle, so double-awaiting the fetch promise (or reusing a member after a
+// combinator) re-reads the finished Response instead of a freed slot.
+func TestE2EFetchPromiseDoubleAwait(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const rp = fetch("%s/flat")
+    const a: Response = await rp
+    console.log(a.status)
+    const b: Response = await rp
+    console.log(b.status)
+    console.log(b.text())
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "200\n200\n"+`{"title":"hello","count":42,"active":true}`)
+}
+
+func TestE2EFetchMemberReuseAfterCombinator(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const rp = fetch("%s/flat")
+    const rs: Response[] = await Promise.all([rp])
+    console.log(rs[0].status)
+    const again: Response = await rp
+    console.log(again.status)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "200\n200")
+}

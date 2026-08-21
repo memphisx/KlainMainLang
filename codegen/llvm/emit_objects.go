@@ -303,9 +303,17 @@ func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, b
 }
 
 func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
+	// Module-global promotion (TDD-00093): a top-level object binding is a single
+	// ptr global; store the object pointer into it rather than a fresh local
+	// alloca (already in e.moduleGlobals, zero-initialized).
+	var ptrName string
+	if e.promotedGlobalDecls[v] {
+		ptrName = e.moduleGlobals[v.Name].Ptr
+	} else {
+		ptrName = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
+	}
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))

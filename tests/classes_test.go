@@ -1962,19 +1962,19 @@ class C {
 	}
 }
 
-// An async generator method (async *) is a clean, specific rejection.
-func TestE2EAsyncGeneratorMethodRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// An async generator method (`async *m()`) now works (TDD-00085 Stage 4) — see
+// TestE2EAsyncGeneratorMethod / …ThrowRejects in generators_test.go for the full
+// behavioral coverage; this just guards that it compiles and runs.
+func TestE2EAsyncGeneratorMethodCompiles(t *testing.T) {
+	assertOutput(t, `
 class C {
-  async *g(): number { yield 1; }
+  async *g(): number { yield 1; yield 2 }
 }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for an async generator method")
-	}
-	if !strings.Contains(err.Error(), "async generator method") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+async function main2(): Promise<void> {
+  for await (const x of new C().g()) { console.log(x) }
+}
+main2()
+`, "1\n2")
 }
 
 // A class constructor accepting an array argument (`new C([1,2,3])`) — a

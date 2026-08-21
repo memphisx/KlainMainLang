@@ -62,6 +62,18 @@ type Emitter struct {
 	allocas               strings.Builder // alloca instructions for the current function
 	body                  strings.Builder // body instructions for the current function
 	scopes                []scope
+	// moduleGlobals holds top-level `const`/`let` bindings promoted to LLVM
+	// module globals so a named `function` declaration (emitted with a fresh,
+	// separate scope) can read them — not just an arrow/closure that captures
+	// them (TDD-00093). lookup falls back to this after the function scopes.
+	moduleGlobals         map[string]Symbol
+	// promotedGlobalDecls marks the exact top-level VarDeclaration nodes promoted
+	// to module globals, by pointer identity — so emitVarDecl stores the
+	// initializer into the global for *those* declarations only. A same-named
+	// local inside a function or a nested block (a different node) is unaffected
+	// and shadows the global normally; scope depth can't distinguish them (a
+	// function body also runs at scopes depth 1).
+	promotedGlobalDecls   map[*ast.VarDeclaration]bool
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
@@ -107,6 +119,10 @@ type Emitter struct {
 	// function the way an ordinary named-function call does; see
 	// emit_generators.go.
 	generators map[string]*GeneratorInfo
+	// asyncGenStepFns memoizes the per-generator-type deferred `.next()` microtask
+	// step function, keyed by the generator struct IR (TDD-00094).
+	asyncGenStepFns map[string]string
+	asyncGenStepCtr int
 	// currentGenerator is non-nil exactly while emitting a generator
 	// function's own body — set/cleared by emitGeneratorFunctionDecl the
 	// same way currentRetType/isAsync are for an ordinary function, checked
@@ -297,8 +313,12 @@ type Emitter struct {
 	usedMathFuncs            bool
 	usedTaskRuntime          bool
 	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
+	usedPromiseSettle        bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedPromiseAdoptRunner   bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
+	usedAwaitTimerDrive      bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
 	usedMicrotasks           bool
 	thenCtr                  int // unique-name counter for .then/.catch/.finally reaction runners
+	newPromiseCtr            int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
 	usedCurrentTaskGlobal    bool
 	hasMaySuspend            bool // any async fn classified may-suspend (TDD-00083 Stage 2)
 	usedCbrt                 bool
@@ -373,6 +393,8 @@ type Emitter struct {
 func NewEmitter() *Emitter {
 	e := &Emitter{
 		strConsts:           make(map[string]string),
+		moduleGlobals:       make(map[string]Symbol),
+		promotedGlobalDecls: make(map[*ast.VarDeclaration]bool),
 		funcs:               make(map[string]FuncSig),
 		interfaces:          make(map[string]Type),
 		interfaceMethodSigs: make(map[string]map[string]FuncSig),
@@ -385,6 +407,7 @@ func NewEmitter() *Emitter {
 		genericTypeAliases:  make(map[string]*ast.TypeAliasDeclaration),
 		genericClasses:      make(map[string]*ast.ClassDeclaration),
 		generators:          make(map[string]*GeneratorInfo),
+		asyncGenStepFns:     make(map[string]string),
 		fnValueTrampolines:  make(map[string]bool),
 		currentRetType:      TypeI32, // main returns i32
 	}
@@ -495,6 +518,12 @@ func (e *Emitter) lookup(name string) (Symbol, bool) {
 		if s, ok := e.scopes[i].syms[name]; ok {
 			return s, true
 		}
+	}
+	// A top-level `const`/`let` promoted to a module global (TDD-00093) is
+	// visible from any function's fresh scope — checked last, so a same-named
+	// local always shadows it.
+	if s, ok := e.moduleGlobals[name]; ok {
+		return s, true
 	}
 	return Symbol{}, false
 }
@@ -719,11 +748,20 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// fallback below (which treats any non-nil ElemType as a plain array —
 	// correct for T[] and Array<T>, wrong for these three).
 	if ta.Name == "Promise" {
+		inner := TypeVoid
 		if ta.ElemType != nil {
-			inner := e.resolveType(ta.ElemType)
-			return PromiseOf(inner)
+			inner = e.resolveType(ta.ElemType)
 		}
-		return PromiseOf(TypeVoid)
+		pt := PromiseOf(inner)
+		// Every promise this compiler produces is now task-shaped — async
+		// functions and methods alike (TDD-00087 follow-up unified async methods
+		// onto the task-struct model) — except a raw fetch's `Promise<Response>`.
+		// So a declared `Promise<T>` annotation is task-shaped, and `const p:
+		// Promise<T> = f(); await p` reads the right slot.
+		if !inner.IsResponse {
+			pt.PromiseTask = true
+		}
+		return pt
 	}
 	if ta.Name == "Map" && ta.ElemType != nil {
 		keyTy := TypePtr
@@ -816,6 +854,17 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		return backing
 	}
+	// An error kind used as a type annotation (`e: Error`, `err: TypeError`)
+	// resolves to the shared error object shape ({kind, message, name}), so
+	// `.message`/`.name` (and `AggregateError`'s `.errors`) work — most useful on a
+	// `.catch`/reject callback's parameter, which receives the thrown error object.
+	if _, ok := errorKindIDs[name]; ok {
+		ty := errorObjType
+		if ta.Nullable {
+			ty.Nullable = true
+		}
+		return ty
+	}
 	ty := ResolveTypeName(ta.Name)
 	if ta.Nullable {
 		ty.Nullable = true
@@ -888,6 +937,12 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// emitter compiles them as coroutine tasks; the rest keep the synchronous
 	// malloc-slot fast path. Must run after registerFunctions (needs e.funcs).
 	e.classifyAsyncSuspension(prog)
+
+	// Pass 1.7: promote top-level simple `const`/`let`/`var` to module globals
+	// (TDD-00093) so the function bodies emitted next can read them (a named
+	// function has its own fresh scope and can't see a `main()` local). Must run
+	// before Pass 2 emits any function body.
+	e.registerModuleGlobals(prog)
 
 	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
 	// function is never emitted here — it has no single concrete signature
@@ -1032,6 +1087,16 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.
 	e.emitLoopTaskStubs()
+	// TDD-00087: a lightweight await drives timers via @__kml_timer_fire_next.
+	// Emit the real one when the program uses timers, else a no-op stub so the
+	// reference resolves (a program with awaits but no timers).
+	if e.usedAwaitTimerDrive {
+		if e.usedTimers {
+			e.emitTimerFireNext()
+		} else {
+			e.emitGlobal("define i1 @__kml_timer_fire_next() {\n  ret i1 0\n}")
+		}
+	}
 	e.emitTerminator("ret i32 0")
 
 	var out strings.Builder

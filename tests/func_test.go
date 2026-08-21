@@ -1075,22 +1075,44 @@ console.log(gen());
 	}
 }
 
-func TestE2ENestedGeneratorFunctionRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A non-capturing nested generator declaration works (TDD-00094); a capturing one
+// is a clean rejection until the __env capture work (sub-step 2) lands.
+func TestE2ENestedGeneratorNonCapturing(t *testing.T) {
+	assertOutput(t, `
 function outer(): void {
-    function* gen(): number {
-        yield 1;
-    }
-    console.log(gen());
+    function* gen(n: number): number { yield n; yield n + 1 }
+    for (const v of gen(5)) { console.log(v) }
 }
-outer();
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a nested generator function, got none")
-	}
-	if !strings.Contains(err.Error(), "nested generator function declaration is not yet supported") {
-		t.Fatalf("expected 'nested generator function declaration is not yet supported', got: %v", err)
-	}
+outer()
+`, "5\n6")
+}
+
+// A capturing nested generator closes over an enclosing variable by reference
+// (TDD-00094): a mutation after the generator is created is seen by a later
+// .next(), matching JS.
+func TestE2ENestedGeneratorCapturing(t *testing.T) {
+	assertOutput(t, `
+function outer(): void {
+    const base = 9
+    function* gen(): number { yield base; yield base + 1 }
+    for (const v of gen()) { console.log(v) }
+}
+outer()
+`, "9\n10")
+}
+
+func TestE2ENestedGeneratorCaptureByReference(t *testing.T) {
+	assertOutput(t, `
+function outer(): void {
+    let base = 10
+    function* gen(): number { yield base; yield base }
+    const it = gen()
+    console.log(it.next().value)
+    base = 99
+    console.log(it.next().value)
+}
+outer()
+`, "10\n99")
 }
 
 func TestE2EYieldOutsideGeneratorRejected(t *testing.T) {
@@ -1107,7 +1129,9 @@ function notAGenerator(): void {
 	}
 }
 
-func TestE2EYieldStarRejected(t *testing.T) {
+// yield* delegates to another generator (TDD-00086); yield* over a general
+// iterable such as an array still needs Symbol.iterator and is a clean rejection.
+func TestE2EYieldStarOverArrayRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 function* gen(): number {
     yield* [1, 2, 3];
@@ -1115,10 +1139,10 @@ function* gen(): number {
 console.log(gen());
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for yield*, got none")
+		t.Fatal("expected a compile error for yield* over an array, got none")
 	}
-	if !strings.Contains(err.Error(), "yield* is not yet supported") {
-		t.Fatalf("expected 'yield* is not yet supported', got: %v", err)
+	if !strings.Contains(err.Error(), "yield* requires a generator operand") {
+		t.Fatalf("expected 'yield* requires a generator operand', got: %v", err)
 	}
 }
 
@@ -1770,4 +1794,254 @@ func TestE2EAnyTypedLetNoInitReadsUndefined(t *testing.T) {
 function h(): void { let x: any; console.log(x); }
 h();
 `, "undefined")
+}
+
+// --- TDD-00093: a top-level `const`/`let`/`var` of a simple type is promoted to
+// a module global, so a named `function` declaration (its own fresh scope, not a
+// capturing closure) can read and write it. Previously a compile error
+// ("undefined variable"). ---
+
+func TestE2EModuleGlobalConstInFunction(t *testing.T) {
+	assertOutput(t, `
+const base = 100
+function add(n: number): number { return base + n }
+console.log(base)
+console.log(add(5))
+`, "100\n105")
+}
+
+func TestE2EModuleGlobalStringInFunction(t *testing.T) {
+	assertOutput(t, `
+const appName = "svc"
+function banner(): string { return "[" + appName + "]" }
+console.log(banner())
+`, "[svc]")
+}
+
+func TestE2EModuleGlobalLetMutatedByFunction(t *testing.T) {
+	assertOutput(t, `
+let counter = 0
+function inc(): void { counter = counter + 1 }
+inc()
+inc()
+inc()
+console.log(counter)
+`, "3")
+}
+
+// A function mutation through the global is visible to an arrow that references
+// the same top-level let — the arrow reads the one global, not a boxed copy.
+func TestE2EModuleGlobalSharedBetweenFnAndArrow(t *testing.T) {
+	assertOutput(t, `
+let n = 1
+function bump(): void { n = 42 }
+const show = (): void => { console.log(n) }
+show()
+bump()
+show()
+`, "1\n42")
+}
+
+// A local of the same name shadows the module global inside the function.
+func TestE2EModuleGlobalLocalShadow(t *testing.T) {
+	assertOutput(t, `
+const v = 1
+function g(): void { const v = 99; console.log(v) }
+g()
+console.log(v)
+`, "99\n1")
+}
+
+// Multi-declarator top-level list, all promoted and readable in a function.
+func TestE2EModuleGlobalMultiDeclarator(t *testing.T) {
+	assertOutput(t, `
+let a = 3, b = 4
+function sum(): number { return a + b }
+console.log(sum())
+`, "7")
+}
+
+// A boolean module global gates a branch inside a function.
+func TestE2EModuleGlobalBoolInFunction(t *testing.T) {
+	assertOutput(t, `
+const verbose = true
+function log(msg: string): void { if (verbose) { console.log(msg) } }
+log("hi")
+`, "hi")
+}
+
+// A top-level array is promoted to two module globals (data + length), so a
+// named function can iterate/read it (TDD-00093).
+func TestE2EModuleGlobalArrayInFunction(t *testing.T) {
+	assertOutput(t, `
+const nums: number[] = [10, 20, 30]
+function total(): number {
+  let s = 0
+  for (const n of nums) { s = s + n }
+  return s
+}
+console.log(total())
+`, "60")
+}
+
+func TestE2EModuleGlobalStringArrayInFunction(t *testing.T) {
+	assertOutput(t, `
+const names = ["a", "b", "c"]
+function joined(): string {
+  let out = ""
+  for (const s of names) { out = out + s }
+  return out
+}
+console.log(joined())
+`, "abc")
+}
+
+// The original trigger: a top-level Promise<number>[] consumed by for-await
+// inside a function.
+func TestE2EModuleGlobalPromiseArrayForAwait(t *testing.T) {
+	assertOutput(t, `
+async function f(n: number): Promise<number> { return n * 2 }
+const jobs: Promise<number>[] = [f(1), f(2), f(3)]
+async function run(): Promise<void> {
+  for await (const x of jobs) { console.log(x) }
+}
+run()
+`, "2\n4\n6")
+}
+
+// A top-level object is a single ptr module global, readable (and its fields
+// mutable) from a named function (TDD-00093).
+func TestE2EModuleGlobalObjectInFunction(t *testing.T) {
+	assertOutput(t, `
+const cfg = { host: "localhost", port: 8080 }
+function url(): string { return cfg.host + ":" + cfg.port }
+console.log(url())
+`, "localhost:8080")
+}
+
+func TestE2EModuleGlobalObjectFieldMutation(t *testing.T) {
+	assertOutput(t, `
+const state = { count: 0 }
+function inc(): void { state.count = state.count + 1 }
+inc()
+inc()
+console.log(state.count)
+`, "2")
+}
+
+func TestE2EModuleGlobalAnnotatedObjectInFunction(t *testing.T) {
+	assertOutput(t, `
+interface Cfg { name: string; max: number }
+const c: Cfg = { name: "svc", max: 5 }
+function describe(): string { return c.name + " max=" + c.max }
+console.log(describe())
+`, "svc max=5")
+}
+
+// A top-level Map/Set is a single ptr module global, usable from a named
+// function (its mutations shared) (TDD-00093).
+func TestE2EModuleGlobalMapInFunction(t *testing.T) {
+	assertOutput(t, `
+const cache = new Map<string, number>()
+cache.set("a", 1)
+function get(k: string): number { return cache.get(k) }
+cache.set("b", 2)
+console.log(get("a"))
+console.log(get("b"))
+`, "1\n2")
+}
+
+func TestE2EModuleGlobalSetInFunction(t *testing.T) {
+	assertOutput(t, `
+const seen = new Set<number>()
+function mark(n: number): void { seen.add(n) }
+mark(5)
+mark(7)
+console.log(seen.has(5))
+console.log(seen.has(9))
+`, "true\nfalse")
+}
+
+// TDD-00093 (complete design): an un-annotated initializer is promoted to a
+// module global when its type is determinable in the pre-pass — a named
+// function's composite return, or an earlier module global — so it too is
+// readable from a named function.
+func TestE2EModuleGlobalUnannotatedCallObject(t *testing.T) {
+	assertOutput(t, `
+interface Cfg { host: string; port: number }
+function loadConfig(): Cfg { return { host: "h", port: 9 } }
+const cfg = loadConfig()
+function url(): string { return cfg.host + ":" + cfg.port }
+console.log(url())
+`, "h:9")
+}
+
+func TestE2EModuleGlobalUnannotatedCallArray(t *testing.T) {
+	assertOutput(t, `
+function seed(): number[] { return [1, 2, 3] }
+const xs = seed()
+function total(): number { let s = 0; for (const x of xs) { s = s + x } return s }
+console.log(total())
+`, "6")
+}
+
+func TestE2EModuleGlobalIdentifierOfEarlierGlobal(t *testing.T) {
+	assertOutput(t, `
+const base = 10
+const derived = base
+function get(): number { return derived }
+console.log(get())
+`, "10")
+}
+
+// A scope-dependent initializer (referencing a runtime-local destructuring
+// target) is correctly NOT promoted — it stays a main() local and still compiles.
+func TestE2EModuleGlobalScopeDependentStaysLocal(t *testing.T) {
+	assertOutput(t, `
+interface Rec { a: number; b: number; c: string }
+let r: Rec = { a: 1, b: 2, c: "three" }
+let { a, ...rest } = r
+let copy = { ...rest }
+console.log(copy.c)
+`, "three")
+}
+
+// A nested function (and nested generator) can call a top-level function — the
+// resolver now descends into nested function bodies and mangles their top-level
+// references (previously `undefined function`) (TDD-00094).
+func TestE2ENestedFunctionCallsTopLevel(t *testing.T) {
+	assertOutput(t, `
+function dbl(n: number): number { return n * 2 }
+function outer(): number {
+  function inner(): number { return dbl(21) }
+  return inner()
+}
+console.log(outer())
+`, "42")
+}
+
+func TestE2ENestedGeneratorCallsTopLevel(t *testing.T) {
+	assertOutput(t, `
+function triple(n: number): number { return n * 3 }
+function outer(): void {
+  function* g(n: number): number { yield triple(n) }
+  for (const v of g(4)) { console.log(v) }
+}
+outer()
+`, "12")
+}
+
+func TestE2ENestedAsyncGeneratorCaptureAndTopLevel(t *testing.T) {
+	assertOutput(t, `
+async function delay(v: number): Promise<number> { return v }
+async function outer(): Promise<void> {
+  const factor = 10
+  async function* g(n: number): number {
+    let i = 0
+    while (i < n) { yield await delay(i * factor); i = i + 1 }
+  }
+  for await (const v of g(3)) { console.log(v) }
+}
+outer()
+`, "0\n10\n20")
 }

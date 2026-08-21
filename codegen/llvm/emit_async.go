@@ -226,66 +226,19 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// inline, so there is nothing to wait for — read it directly, no scheduler,
 	// no libcurl. Either way, read the marshalled value and free the promise.
 	if hdlVal.Ty.PromiseTask {
-		e.ensureFree()
-		e.ensureExceptionHelpers()
-		if e.hasMaySuspend {
-			e.ensureTaskRuntime()
-			e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", hdlVal.Ref))
-		} else {
-			e.ensurePromiseRuntime()
-		}
-		// A rejected task promise (resolved == 2) re-throws its stored error at
-		// the awaiter, so `try { await f() } catch` works (TDD-00083 Stage 2).
-		resReg := e.freshReg()
-		resP := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, hdlVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", resReg, resP))
-		rej := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, resReg))
-		rejL := e.freshLabel("await.reject")
-		okL := e.freshLabel("await.ok")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, rejL, okL))
-		e.emitLabel(rejL)
-		v0P := e.freshReg()
-		v0 := e.freshReg()
-		errReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, hdlVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
-		e.emitTerminator("unreachable")
-		e.emitLabel(okL)
-		if promiseTy.IR == "void" || promiseTy.IR == "" {
-			e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
-			return Value{Ty: TypeVoid}, nil
-		}
-		val := e.loadPromiseValue(hdlVal.Ref, promiseTy)
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
-		return val, nil
+		return e.emitAwaitTaskPromise(hdlVal.Ref, promiseTy)
 	}
 
 	e.ensureFree()
 
 	if promiseTy.IR == "void" || promiseTy.IR == "" {
-		// Promise<void>: just free the 1-byte slot.
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
+		// Promise<void>: nothing to read. The slot is not freed — a Promise is a
+		// reusable value (see emitAwaitTaskPromise); the slot leaks in manual mode
+		// like any allocation (collected under `-mm=gc`).
 		return Value{Ty: TypeVoid}, nil
 	}
 
 	if promiseTy.IsResponse && !promiseTy.PromiseResolved {
-		// fetch()'s Promise<Response>: the slot holds a still-pending fetch
-		// handle (see emit_fetch.go's emitFetch), not a Response yet.
-		// __kml_await_fetch does the actual wait (yielding if on a
-		// connection fiber, busy-spinning otherwise — see
-		// ensureFetchAsync's doc comment) and returns the final
-		// status/body once the transfer completes, throwing on a
-		// transfer-level failure exactly like the old blocking fetch did.
-		// (A Promise<Response> with PromiseResolved set — Promise.race's
-		// own Response branch, emit_promise.go — already did this waiting
-		// itself and falls through to the generic branch below instead,
-		// which just reads the already-built Response struct straight out
-		// of the slot; see PromiseResolved's doc comment in types.go.)
 		e.ensureFetchAsync()
 		pendingPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, hdlVal.Ref))
@@ -297,22 +250,108 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
 		bodyLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-
 		respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
+		// The slot is not freed: a fetch Promise<Response> is a reusable value
+		// too (TDD-00090). Its pending struct is never freed (like every
+		// fetch allocation — see runtime_fetch.go), `__kml_await_fetch`
+		// short-circuits an already-done handle, and `__kml_pending_finish` is a
+		// non-destructive read of the stored status/body — so `await r; await r`
+		// re-reads the same Response instead of a freed slot.
 		return respVal, nil
 	}
 
-	// Load the promised value then free the slot. Array-typed values are
-	// stored as {ptr, i64} (see StructFieldIR/StructFieldSize), not the bare
-	// ptr promiseTy.IR alone would suggest — matching emitAsyncPrologue's
-	// slot sizing above.
 	resultReg := e.freshReg()
 	align := promiseTy.Align()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
 		resultReg, StructFieldIR(promiseTy), hdlVal.Ref, align))
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", hdlVal.Ref))
-
+	// The slot is not freed — a Promise is a reusable value (see
+	// emitAwaitTaskPromise); it leaks in manual mode, collected under `-mm=gc`.
 	return Value{Ref: resultReg, Ty: promiseTy}, nil
+}
+
+// emitAwaitTaskPromise drives a task-shaped promise (already evaluated to hdlRef)
+// to settled and returns its value of type promiseTy — re-throwing on the caller
+// side if it rejected. Shared by `await` and by async-return flattening
+// (`return <promise>` from an async fn — ADR-00265). When the program has
+// may-suspend fns it waits via the scheduler; otherwise it drains microtasks and
+// fires timers until the promise settles (a `.then` chain / `setTimeout`-deferred
+// `new Promise`), then frees the slot.
+func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, error) {
+	e.ensureFree()
+	e.ensureExceptionHelpers()
+	if e.hasMaySuspend {
+		e.ensureTaskRuntime()
+		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", hdlRef))
+	} else {
+		e.ensurePromiseRuntime()
+		e.ensureMicrotasks()
+		// A pending task promise on the lightweight (no-fiber) path settles via a
+		// queued microtask (a `.then`/`.catch` chain reaction — ADR-00262) or a
+		// timer callback (`new Promise((res) => setTimeout(() => res(v)))` —
+		// TDD-00087). Drive both until it settles: drain the microtask FIFO, then
+		// fire the next due timer, re-checking each time. A settled async-fn result
+		// skips the loop immediately; a promise with nothing left to drive it falls
+		// through (rather than hanging). `__kml_timer_fire_next` is the real timer
+		// step when the program uses timers, else a no-op stub.
+		e.usedAwaitTimerDrive = true
+		loopL := e.freshLabel("await.loop")
+		drainL := e.freshLabel("await.drain")
+		timerL := e.freshLabel("await.timer")
+		readyL := e.freshLabel("await.ready")
+		stateOf := func() string {
+			sp := e.freshReg()
+			sv := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, hdlRef))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sv, sp))
+			return sv
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+		e.emitLabel(loopL)
+		s1 := stateOf()
+		set1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", set1, s1))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set1, readyL, drainL))
+		e.emitLabel(drainL)
+		e.emitInstr("call void @__kml_drain_microtasks()")
+		s2 := stateOf()
+		set2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", set2, s2))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set2, readyL, timerL))
+		e.emitLabel(timerL)
+		fired := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_timer_fire_next()", fired))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fired, loopL, readyL))
+		e.emitLabel(readyL)
+	}
+	// A rejected task promise (resolved == 2) re-throws its stored error at the
+	// awaiter, so `try { await f() } catch` works (TDD-00083 Stage 2).
+	resReg := e.freshReg()
+	resP := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, hdlRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", resReg, resP))
+	rej := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, resReg))
+	rejL := e.freshLabel("await.reject")
+	okL := e.freshLabel("await.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, rejL, okL))
+	e.emitLabel(rejL)
+	v0P := e.freshReg()
+	v0 := e.freshReg()
+	errReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, hdlRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
+	// The promise slot is not freed: a Promise is a reusable value in JS,
+	// awaitable any number of times (`await p; await p`) and readable after a
+	// combinator — freeing it here made the second read a use-after-free. The
+	// 40-byte task-promise struct leaks in manual mode, the same ambient
+	// behavior every unreclaimed allocation has (collected under `-mm=gc`).
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
+	if promiseTy.IR == "void" || promiseTy.IR == "" {
+		return Value{Ty: TypeVoid}, nil
+	}
+	val := e.loadPromiseValue(hdlRef, promiseTy)
+	return val, nil
 }
