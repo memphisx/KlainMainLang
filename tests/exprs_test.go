@@ -673,6 +673,52 @@ console.log(typeof add)
 `, "function")
 }
 
+// Every heap-backed built-in value is typeof "object" (a conformance-sweep
+// find: they all fell through to "string"/"number"); null is "object" per JS.
+func TestE2ETypeofBuiltinValues(t *testing.T) {
+	assertOutput(t, `
+async function af(): Promise<number> { return 1 }
+function* g(): number { yield 1 }
+class K { x: number; constructor() { this.x = 1 } }
+async function main2(): Promise<void> {
+  const p = af()
+  console.log(typeof p)
+  console.log(typeof new K())
+  console.log(typeof new Map<string, number>())
+  console.log(typeof new Set<number>())
+  const m = new Map<string, number>()
+  console.log(typeof m)
+  const gi = g()
+  console.log(typeof gi)
+  console.log(typeof null)
+  console.log(typeof new Date())
+  console.log(typeof new Error("x"))
+}
+main2()
+`, "object\nobject\nobject\nobject\nobject\nobject\nobject\nobject\nobject")
+}
+
+// typeof on namespace/constructor references and unresolved identifiers gives
+// the JS answer statically: constructors and implemented statics are
+// "function", Math/JSON are "object", an unimplemented static or undeclared
+// name is "undefined" — never a silent "number".
+func TestE2ETypeofNamespacesAndUndeclared(t *testing.T) {
+	assertOutput(t, `
+class K { }
+console.log(typeof Promise)
+console.log(typeof Promise.all)
+console.log(typeof Promise.race)
+console.log(typeof Promise.try)
+console.log(typeof Math)
+console.log(typeof Math.floor)
+console.log(typeof Math.PI)
+console.log(typeof JSON.parse)
+console.log(typeof K)
+console.log(typeof fetch)
+console.log(typeof totallyUndeclared)
+`, "function\nfunction\nfunction\nundefined\nobject\nfunction\nnumber\nfunction\nfunction\nfunction\nundefined")
+}
+
 // --- const reassignment rejection ---
 
 func TestE2EConstScalarReassignmentRejected(t *testing.T) {

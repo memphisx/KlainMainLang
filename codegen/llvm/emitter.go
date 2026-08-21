@@ -314,6 +314,7 @@ type Emitter struct {
 	usedTaskRuntime          bool
 	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
 	usedPromiseSettle        bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedFetchDriveRunner     bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
 	usedPromiseAdoptRunner   bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
 	usedAwaitTimerDrive      bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
 	usedMicrotasks           bool

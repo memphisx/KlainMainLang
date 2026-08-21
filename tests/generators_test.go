@@ -489,20 +489,277 @@ for (const [a, b] of pairs()) { console.log(a + b) }
 `, "3\n7")
 }
 
-// for await...of accepts an async generator, a Symbol.asyncIterator class, and a
-// sync array (TDD-00092); a sync Map/Set is still a clean rejection (V1 scope).
-func TestE2EForAwaitRejectsSyncMap(t *testing.T) {
-	src := `
+// for await...of over a sync Map iterates its values, awaiting each (identity
+// for plain values); a Set iterates its elements — same shapes as sync for-of.
+func TestE2EForAwaitOverSyncMapAndSet(t *testing.T) {
+	assertOutput(t, `
 async function main2(): Promise<void> {
   const m = new Map<string, number>()
-  m.set("a", 1)
+  m.set("a", 5)
+  m.set("b", 7)
   for await (const v of m) { console.log(v) }
+  const s = new Set<string>()
+  s.add("hi")
+  s.add("yo")
+  for await (const t of s) { console.log(t) }
 }
 main2()
-`
-	if _, err := parseAndCompile(src); err == nil {
-		t.Fatalf("expected a compile error for 'for await' over a sync Map, got none")
-	}
+`, "5\n7\nhi\nyo")
+}
+
+// for await...of over a sync generator (CreateAsyncFromSyncIterator): plain
+// yields are identity-awaited; promise yields are awaited to their values.
+func TestE2EForAwaitOverSyncGenerator(t *testing.T) {
+	assertOutput(t, `
+function* nums(): number {
+  yield 1
+  yield 2
+  yield 3
+}
+async function work(n: number): Promise<number> { return n * 10 }
+function* jobs(): Promise<number> {
+  yield work(1)
+  yield work(2)
+}
+async function main2(): Promise<void> {
+  for await (const n of nums()) { console.log(n) }
+  for await (const v of jobs()) { console.log(v) }
+}
+main2()
+`, "1\n2\n3\n10\n20")
+}
+
+// A destructuring loop variable over a sync generator in for await, and a
+// rejecting promise yield propagating out of the loop.
+func TestE2EForAwaitOverSyncGeneratorDestructureAndReject(t *testing.T) {
+	assertOutput(t, `
+function* points(): { x: number; y: number } {
+  yield { x: 1, y: 2 }
+  yield { x: 3, y: 4 }
+}
+async function ok(n: number): Promise<number> { return n }
+async function bad(): Promise<number> { throw new Error("gen elem fail") }
+function* mixed(): Promise<number> {
+  yield ok(1)
+  yield bad()
+  yield ok(3)
+}
+async function main2(): Promise<void> {
+  for await (const { x, y } of points()) { console.log(x + y) }
+  try {
+    for await (const v of mixed()) { console.log(v) }
+  } catch (e) {
+    console.log("caught " + e.message)
+  }
+}
+main2()
+`, "3\n7\n1\ncaught gen elem fail")
+}
+
+// A class [Symbol.iterator]() method (desugared to @@iterator) drives sync
+// for...of via the spec's {value, done} protocol — `return this` self-iterators
+// and separate per-loop iterator objects both work (a second loop over the same
+// iterable gets a fresh iterator).
+func TestE2EForOfSymbolIterator(t *testing.T) {
+	assertOutput(t, `
+class Countdown {
+  n: number
+  constructor(start: number) { this.n = start }
+  [Symbol.iterator](): Countdown { return this }
+  next(): { value: number; done: boolean } {
+    if (this.n <= 0) { return { value: 0, done: true } }
+    const v = this.n
+    this.n = this.n - 1
+    return { value: v, done: false }
+  }
+}
+class RangeIter {
+  i: number
+  end: number
+  constructor(i: number, end: number) { this.i = i; this.end = end }
+  next(): { value: number; done: boolean } {
+    if (this.i >= this.end) { return { value: 0, done: true } }
+    const v = this.i
+    this.i = this.i + 1
+    return { value: v, done: false }
+  }
+}
+class Range {
+  a: number
+  b: number
+  constructor(a: number, b: number) { this.a = a; this.b = b }
+  [Symbol.iterator](): RangeIter { return new RangeIter(this.a, this.b) }
+}
+for (const x of new Countdown(3)) { console.log(x) }
+const r = new Range(0, 3)
+for (const x of r) { console.log(x) }
+for (const x of r) { console.log(x + 10) }
+`, "3\n2\n1\n0\n1\n2\n10\n11\n12")
+}
+
+// A sync [Symbol.iterator] iterable is also consumable by for await (each value
+// identity-awaited).
+func TestE2EForAwaitOverSymbolIteratorClass(t *testing.T) {
+	assertOutput(t, `
+class Countdown {
+  n: number
+  constructor(start: number) { this.n = start }
+  [Symbol.iterator](): Countdown { return this }
+  next(): { value: number; done: boolean } {
+    if (this.n <= 0) { return { value: 0, done: true } }
+    const v = this.n
+    this.n = this.n - 1
+    return { value: v, done: false }
+  }
+}
+async function main2(): Promise<void> {
+  for await (const x of new Countdown(2)) { console.log(x) }
+}
+main2()
+`, "2\n1")
+}
+
+// An object literal with a [Symbol.asyncIterator] member (arrow-valued or
+// method shorthand, desugared to a closure-typed @@asyncIterator field) is a
+// for-await iterable — returning an async generator, a sync generator, or a
+// class-instance iterator.
+func TestE2EForAwaitObjectLiteralAsyncIterator(t *testing.T) {
+	assertOutput(t, `
+async function work(n: number): Promise<number> { return n * 3 }
+async function* agen(): number {
+  yield await work(1)
+  yield await work(2)
+}
+function* sgen(): number {
+  yield 7
+  yield 8
+}
+class Ticks {
+  n: number
+  constructor() { this.n = 0 }
+  async next(): Promise<{ value: number; done: boolean }> {
+    this.n = this.n + 1
+    if (this.n > 2) { return { value: 0, done: true } }
+    return { value: this.n * 100, done: false }
+  }
+}
+async function main2(): Promise<void> {
+  const objArrow = { [Symbol.asyncIterator]: () => agen() }
+  for await (const x of objArrow) { console.log(x) }
+  const objMethod = { [Symbol.asyncIterator]() { return sgen() } }
+  for await (const x of objMethod) { console.log(x) }
+  const objClass = { [Symbol.asyncIterator]: () => new Ticks() }
+  for await (const x of objClass) { console.log(x) }
+}
+main2()
+`, "3\n6\n7\n8\n100\n200")
+}
+
+// An object literal with a [Symbol.iterator] member works in sync for...of
+// (returning a sync generator or a [Symbol.iterator] class instance) and in
+// for await (values identity-awaited).
+func TestE2EForOfObjectLiteralSymbolIterator(t *testing.T) {
+	assertOutput(t, `
+function* sg(): number { yield 1; yield 2; }
+class CIter {
+  i: number
+  constructor() { this.i = 10 }
+  [Symbol.iterator](): CIter { return this }
+  next(): { value: number; done: boolean } {
+    if (this.i > 12) { return { value: 0, done: true } }
+    const v = this.i
+    this.i = this.i + 1
+    return { value: v, done: false }
+  }
+}
+function main1(): void {
+  const o1 = { [Symbol.iterator]: () => sg() }
+  for (const x of o1) { console.log(x) }
+  const o2 = { [Symbol.iterator]() { return new CIter() } }
+  for (const x of o2) { console.log(x) }
+}
+main1()
+async function amain(): Promise<void> {
+  const o3 = { [Symbol.iterator]: () => sg() }
+  for await (const x of o3) { console.log(x + 100) }
+}
+amain()
+`, "1\n2\n10\n11\n12\n101\n102")
+}
+
+// V8/spec step timing (node-diff verified, node v26): `.next()` starts the body
+// SYNCHRONOUSLY up to the first await/yield; an await inside the body parks the
+// step (its promise stays pending, the consumer's script continues) and resumes
+// via a microtask when the awaited promise settles.
+func TestE2EAsyncGeneratorSyncStartAndParkInterleave(t *testing.T) {
+	assertOutput(t, `
+async function* g(): number {
+  console.log("g1")
+  await 0
+  console.log("g2")
+  yield 1
+}
+async function main2(): Promise<void> {
+  const it = g()
+  const p = it.next()
+  queueMicrotask(() => { console.log("m") })
+  const r = await p
+  console.log("value " + r.value)
+}
+main2()
+console.log("sync")
+`, "g1\nsync\ng2\nm\nvalue 1")
+}
+
+// Two .next() calls before either result is awaited: the second request queues
+// (the spec's AsyncGeneratorEnqueue) and is serviced after the first step
+// settles — results correspond positionally (node-diff verified).
+func TestE2EAsyncGeneratorDoubleNextQueues(t *testing.T) {
+	assertOutput(t, `
+async function work(n: number): Promise<number> { return n }
+async function* g(): number {
+  yield await work(1)
+  yield await work(2)
+}
+async function main2(): Promise<void> {
+  const it = g()
+  const p1 = it.next()
+  const p2 = it.next()
+  const r2 = await p2
+  const r1 = await p1
+  console.log(r1.value + "," + r2.value)
+}
+main2()
+console.log("sync")
+`, "sync\n1,2")
+}
+
+// .return() runs enclosing finallys — including a finally that itself AWAITS
+// (the step parks mid-finally and still settles {42, done:true} afterwards).
+func TestE2EAsyncGeneratorReturnAwaitingFinally(t *testing.T) {
+	assertOutput(t, `
+async function tick(): Promise<number> { return 5 }
+async function* g(): number {
+  try {
+    yield 1
+    yield 2
+  } finally {
+    const t = await tick()
+    console.log("fin " + t)
+  }
+}
+async function main2(): Promise<void> {
+  const it = g()
+  const first = await it.next()
+  console.log(first.value)
+  const r = await it.return(42)
+  console.log(r.value + " done=" + r.done)
+  const after = await it.next()
+  console.log("after done=" + after.done)
+}
+main2()
+console.log("sync")
+`, "sync\n1\nfin 5\n42 done=true\nafter done=true")
 }
 
 // TDD-00085 Stage 4: an async generator *method* (`async *m()`) — the sync

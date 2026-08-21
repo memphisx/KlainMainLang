@@ -51,9 +51,10 @@ func constMemberName(expr ast.Expression) (string, bool) {
 // internal member name (`@@asyncIterator`, the spec's `@@`-prefix convention).
 // The `@@` prefix is not a lexable identifier, so it can never collide with a
 // user-declared method — the same trick the accessor keys (`"get x"`) use
-// (TDD-00089). Only `Symbol.asyncIterator` is recognized; `Symbol.iterator`
-// (the sync protocol) is deliberately still rejected, since sync `for...of`
-// already dispatches structurally on a `next(): T | null` method.
+// (TDD-00089). `Symbol.asyncIterator` and `Symbol.iterator` are both
+// recognized — the sync protocol's `[Symbol.iterator]()` desugars to
+// `@@iterator`, dispatched by `for...of`/`for await...of` alongside the
+// structural `next(): T | null` shape.
 func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	me, ok := expr.(*ast.MemberExpression)
 	if !ok {
@@ -65,6 +66,9 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	}
 	if me.Property == "asyncIterator" {
 		return "@@asyncIterator", true
+	}
+	if me.Property == "iterator" {
+		return "@@iterator", true
 	}
 	return "", false
 }

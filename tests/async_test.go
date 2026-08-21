@@ -617,6 +617,40 @@ main2()
 `, "42")
 }
 
+// `await <non-promise>` still defers the continuation one microtask tick, like
+// awaiting an already-settled promise — `f(); log("c")` where f awaits a plain
+// value prints a c b, matching JS (a conformance-sweep find: it ran fully
+// synchronously, printing a b c).
+func TestE2EAwaitNonPromiseYieldsTick(t *testing.T) {
+	assertOutput(t, `
+async function f(): Promise<void> {
+  console.log("a")
+  await 1
+  console.log("b")
+}
+f()
+console.log("c")
+`, "a\nc\nb")
+}
+
+// .then with no callback, or an undefined/null callback slot, is a
+// pass-through — p.then().then(g) hands g the source value, and
+// .then(undefined, onR) is the .catch shape (JS allows all of these).
+func TestE2EThenAbsentCallbacksPassThrough(t *testing.T) {
+	assertOutput(t, `
+async function f(): Promise<number> { return 7 }
+async function main2(): Promise<void> {
+  const a: number = await f().then()
+  console.log("chained " + a)
+  const b: number = await f().then(undefined, (e) => { console.log("nope"); return 0 })
+  console.log("recovering " + b)
+  const c: number = await f().then(null).then((v: number) => v + 1)
+  console.log("nulled " + c)
+}
+main2()
+`, "chained 7\nrecovering 7\nnulled 8")
+}
+
 // --- TDD-00092: `for await...of` over a sync array — JS awaits each element, so
 // an array of promises is consumed sequentially and an array of plain values
 // awaits each as a harmless identity. ---

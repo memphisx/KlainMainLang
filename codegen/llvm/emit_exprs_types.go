@@ -1281,6 +1281,26 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return e.inferExprType(ex.Exprs[len(ex.Exprs)-1])
 		}
 		return TypeI64
+	case *ast.NewMapExpression:
+		// Mirrors emitNewMapValue's defaults (string keys, number values).
+		keyTy := TypePtr
+		valTy := TypeI64
+		if ex.KeyType != nil {
+			keyTy = e.resolveType(ex.KeyType)
+		}
+		if ex.ValType != nil {
+			valTy = e.resolveType(ex.ValType)
+		}
+		return MapType(keyTy, valTy)
+	case *ast.NewSetExpression:
+		// Mirrors emitNewSetValue's shape without emitting the initializer;
+		// an initializer-inferred element type falls back to the string
+		// default here (typeof/inference only needs the Set-ness).
+		elemTy := TypePtr
+		if ex.ElemType != nil {
+			elemTy = e.resolveType(ex.ElemType)
+		}
+		return SetType(elemTy)
 	case *ast.NewErrorExpression:
 		return errorObjType
 	case *ast.NewDateExpression:

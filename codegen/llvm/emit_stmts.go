@@ -456,12 +456,17 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// second accepted shape (TDD-00089). Any other iterable is a clean rejection.
 	if s.Await {
 		objTy := e.inferExprType(s.Iterable)
-		if objTy.IsGenerator && objTy.GeneratorIsAsync {
+		if objTy.IsGenerator {
 			genVal, err := e.emitExpr(s.Iterable)
 			if err != nil {
 				return err
 			}
-			return e.emitForAwaitOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
+			if objTy.GeneratorIsAsync {
+				return e.emitForAwaitOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
+			}
+			// A sync generator in `for await` (CreateAsyncFromSyncIterator):
+			// drive it synchronously, awaiting each yielded value.
+			return e.emitForAwaitOfSyncGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
 		}
 		if objTy.IsClass {
 			if info, ok := e.classes[objTy.ClassName]; ok {
@@ -472,6 +477,27 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 					}
 					return e.emitForAwaitOfAsyncIterable(s, objTy, iterableVal, condL, bodyL, incL, endL)
 				}
+				// A sync [Symbol.iterator]() iterable in `for await`: drive it
+				// synchronously, awaiting each value before binding.
+				if _, ok := info.MethodSigs[syncIteratorMethodName]; ok {
+					iterableVal, err := e.emitExpr(s.Iterable)
+					if err != nil {
+						return err
+					}
+					return e.emitForOfSymbolIterator(s, objTy, iterableVal, true, condL, bodyL, incL, endL)
+				}
+			}
+		}
+		// An object literal (a static struct) with a `[Symbol.asyncIterator]`
+		// (or, failing that, `[Symbol.iterator]`) member — desugared by the
+		// parser to a closure-typed `@@asyncIterator`/`@@iterator` field: call
+		// the closure and iterate whatever it returns.
+		if objTy.IsObject {
+			if _, _, ok := objTy.FieldIndex(asyncIteratorMethodName); ok {
+				return e.emitForOfObjectSymbolIterable(s, objTy, asyncIteratorMethodName, true, condL, bodyL, incL, endL)
+			}
+			if _, _, ok := objTy.FieldIndex(syncIteratorMethodName); ok {
+				return e.emitForOfObjectSymbolIterable(s, objTy, syncIteratorMethodName, true, condL, bodyL, incL, endL)
 			}
 		}
 		// `for await` over a sync array (TDD-00092): JS awaits each element, so an
@@ -481,7 +507,37 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		if objTy.IsArray {
 			return e.emitForAwaitOfArray(s, objTy, condL, bodyL, incL, endL)
 		}
-		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a class with a [Symbol.asyncIterator]() method, or an array (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
+		// A Map/Set in `for await`: materialize the values into an array (a Set
+		// iterates its elements, a Map its values — same shape as the sync
+		// for-of below) and reuse the array loop's per-element await.
+		if objTy.IsMap || objTy.IsSet {
+			var mapPtr string
+			if id, ok := s.Iterable.(*ast.Identifier); ok {
+				iterSym, found := e.lookup(id.Name)
+				if !found {
+					return fmt.Errorf("%d:%d: undefined variable '%s'", s.GetPos().Line, s.GetPos().Col, id.Name)
+				}
+				loaded := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", loaded, iterSym.Ptr))
+				mapPtr = loaded
+			} else {
+				iterableVal, err := e.emitExpr(s.Iterable)
+				if err != nil {
+					return err
+				}
+				mapPtr = iterableVal.Ref
+			}
+			valsVal, err := e.mapOrSetValuesArray(objTy, mapPtr)
+			if err != nil {
+				return err
+			}
+			ptrR := e.freshReg()
+			lenR := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrR, valsVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenR, valsVal.Ref))
+			return e.emitForAwaitOfArrayCore(s, *valsVal.Ty.ElemType, ptrR, lenR, condL, bodyL, incL, endL)
+		}
+		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
 	}
 
 	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
@@ -490,8 +546,27 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// (unknown length, one call per iteration) from the array/Map/Set path
 	// below, so it's dispatched first and returns early via its own,
 	// independent loop-emission code.
+	// An object literal (a static struct) with a `[Symbol.iterator]` member —
+	// same desugar and dispatch as the for-await object case, sync flavor.
+	if objTy := e.inferExprType(s.Iterable); objTy.IsObject {
+		if _, _, ok := objTy.FieldIndex(syncIteratorMethodName); ok {
+			return e.emitForOfObjectSymbolIterable(s, objTy, syncIteratorMethodName, false, condL, bodyL, incL, endL)
+		}
+	}
+
 	if objTy := e.inferExprType(s.Iterable); objTy.IsClass {
 		if info, ok := e.classes[objTy.ClassName]; ok {
+			// A `[Symbol.iterator]()` method (desugared to `@@iterator`) wins
+			// over the structural `next(): T | null` shape — the spec's real
+			// `{value, done}` protocol, dispatched like `[Symbol.asyncIterator]`
+			// is in `for await`.
+			if _, ok := info.MethodSigs[syncIteratorMethodName]; ok {
+				iterableVal, err := e.emitExpr(s.Iterable)
+				if err != nil {
+					return err
+				}
+				return e.emitForOfSymbolIterator(s, objTy, iterableVal, false, condL, bodyL, incL, endL)
+			}
 			if sig, ok := info.MethodSigs["next"]; ok &&
 				len(sig.ParamTypes) == 0 && sig.RetType.Nullable &&
 				!sig.RetType.IsArray && !sig.RetType.IsMap && !sig.RetType.IsSet {

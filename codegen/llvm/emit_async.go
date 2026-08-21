@@ -200,8 +200,32 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// (a buffer) resolve synchronously and are not Promises; treating one as a
 	// Promise slot (the load-and-free below) would free the live buffer and
 	// hand back an empty value. Guard that here rather than in every caller.
+	//
+	// Identity in *value* only: JS still defers the continuation of EVERY await
+	// — `await 1` yields a microtask tick exactly like awaiting an already-
+	// settled promise (`f(); log("c")` where f awaits a plain value prints
+	// `a c b`). Inside an async fn compiled as a task, wrap the value in a
+	// settled task promise and go through the shared task await, whose
+	// park-and-resume-as-microtask is that tick (TDD-00088). Outside a task
+	// context (an async generator's fiber has no current task to park) the
+	// plain identity return stands.
 	argTy := e.inferExprType(ex.Argument)
 	if !hdlVal.Ty.IsPromise && !argTy.IsPromise {
+		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
+		if (e.isAsync && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
+			e.ensurePromiseRuntime()
+			prom := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+			if hdlVal.Ty.IR != "void" && hdlVal.Ty.IR != "" {
+				e.storePromiseValue(prom, hdlVal)
+			}
+			// A fresh promise has no reactions/waiter yet, so a raw fulfilled
+			// store (no settle-drain) is safe here.
+			rp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
+			e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", rp))
+			return e.emitAwaitTaskPromise(prom, hdlVal.Ty)
+		}
 		return hdlVal, nil
 	}
 
@@ -239,25 +263,7 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	}
 
 	if promiseTy.IsResponse && !promiseTy.PromiseResolved {
-		e.ensureFetchAsync()
-		pendingPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, hdlVal.Ref))
-		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
-		status := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-		bodyLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-		respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-		// The slot is not freed: a fetch Promise<Response> is a reusable value
-		// too (TDD-00090). Its pending struct is never freed (like every
-		// fetch allocation — see runtime_fetch.go), `__kml_await_fetch`
-		// short-circuits an already-done handle, and `__kml_pending_finish` is a
-		// non-destructive read of the stored status/body — so `await r; await r`
-		// re-reads the same Response instead of a freed slot.
-		return respVal, nil
+		return e.emitAwaitFetchSlot(hdlVal.Ref), nil
 	}
 
 	resultReg := e.freshReg()
@@ -267,6 +273,51 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// The slot is not freed — a Promise is a reusable value (see
 	// emitAwaitTaskPromise); it leaks in manual mode, collected under `-mm=gc`.
 	return Value{Ref: resultReg, Ty: promiseTy}, nil
+}
+
+// emitAwaitFetchSlot drives a raw fetch Promise<Response> slot (slotRef is the
+// ptr to the heap slot whose first field holds the pending struct) to completion
+// and returns the built Response. Factored out of emitAwait's IsResponse branch
+// so the for-await element path (emitAwaitPromiseElem) can share it.
+// The slot is not freed: a fetch Promise<Response> is a reusable value
+// (TDD-00090). Its pending struct is never freed (like every fetch allocation —
+// see runtime_fetch.go), `__kml_await_fetch` short-circuits an already-done
+// handle, and `__kml_pending_finish` is a non-destructive read of the stored
+// status/body — so `await r; await r` re-reads the same Response instead of a
+// freed slot. A transport-level failure throws (an HTTP 4xx/5xx is a fulfilled
+// Response, per WHATWG).
+func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
+	e.ensureFetchAsync()
+	pendingPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, slotRef))
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
+	status := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
+	body := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
+	bodyLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
+	return e.buildResponseFromStatusBody(status, body, bodyLen)
+}
+
+// emitAwaitPromiseElem awaits an already-evaluated promise value (elemRef is the
+// slot/handle ptr, elemTy the static Promise<T> type) and returns the awaited T
+// — the per-element await `for await...of` performs on a promise element from an
+// array, Map/Set values, or a sync generator's yields. Dispatches exactly as
+// emitAwait does after evaluation: a raw fetch Promise<Response> drives the
+// fetch (emitAwaitFetchSlot); anything else is a task-shaped promise driven by
+// emitAwaitTaskPromise (which re-throws a rejection at the loop, stopping it —
+// matching JS).
+func (e *Emitter) emitAwaitPromiseElem(elemRef string, elemTy Type) (Value, error) {
+	awaitedTy := TypeVoid
+	if elemTy.PromiseType != nil {
+		awaitedTy = *elemTy.PromiseType
+	}
+	if awaitedTy.IsResponse && !awaitedTy.PromiseResolved && !elemTy.PromiseTask {
+		return e.emitAwaitFetchSlot(elemRef), nil
+	}
+	return e.emitAwaitTaskPromise(elemRef, awaitedTy)
 }
 
 // emitAwaitTaskPromise drives a task-shaped promise (already evaluated to hdlRef)
@@ -279,7 +330,12 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, error) {
 	e.ensureFree()
 	e.ensureExceptionHelpers()
-	if e.hasMaySuspend {
+	if e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync {
+		// Inside an async generator's body (the fiber): park the step on the
+		// promise — the step's q stays pending, the consumer's script continues,
+		// and the settle re-enters the fiber right here via a microtask.
+		e.emitAsyncGenAwaitParkUntilSettled(hdlRef)
+	} else if e.hasMaySuspend {
 		e.ensureTaskRuntime()
 		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", hdlRef))
 	} else {

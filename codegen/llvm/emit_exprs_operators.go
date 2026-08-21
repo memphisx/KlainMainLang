@@ -361,16 +361,28 @@ func (e *Emitter) emitBitShift(op string, left, right Value) (Value, error) {
 	return Value{Ref: result, Ty: TypeI64}, nil
 }
 
-// typeofString maps a compiled type to its TypeScript typeof string.
+// typeofString maps a compiled type to its TypeScript typeof string. The
+// object-flag alternation must come before the bare `IR == "ptr"` case — every
+// heap-backed built-in (Promise, Map, generator instance, Date, …) is a ptr,
+// and falling through mislabeled them all "string" (a 2026-08-21 conformance-
+// sweep find: `typeof somePromise` reported "string").
 func typeofString(ty Type) string {
 	switch {
+	case ty.IsUndefined, ty.IR == "":
+		// The zero Type (an expression the checker can't resolve) reads as
+		// JS's `typeof missingThing === "undefined"`, not a silent "number".
+		return "undefined"
 	case ty.IsFunc:
 		return "function"
 	case ty.IsBigInt:
 		return "bigint"
 	case ty.IsSymbol:
 		return "symbol"
-	case ty.IsObject, ty.IsArray:
+	case ty.IsNull, ty.IsObject, ty.IsArray, ty.IsTuple, ty.IsPromise, ty.IsMap,
+		ty.IsSet, ty.IsGenerator, ty.IsDate, ty.IsResponse, ty.IsClass,
+		ty.IsError, ty.IsRequest, ty.IsFetchRequest, ty.IsURL,
+		ty.IsURLSearchParams, ty.IsHeaders, ty.IsEventEmitter, ty.IsRegExp,
+		ty.IsArrayBuffer, ty.IsTypedArray, ty.IsDynamicObject:
 		return "object"
 	case ty.IR == "i1":
 		return "boolean"
@@ -381,11 +393,126 @@ func typeofString(ty Type) string {
 	}
 }
 
+// typeofBuiltinConstructors are global names that are callable constructors in
+// JS (`typeof Promise === "function"`) and exist in this runtime, but aren't
+// first-class values here — `typeof` answers for them statically.
+var typeofBuiltinConstructors = map[string]bool{
+	"Promise": true, "Map": true, "Set": true, "Date": true, "RegExp": true,
+	"Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
+	"ReferenceError": true, "EvalError": true, "URIError": true, "AggregateError": true,
+	"ArrayBuffer": true, "Int8Array": true, "Uint8Array": true, "Uint8ClampedArray": true,
+	"Int16Array": true, "Uint16Array": true, "Int32Array": true, "Uint32Array": true,
+	"Float32Array": true, "Float64Array": true, "BigInt64Array": false, "BigUint64Array": false,
+	"Number": true, "String": true, "Boolean": true, "Symbol": true, "BigInt": true,
+	"Object": true, "Array": true, "URL": true, "URLSearchParams": true,
+	"Headers": true, "Request": true, "Response": true, "EventEmitter": true,
+	"TextEncoder": true, "TextDecoder": true, "XMLHttpRequest": true,
+	"WebSocket": true, "EventSource": true, "AbortController": true,
+	"AbortSignal": true, "Event": true, "EventTarget": true,
+}
+
+// typeofBuiltinFunctions are implemented global functions (`typeof fetch ===
+// "function"`).
+var typeofBuiltinFunctions = map[string]bool{
+	"fetch": true, "setTimeout": true, "setInterval": true, "clearTimeout": true,
+	"clearInterval": true, "queueMicrotask": true, "structuredClone": true,
+	"parseInt": true, "parseFloat": true, "isNaN": true, "isFinite": true,
+	"btoa": true, "atob": true, "encodeURI": true, "decodeURI": true,
+	"encodeURIComponent": true, "decodeURIComponent": true,
+}
+
+// typeofPromiseStatics are the Promise combinators this runtime implements —
+// `typeof Promise.all === "function"`; an unimplemented static (`Promise.try`)
+// honestly reads "undefined" (it does not exist in this runtime).
+var typeofPromiseStatics = map[string]bool{
+	"all": true, "allSettled": true, "any": true, "race": true,
+	"resolve": true, "reject": true,
+}
+
+// typeofStaticAnswer resolves `typeof <arg>` for arguments that aren't
+// expressions at all in this compiler — references to built-in namespaces,
+// constructors, classes, and unresolved identifiers — where inference has no
+// type to give (previously they all fell into typeofString's "number" default,
+// a silently wrong answer). Returns "" to let normal inference answer.
+func (e *Emitter) typeofStaticAnswer(arg ast.Expression) string {
+	switch a := arg.(type) {
+	case *ast.Identifier:
+		if _, found := e.lookup(a.Name); found {
+			return "" // a real binding — infer normally (shadowing wins)
+		}
+		if _, ok := e.funcs[a.Name]; ok {
+			return "" // named function — inference already answers "function"
+		}
+		if _, ok := e.classes[a.Name]; ok {
+			return "function" // a class is a constructor function in JS
+		}
+		if impl, known := typeofBuiltinConstructors[a.Name]; known {
+			if impl {
+				return "function"
+			}
+			return "undefined"
+		}
+		if typeofBuiltinFunctions[a.Name] {
+			return "function"
+		}
+		switch a.Name {
+		case "Math", "JSON", "console", "globalThis":
+			return "object"
+		case "NaN", "Infinity":
+			return "" // numeric globals — infer normally
+		}
+		// JS: `typeof undeclared` is "undefined", never an error.
+		return "undefined"
+	case *ast.MemberExpression:
+		obj, ok := a.Object.(*ast.Identifier)
+		if !ok {
+			return ""
+		}
+		if _, shadowed := e.lookup(obj.Name); shadowed {
+			return ""
+		}
+		switch obj.Name {
+		case "Promise":
+			if typeofPromiseStatics[a.Property] {
+				return "function"
+			}
+			return "undefined"
+		case "Math":
+			if typeofMathMethods[a.Property] {
+				return "function"
+			}
+			return "" // constants (Math.PI etc.) infer as number correctly
+		case "JSON":
+			if a.Property == "parse" || a.Property == "stringify" {
+				return "function"
+			}
+			return "undefined"
+		}
+	}
+	return ""
+}
+
+// typeofMathMethods are the implemented Math functions (the emit_call_math.go
+// dispatch set) — `typeof Math.floor === "function"`; Math's numeric constants
+// stay on normal inference.
+var typeofMathMethods = map[string]bool{
+	"abs": true, "acos": true, "acosh": true, "asin": true, "asinh": true,
+	"atan": true, "atan2": true, "atanh": true, "cbrt": true, "ceil": true,
+	"clz32": true, "cos": true, "cosh": true, "exp": true, "expm1": true,
+	"floor": true, "fround": true, "hypot": true, "imul": true, "log": true,
+	"log10": true, "log1p": true, "log2": true, "max": true, "min": true,
+	"pow": true, "random": true, "round": true, "sign": true, "sin": true,
+	"sinh": true, "sqrt": true, "tan": true, "tanh": true, "trunc": true,
+}
+
 func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 	// typeof is resolved purely from the inferred type — no code emitted for the
 	// argument — EXCEPT for any/unknown, where the concrete type can change at
 	// runtime, so it must become a genuine runtime tag dispatch instead.
 	if ex.Op == "typeof" {
+		if s := e.typeofStaticAnswer(ex.Arg); s != "" {
+			return Value{Ref: e.internString(s), Ty: TypePtr}, nil
+		}
 		ty := e.inferExprType(ex.Arg)
 		if ty.IsDynamic {
 			val, err := e.emitExpr(ex.Arg)

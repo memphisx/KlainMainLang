@@ -251,6 +251,10 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpStkField, "ptr", jmpStk)
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpTopField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorGenErrorField, "ptr", "null")
+	e.storeGeneratorField(genObj, genTy, GeneratorPendingQField, "ptr", "null")
+	e.storeGeneratorField(genObj, genTy, GeneratorParkedField, "i64", "0")
+	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", "null")
+	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", "null")
 
 	for i, argExpr := range args {
 		val, err := e.emitExpr(argExpr)
@@ -1388,8 +1392,11 @@ func (e *Emitter) emitAsyncGenRejectPromise(q, errPtr string) {
 // fulfilled with the `{value,done}` result, or — when the body's outer catch-all
 // captured an uncaught throw into __genError — rejected with that error
 // (TDD-00086 async extension). Leaves the emitter in a live block.
-func (e *Emitter) emitAsyncGenSwapAndSettle(genObj string, genTy Type, elemTy, resultTy Type, q string) {
-	e.emitGeneratorSwapCore(genObj, genTy, true)
+// emitAsyncGenSettleFromFields settles q from the generator's post-swap state:
+// a captured body error rejects q, else q fulfils with {__yielded, __done} —
+// always through __kml_promise_settle (the ADR-00275 rule: reactions/parked
+// awaiters must be woken).
+func (e *Emitter) emitAsyncGenSettleFromFields(genObj string, genTy Type, elemTy, resultTy Type, q string) {
 	genErr := e.loadGeneratorField(genObj, genTy, GeneratorGenErrorField)
 	isErr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isErr, genErr.Ref))
@@ -1408,6 +1415,119 @@ func (e *Emitter) emitAsyncGenSwapAndSettle(genObj string, genTy Type, elemTy, r
 	e.emitLabel(mrgL)
 }
 
+// emitAsyncGenAwaitParkUntilSettled is emitted INSIDE an async generator's body
+// (the fiber): it parks the current step on promise p — attach a {stepFn,
+// genObj} resume closure to p's reaction list (or enqueue it onto the microtask
+// FIFO now when p is already settled: awaiting a settled promise still defers,
+// as in JS), set __parked, and swap back to the step's caller, leaving the
+// step's q pending. When p settles, its reaction drain enqueues the resume,
+// which swaps back into the fiber right here; __parked clears and p is settled.
+// No __yielded/__done stores (unlike a yield's swap-out) and no jmpbuf/GC
+// bookkeeping (the resumer's swapCore owns that, same as for yields).
+func (e *Emitter) emitAsyncGenAwaitParkUntilSettled(pReg string) {
+	gctx := e.currentGenerator
+	genObj := gctx.genObjReg
+	genTy := gctx.genTy
+	e.ensureMicrotasks()
+	e.ensureMalloc()
+	stepFn := e.ensureAsyncGenStepFn(genTy)
+
+	clo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	cf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cf, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", stepFn, cf))
+	ce := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ce, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genObj, ce))
+
+	// Settled → enqueue the resume now; pending → attach a reaction node.
+	sP := e.freshReg()
+	sV := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sP, promiseStructIR, pReg))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sV, sP))
+	settled := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, sV))
+	nowL := e.freshLabel("agpark.now")
+	attachL := e.freshLabel("agpark.attach")
+	parkL := e.freshLabel("agpark.park")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", settled, nowL, attachL))
+	e.emitLabel(nowL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", parkL))
+	e.emitLabel(attachL)
+	node := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
+	rxP := e.freshReg()
+	oldHead := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, pReg))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
+	nClo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nClo, node))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", clo, nClo))
+	nNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nNext, node))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", oldHead, nNext))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, rxP))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", parkL))
+
+	e.emitLabel(parkL)
+	e.storeGeneratorField(genObj, genTy, GeneratorParkedField, "i64", "1")
+	callerCtx := e.loadGeneratorField(genObj, genTy, GeneratorCallerCtxField)
+	ownCtx := e.loadGeneratorField(genObj, genTy, GeneratorCtxField)
+	swaprc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr %s)", swaprc, ownCtx.Ref, callerCtx.Ref))
+	// Resumed by the step fn: the awaited promise is settled now.
+	e.storeGeneratorField(genObj, genTy, GeneratorParkedField, "i64", "0")
+}
+
+// asyncGenReqNodeIR is the queued-request node layout: {i64 resumeMode,
+// ptr sentSlot (malloc'd elem-typed spill, freed at pop; null for .throw),
+// ptr thrown, ptr q, ptr next}.
+const asyncGenReqNodeIR = "{ i64, ptr, ptr, ptr, ptr }"
+
+// emitAsyncGenSubmitRequest appends a {mode, sent, thrown, q} request to the
+// generator's FIFO — called by .next/.throw/.return when a step is in flight
+// (the spec's AsyncGeneratorEnqueue). sentVal may be the zero value for .throw.
+func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Type, mode string, sentVal Value, thrown string, q string) {
+	e.ensureMalloc()
+	node := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", node))
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", slot, StructFieldSize(elemTy)))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, sentVal.Ref, slot, elemTy.Align()))
+	storeAt := func(idx int, ir, val string) {
+		gp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, asyncGenReqNodeIR, node, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, gp))
+	}
+	storeAt(0, "i64", mode)
+	storeAt(1, "ptr", slot)
+	storeAt(2, "ptr", thrown)
+	storeAt(3, "ptr", q)
+	storeAt(4, "ptr", "null")
+	// Append: empty queue → head = tail = node; else tail.next = node, tail = node.
+	head := e.loadGeneratorField(genObj, genTy, GeneratorReqHeadField)
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isEmpty, head.Ref))
+	emptyL := e.freshLabel("agenq.empty")
+	tailL := e.freshLabel("agenq.tail")
+	doneL := e.freshLabel("agenq.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, emptyL, tailL))
+	e.emitLabel(emptyL)
+	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", node)
+	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", node)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(tailL)
+	tail := e.loadGeneratorField(genObj, genTy, GeneratorReqTailField)
+	tn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", tn, asyncGenReqNodeIR, tail.Ref))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, tn))
+	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", node)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+}
+
 // emitAsyncGeneratorThrowByValue implements `.throw(e)` on an async generator
 // (TDD-00086): it injects the error at the suspension point and returns a settled
 // `Promise<{value,done}>` — fulfilled if the body caught the throw and yielded/
@@ -1416,33 +1536,45 @@ func (e *Emitter) emitAsyncGeneratorThrowByValue(genObj string, genTy Type, errP
 	e.emitAsyncGenRuntimeSetup()
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
-	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", errPtr)
-	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "1")
 
+	// A not-started, idle generator rejects immediately without running the
+	// body (and is marked done). Otherwise the request goes through the shared
+	// submit-or-start: a busy generator queues it (serviced when the in-flight
+	// step settles — the spec never injects into a step mid-await); an idle
+	// suspended one swaps in with resume mode 1; an idle done one rejects via
+	// the step fn's drained-queue dispatch.
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-
+	pending := e.loadGeneratorField(genObj, genTy, GeneratorPendingQField)
+	idle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", idle, pending.Ref))
 	started := e.loadGeneratorField(genObj, genTy, GeneratorStartedField)
-	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
-	notDone := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notDone, done.Ref))
-	suspended := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", suspended, started.Ref, notDone))
-	swapL := e.freshLabel("athrow.swap")
+	notStarted := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notStarted, started.Ref))
+	freshRej := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", freshRej, idle, notStarted))
 	rejL := e.freshLabel("athrow.rej")
+	submitL := e.freshLabel("athrow.submit")
 	doneL := e.freshLabel("athrow.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", suspended, swapL, rejL))
+	qSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", qSlot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", freshRej, rejL, submitL))
 
 	e.emitLabel(rejL)
+	qr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", qr))
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "1")
-	e.emitAsyncGenRejectPromise(q, errPtr)
+	e.emitAsyncGenRejectPromise(qr, errPtr)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qr, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
-	e.emitLabel(swapL)
-	e.emitAsyncGenSwapAndSettle(genObj, genTy, elemTy, resultTy, q)
+	e.emitLabel(submitL)
+	zeroSent := e.emitScalarZero(elemTy)
+	qs := e.emitAsyncGenSubmitOrStart(genObj, genTy, elemTy, "1", zeroSent, errPtr)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qs, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qSlot))
 	qt := PromiseOf(resultTy)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, nil
@@ -1457,36 +1589,46 @@ func (e *Emitter) emitAsyncGeneratorReturnByValue(genObj string, genTy Type, rv 
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
 	trueVal := Value{Ref: "true", Ty: TypeBool}
-	e.storeGeneratorField(genObj, genTy, GeneratorSentField, rv.Ty.IR, rv.Ref)
-	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "2")
 
+	// A not-started, idle generator settles {v, done:true} immediately without
+	// running the body. Otherwise the shared submit-or-start: busy queues the
+	// request; idle-suspended swaps in with resume mode 2 (running enclosing
+	// finallys — which may themselves await and park); idle-done settles via
+	// the step fn's drained-queue dispatch.
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-
+	pending := e.loadGeneratorField(genObj, genTy, GeneratorPendingQField)
+	idle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", idle, pending.Ref))
 	started := e.loadGeneratorField(genObj, genTy, GeneratorStartedField)
-	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
-	notDone := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notDone, done.Ref))
-	suspended := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", suspended, started.Ref, notDone))
-	swapL := e.freshLabel("aret.swap")
+	notStarted := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notStarted, started.Ref))
+	freshProp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", freshProp, idle, notStarted))
 	propL := e.freshLabel("aret.prop")
+	submitL := e.freshLabel("aret.submit")
 	doneL := e.freshLabel("aret.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", suspended, swapL, propL))
+	qSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", qSlot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", freshProp, propL, submitL))
 
 	e.emitLabel(propL)
+	qp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", qp))
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "1")
 	resProp := e.buildGenNextResult(resultTy, elemTy, rv, trueVal)
-	e.storePromiseValue(q, resProp)
+	e.storePromiseValue(qp, resProp)
 	e.ensurePromiseSettle()
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", qp))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qp, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
-	e.emitLabel(swapL)
-	e.emitAsyncGenSwapAndSettle(genObj, genTy, elemTy, resultTy, q)
+	e.emitLabel(submitL)
+	qs := e.emitAsyncGenSubmitOrStart(genObj, genTy, elemTy, "2", rv, "null")
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qs, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qSlot))
 	qt := PromiseOf(resultTy)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, nil
@@ -1511,58 +1653,70 @@ func (e *Emitter) emitAsyncGeneratorNextByValue(genObj string, genTy Type, args 
 	return e.emitAsyncGeneratorNextCore(genObj, genTy, sentVal), nil
 }
 
-// emitAsyncGeneratorNextCore drives a suspended async generator one step with an
-// already-evaluated sent value and returns its settled `Promise<{value,done}>` —
-// the shared core of async `.next()` and of async `yield*`'s delegation loop
-// (TDD-00086), which feeds each sent value through as a Value.
+// emitAsyncGeneratorNextCore submits a `.next(sent)` request: if no step is in
+// flight it starts one **synchronously** — the body runs on its fiber right now,
+// up to the first `await`-park, `yield`, or completion, matching V8/spec (the
+// spec's AsyncGeneratorResume; node prints `before body after` for
+// `log("before"); g().next(); log("after")`) — else it queues the request
+// (AsyncGeneratorEnqueue), serviced when the in-flight step settles. Returns the
+// step's `Promise<{value,done}>`, pending while the fiber is parked at an await.
 func (e *Emitter) emitAsyncGeneratorNextCore(genObj string, genTy Type, sentVal Value) Value {
 	e.emitAsyncGenRuntimeSetup()
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
-	e.storeGeneratorField(genObj, genTy, GeneratorSentField, sentVal.Ty.IR, sentVal.Ref)
-	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "0")
-
-	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-
-	// Deferred (JS-faithful): enqueue the step onto the microtask FIFO and return
-	// the still-pending promise, so the body runs as a microtask, not synchronously
-	// at the `.next()` call (TDD-00094).
-	e.enqueueAsyncGenStep(genObj, genTy, q)
-
+	q := e.emitAsyncGenSubmitOrStart(genObj, genTy, elemTy, "0", sentVal, "null")
 	qt := PromiseOf(resultTy)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}
 }
 
-// enqueueAsyncGenStep enqueues a `{step, env={genObj, q}}` closure onto the
-// microtask FIFO (TDD-00094); the step runs emitAsyncGenStepBody when drained.
-func (e *Emitter) enqueueAsyncGenStep(genObj string, genTy Type, q string) {
-	e.ensureMicrotasks()
-	e.ensureMalloc()
+// emitAsyncGenSubmitOrStart is the shared `.next`/`.throw`/`.return` entry: it
+// allocates the request's result promise q, then either starts the step now
+// (idle: store the resume fields + __pendingQ and call the step function
+// synchronously) or appends the request to the generator's FIFO (busy: a step
+// is running or parked at an await). Returns q's register.
+func (e *Emitter) emitAsyncGenSubmitOrStart(genObj string, genTy Type, elemTy Type, mode string, sentVal Value, thrown string) string {
 	stepFn := e.ensureAsyncGenStepFn(genTy)
-	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
-	e0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genObj, e0))
-	e1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, e1))
-	clo := e.freshReg()
-	cf := e.freshReg()
-	ce := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cf, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", stepFn, cf))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ce, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, ce))
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
+	q := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+	pending := e.loadGeneratorField(genObj, genTy, GeneratorPendingQField)
+	busy := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", busy, pending.Ref))
+	busyL := e.freshLabel("agen.submit.q")
+	startL := e.freshLabel("agen.submit.start")
+	doneL := e.freshLabel("agen.submit.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", busy, busyL, startL))
+
+	e.emitLabel(busyL)
+	e.emitAsyncGenSubmitRequest(genObj, genTy, elemTy, mode, sentVal, thrown, q)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(startL)
+	e.storeGeneratorField(genObj, genTy, GeneratorSentField, sentVal.Ty.IR, sentVal.Ref)
+	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", mode)
+	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", thrown)
+	e.storeGeneratorField(genObj, genTy, GeneratorPendingQField, "ptr", q)
+	e.emitInstr(fmt.Sprintf("call void %s(ptr %s)", stepFn, genObj))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	return q
 }
 
-// ensureAsyncGenStepFn emits (once per generator type) the microtask step function
-// `void @__kml_agen_step_N(ptr %env)`, env = { genObj, q }: it loads both and runs
-// emitAsyncGenStepBody. Memoized by the generator struct IR (TDD-00094).
+// ensureAsyncGenStepFn emits (once per generator type) the step function
+// `void @__kml_agen_step_N(ptr %env)`, env = the generator object itself. It is
+// both the synchronous step entry (called directly by submit-or-start) and the
+// await-park resume target (enqueued as a {stepFn, genObj} microtask closure by
+// the awaited promise's settle). The loop:
+//
+//	steploop: q = __pendingQ
+//	  done?  → settle q per __resumeMode (0: {zero,done}, 1: reject __thrown,
+//	           2: {__sent,done}) — the spec's drained-queue completions
+//	  else   → swap into the fiber; on return:
+//	             __parked? → ret (q stays pending; a settle re-enqueues us)
+//	             else      → settle q from __genError/__yielded (promise_settle)
+//	  then pop the next queued request into the resume fields and loop,
+//	  or (empty queue) clear __pendingQ and ret.
 func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	key := genTy.StructIR()
 	if name, ok := e.asyncGenStepFns[key]; ok {
@@ -1575,44 +1729,115 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	resultTy := genNextResultType(elemTy)
 	restore := e.beginThunkEmit()
 	defer restore()
-	genObj := e.freshReg()
-	ge := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", ge))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", genObj, ge))
+	e.ensureFree()
+	genObj := "%env"
+
+	loopL := e.freshLabel("agstep.loop")
+	doneDispL := e.freshLabel("agstep.donedisp")
+	dRejL := e.freshLabel("agstep.donerej")
+	dChk2L := e.freshLabel("agstep.donechk2")
+	dRetL := e.freshLabel("agstep.doneret")
+	dZeroL := e.freshLabel("agstep.donezero")
+	swapL := e.freshLabel("agstep.swap")
+	settleL := e.freshLabel("agstep.settle")
+	drainL := e.freshLabel("agstep.drainq")
+	idleL := e.freshLabel("agstep.idle")
+	popL := e.freshLabel("agstep.pop")
+	retL := e.freshLabel("agstep.ret")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+
+	e.emitLabel(loopL)
 	q := e.freshReg()
-	qe := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", qe))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qe))
-	e.emitAsyncGenStepBody(genObj, genTy, elemTy, resultTy, q)
+	qv := e.loadGeneratorField(genObj, genTy, GeneratorPendingQField)
+	e.emitInstr(fmt.Sprintf("%s = bitcast ptr %s to ptr", q, qv.Ref))
+	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done.Ref, doneDispL, swapL))
+
+	// A request popped onto (or submitted to) an already-finished generator:
+	// complete it per the spec's drained-queue rules.
+	e.emitLabel(doneDispL)
+	mode := e.loadGeneratorField(genObj, genTy, GeneratorResumeModeField)
+	is1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", is1, mode.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is1, dRejL, dChk2L))
+	e.emitLabel(dRejL)
+	thrown := e.loadGeneratorField(genObj, genTy, GeneratorThrownField)
+	e.emitAsyncGenRejectPromise(q, thrown.Ref)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
+	e.emitLabel(dChk2L)
+	is2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", is2, mode.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is2, dRetL, dZeroL))
+	e.emitLabel(dRetL)
+	sentBack := e.loadGeneratorField(genObj, genTy, GeneratorSentField)
+	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, sentBack)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
+	e.emitLabel(dZeroL)
+	zeroV := e.emitScalarZero(elemTy)
+	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, zeroV)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
+
+	// Live generator: swap into the fiber; the resume fields (__sent /
+	// __resumeMode / __thrown) are already staged. A park leaves q pending.
+	e.emitLabel(swapL)
+	e.emitGeneratorSwapCore(genObj, genTy, true)
+	parked := e.loadGeneratorField(genObj, genTy, GeneratorParkedField)
+	isParked := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isParked, parked.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isParked, retL, settleL))
+
+	e.emitLabel(settleL)
+	e.emitAsyncGenSettleFromFields(genObj, genTy, elemTy, resultTy, q)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
+
+	// Service the next queued request, if any.
+	e.emitLabel(drainL)
+	head := e.loadGeneratorField(genObj, genTy, GeneratorReqHeadField)
+	hnull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", hnull, head.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hnull, idleL, popL))
+
+	e.emitLabel(idleL)
+	e.storeGeneratorField(genObj, genTy, GeneratorPendingQField, "ptr", "null")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
+
+	e.emitLabel(popL)
+	loadAt := func(idx int) string {
+		gp := e.freshReg()
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, asyncGenReqNodeIR, head.Ref, idx))
+		ir := "ptr"
+		if idx == 0 {
+			ir = "i64"
+		}
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", v, ir, gp))
+		return v
+	}
+	pmode := loadAt(0)
+	pslot := loadAt(1)
+	pthrown := loadAt(2)
+	pq := loadAt(3)
+	pnext := loadAt(4)
+	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", pnext)
+	psent := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", psent, elemTy.IR, pslot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pslot))
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", head.Ref))
+	e.storeGeneratorField(genObj, genTy, GeneratorSentField, elemTy.IR, psent)
+	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", pmode)
+	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", pthrown)
+	e.storeGeneratorField(genObj, genTy, GeneratorPendingQField, "ptr", pq)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+
+	e.emitLabel(retL)
 	e.emitInstr("ret void")
+
 	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env) {\nentry:\n", name))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
 	return name
-}
-
-// emitAsyncGenStepBody advances a suspended async generator one step and settles q
-// — the fiber swap + settle (or, if already done, a {value:zero, done:true}
-// settle). Shared between the deferred `.next()` microtask step and the
-// synchronous `yield*`/`.throw`/`.return` paths (TDD-00094).
-func (e *Emitter) emitAsyncGenStepBody(genObj string, genTy, elemTy, resultTy Type, q string) {
-	alreadyDone := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
-	swapL := e.freshLabel("agen.swap")
-	skipL := e.freshLabel("agen.skip")
-	doneL := e.freshLabel("agen.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", alreadyDone.Ref, skipL, swapL))
-
-	e.emitLabel(swapL)
-	e.emitAsyncGenSwapAndSettle(genObj, genTy, elemTy, resultTy, q)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(skipL)
-	skipZero := e.emitScalarZero(elemTy)
-	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, skipZero)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(doneL)
 }
 
 // settleAsyncGenResult builds the `{value, done}` result object from the
@@ -1648,8 +1873,14 @@ func (e *Emitter) settleAsyncGenResult(q, genObj string, genTy, resultTy, elemTy
 func (e *Emitter) emitAwaitSettledResult(promReg string, resultTy Type) Value {
 	e.ensureFree()
 	e.ensureExceptionHelpers()
-	e.ensureTaskRuntime()
-	e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", promReg))
+	if e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync {
+		// `yield*` awaits an inner step from inside the outer's fiber — park the
+		// outer on it (nested parks compose: inner settles → outer resumes).
+		e.emitAsyncGenAwaitParkUntilSettled(promReg)
+	} else {
+		e.ensureTaskRuntime()
+		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", promReg))
+	}
 	resReg := e.freshReg()
 	resP := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, promReg))
@@ -1801,6 +2032,107 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	return nil
 }
 
+// emitForAwaitOfSyncGenerator consumes `for await (const x of syncGen())` —
+// JS treats a sync iterable in `for await` as CreateAsyncFromSyncIterator: each
+// yielded value is awaited before binding (a Promise element awaits to its T, a
+// plain value is an identity await). The loop shape is emitForOfGenerator's
+// (repeated synchronous .next() against one instance); only the per-element
+// await before binding is new.
+func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type, genVal Value, condL, bodyL, incL, endL string) error {
+	pos := s.GetPos()
+	elemTy := *genTy.GeneratorElemType
+
+	// The bound value's type is the yielded element awaited.
+	awaitedTy := elemTy
+	if elemTy.IsPromise {
+		if elemTy.PromiseType != nil {
+			awaitedTy = *elemTy.PromiseType
+		} else {
+			awaitedTy = TypeVoid
+		}
+	}
+
+	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
+	resultAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
+
+	varPtr := e.freshReg()
+	if !isPattern {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, awaitedTy.IR, awaitedTy.Align()))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
+	}
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	nextVal, err := e.emitGeneratorNextByValue(genVal.Ref, genTy, nil, pos)
+	if err != nil {
+		return err
+	}
+	resultTy := nextVal.Ty
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nextVal.Ref, resultAlloca))
+	resultReloaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resultReloaded, resultAlloca))
+	dIdx, _, _ := resultTy.FieldIndex("done")
+	dGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReloaded, dIdx))
+	doneReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", doneReg, dGep))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
+
+	e.emitLabel(bodyL)
+	resultForBody := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resultForBody, resultAlloca))
+	vIdx, _, _ := resultTy.FieldIndex("value")
+	vGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
+	loaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+
+	// Await the yielded value before binding (identity for a plain value).
+	boundVal := Value{Ref: loaded, Ty: elemTy}
+	boundTy := elemTy
+	if elemTy.IsPromise {
+		aw, err := e.emitAwaitPromiseElem(loaded, elemTy)
+		if err != nil {
+			return err
+		}
+		boundVal = aw
+		boundTy = awaitedTy
+		if aw.Ty.IR != "" {
+			boundTy = aw.Ty
+		}
+	}
+
+	switch {
+	case s.ObjectPattern != nil:
+		if err := e.unpackObjectPatternInto(boundVal.Ref, boundTy, s.ObjectPattern, pos); err != nil {
+			return err
+		}
+	case s.ArrayPattern != nil:
+		if !boundTy.IsTuple {
+			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
+		}
+		if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
+			return err
+		}
+	default:
+		if awaitedTy.IR != "void" && awaitedTy.IR != "" {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, awaitedTy.Align()))
+		}
+	}
+	if err := e.emitStmt(s.Body); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
+
+	e.emitLabel(incL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(endL)
+	return nil
+}
+
 // asyncIteratorMethodName is the reserved `MethodSigs` key a `[Symbol.asyncIterator]()`
 // method desugars to (TDD-00089). The `@@` prefix is not a lexable identifier, so it can
 // never collide with a user-declared method — the parser produces it, this file consumes it.
@@ -1823,7 +2155,15 @@ func (e *Emitter) emitForAwaitOfAsyncIterable(s *ast.ForOfStatement, iterableTy 
 	if !iterVal.Ty.IsClass {
 		return fmt.Errorf("%d:%d: [Symbol.asyncIterator]() must return a class instance with a next() method (TDD-00089)", pos.Line, pos.Col)
 	}
-	iterTy := iterVal.Ty
+	return e.emitForAwaitOfAsyncIteratorInstance(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+}
+
+// emitForAwaitOfAsyncIteratorInstance drives an already-obtained iterator class
+// instance (an `async next(): Promise<{value,done}>` object) — the loop half of
+// emitForAwaitOfAsyncIterable, also reachable directly when an object literal's
+// `[Symbol.asyncIterator]` closure returns the iterator instance itself.
+func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, iterTy Type, iterVal Value, condL, bodyL, incL, endL string) error {
+	pos := s.GetPos()
 	iterInfo, ok := e.classes[iterTy.ClassName]
 	if !ok {
 		return fmt.Errorf("%d:%d: unknown iterator class '%s'", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
@@ -1918,6 +2258,200 @@ func (e *Emitter) emitForAwaitOfAsyncIterable(s *ast.ForOfStatement, iterableTy 
 	return nil
 }
 
+// syncIteratorMethodName is the reserved `MethodSigs` key a `[Symbol.iterator]()`
+// method desugars to — the sync analogue of asyncIteratorMethodName.
+const syncIteratorMethodName = "@@iterator"
+
+// emitForOfSymbolIterator consumes a user class implementing the *sync*
+// iteration protocol by hand: `it = iterable[Symbol.iterator]()` yields an
+// iterator whose `next(): {value, done}` is called each turn (`return this`
+// self-iterators and separate iterator objects both work) — the spec's real
+// `{value, done}` protocol, alongside the structural `next(): T | null` shape
+// this compiler's for...of has always dispatched. With isAwait (`for await`),
+// each value is additionally awaited before binding (identity for a plain
+// value, a real await for a Promise value). Mirrors
+// emitForAwaitOfAsyncIterable; only the non-promise next() and the optional
+// per-value await differ.
+func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type, iterableVal Value, isAwait bool, condL, bodyL, incL, endL string) error {
+	pos := s.GetPos()
+
+	iterVal, err := e.emitClassCall(iterableTy, iterableVal, syncIteratorMethodName, nil, pos, false)
+	if err != nil {
+		return err
+	}
+	if !iterVal.Ty.IsClass {
+		return fmt.Errorf("%d:%d: [Symbol.iterator]() must return a class instance with a next() method", pos.Line, pos.Col)
+	}
+	iterTy := iterVal.Ty
+	iterInfo, ok := e.classes[iterTy.ClassName]
+	if !ok {
+		return fmt.Errorf("%d:%d: unknown iterator class '%s'", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
+	}
+	nextSig, ok := iterInfo.MethodSigs["next"]
+	if !ok {
+		return fmt.Errorf("%d:%d: iterator '%s' has no next() method", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
+	}
+	resultTy := nextSig.RetType
+	if resultTy.IsPromise {
+		return fmt.Errorf("%d:%d: '%s'.next() returns a Promise — a [Symbol.iterator]() iterator must be synchronous (use [Symbol.asyncIterator] with for await)", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
+	}
+	_, elemTy, ok := resultTy.FieldIndex("value")
+	if !ok {
+		return fmt.Errorf("%d:%d: iterator '%s'.next() result has no 'value' field", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
+	}
+	if _, _, ok := resultTy.FieldIndex("done"); !ok {
+		return fmt.Errorf("%d:%d: iterator '%s'.next() result has no 'done' field", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
+	}
+
+	// The bound value's type: with `for await`, a Promise value awaits to its T.
+	boundDeclTy := elemTy
+	if isAwait && elemTy.IsPromise {
+		if elemTy.PromiseType != nil {
+			boundDeclTy = *elemTy.PromiseType
+		} else {
+			boundDeclTy = TypeVoid
+		}
+	}
+
+	iterAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", iterAlloca))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", iterVal.Ref, iterAlloca))
+
+	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
+	resultAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
+	varPtr := e.freshReg()
+	if !isPattern {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, boundDeclTy.IR, boundDeclTy.Align()))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: boundDeclTy})
+	}
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	iterReloaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", iterReloaded, iterAlloca))
+	resultObj, err := e.emitClassCall(iterTy, Value{Ref: iterReloaded, Ty: iterTy}, "next", nil, pos, false)
+	if err != nil {
+		return err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", resultObj.Ref, resultAlloca))
+	resultReloaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resultReloaded, resultAlloca))
+	dIdx, _, _ := resultTy.FieldIndex("done")
+	dGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReloaded, dIdx))
+	doneReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", doneReg, dGep))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
+
+	e.emitLabel(bodyL)
+	resultForBody := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resultForBody, resultAlloca))
+	vIdx, _, _ := resultTy.FieldIndex("value")
+	vGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
+	loaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+
+	boundVal := Value{Ref: loaded, Ty: elemTy}
+	boundTy := elemTy
+	if isAwait && elemTy.IsPromise {
+		aw, err := e.emitAwaitPromiseElem(loaded, elemTy)
+		if err != nil {
+			return err
+		}
+		boundVal = aw
+		boundTy = boundDeclTy
+		if aw.Ty.IR != "" {
+			boundTy = aw.Ty
+		}
+	}
+
+	switch {
+	case s.ObjectPattern != nil:
+		if err := e.unpackObjectPatternInto(boundVal.Ref, boundTy, s.ObjectPattern, pos); err != nil {
+			return err
+		}
+	case s.ArrayPattern != nil:
+		if !boundTy.IsTuple {
+			return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-tuple type", pos.Line, pos.Col)
+		}
+		if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
+			return err
+		}
+	default:
+		if boundDeclTy.IR != "void" && boundDeclTy.IR != "" {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, boundDeclTy.Align()))
+		}
+	}
+	if err := e.emitStmt(s.Body); err != nil {
+		return err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
+
+	e.emitLabel(incL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(endL)
+	return nil
+}
+
+// emitForOfObjectSymbolIterable consumes an object literal (a static struct)
+// carrying a closure-typed `@@asyncIterator`/`@@iterator` field (the parser's
+// desugar of `{ [Symbol.asyncIterator]: … }` / `{ [Symbol.iterator]() {…} }`):
+// load the field's closure, call it with no arguments, and iterate the result
+// by its type — an async generator (for await only), a sync generator, or a
+// class instance (its own `[Symbol.asyncIterator]`/`[Symbol.iterator]` when
+// present, else — for the async protocol — directly an `async next()`
+// iterator). isAwait selects the awaiting loop shapes.
+func (e *Emitter) emitForOfObjectSymbolIterable(s *ast.ForOfStatement, objTy Type, key string, isAwait bool, condL, bodyL, incL, endL string) error {
+	pos := s.GetPos()
+	fIdx, fTy, _ := objTy.FieldIndex(key)
+	if !fTy.IsFunc {
+		return fmt.Errorf("%d:%d: a [Symbol.iterator]/[Symbol.asyncIterator] member must be function-valued", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(s.Iterable)
+	if err != nil {
+		return err
+	}
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objTy.StructIR(), objVal.Ref, fIdx))
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, gep))
+	iterVal, err := e.emitClosureCallByPtr(hdr, fTy, nil, pos)
+	if err != nil {
+		return err
+	}
+	switch {
+	case iterVal.Ty.IsGenerator && iterVal.Ty.GeneratorIsAsync:
+		if !isAwait {
+			return fmt.Errorf("%d:%d: a [Symbol.iterator]() returning an async generator requires 'for await...of'", pos.Line, pos.Col)
+		}
+		return e.emitForAwaitOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+	case iterVal.Ty.IsGenerator:
+		if isAwait {
+			return e.emitForAwaitOfSyncGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+		}
+		return e.emitForOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+	case iterVal.Ty.IsClass:
+		if info, ok := e.classes[iterVal.Ty.ClassName]; ok {
+			if _, has := info.MethodSigs[asyncIteratorMethodName]; has && isAwait {
+				return e.emitForAwaitOfAsyncIterable(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+			}
+			if _, has := info.MethodSigs[syncIteratorMethodName]; has {
+				return e.emitForOfSymbolIterator(s, iterVal.Ty, iterVal, isAwait, condL, bodyL, incL, endL)
+			}
+		}
+		if key == asyncIteratorMethodName && isAwait {
+			// The returned instance is directly the iterator (async next()).
+			return e.emitForAwaitOfAsyncIteratorInstance(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
+		}
+		return fmt.Errorf("%d:%d: the class instance returned by [Symbol.iterator]() must itself declare [Symbol.iterator]()", pos.Line, pos.Col)
+	}
+	return fmt.Errorf("%d:%d: a [Symbol.iterator]/[Symbol.asyncIterator] member must return a generator or a class instance", pos.Line, pos.Col)
+}
+
 // emitForAwaitOfArray consumes `for await (const x of arr)` over a sync array
 // (TDD-00092): JS awaits each element, so an array of promises is awaited
 // sequentially (element N's promise settles before N+1 is bound) and an array of
@@ -1925,10 +2459,22 @@ func (e *Emitter) emitForAwaitOfAsyncIterable(s *ast.ForOfStatement, iterableTy 
 // shape; the only difference is the per-element await before binding.
 func (e *Emitter) emitForAwaitOfArray(s *ast.ForOfStatement, arrTy Type, condL, bodyL, incL, endL string) error {
 	pos := s.GetPos()
-	elemTy := *arrTy.ElemType
+	ptrReg, lenReg, _, err := e.resolveArrayForHOF(s.Iterable, pos)
+	if err != nil {
+		return err
+	}
+	return e.emitForAwaitOfArrayCore(s, *arrTy.ElemType, ptrReg, lenReg, condL, bodyL, incL, endL)
+}
+
+// emitForAwaitOfArrayCore is the loop body shared by the array iterable and the
+// Map/Set iterable (whose values are first materialized into an array): index
+// over ptrReg/lenReg, awaiting each element before binding.
+func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, ptrReg, lenReg, condL, bodyL, incL, endL string) error {
+	pos := s.GetPos()
 
 	// The bound value's type is the element type awaited: T for a Promise<T>
-	// element, or the element type itself for a plain value.
+	// element (Response for a raw fetch element), or the element type itself
+	// for a plain value.
 	awaitedTy := elemTy
 	isPromiseElem := elemTy.IsPromise
 	if isPromiseElem {
@@ -1937,16 +2483,6 @@ func (e *Emitter) emitForAwaitOfArray(s *ast.ForOfStatement, arrTy Type, condL, 
 		} else {
 			awaitedTy = TypeVoid
 		}
-		// A raw-fetch Response promise element is a rarer, separate case (its
-		// value isn't read through the task-promise slot) — a clean rejection.
-		if awaitedTy.IsResponse {
-			return fmt.Errorf("%d:%d: 'for await...of' over an array of fetch Promise<Response> is not supported — await each in a Promise.all instead (TDD-00092)", pos.Line, pos.Col)
-		}
-	}
-
-	ptrReg, lenReg, _, err := e.resolveArrayForHOF(s.Iterable, pos)
-	if err != nil {
-		return err
 	}
 
 	idxPtr := e.freshReg()
@@ -1985,16 +2521,22 @@ func (e *Emitter) emitForAwaitOfArray(s *ast.ForOfStatement, arrTy Type, condL, 
 	elemVal := e.loadArrayElem(gepReg, elemTy)
 
 	// Await the element: a promise element drives to settled (re-throwing a
-	// rejection); a plain value is an identity await.
+	// rejection; a raw fetch element drives the fetch and builds the Response);
+	// a plain value is an identity await.
 	boundVal := elemVal
 	boundTy := elemTy
 	if isPromiseElem {
-		aw, err := e.emitAwaitTaskPromise(elemVal.Ref, awaitedTy)
+		aw, err := e.emitAwaitPromiseElem(elemVal.Ref, elemTy)
 		if err != nil {
 			return err
 		}
 		boundVal = aw
 		boundTy = awaitedTy
+		// emitAwaitPromiseElem returns the Response type itself for a raw fetch
+		// element; keep the binding type in sync with the returned value.
+		if aw.Ty.IR != "" {
+			boundTy = aw.Ty
+		}
 	}
 
 	switch {

@@ -45,6 +45,13 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 	return e.emitExpr(arg)
 }
 
+// isAbsentCallback reports whether a `.then` argument is a literal `undefined`
+// or `null` — JS treats either as "no callback" (pass-through), not a callable.
+func isAbsentCallback(arg ast.Expression) bool {
+	_, ok := arg.(*ast.NullLiteral)
+	return ok
+}
+
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
 func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	pVal, err := e.emitExpr(objExpr)
@@ -55,13 +62,16 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 		return Value{}, fmt.Errorf("%d:%d: .%s is only supported on a Promise", pos.Line, pos.Col, kind)
 	}
 	// A raw fetch()'s Promise<Response> is a still-pending fetch handle, not a
-	// task-shaped promise. Drive it to a settled task promise so the reaction
-	// machinery below can attach to it (ADR-00258). The !PromiseTask guard is
-	// essential: a chained `.finally`/`.then` that itself settles to a Response
-	// (e.g. `fetch(u).finally(f).then(g)`) returns a *task* promise that also
-	// looks IsResponse — it must not be re-driven as a fetch handle.
+	// task-shaped promise. Bridge it to a *pending* task promise whose settle
+	// (drive the fetch, build the Response) is deferred to a queued microtask —
+	// so the synchronous script continues immediately and the transport wait
+	// happens when the event loop drains, matching JS ordering (ADR-00258's
+	// synchronous drive replaced). The !PromiseTask guard is essential: a
+	// chained `.finally`/`.then` that itself settles to a Response (e.g.
+	// `fetch(u).finally(f).then(g)`) returns a *task* promise that also looks
+	// IsResponse — it must not be re-driven as a fetch handle.
 	if !pVal.Ty.PromiseTask && pVal.Ty.PromiseType != nil && pVal.Ty.PromiseType.IsResponse && !pVal.Ty.PromiseResolved {
-		pVal = e.emitFetchHandleToSettledPromise(pVal.Ref)
+		pVal = e.emitFetchHandleToPendingPromise(pVal.Ref)
 	}
 	if !pVal.Ty.PromiseTask {
 		return Value{}, fmt.Errorf("%d:%d: .%s is currently supported only on a promise from a may-suspend async function or a fetch (TDD-00083 Stage 3)", pos.Line, pos.Col, kind)
@@ -81,18 +91,23 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	retTy := TypeVoid
 	switch kind {
 	case "then":
-		if len(args) < 1 {
-			return Value{}, fmt.Errorf("%d:%d: then expects at least 1 argument", pos.Line, pos.Col)
+		// JS treats a missing/`undefined`/`null` onFulfilled as a pass-through
+		// (`p.then().then(g)` hands g the source value; `p.then(undefined, onR)`
+		// is the .catch shape) — the runner already has the pass-through block,
+		// so only the arity/argument handling lives here.
+		if len(args) >= 1 && !isAbsentCallback(args[0]) {
+			v, err := e.emitFulfillCallback(args[0], innerTy)
+			if err != nil {
+				return Value{}, err
+			}
+			onF = v.Ref
+			if t, ok := e.callbackReturnType(args[0]); ok {
+				retTy = t
+			}
+		} else {
+			retTy = innerTy // pass-through keeps the source value type
 		}
-		v, err := e.emitFulfillCallback(args[0], innerTy)
-		if err != nil {
-			return Value{}, err
-		}
-		onF = v.Ref
-		if t, ok := e.callbackReturnType(args[0]); ok {
-			retTy = t
-		}
-		if len(args) >= 2 {
+		if len(args) >= 2 && !isAbsentCallback(args[1]) {
 			v2, err := e.emitRejectCallback(args[1])
 			if err != nil {
 				return Value{}, err
@@ -194,74 +209,112 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	return Value{Ref: q, Ty: qt}, nil
 }
 
-// emitFetchHandleToSettledPromise drives a raw fetch()'s Promise<Response> handle
-// (slotRef points at the malloc'd slot holding the pending curl handle) to
-// completion and boxes the result into a settled, task-shaped promise so
-// `.then`/`.catch`/`.finally` work on a raw fetch (ADR-00258). A transport-level
-// failure is caught via setjmp and *rejects* the promise (so `fetch(u).catch(…)`
-// recovers it) rather than throwing; an HTTP 4xx/5xx is a fulfilled Response, per
-// WHATWG. The drive is synchronous at the call site — the fetch's real
-// concurrency lives in Promise.all/.any over an array of fetches, not here.
-func (e *Emitter) emitFetchHandleToSettledPromise(slotRef string) Value {
+// ensureFetchDriveRunner emits @__kml_fetch_drive_run(ptr %env) exactly once —
+// the deferred microtask step that bridges a raw fetch handle to a task promise.
+// env = { ptr slot, ptr prom }: it drives the fetch (`__kml_await_fetch`, the
+// same drive `await` uses), builds the Response, stores it into prom's value
+// slot, and settles prom fulfilled via __kml_promise_settle (so reactions
+// attached while pending fire, and a parked awaiter wakes). A transport-level
+// failure (which `__kml_await_fetch` throws) is caught via setjmp and settles
+// prom *rejected* — `fetch(u).catch(e => …)` recovers it; an HTTP 4xx/5xx is a
+// fulfilled Response, per WHATWG. The fetch slot is NOT freed: a fetch
+// Promise<Response> is a reusable value (TDD-00090) — `const p = fetch(u);
+// p.then(f); await p` must still read a live slot.
+func (e *Emitter) ensureFetchDriveRunner() {
+	if e.usedFetchDriveRunner {
+		return
+	}
+	e.usedFetchDriveRunner = true
 	e.ensurePromiseRuntime()
 	e.ensureFetchAsync()
 	e.ensureExceptionHelpers()
 	e.ensureMalloc()
-	e.ensureFree()
+	e.ensurePromiseSettle()
+
+	respTy := ResponseType()
+	structIR := respTy.StructIR()
+	fieldStore := func(name, ir, ref string, align int) string {
+		idx, _, _ := respTy.FieldIndex(name)
+		return fmt.Sprintf("  %%%s_gep = getelementptr %s, ptr %%resp, i32 0, i32 %d\n  store %s %s, ptr %%%s_gep, align %d\n",
+			name, structIR, idx, ir, ref, name, align)
+	}
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fetch_drive_run(ptr %%env) {
+entry:
+  %%slot_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
+  %%slot = load ptr, ptr %%slot_p, align 8
+  %%prom_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
+  %%prom = load ptr, ptr %%prom_p, align 8
+  %%jb = call ptr @__kml_push_jmpbuf()
+  %%sj = call i32 @setjmp(ptr %%jb)
+  %%threw = icmp ne i32 %%sj, 0
+  br i1 %%threw, label %%catch, label %%try
+try:
+  %%pending = load ptr, ptr %%slot, align 8
+  %%raw = call { i64, ptr, i64 } @__kml_await_fetch(ptr %%pending)
+  %%status = extractvalue { i64, ptr, i64 } %%raw, 0
+  %%body = extractvalue { i64, ptr, i64 } %%raw, 1
+  %%blen = extractvalue { i64, ptr, i64 } %%raw, 2
+  call void @__kml_pop_jmpbuf()
+  %%oklow = icmp sge i64 %%status, 200
+  %%okhigh = icmp slt i64 %%status, 300
+  %%ok = and i1 %%oklow, %%okhigh
+  %%resp = call ptr @malloc(i64 %d)
+%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
+  %%v0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
+  store i64 %%bits, ptr %%v0_p, align 8
+  call void @__kml_promise_settle(ptr %%prom, i64 1)
+  ret void
+catch:
+  %%err = call ptr @__kml_get_thrown()
+  %%ebits = ptrtoint ptr %%err to i64
+  %%ev0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
+  store i64 %%ebits, ptr %%ev0_p, align 8
+  call void @__kml_promise_settle(ptr %%prom, i64 2)
+  ret void
+}`,
+		respTy.StructSize(),
+		fieldStore("status", "i64", "%status", 8),
+		fieldStore("ok", "i1", "%ok", 1),
+		fieldStore("body", "ptr", "%body", 8),
+		fieldStore("bodyLength", "i64", "%blen", 8),
+		promiseStructIR, promiseStructIR))
+}
+
+// emitFetchHandleToPendingPromise bridges a raw fetch()'s Promise<Response>
+// handle (slotRef points at the malloc'd slot holding the pending curl handle)
+// to a *pending* task-shaped promise whose settle is deferred to a queued
+// microtask (@__kml_fetch_drive_run) — so `fetch(u).then(f); console.log("x")`
+// runs the synchronous script first and the transport wait happens when the
+// event loop drains, not at the `.then` call site. The fetch transfer itself is
+// already in flight from the fetch() call; only the completion wait is deferred.
+func (e *Emitter) emitFetchHandleToPendingPromise(slotRef string) Value {
+	e.ensureMicrotasks()
+	e.ensureFetchDriveRunner()
 
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-	setResolved := func(state int) {
-		rp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", state, rp))
-	}
 
-	tryL := e.freshLabel("fetchthen.try")
-	catchL := e.freshLabel("fetchthen.catch")
-	doneL := e.freshLabel("fetchthen.done")
-	jb := e.freshReg()
-	sj := e.freshReg()
-	threw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sj, jb))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
+	// env = { slot, prom }; closure = { @__kml_fetch_drive_run, env }
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	sGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", sGep, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", slotRef, sGep))
+	pGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", pGep, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", prom, pGep))
 
-	// try: drive the fetch, build the Response, fulfill.
-	e.emitLabel(tryL)
-	pendingPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, slotRef))
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
-	status := e.freshReg()
-	body := e.freshReg()
-	bodyLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-	respVal := e.buildResponseFromStatusBody(status, body, bodyLen)
-	e.emitInstr("call void @__kml_pop_jmpbuf()")
-	e.storePromiseValue(prom, respVal)
-	setResolved(1)
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", slotRef))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	clo := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	cfp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
+	e.emitInstr(fmt.Sprintf("store ptr @__kml_fetch_drive_run, ptr %s, align 8", cfp))
+	cep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
 
-	// catch: transport failure → reject with the thrown error. __kml_throw already
-	// popped the jmpbuf (matching emitTry / the inline catch-and-settle path).
-	e.emitLabel(catchL)
-	errReg := e.freshReg()
-	errBits := e.freshReg()
-	v0P := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errReg))
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errReg))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBits, v0P))
-	setResolved(2)
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", slotRef))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(doneL)
 	rt := PromiseOf(ResponseType())
 	rt.PromiseTask = true
 	return Value{Ref: prom, Ty: rt}

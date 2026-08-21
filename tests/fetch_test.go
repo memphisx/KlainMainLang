@@ -907,6 +907,71 @@ console.log("sync")
 	assertOutput(t, src, "sync\ncleanup\n200")
 }
 
+// The .then-on-fetch bridge defers the transport wait to a queued microtask:
+// the synchronous script after the .then call runs immediately (while the slow
+// fetch is still in flight), and only the event-loop drain blocks on it. The
+// elapsed time measured across the sync tail must be well under the server's
+// response delay — with the old synchronous drive it was ≥ the delay.
+func TestE2EFetchThenDoesNotBlockSyncScript(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		fmt.Fprint(w, "late")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	src := fmt.Sprintf(`
+const t0 = Date.now()
+fetch("%s/slow").then((r) => { console.log("status " + r.status) })
+const elapsed = Date.now() - t0
+console.log(elapsed < 300 ? "sync ran immediately" : "sync was blocked")
+`, srv.URL)
+	assertOutput(t, src, "sync ran immediately\nstatus 200")
+}
+
+// A fetch promise stays a reusable value across the .then bridge: attaching a
+// .then does not consume the handle — a later await of the same promise (or the
+// reverse order, .then after an await already drove it) reads the same
+// completed fetch, in both cases exactly once over the wire.
+func TestE2EFetchThenAndAwaitShareOneHandle(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+  const p = fetch("%s/flat")
+  p.then((r) => { console.log("then " + r.status) })
+  const a: Response = await p
+  console.log("await " + a.status)
+  const q = fetch("%s/notfound")
+  const b: Response = await q
+  console.log("await2 " + b.status)
+  q.then((r) => { console.log("then2 " + r.status) })
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "then "+"200\nawait 200\nawait2 404\nthen2 404")
+}
+
+// for await...of over an array of raw fetch Promise<Response>: each element
+// drives its fetch (started concurrently at the fetch() calls) and binds the
+// built Response, in order. A 4xx element is a fulfilled Response; a
+// transport-level failure rejects and stops the loop (catchable).
+func TestE2EForAwaitOverArrayOfFetches(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+  const ps = [fetch("%s/flat"), fetch("%s/notfound"), fetch("%s/flat")]
+  for await (const r of ps) { console.log(r.status + " ok=" + r.ok) }
+  try {
+    for await (const r of [fetch("http://127.0.0.1:1/x")]) { console.log("no throw " + r.status) }
+  } catch (e) {
+    console.log("caught transport failure")
+  }
+}
+main2()
+`, srv.URL, srv.URL, srv.URL)
+	assertOutput(t, src, "200 ok=true\n404 ok=false\n200 ok=true\ncaught transport failure")
+}
+
 // TDD-00090: a fetch Promise<Response> is a reusable value too — its pending
 // struct is never freed and __kml_await_fetch short-circuits an already-done
 // handle, so double-awaiting the fetch promise (or reusing a member after a

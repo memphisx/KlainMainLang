@@ -1,6 +1,8 @@
 // .then / .catch / .finally directly on a raw fetch() Promise<Response> — no
-// surrounding async function. The fetch is driven to a settled promise and each
-// chain runs as a microtask after the synchronous script (ADR-00258).
+// surrounding async function. Attaching a chain never blocks: the transport
+// wait is deferred to a queued microtask, so the synchronous script finishes
+// first and each chain runs when the event loop drains (ADR-00258, drive
+// deferral in its follow-on).
 //
 // Needs a reachable host: `make examples` starts the local httpbin-lite fixture
 // on :8765, same as the other examples/fetch/*.ts files.

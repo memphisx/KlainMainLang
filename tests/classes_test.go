@@ -2032,12 +2032,14 @@ console.log(new C().value);
 `, "7")
 }
 
-// A non-constant computed member name (identifier / call / Symbol) is a
-// clean, specific rejection in V1.
+// A non-constant computed member name (identifier / call / non-well-known
+// Symbol) is a clean, specific rejection in V1. `[Symbol.iterator]` /
+// `[Symbol.asyncIterator]` are the recognized well-known-symbol exceptions.
 func TestE2EComputedNonConstantNameRejected(t *testing.T) {
 	_, err := parseAndCompile(`
+const k = "dyn";
 class C {
-  [Symbol.iterator]() { return 1; }
+  [k]() { return 1; }
 }
 `)
 	if err == nil {

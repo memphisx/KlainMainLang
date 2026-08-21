@@ -578,6 +578,14 @@ const (
 	GeneratorGenErrorField   = "__genError"   // an uncaught body throw the outer catch-all captured, re-thrown on the caller side (ptr, TDD-00086)
 	GeneratorThisField      = "__this"      // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
 	GeneratorEnvField       = "__env"       // a nested generator's closure environment (ptr to the captured-cell struct, null when it captures nothing) — TDD-00094
+
+	// Async-generator step state (the spec-faithful step model: synchronous
+	// body start, park-at-await, request queueing). Present on every
+	// generator's layout for uniformity; sync generators never touch them.
+	GeneratorPendingQField = "__pendingQ" // the in-flight step's result promise (ptr; null = no step running)
+	GeneratorParkedField   = "__parked"   // i64 1 while the fiber is suspended at an await-park (vs a yield/completion)
+	GeneratorReqHeadField  = "__reqHead"  // queued .next/.throw/.return requests while a step is in flight (ptr to {i64 mode, ptr sentSlot, ptr thrown, ptr q, ptr next})
+	GeneratorReqTailField  = "__reqTail"  // tail of the request FIFO (ptr)
 )
 
 // GeneratorType returns a `function* f(params): T {}`'s instance value type
@@ -602,6 +610,10 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 		{Name: GeneratorJmpTopField, Ty: TypeI64},
 		{Name: GeneratorGenErrorField, Ty: TypePtr},
 		{Name: GeneratorEnvField, Ty: TypePtr},
+		{Name: GeneratorPendingQField, Ty: TypePtr},
+		{Name: GeneratorParkedField, Ty: TypeI64},
+		{Name: GeneratorReqHeadField, Ty: TypePtr},
+		{Name: GeneratorReqTailField, Ty: TypePtr},
 	}
 	// A generator *method* (TDD-00063 Stage 2b) carries its receiver in a
 	// dedicated __this slot (a ptr to the class instance), stored at

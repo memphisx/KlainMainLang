@@ -128,7 +128,12 @@ func stmtSuspend(s ast.Statement, ms map[string]bool) bool {
 	case *ast.DoWhileStatement:
 		return exprSuspend(st.Test, ms) || blockSuspend(st.Body, ms)
 	case *ast.ForOfStatement:
-		return exprSuspend(st.Iterable, ms) || blockSuspend(st.Body, ms)
+		// A `for await...of` awaits every element/step — it is a suspension
+		// point in itself, even when neither the iterable expression nor the
+		// body contains an explicit `await` (a 2026-08-21 node-diff find: the
+		// enclosing async fn otherwise ran the whole loop synchronously
+		// before the top-level script continued).
+		return st.Await || exprSuspend(st.Iterable, ms) || blockSuspend(st.Body, ms)
 	case *ast.ForInStatement:
 		return exprSuspend(st.Object, ms) || blockSuspend(st.Body, ms)
 	case *ast.TryStatement:

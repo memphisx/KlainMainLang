@@ -68,6 +68,38 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if _, err := p.expect(lexer.RBRACKET); err != nil {
 				return nil, err
 			}
+			// A well-known symbol key (`[Symbol.asyncIterator]` /
+			// `[Symbol.iterator]`) desugars to a reserved *static* key
+			// (`@@asyncIterator` / `@@iterator`) — same trick the class-member
+			// grammar uses — so the literal stays a static struct (a closure-
+			// typed field) instead of collapsing to a dynamic Map. Both the
+			// `[Symbol.x]: fn` and the `[Symbol.x]() {...}` method-shorthand
+			// forms are accepted.
+			if wk, wkOk := wellKnownSymbolMemberName(keyExpr); wkOk {
+				var val ast.Expression
+				if p.check(lexer.LPAREN) {
+					fnPos := posOf(p.peek())
+					fd, err := p.parseFunctionRest("", false, false)
+					if err != nil {
+						return nil, err
+					}
+					val = ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+				} else {
+					if _, err := p.expect(lexer.COLON); err != nil {
+						return nil, err
+					}
+					var err error
+					val, err = p.parseAssignment()
+					if err != nil {
+						return nil, err
+					}
+				}
+				props = append(props, ast.ObjectProperty{Key: wk, Value: val})
+				if !p.match(lexer.COMMA) {
+					break
+				}
+				continue
+			}
 			if _, err := p.expect(lexer.COLON); err != nil {
 				return nil, err
 			}
