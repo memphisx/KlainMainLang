@@ -97,7 +97,39 @@ type result struct {
 	Category string // first path segment: language, built-ins, intl402, staging, annexB
 	Pass     bool
 	Reason   string // empty when Pass
+	Blocker  string // compile-phase failures only: the concrete identifier/API the file died on (see blockerOf)
 }
+
+// blockerOf extracts the concrete missing identifier/API from a raw (still
+// position-prefixed, still identifier-carrying) compile error — the exact
+// information normalizeReason deliberately collapses away. This feeds the
+// blocked-by histogram: a missing API compile-fails a *whole* test file, so
+// one absent built-in can mask bugs in every in-scope feature the file
+// co-exercises. Ranking blockers by how many files they gate is how
+// low-priority leaf APIs get elevated to their real leverage.
+//
+// Heuristic, not a parser: the first single-quoted token in the message is
+// the blocker for the overwhelmingly common shapes ("undefined variable
+// 'Reflect'", "unknown function 'isConstructor'", "'Symbol.species' is not
+// supported"); a "Math.xyz is not supported"-style unquoted message falls
+// back to its leading token. Empty when nothing identifier-like is found —
+// those files still show up in the reason buckets, just not the histogram.
+func blockerOf(msg string) string {
+	msg = rePos.ReplaceAllString(msg, "")
+	if m := reQuotedCapture.FindStringSubmatch(msg); m != nil && m[1] != "" {
+		return m[1]
+	}
+	if i := strings.Index(msg, " is not supported"); i > 0 {
+		head := msg[:i]
+		if j := strings.LastIndexByte(head, ' '); j >= 0 {
+			head = head[j+1:]
+		}
+		return head
+	}
+	return ""
+}
+
+var reQuotedCapture = regexp.MustCompile(`'([^']+)'`)
 
 func main() {
 	corpus := flag.String("corpus", ".test262", "path to a test262 checkout (see fetch.sh)")
@@ -324,6 +356,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 
 	if compileErr != nil {
 		res.Reason = normalizeReason("COMPILE_ERROR", compileErr.Error())
+		res.Blocker = blockerOf(compileErr.Error())
 		return res
 	}
 
@@ -485,7 +518,9 @@ func writeReport(path string, all []result) error {
 	byCat := map[string]*struct{ total, pass int }{}
 	byReason := map[string]int{}
 	byPhase := map[string]int{}
-	reasonExample := map[string]string{} // lexicographically-smallest failing path per reason
+	byBlocker := map[string]int{}
+	reasonExample := map[string]string{}  // lexicographically-smallest failing path per reason
+	blockerExample := map[string]string{} // same, per blocker
 	for _, r := range all {
 		c, ok := byCat[r.Category]
 		if !ok {
@@ -501,6 +536,12 @@ func writeReport(path string, all []result) error {
 			byPhase[phaseOf(r.Reason)]++
 			if ex, seen := reasonExample[r.Reason]; !seen || r.Path < ex {
 				reasonExample[r.Reason] = r.Path
+			}
+			if r.Blocker != "" {
+				byBlocker[r.Blocker]++
+				if ex, seen := blockerExample[r.Blocker]; !seen || r.Path < ex {
+					blockerExample[r.Blocker] = r.Path
+				}
 			}
 		}
 	}
@@ -540,6 +581,35 @@ func writeReport(path string, all []result) error {
 		if n := byPhase[ph]; n > 0 {
 			fmt.Fprintf(&b, "| %d | %s |\n", n, ph)
 		}
+	}
+
+	// Blocked-by histogram — the leverage-ranking cut: each row is one
+	// concrete identifier/API whose absence compile-failed that many whole
+	// files. Because a compiler reports only the FIRST error per file, a file
+	// gated by several missing APIs counts toward the first one hit — the
+	// histogram is therefore iterative by design: fix the top blocker, re-run,
+	// and the files it was masking redistribute to whatever blocks them next.
+	b.WriteString("\n## Blocked-by histogram (compile-phase)\n\nEach row is one concrete identifier/API whose absence was the *first* compile error in that many files — a missing API fails the whole file, masking everything else it exercises, so high-count rows are high-leverage regardless of the API's own face value. First-error-only, so the ranking is iterative: fix the top row, re-run, and its files redistribute to their next blocker. (Low-count rows can be program-local variable names caught up in the same quoted-token extraction — the ranking sinks them; no lexical filter is applied because real blockers like `assert` are lowercase too.)\n\n| Files blocked | Blocker | Example |\n|---|---|---|\n")
+	type blockerCount struct {
+		blocker string
+		count   int
+	}
+	var blockers []blockerCount
+	for bl, n := range byBlocker {
+		blockers = append(blockers, blockerCount{bl, n})
+	}
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].count != blockers[j].count {
+			return blockers[i].count > blockers[j].count
+		}
+		return blockers[i].blocker < blockers[j].blocker
+	})
+	blimit := 60
+	if len(blockers) < blimit {
+		blimit = len(blockers)
+	}
+	for _, bc := range blockers[:blimit] {
+		fmt.Fprintf(&b, "| %d | `%s` | `%s` |\n", bc.count, bc.blocker, blockerExample[bc.blocker])
 	}
 
 	b.WriteString("\n## Most common failure reasons\n\nThe `Reason` is normalized (position stripped, quoted identifiers collapsed to `'%s'`). `Phase` is the pipeline stage it died in; `Example` is one representative file (the lexicographically first) — pass it to the compiler directly to reproduce.\n\n| Count | Phase | Reason | Example |\n|---|---|---|---|\n")

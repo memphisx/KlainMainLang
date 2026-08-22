@@ -885,7 +885,7 @@ func TestE2ESequenceLocalAndAssignment(t *testing.T) {
 let a = 0;
 let b = (a = 7, a + 1);
 console.log(a, b);
-`, "7\n8")
+`, "7 8")
 }
 
 // The last operand's type drives the result even when it differs from earlier
@@ -904,4 +904,98 @@ func TestE2ESequenceInCondition(t *testing.T) {
 let a = 0;
 if ((a = 1, a === 1)) { console.log("yes"); } else { console.log("no"); }
 `, "yes")
+}
+
+// Math on NaN/±Infinity input (ADR-00286): the float paths preserve
+// non-finite values instead of hitting fptosi poison, min/max propagate NaN
+// via llvm.minimum/maximum, and round uses JS tie-toward-+Infinity semantics
+// including the signed zero.
+func TestE2EMathNaNInfinity(t *testing.T) {
+	assertOutput(t, `
+console.log(Math.floor(NaN), Math.ceil(NaN), Math.round(NaN), Math.trunc(NaN), Math.sign(NaN));
+console.log(Math.floor(Infinity), Math.ceil(-Infinity), Math.trunc(Infinity));
+console.log(Math.min(1, NaN), Math.max(NaN, 2));
+console.log(Math.min(1, Infinity), Math.max(1, -Infinity));
+console.log(Math.sign(Infinity), Math.sign(-Infinity));
+console.log(Math.round(2.5), Math.round(-2.5), Math.round(-0.5));
+`, "NaN NaN NaN NaN NaN\nInfinity -Infinity Infinity\nNaN NaN\n1 1\n1 -1\n3 -2 -0")
+}
+
+// parseInt/parseFloat return NaN on a no-digits input, and
+// charCodeAt/codePointAt are bounds-checked (NaN out of range) instead of
+// reading past the string (ADR-00287).
+func TestE2EParseAndCharCodeNaN(t *testing.T) {
+	assertOutput(t, `
+console.log(parseInt("abc"), parseFloat("abc"), parseInt(""), parseFloat(""));
+console.log(parseInt("12px"), parseFloat("3.5kg"), parseInt("  42"), parseFloat("  .5"));
+console.log(Number.isNaN(parseInt("abc")), Number.isNaN(parseFloat("xyz")));
+console.log(parseInt("42") + 1);
+const s = "abc";
+console.log(s.charCodeAt(0), s.charCodeAt(2), s.charCodeAt(3), s.charCodeAt(-1), s.charCodeAt(100));
+console.log(String.fromCharCode("A".charCodeAt(0) + 1));
+`, "NaN NaN NaN NaN\n12 3.5 42 0.5\ntrue true\n43\n97 99 NaN NaN NaN\nB")
+}
+
+// Multi-argument console.log joins with single spaces on one line, a no-arg
+// call prints a bare newline, and -0 displays as "-0" (ADR-00285).
+func TestE2EConsoleLogSpacingAndNegZero(t *testing.T) {
+	assertOutput(t, `
+console.log(1, "two", true, [3, 4]);
+console.log();
+console.log(-0.0);
+console.log("a", 1.5, "b");
+`, "1 two true [ 3, 4 ]\n\n-0\na 1.5 b")
+}
+
+// Built-in error constructors as first-class values (ADR-00289): boxed
+// funcrefs — identity-comparable, typeof "function", passable to any params.
+func TestE2EErrorConstructorAsValue(t *testing.T) {
+	assertOutput(t, `
+function take(x: any): void {
+  console.log(typeof x);
+  console.log(x === TypeError, x === RangeError);
+}
+take(TypeError);
+console.log(TypeError === TypeError);
+`, "function\ntrue false\ntrue")
+}
+
+// String(x)/Number(x)/Boolean(x) conversion calls (ADR-00291).
+func TestE2EGlobalConversionFunctions(t *testing.T) {
+	assertOutput(t, `
+console.log(String(42), String(3.5), String(true), String("x"));
+console.log(Number("3.5"), Number(""), Number("12px"), Number("0x10"), Number(true), Number(null));
+console.log(Boolean(1), Boolean(0), Boolean(""), Boolean("x"), Boolean(NaN));
+console.log(Number.isNaN(Number("abc")));
+const pn = parseInt("abc");
+console.log(pn, Number.isNaN(pn));
+`, "42 3.5 true x\n3.5 0 NaN 16 1 0\ntrue false false true false\ntrue\nNaN true")
+}
+
+// Mixed int/float arithmetic promotes to double (ADR-00292) — the old
+// left-biased unification computed `i * 1.5` as `i * 1`.
+func TestE2EMixedNumericPromotion(t *testing.T) {
+	assertOutput(t, `
+let i = 3;
+console.log(i * 1.5, i + 0.5, i - 0.25, i / 2.0, i % 2.5);
+console.log(1.5 * i, 0.5 + i);
+console.log(3 === 3.5, 3 < 3.5, 4.5 > i);
+const x = i * 1.5;
+console.log(x, typeof x);
+`, "4.5 3.5 2.75 1.5 0.5\n4.5 3.5\nfalse true true\n4.5 number")
+}
+
+// Near-miss alignment batch (ADR-00295): Unicode whitespace in trims, the JS
+// pow deviation, and oversized integer literals becoming doubles.
+func TestE2ENearMissAlignment(t *testing.T) {
+	assertOutput(t, `
+console.log("[" + "  \u3000abc \uFEFF ".trim() + "]");
+console.log("[" + "  x".trimStart() + "]");
+console.log("[" + "x  ".trimEnd() + "]");
+console.log("  ".trim().length);
+const e2: float64 = Infinity;
+console.log(1 ** e2, (-1) ** -e2, Math.pow(1, e2), 2 ** 0.5);
+console.log(92233720368620160000, typeof 92233720368620160000);
+console.log(92233720368620160000 === 92233720368620160000);
+`, "[abc]\n[x]\n[x]\n0\nNaN NaN NaN 1.4142135623730951\n92233720368620160000 number\ntrue")
 }

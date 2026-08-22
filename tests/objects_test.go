@@ -874,7 +874,7 @@ func TestE2EOptionalFieldOmittedReadsZero(t *testing.T) {
 interface Point { x: number; y?: number }
 let p: Point = { x: 1 };
 console.log(p.x, p.y);
-`, "1\n0")
+`, "1 0")
 }
 
 func TestE2EOptionalFieldOmittedReadsZeroAfterHeapChurn(t *testing.T) {
@@ -907,7 +907,7 @@ class Box {
 }
 const b = new Box();
 console.log(b.x, b.y);
-`, "1\n0")
+`, "1 0")
 }
 
 // --- Object destructuring default values (`{a = expr} = obj`, ADR-00158) ---
@@ -944,7 +944,7 @@ interface Box { items: number[] | null }
 let empty: Box = { items: null };
 let { items = [1, 2, 3] } = empty;
 console.log(items.length, items[0]);
-`, "3\n1")
+`, "3 1")
 }
 
 func TestE2EDestructuredObjectParamDefault(t *testing.T) {
@@ -994,7 +994,7 @@ interface Point { x: number; y: number }
 let p: Point = { x: 3, y: 4 };
 let { "x": px, "y": py } = p;
 console.log(px, py);
-`, "3\n4")
+`, "3 4")
 }
 
 func TestE2EObjectDestructuringStringKeyNonIdentifierField(t *testing.T) {
@@ -1004,7 +1004,7 @@ func TestE2EObjectDestructuringStringKeyNonIdentifierField(t *testing.T) {
 let p = { "first-name": "Ada", "age": 36 };
 let { "first-name": fn, "age": a } = p;
 console.log(fn, a);
-`, "Ada\n36")
+`, "Ada 36")
 }
 
 func TestE2EObjectDestructuringNumericKey(t *testing.T) {
@@ -1012,7 +1012,7 @@ func TestE2EObjectDestructuringNumericKey(t *testing.T) {
 let p = { 0: "zero", 1: "one" };
 let { 0: first, 1: second } = p;
 console.log(first, second);
-`, "zero\none")
+`, "zero one")
 }
 
 func TestE2EObjectDestructuringStringKeyInForOf(t *testing.T) {
@@ -1022,7 +1022,7 @@ let pts: Point[] = [{ x: 1, label: "a" }, { x: 2, label: "b" }];
 for (const { "x": vx, label } of pts) {
   console.log(vx, label);
 }
-`, "1\na\n2\nb")
+`, "1 a\n2 b")
 }
 
 func TestE2EObjectDestructuringStringKeyNestedPattern(t *testing.T) {
@@ -1032,7 +1032,7 @@ interface Wrap { inner: Inner }
 let w: Wrap = { inner: { a: 10, b: 20 } };
 let { "inner": { a, b } } = w;
 console.log(a, b);
-`, "10\n20")
+`, "10 20")
 }
 
 func TestE2EObjectDestructuringStringKeyWithoutBindingRejected(t *testing.T) {
@@ -1059,7 +1059,7 @@ let r: Rec = { a: 1, b: 2, c: "three" };
 let { a, ...rest } = r;
 console.log(a);
 console.log(rest.b, rest.c);
-`, "1\n2\nthree")
+`, "1\n2 three")
 }
 
 func TestE2EObjectDestructuringRestExcludesRenamedSourceKey(t *testing.T) {
@@ -1070,7 +1070,7 @@ let r: Rec = { a: 1, b: 2, c: 3 };
 let { b: bb, ...others } = r;
 console.log(bb);
 console.log(others.a, others.c);
-`, "2\n1\n3")
+`, "2\n1 3")
 }
 
 func TestE2EObjectDestructuringRestWithStringKey(t *testing.T) {
@@ -1079,7 +1079,7 @@ interface Rec { a: number; b: number }
 let r: Rec = { a: 1, b: 2 };
 let { "a": aa, ...tail } = r;
 console.log(aa, tail.b);
-`, "1\n2")
+`, "1 2")
 }
 
 func TestE2EObjectDestructuringRestInForOf(t *testing.T) {
@@ -1089,7 +1089,7 @@ let recs: Rec[] = [{ a: 1, b: 2, c: "x" }, { a: 10, b: 20, c: "y" }];
 for (const { a, ...more } of recs) {
   console.log(a, more.b, more.c);
 }
-`, "1\n2\nx\n10\n20\ny")
+`, "1 2 x\n10 20 y")
 }
 
 func TestE2EObjectDestructuringRestInParameter(t *testing.T) {
@@ -1100,7 +1100,7 @@ function f({ a, ...rest }: Rec): void {
   console.log(rest.b, rest.c);
 }
 f({ a: 1, b: 2, c: 3 });
-`, "1\n2\n3")
+`, "1\n2 3")
 }
 
 func TestE2EObjectDestructuringRestEmptyResidual(t *testing.T) {
@@ -1118,7 +1118,7 @@ interface WithArr { id: number; tags: number[] }
 let w: WithArr = { id: 7, tags: [1, 2, 3] };
 let { id, ...more } = w;
 console.log(more.tags.length, more.tags[0]);
-`, "3\n1")
+`, "3 1")
 }
 
 func TestE2EObjectDestructuringRestIsRealObject(t *testing.T) {
@@ -1168,7 +1168,7 @@ let x: number = 0, y: number = 0;
 let p: Point = { x: 5, y: 6 };
 ({x, y} = p);
 console.log(x, y);
-`, "5\n6")
+`, "5 6")
 }
 
 func TestE2EObjectDestructuringAssignmentRenamed(t *testing.T) {
@@ -1178,7 +1178,7 @@ let px: number = 0, py: number = 0;
 let p: Point = { x: 10, y: 20 };
 ({x: px, y: py} = p);
 console.log(px, py);
-`, "10\n20")
+`, "10 20")
 }
 
 func TestE2EObjectDestructuringAssignmentClosureCapture(t *testing.T) {

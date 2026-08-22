@@ -339,6 +339,28 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
 	}
+	// DataView properties (byteLength/byteOffset/buffer) — dedicated reads
+	// over the hidden header struct, same pattern ArrayBuffer's .byteLength
+	// uses below.
+	if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDataViewProp(objVal, ex.Property, ex.GetPos())
+		}
+	}
+	// TS namespace member in value position (`X.member`, TDD-00095):
+	// resolve through the desugared flat declaration. A local binding
+	// shadowing the namespace name wins.
+	if id, ok := ex.Object.(*ast.Identifier); ok {
+		if members, nsName := e.namespaceMembers(id.Name); members != nil && members[ex.Property] {
+			if !e.isShadowedByLocal(id.Name) {
+				return e.emitIdent(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
+			}
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "MAX_SAFE_INTEGER":

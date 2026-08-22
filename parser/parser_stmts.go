@@ -89,6 +89,10 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 			return p.parseTypeAliasDecl()
 		case "enum":
 			return p.parseEnumDeclaration()
+		case "namespace":
+			if p.peekNth(1).Type == lexer.IDENT {
+				return p.parseNamespaceDecl()
+			}
 		}
 		// label: statement (e.g. `outer: for (...) { ... }`)
 		if p.peekNth(1).Type == lexer.COLON {
@@ -96,6 +100,74 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		}
 	}
 	return p.parseExpressionStatement()
+}
+
+// parseNamespaceDecl parses `namespace X { export function f() {...} export
+// const c = ... }` (TDD-00095 V1: top-level only, exported function/const/let
+// members only). Members desugar to ordinary top-level declarations named
+// ast.NamespaceMangle(X, member); the member set is recorded so `X.member`
+// use sites resolve. Returns the first desugared declaration (or an empty
+// block for an empty namespace); the rest flow through pendingTopLevel.
+func (p *Parser) parseNamespaceDecl() (ast.Statement, error) {
+	nsTok := p.advance() // 'namespace'
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	ns := nameTok.Literal
+	if _, err := p.expect(lexer.LBRACE); err != nil {
+		return nil, err
+	}
+	if p.namespaces == nil {
+		p.namespaces = map[string]map[string]bool{}
+	}
+	if p.namespaces[ns] == nil {
+		p.namespaces[ns] = map[string]bool{}
+	}
+	var decls []ast.Statement
+	for !p.check(lexer.RBRACE) {
+		if _, err := p.expect(lexer.EXPORT); err != nil {
+			return nil, fmt.Errorf("%d:%d: every namespace member must be an `export function` or `export const/let` declaration (V1)", p.peek().Line, p.peek().Col)
+		}
+		isAsync := false
+		if p.check(lexer.ASYNC) && p.peekNth(1).Type == lexer.FUNCTION {
+			p.advance()
+			isAsync = true
+		}
+		switch p.peek().Type {
+		case lexer.FUNCTION:
+			fd, err := p.parseFunctionDecl(isAsync, "")
+			if err != nil {
+				return nil, err
+			}
+			p.namespaces[ns][fd.Name] = true
+			fd.Name = ast.NamespaceMangle(ns, fd.Name)
+			decls = append(decls, fd)
+		case lexer.CONST, lexer.LET, lexer.VAR:
+			vd, err := p.parseVarDecl(true)
+			if err != nil {
+				return nil, err
+			}
+			switch d := vd.(type) {
+			case *ast.VarDeclaration:
+				p.namespaces[ns][d.Name] = true
+				d.Name = ast.NamespaceMangle(ns, d.Name)
+				decls = append(decls, d)
+			default:
+				return nil, fmt.Errorf("%d:%d: a namespace const/let member must declare exactly one binding (V1)", nsTok.Line, nsTok.Col)
+			}
+		default:
+			return nil, fmt.Errorf("%d:%d: unsupported namespace member — V1 supports `export function` and `export const/let` only", p.peek().Line, p.peek().Col)
+		}
+	}
+	if _, err := p.expect(lexer.RBRACE); err != nil {
+		return nil, err
+	}
+	if len(decls) == 0 {
+		return ast.NewBlockStatement(nil, ast.Pos{Line: nsTok.Line, Col: nsTok.Col}), nil
+	}
+	p.pendingTopLevel = append(p.pendingTopLevel, decls[1:]...)
+	return decls[0], nil
 }
 
 func (p *Parser) parseLabeledStatement() (*ast.LabeledStatement, error) {

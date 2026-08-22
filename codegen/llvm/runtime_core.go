@@ -218,6 +218,42 @@ func (e *Emitter) ensureMathFuncs() {
 	e.emitGlobal("declare double @log1p(double noundef)")
 }
 
+// ensureJsPow defines @__kml_js_pow: libm pow with the one place JS's
+// exponentiation deviates from IEEE-754 pow — a base of magnitude exactly 1
+// with an infinite exponent is NaN in JS (pow returns 1).
+func (e *Emitter) ensureJsPow() {
+	if e.usedJsPow {
+		return
+	}
+	e.usedJsPow = true
+	e.ensureMathFuncs()
+	e.emitGlobal(`
+define double @__kml_js_pow(double %b, double %x) {
+entry:
+  %r = call double @pow(double %b, double %x)
+  %ab = call double @fabs(double %b)
+  %is1 = fcmp oeq double %ab, 1.0
+  %ax = call double @fabs(double %x)
+  %isinf = fcmp oeq double %ax, 0x7FF0000000000000
+  %nanify = and i1 %is1, %isinf
+  %res = select i1 %nanify, double 0x7FF8000000000000, double %r
+  ret double %res
+}`)
+}
+
+// ensureFloatMinMaxIntrinsics declares the IEEE-754 minimum/maximum LLVM
+// intrinsics used by Math.min/Math.max's float path — unlike a plain
+// fcmp/select fold, these propagate a NaN operand and order -0.0 below +0.0,
+// which is exactly the JS spec's behavior for both functions.
+func (e *Emitter) ensureFloatMinMaxIntrinsics() {
+	if e.usedFloatMinMax {
+		return
+	}
+	e.usedFloatMinMax = true
+	e.emitGlobal("declare double @llvm.minimum.f64(double, double)")
+	e.emitGlobal("declare double @llvm.maximum.f64(double, double)")
+}
+
 // ensureIPow defines __kml_ipow, an exact i64 integer exponentiation (base**exp)
 // by squaring — used by the `**` operator when both operands are integers, so a
 // result like `2 ** 62` stays exact rather than losing precision through a
@@ -414,6 +450,71 @@ func (e *Emitter) ensureStrtod() {
 		e.emitGlobal("declare double @strtod(ptr noundef, ptr noundef)")
 		e.usedStrtod = true
 	}
+}
+
+// ensureToNumber defines @__kml_to_number, JS's ToNumber for a string:
+// strtod parses (skipping leading whitespace; C99 strtod also handles the
+// "0x10" hex form and "Infinity", both as JS); then the tail must be
+// whitespace-only for the value to count — "12px" is NaN, not strtod's 12.
+// No conversion at all distinguishes "" / whitespace-only (0, as JS) from
+// genuine junk (NaN) by scanning whether anything non-whitespace exists.
+// Known divergence, shared with parseFloat's strtod base: "inf" parses
+// (JS accepts only the full word "Infinity").
+func (e *Emitter) ensureToNumber() {
+	if e.usedToNumber {
+		return
+	}
+	e.usedToNumber = true
+	e.ensureStrtod()
+	e.emitGlobal(`
+define double @__kml_to_number(ptr %s) {
+entry:
+  %endp = alloca ptr, align 8
+  %v = call double @strtod(ptr %s, ptr %endp)
+  %end = load ptr, ptr %endp, align 8
+  %noconv = icmp eq ptr %end, %s
+  br i1 %noconv, label %scan_all, label %scan_tail
+scan_tail:                       ; converted: tail must be whitespace-only
+  br label %tail_loop
+tail_loop:
+  %tp = phi ptr [ %end, %scan_tail ], [ %tp_next, %tail_ws ]
+  %tc = load i8, ptr %tp, align 1
+  %t_nul = icmp eq i8 %tc, 0
+  br i1 %t_nul, label %ret_val, label %tail_check
+tail_check:
+  %t_sp = icmp eq i8 %tc, 32
+  %t_ge_tab = icmp uge i8 %tc, 9
+  %t_le_cr = icmp ule i8 %tc, 13
+  %t_ctlws = and i1 %t_ge_tab, %t_le_cr
+  %t_ws = or i1 %t_sp, %t_ctlws
+  br i1 %t_ws, label %tail_ws, label %ret_nan
+tail_ws:
+  %tp_next = getelementptr i8, ptr %tp, i64 1
+  br label %tail_loop
+scan_all:                        ; no conversion: whitespace-only → 0, else NaN
+  br label %all_loop
+all_loop:
+  %ap = phi ptr [ %s, %scan_all ], [ %ap_next, %all_ws ]
+  %ac = load i8, ptr %ap, align 1
+  %a_nul = icmp eq i8 %ac, 0
+  br i1 %a_nul, label %ret_zero, label %all_check
+all_check:
+  %a_sp = icmp eq i8 %ac, 32
+  %a_ge_tab = icmp uge i8 %ac, 9
+  %a_le_cr = icmp ule i8 %ac, 13
+  %a_ctlws = and i1 %a_ge_tab, %a_le_cr
+  %a_ws = or i1 %a_sp, %a_ctlws
+  br i1 %a_ws, label %all_ws, label %ret_nan
+all_ws:
+  %ap_next = getelementptr i8, ptr %ap, i64 1
+  br label %all_loop
+ret_val:
+  ret double %v
+ret_zero:
+  ret double 0.0
+ret_nan:
+  ret double 0x7FF8000000000000
+}`)
 }
 
 func (e *Emitter) ensureQsort() {

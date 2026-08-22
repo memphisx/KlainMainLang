@@ -14,7 +14,7 @@
 // replaced. See TDD-00008 Design V2 and ADR-00151's own conformance ADR.
 class Test262Error {
     message: string;
-    constructor(message: string) {
+    constructor(message: string = "") {
         this.message = message;
     }
 }

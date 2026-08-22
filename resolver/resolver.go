@@ -515,10 +515,25 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// full statement list — dropping ImportDeclaration and unwrapping
 	// ExportDeclaration everywhere, since codegen/llvm knows neither node.
 	merged := &ast.Program{}
+	mergeNamespaces := func(src *ast.Program) {
+		for ns, members := range src.Namespaces {
+			if merged.Namespaces == nil {
+				merged.Namespaces = map[string]map[string]bool{}
+			}
+			if merged.Namespaces[ns] == nil {
+				merged.Namespaces[ns] = map[string]bool{}
+			}
+			for m := range members {
+				merged.Namespaces[ns][m] = true
+			}
+		}
+	}
 	for _, path := range order {
 		merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
+		mergeNamespaces(files[path].prog)
 	}
 	merged.Body = append(merged.Body, unwrap(files[entryAbs].prog.Body)...)
+	mergeNamespaces(files[entryAbs].prog)
 	return merged, nil
 }
 
@@ -695,6 +710,16 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 		refs := declRefsOf(stmt)
 		var lastNewName string
 		for _, ref := range refs {
+			// A namespace member's desugared flat declaration (TDD-00095)
+			// keeps its `X__kmlns_member` name verbatim — codegen resolves
+			// `X.member` sites by reconstructing exactly that name, so the
+			// per-file `__kml_modN` rename would orphan them. Tradeoff: two
+			// files declaring the same namespace+member collide at link time
+			// (a clear duplicate-symbol error) instead of being file-private.
+			if strings.Contains(ref.Name, "__kmlns_") {
+				mangled[ref.Name] = ref.Name
+				continue
+			}
 			if err := checkReservedBinding(ref.Name, stmt.GetPos().Line, stmt.GetPos().Col, allowGlobalShadowing); err != nil {
 				return nil, err
 			}

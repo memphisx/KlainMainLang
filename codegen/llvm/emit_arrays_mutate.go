@@ -5,27 +5,93 @@ import (
 	"fmt"
 )
 
+// resolveArrayMutLoc resolves the *storage location* of a mutable array —
+// the address its data pointer lives at and the address its length lives at —
+// so the in-place mutators (push/pop/shift/unshift/splice) can write a new
+// ptr/len back. Three receiver shapes exist:
+//   - a named variable: the two allocas of its Symbol (Ptr/LenPtr);
+//   - an object/class array field (incl. `this.field`): the field's inline
+//     {ptr, i64} struct slot, split into its two sub-slots;
+//   - a nested-array element (`matrix[i]`): the element slot holds a box
+//     pointer to a heap {ptr, i64}, so mutating through the box updates every
+//     alias of that inner array.
+//
+// Anything else (a slice result, a call result, ...) has no writable home for
+// a resized length, which is exactly why these methods can't accept an
+// arbitrary array-valued expression.
+func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos ast.Pos) (ptrPtr, lenPtr string, elemTy Type, err error) {
+	switch obj := objExpr.(type) {
+	case *ast.Identifier:
+		sym, ok := e.lookup(obj.Name)
+		if !ok {
+			return "", "", Type{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, obj.Name)
+		}
+		if !sym.Ty.IsArray || sym.Ty.ElemType == nil {
+			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, obj.Name)
+		}
+		return sym.Ptr, sym.LenPtr, *sym.Ty.ElemType, nil
+
+	case *ast.MemberExpression:
+		objVal, evalErr := e.emitExpr(obj.Object)
+		if evalErr != nil {
+			return "", "", Type{}, evalErr
+		}
+		if !objVal.Ty.IsObject {
+			return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array variable, array field, or nested-array element", pos.Line, pos.Col, verb)
+		}
+		idx, fieldTy, ok := objVal.Ty.FieldIndex(obj.Property)
+		if !ok {
+			return "", "", Type{}, fmt.Errorf("%d:%d: no field '%s'", pos.Line, pos.Col, obj.Property)
+		}
+		fieldTy = e.canonicalizeClassTy(fieldTy)
+		if !fieldTy.IsArray || fieldTy.ElemType == nil {
+			return "", "", Type{}, fmt.Errorf("%d:%d: field '%s' is not an array", pos.Line, pos.Col, obj.Property)
+		}
+		if objVal.Ty.IsClass {
+			if err := e.checkFieldVisibility(objVal.Ty.ClassName, obj.Property, pos); err != nil {
+				return "", "", Type{}, err
+			}
+		}
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, objVal.Ty.StructIR(), objVal.Ref, idx))
+		ptrPtr = e.freshReg()
+		lenPtr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", ptrPtr, slot))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lenPtr, slot))
+		return ptrPtr, lenPtr, *fieldTy.ElemType, nil
+
+	case *ast.IndexExpression:
+		slot, eTy, idxErr := e.emitIndexPtr(obj)
+		if idxErr != nil {
+			return "", "", Type{}, idxErr
+		}
+		if !eTy.IsArray || eTy.ElemType == nil {
+			return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array-typed element", pos.Line, pos.Col, verb)
+		}
+		boxPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, slot))
+		ptrPtr = e.freshReg()
+		lenPtr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", ptrPtr, boxPtr))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lenPtr, boxPtr))
+		return ptrPtr, lenPtr, *eTy.ElemType, nil
+	}
+	return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array variable, array field, or nested-array element", pos.Line, pos.Col, verb)
+}
+
 func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: pop takes no arguments", pos.Line, pos.Col)
 	}
-	id, ok := mem.Object.(*ast.Identifier)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: pop requires an array variable", pos.Line, pos.Col)
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "pop", pos)
+	if err != nil {
+		return Value{}, err
 	}
-	sym, ok := e.lookup(id.Name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
-	}
-	if !sym.Ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
-	}
-	elemTy := *sym.Ty.ElemType
 
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
 	// Guard: empty array — return the element type's zero value and leave
 	// length unchanged (0). Real JS returns `undefined`; this compiler has
@@ -63,7 +129,7 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, curPtr, newLen))
 	result := e.loadArrayElem(slot, elemTy)
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
@@ -91,23 +157,15 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	if len(args) < 1 {
 		return Value{}, fmt.Errorf("%d:%d: splice takes at least 1 argument (start)", pos.Line, pos.Col)
 	}
-	id, ok := mem.Object.(*ast.Identifier)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: splice requires an array variable", pos.Line, pos.Col)
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "splice", pos)
+	if err != nil {
+		return Value{}, err
 	}
-	sym, ok := e.lookup(id.Name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
-	}
-	if !sym.Ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
-	}
-	elemTy := *sym.Ty.ElemType
 
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
 	startRaw, err := e.emitExpr(args[0])
 	if err != nil {
@@ -223,8 +281,8 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		e.storeArrayElem(slot, elemTy, itemVal)
 	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", workPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", workPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 
 	// Pack the removed elements into a {ptr, i64} aggregate.
 	r0 := e.freshReg()
@@ -232,7 +290,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, resultPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, delCount))
 
-	return Value{Ref: r1, Ty: sym.Ty}, nil
+	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
 // emitArrayToSpliced implements arr.toSpliced(start, deleteCount?, ...items):
@@ -345,23 +403,15 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: shift takes no arguments", pos.Line, pos.Col)
 	}
-	id, ok := mem.Object.(*ast.Identifier)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: shift requires an array variable", pos.Line, pos.Col)
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "shift", pos)
+	if err != nil {
+		return Value{}, err
 	}
-	sym, ok := e.lookup(id.Name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
-	}
-	if !sym.Ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
-	}
-	elemTy := *sym.Ty.ElemType
 
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
 	// Guard: empty array — return the element type's zero value.
 	isEmpty := e.freshReg()
@@ -400,7 +450,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.ensureMemmove()
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", curPtr, src, moveBytes))
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
@@ -414,58 +464,60 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	return Value{Ref: phiReg, Ty: elemTy}, nil
 }
 
-// emitUnshift implements arr.unshift(val): realloc, memmove right, write at [0], increment len.
-// Returns the new length (matching JS semantics).
+// emitUnshift implements arr.unshift(...items): realloc, memmove right by the
+// item count, write the items at [0..N), increment len by N. Returns the new
+// length (matching JS semantics; the zero-argument call returns the current
+// length unchanged).
 func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: unshift takes exactly one argument", pos.Line, pos.Col)
-	}
-	id, ok := mem.Object.(*ast.Identifier)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unshift requires an array variable", pos.Line, pos.Col)
-	}
-	sym, ok := e.lookup(id.Name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
-	}
-	if !sym.Ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
-	}
-	elemTy := *sym.Ty.ElemType
-
-	val, err := e.emitExpr(args[0])
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "unshift", pos)
 	if err != nil {
 		return Value{}, err
 	}
-	val = e.coerce(val, elemTy)
+
+	vals := make([]Value, 0, len(args))
+	for _, arg := range args {
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		vals = append(vals, e.coerce(v, elemTy))
+	}
 
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+
+	if len(vals) == 0 {
+		return Value{Ref: curLen, Ty: TypeI64}, nil
+	}
 
 	newLen := e.freshReg()
 	newBytes := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newLen, curLen))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, curLen, len(vals)))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
 
 	e.ensureRealloc()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
 
-	// dst = newPtr + 1 element; move existing elements right
+	// dst = newPtr + N elements; move existing elements right
 	dst := e.freshReg()
 	moveBytes := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 1", dst, elemTy.IR, newPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", dst, elemTy.IR, newPtr, len(vals)))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", moveBytes, curLen, elemTy.Align()))
 	e.ensureMemmove()
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", dst, newPtr, moveBytes))
 
-	// write new element at index 0
-	e.storeArrayElem(newPtr, elemTy, val)
+	// write the new elements at [0..N)
+	for i, val := range vals {
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slot, elemTy.IR, newPtr, i))
+		e.storeArrayElem(slot, elemTy, val)
+	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 
 	return Value{Ref: newLen, Ty: TypeI64}, nil
 }
@@ -473,48 +525,52 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 // emitPush implements arr.push(val): realloc, store at [len], update ptr+len.
 // Returns the new length (i64), matching JS semantics.
 func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: push takes exactly one argument", pos.Line, pos.Col)
-	}
-	id, ok := mem.Object.(*ast.Identifier)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: push requires an array variable", pos.Line, pos.Col)
-	}
-	sym, ok := e.lookup(id.Name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
-	}
-	if !sym.Ty.IsArray {
-		return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
-	}
-	elemTy := *sym.Ty.ElemType
-
-	val, err := e.emitExpr(args[0])
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "push", pos)
 	if err != nil {
 		return Value{}, err
 	}
-	val = e.coerce(val, elemTy)
+
+	// Real .push(...items) is variadic (including the zero-argument call,
+	// which just returns the current length): evaluate every item first
+	// (left-to-right, before any resize is observable), then grow once by
+	// the whole count and store each at its slot.
+	vals := make([]Value, 0, len(args))
+	for _, arg := range args {
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		vals = append(vals, e.coerce(v, elemTy))
+	}
 
 	curPtr := e.freshReg()
 	curLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
+
+	if len(vals) == 0 {
+		return Value{Ref: curLen, Ty: TypeI64}, nil
+	}
 
 	newLen := e.freshReg()
 	newBytes := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newLen, curLen))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, curLen, len(vals)))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
 
 	e.ensureRealloc()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
 
-	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, curLen))
-	e.storeArrayElem(slot, elemTy, val)
+	for i, val := range vals {
+		slotIdx := e.freshReg()
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, curLen, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, slotIdx))
+		e.storeArrayElem(slot, elemTy, val)
+	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, sym.LenPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 
 	return Value{Ref: newLen, Ty: TypeI64}, nil
 }

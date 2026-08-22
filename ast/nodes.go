@@ -25,6 +25,20 @@ type Expression interface {
 
 type Program struct {
 	Body []Statement
+	// Namespaces records TS `namespace X { export ... }` declarations
+	// (TDD-00095): namespace name → member-name set. The members themselves
+	// were desugared by the parser into ordinary top-level declarations named
+	// NamespaceMangle(X, member); this table is what lets `X.member` call/
+	// value sites resolve through them. Nil when a program declares none.
+	Namespaces map[string]map[string]bool
+}
+
+// NamespaceMangle is the flat top-level name a namespace member desugars to —
+// shared by the parser (declaration side) and codegen (use side). The
+// `__kmlns_` infix can't collide with user identifiers in practice, the same
+// convention other internal manglings rely on.
+func NamespaceMangle(ns, member string) string {
+	return ns + "__kmlns_" + member
 }
 
 func (*Program) nodeMarker() {}
@@ -799,7 +813,12 @@ type FunctionExpression struct {
 	RetType *TypeAnnotation // nil = infer
 	Body    *BlockStatement
 	IsAsync bool
-	pos     Pos
+	// IsGenerator is `function* () {...}` in expression position
+	// (TDD-00096). Only the top-level `const G = function* ...` binding is
+	// supported — rewritten into a named generator declaration pre-emission;
+	// any other use is a clean codegen rejection.
+	IsGenerator bool
+	pos         Pos
 }
 
 func (*FunctionExpression) nodeMarker()   {}
@@ -1218,6 +1237,23 @@ func NewNewXMLHttpRequestExpression(pos Pos) *NewXMLHttpRequestExpression {
 // zero-initialized raw byte buffer. Unlike Array/Map/Set/TypedArray below,
 // this is a general expression (not restricted to a variable-declaration
 // initializer), matching Date/URL/URLSearchParams.
+// NewDataViewExpression is `new DataView(buffer, byteOffset?, byteLength?)`
+// — an arbitrary-endian read/write view over an ArrayBuffer sub-range.
+type NewDataViewExpression struct {
+	Buffer     Expression
+	ByteOffset Expression // nil when omitted (0)
+	ByteLength Expression // nil when omitted (buffer length - offset)
+	pos        Pos
+}
+
+func (*NewDataViewExpression) nodeMarker()   {}
+func (*NewDataViewExpression) exprMarker()   {}
+func (n *NewDataViewExpression) GetPos() Pos { return n.pos }
+
+func NewNewDataViewExpression(buffer, byteOffset, byteLength Expression, pos Pos) *NewDataViewExpression {
+	return &NewDataViewExpression{Buffer: buffer, ByteOffset: byteOffset, ByteLength: byteLength, pos: pos}
+}
+
 type NewArrayBufferExpression struct {
 	ByteLength Expression
 	pos        Pos

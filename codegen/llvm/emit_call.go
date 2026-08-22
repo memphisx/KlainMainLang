@@ -55,6 +55,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// runtime value bindable via e.lookup/inferExprType.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		if id, ok := mem.Object.(*ast.Identifier); ok {
+			// TS namespace member call `X.member(args)` (TDD-00095): resolve
+			// through the desugared flat function — checked before every
+			// other member dispatch, since a namespace name (like a class
+			// name) is a compile-time construct, never a runtime value. A
+			// local binding shadowing the namespace name wins.
+			if members, nsName := e.namespaceMembers(id.Name); members != nil && members[mem.Property] {
+				if !e.isShadowedByLocal(id.Name) {
+					mangled := ast.NamespaceMangle(nsName, mem.Property)
+					rewritten := ast.NewCallExpression(ast.NewIdentifier(mangled, ex.GetPos()), ex.Args, ex.GetPos())
+					return e.emitCall(rewritten)
+				}
+			}
 			if info, found := e.classes[id.Name]; found {
 				return e.emitStaticMethodCall(info, id.Name, mem.Property, ex.Args, ex.GetPos())
 			}
@@ -435,7 +447,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "error":
 				return e.emitConsolePrint(ex.Args, 2, "")
 			case "warn":
-				return e.emitConsolePrint(ex.Args, 2, "Warning: ")
+				// Real console.warn prints the arguments to stderr with no
+				// prefix of any kind — identical to console.error.
+				return e.emitConsolePrint(ex.Args, 2, "")
 			case "trace":
 				return e.emitConsolePrint(ex.Args, 2, "Trace: ")
 			case "assert":
@@ -632,6 +646,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "flatMap" {
 			return e.emitArrayFlatMap(mem, ex.Args, ex.GetPos())
 		}
+		// DataView accessors (getInt16/setFloat64/..., emit_dataview.go).
+		if op, kind, ok := dataViewMethodKind(mem.Property); ok {
+			if e.inferExprType(mem.Object).IsDataView {
+				if op == "get" {
+					return e.emitDataViewGet(mem, kind, ex.Args, ex.GetPos())
+				}
+				return e.emitDataViewSet(mem, kind, ex.Args, ex.GetPos())
+			}
+		}
 		// TypedArray-only methods. TypedArray IS a plain array (IsArray/
 		// ElemType — see IsTypedArray's doc comment), so indexing/.length/
 		// .fill/.slice/.reverse/.at/.indexOf/.includes/.map/.filter/
@@ -781,6 +804,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitParseInt(ex.Args, ex.GetPos())
 		case "parseFloat":
 			return e.emitParseFloat(ex.Args, ex.GetPos())
+		case "String":
+			return e.emitGlobalStringConv(ex.Args, ex.GetPos())
+		case "Number":
+			return e.emitGlobalNumberConv(ex.Args, ex.GetPos())
+		case "Boolean":
+			return e.emitGlobalBooleanConv(ex.Args, ex.GetPos())
 		case "isNaN":
 			return e.emitNumberIsNaN(ex.Args, ex.GetPos())
 		case "isFinite":
@@ -1150,4 +1179,23 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 		retTy.PromiseTask = true
 	}
 	return Value{Ref: reg, Ty: retTy}, nil
+}
+
+// namespaceMembers resolves name against the TS-namespace table (TDD-00095).
+// The resolver rewrites references to a merged function+namespace name with
+// its per-file `__kml_modN` suffix (`greet` → `greet__kml_mod0`), while the
+// table stays keyed by the source name — so a miss retries with that suffix
+// stripped. Returns the member set (or nil) and the source-level namespace
+// name to mangle members against.
+func (e *Emitter) namespaceMembers(name string) (map[string]bool, string) {
+	if m, ok := e.namespaces[name]; ok {
+		return m, name
+	}
+	if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
+		base := name[:i]
+		if m, ok := e.namespaces[base]; ok {
+			return m, base
+		}
+	}
+	return nil, ""
 }

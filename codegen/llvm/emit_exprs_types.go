@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -306,6 +307,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if strings.ContainsRune(ex.Value, '.') {
 			return TypeF64
 		}
+		// An integer literal too large for i64 is a double — must match
+		// emitNumberLit's own overflow rule.
+		if len(ex.Value) >= 19 && !strings.HasPrefix(ex.Value, "0x") && !strings.HasPrefix(ex.Value, "0b") && !strings.HasPrefix(ex.Value, "0o") {
+			if _, err := strconv.ParseInt(ex.Value, 10, 64); err != nil {
+				return TypeF64
+			}
+		}
 		return TypeI64
 	case *ast.BooleanLiteral:
 		return TypeBool
@@ -340,6 +348,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		if _, _, ok := e.resolveFuncRef(ex.Name); ok {
 			return Type{IR: "ptr", IsFunc: true}
+		}
+		if isErrorKindName(ex.Name) {
+			// Built-in error constructor in value position — a boxed funcref
+			// (must match emitIdent's own emission).
+			return TypeAny
 		}
 	case *ast.IndexExpression:
 		if e.isProcessEnvExpr(ex.Object) {
@@ -400,6 +413,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if lt.IsDate != rt.IsDate {
 				return TypeDate
 			}
+			if lt.Float || rt.Float {
+				// Mixed int/float promotes to double — must match
+				// emitBinary's numeric-promotion rule.
+				return TypeF64
+			}
 			return TypeI64
 		case "-":
 			// Date - Date: a plain number (ms difference). Date - number:
@@ -410,6 +428,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if lt.IsDate && !rt.IsDate {
 				return TypeDate
+			}
+			if lt.Float || rt.Float {
+				return TypeF64
+			}
+			return TypeI64
+		case "*", "/", "%":
+			// Same promotion rule as emitBinary: any float operand makes the
+			// result a double; all-integer stays exact i64.
+			if lt.Float || rt.Float {
+				return TypeF64
 			}
 			return TypeI64
 		case "**":
@@ -431,6 +459,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.MemberExpression:
+		// DataView properties — must match emitDataViewProp.
+		if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
+				if ex.Property == "buffer" {
+					return ArrayBufferType()
+				}
+				return TypeI64
+			}
+		}
+		// TS namespace member (TDD-00095) — must match emitMember.
+		if id, ok := ex.Object.(*ast.Identifier); ok {
+			if members, nsName := e.namespaceMembers(id.Name); members != nil && members[ex.Property] {
+				if !e.isShadowedByLocal(id.Name) {
+					return e.inferExprType(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
+				}
+			}
+		}
 		// Static field read: ClassName.staticField (TDD-00009 Stage 4).
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if info, found := e.classes[id.Name]; found {
@@ -671,10 +716,27 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeI64 // matches this function's own generic identifier-call fallback below
 			}
 			switch id.Name {
-			case "parseInt":
-				return TypeI64
-			case "parseFloat":
+			case "parseInt", "parseFloat":
+				// Both return a double (as real JS) so a no-digits input can
+				// be NaN — see emitParseInt/emitParseFloat.
 				return TypeF64
+			case "String":
+				return TypePtr
+			case "Boolean":
+				return TypeBool
+			case "Number":
+				// Must match emitGlobalNumberConv: numeric input passes
+				// through, a string parses to a double, everything else i64.
+				if len(ex.Args) == 1 {
+					argTy := e.inferExprType(ex.Args[0])
+					if argTy.Float {
+						return TypeF64
+					}
+					if isStringTy(argTy) {
+						return TypeF64
+					}
+				}
+				return TypeI64
 			case "isNaN", "isFinite":
 				return TypeBool
 			case "fetch":
@@ -694,6 +756,27 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			// DataView accessors — get* return i64 (Float* a double), set*
+			// void; must match emitDataViewGet/Set.
+			if op, kind, ok2 := dataViewMethodKind(mem.Property); ok2 {
+				if e.inferExprType(mem.Object).IsDataView {
+					if op == "set" {
+						return TypeVoid
+					}
+					if dataViewAccessKinds[kind].float {
+						return TypeF64
+					}
+					return TypeI64
+				}
+			}
+			// TS namespace member call (TDD-00095) — must match emitCall.
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 {
+				if members, nsName := e.namespaceMembers(id.Name); members != nil && members[mem.Property] {
+					if !e.isShadowedByLocal(id.Name) {
+						return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
+					}
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
 				// Every console.* method returns void (emitConsolePrint and
 				// everything that delegates to it, e.g. emitConsoleDir, all
@@ -717,9 +800,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "isInteger", "isFinite", "isNaN", "isSafeInteger":
 					return TypeBool
-				case "parseInt":
-					return TypeI64
-				case "parseFloat":
+				case "parseInt", "parseFloat":
+					// Both return a double (as real JS) so a no-digits input
+					// can be NaN — see emitParseInt/emitParseFloat.
 					return TypeF64
 				}
 			}
@@ -728,13 +811,30 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
 					"asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "cbrt", "expm1", "log1p", "fround":
 					return TypeF64
-				case "floor", "ceil", "round", "trunc", "sign", "clz32", "imul":
+				case "clz32", "imul":
+					return TypeI64
+				case "floor", "ceil", "round", "trunc", "sign":
+					// Integer input stays i64; float input stays a double
+					// (preserving NaN/±Infinity) — must match emitMathRound/
+					// emitMathSign's own result types.
+					if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).Float {
+						return TypeF64
+					}
 					return TypeI64
 				case "abs":
 					if len(ex.Args) == 1 {
 						return e.inferExprType(ex.Args[0])
 					}
-				case "min", "max", "clamp":
+				case "min", "max":
+					// Any float argument promotes the whole fold to a double
+					// (llvm.minimum/maximum) — must match emitMathMinMax.
+					for _, a := range ex.Args {
+						if e.inferExprType(a).Float {
+							return TypeF64
+						}
+					}
+					return TypeI64
+				case "clamp":
 					if len(ex.Args) > 0 {
 						return e.inferExprType(ex.Args[0])
 					}
@@ -1125,8 +1225,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
-			case "indexOf", "charCodeAt", "findIndex", "findLastIndex", "codePointAt", "search", "localeCompare":
+			case "indexOf", "findIndex", "findLastIndex", "search", "localeCompare":
 				return TypeI64
+			case "charCodeAt", "codePointAt":
+				// A double so an out-of-range index can be NaN — must match
+				// emitStringCharCodeAt.
+				return TypeF64
 			case "includes", "startsWith", "endsWith", "some", "every":
 				return TypeBool
 			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt", "toPrecision", "toExponential":
@@ -1311,6 +1415,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return URLSearchParamsType()
 	case *ast.NewArrayBufferExpression:
 		return ArrayBufferType()
+	case *ast.NewDataViewExpression:
+		return DataViewType()
 	case *ast.NewTextEncoderExpression:
 		return TextEncoderType()
 	case *ast.NewTextDecoderExpression:
@@ -1448,7 +1554,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 // representation instead of always being truthy like any other object.
 func isPlainStringTy(ty Type) bool {
 	return isStringTy(ty) && !ty.IsMap && !ty.IsSet && !ty.IsEventEmitter &&
-		!ty.IsArrayBuffer && !ty.IsTextEncoder && !ty.IsTextDecoder && !ty.IsPromise
+		!ty.IsArrayBuffer && !ty.IsDataView && !ty.IsTextEncoder && !ty.IsTextDecoder && !ty.IsPromise
 }
 
 // toBool converts a Value to i1 (truthiness).

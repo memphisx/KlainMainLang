@@ -21,7 +21,10 @@ func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.P
 		// give exactly 3). @__kml_cbrt is the deterministic fdlibm algorithm.
 		return e.emitMathCbrt(args, pos)
 	case "pow":
-		return e.emitMathBinaryFloat("pow", args, pos)
+		// __kml_js_pow: libm pow plus the JS deviation — |base| exactly 1
+		// with an infinite exponent is NaN (ensureJsPow).
+		e.ensureJsPow()
+		return e.emitMathBinaryFloat("__kml_js_pow", args, pos)
 	case "hypot":
 		return e.emitMathBinaryFloat("hypot", args, pos)
 	case "atan2":
@@ -123,13 +126,35 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 	if val.Ty.IR == "i64" || (val.Ty.IsInteger() && !val.Ty.Float) {
 		return e.coerce(val, TypeI64), nil
 	}
+	// Float input stays a double all the way through — real JS returns a
+	// double here too, and this is what lets NaN/±Infinity pass through
+	// unchanged instead of hitting an fptosi (whose result is poison for any
+	// non-finite input — the pre-fix behavior printed garbage). An integral
+	// double prints without a fraction (TDD-00080's shortest-round-trip
+	// formatter), so Math.floor(2.9) still displays as `2`.
 	fval := e.coerce(val, TypeF64)
 	e.ensureMathFuncs()
 	rounded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s)", rounded, fn, fval.Ref))
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", result, rounded))
-	return Value{Ref: result, Ty: TypeI64}, nil
+	if fn == "round" {
+		// JS Math.round is floor(x + 0.5) — ties round toward +Infinity
+		// (Math.round(-2.5) is -2), not libm round's half-away-from-zero.
+		// A zero result from a negative input must be the *signed* zero
+		// (Math.round(-0.5) is -0), which floor(0.0) alone loses.
+		bumped := e.freshReg()
+		floored := e.freshReg()
+		isZero := e.freshReg()
+		isNegIn := e.freshReg()
+		needNegZero := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fadd double %s, 5.0e-1", bumped, fval.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", floored, bumped))
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", isZero, floored))
+		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", isNegIn, fval.Ref))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", needNegZero, isZero, isNegIn))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double -0.0, double %s", rounded, needNegZero, floored))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s)", rounded, fn, fval.Ref))
+	}
+	return Value{Ref: rounded, Ty: TypeF64}, nil
 }
 
 func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -212,33 +237,52 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 	if len(args) < 2 {
 		return Value{}, fmt.Errorf("%d:%d: Math.%s expects at least 2 arguments", pos.Line, pos.Col, fn)
 	}
-	result, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	for _, arg := range args[1:] {
-		next, err := e.emitExpr(arg)
+	vals := make([]Value, 0, len(args))
+	anyFloat := false
+	for _, arg := range args {
+		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Value{}, err
 		}
-		next = e.coerce(next, result.Ty)
+		vals = append(vals, v)
+		if v.Ty.Float {
+			anyFloat = true
+		}
+	}
+	if anyFloat {
+		// Any float operand promotes the whole reduction to double, and the
+		// fold uses llvm.minimum/llvm.maximum — the IEEE-754 minimum/maximum
+		// operations, which propagate a NaN operand and order -0.0 below
+		// +0.0, exactly real Math.min/Math.max. (A plain fcmp olt/select
+		// silently *dropped* NaN — the ordered compare is false for it —
+		// and this is also what a mixed Math.min(1, someDouble) used to get
+		// wrong by coercing the double into the first operand's i64 type.)
+		e.ensureFloatMinMaxIntrinsics()
+		intrinsic := "llvm.minimum.f64"
+		if fn == "max" {
+			intrinsic = "llvm.maximum.f64"
+		}
+		result := e.coerce(vals[0], TypeF64)
+		for _, v := range vals[1:] {
+			next := e.coerce(v, TypeF64)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, intrinsic, result.Ref, next.Ref))
+			result = Value{Ref: r, Ty: TypeF64}
+		}
+		return result, nil
+	}
+	result := e.coerce(vals[0], TypeI64)
+	for _, v := range vals[1:] {
+		next := e.coerce(v, TypeI64)
 		cmp := e.freshReg()
 		r := e.freshReg()
-		if result.Ty.Float {
-			op := "fcmp olt"
-			if fn == "max" {
-				op = "fcmp ogt"
-			}
-			e.emitInstr(fmt.Sprintf("%s = %s double %s, %s", cmp, op, result.Ref, next.Ref))
-		} else {
-			op := "icmp slt"
-			if fn == "max" {
-				op = "icmp sgt"
-			}
-			e.emitInstr(fmt.Sprintf("%s = %s %s %s, %s", cmp, op, result.Ty.IR, result.Ref, next.Ref))
+		op := "icmp slt"
+		if fn == "max" {
+			op = "icmp sgt"
 		}
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", r, cmp, result.Ty.IR, result.Ref, result.Ty.IR, next.Ref))
-		result = Value{Ref: r, Ty: result.Ty}
+		e.emitInstr(fmt.Sprintf("%s = %s i64 %s, %s", cmp, op, result.Ref, next.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, cmp, result.Ref, next.Ref))
+		result = Value{Ref: r, Ty: TypeI64}
 	}
 	return result, nil
 }
@@ -250,6 +294,22 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 	val, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
+	}
+	if val.Ty.Float {
+		// Float path: ±Infinity give ±1, and NaN/±0 return the input value
+		// itself — the exact JS behavior (Math.sign(NaN) is NaN, and the
+		// sign of a signed zero is that same zero). Both fcmp's are ordered,
+		// so a NaN input fails both and falls through to itself.
+		fval := e.coerce(val, TypeF64)
+		isPos := e.freshReg()
+		isNeg := e.freshReg()
+		fromPos := e.freshReg()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 0.0", isPos, fval.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0.0", isNeg, fval.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 1.0, double %s", fromPos, isPos, fval.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double -1.0, double %s", r, isNeg, fromPos))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	}
 	iVal := e.coerce(val, TypeI64)
 	isPos := e.freshReg()

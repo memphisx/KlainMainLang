@@ -935,7 +935,7 @@ const arr: string[] = [];
 const result = arr.pop();
 console.log("result:", result);
 console.log("len:", arr.length);
-`, "result:\nnull\nlen:\n0")
+`, "result: null\nlen: 0")
 }
 
 // --- shift on empty array: returns element type's zero value, length stays 0 ---
@@ -955,7 +955,7 @@ const arr: string[] = [];
 const result = arr.shift();
 console.log("result:", result);
 console.log("len:", arr.length);
-`, "result:\nnull\nlen:\n0")
+`, "result: null\nlen: 0")
 }
 
 // --- pop/shift on non-empty array still works normally (non-regression) ---
@@ -1103,7 +1103,7 @@ func TestE2EArrayDestructuringBasic(t *testing.T) {
 	assertOutput(t, `
 let [a, b, c] = [10, 20, 30];
 console.log(a, b, c);
-`, "10\n20\n30")
+`, "10 20 30")
 }
 
 func TestE2EArrayDestructuringOutOfBoundsReadsZero(t *testing.T) {
@@ -1115,7 +1115,7 @@ func TestE2EArrayDestructuringOutOfBoundsReadsZero(t *testing.T) {
 	assertOutput(t, `
 let [a, b] = [1];
 console.log(a, b);
-`, "1\n0")
+`, "1 0")
 }
 
 func TestE2EArrayDestructuringAllOutOfBoundsReadsZero(t *testing.T) {
@@ -1123,7 +1123,7 @@ func TestE2EArrayDestructuringAllOutOfBoundsReadsZero(t *testing.T) {
 let arr: number[] = [];
 let [a, b] = arr;
 console.log(a, b);
-`, "0\n0")
+`, "0 0")
 }
 
 func TestE2EArrayDestructuringNestedArrayOutOfBoundsIsEmptyArray(t *testing.T) {
@@ -1143,7 +1143,7 @@ function f([a, b]: number[]): void {
   console.log(a, b);
 }
 f([5]);
-`, "5\n0")
+`, "5 0")
 }
 
 // --- Array destructuring default values (`[a = expr] = arr`, ADR-00158) ---
@@ -1157,14 +1157,14 @@ func TestE2EArrayDestructuringDefaultUsedWhenOutOfBounds(t *testing.T) {
 	assertOutput(t, `
 let [a = 10, b = 20] = [1];
 console.log(a, b);
-`, "1\n20")
+`, "1 20")
 }
 
 func TestE2EArrayDestructuringDefaultNotUsedWhenInBounds(t *testing.T) {
 	assertOutput(t, `
 let [a = 10, b = 20] = [1, 2];
 console.log(a, b);
-`, "1\n2")
+`, "1 2")
 }
 
 func TestE2EArrayDestructuringDefaultReferencesEarlierElement(t *testing.T) {
@@ -1173,7 +1173,7 @@ func TestE2EArrayDestructuringDefaultReferencesEarlierElement(t *testing.T) {
 	assertOutput(t, `
 let [a = 5, b = a] = [1];
 console.log(a, b);
-`, "1\n1")
+`, "1 1")
 }
 
 func TestE2EArrayDestructuringDefaultCapturesOuterVariable(t *testing.T) {
@@ -1195,7 +1195,7 @@ function f([a = 10, b = 20]: number[]): void {
 }
 f([1]);
 f([1, 2]);
-`, "1\n20\n1\n2")
+`, "1 20\n1 2")
 }
 
 // --- Array destructuring assignment (`[a, b] = expr`, ADR-00160) ---
@@ -1209,7 +1209,7 @@ func TestE2EArrayDestructuringAssignmentBasic(t *testing.T) {
 let a: number, b: number;
 [a, b] = [1, 2];
 console.log(a, b);
-`, "1\n2")
+`, "1 2")
 }
 
 func TestE2EArrayDestructuringAssignmentSwapIdiom(t *testing.T) {
@@ -1218,7 +1218,7 @@ let a: number = 1;
 let b: number = 2;
 [a, b] = [b, a];
 console.log(a, b);
-`, "2\n1")
+`, "2 1")
 }
 
 func TestE2EArrayDestructuringAssignmentFromVariable(t *testing.T) {
@@ -1227,7 +1227,7 @@ let a: number = 0, b: number = 0;
 let src: number[] = [7];
 [a, b] = src;
 console.log(a, b);
-`, "7\n0")
+`, "7 0")
 }
 
 func TestE2EArrayDestructuringAssignmentOutOfBoundsReadsZero(t *testing.T) {
@@ -1235,7 +1235,7 @@ func TestE2EArrayDestructuringAssignmentOutOfBoundsReadsZero(t *testing.T) {
 let a: number = 9, b: number = 9;
 [a, b] = [1];
 console.log(a, b);
-`, "1\n0")
+`, "1 0")
 }
 
 func TestE2EArrayDestructuringAssignmentAtTopLevel(t *testing.T) {
@@ -1250,7 +1250,7 @@ let a: number = 0;
 let b: number = 0;
 [a, b] = [9, 10];
 console.log(a, b);
-`, "9\n10")
+`, "9 10")
 }
 
 func TestE2EArrayDestructuringAssignmentClosureCapture(t *testing.T) {
@@ -1310,21 +1310,21 @@ func TestE2EArrayRestDestructuringBasic(t *testing.T) {
 	assertOutput(t, `
 let [a, ...rest] = [1, 2, 3];
 console.log(a, rest.length, rest[0], rest[1]);
-`, "1\n2\n2\n3")
+`, "1 2 2 3")
 }
 
 func TestE2EArrayRestDestructuringEmptyWhenSourceExhausted(t *testing.T) {
 	assertOutput(t, `
 let [a, b, ...rest] = [1, 2];
 console.log(a, b, rest.length);
-`, "1\n2\n0")
+`, "1 2 0")
 }
 
 func TestE2EArrayRestDestructuringWholeArray(t *testing.T) {
 	assertOutput(t, `
 let [...all] = [1, 2, 3];
 console.log(all.length, all[0], all[2]);
-`, "3\n1\n3")
+`, "3 1 3")
 }
 
 func TestE2EArrayRestDestructuringIsIndependentCopy(t *testing.T) {
@@ -1351,7 +1351,7 @@ let a: number = 0;
 let rest: number[] = [];
 [a, ...rest] = [1, 2, 3];
 console.log(a, rest.length);
-`, "1\n2")
+`, "1 2")
 }
 
 func TestE2EArrayRestDestructuringAssignmentTargetMustBeArray(t *testing.T) {
@@ -1392,4 +1392,36 @@ let [...rest = []] = [1, 2, 3];
 	if err == nil {
 		t.Fatal("expected a compile error for a rest element combined with a default value")
 	}
+}
+
+// Array mutators on non-identifier receivers (ADR-00284): class `this.field`,
+// interface-typed object fields, and nested-array elements — all previously
+// hard "requires an array variable" compile errors.
+func TestE2EArrayMutatorsOnFieldsAndElements(t *testing.T) {
+	assertOutput(t, `
+interface Bag { xs: number[]; }
+function make(): Bag { return { xs: [1, 2, 3] }; }
+const b = make();
+b.xs.push(4);
+b.xs.unshift(0);
+console.log(b.xs.join(","));
+const rem = b.xs.splice(1, 2);
+console.log(rem.join(","));
+console.log(b.xs.join(","));
+const m: number[][] = [[1, 2], [3]];
+m[0].push(9);
+m[1].pop();
+console.log(m[0].join(","));
+console.log(m[1].length);
+class Stack {
+  items: string[] = [];
+  add(s: string): number { return this.items.push(s); }
+}
+const st = new Stack();
+console.log(st.add("a"), st.add("b"));
+const top = st.items.pop();
+console.log(top, st.items.length);
+const first = st.items.shift();
+console.log(first, st.items.length);
+`, "0,1,2,3,4\n1,2\n0,3,4\n1,2,9\n0\n1 2\nb 1\na 0")
 }

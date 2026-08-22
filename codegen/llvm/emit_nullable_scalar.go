@@ -581,16 +581,16 @@ func (e *Emitter) applyBranchNarrowing(test ast.Expression, branchIsTrue bool) {
 // emitConsolePrint's main loop does — a boolean as true/false, everything else
 // via its printf conversion. Shared by the payload branch of a nullable
 // scalar's null-aware print.
-func (e *Emitter) emitConsoleScalarValue(val Value, fd int) error {
+func (e *Emitter) emitConsoleScalarValue(val Value, fd int, term string) error {
 	if val.Ty.IR == "i1" {
 		strVal, err := e.emitValueToString(val)
 		if err != nil {
 			return err
 		}
-		e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	e.emitConsolePrintVal(val, e.internString(val.Ty.PrintfFmt()+"\n"), fd)
+	e.emitConsolePrintVal(val, e.internString(val.Ty.PrintfFmt()+term), fd)
 	return nil
 }
 
@@ -599,35 +599,35 @@ func (e *Emitter) emitConsoleScalarValue(val Value, fd int) error {
 // which the pre-Option-A representation could not produce (a null read back as
 // the payload 0 and printed as "0"). A narrowed local never reaches here; it
 // prints its payload through the ordinary path instead.
-func (e *Emitter) emitConsoleNullableScalar(sym Symbol, fd int) error {
+func (e *Emitter) emitConsoleNullableScalar(sym Symbol, fd int, term string) error {
 	present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
 	payload := Value{Ref: e.loadNullableScalarPayload(sym.Ptr, sym.Ty), Ty: sym.Ty.withoutNullable()}
-	return e.emitConsolePresenceBranch(present, payload, fd)
+	return e.emitConsolePresenceBranch(present, payload, fd, term)
 }
 
 // emitConsoleNullableScalarAgg prints a nullable-scalar aggregate *value* (a
 // T|null return/field value) the same null-aware way a boxed local prints.
-func (e *Emitter) emitConsoleNullableScalarAgg(val Value, fd int) error {
+func (e *Emitter) emitConsoleNullableScalarAgg(val Value, fd int, term string) error {
 	present, payload := e.nullableScalarAggParts(val)
-	return e.emitConsolePresenceBranch(present, payload, fd)
+	return e.emitConsolePresenceBranch(present, payload, fd, term)
 }
 
 // emitConsolePresenceBranch prints payload when present is true, the literal
 // `null` when false.
-func (e *Emitter) emitConsolePresenceBranch(present string, payload Value, fd int) error {
+func (e *Emitter) emitConsolePresenceBranch(present string, payload Value, fd int, term string) error {
 	valL := e.freshLabel("console.nullscalar.val")
 	nullL := e.freshLabel("console.nullscalar.null")
 	mergeL := e.freshLabel("console.nullscalar.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, valL, nullL))
 
 	e.emitLabel(valL)
-	if err := e.emitConsoleScalarValue(payload, fd); err != nil {
+	if err := e.emitConsoleScalarValue(payload, fd, term); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(nullL)
-	e.emitConsolePrintVal(Value{Ref: e.internString("null"), Ty: TypePtr}, e.internString("%s\n"), fd)
+	e.emitConsolePrintVal(Value{Ref: e.internString("null"), Ty: TypePtr}, e.internString("%s"+term), fd)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)

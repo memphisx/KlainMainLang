@@ -309,13 +309,34 @@ func (e *Emitter) emitStringCharCodeAt(mem *ast.MemberExpression, args []ast.Exp
 		return Value{}, err
 	}
 	idxVal = e.coerce(idxVal, TypeI64)
+	// Bounds check: an out-of-range index (negative or >= length) returns
+	// NaN, as real JS — the pre-fix code loaded whatever byte happened to sit
+	// at that address. The result is a double for exactly that reason (only a
+	// double can hold NaN); an in-range code unit prints/compares identically.
+	// The load itself is clamped to index 0 when out of range (still inside
+	// the allocation — at worst the NUL terminator) and its value discarded.
+	e.ensureStrlen()
+	sLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, strVal.Ref))
+	geZero := e.freshReg()
+	ltLen := e.freshReg()
+	inBounds := e.freshReg()
+	safeIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", geZero, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", ltLen, idxVal.Ref, sLen))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inBounds, geZero, ltLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", safeIdx, inBounds, idxVal.Ref))
 	charPtr := e.freshReg()
 	charByte := e.freshReg()
+	asI64 := e.freshReg()
+	asF64 := e.freshReg()
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", charPtr, strVal.Ref, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", charPtr, strVal.Ref, safeIdx))
 	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", charByte, charPtr))
-	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", result, charByte))
-	return Value{Ref: result, Ty: TypeI64}, nil
+	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", asI64, charByte))
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", asF64, asI64))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0x7FF8000000000000", result, inBounds, asF64))
+	return Value{Ref: result, Ty: TypeF64}, nil
 }
 
 // emitStringCharAtMethod implements s.charAt(i): a 1-character string at

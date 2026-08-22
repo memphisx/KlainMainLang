@@ -12,7 +12,7 @@ This page follows the shared status-page format ([Status page format](README.md#
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `number` → `i64` | ✅ | • A bare `: number` is `i64`, not TypeScript's IEEE-754 double, so a fractional literal or float-valued expression assigned to one **truncates to its integer part** — `const x: number = 0.1 + 0.2` yields `0` (not `0.30000000000000004`), and `const x: number = 3.9` yields `3`. Use an explicit `float64`/`float32` annotation (or `/** @type {float64} */`) for real double arithmetic | • `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides the default per-binding |
+| `number` → `i64` | ✅ | • A bare `: number` is `i64`, not TypeScript's IEEE-754 double, so a fractional literal or float-valued expression assigned to one **truncates to its integer part** — `const x: number = 0.1 + 0.2` yields `0` (not `0.30000000000000004`), and `const x: number = 3.9` yields `3`. Use an explicit `float64`/`float32` annotation (or `/** @type {float64} */`) for real double arithmetic | • `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides the default per-binding<br>• *Mixed* int/float arithmetic (`i * 1.5`) now promotes both operands to double, as real JS — the old left-biased unification truncated the float operand ([ADR-00292](../adr/ADR-00292.md)); the truncation caveat here is only about a value *assigned into* a declared `: number`/`i64` slot |
 | `string` → `ptr` | ✅ | | |
 | `boolean` → `i1` | ✅ | | |
 | `void` | ✅ | | |

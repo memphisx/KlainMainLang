@@ -326,6 +326,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = URLSearchParamsType()
 		case *ast.NewArrayBufferExpression:
 			ty = ArrayBufferType()
+		case *ast.NewDataViewExpression:
+			ty = DataViewType()
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
 		case *ast.NewTextEncoderExpression:
@@ -390,6 +392,17 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					ty = PromiseOf(ResponseType())
 				case "btoa", "atob", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI":
 					ty = TypePtr
+				case "String":
+					ty = TypePtr
+				case "Number", "parseInt", "parseFloat":
+					// Number/parseInt/parseFloat can produce NaN, so their
+					// results are doubles unless Number's input is already
+					// integral — must match inferExprType's own cases (which
+					// this pre-inference switch would otherwise shadow with
+					// its blind i64 default, truncating a NaN to 0).
+					ty = e.inferExprType(init)
+				case "Boolean":
+					ty = TypeBool
 				case "structuredClone":
 					if len(init.Args) == 1 {
 						ty = e.inferExprType(init.Args[0])
@@ -435,16 +448,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			if mem, ok := init.Callee.(*ast.MemberExpression); ok {
 				switch mem.Property {
 				case "splice":
-					if arrId, ok := mem.Object.(*ast.Identifier); ok {
-						if s, found := e.lookup(arrId.Name); found && s.Ty.IsArray {
-							ty = s.Ty
-						}
+					// Any mutable receiver shape (variable, object/class
+					// field, nested-array element) — the same coverage
+					// emitSplice itself accepts via resolveArrayMutLoc.
+					if recvTy := e.inferExprType(mem.Object); recvTy.IsArray {
+						ty = recvTy
 					}
 				case "pop", "shift":
-					if arrId, ok := mem.Object.(*ast.Identifier); ok {
-						if s, found := e.lookup(arrId.Name); found && s.Ty.IsArray && s.Ty.ElemType != nil {
-							ty = *s.Ty.ElemType
-						}
+					if recvTy := e.inferExprType(mem.Object); recvTy.IsArray && recvTy.ElemType != nil {
+						ty = *recvTy.ElemType
 					}
 				default:
 					inferred := e.inferExprType(init)

@@ -111,6 +111,78 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
+// emitGlobalStringConv implements the String(x) conversion call — routes
+// through emitValueToString, the same rendering template-literal
+// interpolation uses. String() with no argument is "" (real JS: "undefined",
+// but a call with a genuinely absent value doesn't arise in typed code —
+// the empty string is this compiler's deterministic default).
+func (e *Emitter) emitGlobalStringConv(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) == 0 {
+		return Value{Ref: e.internString(""), Ty: TypePtr}, nil
+	}
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: String() takes at most 1 argument", pos.Line, pos.Col)
+	}
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if v.Ty.IsDynamic {
+		return e.emitDynamicToString(v)
+	}
+	return e.emitValueToString(v)
+}
+
+// emitGlobalBooleanConv implements Boolean(x) — JS truthiness via the shared
+// toBool (ADR-00116: NaN is falsy, "" is falsy, 0 is falsy).
+func (e *Emitter) emitGlobalBooleanConv(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) == 0 {
+		return Value{Ref: "0", Ty: TypeBool}, nil
+	}
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Boolean() takes at most 1 argument", pos.Line, pos.Col)
+	}
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitToBool(v), nil
+}
+
+// emitGlobalNumberConv implements Number(x) — JS ToNumber. A numeric input
+// passes through; a boolean is 0/1; a string parses whole-string via
+// @__kml_to_number ("" and whitespace-only are 0, a trailing-junk or
+// no-digit string is NaN — unlike parseFloat's prefix parse); null is 0.
+func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) == 0 {
+		return Value{Ref: "0", Ty: TypeI64}, nil
+	}
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Number() takes at most 1 argument", pos.Line, pos.Col)
+	}
+	if _, isNull := args[0].(*ast.NullLiteral); isNull {
+		return Value{Ref: "0", Ty: TypeI64}, nil
+	}
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	switch {
+	case v.Ty.IR == "i1":
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
+		return Value{Ref: r, Ty: TypeI64}, nil
+	case v.Ty.Float || v.Ty.IsInteger() || v.Ty.IR == "i64":
+		return v, nil
+	case isStringTy(v.Ty):
+		e.ensureToNumber()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", r, v.Ref))
+		return Value{Ref: r, Ty: TypeF64}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: Number() conversion from this operand type is not supported", pos.Line, pos.Col)
+}
+
 func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: parseInt expects 1 or 2 arguments", pos.Line, pos.Col)
@@ -129,9 +201,24 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		r32 := e.coerce(rv, TypeI32)
 		radixRef = r32.Ref
 	}
+	// parseInt returns a double, as real JS: values beyond 2^53 lose
+	// precision in JS too, and only a double can represent the NaN that a
+	// no-digits input must produce. strtoll's endptr tells the two cases
+	// apart — it stays at the start of the string exactly when no digits
+	// were consumed (strtoll itself skips leading whitespace, same as JS).
+	endSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr null, i32 %s)", r, strVal.Ref, radixRef))
-	return Value{Ref: r, Ty: TypeI64}, nil
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr %s, i32 %s)", r, strVal.Ref, endSlot, radixRef))
+	endPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
+	noDigits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", noDigits, endPtr, strVal.Ref))
+	asF := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", asF, r))
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", result, noDigits, asF))
+	return Value{Ref: result, Ty: TypeF64}, nil
 }
 
 func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -143,7 +230,17 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
+	// A no-conversion input must give NaN (real JS), not strtod's bare 0 —
+	// endptr stays at the start of the string exactly in that case.
+	endSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr null)", r, strVal.Ref))
-	return Value{Ref: r, Ty: TypeF64}, nil
+	e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
+	endPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
+	noDigits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", noDigits, endPtr, strVal.Ref))
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", result, noDigits, r))
+	return Value{Ref: result, Ty: TypeF64}, nil
 }

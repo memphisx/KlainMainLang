@@ -253,6 +253,12 @@ type Type struct {
 	// read in emitMember, the same pattern `.size` already uses for
 	// Map/Set. See emit_arraybuffer.go and docs/tdd/TDD-00018.md.
 	IsArrayBuffer bool
+	// IsDataView marks `new DataView(buffer, byteOffset?, byteLength?)`: an
+	// arbitrary-endian read/write view over an ArrayBuffer sub-range. Same
+	// hidden-heap-struct convention as IsArrayBuffer — a ptr to
+	// {ptr data(base+offset), i64 byteLength, i64 byteOffset, ptr bufHdr},
+	// with dedicated property/method dispatch. See emit_dataview.go.
+	IsDataView bool
 	// IsTypedArray marks a TypedArray (Int8Array/Uint8Array/Int16Array/
 	// Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — no
 	// Uint8ClampedArray/BigInt64Array/BigUint64Array, see the TDD's
@@ -638,6 +644,12 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
+}
+
+// DataViewType returns `new DataView(...)`'s result type — see IsDataView's
+// doc comment for the hidden-struct representation.
+func DataViewType() Type {
+	return Type{IR: "ptr", IsDataView: true}
 }
 
 // TextEncoderType returns `new TextEncoder()`'s result type — see

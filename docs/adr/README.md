@@ -321,3 +321,15 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00281](ADR-00281.md) | Non-promise `await` ticks, absent `.then` callbacks, `for await` suspension classification; async-gen step-timing divergence disclosed | Extends [ADR-00268](ADR-00268.md), [ADR-00248](ADR-00248.md); corrects [ADR-00275](ADR-00275.md)'s ordering premise |
 | [00282](ADR-00282.md) | `typeof` correctness cluster — built-in values "object", namespaces/constructors/undeclared answered statically | Found by the same sweep as [ADR-00281](ADR-00281.md) |
 | [00283](ADR-00283.md) | Spec-faithful async-generator step model — synchronous start, park-at-await, request queueing | Supersedes [ADR-00275](ADR-00275.md)'s deferred start; closes [ADR-00281](ADR-00281.md)'s disclosed divergence |
+| [00284](ADR-00284.md) | Array mutators accept any mutable receiver — object/class fields, nested-array elements; variadic `push`/`unshift` | Extends [ADR-00056](ADR-00056.md), [ADR-00061](ADR-00061.md) |
+| [00285](ADR-00285.md) | `console.log` Node-faithful — space-joined args, bare-newline no-arg call, unprefixed `warn`, `-0` display | Extends [ADR-00183](ADR-00183.md) |
+| [00286](ADR-00286.md) | Math NaN/±Infinity correctness — float-preserving rounding family and `sign`, NaN-propagating `min`/`max`, JS `round` ties | Extends [ADR-00187](ADR-00187.md) |
+| [00287](ADR-00287.md) | `parseInt`/`parseFloat` real `NaN` (double results); `charCodeAt`/`codePointAt` bounds-checked | Same audit cluster as [ADR-00284](ADR-00284.md)–[ADR-00286](ADR-00286.md) |
+| [00288](ADR-00288.md) | Blocked-by histogram in the conformance runner — rank missing APIs by files gated | Extends [TDD-00082](../tdd/TDD-00082.md) |
+| [00289](ADR-00289.md) | Built-in error constructors as first-class values (boxed funcrefs, `assert.throws(TypeError, …)`) | Picked from [ADR-00288](ADR-00288.md)'s histogram |
+| [00290](ADR-00290.md) | TS `namespace` declarations with function merging; harness shim's bare `assert` + `compareArray` | Implements [TDD-00095](../tdd/TDD-00095.md) |
+| [00291](ADR-00291.md) | `String(x)`/`Number(x)`/`Boolean(x)` conversion calls | Picked from [ADR-00288](ADR-00288.md)'s histogram; extends [ADR-00287](ADR-00287.md) |
+| [00292](ADR-00292.md) | Mixed int/float arithmetic promotes to double (was left-biased truncation) | Extends [ADR-00187](ADR-00187.md) |
+| [00293](ADR-00293.md) | Generator expressions (bound form) + yield-based element-type inference | Implements [TDD-00096](../tdd/TDD-00096.md) |
+| [00294](ADR-00294.md) | `DataView` over `ArrayBuffer` — full endian-controlled accessor set, sub-range views, RangeErrors | Extends [TDD-00018](../tdd/TDD-00018.md); picked from [ADR-00288](ADR-00288.md)'s histogram |
+| [00295](ADR-00295.md) | Near-miss alignment — Unicode `trim`, JS `pow` edge, oversized int literals → double, DataView ToIndex, shim SameValue NaN | Driven by [ADR-00288](ADR-00288.md)'s near-miss bucket |

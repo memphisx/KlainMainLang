@@ -10,12 +10,11 @@ import (
 // fd=1 writes to stdout via printf; fd=2 writes to stderr via dprintf.
 // prefix, if non-empty, is printed before the first argument on the same line.
 //
-// Each argument is printed on its own line (this compiler's own long-
-// standing convention, not real console.log's single-space-joined-line
-// behavior) — so console.group()'s indent is applied once at the very start
-// (before prefix, or before the first argument if there's no prefix) and
-// again before every argument after the first, since each of those starts a
-// fresh line of its own.
+// Arguments are joined by a single space on one line, matching real
+// console.log — so console.group()'s indent is applied once at the very
+// start (before the prefix, or before the first argument if there's no
+// prefix), and each argument's own print ends with a space except the last,
+// which ends the line with "\n".
 func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string) (Value, error) {
 	if fd == 2 {
 		e.ensureDprintf()
@@ -32,16 +31,22 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtStr, pfxPtr))
 		}
 	}
+	if len(args) == 0 {
+		// console.log() with no arguments prints a bare newline, as real JS.
+		e.emitConsolePrintVal(Value{Ref: e.internString(""), Ty: TypePtr}, e.internString("%s\n"), fd)
+		return Value{Ty: TypeVoid}, nil
+	}
 	for i, arg := range args {
-		if i > 0 {
-			e.emitConsoleGroupIndent(fd)
+		term := "\n"
+		if i < len(args)-1 {
+			term = " "
 		}
 		// An un-narrowed nullable-scalar local prints its value or the literal
 		// `null` (TDD-00064 Stage 2), rather than the payload 0 the bare
 		// representation used to surface for a null. A narrowed local is known
 		// present and falls through to the ordinary path below.
 		if sym, ok := e.nullableScalarLValue(arg); ok && !sym.NarrowedNonNull {
-			if err := e.emitConsoleNullableScalar(sym, fd); err != nil {
+			if err := e.emitConsoleNullableScalar(sym, fd, term); err != nil {
 				return Value{}, err
 			}
 			continue
@@ -53,7 +58,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 		// A nullable-scalar aggregate value (a T|null return/field) prints
 		// null-aware, same as a boxed local (TDD-00064 Stage 3).
 		if isNullableScalar(val.Ty) {
-			if err := e.emitConsoleNullableScalarAgg(val, fd); err != nil {
+			if err := e.emitConsoleNullableScalarAgg(val, fd, term); err != nil {
 				return Value{}, err
 			}
 			continue
@@ -66,7 +71,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 			continue
 		}
 		// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
@@ -76,7 +81,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 			continue
 		}
 		// A class instance / object literal prints Node-style: `Foo { x: 1 }`
@@ -86,7 +91,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitConsolePrintVal(strVal, e.internString("%s\n"), fd)
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 			continue
 		}
 		if val.Ty.IsDynamic {
@@ -94,7 +99,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			fmtPtr := e.internString("%s\n")
+			fmtPtr := e.internString("%s" + term)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
@@ -104,7 +109,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			fmtPtr := e.internString("%s\n")
+			fmtPtr := e.internString("%s" + term)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
@@ -113,7 +118,7 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			fmtPtr := e.internString("%s\n")
+			fmtPtr := e.internString("%s" + term)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
@@ -131,11 +136,25 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			if err != nil {
 				return Value{}, err
 			}
-			fmtPtr := e.internString("%s\n")
+			if val.Ty.Float {
+				// console.log(-0) displays `-0` (Node's util.inspect), even
+				// though String(-0) — what emitValueToString computes — is
+				// "0". Detected by exact bit pattern (only -0.0 has just the
+				// sign bit set), so no other value pays for the check.
+				f64 := e.coerce(val, TypeF64)
+				bits := e.freshReg()
+				isNegZero := e.freshReg()
+				sel := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
+				strVal = Value{Ref: sel, Ty: TypePtr}
+			}
+			fmtPtr := e.internString("%s" + term)
 			e.emitConsolePrintVal(strVal, fmtPtr, fd)
 			continue
 		}
-		fmtPtr := e.internString(val.Ty.PrintfFmt() + "\n")
+		fmtPtr := e.internString(val.Ty.PrintfFmt() + term)
 		e.emitConsolePrintVal(val, fmtPtr, fd)
 	}
 	return Value{Ty: TypeVoid}, nil

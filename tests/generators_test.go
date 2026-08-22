@@ -26,7 +26,7 @@ const r2 = g.next();
 console.log(r2.value, r2.done);
 const r3 = g.next();
 console.log(r3.value, r3.done);
-`, "1\nfalse\n2\nfalse\n3\ntrue")
+`, "1 false\n2 false\n3 true")
 }
 
 func TestE2EGeneratorNextAfterDoneReturnsZeroValue(t *testing.T) {
@@ -45,7 +45,7 @@ const r2 = g.next();
 console.log(r2.value, r2.done);
 const r3 = g.next();
 console.log(r3.value, r3.done);
-`, "2\ntrue\n0\ntrue")
+`, "2 true\n0 true")
 }
 
 func TestE2EGeneratorSentValue(t *testing.T) {
@@ -119,7 +119,7 @@ function* gen(): number {
 const g = gen();
 const r = g.next();
 console.log(r.value, r.done);
-`, "42\ntrue")
+`, "42 true")
 }
 
 func TestE2EGeneratorClosureInsideBody(t *testing.T) {
@@ -1197,5 +1197,46 @@ console.log(outer())
 `
 	if _, err := parseAndCompile(src); err == nil {
 		t.Fatal("expected a compile error for yield* over an async generator in a sync generator, got none")
+	}
+}
+
+// Generator expressions bound at top level (TDD-00096/ADR-00293) — sync and
+// with parameters — plus yield-based element-type inference (no annotation).
+func TestE2EGeneratorExpressionBoundTopLevel(t *testing.T) {
+	assertOutput(t, `
+var items = function* () {
+  yield 1;
+  yield 2;
+  yield 3;
+};
+for (const v of items()) { console.log(v); }
+const words = function* (prefix: string) {
+  yield prefix + "a";
+  yield prefix + "b";
+};
+for (const w of words("x")) { console.log(w); }
+`, "1\n2\n3\nxa\nxb")
+}
+
+func TestE2EGeneratorYieldInferenceFloatJoin(t *testing.T) {
+	assertOutput(t, `
+const halves = function* (n: number) {
+  for (let i = 1; i <= n; i++) { yield i * 1.5; }
+};
+let sum = 0.0;
+for (const f of halves(3)) { sum = sum + f; }
+console.log(sum);
+function* mixed() { yield 1; yield 2.5; }
+for (const m of mixed()) { console.log(m); }
+`, "9\n1\n2.5")
+}
+
+func TestE2EGeneratorExpressionAsValueRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function take(f: () => void): void {}
+take(function* () { yield 1; });
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a generator expression used as a value")
 	}
 }

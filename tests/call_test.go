@@ -235,12 +235,12 @@ console.log("back to top")
 `, "top\nA\n  inside A\n  A.1\n    inside A.1\n  back in A\nback to top")
 }
 
-func TestE2EConsoleGroupMultiArgIndentsEveryLine(t *testing.T) {
+func TestE2EConsoleGroupMultiArgSingleIndentedLine(t *testing.T) {
 	assertOutput(t, `
 console.group("g")
 console.log("a", "b", "c")
 console.groupEnd()
-`, "g\n  a\n  b\n  c")
+`, "g\n  a b c")
 }
 
 func TestE2EConsoleGroupEndUnbalancedDoesNotUnderflow(t *testing.T) {

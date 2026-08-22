@@ -221,6 +221,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewXMLHttpRequestBody(pos)
 	case "ArrayBuffer":
 		return p.parseNewArrayBufferBody(pos)
+	case "DataView":
+		return p.parseNewDataViewBody(pos)
 	case "TextEncoder":
 		return p.parseNewTextEncoderBody(pos)
 	case "TextDecoder":
@@ -656,6 +658,35 @@ func (p *Parser) parseNewRegExpBody(pos ast.Pos) (*ast.NewRegExpExpression, erro
 		return nil, err
 	}
 	return ast.NewNewRegExpExpression(pattern, flags, pos), nil
+}
+
+// parseNewDataViewBody parses `new DataView(buffer, byteOffset?, byteLength?)`.
+func (p *Parser) parseNewDataViewBody(pos ast.Pos) (*ast.NewDataViewExpression, error) {
+	p.advance() // consume 'DataView'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	buffer, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	var byteOffset, byteLength ast.Expression
+	if p.match(lexer.COMMA) {
+		byteOffset, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		if p.match(lexer.COMMA) {
+			byteLength, err = p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewDataViewExpression(buffer, byteOffset, byteLength, pos), nil
 }
 
 func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
@@ -1204,6 +1235,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		// wired up in codegen (emitFunctionExpression, TDD-00060/ADR-00178).
 		p.advance() // consume 'function'
 		fPos := posOf(tok)
+		isGen := p.match(lexer.STAR) // generator expression (TDD-00096)
 		var name string
 		if p.check(lexer.IDENT) {
 			name = p.advance().Literal
@@ -1212,7 +1244,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
-		return ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, false, fPos), nil
+		fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, false, fPos)
+		fe.IsGenerator = isGen
+		return fe, nil
 
 	case lexer.ASYNC:
 		// async (params) => expr / async (params): RetType => { ... }
@@ -1221,6 +1255,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if p.check(lexer.FUNCTION) {
 			p.advance() // consume 'function'
 			fPos := posOf(tok)
+			isGen := p.match(lexer.STAR) // async generator expression (TDD-00096)
 			var name string
 			if p.check(lexer.IDENT) {
 				name = p.advance().Literal
@@ -1229,7 +1264,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			if err != nil {
 				return nil, err
 			}
-			return ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, true, fPos), nil
+			fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, true, fPos)
+			fe.IsGenerator = isGen
+			return fe, nil
 		}
 		af, err := p.parseArrowFunction()
 		if err != nil {

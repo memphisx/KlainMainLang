@@ -670,6 +670,14 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.NewArrayBufferExpression:
 		e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
+	case *ast.NewDataViewExpression:
+		e.Buffer = rewriteExpr(e.Buffer, sc, lu)
+		if e.ByteOffset != nil {
+			e.ByteOffset = rewriteExpr(e.ByteOffset, sc, lu)
+		}
+		if e.ByteLength != nil {
+			e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
+		}
 	case *ast.NewTypedArrayExpression:
 		if e.Arg != nil {
 			e.Arg = rewriteExpr(e.Arg, sc, lu)

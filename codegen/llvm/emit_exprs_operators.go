@@ -149,6 +149,24 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	leftIsDate := left.Ty.IsDate
 	rightIsDate := right.Ty.IsDate
 
+	// Numeric promotion first: for arithmetic and ordering/equality with one
+	// float and one integer operand, BOTH promote to double — real JS
+	// arithmetic is double, and the old left-biased unification silently
+	// `fptosi`'d a float RIGHT operand into the left's integer type
+	// (`i * 1.5` computed `i * 1`, `3 === 3.5` compared `3 === 3`).
+	// Bitwise/shift ops are deliberately excluded: JS ToInt32-truncates
+	// there, which the integer path already approximates. Dates keep their
+	// own duration-arithmetic rules below.
+	if !leftIsDate && !rightIsDate && left.Ty.Float != right.Ty.Float &&
+		(left.Ty.Float || left.Ty.IsInteger() || left.Ty.IR == "i64") &&
+		(right.Ty.Float || right.Ty.IsInteger() || right.Ty.IR == "i64") {
+		switch ex.Op {
+		case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "==", "!=", "===", "!==":
+			left = e.coerce(left, TypeF64)
+			right = e.coerce(right, TypeF64)
+		}
+	}
+
 	// Unify types (promote right to left's type for now)
 	right = e.coerce(right, left.Ty)
 	ty := left.Ty
@@ -255,8 +273,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		if ty.Float {
 			f1 := e.coerce(left, TypeF64)
 			f2 := e.coerce(right, TypeF64)
-			e.ensureMathFuncs()
-			e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
+			e.ensureJsPow()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_js_pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
 			return Value{Ref: reg, Ty: TypeF64}, nil
 		}
 		e.ensureIPow()
@@ -382,7 +400,7 @@ func typeofString(ty Type) string {
 		ty.IsSet, ty.IsGenerator, ty.IsDate, ty.IsResponse, ty.IsClass,
 		ty.IsError, ty.IsRequest, ty.IsFetchRequest, ty.IsURL,
 		ty.IsURLSearchParams, ty.IsHeaders, ty.IsEventEmitter, ty.IsRegExp,
-		ty.IsArrayBuffer, ty.IsTypedArray, ty.IsDynamicObject:
+		ty.IsArrayBuffer, ty.IsDataView, ty.IsTypedArray, ty.IsDynamicObject:
 		return "object"
 	case ty.IR == "i1":
 		return "boolean"
@@ -744,8 +762,8 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 		if ty.Float {
 			f1 := e.coerce(left, TypeF64)
 			f2 := e.coerce(right, TypeF64)
-			e.ensureMathFuncs()
-			e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
+			e.ensureJsPow()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_js_pow(double %s, double %s)", reg, f1.Ref, f2.Ref))
 			return Value{Ref: reg, Ty: TypeF64}, nil
 		}
 		e.ensureIPow()

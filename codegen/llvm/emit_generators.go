@@ -55,13 +55,6 @@ type generatorEmitCtx struct {
 // element type yield/return produce) — no yield-based inference exists yet,
 // unlike an ordinary unannotated function's own best-effort inference.
 func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo, error) {
-	if fd.ReturnType == nil {
-		return nil, fmt.Errorf("%d:%d: generator function '%s' requires an explicit return type annotation (the element type yield/return produce) — inferring it from the body's own yield expressions is not yet supported", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
-	}
-	elemTy := e.resolveType(fd.ReturnType)
-	if elemTy.IsArray {
-		return nil, fmt.Errorf("%d:%d: an array element type is not yet supported on a generator function", fd.GetPos().Line, fd.GetPos().Col)
-	}
 	var paramTypes []Type
 	var paramNames []string
 	for _, p := range fd.Params {
@@ -86,6 +79,22 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		}
 		paramTypes = append(paramTypes, pty)
 		paramNames = append(paramNames, p.Name)
+	}
+	var elemTy Type
+	if fd.ReturnType != nil {
+		elemTy = e.resolveType(fd.ReturnType)
+	} else {
+		// No annotation: infer the element type from the body's own yield
+		// expressions (TDD-00096 Part 2) — real-JS sources never carry the
+		// annotation. Only the genuinely ambiguous case still rejects.
+		inferred, ok := e.inferGeneratorElemType(fd, paramNames, paramTypes)
+		if !ok {
+			return nil, fmt.Errorf("%d:%d: generator function '%s' requires an explicit return type annotation — its yield expressions produce conflicting element types that don't join", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
+		}
+		elemTy = inferred
+	}
+	if elemTy.IsArray {
+		return nil, fmt.Errorf("%d:%d: an array element type is not yet supported on a generator function", fd.GetPos().Line, fd.GetPos().Col)
 	}
 	e.generatorBodyCtr++
 	return &GeneratorInfo{
@@ -2649,4 +2658,268 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 
 	e.emitLabel(endL)
 	return nil
+}
+
+// collectYieldExprs walks a statement list gathering every YieldExpression —
+// TDD-00096 Part 2's inference input. Same pragmatic statement/expression
+// coverage as the async classifier (emit_task_classify.go): common container
+// shapes, not an exhaustive visitor; a yield hiding in an unvisited corner
+// simply doesn't contribute to inference.
+func collectYieldExprs(stmts []ast.Statement, out *[]*ast.YieldExpression) {
+	for _, s := range stmts {
+		collectYieldStmt(s, out)
+	}
+}
+
+func collectYieldStmt(s ast.Statement, out *[]*ast.YieldExpression) {
+	switch st := s.(type) {
+	case *ast.BlockStatement:
+		collectYieldExprs(st.Body, out)
+	case *ast.VarDeclaration:
+		collectYieldExpr(st.Init, out)
+	case *ast.ExpressionStatement:
+		collectYieldExpr(st.Expr, out)
+	case *ast.ReturnStatement:
+		collectYieldExpr(st.Value, out)
+	case *ast.IfStatement:
+		collectYieldExpr(st.Test, out)
+		if st.Consequent != nil {
+			collectYieldExprs(st.Consequent.Body, out)
+		}
+		if st.Alternate != nil {
+			collectYieldStmt(st.Alternate, out)
+		}
+	case *ast.ForStatement:
+		if st.Init != nil {
+			collectYieldStmt(st.Init, out)
+		}
+		collectYieldExpr(st.Test, out)
+		for _, u := range st.Update {
+			collectYieldExpr(u, out)
+		}
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+	case *ast.WhileStatement:
+		collectYieldExpr(st.Test, out)
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+	case *ast.DoWhileStatement:
+		collectYieldExpr(st.Test, out)
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+	case *ast.ForOfStatement:
+		collectYieldExpr(st.Iterable, out)
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+	case *ast.ForInStatement:
+		collectYieldExpr(st.Object, out)
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+	case *ast.TryStatement:
+		if st.Body != nil {
+			collectYieldExprs(st.Body.Body, out)
+		}
+		if st.Catch != nil && st.Catch.Body != nil {
+			collectYieldExprs(st.Catch.Body.Body, out)
+		}
+		if st.Finally != nil {
+			collectYieldExprs(st.Finally.Body, out)
+		}
+	case *ast.SwitchStatement:
+		collectYieldExpr(st.Discriminant, out)
+		for _, c := range st.Cases {
+			collectYieldExpr(c.Test, out)
+			collectYieldExprs(c.Body, out)
+		}
+	case *ast.LabeledStatement:
+		collectYieldStmt(st.Body, out)
+	}
+}
+
+func collectYieldExpr(ex ast.Expression, out *[]*ast.YieldExpression) {
+	switch x := ex.(type) {
+	case nil:
+	case *ast.YieldExpression:
+		*out = append(*out, x)
+		collectYieldExpr(x.Argument, out)
+	case *ast.CallExpression:
+		collectYieldExpr(x.Callee, out)
+		for _, a := range x.Args {
+			collectYieldExpr(a, out)
+		}
+	case *ast.BinaryExpression:
+		collectYieldExpr(x.Left, out)
+		collectYieldExpr(x.Right, out)
+	case *ast.ConditionalExpression:
+		collectYieldExpr(x.Test, out)
+		collectYieldExpr(x.Consequent, out)
+		collectYieldExpr(x.Alternate, out)
+	case *ast.AssignmentExpression:
+		collectYieldExpr(x.Left, out)
+		collectYieldExpr(x.Right, out)
+	case *ast.AwaitExpression:
+		collectYieldExpr(x.Argument, out)
+	}
+}
+
+// inferGeneratorElemType infers an un-annotated generator's element type
+// from its yields (TDD-00096 Part 2): each plain `yield <expr>`'s inferred
+// type joins under the usual numeric rule (any float makes the join f64);
+// `yield*` over a call to a known generator contributes that generator's
+// element type. Zero contributing yields fall back to the first `return
+// <expr>`'s type, then i64. Parameters are temporarily bound so a
+// `yield param` infers from the declared parameter type. Reports !ok only
+// for a genuinely non-joinable mix.
+func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames []string, paramTypes []Type) (Type, bool) {
+	e.pushScope()
+	for i, n := range paramNames {
+		e.define(n, Symbol{Ty: paramTypes[i]})
+	}
+	defer e.popScope()
+
+	// Shallow-bind the body's own let/var/const declarations (recursively
+	// through blocks and for-inits) so a `yield i * 1.5` over a loop-local
+	// infers from the local's actual type rather than the unknown-identifier
+	// i64 fallback. An approximation — shadowing collapses to last-writer —
+	// but inference-only: the real emission scopes normally.
+	var bindLocals func(stmts []ast.Statement)
+	bindLocal := func(vd *ast.VarDeclaration) {
+		if vd == nil {
+			return
+		}
+		var ty Type
+		if vd.TypeAnnot != nil {
+			ty = e.resolveType(vd.TypeAnnot)
+		} else if vd.Init != nil {
+			ty = e.inferExprType(vd.Init)
+		} else {
+			ty = TypeI64
+		}
+		e.define(vd.Name, Symbol{Ty: ty})
+	}
+	bindLocals = func(stmts []ast.Statement) {
+		for _, s := range stmts {
+			switch st := s.(type) {
+			case *ast.VarDeclaration:
+				bindLocal(st)
+			case *ast.VarDeclarationList:
+				for _, d := range st.Decls {
+					bindLocal(d)
+				}
+			case *ast.BlockStatement:
+				bindLocals(st.Body)
+			case *ast.IfStatement:
+				if st.Consequent != nil {
+					bindLocals(st.Consequent.Body)
+				}
+				if st.Alternate != nil {
+					bindLocals([]ast.Statement{st.Alternate})
+				}
+			case *ast.ForStatement:
+				if st.Init != nil {
+					bindLocals([]ast.Statement{st.Init})
+				}
+				if st.Body != nil {
+					bindLocals(st.Body.Body)
+				}
+			case *ast.WhileStatement:
+				if st.Body != nil {
+					bindLocals(st.Body.Body)
+				}
+			case *ast.DoWhileStatement:
+				if st.Body != nil {
+					bindLocals(st.Body.Body)
+				}
+			case *ast.ForOfStatement:
+				if st.Body != nil {
+					bindLocals(st.Body.Body)
+				}
+			case *ast.TryStatement:
+				if st.Body != nil {
+					bindLocals(st.Body.Body)
+				}
+				if st.Catch != nil && st.Catch.Body != nil {
+					bindLocals(st.Catch.Body.Body)
+				}
+				if st.Finally != nil {
+					bindLocals(st.Finally.Body)
+				}
+			}
+		}
+	}
+	if fd.Body != nil {
+		bindLocals(fd.Body.Body)
+	}
+
+	var yields []*ast.YieldExpression
+	if fd.Body != nil {
+		collectYieldExprs(fd.Body.Body, &yields)
+	}
+	var joined Type
+	have := false
+	join := func(t Type) bool {
+		if t.IR == "void" || t.IR == "" {
+			return true
+		}
+		if !have {
+			joined = t
+			have = true
+			return true
+		}
+		if joined.IR == t.IR {
+			return true
+		}
+		num := func(x Type) bool { return x.Float || x.IsInteger() }
+		if num(joined) && num(t) {
+			if t.Float {
+				joined = t
+			}
+			return true
+		}
+		return false
+	}
+	for _, y := range yields {
+		if y.Argument == nil {
+			continue
+		}
+		if y.Delegate {
+			if call, ok := y.Argument.(*ast.CallExpression); ok {
+				if id, ok := call.Callee.(*ast.Identifier); ok {
+					if info, found := e.lookupGenerator(id.Name); found {
+						if !join(info.ElemTy) {
+							return Type{}, false
+						}
+					}
+				}
+			}
+			continue
+		}
+		if !join(e.inferExprType(y.Argument)) {
+			return Type{}, false
+		}
+	}
+	if !have {
+		var rets []*ast.YieldExpression
+		_ = rets
+		// No yields at all: fall back to the first return-with-value's type,
+		// else i64 (a generator that only completes).
+		if fd.Body != nil {
+			for _, s := range fd.Body.Body {
+				if r, ok := s.(*ast.ReturnStatement); ok && r.Value != nil {
+					if join(e.inferExprType(r.Value)) {
+						break
+					}
+				}
+			}
+		}
+		if !have {
+			joined = TypeI64
+		}
+	}
+	return joined, true
 }

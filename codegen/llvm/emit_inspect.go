@@ -39,7 +39,7 @@ func isInspectableObject(ty Type) bool {
 		!ty.IsResponse && !ty.IsRequest && !ty.IsFetchRequest && !ty.IsXHR &&
 		!ty.IsEventEmitter && !ty.IsEventSource && !ty.IsWebSocketClient &&
 		!ty.IsWSConnection && !ty.IsTextEncoder && !ty.IsTextDecoder &&
-		!ty.IsRegExp && !ty.IsTypedArray && !ty.IsArrayBuffer
+		!ty.IsRegExp && !ty.IsTypedArray && !ty.IsArrayBuffer && !ty.IsDataView
 }
 
 // emitInspectObject renders an IsObject value as `ClassName { f: v, ... }` (an

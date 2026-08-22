@@ -1427,6 +1427,14 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 // have expression bodies) and with the same capture / LLVM-function-emission
 // / {funcPtr,envPtr} heap-allocation pipeline.
 func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Type) (Value, error) {
+	// A generator expression that reaches here wasn't a top-level `const G =
+	// function* ...` binding (those were rewritten into named declarations,
+	// TDD-00096) — an argument/nested/IIFE use has no first-class
+	// generator-value model yet, so reject it cleanly rather than emitting
+	// a plain closure whose `yield`s would then fail confusingly.
+	if fe.IsGenerator {
+		return Value{}, fmt.Errorf("%d:%d: a generator expression is only supported as a top-level `const/let/var G = function* ...` binding (V1) — using it as a value (an argument, a nested binding, or an IIFE) is not yet supported", fe.GetPos().Line, fe.GetPos().Col)
+	}
 	// Gather captured variables BEFORE resetting emitter state — the
 	// free-variable scan needs the enclosing scope's context (same
 	// ordering gatherCaptures uses for arrow functions).

@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 15/17 (~88%) · **Strict Coverage**: 7/17 (~41%).
+**Coverage**: 18/20 (90%) · **Strict Coverage**: 8/20 (40%).
 
 This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
 
@@ -10,8 +10,11 @@ This page follows the shared status-page format ([Status page format](README.md#
 |---|---|---|---|
 | `isNaN(x)` | ✅ | | |
 | `isFinite(x)` | ✅ | | |
-| `parseInt(s, radix?)` | ✅ | • Invalid input returns `0` instead of `NaN`<br>• No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • Same underlying bug as [NUMBER-MATH.md](NUMBER-MATH.md)'s `Number.parseInt`/`parseInt` rows. Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
-| `parseFloat(s)` | ✅ | • Invalid input returns `0` instead of `NaN` | • Same underlying bug as [NUMBER-MATH.md](NUMBER-MATH.md)'s `Number.parseFloat`/`parseFloat` rows. Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
+| `String(x)` | ✅ | • `String()` with no argument is `""`, not real JS's `"undefined"` (a genuinely absent value doesn't arise in typed code — [ADR-00291](../adr/ADR-00291.md)) | • Routes through the template-literal renderer; an `any` input dispatches on its runtime tag |
+| `Number(x)` | ✅ | • Inherits `strtod`'s `"inf"` acceptance for the string form (JS accepts only the full word `Infinity`) — same family as `parseFloat`'s ([ADR-00291](../adr/ADR-00291.md)) | • JS ToNumber: whole-string parse (`"12px"` → `NaN`, unlike `parseFloat`), `""`/whitespace → 0, `"0x10"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64) |
+| `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |
+| `parseInt(s, radix?)` | ✅ | • No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • A no-digits input returns a real `NaN` (endptr-checked, double result) — same fix as [NUMBER-MATH.md](NUMBER-MATH.md)'s rows, [ADR-00287](../adr/ADR-00287.md) |
+| `parseFloat(s)` | ✅ | • Inherits `strtod` extras — `"inf"` parses to `Infinity`, C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
 | `NaN` (global constant) | ✅ | • Shadowing is no longer unconditional — since `-compat=strict` became the default (`af7469d`), `let NaN = 99;` is a compile-time-rejected reserved-name collision; only `-compat=js` allows the shadow real JS/browsers permit | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
 | `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |

@@ -311,6 +311,14 @@ type Emitter struct {
 	usedGeneratorRuntime     bool
 	generatorBodyCtr         int
 	usedMathFuncs            bool
+	usedFloatMinMax          bool
+	usedToNumber             bool
+	usedBswap16              bool
+	usedBswap32              bool
+	usedBswap64              bool
+	usedWsSpan               bool
+	usedJsPow                bool
+	namespaces               map[string]map[string]bool
 	usedTaskRuntime          bool
 	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
 	usedPromiseSettle        bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
@@ -901,12 +909,48 @@ func (e *Emitter) rewriteTopLevelClassExpressions(prog *ast.Program) {
 	}
 }
 
+// rewriteTopLevelGeneratorExpressions rewrites each top-level `const/let/var
+// G = function* (...) {...}` (sync or async) into a named generator
+// FunctionDeclaration (TDD-00096 Part 1) — the exact precedent
+// rewriteTopLevelClassExpressions set: a bound generator expression is
+// observationally a declaration under another name. Any *other* use of a
+// generator expression (argument, nested binding, IIFE) is rejected at its
+// emission site instead.
+func (e *Emitter) rewriteTopLevelGeneratorExpressions(prog *ast.Program) {
+	for i, stmt := range prog.Body {
+		vd, ok := stmt.(*ast.VarDeclaration)
+		if !ok {
+			continue
+		}
+		fe, ok := vd.Init.(*ast.FunctionExpression)
+		if !ok || !fe.IsGenerator {
+			continue
+		}
+		fd := &ast.FunctionDeclaration{
+			Name:        vd.Name,
+			Params:      fe.Params,
+			ReturnType:  fe.RetType,
+			Body:        fe.Body,
+			IsAsync:     fe.IsAsync,
+			IsGenerator: true,
+		}
+		fd.SetPos(vd.GetPos())
+		prog.Body[i] = fd
+	}
+}
+
 func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
+	// TS namespaces (TDD-00095): the parser desugared members into flat
+	// mangled declarations; the member table is what use sites resolve
+	// through (emitCall/emitMember/inferExprType).
+	e.namespaces = prog.Namespaces
+
 	// Pass -2: rewrite each top-level `const/let/var X = class {...}` binding
 	// into a nominal `class X {...}` declaration (TDD-00063 Stage 4), before
 	// any registration runs — a class expression is not a runtime value here,
 	// so binding it is the same as declaring the class under the LHS name.
 	e.rewriteTopLevelClassExpressions(prog)
+	e.rewriteTopLevelGeneratorExpressions(prog)
 
 	// Pass -1: register enums so members are available as constants everywhere.
 	e.registerEnums(prog)

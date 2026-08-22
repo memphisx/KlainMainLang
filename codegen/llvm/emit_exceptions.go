@@ -35,6 +35,13 @@ const (
 // package init. Every case in parser_literals.go's parseNew Error-kind
 // switch is guaranteed present here — the parser and this table are kept in
 // sync by hand, same convention typedArrayElemKinds already uses.
+// isErrorKindName reports whether name is one of the built-in error
+// constructors — used by emitIdent's value-position funcref boxing.
+func isErrorKindName(name string) bool {
+	_, ok := errorKindIDs[name]
+	return ok
+}
+
 var errorKindIDs = func() map[string]int64 {
 	m := make(map[string]int64, len(errorKinds))
 	for i, k := range errorKinds {

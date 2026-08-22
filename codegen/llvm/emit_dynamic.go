@@ -156,6 +156,12 @@ const (
 	kmlTagUndefined = 5
 	kmlTagObject    = 6
 	kmlTagArray     = 7
+	// kmlTagFuncRef boxes a reference to a built-in constructor/function used
+	// as a first-class value (`assert.throws(TypeError, fn)`, `f === TypeError`).
+	// The payload is the constructor's interned name string (ptrtoint'd), so
+	// same-tag equality in __kml_any_eq — a plain payload compare — is exact:
+	// interned strings are deduplicated per module, one global per name.
+	kmlTagFuncRef = 8
 )
 
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
@@ -331,6 +337,18 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	store(e.internString("[object Array]"))
 	e.emitLabel(nextL)
 
+	// A boxed built-in-constructor reference stringifies the way real JS
+	// stringifies a native function — the payload is the interned name.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagFuncRef, "dynstr.funcref")
+	e.emitLabel(matchL)
+	fnName := e.freshReg()
+	fnBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", fnName, payload))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", fnBuf))
+	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", fnBuf, e.internString("function %s() { [native code] }"), fnName))
+	store(fnBuf)
+	e.emitLabel(nextL)
+
 	// Remaining tag: object → "[object Object]", matching JS's
 	// `String({}) === "[object Object]"` (a plain object has no useful
 	// value-string, and its field contents aren't recovered from the boxed
@@ -390,6 +408,11 @@ func (e *Emitter) emitDynamicTypeof(v Value) (Value, error) {
 	matchL, nextL = e.emitTagCheck(tag, kmlTagUndefined, "dyntypeof.undef")
 	e.emitLabel(matchL)
 	store("undefined")
+	e.emitLabel(nextL)
+
+	matchL, nextL = e.emitTagCheck(tag, kmlTagFuncRef, "dyntypeof.funcref")
+	e.emitLabel(matchL)
+	store("function")
 	e.emitLabel(nextL)
 
 	// Remaining tag: object.

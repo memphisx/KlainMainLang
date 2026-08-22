@@ -11,6 +11,12 @@ type Parser struct {
 	tokens     []lexer.Token
 	pos        int
 	pendingDoc *jsdoc.Comment
+	// namespaces accumulates TS `namespace X {...}` member sets (TDD-00095);
+	// pendingTopLevel carries a namespace's desugared member declarations
+	// past parseStatement's single-return shape — ParseProgram drains it
+	// after every statement.
+	namespaces      map[string]map[string]bool
+	pendingTopLevel []ast.Statement
 }
 
 func New(tokens []lexer.Token) *Parser {
@@ -164,6 +170,11 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 			return nil, err
 		}
 		prog.Body = append(prog.Body, stmt)
+		if len(p.pendingTopLevel) > 0 {
+			prog.Body = append(prog.Body, p.pendingTopLevel...)
+			p.pendingTopLevel = nil
+		}
 	}
+	prog.Namespaces = p.namespaces
 	return prog, nil
 }

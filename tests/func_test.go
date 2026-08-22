@@ -785,7 +785,7 @@ func TestE2EFunctionExpressionAsCallback(t *testing.T) {
 const arr: number[] = [1, 2, 3];
 const doubled = arr.map(function(x: number): number { return x * 2; });
 console.log(doubled[0], doubled[1], doubled[2]);
-`, "2\n4\n6")
+`, "2 4 6")
 }
 
 func TestE2EFunctionExpressionNoAnnotation(t *testing.T) {
@@ -1059,16 +1059,18 @@ console.log(b.getHandler()());
 // (Real, working generator behavior is covered in generators_test.go.)
 
 func TestE2EGeneratorFunctionMissingReturnTypeRejected(t *testing.T) {
-	// V1 requires an explicit return type annotation (the yielded element
-	// type) — no yield-based inference exists yet.
+	// The element type is now inferred from yields (TDD-00096/ADR-00293) —
+	// only a genuinely non-joinable yield mix still demands the annotation.
 	_, err := parseAndCompile(`
 function* gen() {
     yield 1;
+    yield "two";
 }
-console.log(gen());
+const g = gen();
+console.log(g.next().value);
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a generator with no return type annotation, got none")
+		t.Fatal("expected a compile error for a generator whose yields produce non-joinable element types, got none")
 	}
 	if !strings.Contains(err.Error(), "requires an explicit return type annotation") {
 		t.Fatalf("expected 'requires an explicit return type annotation', got: %v", err)

@@ -23,7 +23,7 @@ func TestE2EMultiDeclaratorLet(t *testing.T) {
 	assertOutput(t, `
 let i = 1, j = 2, k = 3;
 console.log(i, j, k);
-`, "1\n2\n3")
+`, "1 2 3")
 }
 
 func TestE2EMultiDeclaratorConst(t *testing.T) {
@@ -64,7 +64,7 @@ for (let i = 0, j = 10; i < j; i++) {
   console.log(i, j);
   break;
 }
-`, "0\n10")
+`, "0 10")
 }
 
 func TestE2EForLoopCommaUpdate(t *testing.T) {

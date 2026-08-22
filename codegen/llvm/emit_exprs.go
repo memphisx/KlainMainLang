@@ -155,6 +155,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewWebSocketClientExpression(ex)
 	case *ast.NewHeadersExpression:
 		return e.emitNewHeadersExpression(ex)
+	case *ast.NewDataViewExpression:
+		return e.emitNewDataViewExpression(ex)
 	case *ast.NewRequestExpression:
 		return e.emitNewRequestExpression(ex)
 	case *ast.NewXMLHttpRequestExpression:
@@ -187,6 +189,16 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 		}
 		return Value{Ref: fmt.Sprintf("%d", n64), Ty: TypeI64}, nil
 	}
+	// A decimal integer literal that doesn't fit i64 (e.g.
+	// 92233720368620160000) becomes a double, as in JS — every JS number
+	// literal is a double anyway; the exact-i64 model applies only to the
+	// range i64 can actually hold. Previously the oversized literal passed
+	// through verbatim and silently wrapped at the LLVM layer.
+	if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+		if f, ferr := strconv.ParseFloat(v, 64); ferr == nil {
+			return Value{Ref: strconv.FormatFloat(f, 'e', -1, 64), Ty: TypeF64}, nil
+		}
+	}
 	return Value{Ref: v, Ty: TypeI64}, nil
 }
 
@@ -208,6 +220,20 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// (emitCall dispatches a named callee straight to a direct call).
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
 			return e.emitNamedFuncValue(mangled, sig), nil
+		}
+		// A built-in error constructor in value position (`assert.throws(
+		// TypeError, fn)`, `x === RangeError`): a boxed funcref carrying the
+		// interned constructor name (ADR-00289). `new TypeError(...)` and
+		// `e instanceof TypeError` never reach here — both have their own
+		// dedicated paths.
+		if isErrorKindName(id.Name) {
+			r0 := e.freshReg()
+			r1 := e.freshReg()
+			pay := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pay, e.internString(id.Name)))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagFuncRef))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pay))
+			return Value{Ref: r1, Ty: TypeAny}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}

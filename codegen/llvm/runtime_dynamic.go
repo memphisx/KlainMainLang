@@ -82,7 +82,9 @@ check_null_undef:
 check_object:
   %is_object = icmp eq i8 %tagA, 6
   %is_array = icmp eq i8 %tagA, 7
-  %is_ref = or i1 %is_object, %is_array
+  %is_funcref = icmp eq i8 %tagA, 8
+  %is_obj_or_arr = or i1 %is_object, %is_array
+  %is_ref = or i1 %is_obj_or_arr, %is_funcref
   br i1 %is_ref, label %cmp_object, label %not_equal
 cmp_object:
   %oa = inttoptr i64 %payA to ptr

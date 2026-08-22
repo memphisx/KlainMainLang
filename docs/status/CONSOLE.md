@@ -2,15 +2,15 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 11/12 (~92%) · **Strict Coverage**: 7/12 (~58%).
+**Coverage**: 11/12 (~92%) · **Strict Coverage**: 8/12 (~67%).
 
 This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `console.log(...)` | ✅ | | |
+| `console.log(...)` | ✅ | | • Multiple arguments join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `"0"`) — [ADR-00285](../adr/ADR-00285.md) |
 | `console.error(...)` | ✅ | | • Writes to stderr |
-| `console.warn(...)` | ✅ | • Prepends an undocumented `"Warning: "` prefix to every call; real Node's `console.warn` behaves identically to `console.error` with no prefix at all | • Writes to stderr<br>• Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
+| `console.warn(...)` | ✅ | | • Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/ADR-00285.md)) |
 | `console.info(...)` | ✅ | | |
 | `console.debug(...)` | ✅ | | |
 | `console.trace(...)` | ✅ | • Prints `"Trace: <message>"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all | • Same generic print path as `.debug()`/`.info()`, no stack-walking logic<br>• Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |

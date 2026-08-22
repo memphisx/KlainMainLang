@@ -37,29 +37,47 @@
 // sameValue/notSameValue/throws, and needs array element-wise comparison
 // this shim doesn't attempt yet. A call fails to compile, visible as its
 // own bucket in the report.
-class assert {
-    static ok(mustBeTrue: boolean, message: string = ""): void {
+// Function + namespace declaration merging (TDD-00095) gives this shim the
+// real upstream shape at last: `assert(x)` (the bare-call form) AND
+// `assert.sameValue(...)` (the namespace form) on one name — the exact TS
+// idiom for JS's callable-object duality.
+function assert(mustBeTrue: any, message: string = ""): void {
+    if (mustBeTrue === true) {
+        return;
+    }
+    throw new Test262Error(message);
+}
+
+namespace assert {
+    export function ok(mustBeTrue: any, message: string = ""): void {
         if (mustBeTrue === true) {
             return;
         }
         throw new Test262Error(message);
     }
 
-    static sameValue(actual: any, expected: any, message: string = ""): void {
+    export function sameValue(actual: any, expected: any, message: string = ""): void {
         if (actual === expected) {
+            return;
+        }
+        // SameValue semantics, as upstream: NaN equals NaN (=== says no).
+        // The one remaining SameValue difference — SameValue(+0, -0) being
+        // false where === says true — is not reproduced (a rare wrong-pass,
+        // not a wrong-fail).
+        if (actual !== actual && expected !== expected) {
             return;
         }
         throw new Test262Error("assert.sameValue failed: " + message);
     }
 
-    static notSameValue(actual: any, unexpected: any, message: string = ""): void {
+    export function notSameValue(actual: any, unexpected: any, message: string = ""): void {
         if (actual !== unexpected) {
             return;
         }
         throw new Test262Error("assert.notSameValue failed: " + message);
     }
 
-    static throws(expectedErrorConstructor: any, func: () => void, message: string = ""): void {
+    export function throws(expectedErrorConstructor: any, func: () => void, message: string = ""): void {
         try {
             func();
         } catch (e) {
@@ -67,10 +85,15 @@ class assert {
         }
         throw new Test262Error("assert.throws: expected an exception but none was thrown. " + message);
     }
-}
 
-// Bare `assert(mustBeTrue, message)` — the ~12% of files that only use
-// this form instead of `assert.ok`/`.sameValue`/etc. would need it under
-// the plain identifier `assert`, which collides with the class above (this
-// compiler has one flat top-level namespace); not provided, per the
-// tradeoff explained above.
+    export function compareArray<T>(actual: T[], expected: T[], message: string = ""): void {
+        if (actual.length !== expected.length) {
+            throw new Test262Error("assert.compareArray length mismatch: " + message);
+        }
+        for (let i = 0; i < actual.length; i++) {
+            if (actual[i] !== expected[i]) {
+                throw new Test262Error("assert.compareArray element mismatch: " + message);
+            }
+        }
+    }
+}
