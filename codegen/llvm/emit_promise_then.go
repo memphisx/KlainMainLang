@@ -227,6 +227,7 @@ func (e *Emitter) ensureFetchDriveRunner() {
 	e.usedFetchDriveRunner = true
 	e.ensurePromiseRuntime()
 	e.ensureFetchAsync()
+	e.ensureAwaitFetchHeaders()
 	e.ensureExceptionHelpers()
 	e.ensureMalloc()
 	e.ensurePromiseSettle()
@@ -251,16 +252,15 @@ entry:
   br i1 %%threw, label %%catch, label %%try
 try:
   %%pending = load ptr, ptr %%slot, align 8
-  %%raw = call { i64, ptr, i64 } @__kml_await_fetch(ptr %%pending)
-  %%status = extractvalue { i64, ptr, i64 } %%raw, 0
-  %%body = extractvalue { i64, ptr, i64 } %%raw, 1
-  %%blen = extractvalue { i64, ptr, i64 } %%raw, 2
+  ; Resolve at headers-complete (TDD-00097 Stage 4), like await does — the
+  ; Response carries the pending handle; body reads drive the rest lazily.
+  %%status = call i64 @__kml_await_fetch_headers(ptr %%pending)
   call void @__kml_pop_jmpbuf()
   %%oklow = icmp sge i64 %%status, 200
   %%okhigh = icmp slt i64 %%status, 300
   %%ok = and i1 %%oklow, %%okhigh
   %%resp = call ptr @malloc(i64 %d)
-%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
+%s%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
   %%v0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
   store i64 %%bits, ptr %%v0_p, align 8
   call void @__kml_promise_settle(ptr %%prom, i64 1)
@@ -276,8 +276,9 @@ catch:
 		respTy.StructSize(),
 		fieldStore("status", "i64", "%status", 8),
 		fieldStore("ok", "i1", "%ok", 1),
-		fieldStore("body", "ptr", "%body", 8),
-		fieldStore("bodyLength", "i64", "%blen", 8),
+		fieldStore("body", "ptr", "null", 8),
+		fieldStore("bodyLength", "i64", "0", 8),
+		fieldStore("__kml_pending", "ptr", "%pending", 8),
 		promiseStructIR, promiseStructIR))
 }
 

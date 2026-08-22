@@ -73,8 +73,10 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	// Part A. A handler defined as a separate top-level function that awaits fetch
 	// is a may-suspend body and untouched by that wrapper anyway.
 	e.emittingHTTPHandler = true
+	e.httpHandlerNode = args[1]
 	handlerVal, err := e.emitExpr(args[1])
 	e.emittingHTTPHandler = false
+	e.httpHandlerNode = nil
 	if err != nil {
 		return Value{}, err
 	}
@@ -216,7 +218,45 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 // emitResponseArrayBuffer (emit_fetch.go, ADR-00094) does — wraps the
 // request's own already-buffered body pointer directly instead of
 // malloc'ing a fresh one, no copy needed.
+// emitRequestBodyDrain emits the Stage 5b drain call: under headers-complete
+// dispatch, complete the pre-allocated body buffer in place before any
+// buffered accessor reads it. A no-op stub resolves the call when the
+// streaming runtime was never emitted, and the runtime itself no-ops on a
+// null context — so buffered-mode programs are unaffected.
+func (e *Emitter) emitRequestBodyDrain(objVal Value) {
+	ctxIdx, _, ok := objVal.Ty.FieldIndex("__kml_bodyctx")
+	if !ok {
+		return
+	}
+	e.usedReqBodyDrain = true
+	ctxVal := e.loadFieldValue(objVal, ctxIdx, TypePtr)
+	e.emitInstr(fmt.Sprintf("call void @__kml_reqbody_drain(ptr %s)", ctxVal.Ref))
+}
+
+// emitRequestStream implements req.stream(): ReadableStream<Uint8Array>
+// (TDD-00097 Stage 5b) — activate the request's streaming body.
+func (e *Emitter) emitRequestStream(objVal Value, pos ast.Pos) (Value, error) {
+	e.usedReqBodyStream = true
+	e.ensureReqBodyRuntime()
+	ctxIdx, _, ok := objVal.Ty.FieldIndex("__kml_bodyctx")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
+	}
+	ctxVal := e.loadFieldValue(objVal, ctxIdx, TypePtr)
+	chunkTy := TypedArrayType("uint8")
+	fulfill := e.emitStreamFulfillThunk(chunkTy)
+	s := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", s, fulfill))
+	e.storeStreamField(s, 9, e.buildBuiltinClosure("@__kml_reqbody_pull", ctxVal.Ref))
+	started := e.buildBuiltinClosure("@__kml_rs_started", s)
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", started))
+	actual := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_reqbody_stream(ptr %s, ptr %s)", actual, ctxVal.Ref, s))
+	return Value{Ref: actual, Ty: ReadableStreamType(chunkTy)}, nil
+}
+
 func (e *Emitter) emitRequestBodyBytes(objVal Value, pos ast.Pos) (Value, error) {
+	e.emitRequestBodyDrain(objVal)
 	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
@@ -629,7 +669,14 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", haveBytes, trNow1, bodyStart0))
 	bodyComplete := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", bodyComplete, haveBytes, contentLenNow))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bodyComplete, parseL, readLoopL))
+	if e.usedReqBodyStream {
+		// Streaming request bodies (TDD-00097 Stage 5b): dispatch as soon as
+		// the headers are parsed — the remaining body flows through the
+		// request's body context instead of this buffer.
+		e.emitTerminator(fmt.Sprintf("br label %%%s", parseL))
+	} else {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bodyComplete, parseL, readLoopL))
+	}
 
 	// parseL: the request is now fully buffered — parse the request line,
 	// split the query string out of the path, load the already-parsed
@@ -704,10 +751,44 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bodyAlloc, contentLenFinal))
 	bodyBuf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", bodyBuf, bodyAlloc))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", bodyBuf, bodySrc, contentLenFinal))
+	// Copy only what has actually arrived (== Content-Length in buffered
+	// mode; possibly less under Stage 5b's headers-complete dispatch).
+	trFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trFinal, totalReadA))
+	haveFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", haveFinal, trFinal, bodyStartFinal))
+	haveNeg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", haveNeg, haveFinal))
+	haveClamped := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", haveClamped, haveNeg, haveFinal))
+	haveOver := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", haveOver, haveClamped, contentLenFinal))
+	copiedFinal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", copiedFinal, haveOver, contentLenFinal, haveClamped))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", bodyBuf, bodySrc, copiedFinal))
 	bodyTerm := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", bodyTerm, bodyBuf, contentLenFinal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", bodyTerm, bodyBuf, copiedFinal))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", bodyTerm))
+	bodyCtxRef := "null"
+	if e.usedReqBodyStream {
+		e.ensureReqBodyRuntime()
+		remFinal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", remFinal, contentLenFinal, copiedFinal))
+		ctxReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 48)", ctxReg))
+		storeCtx := func(idx int, ir, ref string) {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, reqbodyStructIR, ctxReg, idx))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, ref, gep))
+		}
+		storeCtx(0, "i64", fd64)
+		storeCtx(1, "i64", remFinal)
+		storeCtx(2, "ptr", bodyBuf)
+		storeCtx(3, "i64", copiedFinal)
+		storeCtx(4, "ptr", "null")
+		storeCtx(5, "i64", "0")
+		bodyCtxRef = ctxReg
+	}
 
 	reqTy := RequestType()
 	reqReg := e.freshReg()
@@ -725,6 +806,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	storeReqField("headers", headersMapFinal)
 	storeReqField("body", bodyBuf)
 	storeReqField("bodyLength", contentLenFinal)
+	storeReqField("__kml_bodyctx", bodyCtxRef)
 	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
 
 	handlerPtr := e.freshReg()
@@ -808,6 +890,14 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		extraHeadersRef = e.internString("")
 	}
 
+	// A statically ReadableStream-typed body (TDD-00097 Stage 5) selects the
+	// chunked-transfer tail at compile time: send the chunked response head,
+	// hand the connection's fd to a reaction-driven %kml.hws writer, and
+	// return — the writer reads chunk-at-a-time, writes chunked framing, and
+	// closes the fd (and decrements the active-connection count) when the
+	// stream ends. A slow producer therefore never blocks other connections.
+	streamingBody := bodyTy.IsReadableStream
+
 	// Optional binary response body (TDD-00026/ADR-00106): bodyBytes wins
 	// over body's own strlen-computed length whenever it's present at the
 	// type level *and* non-null at runtime (a null bodyBytes falls back to
@@ -819,7 +909,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	// binary payload (embedded null bytes and all) reaches the socket whole
 	// — see runtime_http.go.
 	var bodyDataRef, bodyLenRef string
-	if bbIdx, bbTy, ok := retTy.FieldIndex("bodyBytes"); ok {
+	if bbIdx, bbTy, ok := retTy.FieldIndex("bodyBytes"); streamingBody {
+		// The buffered body refs are unused on the streaming tail below.
+		bodyDataRef, bodyLenRef = "null", "0"
+	} else if ok {
 		bbGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bbGep, retTy.StructIR(), respReg, bbIdx))
 		bbReg := e.freshReg()
@@ -879,10 +972,36 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", activeNew))
 	}
 
-	e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyDataRef, bodyLenRef, extraHeadersRef))
-	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
-	emitConnActiveDecrement()
-	e.emitTerminator("ret void")
+	if streamingBody {
+		// TDD-00097 Stage 5: chunked-transfer tail. Send the chunked head,
+		// hand the fd to the reaction-driven %kml.hws writer, and return —
+		// the writer closes the fd and decrements the active-connection
+		// count when the stream ends, so a slow producer never blocks other
+		// connections (and http.close() still waits for it).
+		chunkTy := TypeI64
+		if bodyTy.StreamChunk != nil {
+			chunkTy = *bodyTy.StreamChunk
+		}
+		isText := "1"
+		if chunkTy.IsArray {
+			isText = "0"
+		} else if chunkTy.IR != "ptr" {
+			return fmt.Errorf("a streaming http response body must be ReadableStream<Uint8Array> or ReadableStream<string>")
+		}
+		e.ensureHTTPStreamRuntime()
+		decode := e.emitStreamDecodeThunk(chunkTy)
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, extraHeadersRef))
+		fd64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", fd64, fd32))
+		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s)", fd64, bodyReg, decode, isText))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+		e.emitTerminator("ret void")
+	} else {
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyDataRef, bodyLenRef, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+		emitConnActiveDecrement()
+		e.emitTerminator("ret void")
+	}
 
 	e.emitLabel(noReqL)
 	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))

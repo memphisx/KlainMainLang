@@ -489,6 +489,13 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			// check as every other lookup here, so a local variable that
 			// happens to share the imported name still shadows it.
 			if ref, ok := lu.builtinMembers[e.Name]; ok {
+				// The stream module's class names bind as identity — the
+				// constructors are recognized by name at parse time, and
+				// their statics (Readable.from) dispatch on the bare name
+				// (TDD-00097 Stage 8).
+				if ref.Marker == "stream__kml_builtin" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
@@ -631,6 +638,56 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.NewEventEmitterExpression:
 		if e.PayloadType != nil {
 			rewriteType(e.PayloadType, sc, lu)
+		}
+	case *ast.NewNodeStreamExpression:
+		if e.InType != nil {
+			rewriteType(e.InType, sc, lu)
+		}
+		if e.OutType != nil {
+			rewriteType(e.OutType, sc, lu)
+		}
+		if e.Options != nil {
+			e.Options = rewriteExpr(e.Options, sc, lu)
+		}
+	case *ast.NewCompressionStreamExpression:
+		if e.Format != nil {
+			e.Format = rewriteExpr(e.Format, sc, lu)
+		}
+	case *ast.NewTransformStreamExpression:
+		if e.InType != nil {
+			rewriteType(e.InType, sc, lu)
+		}
+		if e.OutType != nil {
+			rewriteType(e.OutType, sc, lu)
+		}
+		if e.Transformer != nil {
+			e.Transformer = rewriteExpr(e.Transformer, sc, lu)
+		}
+		if e.WritableStrategy != nil {
+			e.WritableStrategy = rewriteExpr(e.WritableStrategy, sc, lu)
+		}
+		if e.ReadableStrategy != nil {
+			e.ReadableStrategy = rewriteExpr(e.ReadableStrategy, sc, lu)
+		}
+	case *ast.NewWritableStreamExpression:
+		if e.ChunkType != nil {
+			rewriteType(e.ChunkType, sc, lu)
+		}
+		if e.Sink != nil {
+			e.Sink = rewriteExpr(e.Sink, sc, lu)
+		}
+		if e.Strategy != nil {
+			e.Strategy = rewriteExpr(e.Strategy, sc, lu)
+		}
+	case *ast.NewReadableStreamExpression:
+		if e.ChunkType != nil {
+			rewriteType(e.ChunkType, sc, lu)
+		}
+		if e.Source != nil {
+			e.Source = rewriteExpr(e.Source, sc, lu)
+		}
+		if e.Strategy != nil {
+			e.Strategy = rewriteExpr(e.Strategy, sc, lu)
 		}
 	case *ast.NewErrorExpression:
 		if e.Message != nil {

@@ -110,6 +110,33 @@ func (e *Emitter) resolveEventEmitterForCall(objExpr ast.Expression, pos ast.Pos
 	return val.Ty, val.Ref, nil
 }
 
+// resolveEventPayload resolves the effective payload type for one on/once/
+// emit/off call (TDD-00097 Stage 7). A scalar/Error payload type keeps the
+// original single-T semantics for every event. An object-typed payload is an
+// **event map** (`EventEmitter<{ data: Uint8Array; error: Error; end: void }>`):
+// the event-name argument must be a string literal naming one of its fields,
+// and that field's type is the event's own payload — `void` meaning a
+// payload-less event (zero-arg listeners, one-argument emit).
+func (e *Emitter) resolveEventPayload(payloadTy Type, eventArg ast.Expression, pos ast.Pos) (Type, bool, error) {
+	// Map mode is only a plain structural object-literal type — an Error /
+	// class / tuple payload keeps whole-payload single-T semantics.
+	isMap := payloadTy.IsObject && !payloadTy.IsError && !payloadTy.IsClass && !payloadTy.IsTuple
+	if !isMap {
+		isVoid := payloadTy.IR == "void" || payloadTy.IR == ""
+		return payloadTy, isVoid, nil
+	}
+	lit, ok := eventArg.(*ast.StringLiteral)
+	if !ok {
+		return Type{}, false, fmt.Errorf("%d:%d: an event-map EventEmitter requires a string-literal event name", pos.Line, pos.Col)
+	}
+	_, fieldTy, found := payloadTy.FieldIndex(lit.Value)
+	if !found {
+		return Type{}, false, fmt.Errorf("%d:%d: event '%s' is not declared in this EventEmitter's event map", pos.Line, pos.Col, lit.Value)
+	}
+	isVoid := fieldTy.IR == "void" || fieldTy.IR == ""
+	return fieldTy, isVoid, nil
+}
+
 // resolveEventEmitterListenerArg evaluates and validates arg as a
 // single-argument, void-returning closure whose parameter matches
 // payloadTy — the only listener shape .on()/.once() accept, generalizing
@@ -122,13 +149,17 @@ func (e *Emitter) resolveEventEmitterForCall(objExpr ast.Expression, pos ast.Pos
 // already has): .emit() must be able to invoke the listener later, from a
 // different call site entirely, which requires a real runtime closure
 // pointer to store — a named function has no such pointer representation.
-func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy Type, fnName string, pos ast.Pos) (string, error) {
+func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy Type, isVoid bool, fnName string, pos ast.Pos) (string, error) {
+	hints := []Type{payloadTy}
+	if isVoid {
+		hints = nil
+	}
 	var val Value
 	var err error
 	if af, ok := arg.(*ast.ArrowFunction); ok {
-		val, err = e.emitArrowFunctionWithHints(af, []Type{payloadTy})
+		val, err = e.emitArrowFunctionWithHints(af, hints)
 	} else if fe, ok := arg.(*ast.FunctionExpression); ok {
-		val, err = e.emitFunctionExpression(fe, []Type{payloadTy})
+		val, err = e.emitFunctionExpression(fe, hints)
 	} else {
 		val, err = e.emitExpr(arg)
 	}
@@ -138,8 +169,12 @@ func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy T
 	if !val.Ty.IsFunc {
 		return "", fmt.Errorf("%d:%d: %s's listener must be a function", pos.Line, pos.Col, fnName)
 	}
-	if len(val.Ty.FuncParams) != 1 || val.Ty.FuncParams[0].IR != payloadTy.IR {
-		return "", fmt.Errorf("%d:%d: %s's listener must take exactly 1 argument matching this EventEmitter's payload type", pos.Line, pos.Col, fnName)
+	if isVoid {
+		if len(val.Ty.FuncParams) != 0 {
+			return "", fmt.Errorf("%d:%d: %s's listener for a payload-less event must take no arguments", pos.Line, pos.Col, fnName)
+		}
+	} else if len(val.Ty.FuncParams) != 1 || val.Ty.FuncParams[0].IR != payloadTy.IR {
+		return "", fmt.Errorf("%d:%d: %s's listener must take exactly 1 argument matching this event's payload type", pos.Line, pos.Col, fnName)
 	}
 	if val.Ty.FuncRetType != nil && val.Ty.FuncRetType.IR != "void" {
 		return "", fmt.Errorf("%d:%d: %s's listener must return nothing (void)", pos.Line, pos.Col, fnName)
@@ -217,7 +252,11 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 			return Value{}, err
 		}
 		eventVal = e.coerce(eventVal, TypePtr)
-		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], payloadTy, method, pos)
+		evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], evTy, evVoid, method, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -239,7 +278,11 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 			return Value{}, err
 		}
 		eventVal = e.coerce(eventVal, TypePtr)
-		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], payloadTy, method, pos)
+		evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], evTy, evVoid, method, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -329,19 +372,33 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 // matching real Node's one specially-treated event name. Returns whether
 // any listener was invoked.
 func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: emit() requires 2 arguments (event, data)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: emit() takes (event) or (event, data)", pos.Line, pos.Col)
 	}
 	eventVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	eventVal = e.coerce(eventVal, TypePtr)
-	dataVal, err := e.emitExprWithObjectHint(args[1], payloadTy)
+	evTy, evVoid, err := e.resolveEventPayload(payloadTy, args[0], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	dataVal = e.coerce(dataVal, payloadTy)
+	var dataVal Value
+	if evVoid {
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: emit() for a payload-less event takes only the event name", pos.Line, pos.Col)
+		}
+	} else {
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: emit() for this event requires a data argument", pos.Line, pos.Col)
+		}
+		dataVal, err = e.emitExprWithObjectHint(args[1], evTy)
+		if err != nil {
+			return Value{}, err
+		}
+		dataVal = e.coerce(dataVal, evTy)
+	}
 
 	e.ensureMapStrHelpers()
 	e.ensureEventEmitterRuntime()
@@ -400,8 +457,14 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	onceFlag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", onceFlag, op))
 
-	cb := Callback{kind: cbClosure, hdrPtr: listenerPtr, ty: FuncType([]Type{payloadTy}, TypeVoid)}
-	if _, err := e.emitCBCall(cb, []Value{dataVal}); err != nil {
+	cbParams := []Type{evTy}
+	cbArgs := []Value{dataVal}
+	if evVoid {
+		cbParams = nil
+		cbArgs = nil
+	}
+	cb := Callback{kind: cbClosure, hdrPtr: listenerPtr, ty: FuncType(cbParams, TypeVoid)}
+	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err
 	}
 
@@ -447,7 +510,10 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 
 	e.emitLabel(throwL)
 	e.ensureExceptionHelpers()
-	if payloadTy.IsError {
+	if evVoid {
+		errPtr := e.buildErrorObj(0, e.internString("Unhandled 'error' event"), e.internString("Error"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
+	} else if evTy.IsError {
 		// The payload is already an errorObjType-shaped pointer — rethrow
 		// it directly rather than re-wrapping/stringifying it.
 		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", dataVal.Ref))

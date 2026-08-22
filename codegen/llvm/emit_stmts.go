@@ -468,6 +468,15 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			// drive it synchronously, awaiting each yielded value.
 			return e.emitForAwaitOfSyncGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
 		}
+		// A ReadableStream (or an already-obtained reader) in `for await`
+		// (TDD-00097 Stage 1): read chunk-at-a-time, awaiting each read().
+		if objTy.IsReadableStream || objTy.IsStreamReader {
+			streamVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			return e.emitForAwaitOfStream(s, objTy, streamVal, condL, bodyL, incL, endL)
+		}
 		if objTy.IsClass {
 			if info, ok := e.classes[objTy.ClassName]; ok {
 				if _, ok := info.MethodSigs[asyncIteratorMethodName]; ok {

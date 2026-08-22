@@ -1,0 +1,604 @@
+// emit_node_stream.go — TDD-00097 Stage 8 codegen: Node's `stream` module.
+// `new Readable<T>(opts?)` / `new Writable<T>(opts?)` / `new Transform<I, O>
+// (opts?)`, the `'data'`/`'end'`/`'error'`/`'close'`/`'finish'`/`'drain'`
+// event surface (Stage 7-style literal-event typing), `push`/`write`/`end`/
+// `pause`/`resume`/`.pipe()`, the web-stream bridges, and the
+// `stream/promises` `pipeline`/`finished`.
+package llvm
+
+import (
+	"fmt"
+
+	"KlainMainLang/ast"
+)
+
+// emitNodeInvokeDataThunk emits `void @__kml_ns_invoke_N(ptr %clo, i64 %v0,
+// i64 %v1)` — the runtime's typed 'data'-listener caller.
+func (e *Emitter) emitNodeInvokeDataThunk(chunkTy Type) string {
+	e.streamSiteCtr++
+	fn := fmt.Sprintf("@__kml_ns_invoke_%d", e.streamSiteCtr)
+
+	restore := e.beginThunkEmit()
+	fp := e.freshReg()
+	fpp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 0", fpp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	ep := e.freshReg()
+	epp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 1", epp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+	if chunkTy.IsArray {
+		cp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", cp))
+		e.emitInstr(fmt.Sprintf("call void (ptr, ptr, i64) %s(ptr %s, ptr %s, i64 %%v1)", fp, ep, cp))
+	} else {
+		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
+		e.emitInstr(fmt.Sprintf("call void (ptr, %s) %s(ptr %s, %s %s)", chunkTy.IR, fp, ep, chunkTy.IR, chunk.Ref))
+	}
+	e.emitInstr("ret void")
+	body := e.allocas.String() + e.body.String()
+	restore()
+
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%clo, i64 %%v0, i64 %%v1) {\nentry:\n%s}\n", fn, body))
+	return fn
+}
+
+// destructureNodeStreamOptions splits the options object literal.
+func destructureNodeStreamOptions(opts ast.Expression, allowed map[string]bool, what string, pos ast.Pos) (map[string]ast.Expression, error) {
+	out := map[string]ast.Expression{}
+	if opts == nil {
+		return out, nil
+	}
+	ol, ok := opts.(*ast.ObjectLiteral)
+	if !ok {
+		return nil, fmt.Errorf("%d:%d: %s's options must be an object literal", pos.Line, pos.Col, what)
+	}
+	for _, p := range ol.Properties {
+		if !allowed[p.Key] {
+			return nil, fmt.Errorf("%d:%d: unknown %s option '%s'", pos.Line, pos.Col, what, p.Key)
+		}
+		out[p.Key] = p.Value
+	}
+	return out, nil
+}
+
+// emitNewNodeStream implements the three constructors.
+func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, error) {
+	pos := ex.GetPos()
+	e.ensureNodeStreamRuntime()
+
+	inTy, outTy := TypeI64, TypeI64
+	if ex.InType != nil {
+		inTy = e.resolveType(ex.InType)
+	}
+	if ex.OutType != nil {
+		outTy = e.resolveType(ex.OutType)
+	}
+
+	switch ex.Kind {
+	case "readable":
+		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"read": true}, "Readable", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		fulfill := e.emitStreamFulfillThunk(outTy)
+		rs := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfill))
+		inv := e.emitNodeInvokeDataThunk(outTy)
+		dec := e.emitStreamDecodeThunk(outTy)
+		nsTy := NodeReadableType(outTy)
+		nsReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr null, ptr %s, ptr %s)", nsReg, rs, inv, dec))
+		if readExpr, ok := opts["read"]; ok {
+			// The read callback receives the Readable itself (this compiler
+			// has no `this` binding for object-literal callbacks — a
+			// documented deviation from Node's this-based `read()`), so it
+			// can `r.push(...)`.
+			userClo, err := e.streamCallbackClosure(readExpr, []Type{nsTy}, "read callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: a Readable read callback takes at most one (stream) parameter", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamPullWrap(userClo.Ty)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nsReg, g1))
+			e.storeStreamField(rs, 9, e.buildBuiltinClosure(wrap, env))
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+		return Value{Ref: nsReg, Ty: nsTy}, nil
+
+	case "writable":
+		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"write": true, "final": true}, "Writable", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		ws := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
+		if writeExpr, ok := opts["write"]; ok {
+			userClo, err := e.streamCallbackClosure(writeExpr, []Type{inTy}, "write callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: a Writable write callback takes one (chunk) parameter", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ws, g1))
+			e.storeWStreamField(ws, 9, e.buildBuiltinClosure(wrap, env))
+		}
+		if finalExpr, ok := opts["final"]; ok {
+			userClo, err := e.streamCallbackClosure(finalExpr, nil, "final callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 0 {
+				return Value{}, fmt.Errorf("%d:%d: a Writable final callback takes no parameters", pos.Line, pos.Col)
+			}
+			e.storeWStreamField(ws, 10, e.buildBuiltinClosure(e.emitStreamCloseWrap(userClo.Ty), userClo.Ref))
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
+		nsTy := NodeWritableType(inTy)
+		nsReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr null, ptr %s, ptr null, ptr null)", nsReg, ws))
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
+		return Value{Ref: nsReg, Ty: nsTy}, nil
+
+	case "transform":
+		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"transform": true, "flush": true}, "Transform", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		fulfill := e.emitStreamFulfillThunk(outTy)
+		rs := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 0.0, ptr %s)", rs, fulfill))
+		ws := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
+
+		ctx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+		storeCtxPtr := func(idx int, val string) {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, ctx, idx))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+		}
+		storeCtxPtr(0, rs)
+		storeCtxPtr(1, ws)
+		rsCtrlTy := RSControllerType(outTy)
+		if trExpr, ok := opts["transform"]; ok {
+			userClo, err := e.streamCallbackClosure(trExpr, []Type{inTy, rsCtrlTy}, "transform callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 2 {
+				return Value{}, fmt.Errorf("%d:%d: a transform callback takes (chunk, controller?)", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rs, g1))
+			storeCtxPtr(2, e.buildBuiltinClosure(wrap, env))
+		} else {
+			if inTy.IR != outTy.IR || inTy.IsArray != outTy.IsArray {
+				return Value{}, fmt.Errorf("%d:%d: an identity Transform (no transform callback) requires matching chunk types", pos.Line, pos.Col)
+			}
+			storeCtxPtr(2, "null")
+		}
+		if flExpr, ok := opts["flush"]; ok {
+			userClo, err := e.streamCallbackClosure(flExpr, []Type{rsCtrlTy}, "flush callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: a flush callback takes at most one (controller) parameter", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamPullWrap(userClo.Ty)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rs, g1))
+			storeCtxPtr(3, e.buildBuiltinClosure(wrap, env))
+		} else {
+			storeCtxPtr(3, "null")
+		}
+		for i := 4; i <= 6; i++ {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+		}
+		storeCtxPtr(7, "null")
+		storeCtxPtr(8, "null")
+		e.storeWStreamField(ws, 9, e.buildBuiltinClosure("@__kml_ts_sink_write", ctx))
+		e.storeWStreamField(ws, 10, e.buildBuiltinClosure("@__kml_ts_sink_close", ctx))
+		e.storeWStreamField(ws, 11, e.buildBuiltinClosure("@__kml_ts_sink_abort", ctx))
+		e.storeStreamField(rs, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctx))
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
+
+		inv := e.emitNodeInvokeDataThunk(outTy)
+		dec := e.emitStreamDecodeThunk(outTy)
+		nsReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr %s, ptr %s, ptr %s)", nsReg, rs, ws, inv, dec))
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
+		return Value{Ref: nsReg, Ty: NodeTransformType(inTy, outTy)}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown node stream kind", pos.Line, pos.Col)
+}
+
+// nodeStreamSide loads the inner rstream (side 0) or wstream (side 1).
+func (e *Emitter) nodeStreamSide(nsPtr string, side int) string {
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, nodeStreamStructIR, nsPtr, side))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+	return r
+}
+
+// resolveNodeStreamForCall resolves a node-stream receiver.
+func (e *Emitter) resolveNodeStreamForCall(objExpr ast.Expression, pos ast.Pos) (Type, string, error) {
+	if id, ok := objExpr.(*ast.Identifier); ok {
+		sym, found := e.lookup(id.Name)
+		if found && (sym.Ty.IsNodeReadable || sym.Ty.IsNodeWritable) {
+			ptr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptr, sym.Ptr))
+			return sym.Ty, ptr, nil
+		}
+	}
+	val, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Type{}, "", err
+	}
+	if !val.Ty.IsNodeReadable && !val.Ty.IsNodeWritable {
+		return Type{}, "", fmt.Errorf("%d:%d: value is not a Node stream", pos.Line, pos.Col)
+	}
+	return val.Ty, val.Ref, nil
+}
+
+// nodeEventPayload maps a literal event name to its payload for ty.
+func nodeEventPayload(ty Type, event string, pos ast.Pos) (Type, bool, error) {
+	switch event {
+	case "data":
+		if !ty.IsNodeReadable {
+			return Type{}, false, fmt.Errorf("%d:%d: 'data' is a readable-side event", pos.Line, pos.Col)
+		}
+		out := TypeI64
+		if ty.StreamOut != nil {
+			out = *ty.StreamOut
+		}
+		return out, false, nil
+	case "error":
+		return errorObjType, false, nil
+	case "end":
+		if !ty.IsNodeReadable {
+			return Type{}, false, fmt.Errorf("%d:%d: 'end' is a readable-side event", pos.Line, pos.Col)
+		}
+		return Type{}, true, nil
+	case "finish", "drain":
+		if !ty.IsNodeWritable {
+			return Type{}, false, fmt.Errorf("%d:%d: '%s' is a writable-side event", pos.Line, pos.Col, event)
+		}
+		return Type{}, true, nil
+	case "close":
+		return Type{}, true, nil
+	}
+	return Type{}, false, fmt.Errorf("%d:%d: unsupported stream event '%s' (data, end, error, close, finish, drain)", pos.Line, pos.Col, event)
+}
+
+// emitNodeStreamCall dispatches node-stream method calls.
+func (e *Emitter) emitNodeStreamCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	ty, ptr, err := e.resolveNodeStreamForCall(objExpr, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureNodeStreamRuntime()
+	self := Value{Ref: ptr, Ty: ty}
+	outTy := TypeI64
+	if ty.StreamOut != nil {
+		outTy = *ty.StreamOut
+	}
+	inTy := TypeI64
+	if ty.StreamChunk != nil {
+		inTy = *ty.StreamChunk
+	}
+
+	switch method {
+	case "on", "once":
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: %s() requires (event, listener)", pos.Line, pos.Col, method)
+		}
+		lit, ok := args[0].(*ast.StringLiteral)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: a stream's %s() requires a string-literal event name", pos.Line, pos.Col, method)
+		}
+		evTy, evVoid, err := nodeEventPayload(ty, lit.Value, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		listenerPtr, err := e.resolveEventEmitterListenerArg(args[1], evTy, evVoid, method, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		once := "0"
+		if method == "once" {
+			once = "1"
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_add_listener(ptr %s, ptr %s, ptr %s, i64 %s)", ptr, e.internString(lit.Value), listenerPtr, once))
+		if lit.Value == "data" {
+			e.emitInstr(fmt.Sprintf("call void @__kml_ns_start_flow(ptr %s)", ptr))
+		}
+		return self, nil
+
+	case "push":
+		if !ty.IsNodeReadable {
+			return Value{}, fmt.Errorf("%d:%d: push() requires a Readable", pos.Line, pos.Col)
+		}
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: push() takes one argument (a chunk, or null to end)", pos.Line, pos.Col)
+		}
+		rs := e.nodeStreamSide(ptr, 0)
+		if _, isNull := args[0].(*ast.NullLiteral); isNull {
+			closed := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, rs))
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		}
+		cv, err := e.emitExprWithObjectHint(args[0], outTy)
+		if err != nil {
+			return Value{}, err
+		}
+		cv = e.coerce(cv, outTy)
+		v0, v1 := e.streamChunkWords(cv)
+		okR := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue(ptr %s, i64 %s, i64 %s)", okR, rs, v0, v1))
+		d := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_rs_desired(ptr %s)", d, rs))
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 0.0", b, d))
+		return Value{Ref: b, Ty: TypeBool}, nil
+
+	case "pause":
+		rs := e.nodeStreamSide(ptr, 0)
+		_ = rs
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", gep, nodeStreamStructIR, ptr))
+		e.emitInstr(fmt.Sprintf("store i64 2, ptr %s, align 8", gep))
+		return self, nil
+
+	case "resume":
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_resume(ptr %s)", ptr))
+		return self, nil
+
+	case "write":
+		if !ty.IsNodeWritable {
+			return Value{}, fmt.Errorf("%d:%d: write() requires a Writable", pos.Line, pos.Col)
+		}
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: write() takes one chunk argument", pos.Line, pos.Col)
+		}
+		ws := e.nodeStreamSide(ptr, 1)
+		cv, err := e.emitExprWithObjectHint(args[0], inTy)
+		if err != nil {
+			return Value{}, err
+		}
+		cv = e.coerce(cv, inTy)
+		v0, v1 := e.streamChunkWords(cv)
+		prom := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", prom, ws, v0, v1))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isNull, prom))
+		okI := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", okI, isNull))
+		e.streamThrowTypeError(okI, "cannot write to an ended Writable")
+		bI := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ns_write_done(ptr %s, ptr %s)", bI, ptr, ws))
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", b, bI))
+		return Value{Ref: b, Ty: TypeBool}, nil
+
+	case "end":
+		if !ty.IsNodeWritable {
+			return Value{}, fmt.Errorf("%d:%d: end() requires a Writable", pos.Line, pos.Col)
+		}
+		if len(args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: end() takes at most one final chunk", pos.Line, pos.Col)
+		}
+		ws := e.nodeStreamSide(ptr, 1)
+		if len(args) == 1 {
+			cv, err := e.emitExprWithObjectHint(args[0], inTy)
+			if err != nil {
+				return Value{}, err
+			}
+			cv = e.coerce(cv, inTy)
+			v0, v1 := e.streamChunkWords(cv)
+			ign := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", ign, ws, v0, v1))
+		}
+		closed := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_close(ptr %s)", closed, ws))
+		return self, nil
+
+	case "pipe":
+		if !ty.IsNodeReadable {
+			return Value{}, fmt.Errorf("%d:%d: pipe() requires a Readable source", pos.Line, pos.Col)
+		}
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: pipe() takes one destination", pos.Line, pos.Col)
+		}
+		dv, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		if !dv.Ty.IsNodeWritable {
+			return Value{}, fmt.Errorf("%d:%d: pipe()'s destination must be a Writable (or Transform)", pos.Line, pos.Col)
+		}
+		e.ensureStreamPipeRuntime()
+		rs := e.nodeStreamSide(ptr, 0)
+		dws := e.nodeStreamSide(dv.Ref, 1)
+		decode := e.emitStreamDecodeThunk(outTy)
+		// preventClose stays 0: source end closes the destination, which is
+		// Node's default .pipe() behavior too.
+		ign := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null)", ign, rs, dws, decode))
+		return dv, nil
+
+	case "toWeb":
+		if ty.IsNodeReadable && !ty.IsNodeWritable {
+			rs := e.nodeStreamSide(ptr, 0)
+			return Value{Ref: rs, Ty: ReadableStreamType(outTy)}, nil
+		}
+		if ty.IsNodeWritable && !ty.IsNodeReadable {
+			ws := e.nodeStreamSide(ptr, 1)
+			return Value{Ref: ws, Ty: WritableStreamType(inTy)}, nil
+		}
+		return Value{}, fmt.Errorf("%d:%d: toWeb() is supported on a plain Readable or Writable", pos.Line, pos.Col)
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown stream method '%s'", pos.Line, pos.Col, method)
+}
+
+// emitNodeReadableStatic handles `Readable.from(...)` / `Readable.fromWeb(...)`.
+func (e *Emitter) emitNodeReadableStatic(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureNodeStreamRuntime()
+	switch method {
+	case "from":
+		wv, err := e.emitReadableStreamFrom(args, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.wrapWebReadable(wv)
+	case "fromWeb":
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: Readable.fromWeb() takes one ReadableStream", pos.Line, pos.Col)
+		}
+		wv, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		if !wv.Ty.IsReadableStream {
+			return Value{}, fmt.Errorf("%d:%d: Readable.fromWeb() requires a ReadableStream", pos.Line, pos.Col)
+		}
+		return e.wrapWebReadable(wv)
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown Readable static '%s'", pos.Line, pos.Col, method)
+}
+
+// wrapWebReadable wraps a WHATWG readable value into a Node Readable.
+func (e *Emitter) wrapWebReadable(wv Value) (Value, error) {
+	outTy := TypeI64
+	if wv.Ty.StreamChunk != nil {
+		outTy = *wv.Ty.StreamChunk
+	}
+	inv := e.emitNodeInvokeDataThunk(outTy)
+	dec := e.emitStreamDecodeThunk(outTy)
+	nsReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr null, ptr %s, ptr %s)", nsReg, wv.Ref, inv, dec))
+	return Value{Ref: nsReg, Ty: NodeReadableType(outTy)}, nil
+}
+
+// emitStreamPromisesCall handles `pipeline(...)` / `finished(...)` from
+// 'stream/promises'.
+func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureNodeStreamRuntime()
+	voidPromise := func(ref string) Value {
+		pt := PromiseOf(TypeVoid)
+		pt.PromiseTask = true
+		return Value{Ref: ref, Ty: pt}
+	}
+	closedPromOf := func(v Value) (string, error) {
+		if v.Ty.IsNodeWritable {
+			ws := e.nodeStreamSide(v.Ref, 1)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 14", gep, wstreamStructIR, ws))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+			return r, nil
+		}
+		if v.Ty.IsNodeReadable {
+			rs := e.nodeStreamSide(v.Ref, 0)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 16", gep, rstreamStructIR, rs))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+			return r, nil
+		}
+		return "", fmt.Errorf("%d:%d: expected a Node stream", pos.Line, pos.Col)
+	}
+
+	switch method {
+	case "finished":
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: finished() takes one stream", pos.Line, pos.Col)
+		}
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		cp, err := closedPromOf(v)
+		if err != nil {
+			return Value{}, err
+		}
+		return voidPromise(cp), nil
+
+	case "pipeline":
+		if len(args) < 2 {
+			return Value{}, fmt.Errorf("%d:%d: pipeline() takes at least a source and a destination", pos.Line, pos.Col)
+		}
+		vals := make([]Value, len(args))
+		for i, a := range args {
+			v, err := e.emitExpr(a)
+			if err != nil {
+				return Value{}, err
+			}
+			if !v.Ty.IsNodeReadable && !v.Ty.IsNodeWritable {
+				return Value{}, fmt.Errorf("%d:%d: pipeline() arguments must be Node streams", pos.Line, pos.Col)
+			}
+			vals[i] = v
+		}
+		e.ensureStreamPipeRuntime()
+		for i := 0; i < len(vals)-1; i++ {
+			src, dst := vals[i], vals[i+1]
+			if !src.Ty.IsNodeReadable {
+				return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be readable", pos.Line, pos.Col, i+1)
+			}
+			if !dst.Ty.IsNodeWritable {
+				return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be writable", pos.Line, pos.Col, i+2)
+			}
+			outTy := TypeI64
+			if src.Ty.StreamOut != nil {
+				outTy = *src.Ty.StreamOut
+			}
+			rs := e.nodeStreamSide(src.Ref, 0)
+			dws := e.nodeStreamSide(dst.Ref, 1)
+			decode := e.emitStreamDecodeThunk(outTy)
+			ign := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null)", ign, rs, dws, decode))
+		}
+		cp, err := closedPromOf(vals[len(vals)-1])
+		if err != nil {
+			return Value{}, err
+		}
+		return voidPromise(cp), nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown stream/promises member '%s'", pos.Line, pos.Col, method)
+}

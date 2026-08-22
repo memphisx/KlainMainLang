@@ -47,6 +47,28 @@ func (e *Emitter) ensureFetch() {
 define i64 @__kml_curl_write_cb(ptr %chunk, i64 %size, i64 %nmemb, ptr %ud) {
 entry:
   %total = mul i64 %size, %nmemb
+  ; TDD-00097 Stage 4: slot 3 of the (extended, 32-byte) buffer struct holds
+  ; a backpointer to the pending-fetch struct (null on the blocking path).
+  ; When the fetch has an activated body stream, the hook consumes or pauses
+  ; the chunk; a 0 return means "not streaming — buffer as before".
+  %pend_p = getelementptr ptr, ptr %ud, i64 3
+  %pend = load ptr, ptr %pend_p, align 8
+  %nopend = icmp eq ptr %pend, null
+  br i1 %nopend, label %buffer, label %markhdrs
+markhdrs:
+  %hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pend, i32 0, i32 6
+  store i64 1, ptr %hd_p, align 8
+  %hook = call i64 @__kml_fetch_body_write(ptr %pend, ptr %chunk, i64 %total)
+  %consumed = icmp eq i64 %hook, 1
+  br i1 %consumed, label %retok, label %ckpause
+retok:
+  ret i64 %total
+ckpause:
+  %paused = icmp eq i64 %hook, 2
+  br i1 %paused, label %retpause, label %buffer
+retpause:
+  ret i64 268435457
+buffer:
   %data_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 0
   %len_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 1
   %cap_p = getelementptr { ptr, i64, i64 }, ptr %ud, i32 0, i32 2
@@ -219,13 +241,15 @@ initmulti:
 havemulti:
   %multi2 = load ptr, ptr @__kml_curl_multi, align 8
 
-  %buf = call ptr @malloc(i64 24)
+  %buf = call ptr @malloc(i64 32)
   %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
   %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
   store ptr null, ptr %buf_data_p, align 8
   store i64 0, ptr %buf_len_p, align 8
   store i64 0, ptr %buf_cap_p, align 8
+  %buf_pend_p = getelementptr ptr, ptr %buf, i64 3
+  store ptr null, ptr %buf_pend_p, align 8
 
   %curl = call ptr @curl_easy_init()
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)
@@ -259,7 +283,7 @@ setbody:
   br label %skipbody
 
 skipbody:
-  %pending = call ptr @malloc(i64 48)
+  %pending = call ptr @malloc(i64 72)
   %p_easy = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
   store ptr %curl, ptr %p_easy, align 8
   %p_buf = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
@@ -272,6 +296,13 @@ skipbody:
   store i64 0, ptr %p_result, align 8
   %p_signal = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %pending, i32 0, i32 5
   store ptr %signal, ptr %p_signal, align 8
+  %p_hdrs = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 6
+  store i64 0, ptr %p_hdrs, align 8
+  %p_bstream = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 7
+  store ptr null, ptr %p_bstream, align 8
+  %p_paused = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 8
+  store i64 0, ptr %p_paused, align 8
+  store ptr %pending, ptr %buf_pend_p, align 8
 
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10103, ptr %pending)
   call i32 @curl_multi_add_handle(ptr %multi2, ptr %curl)
@@ -325,11 +356,34 @@ handledone:
 
   %p_done2 = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
   store i64 1, ptr %p_done2, align 8
+  call void @__kml_fetch_body_on_done(ptr %pending)
 
   br label %drainloop
 
 done:
   ret void
+}`)
+
+	// __kml_fetch_pump: one multi_perform + message drain, reporting whether
+	// transfers are still running — the no-fiber await drive's hook
+	// (TDD-00097 Stage 4). A no-op stub is emitted at finalize when fetch is
+	// entirely unused.
+	e.emitGlobal(`
+define i1 @__kml_fetch_pump() {
+entry:
+  %multi = load ptr, ptr @__kml_curl_multi, align 8
+  %nomulti = icmp eq ptr %multi, null
+  br i1 %nomulti, label %idle, label %pump
+idle:
+  ret i1 0
+pump:
+  %runningp = alloca i32, align 4
+  store i32 0, ptr %runningp, align 4
+  call i32 @curl_multi_perform(ptr %multi, ptr %runningp)
+  call void @__kml_curl_drain_messages()
+  %running = load i32, ptr %runningp, align 4
+  %active = icmp sgt i32 %running, 0
+  ret i1 %active
 }`)
 
 	// __kml_pending_finish: a pure extraction of what used to be
@@ -472,6 +526,122 @@ finish:
   %%raw = call { i64, ptr, i64 } @__kml_pending_finish(ptr %%pending)
   ret { i64, ptr, i64 } %%raw
 }`, timeoutNamePtr, abortNamePtr, timeoutMsgPtr, abortMsgPtr, domExcKind, awfTaskCheck, awfTaskYield))
+}
+
+// ensureAwaitFetchHeaders emits @__kml_await_fetch_headers (TDD-00097
+// Stage 4): drive the multi loop until the response's headers have arrived
+// (the first write-callback invocation) or the transfer is done, then return
+// the HTTP status — the resolve-at-headers point `await fetch(...)` now uses,
+// so `.body` can stream the rest. A busy-spin (multi_perform + drain) in
+// every context: the headers phase is short, and body consumption afterwards
+// runs on promise reactions. Also emits @__kml_fetch_pump, the no-fiber await
+// drive's hook to keep in-flight transfers progressing (a real definition
+// here; a no-op stub is emitted at finalize when fetch is unused).
+func (e *Emitter) ensureAwaitFetchHeaders() {
+	if e.usedAwaitFetchHeaders {
+		return
+	}
+	e.usedAwaitFetchHeaders = true
+	e.ensureFetchAsync()
+	e.ensureMicrotasks()
+	// Task-park path (mirrors __kml_await_fetch's): a coroutine task awaiting
+	// headers parks on the fetch so the scheduler/event loop can run others
+	// (incl. this process's own http accept loop — a self-fetch deadlocked on
+	// the busy-spin before this). Emitted only under hasMaySuspend.
+	hdrTaskCheck := "\n  br label %hmaybeconn"
+	hdrTaskYield := ""
+	if e.hasMaySuspend {
+		hdrGCRestore := ""
+		if e.isGCMode() {
+			hdrGCRestore = "\n  call void @__kml_task_gc_restore()"
+		}
+		hdrTaskCheck = "\n  %h_task = load ptr, ptr @__kml_current_task, align 8\n  %h_ontask = icmp ne ptr %h_task, null\n  br i1 %h_ontask, label %htaskyield, label %hmaybeconn"
+		hdrTaskYield = "\nhtaskyield:" +
+			"\n  %h_pf_p = getelementptr " + taskStructIR + ", ptr %h_task, i32 0, i32 " + fmt.Sprintf("%d", taskPendingFetch) + "\n  store ptr %pending, ptr %h_pf_p, align 8" +
+			"\n  %h_st_p = getelementptr " + taskStructIR + ", ptr %h_task, i32 0, i32 " + fmt.Sprintf("%d", taskState) + "\n  store i64 1, ptr %h_st_p, align 8" +
+			"\n  %h_rc_p = getelementptr " + taskStructIR + ", ptr %h_task, i32 0, i32 " + fmt.Sprintf("%d", taskResumerCtx) + "\n  %h_rc = load ptr, ptr %h_rc_p, align 8" +
+			"\n  %h_ctx_p = getelementptr " + taskStructIR + ", ptr %h_task, i32 0, i32 " + fmt.Sprintf("%d", taskCtx) + "\n  %h_ctx = load ptr, ptr %h_ctx_p, align 8" +
+			"\n  %h_sjt_p = getelementptr " + taskStructIR + ", ptr %h_task, i32 0, i32 " + fmt.Sprintf("%d", taskSavedJmpTop) + "\n  %h_top = load i32, ptr @__kml_jmp_top, align 4\n  %h_top64 = zext i32 %h_top to i64\n  store i64 %h_top64, ptr %h_sjt_p, align 8" +
+			"\n  %h_sw = call i32 @swapcontext(ptr %h_ctx, ptr %h_rc)" + hdrGCRestore +
+			"\n  br label %checkloop"
+	}
+	e.emitGlobal(`
+define i64 @__kml_await_fetch_headers(ptr %pending) {
+entry:
+  %runningp = alloca i32, align 4
+  %statusslot = alloca i64, align 8
+  ; A signal-carrying fetch keeps the full await (abort/timeout teardown
+  ; machinery lives there) and so resolves at completion, not headers.
+  %sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %pending, i32 0, i32 5
+  %sig = load ptr, ptr %sig_p, align 8
+  %hassig = icmp ne ptr %sig, null
+  br i1 %hassig, label %fullawait, label %checkloop
+fullawait:
+  %raw = call { i64, ptr, i64 } @__kml_await_fetch(ptr %pending)
+  %sst = extractvalue { i64, ptr, i64 } %raw, 0
+  ret i64 %sst
+checkloop:
+  %done_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
+  %done = load i64, ptr %done_p, align 8
+  %isdone = icmp ne i64 %done, 0
+  br i1 %isdone, label %fromdone, label %ckhdrs
+ckhdrs:
+  %hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %pending, i32 0, i32 6
+  %hd = load i64, ptr %hd_p, align 8
+  %havehdrs = icmp ne i64 %hd, 0
+  br i1 %havehdrs, label %fromeasy, label %parkcheck
+parkcheck:` + hdrTaskCheck + hdrTaskYield + `
+hmaybeconn:
+  br label %maybeconn
+maybeconn:
+  ; Inside an http.listen connection fiber, park on the fetch like the full
+  ; await does — the event loop resumes on headersDone or done, so other
+  ; connections keep making progress during a slow upstream's header wait.
+  %curidx = load i64, ptr @__kml_current_conn_idx, align 8
+  %onfiber = icmp sge i64 %curidx, 0
+  br i1 %onfiber, label %doyield, label %spin
+doyield:
+  %conndata = load ptr, ptr @__kml_conn_data, align 8
+  %selfslot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %conndata, i64 %curidx
+  %ypf_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %selfslot, i32 0, i32 3
+  store ptr %pending, ptr %ypf_p, align 8
+  %yctx_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %selfslot, i32 0, i32 1
+  %yctx = load ptr, ptr %yctx_p, align 8
+  call i32 @swapcontext(ptr %yctx, ptr @__kml_main_ctx)
+  store ptr null, ptr %ypf_p, align 8
+  br label %checkloop
+spin:
+  %multi = load ptr, ptr @__kml_curl_multi, align 8
+  call i32 @curl_multi_perform(ptr %multi, ptr %runningp)
+  call void @__kml_curl_drain_messages()
+  ; Keep microtask ordering intact while waiting on headers — a queued
+  ; .then drive (ADR-00280) fires here, exactly as it did under the old
+  ; resolve-at-completion await.
+  call void @__kml_drain_microtasks()
+  br label %checkloop
+fromeasy:
+  %easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
+  %easy = load ptr, ptr %easy_p, align 8
+  store i64 0, ptr %statusslot, align 8
+  call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easy, i32 2097154, ptr %statusslot)
+  %st1 = load i64, ptr %statusslot, align 8
+  ret i64 %st1
+fromdone:
+  ; A transfer-level failure throws via the shared finish path (which also
+  ; handles the empty-body normalization we don't need here).
+  %result_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 4
+  %result = load i64, ptr %result_p, align 8
+  %failed = icmp ne i64 %result, 0
+  br i1 %failed, label %finishthrow, label %okdone
+finishthrow:
+  %ignored = call { i64, ptr, i64 } @__kml_pending_finish(ptr %pending)
+  br label %okdone
+okdone:
+  %status_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 3
+  %st2 = load i64, ptr %status_p, align 8
+  ret i64 %st2
+}
+`)
 }
 
 // ensureCurlSlist declares curl_slist_append (ADR-00074/TDD-00017) —

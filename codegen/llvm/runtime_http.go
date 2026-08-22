@@ -950,6 +950,7 @@ timerscan:
   call void @__kml_drain_microtasks()
   call void @__kml_task_sched_step()
   call void @__kml_drain_microtasks()
+  call void @__kml_reqbody_pump()
   %tact_el = load i64, ptr @__kml_task_active, align 8
   %hasactivetasks_el = icmp sgt i64 %tact_el, 0
   store i1 %hasactivetasks_el, ptr %hasactivetasks_slot, align 1
@@ -1303,7 +1304,15 @@ fdfoldnext:
   br label %fdfoldloop
 
 fdfolddone:
-  %needimmediate = load i1, ptr %forcezero, align 1
+  ; Never block in select() while microtask reactions are queued (TDD-00097
+  ; Stage 5): a connection fiber that ran earlier in THIS iteration may have
+  ; enqueued stream/pipe reactions — checked here, immediately before the
+  ; timeout decision, not at the top of the iteration.
+  %mtpend = call i1 @__kml_microtasks_pending()
+  %rbwant = call i1 @__kml_reqbody_want()
+  %pend0 = or i1 %mtpend, %rbwant
+  %needimmediate0 = load i1, ptr %forcezero, align 1
+  %needimmediate = or i1 %needimmediate0, %pend0
   %usetimer0 = or i1 %havetimer, %needimmediate
   %havefetchdlv = load i1, ptr %havefetchdl, align 1
   %usetimer = or i1 %usetimer0, %havefetchdlv
@@ -1448,7 +1457,14 @@ rcheckfetchdone:
   %rpf_sig_p = getelementptr { ptr, ptr, i64, i64, i64, ptr }, ptr %rpf, i32 0, i32 5
   %rpf_sig = load ptr, ptr %rpf_sig_p, align 8
   %rpf_ab = call i1 @__kml_signal_aborted(ptr %rpf_sig)
-  %rfetchready = or i1 %rfetchdone, %rpf_ab
+  ; Headers-resolved awaits (TDD-00097 Stage 4) park until the first body
+  ; byte arrives — resume on headersDone too; the resumed await re-checks
+  ; what it was actually waiting for.
+  %rpf_hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %rpf, i32 0, i32 6
+  %rpf_hd = load i64, ptr %rpf_hd_p, align 8
+  %rhdrsdone = icmp ne i64 %rpf_hd, 0
+  %rfetchready0 = or i1 %rfetchdone, %rpf_ab
+  %rfetchready = or i1 %rfetchready0, %rhdrsdone
   br i1 %rfetchready, label %rresume, label %rscannext
 
 rcheckgroup:

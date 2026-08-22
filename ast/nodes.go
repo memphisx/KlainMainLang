@@ -942,6 +942,99 @@ func NewNewEventEmitterExpression(payload *TypeAnnotation, pos Pos) *NewEventEmi
 	return &NewEventEmitterExpression{PayloadType: payload, pos: pos}
 }
 
+// NewReadableStreamExpression — `new ReadableStream<T>(underlyingSource?,
+// strategy?)` (TDD-00097 Stage 1). The underlying source must be an object
+// literal (its start/pull/cancel members are destructured at compile time);
+// the strategy argument may be an object literal ({highWaterMark, size}) or a
+// `new CountQueuingStrategy(...)`/`new ByteLengthQueuingStrategy(...)`
+// expression, both validated in codegen.
+type NewReadableStreamExpression struct {
+	ChunkType *TypeAnnotation // T in ReadableStream<T>; nil → number
+	Source    Expression      // underlying source object literal, or nil
+	Strategy  Expression      // queuing strategy, or nil
+	pos       Pos
+}
+
+func (*NewReadableStreamExpression) nodeMarker()   {}
+func (*NewReadableStreamExpression) exprMarker()   {}
+func (n *NewReadableStreamExpression) GetPos() Pos { return n.pos }
+
+func NewNewReadableStreamExpression(chunk *TypeAnnotation, source, strategy Expression, pos Pos) *NewReadableStreamExpression {
+	return &NewReadableStreamExpression{ChunkType: chunk, Source: source, Strategy: strategy, pos: pos}
+}
+
+// NewWritableStreamExpression — `new WritableStream<T>(underlyingSink?,
+// strategy?)` (TDD-00097 Stage 2). Mirrors NewReadableStreamExpression.
+type NewWritableStreamExpression struct {
+	ChunkType *TypeAnnotation // T; nil → number
+	Sink      Expression      // underlying sink object literal, or nil
+	Strategy  Expression      // queuing strategy, or nil
+	pos       Pos
+}
+
+func (*NewWritableStreamExpression) nodeMarker()   {}
+func (*NewWritableStreamExpression) exprMarker()   {}
+func (n *NewWritableStreamExpression) GetPos() Pos { return n.pos }
+
+func NewNewWritableStreamExpression(chunk *TypeAnnotation, sink, strategy Expression, pos Pos) *NewWritableStreamExpression {
+	return &NewWritableStreamExpression{ChunkType: chunk, Sink: sink, Strategy: strategy, pos: pos}
+}
+
+// NewTransformStreamExpression — `new TransformStream<I, O>(transformer?,
+// writableStrategy?, readableStrategy?)` (TDD-00097 Stage 3).
+type NewTransformStreamExpression struct {
+	InType           *TypeAnnotation // I; nil → number
+	OutType          *TypeAnnotation // O; nil → number
+	Transformer      Expression      // {transform, flush} object literal, or nil
+	WritableStrategy Expression
+	ReadableStrategy Expression
+	pos              Pos
+}
+
+func (*NewTransformStreamExpression) nodeMarker()   {}
+func (*NewTransformStreamExpression) exprMarker()   {}
+func (n *NewTransformStreamExpression) GetPos() Pos { return n.pos }
+
+func NewNewTransformStreamExpression(in, out *TypeAnnotation, transformer, wstrat, rstrat Expression, pos Pos) *NewTransformStreamExpression {
+	return &NewTransformStreamExpression{InType: in, OutType: out, Transformer: transformer, WritableStrategy: wstrat, ReadableStrategy: rstrat, pos: pos}
+}
+
+// NewCompressionStreamExpression — `new CompressionStream(format)` /
+// `new DecompressionStream(format)` (TDD-00097 Stage 6). Decompress selects
+// the inflate direction; Format must be a string literal ("gzip", "deflate",
+// "deflate-raw"), validated at codegen.
+type NewCompressionStreamExpression struct {
+	Decompress bool
+	Format     Expression
+	pos        Pos
+}
+
+func (*NewCompressionStreamExpression) nodeMarker()   {}
+func (*NewCompressionStreamExpression) exprMarker()   {}
+func (n *NewCompressionStreamExpression) GetPos() Pos { return n.pos }
+
+func NewNewCompressionStreamExpression(decompress bool, format Expression, pos Pos) *NewCompressionStreamExpression {
+	return &NewCompressionStreamExpression{Decompress: decompress, Format: format, pos: pos}
+}
+
+// NewNodeStreamExpression — `new Readable<T>(opts?)` / `new Writable<T>(opts?)`
+// / `new Transform<I, O>(opts?)` (TDD-00097 Stage 8, Node's stream module).
+type NewNodeStreamExpression struct {
+	Kind    string // "readable" | "writable" | "transform"
+	InType  *TypeAnnotation
+	OutType *TypeAnnotation
+	Options Expression // object literal, or nil
+	pos     Pos
+}
+
+func (*NewNodeStreamExpression) nodeMarker()   {}
+func (*NewNodeStreamExpression) exprMarker()   {}
+func (n *NewNodeStreamExpression) GetPos() Pos { return n.pos }
+
+func NewNewNodeStreamExpression(kind string, in, out *TypeAnnotation, options Expression, pos Pos) *NewNodeStreamExpression {
+	return &NewNodeStreamExpression{Kind: kind, InType: in, OutType: out, Options: options, pos: pos}
+}
+
 // EnumMember is one member of an enum declaration.
 type EnumMember struct {
 	Name  string

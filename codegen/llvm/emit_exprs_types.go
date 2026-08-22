@@ -459,6 +459,42 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.MemberExpression:
+		// Response.body — must match emitResponseBodyStream (TDD-00097 St. 4).
+		if ex.Property == "body" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+				return ReadableStreamType(TypedArrayType("uint8"))
+			}
+		}
+		// TransformStream sides — must match emitTransformStreamProperty.
+		if ex.Property == "readable" || ex.Property == "writable" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsTransformStream {
+				if ex.Property == "readable" {
+					if objTy.StreamOut != nil {
+						return ReadableStreamType(*objTy.StreamOut)
+					}
+					return ReadableStreamType(TypeI64)
+				}
+				if objTy.StreamChunk != nil {
+					return WritableStreamType(*objTy.StreamChunk)
+				}
+				return WritableStreamType(TypeI64)
+			}
+		}
+		// Stream properties — must match emitStreamProperty (TDD-00097).
+		if ex.Property == "locked" || ex.Property == "desiredSize" || ex.Property == "closed" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController {
+				switch ex.Property {
+				case "locked":
+					return TypeBool
+				case "desiredSize":
+					return TypeF64
+				case "closed":
+					pt := PromiseOf(TypeVoid)
+					pt.PromiseTask = true
+					return pt
+				}
+			}
+		}
 		// DataView properties — must match emitDataViewProp.
 		if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
@@ -664,6 +700,97 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if id, ok := ex.Callee.(*ast.Identifier); ok {
 			if info, found := e.lookupGenerator(id.Name); found {
 				return info.GenTy
+			}
+		}
+		// req.stream() (TDD-00097 Stage 5b) — must match emitRequestStream.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "stream" {
+			if e.inferExprType(mem.Object).IsRequest {
+				return ReadableStreamType(TypedArrayType("uint8"))
+			}
+		}
+		// Node-stream method results (TDD-00097 Stage 8).
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if objTy := e.inferExprType(mem.Object); objTy.IsNodeReadable || objTy.IsNodeWritable {
+				switch mem.Property {
+				case "on", "once", "pause", "resume", "end":
+					return objTy
+				case "push", "write":
+					return TypeBool
+				case "pipe":
+					if len(ex.Args) == 1 {
+						return e.inferExprType(ex.Args[0])
+					}
+				case "toWeb":
+					if objTy.IsNodeReadable && !objTy.IsNodeWritable {
+						out := TypeI64
+						if objTy.StreamOut != nil {
+							out = *objTy.StreamOut
+						}
+						return ReadableStreamType(out)
+					}
+					in := TypeI64
+					if objTy.StreamChunk != nil {
+						in = *objTy.StreamChunk
+					}
+					return WritableStreamType(in)
+				}
+			}
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Readable" && (mem.Property == "from" || mem.Property == "fromWeb") && len(ex.Args) == 1 {
+				if _, found := e.lookup(id.Name); !found {
+					argTy := e.inferExprType(ex.Args[0])
+					out := TypeI64
+					if argTy.IsArray && argTy.ElemType != nil {
+						out = *argTy.ElemType
+					} else if argTy.IsReadableStream && argTy.StreamChunk != nil {
+						out = *argTy.StreamChunk
+					}
+					return NodeReadableType(out)
+				}
+			}
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "streampromises__kml_builtin" {
+				pt := PromiseOf(TypeVoid)
+				pt.PromiseTask = true
+				return pt
+			}
+		}
+		// Stream/reader/controller method results (TDD-00097 Stage 1) —
+		// checked before the property-name-based chains, same as generators.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if objTy := e.inferExprType(mem.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController || objTy.IsWritableStream || objTy.IsStreamWriter || objTy.IsWSController {
+				chunkTy := TypeI64
+				if objTy.StreamChunk != nil {
+					chunkTy = *objTy.StreamChunk
+				}
+				switch mem.Property {
+				case "getReader", "values":
+					return StreamReaderType(chunkTy)
+				case "getWriter":
+					return WSWriterType(chunkTy)
+				case "read":
+					pt := PromiseOf(genNextResultType(chunkTy))
+					pt.PromiseTask = true
+					return pt
+				case "cancel", "write", "close", "abort", "pipeTo":
+					pt := PromiseOf(TypeVoid)
+					pt.PromiseTask = true
+					return pt
+				case "pipeThrough":
+					if len(ex.Args) >= 1 {
+						if tTy := e.inferExprType(ex.Args[0]); tTy.IsTransformStream && tTy.StreamOut != nil {
+							return ReadableStreamType(*tTy.StreamOut)
+						}
+					}
+					return ReadableStreamType(TypeI64)
+				case "tee":
+					return ArrayOf(ReadableStreamType(chunkTy))
+				}
+			}
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ReadableStream" && mem.Property == "from" && len(ex.Args) == 1 {
+				if _, found := e.lookup(id.Name); !found {
+					if argTy := e.inferExprType(ex.Args[0]); argTy.IsArray {
+						return ReadableStreamType(*argTy.ElemType)
+					}
+				}
 			}
 		}
 		// gen.next(value)'s own result type ({value: T, done: bool}) —
@@ -1385,6 +1512,45 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return e.inferExprType(ex.Exprs[len(ex.Exprs)-1])
 		}
 		return TypeI64
+	case *ast.NewNodeStreamExpression:
+		inTy, outTy := TypeI64, TypeI64
+		if ex.InType != nil {
+			inTy = e.resolveType(ex.InType)
+		}
+		if ex.OutType != nil {
+			outTy = e.resolveType(ex.OutType)
+		}
+		switch ex.Kind {
+		case "readable":
+			return NodeReadableType(outTy)
+		case "writable":
+			return NodeWritableType(inTy)
+		}
+		return NodeTransformType(inTy, outTy)
+	case *ast.NewCompressionStreamExpression:
+		u8i := TypedArrayType("uint8")
+		u8o := TypedArrayType("uint8")
+		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &u8i, StreamOut: &u8o}
+	case *ast.NewTransformStreamExpression:
+		inTy, outTy := TypeI64, TypeI64
+		if ex.InType != nil {
+			inTy = e.resolveType(ex.InType)
+		}
+		if ex.OutType != nil {
+			outTy = e.resolveType(ex.OutType)
+		}
+		i, o := inTy, outTy
+		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i, StreamOut: &o}
+	case *ast.NewWritableStreamExpression:
+		if ex.ChunkType != nil {
+			return WritableStreamType(e.resolveType(ex.ChunkType))
+		}
+		return WritableStreamType(TypeI64)
+	case *ast.NewReadableStreamExpression:
+		if ex.ChunkType != nil {
+			return ReadableStreamType(e.resolveType(ex.ChunkType))
+		}
+		return ReadableStreamType(TypeI64)
 	case *ast.NewMapExpression:
 		// Mirrors emitNewMapValue's defaults (string keys, number values).
 		keyTy := TypePtr

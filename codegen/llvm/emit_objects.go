@@ -653,6 +653,18 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 		}
 		return val.Ref, val.Ty, nil
 
+	case *ast.AwaitExpression:
+		// `const { value, done } = await reader.read()` / `await gen.next()`
+		// (TDD-00097): await the promise, destructure its object result.
+		val, err := e.emitAwait(src)
+		if err != nil {
+			return "", Type{}, err
+		}
+		if !val.Ty.IsObject {
+			return "", Type{}, fmt.Errorf("%d:%d: awaited value is not an object", pos.Line, pos.Col)
+		}
+		return val.Ref, val.Ty, nil
+
 	case *ast.ObjectLiteral:
 		ty := e.inferObjectType(src)
 		// calloc, not malloc — see emitObjectLiteralWithHint's identical

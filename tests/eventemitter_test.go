@@ -302,15 +302,77 @@ e.on('x', (): void => {})
 	}
 }
 
-func TestE2EEventEmitterInstanceofRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EEventEmitterInstanceofWorks(t *testing.T) {
+	// TDD-00097 Stage 7 lifted the old "instanceof EventEmitter is a compile
+	// error" limitation this test used to assert.
+	assertOutput(t, `
 const e = new EventEmitter<string>()
 console.log(e instanceof EventEmitter)
+`, "true")
+}
+
+// TDD-00097 Stage 7: event-map payload typing + instanceof.
+
+func TestE2EEventEmitterEventMap(t *testing.T) {
+	assertOutput(t, `
+const em = new EventEmitter<{ data: string; count: number; end: void; error: Error }>();
+em.on("data", (s) => { console.log("data:", s.toUpperCase()); });
+em.on("count", (n) => { console.log("count:", n * 2); });
+em.on("end", () => { console.log("ended"); });
+em.emit("data", "hello");
+em.emit("count", 21);
+em.emit("end");
+try {
+  em.emit("error", new Error("boom"));
+} catch (e) {
+  console.log("caught:", e.message);
+}
+`, "data: HELLO\ncount: 42\nended\ncaught: boom")
+}
+
+func TestE2EEventEmitterEventMapExtends(t *testing.T) {
+	assertOutput(t, `
+class Ticker extends EventEmitter<{ tick: number; done: void }> {
+  run(times: number): void {
+    for (let i = 1; i <= times; i = i + 1) { this.emit("tick", i); }
+    this.emit("done");
+  }
+}
+const t = new Ticker();
+t.on("tick", (n) => { console.log("tick", n); });
+t.on("done", () => { console.log("done"); });
+t.run(2);
+`, "tick 1\ntick 2\ndone")
+}
+
+func TestE2EEventEmitterEventMapUndeclaredEventRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const em = new EventEmitter<{ data: string }>();
+em.emit("nope", "x");
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for instanceof EventEmitter")
+		t.Fatal("expected a compile error for an undeclared event-map event")
 	}
-	if !strings.Contains(err.Error(), "not a registered class") {
+	if !strings.Contains(err.Error(), "not declared in this EventEmitter's event map") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+}
+
+func TestE2EEventEmitterInstanceof(t *testing.T) {
+	assertOutput(t, `
+const em = new EventEmitter<number>();
+class Sub extends EventEmitter<string> {}
+const s = new Sub();
+const m = new Map<string, number>();
+console.log(em instanceof EventEmitter, s instanceof EventEmitter, m instanceof EventEmitter);
+`, "true true false")
+}
+
+func TestE2EStreamInstanceof(t *testing.T) {
+	assertOutput(t, `
+const rs = new ReadableStream<number>({});
+const ws = new WritableStream<number>({});
+const ts = new TransformStream<number, number>();
+console.log(rs instanceof ReadableStream, ws instanceof WritableStream, ts instanceof TransformStream, rs instanceof WritableStream);
+`, "true true true false")
 }

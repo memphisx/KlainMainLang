@@ -129,6 +129,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "toString" && e.inferExprType(mem.Object).IsBigInt {
 			return e.emitBigIntToStringMethod(mem.Object, ex.Args, ex.GetPos())
 		}
+		if objTy := e.inferExprType(mem.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController {
+			return e.emitStreamMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if objTy := e.inferExprType(mem.Object); objTy.IsWritableStream || objTy.IsStreamWriter || objTy.IsWSController {
+			return e.emitWStreamMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if objTy := e.inferExprType(mem.Object); objTy.IsNodeReadable || objTy.IsNodeWritable {
+			return e.emitNodeStreamCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if (mem.Property == "then" || mem.Property == "catch" || mem.Property == "finally") && e.inferExprType(mem.Object).IsPromise {
 			return e.emitPromiseThen(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -199,6 +208,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "close" && e.inferExprType(mem.Object).IsWebSocketClient {
 			return e.emitWSClientClose(mem.Object, ex.GetPos())
 		}
+		if mem.Property == "stream" && e.inferExprType(mem.Object).IsRequest {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitRequestStream(objVal, ex.GetPos())
+		}
 		if mem.Property == "bodyBytes" && e.inferExprType(mem.Object).IsRequest {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
@@ -268,6 +284,19 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "from":
 				return e.emitArrayFrom(ex.Args, ex.GetPos())
 			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ReadableStream" && mem.Property == "from" {
+			if _, found := e.lookup(id.Name); !found {
+				return e.emitReadableStreamFrom(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Readable" && (mem.Property == "from" || mem.Property == "fromWeb") {
+			if _, found := e.lookup(id.Name); !found {
+				return e.emitNodeReadableStatic(mem.Property, ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "streampromises__kml_builtin" {
+			return e.emitStreamPromisesCall(mem.Property, ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" {
 			switch mem.Property {

@@ -177,6 +177,22 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewSetBody(pos)
 	case "EventEmitter":
 		return p.parseNewEventEmitterBody(pos)
+	case "ReadableStream":
+		return p.parseNewReadableStreamBody(pos)
+	case "WritableStream":
+		return p.parseNewWritableStreamBody(pos)
+	case "TransformStream":
+		return p.parseNewTransformStreamBody(pos)
+	case "Readable":
+		return p.parseNewNodeStreamBody(pos, "readable")
+	case "Writable":
+		return p.parseNewNodeStreamBody(pos, "writable")
+	case "Transform":
+		return p.parseNewNodeStreamBody(pos, "transform")
+	case "CompressionStream":
+		return p.parseNewCompressionStreamBody(pos, false)
+	case "DecompressionStream":
+		return p.parseNewCompressionStreamBody(pos, true)
 	case "Error":
 		return p.parseNewErrorBody(pos, "Error")
 	case "TypeError":
@@ -855,6 +871,188 @@ func (p *Parser) parseNewEventEmitterBody(pos ast.Pos) (*ast.NewEventEmitterExpr
 	}
 
 	return ast.NewNewEventEmitterExpression(payloadType, pos), nil
+}
+
+// parseNewReadableStreamBody parses `new ReadableStream<T>(source?, strategy?)`
+// (TDD-00097 Stage 1). Both arguments are ordinary expressions here — codegen
+// validates that the source is an object literal and destructures it.
+func (p *Parser) parseNewWritableStreamBody(pos ast.Pos) (*ast.NewWritableStreamExpression, error) {
+	chunkType, sink, strategy, err := p.parseNewStreamArgs()
+	if err != nil {
+		return nil, err
+	}
+	return ast.NewNewWritableStreamExpression(chunkType, sink, strategy, pos), nil
+}
+
+func (p *Parser) parseNewReadableStreamBody(pos ast.Pos) (*ast.NewReadableStreamExpression, error) {
+	chunkType, source, strategy, err := p.parseNewStreamArgs()
+	if err != nil {
+		return nil, err
+	}
+	return ast.NewNewReadableStreamExpression(chunkType, source, strategy, pos), nil
+}
+
+// parseNewTransformStreamBody parses `new TransformStream<I, O>(transformer?,
+// writableStrategy?, readableStrategy?)` (TDD-00097 Stage 3).
+func (p *Parser) parseNewTransformStreamBody(pos ast.Pos) (*ast.NewTransformStreamExpression, error) {
+	p.advance() // consume 'TransformStream'
+	var inTy, outTy *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance()
+		var err error
+		inTy, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if p.match(lexer.COMMA) {
+			outTy, err = p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			outTy = inTy
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var exprs []ast.Expression
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		ex, err := p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		exprs = append(exprs, ex)
+		if !p.match(lexer.COMMA) {
+			break
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	if len(exprs) > 3 {
+		return nil, fmt.Errorf("%d:%d: new TransformStream takes at most 3 arguments", pos.Line, pos.Col)
+	}
+	var transformer, wstrat, rstrat ast.Expression
+	if len(exprs) > 0 {
+		transformer = exprs[0]
+	}
+	if len(exprs) > 1 {
+		wstrat = exprs[1]
+	}
+	if len(exprs) > 2 {
+		rstrat = exprs[2]
+	}
+	return ast.NewNewTransformStreamExpression(inTy, outTy, transformer, wstrat, rstrat, pos), nil
+}
+
+// parseNewNodeStreamBody parses `new Readable<T>(opts?)` / `new
+// Writable<T>(opts?)` / `new Transform<I, O>(opts?)` (TDD-00097 Stage 8).
+func (p *Parser) parseNewNodeStreamBody(pos ast.Pos, kind string) (*ast.NewNodeStreamExpression, error) {
+	p.advance() // consume the constructor name
+	var inTy, outTy *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance()
+		var err error
+		first, err := p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if p.match(lexer.COMMA) {
+			second, err := p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
+			inTy, outTy = first, second
+		} else if kind == "readable" {
+			outTy = first
+		} else {
+			inTy = first
+			if kind == "transform" {
+				outTy = first
+			}
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var options ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		options, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewNodeStreamExpression(kind, inTy, outTy, options, pos), nil
+}
+
+// parseNewCompressionStreamBody parses `new CompressionStream(format)` /
+// `new DecompressionStream(format)` (TDD-00097 Stage 6).
+func (p *Parser) parseNewCompressionStreamBody(pos ast.Pos, decompress bool) (*ast.NewCompressionStreamExpression, error) {
+	p.advance() // consume the constructor name
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	format, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewCompressionStreamExpression(decompress, format, pos), nil
+}
+
+// parseNewStreamArgs parses the shared `<T>(sourceOrSink?, strategy?)` tail
+// of both stream constructors (the constructor name token is still current).
+func (p *Parser) parseNewStreamArgs() (*ast.TypeAnnotation, ast.Expression, ast.Expression, error) {
+	p.advance() // consume the constructor name
+
+	var chunkType *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		var err error
+		chunkType, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, nil, nil, err
+	}
+	var source, strategy ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		source, err = p.parseAssignment()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if p.match(lexer.COMMA) {
+			strategy, err = p.parseAssignment()
+			if err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, nil, nil, err
+	}
+
+	return chunkType, source, strategy, nil
 }
 
 func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {

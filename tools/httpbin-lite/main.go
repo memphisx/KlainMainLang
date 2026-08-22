@@ -103,6 +103,20 @@ func main() {
 	// disconnects (the example's own es.close()) rather than a fixed
 	// sleep, so this endpoint never outlives whatever's actually reading
 	// from it.
+	// GET /chunked — a slowly-flushed chunked body for fetch Response.body
+	// streaming (TDD-00097 Stage 4): three text chunks, each flushed
+	// separately with a small delay so a streaming client observes them
+	// incrementally.
+	mux.HandleFunc("GET /chunked", func(w http.ResponseWriter, r *http.Request) {
+		fl := w.(http.Flusher)
+		w.WriteHeader(http.StatusOK)
+		for _, part := range []string{"alpha ", "beta ", "gamma"} {
+			fmt.Fprint(w, part)
+			fl.Flush()
+			time.Sleep(30 * time.Millisecond)
+		}
+	})
+
 	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)

@@ -378,6 +378,45 @@ type Type struct {
 	// it still yields the current fiber rather than blocking when called
 	// from inside an http.listen connection handler. See emit_xhr.go.
 	IsXHR bool
+	// IsReadableStream marks `new ReadableStream<T>(...)`'s result (TDD-00097
+	// Stage 1): a ptr to a hidden 18-field heap struct (%kml.rstream in
+	// runtime_streams.go — state machine, chunk queue with high-water mark,
+	// pending-read promise FIFO, underlying-source closures, a per-site
+	// "fulfill thunk" that builds typed {value,done} records). Deliberately
+	// NOT IsObject, same opaque-handle reasoning IsEventEmitter's doc comment
+	// gives. StreamChunk is the T — every enqueue/read site needs it to know
+	// the chunk's IR shape (array-shaped chunks span the two queue words).
+	// The reader, controller, and stream are all the SAME runtime pointer,
+	// distinguished only by these compile-time flags — getReader() returns
+	// its receiver retyped, and a controller value is the stream itself.
+	IsReadableStream bool
+	// IsStreamReader marks getReader()'s/values()' result — the same stream
+	// pointer retyped so read()/releaseLock()/cancel()/.closed dispatch.
+	IsStreamReader bool
+	// IsRSController marks the controller passed to the underlying source's
+	// start/pull callbacks — the stream pointer retyped so enqueue()/close()/
+	// error()/.desiredSize dispatch.
+	IsRSController bool
+	// IsWritableStream / IsStreamWriter / IsWSController are the writable
+	// side's mirror trio (TDD-00097 Stage 2): one %kml.wstream pointer
+	// (runtime_streams_writable.go), retyped at compile time for the stream,
+	// getWriter()'s writer, and the sink callbacks' controller.
+	IsWritableStream bool
+	IsStreamWriter   bool
+	IsWSController bool
+	// IsTransformStream marks `new TransformStream<I, O>(...)` (TDD-00097
+	// Stage 3): a ptr to the runtime ts context whose first two fields are
+	// the readable (chunk O) and writable (chunk I) stream pointers.
+	// StreamChunk carries I, StreamOut carries O.
+	IsTransformStream bool
+	// IsNodeReadable / IsNodeWritable mark Node's `stream` classes (TDD-00097
+	// Stage 8): a ptr to the %kml.nodestream wrapper over the WHATWG
+	// internals. A Transform sets both. StreamChunk carries the writable-in
+	// type, StreamOut the readable-out type.
+	IsNodeReadable bool
+	IsNodeWritable bool
+	StreamChunk    *Type
+	StreamOut      *Type
 }
 
 // ArrayOf returns an array type whose elements are of the given type.
@@ -422,6 +461,57 @@ func PromiseOf(inner Type) Type {
 	return Type{IR: "ptr", IsPromise: true, PromiseType: &innerCopy}
 }
 
+// ReadableStreamType returns a ReadableStream<chunk> type (TDD-00097).
+func ReadableStreamType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsReadableStream: true, StreamChunk: &c}
+}
+
+// StreamReaderType returns the reader type getReader() yields.
+func StreamReaderType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsStreamReader: true, StreamChunk: &c}
+}
+
+// RSControllerType returns the controller type start/pull callbacks receive.
+func RSControllerType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsRSController: true, StreamChunk: &c}
+}
+
+// WritableStreamType / WSWriterType / WSControllerType are the writable-side
+// mirrors (TDD-00097 Stage 2).
+func WritableStreamType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsWritableStream: true, StreamChunk: &c}
+}
+
+func WSWriterType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsStreamWriter: true, StreamChunk: &c}
+}
+
+func WSControllerType(chunk Type) Type {
+	c := chunk
+	return Type{IR: "ptr", IsWSController: true, StreamChunk: &c}
+}
+
+// NodeReadableType / NodeWritableType / NodeTransformType (TDD-00097 St. 8).
+func NodeReadableType(out Type) Type {
+	o := out
+	return Type{IR: "ptr", IsNodeReadable: true, StreamOut: &o}
+}
+
+func NodeWritableType(in Type) Type {
+	i := in
+	return Type{IR: "ptr", IsNodeWritable: true, StreamChunk: &i}
+}
+
+func NodeTransformType(in, out Type) Type {
+	i, o := in, out
+	return Type{IR: "ptr", IsNodeReadable: true, IsNodeWritable: true, StreamChunk: &i, StreamOut: &o}
+}
+
 // ResponseType returns fetch()'s Response object type: a plain heap object
 // with status/ok/body fields (readable via the ordinary object field-access
 // path — no special dispatch needed for those three), plus IsResponse set so
@@ -436,6 +526,11 @@ func ResponseType() Type {
 		{Name: "ok", Ty: TypeBool},
 		{Name: "body", Ty: TypePtr},
 		{Name: "bodyLength", Ty: TypeI64},
+		// The pending-fetch handle backing lazy body access (TDD-00097
+		// Stage 4): non-null on a headers-resolved Response, so
+		// .text()/.json()/.arrayBuffer() drive the rest of the transfer and
+		// .body can stream it. Null on combinator-built Responses.
+		{Name: "__kml_pending", Ty: TypePtr},
 	})
 	ty.IsResponse = true
 	return ty
@@ -1122,6 +1217,10 @@ func RequestType() Type {
 		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
 		{Name: "body", Ty: TypePtr},
 		{Name: "bodyLength", Ty: TypeI64},
+		// The streaming body context (TDD-00097 Stage 5b) — null unless the
+		// program uses req.stream() (which switches the dispatcher to
+		// headers-complete dispatch); .body/.bodyBytes() drain through it.
+		{Name: "__kml_bodyctx", Ty: TypePtr},
 	})
 	ty.IsRequest = true
 	return ty

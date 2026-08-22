@@ -130,6 +130,12 @@ none:
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
+	// Streaming-request-body pump stubs — referenced by both the event loop
+	// and the task scheduler's step, so emitted whenever either exists.
+	if (e.usedHTTP || e.usedTaskRuntime) && !e.usedReqBodyRuntime {
+		e.emitGlobal("define void @__kml_reqbody_pump() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define i1 @__kml_reqbody_want() {\nentry:\n  ret i1 0\n}")
+	}
 	if !e.usedHTTP {
 		return
 	}
@@ -139,7 +145,9 @@ func (e *Emitter) emitLoopTaskStubs() {
 	}
 	if !e.usedMicrotasks {
 		e.emitGlobal("define void @__kml_drain_microtasks() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define i1 @__kml_microtasks_pending() {\nentry:\n  ret i1 0\n}")
 	}
+
 }
 
 func (e *Emitter) ensureTaskRuntime() {
@@ -163,6 +171,7 @@ func (e *Emitter) ensureTaskRuntime() {
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
 
 	e.emitGlobal("@__kml_task_launching = internal global ptr null, align 8")
+	e.emitGlobal("declare i32 @usleep(i32 noundef)")
 	e.emitGlobal("@__kml_task_data = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_task_len = internal global i64 0, align 8")
 	e.emitGlobal("@__kml_task_cap = internal global i64 0, align 8")
@@ -319,18 +328,13 @@ entry:
   ; register in the task array (grow by realloc-doubling, 8 min)
   call void @__kml_task_register(ptr %%t)
 
-  ; caller ctx = main if not on a task, else current task's ctx
+  ; The caller's resume point is saved into a per-call stack slot — never
+  ; into @__kml_main_ctx (the spawner may be a connection fiber whose
+  ; uc_link is @__kml_main_ctx: overwriting it there leaves a stale frame
+  ; behind and a wild jump when the fiber ends — TDD-00097 Stage 5b) and
+  ; never into the parent task's own ctx slot.
   %%prev = load ptr, ptr @__kml_current_task, align 8
-  %%onmain = icmp eq ptr %%prev, null
-  br i1 %%onmain, label %%fromMain, label %%fromTask
-fromMain:
-  br label %%doswap
-fromTask:
-  %%prevctx_p = getelementptr %s, ptr %%prev, i32 0, i32 %d
-  %%prevctx = load ptr, ptr %%prevctx_p, align 8
-  br label %%doswap
-doswap:
-  %%callerctx = phi ptr [ @__kml_main_ctx, %%fromMain ], [ %%prevctx, %%fromTask ]
+  %%callerctx = alloca [%d x i8], align 16
   %%res_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store ptr %%callerctx, ptr %%res_p, align 8
   %%callerStk = load ptr, ptr @__kml_cur_jmp_stk, align 8
@@ -351,7 +355,7 @@ doswap:
 		taskStructIR, taskCtx, taskStructIR, taskStack, taskStructIR, taskPromiseSlot,
 		taskStructIR, taskState, taskStructIR, taskPendingFetch, taskStructIR, taskPendingGroup,
 		taskStructIR, taskPendingProm, taskStructIR, taskFn, taskStructIR, taskArgs,
-		taskStructIR, taskCtx,
+		ctxSize,
 		taskStructIR, taskResumerCtx,
 		gcSetInto("%stack"), gcRestoreAfterSwap))
 
@@ -435,6 +439,7 @@ define void @__kml_task_sched_step() {
 entry:
   %%multi = load ptr, ptr @__kml_curl_multi, align 8
   %%hasmulti = icmp ne ptr %%multi, null
+  call void @__kml_reqbody_pump()
   br i1 %%hasmulti, label %%pump, label %%scan
 pump:
   %%run = alloca i32, align 4
@@ -465,7 +470,14 @@ chkfetch:
   %%d_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pf, i32 0, i32 2
   %%d = load i64, ptr %%d_p, align 8
   %%fdone = icmp ne i64 %%d, 0
-  br i1 %%fdone, label %%resume, label %%next
+  ; Headers-resolved awaits (TDD-00097 Stage 4/5) park until the first body
+  ; byte — resume on headersDone too; the resumed await re-checks its
+  ; condition.
+  %%hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %%pf, i32 0, i32 6
+  %%hd = load i64, ptr %%hd_p, align 8
+  %%hdone = icmp ne i64 %%hd, 0
+  %%fready = or i1 %%fdone, %%hdone
+  br i1 %%fready, label %%resume, label %%next
 chkpp:
   %%pp_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   %%pp = load ptr, ptr %%pp_p, align 8
@@ -696,12 +708,18 @@ done:
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_task_resume(ptr %%t) {
 entry:
+  ; Save the resumer into a per-call stack slot, NOT @__kml_main_ctx: this
+  ; runner can fire from a microtask drain running on a connection fiber
+  ; (an http handler awaiting a task — TDD-00097 Stage 5b exposed it), and
+  ; overwriting the real main context there leaves the fiber's uc_link
+  ; pointing into a stale frame — a wild jump when the fiber later ends.
+  %%savectx = alloca [%d x i8], align 16
   %%pp = getelementptr %s, ptr %%t, i32 0, i32 6
   store ptr null, ptr %%pp, align 8
   %%st = getelementptr %s, ptr %%t, i32 0, i32 3
   store i64 0, ptr %%st, align 8
   %%rc = getelementptr %s, ptr %%t, i32 0, i32 9
-  store ptr @__kml_main_ctx, ptr %%rc, align 8
+  store ptr %%savectx, ptr %%rc, align 8
   %%mstk = load ptr, ptr @__kml_cur_jmp_stk, align 8
   %%mtop = load i32, ptr @__kml_jmp_top, align 4
   %%tjstk_p = getelementptr %s, ptr %%t, i32 0, i32 10
@@ -715,12 +733,12 @@ entry:
   %%dr_stk_p = getelementptr %s, ptr %%t, i32 0, i32 1
   %%ctx_p = getelementptr %s, ptr %%t, i32 0, i32 0
   %%ctx = load ptr, ptr %%ctx_p, align 8%s
-  %%sw = call i32 @swapcontext(ptr @__kml_main_ctx, ptr %%ctx)
+  %%sw = call i32 @swapcontext(ptr %%savectx, ptr %%ctx)
   store ptr null, ptr @__kml_current_task, align 8%s
   store ptr %%mstk, ptr @__kml_cur_jmp_stk, align 8
   store i32 %%mtop, ptr @__kml_jmp_top, align 4
   ret void
-}`, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcSetTaskStack, gcRestoreAfterSwap))
+}`, ctxSize, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, taskStructIR, gcSetTaskStack, gcRestoreAfterSwap))
 
 	// @__kml_task_await_ready(ptr %promise): on a task, register a resume reaction
 	// on the promise and park — so `await` always yields a microtask tick and the
@@ -746,6 +764,10 @@ tdrive:
   call void @__kml_drain_microtasks()
   call void @__kml_task_sched_step()
   %%tf = call i1 @__kml_timer_fire_next()
+  ; A short pause per drive cycle: this busy-wait can run for the whole
+  ; duration of an external transfer (e.g. a streaming request body,
+  ; TDD-00097 Stage 5b) and starves the peer process without it.
+  %%ig = call i32 @usleep(i32 200)
   br label %%toploop
 ontask:
   %%clo = call ptr @malloc(i64 16)

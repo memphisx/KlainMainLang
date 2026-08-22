@@ -572,6 +572,40 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		for _, sub := range x.Exprs {
 			scanExprFV(sub, bound, result)
 		}
+	case *ast.NewNodeStreamExpression:
+		if x.Options != nil {
+			scanExprFV(x.Options, bound, result)
+		}
+	case *ast.NewCompressionStreamExpression:
+		if x.Format != nil {
+			scanExprFV(x.Format, bound, result)
+		}
+	case *ast.NewTransformStreamExpression:
+		if x.Transformer != nil {
+			scanExprFV(x.Transformer, bound, result)
+		}
+		if x.WritableStrategy != nil {
+			scanExprFV(x.WritableStrategy, bound, result)
+		}
+		if x.ReadableStrategy != nil {
+			scanExprFV(x.ReadableStrategy, bound, result)
+		}
+	case *ast.NewWritableStreamExpression:
+		if x.Sink != nil {
+			scanExprFV(x.Sink, bound, result)
+		}
+		if x.Strategy != nil {
+			scanExprFV(x.Strategy, bound, result)
+		}
+	case *ast.NewReadableStreamExpression:
+		// The underlying source / strategy object literals hold callbacks
+		// whose free variables are real captures (TDD-00097 Stage 1).
+		if x.Source != nil {
+			scanExprFV(x.Source, bound, result)
+		}
+		if x.Strategy != nil {
+			scanExprFV(x.Strategy, bound, result)
+		}
 	case *ast.ArrowFunction:
 		// Nested arrow function: its params are bound within its own body.
 		innerBound := make(map[string]bool, len(bound)+len(x.Params))
@@ -841,6 +875,12 @@ func (e *Emitter) gatherGeneratorCaptures(fd *ast.FunctionDeclaration) []Capture
 // the arrow function's regular parameters. Captured variables are accessed via
 // GEP into %env.
 func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, retTy Type, paramTypes []Type, closureName string) error {
+	// Only the http.listen handler arrow itself keeps the bare-slot async
+	// model — a nested async closure gets the real settled-promise path.
+	if e.emittingHTTPHandler && ast.Node(af) != e.httpHandlerNode {
+		e.emittingHTTPHandler = false
+		defer func() { e.emittingHTTPHandler = true }()
+	}
 	// Save emitter state.
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -1285,6 +1325,27 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 	for i, name := range paramNames {
 		e.define(name, Symbol{Ty: paramTypes[i]})
 	}
+	// Best-effort visibility for the block's own top-level locals, so a
+	// `return { body: localStream }` infers the local's real type instead of
+	// the bare-scalar default (found wiring TDD-00097 Stage 5's streaming
+	// http bodies; helps any handler returning a local).
+	defineDecl := func(vd *ast.VarDeclaration) {
+		if vd.TypeAnnot != nil {
+			e.define(vd.Name, Symbol{Ty: e.resolveType(vd.TypeAnnot)})
+		} else if vd.Init != nil {
+			e.define(vd.Name, Symbol{Ty: e.inferExprType(vd.Init)})
+		}
+	}
+	for _, st := range block.Body {
+		switch vd := st.(type) {
+		case *ast.VarDeclaration:
+			defineDecl(vd)
+		case *ast.VarDeclarationList:
+			for _, d := range vd.Decls {
+				defineDecl(d)
+			}
+		}
+	}
 	inferred := e.inferExprType(retExpr)
 	e.popScope()
 	return inferred, true
@@ -1355,11 +1416,29 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		}
 		if inferred, ok := e.inferUnannotatedReturnType(af.Block, paramNames, paramTypes); ok {
 			retTy = inferred
+		} else if firstReturnExprInBlock(af.Block) == nil {
+			// Every return in the block is a bare `return;` — a void closure.
+			// The scalar default below used to win here, emitting `ret i64 0`
+			// for the bare return and a runtime-reachable `unreachable` at the
+			// fall-through end (a real pre-existing crash, found by TDD-00097
+			// Stage 6's pull callbacks using early-return).
+			retTy = TypeVoid
 		} else {
 			retTy = TypeI64 // block body: scalar default, caller may override via annotation
 		}
 	} else {
 		retTy = TypeVoid // block body with no reachable return (e.g. forEach callback)
+	}
+
+	// An async arrow always returns a promise slot (the inline async
+	// prologue/epilogue below) — wrap a non-promise inferred/void return type
+	// so the emitted define's return IR (ptr) matches what the epilogue
+	// actually returns, and so callers see a Promise-typed callback. Found
+	// wiring ReadableStream's async pull (TDD-00097): an async block-bodied
+	// arrow with no `return` inferred `void` and emitted `ret ptr` inside a
+	// `define void`, which clang rejects.
+	if af.IsAsync && !retTy.IsPromise {
+		retTy = PromiseOf(retTy)
 	}
 
 	// Emit the LLVM function for this closure.
@@ -1519,6 +1598,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		}
 		if inferred, ok := e.inferUnannotatedReturnType(fe.Body, paramNames, paramTypes); ok {
 			retTy = inferred
+		} else if firstReturnExprInBlock(fe.Body) == nil {
+			retTy = TypeVoid // every return is bare — see the arrow variant above
 		} else {
 			retTy = TypeI64
 		}

@@ -347,6 +347,19 @@ type Emitter struct {
 	usedMapStrHelpers        bool
 	usedMapNumHelpers        bool
 	usedEventEmitterRuntime  bool
+	usedStreamRuntime        bool
+	usedWStreamRuntime       bool
+	usedStreamPipeRuntime    bool
+	usedAwaitFetchHeaders    bool
+	usedFetchBodyStream      bool
+	usedHTTPStreamRuntime    bool
+	usedReqBodyRuntime       bool
+	usedReqBodyStream        bool
+	usedReqBodyDrain         bool
+	usedZlibStreamRuntime    bool
+	usedNodeStreamRuntime    bool
+	usedPromiseAddReaction   bool
+	streamSiteCtr            int
 	usedOSReadProcFile       bool
 	usedOSCpusLinux          bool
 	usedOSCpusDarwin         bool
@@ -395,6 +408,12 @@ type Emitter struct {
 	asyncPromiseReg  string // non-suspending async fn: the settled task promise it returns (TDD-00084 Part A)
 	asyncCatchLabel  string // non-suspending async fn: the catch-and-reject block label
 	emittingHTTPHandler bool // an http.listen handler arrow is being emitted — keep the old bare-slot async model (connection-fiber-driven, not task-promise), TDD-00084 Part A
+	// httpHandlerNode pins WHICH arrow/function-expression is the handler:
+	// the bare-slot model applies to it alone — an async callback nested
+	// inside the handler (e.g. a streaming body's pull, TDD-00097 Stage 5)
+	// must get a real settled promise, or its returned slot is an 8-byte
+	// never-settled sentinel that loses every reaction attached to it.
+	httpHandlerNode ast.Node
 	currentPromiseTy Type   // T in Promise<T>; void if Promise<void>
 	coroRetLabel     string // label for the async-return block
 }
@@ -813,6 +832,44 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta.Name == "EventEmitter" && ta.ElemType != nil {
 		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
 	}
+	// ReadableStream<T> and its reader/controller (TDD-00097 Stage 1). A bare
+	// `ReadableStream` annotation (no type arg) defaults its chunk to number,
+	// same as `new ReadableStream(...)` without a type argument.
+	if ta.Name == "ReadableStream" {
+		if ta.ElemType != nil {
+			return ReadableStreamType(e.resolveType(ta.ElemType))
+		}
+		return ReadableStreamType(TypeI64)
+	}
+	if ta.Name == "ReadableStreamDefaultReader" && ta.ElemType != nil {
+		return StreamReaderType(e.resolveType(ta.ElemType))
+	}
+	if ta.Name == "ReadableStreamDefaultController" && ta.ElemType != nil {
+		return RSControllerType(e.resolveType(ta.ElemType))
+	}
+	if ta.Name == "WritableStream" {
+		if ta.ElemType != nil {
+			return WritableStreamType(e.resolveType(ta.ElemType))
+		}
+		return WritableStreamType(TypeI64)
+	}
+	if ta.Name == "WritableStreamDefaultWriter" && ta.ElemType != nil {
+		return WSWriterType(e.resolveType(ta.ElemType))
+	}
+	if ta.Name == "WritableStreamDefaultController" && ta.ElemType != nil {
+		return WSControllerType(e.resolveType(ta.ElemType))
+	}
+	if ta.Name == "TransformStream" {
+		inTy, outTy := TypeI64, TypeI64
+		if ta.KeyType != nil {
+			inTy = e.resolveType(ta.KeyType)
+		}
+		if ta.ElemType != nil {
+			outTy = e.resolveType(ta.ElemType)
+		}
+		i, o := inTy, outTy
+		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i, StreamOut: &o}
+	}
 	// Tuple type `[T0, T1, ...]` (TDD-00066) — checked before the generic
 	// ElemType/array fallback below.
 	if len(ta.TupleElems) > 0 {
@@ -1141,6 +1198,21 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 		} else {
 			e.emitGlobal("define i1 @__kml_timer_fire_next() {\n  ret i1 0\n}")
 		}
+		// The same drive loop pumps in-flight fetches (TDD-00097 Stage 4);
+		// without fetch the pump is a no-op stub.
+		if !e.usedFetchAsync {
+			e.emitGlobal("define i1 @__kml_fetch_pump() {\n  ret i1 0\n}")
+		}
+	}
+	// The shared curl write callback references the body-stream hooks
+	// (TDD-00097 Stage 4); when no Response.body stream was ever created,
+	// they are no-op stubs and the buffered path is byte-for-byte unchanged.
+	if e.usedReqBodyDrain && !e.usedReqBodyRuntime {
+		e.emitGlobal("define void @__kml_reqbody_drain(ptr %c) {\n  ret void\n}")
+	}
+	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyStream {
+		e.emitGlobal("define i64 @__kml_fetch_body_write(ptr %p, ptr %c, i64 %t) {\n  ret i64 0\n}")
+		e.emitGlobal("define void @__kml_fetch_body_on_done(ptr %p) {\n  ret void\n}")
 	}
 	e.emitTerminator("ret i32 0")
 

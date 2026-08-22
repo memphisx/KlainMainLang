@@ -333,3 +333,12 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00293](ADR-00293.md) | Generator expressions (bound form) + yield-based element-type inference | Implements [TDD-00096](../tdd/TDD-00096.md) |
 | [00294](ADR-00294.md) | `DataView` over `ArrayBuffer` — full endian-controlled accessor set, sub-range views, RangeErrors | Extends [TDD-00018](../tdd/TDD-00018.md); picked from [ADR-00288](ADR-00288.md)'s histogram |
 | [00295](ADR-00295.md) | Near-miss alignment — Unicode `trim`, JS `pow` edge, oversized int literals → double, DataView ToIndex, shim SameValue NaN | Driven by [ADR-00288](ADR-00288.md)'s near-miss bucket |
+| [00296](ADR-00296.md) | `ReadableStream<T>` core — queue/HWM/pull state machine, readers, strategies, `from()`, `for await` | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 1 |
+| [00297](ADR-00297.md) | `WritableStream<T>` — writer lock, serialized sink writes, `ready` backpressure | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 2 |
+| [00298](ADR-00298.md) | `pipeTo`/`pipeThrough`, `TransformStream<I,O>`, `tee()` — reaction-driven pipeline | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 3 |
+| [00299](ADR-00299.md) | fetch `Response.body` streaming — resolve-at-headers await, curl pause/unpause | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 4 |
+| [00300](ADR-00300.md) | Chunked HTTP responses from a `ReadableStream` body | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 5 (response side) |
+| [00301](ADR-00301.md) | Streaming http request bodies — `req.stream()`, headers-complete dispatch, cap lifted | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 5b |
+| [00302](ADR-00302.md) | `CompressionStream`/`DecompressionStream` over zlib; bare-return closures inferred void | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 6 |
+| [00303](ADR-00303.md) | EventEmitter event maps (per-event payload typing, `void` events) + built-in `instanceof` lifts | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 7 |
+| [00304](ADR-00304.md) | Node `stream` module — Readable/Writable/Transform wrappers, events, `.pipe()`, `stream/promises` | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 8 |

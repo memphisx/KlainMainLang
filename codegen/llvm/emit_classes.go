@@ -2386,6 +2386,12 @@ var builtinInstanceofTypes = map[string]func(Type) bool{
 	"Set":    func(t Type) bool { return t.IsSet },
 	"Date":   func(t Type) bool { return t.IsDate },
 	"RegExp": func(t Type) bool { return t.IsRegExp },
+	// TDD-00097 Stage 7: a class extending EventEmitter carries the
+	// HasEventEmitter flag, so the subclass answers true too.
+	"EventEmitter":    func(t Type) bool { return t.IsEventEmitter || t.HasEventEmitter },
+	"ReadableStream":  func(t Type) bool { return t.IsReadableStream },
+	"WritableStream":  func(t Type) bool { return t.IsWritableStream },
+	"TransformStream": func(t Type) bool { return t.IsTransformStream },
 }
 
 func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {

@@ -50,6 +50,19 @@ app:
   ret void
 }`)
 
+	// @__kml_microtasks_pending() -> i1: the event loop's select() must not
+	// block while reactions sit queued (TDD-00097 Stage 5 — a stream chain
+	// advanced by a pull_settled reaction stalled behind an indefinite
+	// select() before this check existed).
+	e.emitGlobal(`
+define i1 @__kml_microtasks_pending() {
+entry:
+  %head = load i64, ptr @__kml_mt_head, align 8
+  %len = load i64, ptr @__kml_mt_len, align 8
+  %pending = icmp slt i64 %head, %len
+  ret i1 %pending
+}`)
+
 	// @__kml_drain_microtasks(): run queued callbacks FIFO until empty — a
 	// callback may enqueue more (chained .then), which are drained in the same
 	// pass, matching the microtask-checkpoint semantics.

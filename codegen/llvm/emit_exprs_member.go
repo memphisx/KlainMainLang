@@ -436,6 +436,43 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
 		}
 	}
+	// HttpRequest.body under streaming dispatch (TDD-00097 Stage 5b):
+	// complete the buffer in place before the plain field read below.
+	if ex.Property == "body" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsRequest {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitRequestBodyDrain(objVal)
+			bodyIdx, bodyFieldTy, _ := objVal.Ty.FieldIndex("body")
+			return e.loadFieldValue(objVal, bodyIdx, bodyFieldTy), nil
+		}
+	}
+	// Response.body as a ReadableStream<Uint8Array> (TDD-00097 Stage 4) —
+	// dispatched ahead of the generic object-field read that would otherwise
+	// surface the internal buffered-body string field.
+	if ex.Property == "body" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+			return e.emitResponseBodyStream(ex)
+		}
+	}
+	// ReadableStream/reader/controller properties (TDD-00097 Stage 1) —
+	// dedicated reads over the hidden %kml.rstream struct, same pattern
+	// Map/Set's .size uses below.
+	if ex.Property == "locked" || ex.Property == "desiredSize" || ex.Property == "closed" || ex.Property == "ready" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController {
+			return e.emitStreamProperty(ex, objTy)
+		}
+		if objTy := e.inferExprType(ex.Object); objTy.IsWritableStream || objTy.IsStreamWriter || objTy.IsWSController {
+			return e.emitWStreamProperty(ex)
+		}
+	}
+	if ex.Property == "readable" || ex.Property == "writable" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsTransformStream {
+			return e.emitTransformStreamProperty(ex, objTy)
+		}
+	}
 	if ex.Property == "size" {
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap || sym.Ty.IsSet) {

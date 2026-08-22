@@ -34,6 +34,12 @@ var virtualBuiltinMarkers = map[string]string{
 	"http":        "http__kml_builtin",
 	"cluster":     "cluster__kml_builtin",
 	"memory":      "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
+	// TDD-00097 Stage 8: Node's stream module. The class names bind as
+	// identity (see resolver.go's stream special-case) — `new Readable(...)`
+	// is recognized by name at parse time like every other builtin
+	// constructor; pipeline/finished live under 'stream/promises'.
+	"stream":          "stream__kml_builtin",
+	"stream/promises": "streampromises__kml_builtin",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -68,6 +74,10 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"http":    {"listen": true, "close": true},
 	"cluster": {"isPrimary": true, "workerId": true},
 	"memory":  {"free": true},
+	"stream": {
+		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
+	},
+	"stream/promises": {"pipeline": true, "finished": true},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds

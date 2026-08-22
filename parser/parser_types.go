@@ -358,7 +358,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 	// Promise<T> / Array<T> / Set<T> / EventEmitter<T>: single type
 	// parameter — parse it for real instead of skipping, same as the
 	// T[] / new Array<T>() forms.
-	if (name == "Promise" || name == "Array" || name == "Set" || name == "EventEmitter") && p.check(lexer.LT) {
+	if (name == "Promise" || name == "Array" || name == "Set" || name == "EventEmitter" || name == "ReadableStream" || name == "ReadableStreamDefaultReader" || name == "ReadableStreamDefaultController" || name == "WritableStream" || name == "WritableStreamDefaultWriter" || name == "WritableStreamDefaultController") && p.check(lexer.LT) {
 		p.advance() // consume '<'
 		inner, err := p.parseTypeAnnotation(source)
 		if err != nil {
@@ -372,8 +372,8 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{Name: name, ElemType: inner, Source: source})
 	}
 
-	// Map<K,V>: two type parameters.
-	if name == "Map" && p.check(lexer.LT) {
+	// Map<K,V> / TransformStream<I,O>: two type parameters.
+	if (name == "Map" || name == "TransformStream") && p.check(lexer.LT) {
 		p.advance() // consume '<'
 		keyTy, err := p.parseTypeAnnotation(source)
 		if err != nil {

@@ -320,13 +320,17 @@ initmulti:
 havemulti:
   %multi2 = load ptr, ptr @__kml_curl_multi, align 8
 
-  %buf = call ptr @malloc(i64 24)
+  ; 32 bytes: the shared write callback now reads a pending-fetch
+  ; backpointer at slot 3 (TDD-00097 Stage 4) — null here (no body stream).
+  %buf = call ptr @malloc(i64 32)
   %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
   %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
   store ptr null, ptr %buf_data_p, align 8
   store i64 0, ptr %buf_len_p, align 8
   store i64 0, ptr %buf_cap_p, align 8
+  %buf_pend_p = getelementptr ptr, ptr %buf, i64 3
+  store ptr null, ptr %buf_pend_p, align 8
 
   %curl = call ptr @curl_easy_init()
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)

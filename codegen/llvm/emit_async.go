@@ -159,6 +159,13 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 // group of concurrently-awaited fetches, without duplicating this
 // struct-building code a third time.
 func (e *Emitter) buildResponseFromStatusBody(status, body, bodyLen string) Value {
+	return e.buildResponseWithPending(status, body, bodyLen, "null")
+}
+
+// buildResponseWithPending is the TDD-00097 Stage 4 core: a Response that
+// additionally carries its pending-fetch handle (null for an already-finished
+// body, e.g. the combinators' group waits).
+func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef string) Value {
 	ok := e.freshReg()
 	okHigh := e.freshReg()
 	okLow := e.freshReg()
@@ -181,6 +188,7 @@ func (e *Emitter) buildResponseFromStatusBody(status, body, bodyLen string) Valu
 	storeField("ok", "i1", ok, 1)
 	storeField("body", "ptr", body, 8)
 	storeField("bodyLength", "i64", bodyLen, 8)
+	storeField("__kml_pending", "ptr", pendingRef, 8)
 
 	return Value{Ref: respReg, Ty: respTy}
 }
@@ -288,17 +296,16 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 // Response, per WHATWG).
 func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
 	e.ensureFetchAsync()
+	e.ensureAwaitFetchHeaders()
 	pendingPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, slotRef))
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pendingPtr))
+	// Resolve at headers-complete (TDD-00097 Stage 4): the Response is built
+	// with the status and its pending handle; the body is read lazily —
+	// .text()/.json()/.arrayBuffer() drive the transfer to completion,
+	// .body streams the rest as it arrives.
 	status := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 0", status, raw))
-	body := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
-	bodyLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
-	return e.buildResponseFromStatusBody(status, body, bodyLen)
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_await_fetch_headers(ptr %s)", status, pendingPtr))
+	return e.buildResponseWithPending(status, "null", "0", pendingPtr)
 }
 
 // emitAwaitPromiseElem awaits an already-evaluated promise value (elemRef is the
@@ -376,7 +383,14 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 		e.emitLabel(timerL)
 		fired := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_timer_fire_next()", fired))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fired, loopL, readyL))
+		// Also pump in-flight fetch transfers (TDD-00097 Stage 4) — a parked
+		// body-stream read is settled by curl's write callback, which only
+		// runs when the multi handle is driven. No fetch ⇒ a no-op stub.
+		pumped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_fetch_pump()", pumped))
+		cont := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", cont, fired, pumped))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cont, loopL, readyL))
 		e.emitLabel(readyL)
 	}
 	// A rejected task promise (resolved == 2) re-throws its stored error at the

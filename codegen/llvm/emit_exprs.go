@@ -76,6 +76,16 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewSetValue(ex)
 	case *ast.NewEventEmitterExpression:
 		return e.emitNewEventEmitterValue(ex)
+	case *ast.NewReadableStreamExpression:
+		return e.emitNewReadableStream(ex)
+	case *ast.NewWritableStreamExpression:
+		return e.emitNewWritableStream(ex)
+	case *ast.NewTransformStreamExpression:
+		return e.emitNewTransformStream(ex)
+	case *ast.NewCompressionStreamExpression:
+		return e.emitNewCompressionStream(ex)
+	case *ast.NewNodeStreamExpression:
+		return e.emitNewNodeStream(ex)
 	case *ast.NewErrorExpression:
 		return e.emitNewError(ex)
 	case *ast.NewDateExpression:

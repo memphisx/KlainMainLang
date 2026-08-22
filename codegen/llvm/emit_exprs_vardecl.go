@@ -260,6 +260,61 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if init, ok := v.Init.(*ast.NewEventEmitterExpression); ok {
 		return e.emitEventEmitterVarDecl(v, init)
 	}
+	if init, ok := v.Init.(*ast.NewNodeStreamExpression); ok {
+		val, err := e.emitNewNodeStream(init)
+		if err != nil {
+			return err
+		}
+		ptrName := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewCompressionStreamExpression); ok {
+		val, err := e.emitNewCompressionStream(init)
+		if err != nil {
+			return err
+		}
+		ptrName := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewTransformStreamExpression); ok {
+		val, err := e.emitNewTransformStream(init)
+		if err != nil {
+			return err
+		}
+		ptrName := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewWritableStreamExpression); ok {
+		val, err := e.emitNewWritableStream(init)
+		if err != nil {
+			return err
+		}
+		ptrName := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewReadableStreamExpression); ok {
+		val, err := e.emitNewReadableStream(init)
+		if err != nil {
+			return err
+		}
+		ptrName := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		return nil
+	}
 
 	ty := e.resolveType(v.TypeAnnot)
 

@@ -232,6 +232,7 @@ func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
 // plain GEP+load of its "body" field — factored out since both text() and
 // json() need the same raw string before doing anything method-specific).
 func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
+	e.emitResponseDriveToDone(objVal)
 	idx, fieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
@@ -241,6 +242,46 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
 	return Value{Ref: r, Ty: fieldTy}, nil
+}
+
+// emitResponseDriveToDone (TDD-00097 Stage 4): a headers-resolved Response
+// carries its pending handle; before any buffered body read, drive the
+// transfer to completion and cache body/bodyLength into the object (clearing
+// the handle so repeat reads are plain field loads).
+func (e *Emitter) emitResponseDriveToDone(objVal Value) {
+	pIdx, _, ok := objVal.Ty.FieldIndex("__kml_pending")
+	if !ok {
+		return
+	}
+	e.ensureFetchAsync()
+	structIR := objVal.Ty.StructIR()
+	pGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", pGep, structIR, objVal.Ref, pIdx))
+	pending := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pending, pGep))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, pending))
+	driveL := e.freshLabel("resp.drive")
+	doneL := e.freshLabel("resp.drive.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, driveL))
+	e.emitLabel(driveL)
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pending))
+	body := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
+	bodyLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
+	bIdx, _, _ := objVal.Ty.FieldIndex("body")
+	bGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bGep, structIR, objVal.Ref, bIdx))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", body, bGep))
+	lIdx, _, _ := objVal.Ty.FieldIndex("bodyLength")
+	lGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, structIR, objVal.Ref, lIdx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bodyLen, lGep))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", pGep))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
 }
 
 // emitResponseArrayBuffer implements response.arrayBuffer() (ADR-00094):
@@ -253,6 +294,7 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 // buffered body pointer directly instead of calloc'ing a fresh one — no
 // copy needed, the bytes are already there.
 func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, error) {
+	e.emitResponseDriveToDone(objVal)
 	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
