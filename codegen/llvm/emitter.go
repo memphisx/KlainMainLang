@@ -83,6 +83,8 @@ type Emitter struct {
 	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
 	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
 	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
+	cryptoBackend         string          // "" (== "openssl", the default) or "commoncrypto" — the __kml_crypto_* ABI implementation to compile+link. See SetCryptoBackend / TDD-00104
+	usesCrypto            bool            // set the first time any crypto.subtle operation is emitted (drives backend compile+link in main.go)
 	usesBigInt            bool            // set the first time any bigint operation is emitted (drives backend compile+link in main.go)
 	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
 	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
@@ -256,6 +258,20 @@ type Emitter struct {
 	usedSignalSigint         bool
 	usedSignalSigterm        bool
 	usedErrnoAccessor        bool
+	usedCryptoCheck          bool
+	usedCryptoDigest         bool
+	usedCryptoHmac           bool
+	usedCryptoMemeq          bool
+	usedCryptoAesGcm         bool
+	usedCryptoAesCbc         bool
+	usedCryptoB64url         bool
+	usedCryptoRsa            bool
+	usedCryptoEcdsa          bool
+	usedCryptoEcRaw          bool
+	usedCryptoJwkRsa         bool
+	usedCryptoJwkEc          bool
+	usedCryptoJwkMapSet      bool
+	usedCryptoDerive         bool
 	usedStrerror             bool
 	usedFsMkdir              bool
 	usedFsRmdir              bool
@@ -497,6 +513,24 @@ func (e *Emitter) BigIntBackend() string {
 	}
 	return e.bigintBackend
 }
+
+// SetCryptoBackend selects the compile-wide crypto backend (TDD-00104),
+// called by main.go from the -crypto flag. "" resolves to the default,
+// openssl (libcrypto, all platforms); "commoncrypto" opts into Apple
+// CommonCrypto + Security.framework (macOS only).
+func (e *Emitter) SetCryptoBackend(mode string) { e.cryptoBackend = mode }
+
+// CryptoBackend returns the resolved backend name ("" → the openssl default).
+func (e *Emitter) CryptoBackend() string {
+	if e.cryptoBackend == "" {
+		return "openssl"
+	}
+	return e.cryptoBackend
+}
+
+// UsesCrypto reports whether the emitted program actually used crypto.subtle,
+// so main.go only compiles+links a crypto backend for programs that need one.
+func (e *Emitter) UsesCrypto() bool { return e.usesCrypto }
 
 // UsesBigInt reports whether the emitted program actually used bigint, so
 // main.go only compiles+links a backend for programs that need one.

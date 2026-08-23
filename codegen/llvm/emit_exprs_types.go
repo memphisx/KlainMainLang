@@ -524,6 +524,21 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypePtr
 			}
 		}
+		// CryptoKey properties — must match emitCryptoKeyProp.
+		if ex.Property == "type" || ex.Property == "extractable" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsCryptoKey {
+				if ex.Property == "type" {
+					return TypePtr
+				}
+				return TypeBool
+			}
+		}
+		// CryptoKeyPair properties — must match emitCryptoKeyPairProp.
+		if ex.Property == "publicKey" || ex.Property == "privateKey" {
+			if e.inferExprType(ex.Object).IsCryptoKeyPair {
+				return CryptoKeyType()
+			}
+		}
 		// TS namespace member (TDD-00095) — must match emitMember.
 		if id, ok := ex.Object.(*ast.Identifier); ok {
 			if members, nsName := e.namespaceMembers(id.Name); members != nil && members[ex.Property] {
@@ -1102,6 +1117,40 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert__kml_builtin" {
 				return TypeVoid
+			}
+			if e.isCryptoSubtle(mem.Object) {
+				task := func(inner Type) Type {
+					ty := PromiseOf(inner)
+					ty.PromiseTask = true
+					return ty
+				}
+				switch mem.Property {
+				case "digest", "encrypt", "decrypt", "sign", "deriveBits":
+					return task(ArrayBufferType())
+				case "deriveKey":
+					return task(CryptoKeyType())
+				case "verify":
+					return task(TypeBool)
+				case "importKey":
+					return task(CryptoKeyType())
+				case "generateKey":
+					if len(ex.Args) >= 1 {
+						if name, ok3 := subtleAlgoName(ex.Args[0]); ok3 {
+							switch name {
+							case "RSA-OAEP", "RSA-PSS", "ECDSA":
+								return task(CryptoKeyPairType())
+							}
+						}
+					}
+					return task(CryptoKeyType())
+				case "exportKey":
+					if len(ex.Args) >= 1 {
+						if f, ok3 := ex.Args[0].(*ast.StringLiteral); ok3 && f.Value == "jwk" {
+							return task(MapType(TypePtr, TypePtr))
+						}
+					}
+					return task(ArrayBufferType())
+				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "crypto" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {

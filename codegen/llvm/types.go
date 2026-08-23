@@ -293,6 +293,17 @@ type Type struct {
 	// `number[]` does not get. See emit_arraybuffer.go and
 	// docs/tdd/TDD-00018.md.
 	IsTypedArray bool
+	// IsCryptoKey marks a Web Crypto CryptoKey (TDD-00104): a ptr to a
+	// hidden { i64 algId, i64 hashId, i64 usages, i64 extractable,
+	// i64 kind, ptr keyData, i64 keyLen } heap struct — same hidden-layout
+	// convention as IsArrayBuffer/IsBlob, with dedicated .type/
+	// .extractable property reads. keyData is raw bytes for symmetric
+	// keys, DER (PKCS#8/SPKI) for asymmetric. See emit_call_crypto.go.
+	IsCryptoKey bool
+	// IsCryptoKeyPair marks generateKey's RSA/EC result (TDD-00104): a ptr
+	// to { ptr publicKey, ptr privateKey }, with dedicated .publicKey/
+	// .privateKey property reads yielding IsCryptoKey values.
+	IsCryptoKeyPair bool
 	// IsBuffer marks a Node Buffer (TDD-00103): storage-wise it IS a
 	// Uint8Array (IsTypedArray/IsArray/ElemType u8), so the whole array/
 	// TypedArray surface comes free; the flag only additionally enables
@@ -815,6 +826,17 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
+}
+
+// CryptoKeyType returns a Web Crypto CryptoKey's type (TDD-00104).
+func CryptoKeyType() Type {
+	return Type{IR: "ptr", IsCryptoKey: true}
+}
+
+// CryptoKeyPairType returns generateKey's {publicKey, privateKey} result
+// type for asymmetric algorithms (TDD-00104).
+func CryptoKeyPairType() Type {
+	return Type{IR: "ptr", IsCryptoKeyPair: true}
 }
 
 // BroadcastChannelType returns `new BroadcastChannel(name)`'s result type

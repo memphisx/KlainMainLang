@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -60,6 +61,7 @@ func buildBinary(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -68,6 +70,9 @@ func buildBinary(t *testing.T, src string) string {
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -100,6 +105,29 @@ func appendBigIntBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 	}
 	clangArgs = append(clangArgs, biFile)
 	cflags, libs := llvm.LocateBigInt(backend)
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	return clangArgs, true
+}
+
+// appendCryptoBackend compiles+links the selected crypto backend C file into
+// the clang invocation when the program used crypto.subtle, mirroring main.go
+// so the test build and the real build can't drift (TDD-00104; same rationale
+// as appendBigIntBackend). Returns whether crypto was used, so a caller can
+// Skip (not Fail) when the backend library isn't installed on the machine.
+func appendCryptoBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) ([]string, bool) {
+	t.Helper()
+	if !em.UsesCrypto() {
+		return clangArgs, false
+	}
+	backend := em.CryptoBackend()
+	src, _ := llvm.CryptoBackendSource(backend)
+	crFile := filepath.Join(dir, "crypto.c")
+	if err := os.WriteFile(crFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write crypto backend: %v", err)
+	}
+	clangArgs = append(clangArgs, crFile)
+	cflags, libs := llvm.LocateCrypto(backend)
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs, true
@@ -268,6 +296,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -276,6 +305,9 @@ func buildBinaryImports(t *testing.T, src string) string {
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -633,6 +665,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -641,6 +674,9 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -687,6 +723,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -695,6 +732,9 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -771,6 +811,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -779,6 +820,9 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -818,6 +862,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -826,6 +871,9 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -842,6 +890,72 @@ func assertOutputCompatJS(t *testing.T, src, want string) {
 		t.Fatalf("run: %v", err)
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
+}
+
+// buildBinaryCryptoMode is buildBinary with an explicit `-crypto` backend
+// (TDD-00104: "openssl" or "commoncrypto"). Mirrors main.go's
+// em.SetCryptoBackend() so the backend-matrix Web Crypto tests exercise each
+// library; skips (not fails) when the backend isn't installed/applicable.
+func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	if backend == "commoncrypto" && runtime.GOOS != "darwin" {
+		t.Skip("-crypto=commoncrypto is macOS-only")
+	}
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	em := llvm.NewEmitter()
+	em.SetCryptoBackend(backend)
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
+	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
+	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	if err != nil {
+		if bigintUsed {
+			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
+		}
+		if cryptoUsed {
+			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
+		}
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	return binFile
+}
+
+// compileAndRunCryptoMode compiles src under a given `-crypto` backend, runs
+// it, and returns trimmed stdout.
+func compileAndRunCryptoMode(t *testing.T, src, backend string) string {
+	t.Helper()
+	binFile := buildBinaryCryptoMode(t, src, backend)
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return strings.TrimRight(string(result), "\n")
 }
 
 // compileAndRunRegexMode compiles src under a given `-regex` mode, runs it,

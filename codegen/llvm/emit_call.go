@@ -483,6 +483,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.isCryptoSubtle(mem.Object) {
+			return e.emitCryptoSubtleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "crypto" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "getRandomValues":

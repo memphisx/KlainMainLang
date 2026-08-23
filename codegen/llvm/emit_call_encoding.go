@@ -24,28 +24,63 @@ func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, 
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
-// emitCryptoGetRandomValues implements crypto.getRandomValues(arr), filling
-// an existing number[] array's elements with random byte values (0-255
-// each) — a deliberate deviation from the real TypedArray-based API, since
-// this compiler has no ArrayBuffer/TypedArrays yet (see
-// ensureCryptoFillNumberArray's doc in runtime.go). Requires a named array
-// variable (not an arbitrary expression), matching the same restriction
-// emitPush already has for array mutation (emit_arrays_mutate.go) — there's
-// no heap location to write into otherwise.
+// emitCryptoGetRandomValues implements crypto.getRandomValues(view): fills
+// a TypedArray's (or ArrayBuffer's) bytes in place with CSPRNG output and
+// returns the argument, per the real API. The original pre-TypedArray form
+// — a named number[] variable filled with one random byte value (0-255)
+// per i64 element — is kept as a legacy path (see
+// ensureCryptoFillNumberArray's doc in runtime_crypto.go).
 func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues takes exactly 1 argument", pos.Line, pos.Col)
 	}
+
+	argTy := e.inferExprType(args[0])
+	if argTy.IsArrayBuffer {
+		bufVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureCryptoRandomBytes()
+		byteLenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", byteLenReg, bufVal.Ref))
+		dataSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
+		dataReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataReg, dataSlot))
+		e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes(ptr %s, i64 %s)", dataReg, byteLenReg))
+		return bufVal, nil
+	}
+	if argTy.IsArray && argTy.ElemType != nil &&
+		(argTy.IsTypedArray || (argTy.ElemType.IR == "i8" && !argTy.ElemType.Signed)) {
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureCryptoRandomBytes()
+		byteLenReg := lenReg
+		if elemTy.Align() != 1 {
+			byteLenReg = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLenReg, lenReg, elemTy.Align()))
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes(ptr %s, i64 %s)", ptrReg, byteLenReg))
+		r0 := e.freshReg()
+		r1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", r0, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", r1, r0, lenReg))
+		return Value{Ref: r1, Ty: argTy}, nil
+	}
+
 	id, ok := args[0].(*ast.Identifier)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires a named number[] array variable", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires a TypedArray, an ArrayBuffer, or a named number[] array variable", pos.Line, pos.Col)
 	}
 	sym, ok := e.lookup(id.Name)
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
 	}
 	if !sym.Ty.IsArray || sym.Ty.ElemType == nil || sym.Ty.ElemType.IR != "i64" {
-		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires a number[] array (this compiler has no TypedArrays yet)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires a TypedArray, an ArrayBuffer, or a number[] array", pos.Line, pos.Col)
 	}
 
 	e.ensureCryptoFillNumberArray()

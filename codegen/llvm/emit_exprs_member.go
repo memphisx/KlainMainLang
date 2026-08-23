@@ -367,6 +367,26 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitBlobProp(objVal, ex.Property, ex.GetPos())
 		}
 	}
+	// CryptoKeyPair properties (publicKey/privateKey, TDD-00104).
+	if ex.Property == "publicKey" || ex.Property == "privateKey" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsCryptoKeyPair {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitCryptoKeyPairProp(objVal, ex.Property)
+		}
+	}
+	// CryptoKey properties (type/extractable, TDD-00104) — same pattern.
+	if ex.Property == "type" || ex.Property == "extractable" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsCryptoKey {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitCryptoKeyProp(objVal, ex.Property)
+		}
+	}
 	// TS namespace member in value position (`X.member`, TDD-00095):
 	// resolve through the desugared flat declaration. A local binding
 	// shadowing the namespace name wins.

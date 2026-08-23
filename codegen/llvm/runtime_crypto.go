@@ -42,11 +42,10 @@ entry:
 // arr, i64 len): fills an existing number[] array's elements with random
 // byte values (0-255 each) — the crypto.getRandomValues(arr) implementation.
 // A deliberate deviation from the real API (which fills a TypedArray in
-// place, byte for byte): this predates ArrayBuffer/TypedArrays (now
-// implemented, see docs/status/BINARY-DATA-TYPED-ARRAYS.md), so a plain
-// number[] stands in as the "buffer," one random byte value per i64
-// element — migrating to a real Uint8Array is a separate, not-yet-started
-// follow-up.
+// place, byte for byte): this predates ArrayBuffer/TypedArrays, and is kept
+// as the legacy back-compat path now that getRandomValues fills real
+// TypedArrays/ArrayBuffers directly (ADR-00317) — a plain number[] stands
+// in as the "buffer," one random byte value per i64 element.
 func (e *Emitter) ensureCryptoFillNumberArray() {
 	if e.usedCryptoFillNumArray {
 		return

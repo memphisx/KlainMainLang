@@ -20,6 +20,7 @@ func main() {
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
+	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms) or commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency). Both give identical Web Crypto semantics")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "usage: klainmain [flags] <file.ts>")
@@ -82,6 +83,20 @@ func main() {
 		fatal("unrecognized -bigint value %q — must be one of: libtommath (default), gmp", *bigint)
 	}
 
+	switch *cryptoBackend {
+	case "openssl":
+		// ok
+	case "commoncrypto":
+		if runtime.GOOS != "darwin" {
+			fatal("-crypto=commoncrypto is only supported when compiling on macOS (this run is on %s) — CommonCrypto and Security.framework are Apple system libraries with no ports elsewhere. Use the default -crypto=openssl instead", runtime.GOOS)
+		}
+		if *static {
+			fatal("-crypto=commoncrypto cannot be combined with --static: Apple frameworks are dynamic-only (and --static itself is Linux-only). Use -crypto=openssl for static builds")
+		}
+	default:
+		fatal("unrecognized -crypto value %q — must be one of: openssl (default), commoncrypto (macOS only)", *cryptoBackend)
+	}
+
 	inFile := flag.Arg(0)
 	prog, err := resolver.ResolveProgramWithOptions(inFile, *compat == "js")
 	if err != nil {
@@ -92,6 +107,7 @@ func main() {
 	em.SetMemMode(*mm)
 	em.SetRegexMode(*regex)
 	em.SetBigIntBackend(*bigint)
+	em.SetCryptoBackend(*cryptoBackend)
 	em.SetCompatMode(*compat)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
@@ -157,6 +173,25 @@ func main() {
 		}
 		clangArgs = append(clangArgs, biPath)
 		cflags, libs := llvm.LocateBigInt(backend)
+		clangArgs = append(clangArgs, cflags...)
+		clangArgs = append(clangArgs, libs...)
+	}
+	// crypto.subtle (TDD-00104): compile the selected crypto backend's C file
+	// (which implements the __kml_crypto_* subtle ABI) alongside the program
+	// and link its library/frameworks — only when the program actually used
+	// crypto.subtle. Same shape as bigint above.
+	if em.UsesCrypto() {
+		backend := em.CryptoBackend()
+		src, ok := llvm.CryptoBackendSource(backend)
+		if !ok {
+			fatal("crypto: unknown backend %q", backend)
+		}
+		crPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".crypto.c"
+		if err := os.WriteFile(crPath, []byte(src), 0644); err != nil {
+			fatal("cannot write crypto backend source: %v", err)
+		}
+		clangArgs = append(clangArgs, crPath)
+		cflags, libs := llvm.LocateCrypto(backend)
 		clangArgs = append(clangArgs, cflags...)
 		clangArgs = append(clangArgs, libs...)
 	}

@@ -353,3 +353,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00313](ADR-00313.md) | `BigInt64Array`/`BigUint64Array` + `Uint8ClampedArray` — TypedArray store/load conversion layer | Implements [TDD-00101](../tdd/TDD-00101.md) |
 | [00314](ADR-00314.md) | `Blob` — immutable binary data with a MIME type | Implements [TDD-00102](../tdd/TDD-00102.md) |
 | [00315](ADR-00315.md) | Node `Buffer` — a flagged Uint8Array with codecs and binary accessors | Implements [TDD-00103](../tdd/TDD-00103.md); supersedes [ADR-00094](ADR-00094.md)'s "no Buffer class" half |
+| [00316](ADR-00316.md) | `-crypto` backend flag, `__kml_crypto_*` subtle ABI, and `crypto.subtle.digest` | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 1; extends [ADR-00024](ADR-00024.md) |
+| [00317](ADR-00317.md) | `crypto.getRandomValues` accepts real TypedArrays and ArrayBuffers | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 1; closes the migration deferred in [ADR-00078](ADR-00078.md) |
+| [00318](ADR-00318.md) | CryptoKey model + symmetric `crypto.subtle` (HMAC, AES-GCM/CBC, keys, JWK oct) | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 2; extends [ADR-00316](ADR-00316.md) |
+| [00319](ADR-00319.md) | Asymmetric `crypto.subtle` — RSA-OAEP/RSA-PSS/ECDSA, CryptoKeyPair, pkcs8/spki/raw/JWK | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 3; extends [ADR-00316](ADR-00316.md), [ADR-00318](ADR-00318.md) |
+| [00320](ADR-00320.md) | `crypto.subtle.deriveBits`/`deriveKey` — PBKDF2 and HKDF | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 4, completing it; extends [ADR-00316](ADR-00316.md), [ADR-00318](ADR-00318.md) |

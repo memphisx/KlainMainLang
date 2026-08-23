@@ -33,6 +33,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - `bdw-gc`/`libgc` (the Boehm-Demers-Weiser garbage collector), needed only if compiling with `-mm=gc` — `brew install bdw-gc` on macOS, `apt-get install libgc-dev` on Debian/Ubuntu, `apk add gc-dev` on Alpine. The default `manual` mode needs nothing beyond plain libc
 - `libpcre2-8`/`libpcre2-dev`, needed if the compiled program uses `RegExp` (either `new RegExp(...)` or a `/pattern/flags` literal) — `apt-get install libpcre2-dev` on Debian/Ubuntu, `brew install pcre2` on macOS, `apk add pcre2-dev` on Alpine. Same conditional-linking convention as `libcurl`: every other program stays plain-libc. See [docs/status/REGEXP.md](docs/status/REGEXP.md)
 - a bigint backend library, needed only if the compiled program uses `bigint` — `libtommath` by default (`brew install libtommath` / `apt-get install libtommath-dev` / `apk add libtommath-dev`), or GMP with `-bigint=gmp` (`brew install gmp` / `apt-get install libgmp-dev`). Same conditional-linking convention: a program without bigint stays plain-libc. See [docs/tdd/TDD-00074.md](docs/tdd/TDD-00074.md)
+- a crypto backend library, needed only if the compiled program uses `crypto.subtle` — OpenSSL 3's libcrypto by default (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`), or Apple CommonCrypto + Security.framework with `-crypto=commoncrypto` (macOS only, ships with the OS — no install at all). Same conditional-linking convention: a program without `crypto.subtle` stays plain-libc (`crypto.getRandomValues`/`randomUUID` use the OS CSPRNG directly, no library). See [docs/tdd/TDD-00104.md](docs/tdd/TDD-00104.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
@@ -114,6 +115,13 @@ klainmain [flags] <file.ts>
                 bigint: libtommath (default, public domain) or gmp (LGPL,
                 faster). Both give identical arbitrary-precision semantics —
                 the flag only trades license/speed. See docs/tdd/TDD-00074.md.
+  
+  -crypto <lib> crypto.subtle backend library, compiled+linked only when a
+                program uses crypto.subtle: openssl (default — libcrypto
+                3.x, all platforms) or commoncrypto (macOS only — Apple
+                CommonCrypto plus Security.framework, no OpenSSL
+                dependency). Both give identical Web Crypto semantics.
+                See docs/tdd/TDD-00104.md.
   
   -compat <m>   Compatibility mode (see docs/tdd/TDD-00075.md): strict
                 (default — the compiler's opinionated, safer-than-JS
