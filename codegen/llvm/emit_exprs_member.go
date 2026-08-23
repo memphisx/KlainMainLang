@@ -496,6 +496,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: result, Ty: TypeI64}, nil
 		}
 	}
+	if ex.Property == "port1" || ex.Property == "port2" {
+		// TDD-00099: `ch.port1` / `ch.port2` off a MessageChannel pair.
+		if objTy := e.inferExprType(ex.Object); objTy.IsMessageChannel {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitMessageChannelPortRead(objVal, ex.Property)
+		}
+	}
 	if ex.Property == "byteLength" {
 		// ArrayBuffer: read word 0 of its hidden header struct — same
 		// named-variable-vs-arbitrary-expression split `.size` uses above.

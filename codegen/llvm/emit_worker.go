@@ -36,7 +36,7 @@ type workerEntryInfo struct {
 // pipe envelope can't carry.
 func workerPayloadOK(ty Type, pos ast.Pos, what string) error {
 	if kind := structuredCloneUnsupportedKind(ty); kind != "" {
-		return fmt.Errorf("%d:%d: %s cannot be %s — only structured-clone-safe values (numbers, strings, booleans, plain arrays and objects) cross a worker boundary", pos.Line, pos.Col, what, kind)
+		return fmt.Errorf("%d:%d: %s cannot be %s — only structured-clone-safe values (numbers, strings, booleans, plain arrays and objects, SharedArrayBuffer) cross a worker boundary", pos.Line, pos.Col, what, kind)
 	}
 	return nil
 }

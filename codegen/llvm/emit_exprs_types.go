@@ -495,6 +495,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 			}
 		}
+		// MessageChannel ports (TDD-00099) — must match
+		// emitMessageChannelPortRead.
+		if ex.Property == "port1" || ex.Property == "port2" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsMessageChannel {
+				return MessagePortType(*objTy.ElemType)
+			}
+		}
 		// DataView properties — must match emitDataViewProp.
 		if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
@@ -933,6 +940,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeF64
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Atomics" && !e.isShadowedByLocal(id.Name) {
+				switch mem.Property {
+				case "wait":
+					return TypePtr // "ok" / "not-equal" / "timed-out"
+				case "notify":
+					return TypeI64
+				default:
+					// load/store/RMW/compareExchange return the receiver's
+					// element type.
+					if len(ex.Args) > 0 {
+						if taTy := e.inferExprType(ex.Args[0]); taTy.IsTypedArray && taTy.ElemType != nil {
+							return *taTy.ElemType
+						}
+					}
+					return TypeI64
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
@@ -1335,11 +1359,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			case "test":
-				if e.inferExprType(mem.Object).IsRegExp {
+				if ty := e.inferExprType(mem.Object); ty.IsRegExp || ty.IsURLPattern {
 					return TypeBool
 				}
 			case "exec":
-				if e.inferExprType(mem.Object).IsRegExp {
+				ty := e.inferExprType(mem.Object)
+				if ty.IsURLPattern {
+					return MapType(TypePtr, TypePtr)
+				}
+				if ty.IsRegExp {
 					return regExpExecResultType()
 				}
 			case "split":
@@ -1579,8 +1607,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return URLType()
 	case *ast.NewURLSearchParamsExpression:
 		return URLSearchParamsType()
+	case *ast.NewURLPatternExpression:
+		return URLPatternType()
 	case *ast.NewArrayBufferExpression:
+		if ex.Shared {
+			return SharedArrayBufferType()
+		}
 		return ArrayBufferType()
+	case *ast.NewBroadcastChannelExpression:
+		return BroadcastChannelType(ex.Name)
+	case *ast.NewMessageChannelExpression:
+		if ex.TypeArg != nil {
+			return MessageChannelType(e.resolveType(ex.TypeArg))
+		}
+		return MessageChannelType(TypeI64)
 	case *ast.NewDataViewExpression:
 		return DataViewType()
 	case *ast.NewTextEncoderExpression:

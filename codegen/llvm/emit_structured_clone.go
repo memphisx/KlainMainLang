@@ -58,7 +58,17 @@ func structuredCloneUnsupportedKind(ty Type) string {
 		return "Set"
 	case ty.IsEventEmitter:
 		return "EventEmitter"
-	case ty.IsArrayBuffer:
+	case ty.IsBroadcastChannel:
+		return "a BroadcastChannel"
+	case ty.IsMessageChannel:
+		// The pair box crosses nowhere; a MessagePort (either half alone)
+		// deliberately passes — it is shared by reference, like an SAB
+		// (TDD-00099).
+		return "a MessageChannel"
+	case ty.IsArrayBuffer && !ty.IsSharedArrayBuffer:
+		// A SharedArrayBuffer deliberately passes: the spec's semantics are
+		// share-not-copy, so emitDeepClone lets its header pointer through
+		// unchanged (TDD-00099). A plain ArrayBuffer stays rejected.
 		return "ArrayBuffer"
 	case ty.IsFunc:
 		return "a function"

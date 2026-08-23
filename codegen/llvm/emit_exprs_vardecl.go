@@ -379,8 +379,21 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = URLType()
 		case *ast.NewURLSearchParamsExpression:
 			ty = URLSearchParamsType()
+		case *ast.NewURLPatternExpression:
+			ty = URLPatternType()
 		case *ast.NewArrayBufferExpression:
 			ty = ArrayBufferType()
+			if init.Shared {
+				ty = SharedArrayBufferType()
+			}
+		case *ast.NewBroadcastChannelExpression:
+			ty = BroadcastChannelType(init.Name)
+		case *ast.NewMessageChannelExpression:
+			if init.TypeArg != nil {
+				ty = MessageChannelType(e.resolveType(init.TypeArg))
+			} else {
+				ty = MessageChannelType(TypeI64)
+			}
 		case *ast.NewDataViewExpression:
 			ty = DataViewType()
 		case *ast.NewTypedArrayExpression:

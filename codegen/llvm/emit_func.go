@@ -572,6 +572,18 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		for _, sub := range x.Exprs {
 			scanExprFV(sub, bound, result)
 		}
+	case *ast.NewTypedArrayExpression:
+		// `new Int32Array(buf)` inside a closure body: buf is a real free
+		// variable (was silently unscanned, later failing as "undefined
+		// variable" at emission — found via a SharedArrayBuffer view in a
+		// worker handler, TDD-00099).
+		scanExprFV(x.Arg, bound, result)
+	case *ast.NewArrayBufferExpression:
+		scanExprFV(x.ByteLength, bound, result)
+	case *ast.NewDataViewExpression:
+		scanExprFV(x.Buffer, bound, result)
+		scanExprFV(x.ByteOffset, bound, result)
+		scanExprFV(x.ByteLength, bound, result)
 	case *ast.NewNodeStreamExpression:
 		if x.Options != nil {
 			scanExprFV(x.Options, bound, result)

@@ -141,8 +141,14 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewURLExpression(ex)
 	case *ast.NewURLSearchParamsExpression:
 		return e.emitNewURLSearchParamsExpression(ex)
+	case *ast.NewURLPatternExpression:
+		return e.emitNewURLPatternExpression(ex)
 	case *ast.NewArrayBufferExpression:
 		return e.emitNewArrayBufferExpression(ex)
+	case *ast.NewBroadcastChannelExpression:
+		return e.emitNewBroadcastChannelExpression(ex)
+	case *ast.NewMessageChannelExpression:
+		return e.emitNewMessageChannelExpression(ex)
 	case *ast.NewTypedArrayExpression:
 		return Value{}, fmt.Errorf("%d:%d: a TypedArray constructor must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.NewTextEncoderExpression:

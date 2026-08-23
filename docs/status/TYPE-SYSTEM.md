@@ -4,7 +4,7 @@
 
 **Coverage**: Type primitives 12/12 (100%) · Type system features 13/13 (100%).
 
-**Strict Coverage**: Type primitives 8/12 (~67%) · Type system features 7/13 (~54%). A row counts toward Strict only when its **Caveats** column is empty — the zero-known-caveats basis from the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)), now derived directly from the table so the two can't drift.
+**Strict Coverage**: Type primitives 7/12 (~58%) · Type system features 7/13 (~54%). A row counts toward Strict only when its **Caveats** column is empty.
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -12,13 +12,13 @@ Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `number` → `i64` | ✅ | • A bare `: number` is `i64`, not TypeScript's IEEE-754 double, so a fractional literal or float-valued expression assigned to one **truncates to its integer part** — `const x: number = 0.1 + 0.2` yields `0` (not `0.30000000000000004`), and `const x: number = 3.9` yields `3`. Use an explicit `float64`/`float32` annotation (or `/** @type {float64} */`) for real double arithmetic | • `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides the default per-binding<br>• *Mixed* int/float arithmetic (`i * 1.5`) now promotes both operands to double, as real JS — the old left-biased unification truncated the float operand ([ADR-00292](../adr/ADR-00292.md)); the truncation caveat here is only about a value *assigned into* a declared `: number`/`i64` slot |
+| `number` → `i64` | ✅ | • A bare `: number` is `i64`, not TypeScript's IEEE-754 double, so a fractional literal or float-valued expression assigned to one **truncates to its integer part** — `const x: number = 0.1 + 0.2` yields `0` (not `0.30000000000000004`), and `const x: number = 3.9` yields `3`. Use an explicit `float64`/`float32` annotation (or `/** @type {float64} */`) for real double arithmetic | • `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides the default per-binding<br>• *Mixed* int/float arithmetic (`i * 1.5`) promotes both operands to double, as real JS ([ADR-00292](../adr/ADR-00292.md)); the truncation caveat here is only about a value *assigned into* a declared `: number`/`i64` slot |
 | `string` → `ptr` | ✅ | | |
 | `boolean` → `i1` | ✅ | | |
 | `void` | ✅ | | |
 | `null` / `undefined` | ✅ | | • Sentinel `ptr null` |
 | JSDoc extended integers | ✅ | | • `@type {int8\|int16\|int32\|int64\|uint8…uint64}` |
-| JSDoc extended floats | ✅ | | • `@type {float32\|float64}`<br>• Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript `Number::toString` — `1.1 + 2.2` prints `3.3000000000000003`, integers-valued floats drop the point, and the fixed/exponential switch matches JS's thresholds ([TDD-00080](../tdd/TDD-00080.md)/[ADR-00233](../adr/ADR-00233.md), superseding the old `%g` behavior of [ADR-00166](../adr/ADR-00166.md))<br>• `console.log(-0)` prints `0` (this compiler's `console.log` uses `ToString`, and `String(-0)`/`${-0}` are `"0"` in JS too); Node's `console.log` shows `-0` only via `util.inspect`, a console-display quirk<br>• A `float32` prints against its widened `double` |
+| JSDoc extended floats | ✅ | | • `@type {float32\|float64}`<br>• Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript `Number::toString` — `1.1 + 2.2` prints `3.3000000000000003`, integers-valued floats drop the point, and the fixed/exponential switch matches JS's thresholds ([TDD-00080](../tdd/TDD-00080.md)/[ADR-00233](../adr/ADR-00233.md))<br>• `console.log(-0)` prints `0` (this compiler's `console.log` uses `ToString`, and `String(-0)`/`${-0}` are `"0"` in JS too); Node's `console.log` shows `-0` only via `util.inspect`, a console-display quirk<br>• A `float32` prints against its widened `double` |
 | `any` | ✅ | • Arithmetic on an `any` is a clean compile error<br>• Nested positions `any[]`/`{ x: any }` are clean compile errors<br>• A boxed array keeps only its data pointer — length/elements aren't recoverable, so it stringifies to the `[object Array]` tag, not its contents ([ADR-00177](../adr/ADR-00177.md)) | • Runtime-tagged value ([TDD-00062](../tdd/TDD-00062.md))<br>• Supports declare/assign/reassign/print/`typeof`/`===` + bare `any` param/return on every function shape<br>• Objects and arrays box by reference — `===` is reference identity, `typeof` is `"object"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md)) |
 | `unknown` | ✅ | • Same as `any` (see above) | • Same Staged V1 scope as `any` |
 | `never` | ✅ | | • A `(): never` function that always throws works correctly |

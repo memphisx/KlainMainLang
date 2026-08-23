@@ -150,6 +150,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				if e.inferExprType(memEx.Object).IsWorker {
 					return e.emitWorkerHandlerAssign(memEx.Object, memEx.Property, ex.Right, ex.GetPos())
 				}
+				// TDD-00099: BroadcastChannel / MessagePort onmessage.
+				if memEx.Property == "onmessage" {
+					if objTy := e.inferExprType(memEx.Object); objTy.IsBroadcastChannel || objTy.IsMessagePort {
+						return e.emitChanOnMessageAssign(memEx.Object, ex.Right, ex.GetPos())
+					}
+				}
 			}
 		}
 		if id, ok := ex.Left.(*ast.Identifier); ok && id.Name == "onmessage" && e.currentWorkerMod != "" && !e.isShadowedByLocal("onmessage") {

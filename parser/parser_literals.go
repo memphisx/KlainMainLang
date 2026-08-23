@@ -231,14 +231,20 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewWorkerBody(pos)
 	case "URLSearchParams":
 		return p.parseNewURLSearchParamsBody(pos)
+	case "URLPattern":
+		return p.parseNewURLPatternBody(pos)
 	case "Headers":
 		return p.parseNewHeadersBody(pos)
 	case "Request":
 		return p.parseNewRequestBody(pos)
 	case "XMLHttpRequest":
 		return p.parseNewXMLHttpRequestBody(pos)
-	case "ArrayBuffer":
+	case "ArrayBuffer", "SharedArrayBuffer":
 		return p.parseNewArrayBufferBody(pos)
+	case "BroadcastChannel":
+		return p.parseNewBroadcastChannelBody(pos)
+	case "MessageChannel":
+		return p.parseNewMessageChannelBody(pos)
 	case "DataView":
 		return p.parseNewDataViewBody(pos)
 	case "TextEncoder":
@@ -614,6 +620,32 @@ func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchPara
 	return ast.NewNewURLSearchParamsExpression(init, pos), nil
 }
 
+// parseNewURLPatternBody parses `new URLPattern()` / `new URLPattern(init)`
+// (TDD-00100). The init's object-literal shape is validated by codegen, which
+// owns the supported-component list; a second (baseURL) argument is rejected
+// here since it's a constructor-form scope cut, not a component question.
+func (p *Parser) parseNewURLPatternBody(pos ast.Pos) (*ast.NewURLPatternExpression, error) {
+	p.advance() // consume 'URLPattern'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var init ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		if p.check(lexer.COMMA) {
+			return nil, fmt.Errorf("%d:%d: new URLPattern does not take a baseURL second argument (single object-init form only)", pos.Line, pos.Col)
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewURLPatternExpression(init, pos), nil
+}
+
 func (p *Parser) parseNewHeadersBody(pos ast.Pos) (*ast.NewHeadersExpression, error) {
 	p.advance() // consume 'Headers'
 	if _, err := p.expect(lexer.LPAREN); err != nil {
@@ -748,7 +780,8 @@ func (p *Parser) parseNewDataViewBody(pos ast.Pos) (*ast.NewDataViewExpression, 
 }
 
 func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
-	p.advance() // consume 'ArrayBuffer'
+	shared := p.peek().Literal == "SharedArrayBuffer"
+	p.advance() // consume 'ArrayBuffer' / 'SharedArrayBuffer'
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
@@ -759,7 +792,51 @@ func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpres
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewArrayBufferExpression(byteLength, pos), nil
+	ex := ast.NewNewArrayBufferExpression(byteLength, pos)
+	ex.Shared = shared
+	return ex, nil
+}
+
+// parseNewBroadcastChannelBody parses `new BroadcastChannel('name')` — the
+// name must be a string literal (it keys the compile-time channel-type
+// registry; TDD-00099).
+func (p *Parser) parseNewBroadcastChannelBody(pos ast.Pos) (*ast.NewBroadcastChannelExpression, error) {
+	p.advance() // consume 'BroadcastChannel'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	nameTok, err := p.expect(lexer.STRING)
+	if err != nil {
+		return nil, fmt.Errorf("%d:%d: new BroadcastChannel(...) requires a string-literal channel name", pos.Line, pos.Col)
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewBroadcastChannelExpression(nameTok.Literal, pos), nil
+}
+
+// parseNewMessageChannelBody parses `new MessageChannel<T>()` (TDD-00099).
+func (p *Parser) parseNewMessageChannelBody(pos ast.Pos) (*ast.NewMessageChannelExpression, error) {
+	p.advance() // consume 'MessageChannel'
+	var typeArg *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		arg, err := p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		typeArg = arg
+		if err := p.expectGT("MessageChannel<T>"); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewMessageChannelExpression(typeArg, pos), nil
 }
 
 // parseNewTypedArrayBody parses `new Int8Array(...)`/.../`new

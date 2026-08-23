@@ -8,7 +8,7 @@ Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `+` (concatenation) | ✅ | • A `number \| null` operand still silently prints `"x0"` instead of `"xnull"` — the numeric branch of value-to-string has no nullability check ([ADR-00166](../adr/ADR-00166.md)) | • A null *string* operand now stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS; previously segfaulted via `strlen(NULL)` ([ADR-00165](../adr/ADR-00165.md)) |
+| `+` (concatenation) | ✅ | • A `number \| null` operand still silently prints `"x0"` instead of `"xnull"` — the numeric branch of value-to-string has no nullability check ([ADR-00166](../adr/ADR-00166.md)) | • A null *string* operand stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS ([ADR-00165](../adr/ADR-00165.md)) |
 | `.length` | ✅ | | |
 | `.slice(start, end?)` | ✅ | | |
 | `.substring(start, end?)` | ✅ | | |
@@ -17,14 +17,14 @@ Format: [Status page format](README.md#status-page-format).
 | `.startsWith(prefix)` | ✅ | | |
 | `.endsWith(suffix)` | ✅ | | |
 | `.replace(from, to)` | ✅ | | |
-| `.split(sep)` | ✅ | | • Empty separator splits into individual characters, matching JS; previously hung ([ADR-00004](../adr/ADR-00004.md)) |
+| `.split(sep)` | ✅ | | • Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
 | `.toUpperCase()` | ✅ | | |
 | `.toLowerCase()` | ✅ | | |
 | `.repeat(n)` | ✅ | | |
-| `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS; previously corrupted output ([ADR-00004](../adr/ADR-00004.md)) |
-| `.padEnd(len, pad?)` | ✅ | | • Same empty-pad fix as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |
+| `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
+| `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |
 | `.charCodeAt(i)` | ✅ | | • Bounds-checked: an out-of-range index (negative or `>= length`) returns `NaN`, as real JS — the result is a double for exactly that reason ([ADR-00287](../adr/ADR-00287.md)); byte-space code units per this compiler's byte-sequence strings |
 | `.at(i)` | ✅ | • An out-of-range `i` returns `""` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data ([ADR-00166](../adr/ADR-00166.md)) | |
 | `.charAt(i)` | ✅ | | • Never wraps a negative index from the end — always `""` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/ADR-00028.md)) |

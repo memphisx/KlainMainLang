@@ -180,6 +180,12 @@ type Type struct {
 	// machinery, no dispatched methods of its own) built by parsing through
 	// libcurl's URL API. See emit_url.go.
 	IsURL bool
+	// IsURLPattern marks `new URLPattern(...)`'s result (TDD-00100): a heap
+	// object whose six visible fields are the (defaulted) component pattern
+	// strings, plus a hidden __kml_handle ptr to the C-side compiled state
+	// (urlpatternsrc/urlpattern.c) that .test/.exec dispatch on. Same
+	// flagged-ObjectType shape as URL/Response.
+	IsURLPattern bool
 	// IsSymbol marks Symbol(...)'s result (TDD-00044 V1): an ordinary
 	// 1-field heap object ({description: string}, description read via the
 	// existing object field-access machinery, no dynamic property keys or
@@ -253,6 +259,14 @@ type Type struct {
 	// read in emitMember, the same pattern `.size` already uses for
 	// Map/Set. See emit_arraybuffer.go and docs/tdd/TDD-00018.md.
 	IsArrayBuffer bool
+	// IsSharedArrayBuffer marks `new SharedArrayBuffer(byteLength)`
+	// (TDD-00099). Always set together with IsArrayBuffer — layout,
+	// `.byteLength`, TypedArray views, and DataView all work through the
+	// IsArrayBuffer paths unchanged; this flag only changes the worker
+	// boundary (shared by reference, never deep-copied) and, under -mm=gc,
+	// the allocation (GC_malloc_uncollectable, since the only live
+	// reference may be on another thread).
+	IsSharedArrayBuffer bool
 	// IsDataView marks `new DataView(buffer, byteOffset?, byteLength?)`: an
 	// arbitrary-endian read/write view over an ArrayBuffer sub-range. Same
 	// hidden-heap-struct convention as IsArrayBuffer — a ptr to
@@ -350,6 +364,16 @@ type Type struct {
 	// which is how each parent-side postMessage/on site is type-checked.
 	IsWorker   bool
 	WorkerPath string
+	// IsBroadcastChannel / IsMessageChannel / IsMessagePort (TDD-00099):
+	// each is a ptr to a runtime channel-endpoint block (runtime_chan.go's
+	// chanEpIR; a MessageChannel value is the port1 half, port1/port2
+	// resolved by member access). BCName is the BroadcastChannel's
+	// compile-time name — the key into e.bcChannels' per-name message type.
+	// A MessagePort's message type lives in ElemType (like Set<T>).
+	IsBroadcastChannel bool
+	IsMessageChannel   bool
+	IsMessagePort      bool
+	BCName             string
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -574,6 +598,25 @@ func URLType() Type {
 	return ty
 }
 
+// URLPatternType returns `new URLPattern(...)`'s result type (TDD-00100): the
+// six component pattern strings as readable fields (matching the spec's
+// readonly component accessors — an omitted init component reads back as its
+// "*" default), plus the hidden __kml_handle carrying the compiled per-
+// component PCRE2 state, same hidden-field trick as Response.__kml_pending.
+func URLPatternType() Type {
+	ty := ObjectType([]Field{
+		{Name: "protocol", Ty: TypePtr},
+		{Name: "hostname", Ty: TypePtr},
+		{Name: "port", Ty: TypePtr},
+		{Name: "pathname", Ty: TypePtr},
+		{Name: "search", Ty: TypePtr},
+		{Name: "hash", Ty: TypePtr},
+		{Name: "__kml_handle", Ty: TypePtr},
+	})
+	ty.IsURLPattern = true
+	return ty
+}
+
 // SymbolType returns Symbol(...)'s result type (TDD-00044 V1) — a plain
 // 1-field heap object, same "flag a generic ObjectType" shape URLType uses
 // above. Uniqueness and === come from the struct's own pointer identity, not
@@ -746,6 +789,31 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true}
+}
+
+// BroadcastChannelType returns `new BroadcastChannel(name)`'s result type
+// (TDD-00099).
+func BroadcastChannelType(name string) Type {
+	return Type{IR: "ptr", IsBroadcastChannel: true, BCName: name}
+}
+
+// MessagePortType returns a MessagePort<msg> type (TDD-00099).
+func MessagePortType(msg Type) Type {
+	m := msg
+	return Type{IR: "ptr", IsMessagePort: true, ElemType: &m}
+}
+
+// MessageChannelType returns `new MessageChannel<msg>()`'s result type
+// (TDD-00099).
+func MessageChannelType(msg Type) Type {
+	m := msg
+	return Type{IR: "ptr", IsMessageChannel: true, ElemType: &m}
+}
+
+// SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
+// the ArrayBuffer representation plus the shared-across-workers flag.
+func SharedArrayBufferType() Type {
+	return Type{IR: "ptr", IsArrayBuffer: true, IsSharedArrayBuffer: true}
 }
 
 // DataViewType returns `new DataView(...)`'s result type — see IsDataView's
@@ -1612,6 +1680,8 @@ func ResolveTypeName(name string) Type {
 		return URLType()
 	case "URLSearchParams":
 		return URLSearchParamsType()
+	case "URLPattern":
+		return URLPatternType()
 	case "RegExp":
 		return RegExpType()
 	case "EventSource":
@@ -1626,6 +1696,8 @@ func ResolveTypeName(name string) Type {
 		return WebSocketClientType()
 	case "ArrayBuffer":
 		return ArrayBufferType()
+	case "SharedArrayBuffer":
+		return SharedArrayBufferType()
 	case "Int8Array":
 		return TypedArrayType("int8")
 	case "Uint8Array":

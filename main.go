@@ -171,6 +171,16 @@ func main() {
 		}
 		clangArgs = append(clangArgs, jsonPath)
 	}
+	// URLPattern (TDD-00100): the pattern-compile/match runtime (pcre2 + curl,
+	// both already added via LinkLibs above when used) — only when the program
+	// constructs a URLPattern. Same shape as the JSON parse-tree file.
+	if em.UsesURLPattern() {
+		upPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".urlpattern.c"
+		if err := os.WriteFile(upPath, []byte(llvm.URLPatternSource()), 0644); err != nil {
+			fatal("cannot write URLPattern runtime source: %v", err)
+		}
+		clangArgs = append(clangArgs, upPath)
+	}
 	// Float formatter (TDD-00080): the JS-faithful shortest-round-trip dtoa,
 	// compiled alongside the program only when it prints a float (libc only).
 	if em.UsesFloatFmt() {

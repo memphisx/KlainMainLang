@@ -154,6 +154,12 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_worker_dispatch() {\nentry:\n  ret void\n}")
 	}
+	// TDD-00099: channel (BroadcastChannel/MessagePort) hooks likewise.
+	if !e.usedChanRuntime {
+		e.emitGlobal("define i1 @__kml_chan_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_chan_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_chan_dispatch() {\nentry:\n  ret void\n}")
+	}
 }
 
 func (e *Emitter) ensureTaskRuntime() {

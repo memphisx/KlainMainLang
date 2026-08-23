@@ -45,7 +45,7 @@ var reservedTier2 = map[string]bool{
 	"Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
 	"EvalError": true, "URIError": true, "ReferenceError": true,
 	"RegExp": true, "URL": true, "EventSource": true, "WebSocket": true,
-	"URLSearchParams": true, "Headers": true, "Request": true,
+	"URLSearchParams": true, "URLPattern": true, "Headers": true, "Request": true,
 	"XMLHttpRequest": true, "ArrayBuffer": true, "TextEncoder": true,
 	"TextDecoder": true,
 	"Int8Array":   true, "Uint8Array": true, "Int16Array": true,

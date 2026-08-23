@@ -83,6 +83,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 			return e.emitMathCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Atomics" && !e.isShadowedByLocal(id.Name) {
+			return e.emitAtomicsCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "stringify":
@@ -154,6 +157,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "decode" && e.inferExprType(mem.Object).IsTextDecoder {
 			return e.emitTextDecoderDecode(mem.Object, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "test" && e.inferExprType(mem.Object).IsURLPattern {
+			return e.emitURLPatternTest(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "exec" && e.inferExprType(mem.Object).IsURLPattern {
+			return e.emitURLPatternExec(mem, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "test" && e.inferExprType(mem.Object).IsRegExp {
 			return e.emitRegexTest(mem, ex.Args, ex.GetPos())
 		}
@@ -217,6 +226,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if (mem.Property == "postMessage" || mem.Property == "on" || mem.Property == "terminate") && e.inferExprType(mem.Object).IsWorker {
 			return e.emitWorkerMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		// TDD-00099: BroadcastChannel / MessagePort surfaces.
+		if mem.Property == "postMessage" || mem.Property == "close" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsBroadcastChannel {
+				return e.emitBroadcastChannelMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+			} else if objTy.IsMessagePort {
+				return e.emitMessagePortMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+			}
 		}
 		if mem.Property == "close" && e.inferExprType(mem.Object).IsWebSocketClient {
 			return e.emitWSClientClose(mem.Object, ex.GetPos())

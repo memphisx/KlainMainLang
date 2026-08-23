@@ -13,10 +13,10 @@ Format: [Status page format](README.md#status-page-format).
 | `String(x)` | ✅ | • `String()` with no argument is `""`, not real JS's `"undefined"` (a genuinely absent value doesn't arise in typed code — [ADR-00291](../adr/ADR-00291.md)) | • Routes through the template-literal renderer; an `any` input dispatches on its runtime tag |
 | `Number(x)` | ✅ | • Inherits `strtod`'s `"inf"` acceptance for the string form (JS accepts only the full word `Infinity`) — same family as `parseFloat`'s ([ADR-00291](../adr/ADR-00291.md)) | • JS ToNumber: whole-string parse (`"12px"` → `NaN`, unlike `parseFloat`), `""`/whitespace → 0, `"0x10"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64) |
 | `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |
-| `parseInt(s, radix?)` | ✅ | • No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • A no-digits input returns a real `NaN` (endptr-checked, double result) — same fix as [NUMBER-MATH.md](NUMBER-MATH.md)'s rows, [ADR-00287](../adr/ADR-00287.md) |
+| `parseInt(s, radix?)` | ✅ | • No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/ADR-00287.md)) |
 | `parseFloat(s)` | ✅ | • Inherits `strtod` extras — `"inf"` parses to `Infinity`, C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
 | `NaN` (global constant) | ✅ | • `let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
-| `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
+| `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |
 | `globalThis` | ❌ | | • Not meaningful in a native single-file context |
 | `encodeURI(s)` | ✅ | | • Leaves the unreserved *and* reserved (`;/?:@&=+$,#`) character sets unescaped. See [ADR-00024](../adr/ADR-00024.md). |

@@ -1185,6 +1185,24 @@ func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
 	return &NewURLExpression{URL: url, pos: pos}
 }
 
+// NewURLPatternExpression is `new URLPattern()` / `new URLPattern(init)` —
+// init, when present, must be an object literal with any subset of the six
+// supported component patterns (protocol/hostname/port/pathname/search/hash);
+// codegen enforces that shape (TDD-00100). The constructor-string form and a
+// baseURL second argument are out of scope.
+type NewURLPatternExpression struct {
+	Init Expression
+	pos  Pos
+}
+
+func (*NewURLPatternExpression) nodeMarker()   {}
+func (*NewURLPatternExpression) exprMarker()   {}
+func (n *NewURLPatternExpression) GetPos() Pos { return n.pos }
+
+func NewNewURLPatternExpression(init Expression, pos Pos) *NewURLPatternExpression {
+	return &NewURLPatternExpression{Init: init, pos: pos}
+}
+
 // NewEventSourceExpression is `new EventSource(url)` — a single required
 // string argument, matching the real Web platform's own narrow constructor
 // (a `{ withCredentials }` second argument is the only other thing real
@@ -1394,7 +1412,11 @@ func NewNewDataViewExpression(buffer, byteOffset, byteLength Expression, pos Pos
 
 type NewArrayBufferExpression struct {
 	ByteLength Expression
-	pos        Pos
+	// Shared marks `new SharedArrayBuffer(byteLength)` — identical layout
+	// and construction, but the result crosses a worker boundary by
+	// reference instead of being deep-copied (TDD-00099).
+	Shared bool
+	pos    Pos
 }
 
 func (*NewArrayBufferExpression) nodeMarker()   {}
@@ -1403,6 +1425,40 @@ func (n *NewArrayBufferExpression) GetPos() Pos { return n.pos }
 
 func NewNewArrayBufferExpression(byteLength Expression, pos Pos) *NewArrayBufferExpression {
 	return &NewArrayBufferExpression{ByteLength: byteLength, pos: pos}
+}
+
+// NewBroadcastChannelExpression is `new BroadcastChannel('name')`
+// (TDD-00099) — a process-wide pub/sub endpoint. The channel name must be a
+// compile-time string literal: it keys the compile-time per-name message
+// type, the same posture as new Worker's path literal.
+type NewBroadcastChannelExpression struct {
+	Name string
+	pos  Pos
+}
+
+func (*NewBroadcastChannelExpression) nodeMarker()   {}
+func (*NewBroadcastChannelExpression) exprMarker()   {}
+func (n *NewBroadcastChannelExpression) GetPos() Pos { return n.pos }
+
+func NewNewBroadcastChannelExpression(name string, pos Pos) *NewBroadcastChannelExpression {
+	return &NewBroadcastChannelExpression{Name: name, pos: pos}
+}
+
+// NewMessageChannelExpression is `new MessageChannel<T>()` (TDD-00099) — a
+// linked pair of MessagePorts. The explicit type argument declares the
+// (single, symmetric) message type both ports carry; omitted, it defaults to
+// number.
+type NewMessageChannelExpression struct {
+	TypeArg *TypeAnnotation // nil when omitted
+	pos     Pos
+}
+
+func (*NewMessageChannelExpression) nodeMarker()   {}
+func (*NewMessageChannelExpression) exprMarker()   {}
+func (n *NewMessageChannelExpression) GetPos() Pos { return n.pos }
+
+func NewNewMessageChannelExpression(typeArg *TypeAnnotation, pos Pos) *NewMessageChannelExpression {
+	return &NewMessageChannelExpression{TypeArg: typeArg, pos: pos}
 }
 
 // NewTypedArrayExpression is `new Int8Array(...)`/`new Uint8Array(...)`/.../

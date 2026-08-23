@@ -87,6 +87,8 @@ type Emitter struct {
 	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
 	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
 	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
+	usesURLPattern        bool            // set the first time a URLPattern is constructed (drives urlpattern.c compile+link in main.go — TDD-00100)
+	declaredURLPattern    bool            // the __kml_urlpattern_* declares have been emitted once
 	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
 	declaredDtoa          bool            // the __kml_dtoa declare has been emitted once
 	usedSignalAborted     bool            // the __kml_signal_aborted helper has been emitted (TDD-00081 Stage 3c)
@@ -201,6 +203,14 @@ type Emitter struct {
 	workerEntries     map[string]*workerEntryInfo
 	currentWorkerMod  string
 	workerAdaptCtr    int
+	// TDD-00099: shared memory + channels.
+	usedGCUncollectable bool
+	usedAtomicsRuntime  bool
+	usedChanRuntime     bool
+	usedPipeDecl        bool
+	usedPthreadMutex    bool
+	usedWorkerFdSetbit  bool
+	bcChannels          map[string]*bcChannelInfo
 	usedPromiseCombinators   bool
 	usedPendingFinishSettled bool
 	usedFetchAwaitSettled    bool
@@ -843,6 +853,17 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
 	}
+	// MessagePort<T> (TDD-00099) — the worker-side annotation for a port
+	// received through workerData/postMessage.
+	if ta.Name == "MessagePort" {
+		if ta.ElemType != nil {
+			return MessagePortType(e.resolveType(ta.ElemType))
+		}
+		if len(ta.TypeArgs) > 0 {
+			return MessagePortType(e.resolveType(ta.TypeArgs[0]))
+		}
+		return MessagePortType(TypeI64)
+	}
 	if ta.Name == "EventEmitter" && ta.ElemType != nil {
 		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
 	}
@@ -1232,7 +1253,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")

@@ -742,6 +742,10 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.Init != nil {
 			e.Init = rewriteExpr(e.Init, sc, lu)
 		}
+	case *ast.NewURLPatternExpression:
+		if e.Init != nil {
+			e.Init = rewriteExpr(e.Init, sc, lu)
+		}
 	case *ast.NewHeadersExpression:
 		if e.Init != nil {
 			e.Init = rewriteExpr(e.Init, sc, lu)

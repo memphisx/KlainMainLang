@@ -60,6 +60,18 @@ func sigBlockFlag() int {
 	return 0
 }
 
+// ensureGCUncollectable declares GC_malloc_uncollectable exactly once —
+// zeroed, never collected, but still scanned. Used for any allocation whose
+// only live reference can be invisible to Boehm (pipe-buffered envelopes,
+// cross-thread shared blocks; TDD-00098/TDD-00099).
+func (e *Emitter) ensureGCUncollectable() {
+	if e.usedGCUncollectable {
+		return
+	}
+	e.usedGCUncollectable = true
+	e.emitGlobal("declare ptr @GC_malloc_uncollectable(i64 noundef)")
+}
+
 func (e *Emitter) ensureWorkerRuntime() {
 	if e.usedWorkerRuntime {
 		return
@@ -81,7 +93,8 @@ func (e *Emitter) ensureWorkerRuntime() {
 	e.emitGlobal("declare i32 @pthread_join(i64 noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @pthread_sigmask(i32 noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @sigfillset(ptr noundef)")
-	e.emitGlobal("declare i32 @pipe(ptr noundef)")
+	e.ensurePipeDecl()
+	e.ensureWorkerFdSetbit()
 	e.emitGlobal("declare void @pthread_exit(ptr noundef)")
 	// read/write/close/fcntl are declared by ensureHTTPRuntime already.
 
@@ -102,7 +115,7 @@ func (e *Emitter) ensureWorkerRuntime() {
 	rawAlloc := "@malloc"
 	ctrlAlloc := fmt.Sprintf("call ptr @calloc(i64 1, i64 %d)", workerCtrlBytes)
 	if e.isGCMode() {
-		e.emitGlobal("declare ptr @GC_malloc_uncollectable(i64 noundef)")
+		e.ensureGCUncollectable()
 		rawAlloc = "@GC_malloc_uncollectable"
 		// GC_malloc_uncollectable returns zeroed memory, matching calloc.
 		ctrlAlloc = fmt.Sprintf("call ptr @GC_malloc_uncollectable(i64 %d)", workerCtrlBytes)
@@ -397,6 +410,16 @@ done:
   ret i1 0
 }`, workerCtrlIR, workerCtrlIR, workerCtrlIR))
 
+	e.emitWorkerDrainAndDispatch()
+}
+
+// ensureWorkerFdSetbit emits the fd_set bit-set helper exactly once — used
+// by both the worker and channel event-loop hooks.
+func (e *Emitter) ensureWorkerFdSetbit() {
+	if e.usedWorkerFdSetbit {
+		return
+	}
+	e.usedWorkerFdSetbit = true
 	e.emitGlobal(`define void @__kml_worker_fd_setbit(i32 %fd, ptr %fdset, ptr %maxfd) {
 entry:
   %fddiv8 = sdiv i32 %fd, 8
@@ -419,7 +442,12 @@ update:
 done:
   ret void
 }`)
+}
 
+// emitWorkerDrainAndDispatch emits the worker-side drain/dispatch/uncaught
+// trio — split out of ensureWorkerRuntime only so ensureWorkerFdSetbit above
+// can stay a minimal shared helper for the channel runtime.
+func (e *Emitter) emitWorkerDrainAndDispatch() {
 	// __kml_worker_drain_fd: read 8-byte envelope pointers from fd until
 	// EAGAIN, dispatching each against ctrl. side: 0 = parent draining a
 	// child's worker→parent pipe, 1 = worker draining its parent→worker

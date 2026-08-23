@@ -345,3 +345,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00305](ADR-00305.md) | Worker threads — spawn/join + typed copy-only postMessage (manual mode) | Implements [TDD-00098](../tdd/TDD-00098.md) stages 1–3 |
 | [00306](ADR-00306.md) | Worker threads — `-mm=gc` support, error/termination semantics, browser surface | Implements [TDD-00098](../tdd/TDD-00098.md) stages 4–6; extends [ADR-00305](ADR-00305.md) |
 | [00307](ADR-00307.md) | Event-loop lost-wakeup deadlocks — resumable-task check, conn poke, curl deadline fold | Intermittent hard hang of streaming uploads under the unified event loop |
+| [00308](ADR-00308.md) | `SharedArrayBuffer` + `Atomics` — shared memory across worker threads | Implements [TDD-00099](../tdd/TDD-00099.md); wait/notify as a portable futex substitute |
+| [00309](ADR-00309.md) | `BroadcastChannel` + `MessageChannel`/`MessagePort` | Implements [TDD-00099](../tdd/TDD-00099.md); shared pipe-backed endpoint runtime |
+| [00310](ADR-00310.md) | Free-variable scanner missed `new TypedArray/ArrayBuffer/DataView(...)` arguments | Closure capture miscompile found during ADR-00308 |
+| [00311](ADR-00311.md) | URLPattern — route matching over compiled per-component regexes | Implements [TDD-00100](../tdd/TDD-00100.md); merged-Map `.exec` result |

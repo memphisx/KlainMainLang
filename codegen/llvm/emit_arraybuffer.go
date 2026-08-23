@@ -26,18 +26,31 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 	}
 	sizeVal = e.coerce(sizeVal, TypeI64)
 
-	e.ensureCalloc()
-	e.ensureMalloc()
+	// A SharedArrayBuffer under -mm=gc must survive the window where its
+	// only live reference is on another thread (or inside a pipe envelope)
+	// — invisible to this thread's Boehm scan — so header and data are
+	// GC_malloc_uncollectable (zeroed, never collected, still scanned).
+	// TDD-00099.
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", dataReg, sizeVal.Ref))
-
 	hdrReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+	if ex.Shared && e.isGCMode() {
+		e.ensureGCUncollectable()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", dataReg, sizeVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 16)", hdrReg))
+	} else {
+		e.ensureCalloc()
+		e.ensureMalloc()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", dataReg, sizeVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, hdrReg))
 	dataSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, dataSlot))
 
+	if ex.Shared {
+		return Value{Ref: hdrReg, Ty: SharedArrayBufferType()}, nil
+	}
 	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
 }
 

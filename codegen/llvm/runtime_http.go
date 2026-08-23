@@ -1071,11 +1071,16 @@ afteresreconnect:
   ; (a no-op stub when the program never uses workers, same mechanism as
   ; the task/microtask stubs).
   %wkeep = call i1 @__kml_worker_keepalive()
+  ; TDD-00099: a channel endpoint (BroadcastChannel/MessagePort) with a
+  ; registered onmessage handler holds this thread's loop alive until
+  ; close() — same no-op-stub mechanism as the worker hook above.
+  %ckeep = call i1 @__kml_chan_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
   %anywork3 = or i1 %anywork2, %hasopenwsc
-  %anywork = or i1 %anywork3, %wkeep
+  %anywork4 = or i1 %anywork3, %wkeep
+  %anywork = or i1 %anywork4, %ckeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1221,6 +1226,11 @@ wscsetdone:
   %wfz0 = load i1, ptr %forcezero, align 1
   %wfz1 = or i1 %wfz0, %wfdforce
   store i1 %wfz1, ptr %forcezero, align 1
+  ; TDD-00099: fold this thread's channel-endpoint pipes in likewise.
+  %cfdforce = call i1 @__kml_chan_fdset_add(ptr %fdset, ptr %maxfd)
+  %cfz0 = load i1, ptr %forcezero, align 1
+  %cfz1 = or i1 %cfz0, %cfdforce
+  store i1 %cfz1, ptr %forcezero, align 1
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -1456,6 +1466,8 @@ afterselectok:
   ; (workers are plain pipes, no libcurl involvement); no-op stub when the
   ; program never uses workers.
   call void @__kml_worker_dispatch()
+  ; TDD-00099: drain channel-endpoint envelopes for this thread likewise.
+  call void @__kml_chan_dispatch()
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:

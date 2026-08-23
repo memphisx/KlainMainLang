@@ -13,7 +13,7 @@ Format: [Status page format](README.md#status-page-format).
 | `console.warn(...)` | ✅ | | • Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/ADR-00285.md)) |
 | `console.info(...)` | ✅ | | |
 | `console.debug(...)` | ✅ | | |
-| `console.trace(...)` | ✅ | • Prints `"Trace: <message>"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all | • Same generic print path as `.debug()`/`.info()`, no stack-walking logic<br>• Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
+| `console.trace(...)` | ✅ | • Prints `"Trace: <message>"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all | • Same generic print path as `.debug()`/`.info()`, no stack-walking logic. See [ADR-00166](../adr/ADR-00166.md). |
 | `console.assert(cond, msg)` | ✅ | | |
 | `console.table()` | ❌ | | • Deliberately deferred, not attempted — needs a genuinely new algorithm (dynamic per-column width computation, box-drawing header/index rows over arbitrarily-shaped input), not a quick extension of existing print machinery like the other rows below |
 | `console.time()` / `.timeEnd()` | ✅ | • V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label | • See [ADR-00029](../adr/ADR-00029.md). |
