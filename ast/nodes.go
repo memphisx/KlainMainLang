@@ -31,6 +31,28 @@ type Program struct {
 	// NamespaceMangle(X, member); this table is what lets `X.member` call/
 	// value sites resolve through them. Nil when a program declares none.
 	Namespaces map[string]map[string]bool
+	// WorkerPaths is filled by the parser for a single file's program: the
+	// raw string-literal path of every `new Worker('...')` in the file, so
+	// the resolver can resolve worker entry files as dependencies without a
+	// full-AST walk (TDD-00098). Empty in the merged program.
+	WorkerPaths []string
+	// WorkerModules is filled by the resolver on the merged program: one
+	// entry per distinct worker entry file, holding that file's top-level
+	// statements — kept out of Body so codegen emits them into a dedicated
+	// per-worker entry function instead of main (TDD-00098). The worker
+	// file's function/class/interface/type/enum declarations are hoisted
+	// into Body like any dependency's; only its var declarations and
+	// executable statements stay here.
+	WorkerModules []WorkerModule
+}
+
+// WorkerModule is one worker entry file's diverted top-level statement list
+// (TDD-00098). Path is the canonical absolute file path — the same key a
+// NewWorkerExpression's ResolvedPath carries, which is how codegen matches a
+// `new Worker(...)` site to its entry function.
+type WorkerModule struct {
+	Path string
+	Body []Statement
 }
 
 // NamespaceMangle is the flat top-level name a namespace member desugars to —
@@ -1197,6 +1219,29 @@ type NewWebSocketExpression struct {
 func (*NewWebSocketExpression) nodeMarker()   {}
 func (*NewWebSocketExpression) exprMarker()   {}
 func (n *NewWebSocketExpression) GetPos() Pos { return n.pos }
+
+// NewWorkerExpression is `new Worker('./file.ts', { workerData: v })`
+// (TDD-00098) — the path must be a compile-time string literal (there is no
+// interpreter to load code at runtime; the worker file is compiled into the
+// same binary as its own entry function), resolved relative to the file
+// containing this expression. The optional second argument is an object
+// literal whose only recognized property is `workerData`.
+type NewWorkerExpression struct {
+	Path string // raw literal as written
+	// ResolvedPath is the canonical absolute path, set by the resolver's
+	// rename walk — the key that matches a WorkerModule.Path.
+	ResolvedPath string
+	WorkerData   Expression // nil when no { workerData } option is given
+	pos          Pos
+}
+
+func (*NewWorkerExpression) nodeMarker()   {}
+func (*NewWorkerExpression) exprMarker()   {}
+func (n *NewWorkerExpression) GetPos() Pos { return n.pos }
+
+func NewNewWorkerExpression(path string, workerData Expression, pos Pos) *NewWorkerExpression {
+	return &NewWorkerExpression{Path: path, WorkerData: workerData, pos: pos}
+}
 
 func NewNewWebSocketExpression(url Expression, pos Pos) *NewWebSocketExpression {
 	return &NewWebSocketExpression{URL: url, pos: pos}

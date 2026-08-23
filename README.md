@@ -13,7 +13,7 @@ The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/REA
 Broad strokes:
 
 - **Core TypeScript — solid.** Control flow, operators, closures, full classes (inheritance, access modifiers, getters/setters), generics, enums, interfaces, destructuring, generators, tuples, unions, `bigint`, `RegExp`.
-- **Node.js APIs — substantial.** `fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`.
+- **Node.js APIs — substantial.** `fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`, `worker_threads` (real OS threads).
 - **Web Platform APIs — a mixed bag.** `fetch`, `URL`, `WebSocket`, `ArrayBuffer`/TypedArrays are in; plenty around them isn't.
 - **Gaps you'll trip over first.** Async is mostly synchronous under the hood except `await fetch`; no `Proxy` or dynamic property bags, by design.
 
@@ -200,7 +200,7 @@ Makefile            Build, test, and example targets
    - A scope stack for symbol resolution, plus a two-pass setup so functions can forward-reference each other.
    - Arrays are `{ptr, i64}` aggregates; objects are heap-allocated structs reached via GEP; closures are heap-allocated `{funcPtr, envPtr}` pairs; exceptions are `setjmp`/`longjmp` with a 64-slot jump-buffer stack; `any`/`unknown` are a boxed `{tag, payload}` pair with runtime-dispatched `typeof`/print/equality.
    - `ensure*()` pattern: every C stdlib dependency (`malloc`, `sscanf`, `gmtime`, you name it) gets declared exactly once, the first time it's actually needed.
-   - Concurrency, such as it is: a `select()`-based event loop merges the listening socket, every open `http.listen` connection, libcurl's own fds (for `fetch`), and the timer queue into one wait. Actual suspension is `ucontext.h` fibers, not LLVM's coroutine intrinsics — a direct prototype proved coroutines segfault the moment a `try`/`catch` spans a suspend point, since this compiler's `setjmp`/`longjmp` exceptions assume a C stack frame that a coroutine's suspend unwinds out from under them. Fibers keep their own OS stack, so they don't have that problem. No thread pool, no preemption: exactly one fiber runs at a time, cooperatively, same as JS's own single-threaded model.
+   - Concurrency, such as it is: a `select()`-based event loop merges the listening socket, every open `http.listen` connection, libcurl's own fds (for `fetch`), and the timer queue into one wait. Actual suspension is `ucontext.h` fibers, not LLVM's coroutine intrinsics — a direct prototype proved coroutines segfault the moment a `try`/`catch` spans a suspend point, since this compiler's `setjmp`/`longjmp` exceptions assume a C stack frame that a coroutine's suspend unwinds out from under them. Fibers keep their own OS stack, so they don't have that problem. Within one thread there is no preemption: exactly one fiber runs at a time, cooperatively, same as JS's own single-threaded model. Real parallelism exists one level up — `worker_threads`' `Worker` spawns actual pthreads, each running its own independent instance of this same loop (every runtime singleton is `thread_local`), talking to the parent over pipe-based message channels.
 4. **Compile**: the emitter writes a `.ll` file next to the source, then shells out to `clang -O2` for the actual native codegen. KlainMainLang does the fun 90% and quietly lets a real compiler backend handle the part that would otherwise take a PhD.
 
 ## Things this compiler will cheerfully never do

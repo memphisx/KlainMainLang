@@ -4,7 +4,7 @@
 
 **Coverage**: 6/6 (100%) · **Strict Coverage**: 3/6 (50%).
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 | API | Status | Caveats | Notes |
 |---|---|---|---|

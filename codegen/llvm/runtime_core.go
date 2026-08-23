@@ -417,7 +417,7 @@ func (e *Emitter) ensureRandRandom() {
 	e.emitGlobal("declare i64  @time(ptr)")
 
 	// One-time seeded flag (thread-unsafe but fine for single-threaded scripts).
-	e.emitGlobal("@__klain_rand_seeded = private global i1 false, align 1")
+	e.emitGlobal("@__klain_rand_seeded = private thread_local global i1 false, align 1")
 
 	// The helper function itself — defined fully in IR, no external symbols beyond the above.
 	e.emitGlobal(`define private double @__klain_math_random() {

@@ -19,6 +19,8 @@ package resolver
 // that held it, which a bare in-place mutation can't do.
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -496,6 +498,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "stream__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// worker_threads members likewise (TDD-00098): Worker is a
+				// parse-time constructor, parentPort/workerData are reserved
+				// identifiers dispatched by codegen inside worker modules.
+				if ref.Marker == "workerthreads__kml_builtin" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
@@ -712,6 +720,24 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		e.URL = rewriteExpr(e.URL, sc, lu)
 	case *ast.NewWebSocketExpression:
 		e.URL = rewriteExpr(e.URL, sc, lu)
+	case *ast.NewWorkerExpression:
+		// TDD-00098: canonicalize the worker path relative to this file, the
+		// same way visit() resolved it as a dependency edge — the resulting
+		// key is what codegen matches against WorkerModule.Path.
+		if e.WorkerData != nil {
+			e.WorkerData = rewriteExpr(e.WorkerData, sc, lu)
+		}
+		abs, found, err := resolveTsFile(filepath.Dir(lu.filePath), e.Path)
+		if err == nil && !found {
+			err = fmt.Errorf("%d:%d: cannot find worker module '%s' (resolved to %s)", e.GetPos().Line, e.GetPos().Col, e.Path, abs)
+		}
+		if err != nil {
+			if *lu.reservedErr == nil {
+				*lu.reservedErr = err
+			}
+			break
+		}
+		e.ResolvedPath = abs
 	case *ast.NewURLSearchParamsExpression:
 		if e.Init != nil {
 			e.Init = rewriteExpr(e.Init, sc, lu)

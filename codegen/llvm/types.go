@@ -343,6 +343,13 @@ type Type struct {
 	// loop walks each iteration to deliver `.onmessage`/`.onclose`/
 	// `.onerror`. See emit_websocket_client.go.
 	IsWebSocketClient bool
+	// IsWorker marks `new Worker(path)`'s result (TDD-00098): a ptr to the
+	// runtime control block (runtime_worker.go's workerCtrlIR). WorkerPath
+	// is the worker module's canonical file path — the key into
+	// e.workerEntries that carries the statically-declared channel types,
+	// which is how each parent-side postMessage/on site is type-checked.
+	IsWorker   bool
+	WorkerPath string
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -1021,6 +1028,17 @@ func WebSocketClientType() Type {
 		{Name: "onerror", Ty: FuncType([]Type{msgTy}, TypeVoid)},
 	})
 	ty.IsWebSocketClient = true
+	return ty
+}
+
+// WorkerType is `new Worker(path)`'s result (TDD-00098): a bare pointer to
+// the runtime control block, flag-tagged so method dispatch and the string
+// heuristics never mistake it for anything else. path keys the compile-time
+// channel record in e.workerEntries.
+func WorkerType(path string) Type {
+	ty := ObjectType([]Field{{Name: "__worker_ctrl", Ty: TypePtr}})
+	ty.IsWorker = true
+	ty.WorkerPath = path
 	return ty
 }
 

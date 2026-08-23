@@ -342,3 +342,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00302](ADR-00302.md) | `CompressionStream`/`DecompressionStream` over zlib; bare-return closures inferred void | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 6 |
 | [00303](ADR-00303.md) | EventEmitter event maps (per-event payload typing, `void` events) + built-in `instanceof` lifts | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 7 |
 | [00304](ADR-00304.md) | Node `stream` module — Readable/Writable/Transform wrappers, events, `.pipe()`, `stream/promises` | Implements [TDD-00097](../tdd/TDD-00097.md) Stage 8 |
+| [00305](ADR-00305.md) | Worker threads — spawn/join + typed copy-only postMessage (manual mode) | Implements [TDD-00098](../tdd/TDD-00098.md) stages 1–3 |
+| [00306](ADR-00306.md) | Worker threads — `-mm=gc` support, error/termination semantics, browser surface | Implements [TDD-00098](../tdd/TDD-00098.md) stages 4–6; extends [ADR-00305](ADR-00305.md) |
+| [00307](ADR-00307.md) | Event-loop lost-wakeup deadlocks — resumable-task check, conn poke, curl deadline fold | Intermittent hard hang of streaming uploads under the unified event loop |

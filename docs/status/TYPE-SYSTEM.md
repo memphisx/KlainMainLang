@@ -6,7 +6,7 @@
 
 **Strict Coverage**: Type primitives 8/12 (~67%) · Type system features 7/13 (~54%). A row counts toward Strict only when its **Caveats** column is empty — the zero-known-caveats basis from the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)), now derived directly from the table so the two can't drift.
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 ## Type primitives
 

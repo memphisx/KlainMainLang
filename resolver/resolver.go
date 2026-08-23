@@ -152,6 +152,16 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	onStack := map[string]bool{}
 	cyclic := map[string]bool{}
 
+	// TDD-00098: worker entry files. A `new Worker('./w.ts')` path is a
+	// dependency edge like an import's (the worker file and its own imports
+	// must be parsed/mangled/renamed with everything else), but the worker
+	// file's top-level statements are diverted into Program.WorkerModules at
+	// merge time instead of the main statement stream. importTargets tracks
+	// files reached via a real import edge so the "a worker entry cannot
+	// also be imported" conflict is detectable after the DFS.
+	importTargets := map[string]bool{}
+	workerTargets := map[string]bool{}
+
 	var visit func(path string, isEntry bool) error
 	visit = func(path string, isEntry bool) error {
 		if _, seen := files[path]; seen {
@@ -216,6 +226,22 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 			if err != nil {
 				return fmt.Errorf("%d:%d: %w", stmt.GetPos().Line, stmt.GetPos().Col, err)
 			}
+			importTargets[resolved] = true
+			if err := visit(resolved, false); err != nil {
+				return err
+			}
+		}
+
+		// TDD-00098: visit each `new Worker('...')` target as a dependency.
+		for _, wp := range prog.WorkerPaths {
+			resolved, found, err := resolveTsFile(dir, wp)
+			if err != nil {
+				return fmt.Errorf("%s: resolving worker module '%s': %w", path, wp, err)
+			}
+			if !found {
+				return fmt.Errorf("%s: cannot find worker module '%s' (resolved to %s)", path, wp, resolved)
+			}
+			workerTargets[resolved] = true
 			if err := visit(resolved, false); err != nil {
 				return err
 			}
@@ -230,6 +256,19 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 
 	if err := visit(entryAbs, true); err != nil {
 		return nil, err
+	}
+
+	// TDD-00098: worker-entry conflict checks, once the whole graph is known.
+	for wf := range workerTargets {
+		if wf == entryAbs {
+			return nil, fmt.Errorf("%s: the program's own entry file cannot be used as a worker module", wf)
+		}
+		if importTargets[wf] {
+			return nil, fmt.Errorf("%s: a worker module cannot also be imported — its top level runs on the worker thread, not at import time", wf)
+		}
+		if len(files[wf].prog.WorkerPaths) > 0 {
+			return nil, fmt.Errorf("%s: a worker module cannot spawn workers of its own (nested workers are not supported)", wf)
+		}
 	}
 
 	// TDD-00052: a file's cyclic-ness can only be known once the full DFS
@@ -529,6 +568,18 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 		}
 	}
 	for _, path := range order {
+		if workerTargets[path] {
+			// TDD-00098: a worker module's function/class/interface/type/enum
+			// declarations are hoisted into the shared program body (they're
+			// pure definitions — emitted as functions, callable from any
+			// thread), while its var declarations and executable statements
+			// become the worker's entry-function body.
+			decls, body := splitWorkerBody(unwrap(files[path].prog.Body))
+			merged.Body = append(merged.Body, decls...)
+			merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: path, Body: body})
+			mergeNamespaces(files[path].prog)
+			continue
+		}
 		merged.Body = append(merged.Body, unwrap(files[path].prog.Body)...)
 		mergeNamespaces(files[path].prog)
 	}
@@ -886,6 +937,28 @@ func resolveKlmpmPackage(klainModulesDir, name string) (string, error) {
 		return "", fmt.Errorf("package '%s': klain.json's \"main\" (%s) does not exist (resolved to %s)", name, manifest.Main, abs)
 	}
 	return abs, nil
+}
+
+// splitWorkerBody partitions a worker module's (already-unwrapped) top-level
+// statements into hoistable pure declarations vs. the statements that make
+// up the worker's entry-function body (TDD-00098). Var declarations stay in
+// the body deliberately: they are per-worker state, initialized on the
+// worker thread. The known cost: a worker module's *named* functions can't
+// read the worker's own top-level bindings (those are entry-function locals,
+// the pre-TDD-00093 situation, scoped to worker modules) — an arrow closure
+// captures them fine.
+func splitWorkerBody(stmts []ast.Statement) (decls, body []ast.Statement) {
+	for _, s := range stmts {
+		switch s.(type) {
+		case *ast.FunctionDeclaration, *ast.ClassDeclaration,
+			*ast.InterfaceDeclaration, *ast.TypeAliasDeclaration,
+			*ast.EnumDeclaration:
+			decls = append(decls, s)
+		default:
+			body = append(body, s)
+		}
+	}
+	return decls, body
 }
 
 // unwrap strips ImportDeclaration nodes and unwraps ExportDeclaration nodes

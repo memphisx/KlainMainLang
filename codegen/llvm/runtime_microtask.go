@@ -16,10 +16,10 @@ func (e *Emitter) ensureMicrotasks() {
 	e.usedMicrotasks = true
 	e.ensureMalloc()
 
-	e.emitGlobal("@__kml_mt_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_mt_len  = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_mt_cap  = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_mt_head = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_mt_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_mt_len  = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_mt_cap  = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_mt_head = internal thread_local global i64 0, align 8")
 	e.ensureRealloc()
 
 	// @__kml_microtask_enqueue(ptr %cl): append a closure header pointer.

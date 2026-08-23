@@ -457,10 +457,10 @@ func (e *Emitter) ensureSignalHandlerRuntime() {
 	}
 	e.usedSignalHandler = true
 	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
-	e.emitGlobal("@__kml_sigint_pending = internal global i8 0")
-	e.emitGlobal("@__kml_sigterm_pending = internal global i8 0")
-	e.emitGlobal("@__kml_sigint_closure = internal global ptr null")
-	e.emitGlobal("@__kml_sigterm_closure = internal global ptr null")
+	e.emitGlobal("@__kml_sigint_pending = internal thread_local global i8 0")
+	e.emitGlobal("@__kml_sigterm_pending = internal thread_local global i8 0")
+	e.emitGlobal("@__kml_sigint_closure = internal thread_local global ptr null")
+	e.emitGlobal("@__kml_sigterm_closure = internal thread_local global ptr null")
 	e.emitGlobal(`
 define void @__kml_sig_handler(i32 %signum) {
 entry:

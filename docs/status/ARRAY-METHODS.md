@@ -4,7 +4,7 @@
 
 **Coverage**: 35/35 (100%) · **Strict Coverage**: 25/35 (~71%).
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
@@ -15,7 +15,7 @@ This page follows the shared status-page format ([Status page format](README.md#
 | `.pop()` | ✅ | • On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type ([ADR-00157](../adr/ADR-00157.md) convention) | • Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md))<br>• The empty-array crash (garbage return, `.length` → `-1`) was fixed in [ADR-00167](../adr/ADR-00167.md) |
 | `.shift()` | ✅ | • Same empty-array zero-value-instead-of-`undefined` convention as `.pop()` ([ADR-00157](../adr/ADR-00157.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• The empty-array crash (garbage return, `.length` → `-1`, unguarded memmove) was fixed in [ADR-00167](../adr/ADR-00167.md) |
 | `.unshift(...items)` | ✅ | | • Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md)) |
-| `.splice(start, delete?, ...items)` | ✅ | | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• An over-large `delete` used to read past the backing allocation and corrupt the length to negative (a memory-safety bug), and `...items` insertion wasn't implemented despite the row claiming it — both fixed together ([ADR-00056](../adr/ADR-00056.md)) |
+| `.splice(start, delete?, ...items)` | ✅ | | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• [ADR-00056](../adr/ADR-00056.md) |
 | `.slice(start, end?)` | ✅ | | |
 | `.at(i)` | ✅ | | |
 | `.indexOf(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |

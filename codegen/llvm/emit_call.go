@@ -205,6 +205,19 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "send" && e.inferExprType(mem.Object).IsWebSocketClient {
 			return e.emitWSClientSend(mem.Object, ex.Args, ex.GetPos())
 		}
+		// TDD-00098: parentPort.on/postMessage inside a worker module, and
+		// the parent-side Worker method surface.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "parentPort" && !e.isShadowedByLocal(id.Name) {
+			return e.emitParentPortCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		// Browser worker surface (TDD-00098 stage 6): self.postMessage(...)
+		// inside a worker module is parentPort.postMessage.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "self" && mem.Property == "postMessage" && e.currentWorkerMod != "" && !e.isShadowedByLocal(id.Name) {
+			return e.emitParentPortCall("postMessage", ex.Args, ex.GetPos())
+		}
+		if (mem.Property == "postMessage" || mem.Property == "on" || mem.Property == "terminate") && e.inferExprType(mem.Object).IsWorker {
+			return e.emitWorkerMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if mem.Property == "close" && e.inferExprType(mem.Object).IsWebSocketClient {
 			return e.emitWSClientClose(mem.Object, ex.GetPos())
 		}
@@ -937,6 +950,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// user-defined function named `eval` still wins.
 		if id.Name == "eval" {
 			return e.emitStaticEval(ex.Args, ex.GetPos())
+		}
+		// Browser worker surface (TDD-00098 stage 6): a bare postMessage(x)
+		// inside a worker module is parentPort.postMessage(x). Checked after
+		// every user-binding lookup, so a user function named postMessage
+		// still wins.
+		if id.Name == "postMessage" && e.currentWorkerMod != "" {
+			return e.emitParentPortCall("postMessage", ex.Args, ex.GetPos())
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined function or closure '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 	}

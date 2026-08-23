@@ -6,7 +6,7 @@
 
 **Strict Coverage**: 0/3 — both shipped modes carry a real, disclosed caveat (a non-empty Caveats cell), so neither counts; verified by the 2026-08-11 audit ([ADR-00166](../adr/ADR-00166.md)), which found no false ✅ on this page.
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)), adapted to compilation *modes* rather than features: **Status** is a bare ✅/❌; **Caveats** lists real limitations of a shipped mode (a non-empty Caveats cell is what keeps it out of Strict Coverage); **Notes** carries implementation detail. Figures above derive from the table below.
+Format: [Status page format](README.md#status-page-format).
 
 ## The three modes
 

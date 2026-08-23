@@ -115,6 +115,11 @@ func main() {
 	}
 
 	clangArgs := []string{"-O2", llFile}
+	if em.UsesWorkers() {
+		// Worker threads (worker_threads): the first and only pthread
+		// dependency; -pthread covers both compile and link phases.
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	if *mm == "gc" {
 		gcShimPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".gcshim.c"
 		if err := os.WriteFile(gcShimPath, []byte(llvm.GCShimSource), 0644); err != nil {

@@ -1,13 +1,13 @@
 # Concurrency (Workers)
 
-> Part of the [Implementation Status](README.md) index. Requires spawning threads or processes and sharing memory.
+> Part of the [Implementation Status](README.md) index. Real OS threads and cross-thread messaging.
 
-**Coverage**: 0/3 (0%) · **Strict Coverage**: 0/3 (0%).
+**Coverage**: 1/3 (33%) · **Strict Coverage**: 0/3 (0%).
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `Worker` (Web Workers API) | ❌ | | • Run code on a background thread<br>• The shipped event loop ([TDD-00006](../tdd/TDD-00006.md)) is cooperative, one-fiber-at-a-time concurrency, not preemptive multi-threading — `Worker` needs a separate mechanism (`pthreads`), plus `SharedArrayBuffer`/`Atomics`<br>• Scoped, not started — see [TDD-00047](../tdd/TDD-00047.md), which found process-wide singleton state (exception jump-buffer globals, GC stack-bottom tracking) that must be fixed before real threads are safe, beyond the `pthreads` dependency itself |
+| `Worker` | ✅ | • One listener per event, arrow-function literals only<br>• One message type per direction, declared by annotation<br>• Payloads: structured-clone-safe values only; strings share their buffer across threads; no arrays through `onmessage`/`e.data`<br>• `'error'` carries the message string, not an Error object; no `self.onerror`<br>• `terminate()` is cooperative, keeps queued messages, always exits 1<br>• Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings<br>• `-mm=manual` leaks per message; no combining with `http.listen({workers:N})` | • Both surfaces ship: Node `worker_threads` and the browser `Worker`/`onmessage` shape ([TDD-00098](../tdd/TDD-00098.md), [ADR-00305](../adr/ADR-00305.md), [ADR-00306](../adr/ADR-00306.md))<br>• The worker file compiles into the same binary as its own entry function<br>• Each thread runs its own event loop (runtime singletons are `thread_local`); messages travel over pipes as pointer envelopes, deep-copied at the boundary<br>• `-mm=gc` registers each thread with Boehm<br>• Uncaught worker exception → `'error'` + `'exit'(1)` on the parent, or process exit if unhandled<br>• darwin/arm64 verified; the Linux pass (`--static` + `-pthread`, glibc ucontext layout) is pending |
 | `BroadcastChannel` | ❌ | | • Pub/sub across workers |
 | `MessageChannel` / `MessagePort` | ❌ | | • Bidirectional channel between contexts |

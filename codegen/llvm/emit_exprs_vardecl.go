@@ -407,6 +407,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = CustomEventType(detailTy)
 		case *ast.NewWebSocketExpression:
 			ty = WebSocketClientType()
+		case *ast.NewWorkerExpression:
+			ty = WorkerType(init.ResolvedPath)
 		case *ast.NewHeadersExpression:
 			ty = HeadersType()
 		case *ast.NewRequestExpression:

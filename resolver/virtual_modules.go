@@ -40,6 +40,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// constructor; pipeline/finished live under 'stream/promises'.
 	"stream":          "stream__kml_builtin",
 	"stream/promises": "streampromises__kml_builtin",
+	// TDD-00098: worker_threads. All three members bind as identity (the
+	// same posture as stream's class names): `new Worker(...)` is recognized
+	// by name at parse time like every other builtin constructor, and
+	// `parentPort`/`workerData` are reserved identifiers codegen only
+	// accepts inside a worker entry module.
+	"worker_threads": "workerthreads__kml_builtin",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -78,6 +84,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
 	},
 	"stream/promises": {"pipeline": true, "finished": true},
+	"worker_threads":  {"Worker": true, "parentPort": true, "workerData": true},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds

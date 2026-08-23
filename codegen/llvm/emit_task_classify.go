@@ -56,7 +56,23 @@ func (e *Emitter) ensureCurrentTaskGlobal() {
 		return
 	}
 	e.usedCurrentTaskGlobal = true
-	e.emitGlobal("@__kml_current_task = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_current_task = internal thread_local global ptr null, align 8")
+}
+
+// ensureConnPokeGlobal declares @__kml_conn_poke once: set whenever a task
+// completes (finish or reject), telling the event loop's connection-resume
+// scan to resume every parked connection fiber once so it re-checks its own
+// await condition. Closes a lost-wakeup deadlock: a conn fiber awaiting an
+// async handler's promise parks as "resume on my fd readable", but when the
+// handler's last input was fed by the pump (not the fiber), the fd never
+// becomes readable again and the resolved promise went unnoticed forever.
+// Shared by runtime_task.go (setters) and runtime_http.go (the loop).
+func (e *Emitter) ensureConnPokeGlobal() {
+	if e.usedConnPokeGlobal {
+		return
+	}
+	e.usedConnPokeGlobal = true
+	e.emitGlobal("@__kml_conn_poke = internal thread_local global i8 0, align 1")
 }
 
 // isSuspendingAwaitArg reports whether awaiting arg suspends: a fetch call, a

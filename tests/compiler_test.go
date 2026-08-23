@@ -53,6 +53,9 @@ func buildBinary(t *testing.T, src string) string {
 	}
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
@@ -222,6 +225,9 @@ func buildBinaryImports(t *testing.T, src string) string {
 	}
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
@@ -576,6 +582,9 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
@@ -625,6 +634,9 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
@@ -704,6 +716,9 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
@@ -746,6 +761,9 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 		t.Fatalf("write IR: %v", err)
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	if em.UsesWorkers() {
+		clangArgs = append(clangArgs, "-pthread")
+	}
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}

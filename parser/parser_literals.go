@@ -227,6 +227,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewCustomEventBody(pos)
 	case "WebSocket":
 		return p.parseNewWebSocketBody(pos)
+	case "Worker":
+		return p.parseNewWorkerBody(pos)
 	case "URLSearchParams":
 		return p.parseNewURLSearchParamsBody(pos)
 	case "Headers":
@@ -551,6 +553,46 @@ func (p *Parser) parseNewWebSocketBody(pos ast.Pos) (*ast.NewWebSocketExpression
 		return nil, err
 	}
 	return ast.NewNewWebSocketExpression(url, pos), nil
+}
+
+// parseNewWorkerBody parses `new Worker('./file.ts')` and
+// `new Worker('./file.ts', { workerData: expr })` (TDD-00098). The path must
+// be a string literal — the worker file is compiled into the same binary, so
+// a runtime-computed path has nothing to load. Only the `workerData`
+// property is recognized in the options object.
+func (p *Parser) parseNewWorkerBody(pos ast.Pos) (*ast.NewWorkerExpression, error) {
+	p.advance() // consume 'Worker'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	pathTok := p.peek()
+	if pathTok.Type != lexer.STRING {
+		return nil, fmt.Errorf("%d:%d: new Worker(...) requires a compile-time string-literal path — the worker file is compiled into the binary, so a runtime-computed path cannot be loaded", pathTok.Line, pathTok.Col)
+	}
+	p.advance()
+	var workerData ast.Expression
+	if p.check(lexer.COMMA) {
+		p.advance()
+		obj, err := p.parsePrimary()
+		if err != nil {
+			return nil, err
+		}
+		lit, ok := obj.(*ast.ObjectLiteral)
+		if !ok {
+			return nil, fmt.Errorf("%d:%d: new Worker's second argument must be an object literal (e.g. { workerData: ... })", pos.Line, pos.Col)
+		}
+		for _, prop := range lit.Properties {
+			if prop.Key != "workerData" {
+				return nil, fmt.Errorf("%d:%d: new Worker options: only 'workerData' is supported (found '%s')", pos.Line, pos.Col, prop.Key)
+			}
+			workerData = prop.Value
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	p.workerPaths = append(p.workerPaths, pathTok.Literal)
+	return ast.NewNewWorkerExpression(pathTok.Literal, workerData, pos), nil
 }
 
 func (p *Parser) parseNewURLSearchParamsBody(pos ast.Pos) (*ast.NewURLSearchParamsExpression, error) {

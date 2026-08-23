@@ -163,6 +163,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewCustomEventExpression(ex)
 	case *ast.NewWebSocketExpression:
 		return e.emitNewWebSocketClientExpression(ex)
+	case *ast.NewWorkerExpression:
+		return e.emitNewWorkerExpression(ex)
 	case *ast.NewHeadersExpression:
 		return e.emitNewHeadersExpression(ex)
 	case *ast.NewDataViewExpression:
@@ -223,6 +225,10 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
 		case "Infinity":
 			return Value{Ref: "0x7FF0000000000000", Ty: TypeF64}, nil
+		case "workerData":
+			// TDD-00098: only meaningful inside a worker module; a local
+			// binding of the same name shadows it via the lookup above.
+			return e.emitWorkerDataRead(id.GetPos())
 		}
 		// A bare reference to a named function in a value position (`const g =
 		// f`, `apply(f, ...)`) — materialize a closure value wrapping it via an

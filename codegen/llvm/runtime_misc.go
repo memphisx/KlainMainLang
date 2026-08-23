@@ -11,7 +11,7 @@ func (e *Emitter) ensureConsoleGroupDepth() {
 		return
 	}
 	e.usedConsoleGroupDepth = true
-	e.emitGlobal("@__kml_console_group_depth = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_console_group_depth = internal thread_local global i64 0, align 8")
 }
 
 // ensureConsoleTimer declares the hidden global backing console.time()/
@@ -27,7 +27,7 @@ func (e *Emitter) ensureConsoleTimer() {
 	}
 	e.usedConsoleTimer = true
 	e.ensurePerformanceNow()
-	e.emitGlobal("@__kml_console_time_start = internal global double 0.0, align 8")
+	e.emitGlobal("@__kml_console_time_start = internal thread_local global double 0.0, align 8")
 }
 
 // ensureConsoleCountMap declares the hidden global backing console.count()/
@@ -43,7 +43,7 @@ func (e *Emitter) ensureConsoleCountMap() {
 	}
 	e.usedConsoleCountMap = true
 	e.ensureMapStrHelpers()
-	e.emitGlobal("@__kml_console_count_map = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_console_count_map = internal thread_local global ptr null, align 8")
 }
 
 // ensureMapFree declares __kml_map_free: frees a Map<K,V>/Set<T>'s own two

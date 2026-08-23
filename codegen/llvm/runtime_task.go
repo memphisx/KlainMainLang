@@ -140,14 +140,20 @@ func (e *Emitter) emitLoopTaskStubs() {
 		return
 	}
 	if !e.usedTaskRuntime {
-		e.emitGlobal("@__kml_task_active = internal global i64 0, align 8")
+		e.emitGlobal("@__kml_task_active = internal thread_local global i64 0, align 8")
 		e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define i1 @__kml_task_resumable() {\nentry:\n  ret i1 0\n}")
 	}
 	if !e.usedMicrotasks {
 		e.emitGlobal("define void @__kml_drain_microtasks() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i1 @__kml_microtasks_pending() {\nentry:\n  ret i1 0\n}")
 	}
-
+	// TDD-00098: worker hooks the event loop references unconditionally.
+	if !e.usedWorkerRuntime {
+		e.emitGlobal("define i1 @__kml_worker_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_worker_dispatch() {\nentry:\n  ret void\n}")
+	}
 }
 
 func (e *Emitter) ensureTaskRuntime() {
@@ -160,6 +166,7 @@ func (e *Emitter) ensureTaskRuntime() {
 	e.ensureFree()
 	e.ensureFiberRuntime()      // getcontext/makecontext/swapcontext + @__kml_main_ctx
 	e.ensureCurrentTaskGlobal() // @__kml_current_task
+	e.ensureConnPokeGlobal()    // task completion pokes parked connection fibers
 	e.ensureExceptionHelpers()  // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
 	e.usedAwaitTimerDrive = true // __kml_task_await_ready's top-level drive fires timers (TDD-00088)
 	e.ensureMicrotasks()        // .then/.catch/.finally reactions drain here
@@ -170,12 +177,12 @@ func (e *Emitter) ensureTaskRuntime() {
 
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := ucontextLayout()
 
-	e.emitGlobal("@__kml_task_launching = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_task_launching = internal thread_local global ptr null, align 8")
 	e.emitGlobal("declare i32 @usleep(i32 noundef)")
-	e.emitGlobal("@__kml_task_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_task_len = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_task_cap = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_task_active = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_task_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_task_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_task_cap = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_task_active = internal thread_local global i64 0, align 8")
 
 	// GC-mode stack-bottom set (into a fiber's stack) / restore (to whatever the
 	// swapper's stack was: the real process stack when on main, else the current
@@ -184,7 +191,7 @@ func (e *Emitter) ensureTaskRuntime() {
 		if !e.isGCMode() {
 			return ""
 		}
-		return fmt.Sprintf("\n  %%__gchigh = getelementptr i8, ptr %s, i64 %d\n  store ptr %%__gchigh, ptr @GC_stackbottom, align 8", stackReg, taskStackBytes)
+		return fmt.Sprintf("\n  %%__gchigh = getelementptr i8, ptr %s, i64 %d\n  %s", stackReg, taskStackBytes, e.gcSBStore("%__gchigh"))
 	}
 	gcRestoreAfterSwap := ""
 	if e.isGCMode() {
@@ -204,15 +211,15 @@ entry:
   br i1 %%onmain, label %%main, label %%fiber
 main:
   %%orig = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
-  store ptr %%orig, ptr @GC_stackbottom, align 8
+  %s
   ret void
 fiber:
   %%stk_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   %%stk = load ptr, ptr %%stk_p, align 8
   %%high = getelementptr i8, ptr %%stk, i64 %d
-  store ptr %%high, ptr @GC_stackbottom, align 8
+  %s
   ret void
-}`, taskStructIR, taskStack, taskStackBytes))
+}`, e.gcSBStore("%orig"), taskStructIR, taskStack, taskStackBytes, e.gcSBStore("%high")))
 	}
 
 	// @__kml_task_trampoline() : makecontext entry. Reads the just-launched task
@@ -271,6 +278,10 @@ nowake:
   %%act = load i64, ptr @__kml_task_active, align 8
   %%act1 = sub i64 %%act, 1
   store i64 %%act1, ptr @__kml_task_active, align 8
+  ; A parked connection fiber may be awaiting exactly this task's promise
+  ; while spuriously parked as resume-on-fd-readable — poke the loop's conn
+  ; scan so every parked fiber re-checks its own condition once.
+  store i8 1, ptr @__kml_conn_poke, align 1
   call void @__kml_promise_drain_reactions(ptr %%prom)
   %%rc_p = getelementptr %s, ptr %%task, i32 0, i32 %d
   %%rc = load ptr, ptr %%rc_p, align 8
@@ -415,6 +426,10 @@ nowake:
   %%act = load i64, ptr @__kml_task_active, align 8
   %%act1 = sub i64 %%act, 1
   store i64 %%act1, ptr @__kml_task_active, align 8
+  ; A parked connection fiber may be awaiting exactly this task's promise
+  ; while spuriously parked as resume-on-fd-readable — poke the loop's conn
+  ; scan so every parked fiber re-checks its own condition once.
+  store i8 1, ptr @__kml_conn_poke, align 1
   call void @__kml_promise_drain_reactions(ptr %%prom)
   %%rc_p = getelementptr %s, ptr %%task, i32 0, i32 %d
   %%rc = load ptr, ptr %%rc_p, align 8
@@ -524,6 +539,66 @@ done:
 		promiseStructIR, taskStructIR, taskPendingFetch, taskStructIR, taskPendingProm,
 		taskStructIR, taskState, taskStructIR, taskResumerCtx, taskStructIR, taskStack,
 		taskStructIR, taskCtx, gcSetTaskStack, gcRestoreAfterSwap))
+
+	// @__kml_task_resumable() -> i1: is any suspended task's park condition
+	// already satisfied — a done (or headers-done) fetch, a settled awaited
+	// promise, or no park reason at all? Mirrors task_sched_step's own
+	// resume checks exactly. Folded into the event loop's "never block in
+	// select() while work is ready" condition: a fetch completion drained
+	// AFTER task_sched_step ran in the same iteration otherwise left the
+	// parked awaiter resumable but nothing to wake select() (curl done = no
+	// fds, no timer, task_active already 0) — found as an intermittent
+	// (~40%) hard hang of an in-process 8 MiB upload example.
+	e.emitGlobal(fmt.Sprintf(`
+define i1 @__kml_task_resumable() {
+entry:
+  %%len = load i64, ptr @__kml_task_len, align 8
+  %%data = load ptr, ptr @__kml_task_data, align 8
+  br label %%cond
+cond:
+  %%i = phi i64 [ 0, %%entry ], [ %%inext, %%next ]
+  %%go = icmp slt i64 %%i, %%len
+  br i1 %%go, label %%body, label %%no
+body:
+  %%slotp = getelementptr ptr, ptr %%data, i64 %%i
+  %%t = load ptr, ptr %%slotp, align 8
+  %%st_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%st = load i64, ptr %%st_p, align 8
+  %%susp = icmp eq i64 %%st, 1
+  br i1 %%susp, label %%chkpf, label %%next
+chkpf:
+  %%pf_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%pf = load ptr, ptr %%pf_p, align 8
+  %%haspf = icmp ne ptr %%pf, null
+  br i1 %%haspf, label %%chkfetch, label %%chkpp
+chkfetch:
+  %%d_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %%pf, i32 0, i32 2
+  %%d = load i64, ptr %%d_p, align 8
+  %%fdone = icmp ne i64 %%d, 0
+  %%hd_p = getelementptr { ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }, ptr %%pf, i32 0, i32 6
+  %%hd = load i64, ptr %%hd_p, align 8
+  %%hdone = icmp ne i64 %%hd, 0
+  %%fready = or i1 %%fdone, %%hdone
+  br i1 %%fready, label %%yes, label %%next
+chkpp:
+  %%pp_p = getelementptr %s, ptr %%t, i32 0, i32 %d
+  %%pp = load ptr, ptr %%pp_p, align 8
+  %%haspp = icmp ne ptr %%pp, null
+  br i1 %%haspp, label %%chkpres, label %%yes
+chkpres:
+  %%pres_p = getelementptr %s, ptr %%pp, i32 0, i32 0
+  %%pres = load i64, ptr %%pres_p, align 8
+  %%presok = icmp ne i64 %%pres, 0
+  br i1 %%presok, label %%yes, label %%next
+next:
+  %%inext = add i64 %%i, 1
+  br label %%cond
+yes:
+  ret i1 1
+no:
+  ret i1 0
+}`, taskStructIR, taskState, taskStructIR, taskPendingFetch,
+		taskStructIR, taskPendingProm, promiseStructIR))
 
 	// @__kml_task_await_any_of(ptr %members, i64 %count) -> i64: wait until any
 	// member task-promise resolves, returning its index (Promise.race/any over

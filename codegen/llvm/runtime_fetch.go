@@ -213,9 +213,10 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_remove_handle(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_fdset(ptr noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i32 @curl_multi_timeout(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
-	e.emitGlobal("@__kml_curl_multi = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_curl_multi = internal thread_local global ptr null, align 8")
 
 	e.emitGlobal(`
 define ptr @__kml_fetch_async(ptr %url, ptr %method, ptr %headers, ptr %body, ptr %signal) {

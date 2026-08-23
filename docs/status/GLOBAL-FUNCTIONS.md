@@ -4,7 +4,7 @@
 
 **Coverage**: 18/20 (90%) · **Strict Coverage**: 8/20 (40%).
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
@@ -15,7 +15,7 @@ This page follows the shared status-page format ([Status page format](README.md#
 | `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |
 | `parseInt(s, radix?)` | ✅ | • No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • A no-digits input returns a real `NaN` (endptr-checked, double result) — same fix as [NUMBER-MATH.md](NUMBER-MATH.md)'s rows, [ADR-00287](../adr/ADR-00287.md) |
 | `parseFloat(s)` | ✅ | • Inherits `strtod` extras — `"inf"` parses to `Infinity`, C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
-| `NaN` (global constant) | ✅ | • Shadowing is no longer unconditional — since `-compat=strict` became the default (`af7469d`), `let NaN = 99;` is a compile-time-rejected reserved-name collision; only `-compat=js` allows the shadow real JS/browsers permit | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
+| `NaN` (global constant) | ✅ | • `let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
 | `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • Found by the 2026-08-11 audit. See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |
 | `globalThis` | ❌ | | • Not meaningful in a native single-file context |

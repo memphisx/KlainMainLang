@@ -1593,6 +1593,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return EventSourceType()
 	case *ast.NewWebSocketExpression:
 		return WebSocketClientType()
+	case *ast.NewWorkerExpression:
+		return WorkerType(ex.ResolvedPath)
 	case *ast.NewHeadersExpression:
 		return HeadersType()
 	case *ast.NewRequestExpression:

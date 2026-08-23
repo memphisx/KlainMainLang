@@ -161,7 +161,7 @@ func (e *Emitter) ensureGeneratorRuntime() {
 	e.usedGeneratorRuntime = true
 	e.ensureFiberRuntime()
 	e.ensureMalloc()
-	e.emitGlobal("@__kml_gen_pending_obj = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_gen_pending_obj = internal thread_local global ptr null, align 8")
 }
 
 // storeGeneratorField GEPs+stores one field of a generator instance —
@@ -1929,11 +1929,11 @@ func (e *Emitter) generatorGCStackbottomOps(genObj string, genTy Type) (setOp, r
 	}
 	stack := e.loadGeneratorField(genObj, genTy, GeneratorStackField)
 	high := e.freshReg()
-	setOp = fmt.Sprintf("  %s = getelementptr i8, ptr %s, i64 %d\n  store ptr %s, ptr @GC_stackbottom, align 8\n",
-		high, stack.Ref, fiberStackBytes, high)
+	setOp = fmt.Sprintf("  %s = getelementptr i8, ptr %s, i64 %d\n  %s\n",
+		high, stack.Ref, fiberStackBytes, e.gcSBStore(high))
 	origBottom := e.freshReg()
-	restoreOp = fmt.Sprintf("  %s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n  store ptr %s, ptr @GC_stackbottom, align 8\n",
-		origBottom, origBottom)
+	restoreOp = fmt.Sprintf("  %s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8\n  %s\n",
+		origBottom, e.gcSBStore(origBottom))
 	return setOp, restoreOp
 }
 

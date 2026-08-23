@@ -154,6 +154,13 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 		}
 		_, _, hasWorkersField := optsVal.Ty.FieldIndex("workers")
 		if hasWorkersField {
+			// TDD-00098: fork-based clustering and Worker threads are a
+			// known-hazardous mix (fork() in a multi-threaded process only
+			// reproduces the calling thread; the children would inherit
+			// locked/torn thread state) — rejected outright for V1.
+			if e.usedWorkerRuntime {
+				return Value{}, fmt.Errorf("%d:%d: http.listen's { workers: N } fork-clustering cannot be combined with Worker threads in the same program", pos.Line, pos.Col)
+			}
 			idx, fieldTy, _ := optsVal.Ty.FieldIndex("workers")
 			if fieldTy.IR != "i64" || fieldTy.Float {
 				return Value{}, fmt.Errorf("%d:%d: http.listen's 'workers' field must be a number", pos.Line, pos.Col)

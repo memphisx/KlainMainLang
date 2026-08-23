@@ -104,7 +104,7 @@ func (e *Emitter) ensurePerformanceMarkMap() {
 	}
 	e.usedPerformanceMarkMap = true
 	e.ensureMapStrHelpers()
-	e.emitGlobal("@__kml_performance_mark_map = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_performance_mark_map = internal thread_local global ptr null, align 8")
 }
 
 // ensureDateDecompose declares __kml_date_decompose: converts a milliseconds-

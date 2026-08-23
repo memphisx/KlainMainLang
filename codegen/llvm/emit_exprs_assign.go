@@ -134,6 +134,30 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 }
 
 func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
+	// TDD-00098 stage 6, browser Worker surface. Parent side:
+	// `w.onmessage = ...` / `w.onerror = ...` on a Worker-typed receiver.
+	// Worker side: a bare (or self.) `onmessage = ...` at the module top
+	// level. All gated behind shadowing checks so a user binding wins.
+	if ex.Op == "=" {
+		if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
+			if memEx.Property == "onmessage" || memEx.Property == "onerror" {
+				if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "self" && !e.isShadowedByLocal("self") && e.currentWorkerMod != "" {
+					if memEx.Property == "onerror" {
+						return Value{}, fmt.Errorf("%d:%d: self.onerror is not supported inside a worker — an uncaught worker exception is reported to the parent", ex.GetPos().Line, ex.GetPos().Col)
+					}
+					return e.emitWorkerSideOnMessageAssign(ex.Right, ex.GetPos())
+				}
+				if e.inferExprType(memEx.Object).IsWorker {
+					return e.emitWorkerHandlerAssign(memEx.Object, memEx.Property, ex.Right, ex.GetPos())
+				}
+			}
+		}
+		if id, ok := ex.Left.(*ast.Identifier); ok && id.Name == "onmessage" && e.currentWorkerMod != "" && !e.isShadowedByLocal("onmessage") {
+			if _, bound := e.lookup("onmessage"); !bound {
+				return e.emitWorkerSideOnMessageAssign(ex.Right, ex.GetPos())
+			}
+		}
+	}
 	// Static field assignment: ClassName.staticField = val (or compound
 	// ops) — TDD-00009 Stage 4. A bare class-name identifier is a
 	// compile-time namespace, never a real runtime value, so this must be

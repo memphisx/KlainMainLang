@@ -17,6 +17,10 @@ type Parser struct {
 	// after every statement.
 	namespaces      map[string]map[string]bool
 	pendingTopLevel []ast.Statement
+	// workerPaths accumulates every `new Worker('...')` path literal seen in
+	// this file (TDD-00098), surfaced as Program.WorkerPaths so the resolver
+	// can treat worker entry files as dependency edges without an AST walk.
+	workerPaths []string
 }
 
 func New(tokens []lexer.Token) *Parser {
@@ -176,5 +180,6 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 		}
 	}
 	prog.Namespaces = p.namespaces
+	prog.WorkerPaths = p.workerPaths
 	return prog, nil
 }

@@ -485,12 +485,12 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
 	ctxSize, _, _, _ := ucontextLayout()
-	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal global [%d x i8] zeroinitializer, align 16", ctxSize))
-	e.emitGlobal("@__kml_conn_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_conn_len = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_conn_cap = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_current_conn_idx = internal global i64 -1, align 8")
-	e.emitGlobal("@__kml_conn_active = internal global i64 0, align 8")
+	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = internal thread_local global [%d x i8] zeroinitializer, align 16", ctxSize))
+	e.emitGlobal("@__kml_conn_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_conn_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_conn_cap = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_current_conn_idx = internal thread_local global i64 -1, align 8")
+	e.emitGlobal("@__kml_conn_active = internal thread_local global i64 0, align 8")
 }
 
 // ensureHTTPClusterFork declares __kml_http_cluster_fork(i64 numWorkers) and
@@ -581,6 +581,7 @@ func (e *Emitter) ensureHTTPRuntime() {
 	// full async-fetch machinery (and, transitively, libcurl) alongside
 	// its own socket runtime, not just when fetch() is textually present.
 	e.ensureFetchAsync()
+	e.ensureConnPokeGlobal() // the loop's conn scan + timeout decision read it
 	// Same reasoning again (ADR-00073): __kml_event_loop_run's rcheckgroup
 	// block below unconditionally calls @__kml_group_satisfied to check a
 	// fiber's pendingGroup field, whether or not this program ever calls
@@ -628,9 +629,9 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
 	e.ensureForkDecl()
 
-	e.emitGlobal("@__kml_listen_fd = internal global i32 -1, align 4")
-	e.emitGlobal("@__kml_listen_dispatch = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_listen_handler = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_fd = internal thread_local global i32 -1, align 4")
+	e.emitGlobal("@__kml_listen_dispatch = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_handler = internal thread_local global ptr null, align 8")
 	// @__kml_listen_ws_handler (TDD-00039 Stage 1): the optional `ws`
 	// closure from `http.listen(port, handler, { ws })`, null when omitted
 	// — declared unconditionally, same "always pull in the full machinery"
@@ -638,7 +639,7 @@ func (e *Emitter) ensureHTTPRuntime() {
 	// comment above), so a program with no `ws` handler just never
 	// populates or reads it, rather than needing its own conditional
 	// declaration path.
-	e.emitGlobal("@__kml_listen_ws_handler = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_ws_handler = internal thread_local global ptr null, align 8")
 
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()
@@ -752,10 +753,10 @@ failnofd:
 	if e.isGCMode() {
 		gcSetStackbottom = fmt.Sprintf(`
   %%stackhigh = getelementptr i8, ptr %%stack, i64 %d
-  store ptr %%stackhigh, ptr @GC_stackbottom, align 8`, fiberStackBytes)
-		gcRestoreStackbottom = `
-  %origbottom0 = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
-  store ptr %origbottom0, ptr @GC_stackbottom, align 8`
+  %s`, fiberStackBytes, e.gcSBStore("%stackhigh"))
+		gcRestoreStackbottom = fmt.Sprintf(`
+  %%origbottom0 = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
+  %s`, e.gcSBStore("%origbottom0"))
 	}
 
 	e.emitGlobal(`
@@ -870,10 +871,10 @@ entry:
   %%rstack_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %%rslot, i32 0, i32 2
   %%rstack = load ptr, ptr %%rstack_p, align 8
   %%rstackhigh = getelementptr i8, ptr %%rstack, i64 %d
-  store ptr %%rstackhigh, ptr @GC_stackbottom, align 8`, fiberStackBytes)
-		gcRestoreRStackbottom = `
-  %rorigbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
-  store ptr %rorigbottom, ptr @GC_stackbottom, align 8`
+  %s`, fiberStackBytes, e.gcSBStore("%rstackhigh"))
+		gcRestoreRStackbottom = fmt.Sprintf(`
+  %%rorigbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
+  %s`, e.gcSBStore("%rorigbottom"))
 	}
 
 	e.emitGlobal(`
@@ -895,6 +896,8 @@ entry:
   %fdsi = alloca i64, align 8
   %havefetchdl = alloca i1, align 1
   %hasactivetasks_slot = alloca i1, align 1
+  %cmtoslot = alloca i64, align 8
+  %cmdlabs = alloca i64, align 8
   br label %outerloop
 
 outerloop:
@@ -1019,19 +1022,20 @@ scandone:
   ; checks right after select() returns (checkes below).
   %esreconnectms = call i64 @__kml_eventsource_next_reconnect_ms()
   %hasesreconnect = icmp sge i64 %esreconnectms, 0
+  ; %cmdlabs is the shared extra-deadline slot (0 = none): the soonest of
+  ; the EventSource reconnect deadline, any fetch AbortSignal deadline, and
+  ; libcurl's internal timeout. Kept OUT of %bestfire deliberately —
+  ; checktimerfire fires the soonest JS timer whenever now >= %bestfire, so
+  ; a sooner non-timer deadline folded in there fired pending timers early.
+  ; %bestfire now holds JS-timer fire times only.
+  store i64 0, ptr %cmdlabs, align 8
   br i1 %hasesreconnect, label %esconsiderreconnect, label %afteresreconnect
 
 esconsiderreconnect:
-  %esreconnectns = mul i64 %esreconnectms, 1000000
-  br i1 %havetimer_js, label %escomparefire, label %estakefire
-
-escomparefire:
-  %curbestfire_es = load i64, ptr %bestfire, align 8
-  %esbetter = icmp slt i64 %esreconnectns, %curbestfire_es
-  br i1 %esbetter, label %estakefire, label %afteresreconnect
-
-estakefire:
-  store i64 %esreconnectns, ptr %bestfire, align 8
+  %esreconnectns0 = mul i64 %esreconnectms, 1000000
+  %esdlz = icmp eq i64 %esreconnectns0, 0
+  %esdl = select i1 %esdlz, i64 1, i64 %esreconnectns0
+  store i64 %esdl, ptr %cmdlabs, align 8
   br label %afteresreconnect
 
 afteresreconnect:
@@ -1061,10 +1065,17 @@ afteresreconnect:
   ; one level up (a fifth scanned resource now, not a fourth).
   %wscactive = load i64, ptr @__kml_wsc_active, align 8
   %hasopenwsc = icmp sgt i64 %wscactive, 0
+  ; TDD-00098: a live (not yet exited) Worker keeps the parent's loop
+  ; running, and a worker thread's own loop instance stays alive while its
+  ; parentPort message listener is registered — both folded in via one hook
+  ; (a no-op stub when the program never uses workers, same mechanism as
+  ; the task/microtask stubs).
+  %wkeep = call i1 @__kml_worker_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
-  %anywork = or i1 %anywork2, %hasopenwsc
+  %anywork3 = or i1 %anywork2, %hasopenwsc
+  %anywork = or i1 %anywork3, %wkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1201,6 +1212,15 @@ wscsetnext:
   br label %wscsetloop
 
 wscsetdone:
+  ; TDD-00098: add the worker message pipes into the read fd_set — on the
+  ; parent thread, every live child worker's worker→parent pipe; on a worker
+  ; thread, its own parent→worker pipe. Returns true when a message envelope
+  ; may already be buffered, folding into %forcezero the same way the
+  ; WebSocket-client scan above does. No-op stub when workers are unused.
+  %wfdforce = call i1 @__kml_worker_fdset_add(ptr %fdset, ptr %maxfd)
+  %wfz0 = load i1, ptr %forcezero, align 1
+  %wfz1 = or i1 %wfz0, %wfdforce
+  store i1 %wfz1, ptr %forcezero, align 1
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -1284,18 +1304,15 @@ fdchkdl:
   br i1 %fdhasdl, label %fdfold, label %fdfoldnext
 
 fdfold:
-  %fdanysofar = load i1, ptr %havefetchdl, align 1
-  %fdanytimer = or i1 %havetimer, %fdanysofar
   store i1 1, ptr %havefetchdl, align 1
-  br i1 %fdanytimer, label %fdcompare, label %fdtake
-
-fdcompare:
-  %fdcurbest = load i64, ptr %bestfire, align 8
-  %fdbetter = icmp slt i64 %fddl, %fdcurbest
-  br i1 %fdbetter, label %fdtake, label %fdfoldnext
+  %fdcur = load i64, ptr %cmdlabs, align 8
+  %fdempty = icmp eq i64 %fdcur, 0
+  %fdsooner = icmp slt i64 %fddl, %fdcur
+  %fdtakeit = or i1 %fdempty, %fdsooner
+  br i1 %fdtakeit, label %fdtake, label %fdfoldnext
 
 fdtake:
-  store i64 %fddl, ptr %bestfire, align 8
+  store i64 %fddl, ptr %cmdlabs, align 8
   br label %fdfoldnext
 
 fdfoldnext:
@@ -1304,18 +1321,70 @@ fdfoldnext:
   br label %fdfoldloop
 
 fdfolddone:
+  ; Fold libcurl's own internal deadline into the extra-deadline slot.
+  ; During some transfer states — most notably the Expect: 100-continue
+  ; wait a large POST body triggers — curl_multi_fdset returns NO fds at
+  ; all and libcurl's documented contract is that the caller must consult
+  ; curl_multi_timeout() and wake it by that deadline. Without this, a
+  ; program whose only pending work was such a transfer blocked in select()
+  ; forever (no fd ever becomes ready, no JS timer bounds the wait).
+  br i1 %hascurl, label %cmtofold, label %cmtodone
+
+cmtofold:
+  store i64 -1, ptr %cmtoslot, align 8
+  call i32 @curl_multi_timeout(ptr %curlmulti, ptr %cmtoslot)
+  %cmtoms = load i64, ptr %cmtoslot, align 8
+  %hascmto = icmp sge i64 %cmtoms, 0
+  br i1 %hascmto, label %cmtoapply, label %cmtodone
+
+cmtoapply:
+  ; Deliberately kept OUT of %bestfire: checktimerfire fires the soonest JS
+  ; timer whenever now >= %bestfire, so folding a near-immediate curl
+  ; deadline in there fired pending timers early (caught as a Promise.race
+  ; regression where a 400ms timer beat a fast fetch). This slot bounds only
+  ; the select() wait below.
+  %cmnow = call i64 @__kml_monotonic_ns()
+  %cmrel = mul i64 %cmtoms, 1000000
+  %cmdl0 = add i64 %cmnow, %cmrel
+  %cmzero = icmp eq i64 %cmdl0, 0
+  %cmdl = select i1 %cmzero, i64 1, i64 %cmdl0
+  %cmcur = load i64, ptr %cmdlabs, align 8
+  %cmempty = icmp eq i64 %cmcur, 0
+  %cmsoon = icmp slt i64 %cmdl, %cmcur
+  %cmtakeit = or i1 %cmempty, %cmsoon
+  br i1 %cmtakeit, label %cmstore, label %cmtodone
+
+cmstore:
+  store i64 %cmdl, ptr %cmdlabs, align 8
+  br label %cmtodone
+
+cmtodone:
   ; Never block in select() while microtask reactions are queued (TDD-00097
   ; Stage 5): a connection fiber that ran earlier in THIS iteration may have
   ; enqueued stream/pipe reactions — checked here, immediately before the
   ; timeout decision, not at the top of the iteration.
   %mtpend = call i1 @__kml_microtasks_pending()
   %rbwant = call i1 @__kml_reqbody_want()
-  %pend0 = or i1 %mtpend, %rbwant
+  ; A suspended task whose park condition is ALREADY satisfied (fetch done,
+  ; awaited promise settled) must never sit behind a blocking select() — the
+  ; completion may have been drained after this iteration's own
+  ; task_sched_step already ran, with no fd or timer left to wake the loop.
+  %tres = call i1 @__kml_task_resumable()
+  ; An un-serviced conn poke also forbids blocking: the task completion that
+  ; set it may have happened after this iteration's conn scan already ran.
+  %pokev = load i8, ptr @__kml_conn_poke, align 1
+  %pokep = icmp ne i8 %pokev, 0
+  %pend00 = or i1 %mtpend, %rbwant
+  %pend01 = or i1 %pend00, %tres
+  %pend0 = or i1 %pend01, %pokep
   %needimmediate0 = load i1, ptr %forcezero, align 1
   %needimmediate = or i1 %needimmediate0, %pend0
   %usetimer0 = or i1 %havetimer, %needimmediate
   %havefetchdlv = load i1, ptr %havefetchdl, align 1
-  %usetimer = or i1 %usetimer0, %havefetchdlv
+  %usetimer1 = or i1 %usetimer0, %havefetchdlv
+  %cmdlv0 = load i64, ptr %cmdlabs, align 8
+  %hascmdl = icmp ne i64 %cmdlv0, 0
+  %usetimer = or i1 %usetimer1, %hascmdl
   br i1 %usetimer, label %timeoutpath, label %notimeoutpath
 
 timeoutpath:
@@ -1323,7 +1392,18 @@ timeoutpath:
   %now1 = call i64 @__kml_monotonic_ns()
   %rawwait = sub i64 %targetfire, %now1
   %negwait = icmp slt i64 %rawwait, 0
-  %waitns0 = select i1 %negwait, i64 0, i64 %rawwait
+  %waitns00 = select i1 %negwait, i64 0, i64 %rawwait
+  ; %bestfire is only meaningful when a timer/fetch-deadline set it; with
+  ; only a curl deadline pending, wait on that alone instead of a stale 0.
+  %waitbase = select i1 %havetimer_js, i64 %waitns00, i64 9223372036854775807
+  %cmdlv = load i64, ptr %cmdlabs, align 8
+  %hascm2 = icmp ne i64 %cmdlv, 0
+  %cmraw = sub i64 %cmdlv, %now1
+  %cmneg = icmp slt i64 %cmraw, 0
+  %cmwait0 = select i1 %cmneg, i64 0, i64 %cmraw
+  %cmwait = select i1 %hascm2, i64 %cmwait0, i64 9223372036854775807
+  %cmsooner = icmp slt i64 %cmwait, %waitbase
+  %waitns0 = select i1 %cmsooner, i64 %cmwait, i64 %waitbase
   ; TDD-00039 Stage 3: a pending WebSocket-client notification always wins
   ; over a real timer's own (possibly much longer) remaining wait — found
   ; as a real bug where %usetimer's own %forcezero routing into this same
@@ -1370,6 +1450,12 @@ afterselectok:
   ; program -- found the hard way as a real bug (onopen/onmessage never
   ; firing) when %hascurl was false for a WebSocket-client-only program.
   call void @__kml_wsclient_scan()
+  ; TDD-00098: drain any worker message envelopes that arrived — child
+  ; workers' messages/exit notices on the parent thread, parent-posted
+  ; messages on a worker thread. Unconditional like the WebSocket scan
+  ; (workers are plain pipes, no libcurl involvement); no-op stub when the
+  ; program never uses workers.
+  call void @__kml_worker_dispatch()
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:
@@ -1492,7 +1578,16 @@ rcheckready:
   %rmask = shl i8 1, %rmod8_8
   %rbyteval = load i8, ptr %rbyteptr, align 1
   %rmasked = and i8 %rbyteval, %rmask
-  %rready = icmp ne i8 %rmasked, 0
+  %rfdready = icmp ne i8 %rmasked, 0
+  ; A completed task pokes every parked fiber once (@__kml_conn_poke, set by
+  ; __kml_task_finish/__kml_task_reject): a fiber awaiting an async
+  ; handler's promise is parked as resume-on-fd-readable, but when the
+  ; handler's last input was pump-fed the fd never becomes readable again —
+  ; the resumed fiber re-checks its own await condition and re-parks if it
+  ; is still genuinely waiting, so a spurious resume is benign.
+  %rpoke = load i8, ptr @__kml_conn_poke, align 1
+  %rpoked = icmp ne i8 %rpoke, 0
+  %rready = or i1 %rfdready, %rpoked
   br i1 %rready, label %rresume, label %rscannext
 
 rresume:
@@ -1508,6 +1603,9 @@ rscannext:
   br label %rscanloop
 
 checktimerfire:
+  ; The poke is one-shot: every parked fiber has now been resumed once and
+  ; re-parked if still waiting; clear it so the scan goes back to fd-driven.
+  store i8 0, ptr @__kml_conn_poke, align 1
   ; %havetimer_js (not the merged %havetimer, which also goes true whenever
   ; only an EventSource reconnect deadline bounded the wait, see scandone
   ; above) — %besti below indexes into @__kml_timer_data and is -1 whenever

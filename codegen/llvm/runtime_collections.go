@@ -201,7 +201,7 @@ entry:
 
 func (e *Emitter) ensureSortClosGlobal() {
 	if !e.usedSortClosGlobal {
-		e.emitGlobal("@__kml_sort_clos = global ptr null")
+		e.emitGlobal("@__kml_sort_clos = thread_local global ptr null")
 		e.usedSortClosGlobal = true
 	}
 }
@@ -694,7 +694,7 @@ func (e *Emitter) ensureFrozenSet() {
 	}
 	e.usedFrozenSet = true
 	e.ensureMapNumHelpers()
-	e.emitGlobal(`@__kml_frozen_set = internal global ptr null, align 8`)
+	e.emitGlobal(`@__kml_frozen_set = internal thread_local global ptr null, align 8`)
 	e.emitGlobal(`
 define ptr @__kml_frozen_set_get() {
 entry:

@@ -109,10 +109,10 @@ func (e *Emitter) ensureWSClientRuntime() {
 		e.emitGlobal("declare void @freeaddrinfo(ptr noundef)")
 	}
 
-	e.emitGlobal("@__kml_wsc_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_wsc_len = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_wsc_cap = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_wsc_active = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_wsc_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_wsc_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_wsc_cap = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_wsc_active = internal thread_local global i64 0, align 8")
 
 	e.emitWSClientConnect()
 	e.emitWSClientOpen()

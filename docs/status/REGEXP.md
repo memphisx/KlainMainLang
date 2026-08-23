@@ -4,7 +4,7 @@
 
 **Coverage**: 13/14 (~93%) · **Strict Coverage**: 2/14 (~14%).
 
-This page follows the shared status-page format ([Status page format](README.md#status-page-format)): **Status** is a bare ✅/❌; **Caveats** lists behavioral divergences from real JS/TS (a non-empty Caveats cell is what excludes an otherwise-✅ row from Strict Coverage); **Notes** carries implementation/representation detail only. One table per index category; each category's figures above derive from its table below.
+Format: [Status page format](README.md#status-page-format).
 
 All 7 stages are done, including Stage 6 (`--static` linking, verified both on bare Linux and inside a real Docker `scratch` container — `docker/Dockerfile.regexp-test`; PCRE2 has no TLS-backend-style transitive dependency chain, unlike `fetch`'s libcurl, so it links with zero extra flags — see [ADR-00120](../adr/ADR-00120.md)). See [TDD-00035](../tdd/TDD-00035.md) for the full design and [ADR-00114](../adr/ADR-00114.md), [ADR-00115](../adr/ADR-00115.md), [ADR-00116](../adr/ADR-00116.md), [ADR-00117](../adr/ADR-00117.md), [ADR-00118](../adr/ADR-00118.md), [ADR-00119](../adr/ADR-00119.md), [ADR-00120](../adr/ADR-00120.md) for what actually shipped.
 

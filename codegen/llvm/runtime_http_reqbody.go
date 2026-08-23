@@ -44,9 +44,9 @@ func (e *Emitter) ensureReqBodyRuntime() {
 	earlyEndMsg := e.internString("unexpected end of request body")
 	errName := e.internString("Error")
 
-	e.emitGlobal("@__kml_reqbody_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_reqbody_len = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_reqbody_cap = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_reqbody_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_reqbody_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_reqbody_cap = internal thread_local global i64 0, align 8")
 
 	// __kml_reqbody_register: add a context to the pump scan.
 	e.emitGlobal(`

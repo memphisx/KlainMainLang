@@ -274,10 +274,10 @@ func (e *Emitter) ensureTimerRuntime() {
 	e.ensureSignalHandlerRuntime()
 	clockID := monotonicClockID()
 	e.emitGlobal("declare i32 @nanosleep(ptr noundef, ptr noundef)")
-	e.emitGlobal("@__kml_timer_data = internal global ptr null, align 8")
-	e.emitGlobal("@__kml_timer_len = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_timer_cap = internal global i64 0, align 8")
-	e.emitGlobal("@__kml_timer_next_id = internal global i64 1, align 8")
+	e.emitGlobal("@__kml_timer_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_timer_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_timer_cap = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_timer_next_id = internal thread_local global i64 1, align 8")
 
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_monotonic_ns() {

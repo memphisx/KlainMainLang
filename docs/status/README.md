@@ -52,7 +52,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. Not part of the JS *language* itself, but not Node-specific either. Filtered to those that make sense outside a browser context; pure browser-only APIs (DOM, Canvas, WebGL, CSS, Gamepad, etc.) are out of scope — see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md).
 
-**26 / 55 features, ~47% coverage.**
+**27 / 55 features, ~49% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
@@ -65,13 +65,13 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 | Networking (fetch, WebSocket, SSE) | 6/6, 100% | 1/6, ~17% | [NETWORKING.md](NETWORKING.md) | • `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send and no `wss://`/TLS<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))<br>• `Response.text()`/`.json()`/`.arrayBuffer()` are synchronous, not `Promise`-returning ([ADR-00241](../adr/ADR-00241.md)) |
 | Streams | 7/8, 88% | 0/8, 0% | [STREAMS.md](STREAMS.md) | • No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• Node streams are options-form only — no `class X extends Readable`, no `Duplex`, no callback-style `pipeline`/`finished`<br>• `Blob.stream()` waits on `Blob` itself — full per-row lists on the page |
 | Events & Cancellation | 3/3, 100% | 0/3, 0% | [EVENTS-CANCELLATION.md](EVENTS-CANCELLATION.md) | • Single-target dispatch — no capture/bubble/propagation (`stopPropagation` is a no-op)<br>• `removeEventListener` matches by closure identity (the listener must be a named binding); no `class X extends EventTarget`<br>• `Event`/`CustomEvent` expose only `type`/`defaultPrevented`/`detail`; the fuller WHATWG properties and `new Event` init options are absent/ignored<br>• `AbortSignal` `timeout` latches only when an await loop checks it and isn't wired into `setTimeout`; a custom `abort(reason)` still throws `AbortError`, and `DOMException` carries no numeric `.code` |
-| Workers / Concurrency | 0/3, 0% | 0/3, 0% | [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md) | Not started; needs `pthreads` + `SharedArrayBuffer`/`Atomics` |
+| Workers / Concurrency | 1/3, 33% | 0/3, 0% | [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md) | • `Worker` fully shipped — real pthreads, typed copy-only postMessage, both `worker_threads` and browser surfaces, `-mm=gc` support, `'error'`/termination semantics ([ADR-00305](../adr/ADR-00305.md)/[ADR-00306](../adr/ADR-00306.md)); per-row caveats on the page<br>• `BroadcastChannel` and `MessageChannel`/`MessagePort` not started |
 
 ## Node.js APIs
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.listen`/`.close`, `cluster.*`, and this project's own `Memory.free`) require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
-**58 / 79 features, ~73% coverage.** A 2026-07-30 audit against the actual lexer/parser/codegen source (not just prior documentation) found a large previously-untracked surface — `path`, `os`, `EventEmitter`, async `child_process`, interactive `readline`, and several smaller core modules had zero rows anywhere before this pass. The drop from this group's earlier ~82% figure reflects newly-discovered scope, not regressed implementation. `process.on('SIGINT'/'SIGTERM', handler)` shipped the same day ([TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md)), closing `http.listen`'s last open gap. `path` shipped shortly after, closing out the audit's top CLI-priority gap — see [ADR-00081](../adr/ADR-00081.md). `EventEmitter` shipped after that — see [TDD-00023](../tdd/TDD-00023.md)/[ADR-00089](../adr/ADR-00089.md) — unblocking (not yet picked up) Node's own `stream` module, async `child_process`, and interactive `readline`. `os` shipped next — see [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md); its Darwin-specific paths (`freemem()`, `cpus()`'s per-core `times`) are now verified on Apple Silicon (M4 Pro, darwin/arm64). `querystring` and `assert` shipped last, out of the audit's lower-priority "Other core modules" bucket — see [ADR-00139](../adr/ADR-00139.md)/[ADR-00140](../adr/ADR-00140.md).
+**58 / 79 features, ~73% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
@@ -111,7 +111,7 @@ This section is core-*language* gaps only. Not-yet-built library/runtime APIs (W
 | Decorators | Requires metadata reflection |
 | `Proxy` / `Reflect` | Dynamic property intercept; likely impractical |
 | Dynamic `import()` — real lazy / runtime-conditional loading | The eager literal-specifier form and `import.meta.url` already shipped ([ADR-00148](../adr/ADR-00148.md)); genuine laziness needs a `.so`/`.dylib` island per target, at odds with whole-program AOT — see [MODULES.md](MODULES.md)/[TDD-00055](../tdd/TDD-00055.md)/[TDD-00056](../tdd/TDD-00056.md) |
-| Opt-in dynamic property add/delete on objects | This compiler's objects are fixed-shape heap structs (an interface's field list is fixed at compile time) — real JS lets any object gain/lose properties at runtime, which `Object.freeze`/`.seal` ([ADR-00055](../adr/ADR-00055.md)) currently don't need to enforce since it's already structurally impossible for *any* object, frozen or not. Noted here as a real gap from 100% JS compatibility, not because it's next in line — surfaced while scoping freeze/seal, not researched or designed. If picked up, likely shaped as an explicit compiler flag/opt-in (a genuine dynamic property bag is a different, heavier object representation than the fixed-struct one everything else here assumes) rather than the default. The native dynamic/prototype object model is [TDD-00068](../tdd/TDD-00068.md)'s deferred Axis 2. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |
+| Opt-in dynamic property add/delete on objects | Objects are fixed-shape heap structs — no runtime property add/delete (which is also why `Object.freeze`/`.seal` need no enforcement). Would need a different object representation, likely behind an opt-in flag; the dynamic/prototype object model is [TDD-00068](../tdd/TDD-00068.md)'s deferred Axis 2. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |
 | Best-effort vanilla JavaScript compatibility (opt-in flag) | Direct testing found plain untyped JS fails on four independent things: class fields assigned only in the constructor (no upfront declaration), unannotated-parameter type mismatches, prototype-based pre-ES6 "classes," and dynamic property addition — the last two need the same different object representation as the row above and stay out of scope even here. Confirmed a naive "default everything unannotated to `any`" approach would not work: today's `any` runtime rejects arithmetic/most operators, so it wouldn't make ordinary code like `function add(a,b){return a+b}` compile either. See [TDD-00022](../tdd/TDD-00022.md); the implicit-`any`/operator-dispatch half is scoped separately in [TDD-00076](../tdd/TDD-00076.md). |
 
 ---
@@ -131,7 +131,7 @@ Every row below is marked ✅ (or 100%) on its own page — the feature genuinel
 | `.codePointAt()` / `.localeCompare()` (✅) | Byte-sequence stand-ins, not real Unicode/locale behavior — `.codePointAt()` is `.charCodeAt()` under another name (no surrogate-pair decoding), `.localeCompare()` is a plain `strcmp`. Correct only for ASCII/Latin-1 text | [STRING-METHODS.md](STRING-METHODS.md) |
 | `setImmediate` (✅) | Indistinguishable from a same-tick `setTimeout(fn, 0)` — real Node guarantees `setImmediate` fires first when scheduled from an I/O callback (distinct check/timers event-loop phases); this compiler's timer queue is a single flat fire-time-ordered list with no phase concept | [TIMERS.md](TIMERS.md) |
 | `XMLHttpRequest` / `WebSocket` (100% as part of Networking) | `XMLHttpRequest` only implements the spec's legacy synchronous mode (no default-async, callback-interleaved mode); `WebSocket` has no binary `.send()` and no `wss://`/TLS on either side | [NETWORKING.md](NETWORKING.md) |
-| Optional (`?:`) interface fields, under-assigned class fields, array destructuring past the source's length (all ✅/100%) | Read as a deterministic zero (or, for a nested-array destructured element, a safe empty array) — a real, documented simplification, not real JS's `undefined` (no general sentinel for that on a concrete scalar type). Previously read genuinely uninitialized/out-of-bounds heap memory instead, a real memory-safety bug fixed alongside this — see [ADR-00157](../adr/ADR-00157.md) | [ADR-00157](../adr/ADR-00157.md) |
+| Optional (`?:`) interface fields, under-assigned class fields, array destructuring past the source's length (all ✅/100%) | Read as a deterministic zero (or, for a nested-array destructured element, an empty array) — a documented simplification, not real JS's `undefined` (no general sentinel for that on a concrete scalar type) | [ADR-00157](../adr/ADR-00157.md) |
 
 ---
 
@@ -176,20 +176,20 @@ Memory management, the event loop, and the HTTP server were this project's three
 
 Not-yet-implemented items from the [Web Platform APIs](#web-platform-apis) and [Node.js APIs](#nodejs-apis) sections above, grouped by effort. Within a tier, the same tiebreaker applies — prefer whichever unlocks REST API interaction / file I/O / process interaction.
 
-`EventTarget`/`Event`/`CustomEvent` and `AbortController`/`AbortSignal` — formerly the top medium-effort items here — shipped ([TDD-00081](../tdd/TDD-00081.md)), as did true async-function suspension + microtasks ([TDD-00083](../tdd/TDD-00083.md)); the event loop ([TDD-00006](../tdd/TDD-00006.md)) is likewise no longer a "needs this first" blocker for anything below. What remains, re-tiered against actual effort:
+What remains, tiered by effort:
 
 **Low / medium effort (existing subsystem or one small addition):**
 - Node `Buffer` — a `Uint8Array` subclass with Node's extra methods; rides the shipped `ArrayBuffer`/TypedArray machinery. See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md).
 - Async `child_process`, interactive `readline` — both built on `EventEmitter` (shipped) in real Node. See [EVENT-EMITTER.md](EVENT-EMITTER.md) and [PROCESS-CLI.md](PROCESS-CLI.md).
+- `MessageChannel`/`MessagePort` and `BroadcastChannel` — ride `Worker`'s shipped pipe-envelope channel machinery ([ADR-00305](../adr/ADR-00305.md)/[ADR-00306](../adr/ADR-00306.md)) rather than needing a new concurrency model. See [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md).
 
 **Medium effort (new dependency or subsystem):**
-- `CompressionStream` / `DecompressionStream`, and `zlib` as a module — link `zlib`. See [STREAMS.md](STREAMS.md) / [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
-- Node's own `stream` module (distinct from WHATWG streams) — built on `EventEmitter`. See [STREAMS.md](STREAMS.md).
+- `zlib` as a Node module (callback/sync `.gzip`/`.gunzip`/`.deflate` shapes) — the underlying `-lz` link and codec machinery already ship with `CompressionStream`/`DecompressionStream` ([ADR-00302](../adr/ADR-00302.md)), so this is now a surface-binding job, not a new dependency. See [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
 - `util`, `net`/`dgram`/`tls`/`dns`, `vm`, `cluster`, `http2` — lower individual priority, grouped in [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
 
-**High effort (needs a concurrency model beyond the event loop's single-fiber cooperative scheduling, or a new external dependency):**
-- `Worker` (Web Workers) — threads via `pthreads`; requires `SharedArrayBuffer` + `Atomics` too. The shipped event loop is cooperative, one-fiber-at-a-time concurrency ([TDD-00006](../tdd/TDD-00006.md)), not preemptive multi-threading — a genuinely separate mechanism, not an extension of it. Scoped — see [TDD-00047](../tdd/TDD-00047.md) — picked up ahead of the lighter items deliberately, to surface concurrency bugs in shared runtime state early. See [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md).
+**High effort (a new external dependency, or genuinely new machinery):**
 - `crypto.subtle` (digest, encrypt, sign) — delegate to OpenSSL or Apple CommonCrypto. See [WEB-CRYPTO.md](WEB-CRYPTO.md).
+- `SharedArrayBuffer`/`Atomics` — real shared memory across `Worker` threads, deliberately excluded from [TDD-00098](../tdd/TDD-00098.md)'s message-passing-only model; needs its own synchronization design before it's worth having. See [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md).
 
 ### Later — differentiator features, deliberately deprioritized
 
@@ -211,4 +211,4 @@ Every detail page linked from this index follows one layout, so the tables stay 
 
 Every detail page linked from this index follows this format.
 
-*Last updated: 2026-08-22*
+*Last updated: 2026-08-23*

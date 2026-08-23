@@ -191,6 +191,16 @@ type Emitter struct {
 	usedDateNameTables       bool
 	usedFetch                bool
 	usedFetchAsync           bool
+	// TDD-00098: Worker (worker_threads) state. workerEntries maps a worker
+	// module's canonical path to its entry symbol + statically-declared
+	// channel types; currentWorkerMod is non-empty while a worker module's
+	// entry function is being emitted (gates parentPort/workerData).
+	usedConnPokeGlobal bool
+	usedWorkerRuntime  bool
+	hasWorkers        bool // set at EmitProgram start from Program.WorkerModules
+	workerEntries     map[string]*workerEntryInfo
+	currentWorkerMod  string
+	workerAdaptCtr    int
 	usedPromiseCombinators   bool
 	usedPendingFinishSettled bool
 	usedFetchAwaitSettled    bool
@@ -477,6 +487,10 @@ func (e *Emitter) BigIntBackend() string {
 // UsesBigInt reports whether the emitted program actually used bigint, so
 // main.go only compiles+links a backend for programs that need one.
 func (e *Emitter) UsesBigInt() bool { return e.usesBigInt }
+
+// UsesWorkers reports whether the program spawns Worker threads (TDD-00098)
+// — main.go adds -pthread to the clang invocation when it does.
+func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
 
 // SetCompatMode selects the whole-program compatibility axis (TDD-00075):
 // "" / "strict" (default — the compiler's opinionated, safer-than-JS
@@ -1002,6 +1016,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// through (emitCall/emitMember/inferExprType).
 	e.namespaces = prog.Namespaces
 
+	// TDD-00098: known before any emission (the resolver recorded worker
+	// modules), so every gc-fiber emission site can pick the thread-aware
+	// stackbottom mechanism up front.
+	e.hasWorkers = len(prog.WorkerModules) > 0
+
 	// Pass -2: rewrite each top-level `const/let/var X = class {...}` binding
 	// into a nominal `class X {...}` declaration (TDD-00063 Stage 4), before
 	// any registration runs — a class expression is not a runtime value here,
@@ -1106,6 +1125,14 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 		}
 	}
 
+	// Pass 2d (TDD-00098): emit every worker module's entry function before
+	// main — the channel types recorded during worker emission (parentPort
+	// handler annotations, workerData annotation, postMessage payload
+	// types) gate every parent-side Worker use emitted in Pass 3.
+	if err := e.emitWorkerModules(prog); err != nil {
+		return "", err
+	}
+
 	// Pass 3: emit remaining statements into main().
 	// process.argv is backed by two globals set from main's own argc/argv
 	// parameters, so any expression (top-level code, or any function/closure)
@@ -1125,10 +1152,38 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// docs/adr/ADR-00071.md for why this is needed.
 	if e.isGCMode() {
 		e.emitGlobal("@GC_stackbottom = external global ptr")
-		e.emitGlobal("@__kml_gc_orig_stackbottom = internal global ptr null, align 8")
+		// thread_local: under Worker threads each thread restores to ITS OWN
+		// stack bottom, never the main thread's (TDD-00098 stage 4). The
+		// worker trampoline fills in each worker thread's value; main's is
+		// snapshotted here. Harmless TLS for the single-threaded case too.
+		e.emitGlobal("@__kml_gc_orig_stackbottom = internal thread_local global ptr null, align 8")
 		origReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @GC_stackbottom, align 8", origReg))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_gc_orig_stackbottom, align 8", origReg))
+		if e.hasWorkers {
+			// Thread-aware stackbottom mechanism (validated by direct .ll
+			// prototype on darwin/arm64): instead of storing through the
+			// process-wide @GC_stackbottom, every fiber swap site calls
+			// @__kml_gc_set_sb, which updates the CURRENT thread's recorded
+			// stack bottom under the GC allocation lock.
+			e.emitGlobal("declare void @GC_set_stackbottom(ptr noundef, ptr noundef)")
+			e.emitGlobal("declare ptr @GC_call_with_alloc_lock(ptr noundef, ptr noundef)")
+			e.emitGlobal("declare void @GC_allow_register_threads()")
+			e.emitGlobal(`define ptr @__kml_gc_set_sb_locked(ptr %mem) {
+entry:
+  %sb = alloca [2 x ptr], align 8
+  %slot = getelementptr [2 x ptr], ptr %sb, i32 0, i32 0
+  store ptr %mem, ptr %slot, align 8
+  call void @GC_set_stackbottom(ptr null, ptr %sb)
+  ret ptr null
+}`)
+			e.emitGlobal(`define void @__kml_gc_set_sb(ptr %mem) {
+entry:
+  call ptr @GC_call_with_alloc_lock(ptr @__kml_gc_set_sb_locked, ptr %mem)
+  ret void
+}`)
+			e.emitInstr("call void @GC_allow_register_threads()")
+		}
 	}
 
 	// TDD-00009 Stage 4: run every class's static {} block(s) once, in
@@ -1175,7 +1230,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// EventSource/WebSocket drives all of them under the single task-aware event
 	// loop (__kml_event_loop_run). A pure-task program (fetch only) keeps the
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers)
+	// TDD-00098: a program that spawned workers must keep driving the full
+	// loop — it is what delivers worker messages and joins exited workers.
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
@@ -1189,6 +1246,32 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.
 	e.emitLoopTaskStubs()
+	// TDD-00098 stage 5: @__kml_throw's uncaught path references
+	// @__kml_worker_uncaught unconditionally; no-op stub without workers.
+	if e.usedExceptionHelpers && !e.usedWorkerRuntime {
+		e.emitGlobal("define void @__kml_worker_uncaught(ptr %msg) {\nentry:\n  ret void\n}")
+	}
+	// TDD-00098: __kml_worker_spawn calls this before the first
+	// pthread_create — curl_global_init is not thread-safe and must run
+	// exactly once, before any thread exists. Real when the program can
+	// fetch at all; a no-op stub otherwise.
+	if e.usedWorkerRuntime {
+		if e.usedFetch || e.usedFetchAsync {
+			e.emitGlobal(`define void @__kml_worker_curl_preinit() {
+entry:
+  %inited = load i1, ptr @__kml_curl_inited, align 1
+  br i1 %inited, label %done, label %doinit
+doinit:
+  call void @curl_global_init(i64 3)
+  store i1 1, ptr @__kml_curl_inited, align 1
+  br label %done
+done:
+  ret void
+}`)
+		} else {
+			e.emitGlobal("define void @__kml_worker_curl_preinit() {\nentry:\n  ret void\n}")
+		}
+	}
 	// TDD-00087: a lightweight await drives timers via @__kml_timer_fire_next.
 	// Emit the real one when the program uses timers, else a no-op stub so the
 	// reference resolves (a program with awaits but no timers).
