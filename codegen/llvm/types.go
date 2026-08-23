@@ -76,8 +76,8 @@ type Type struct {
 	// (`Promise<never>`), which never actually produces a value (await re-throws).
 	// It assigns to any target: coerce turns it into a zero of the target type,
 	// keeping the IR well-typed while it stays dead (TDD-00087 follow-up).
-	IsNever     bool
-	Nullable    bool
+	IsNever  bool
+	Nullable bool
 	// IsPromise marks Promise<T> types (the coroutine handle, IR type ptr).
 	// PromiseType is the T in Promise<T>; nil means Promise<void>.
 	IsPromise   bool
@@ -401,6 +401,17 @@ type Type struct {
 	// which is how each parent-side postMessage/on site is type-checked.
 	IsWorker   bool
 	WorkerPath string
+	// child_process handles: IsChildProcess marks a spawn()/exec()/execFile()
+	// ChildProcess value (a ptr to runtime_childprocess.go's cpStructIR);
+	// IsCPStream marks child.stdout/child.stderr (CPWhich 0/1 picks the
+	// listener slots); IsCPStdin marks child.stdin (.write/.end).
+	IsChildProcess bool
+	IsCPStream     bool
+	IsCPStdin      bool
+	CPWhich        int
+	// IsReadline marks a readline.createInterface() handle (a ptr to
+	// runtime_readline.go's rlStructIR), for .on/.question/.close dispatch.
+	IsReadline bool
 	// IsBroadcastChannel / IsMessageChannel / IsMessagePort (TDD-00099):
 	// each is a ptr to a runtime channel-endpoint block (runtime_chan.go's
 	// chanEpIR; a MessageChannel value is the port1 half, port1/port2
@@ -471,7 +482,7 @@ type Type struct {
 	// getWriter()'s writer, and the sink callbacks' controller.
 	IsWritableStream bool
 	IsStreamWriter   bool
-	IsWSController bool
+	IsWSController   bool
 	// IsTransformStream marks `new TransformStream<I, O>(...)` (TDD-00097
 	// Stage 3): a ptr to the runtime ts context whose first two fields are
 	// the readable (chunk O) and writable (chunk I) stream pointers.
@@ -752,20 +763,20 @@ func EventEmitterType(payload Type) Type {
 // "__param1", ... — same synthetic-name convention a destructured function
 // parameter's own pattern fields already use, see ast.Param's doc comment).
 const (
-	GeneratorCtxField       = "__ctx"       // this generator's own ucontext_t (ptr, malloc'd ucontextLayout()-sized)
-	GeneratorStackField     = "__stack"     // this generator's own fiber stack (ptr, malloc'd fiberStackBytes)
-	GeneratorCallerCtxField = "__callerCtx" // where to swapcontext back to on yield/return — reset before every .next() call
-	GeneratorStartedField   = "__started"   // false until the first .next() call
-	GeneratorDoneField      = "__done"      // true once the body has returned or fallen off the end
-	GeneratorYieldedField   = "__yielded"   // what the most recent yield/return produced
-	GeneratorSentField      = "__sent"      // what the current .next(value)/.return(value) call is passing in
+	GeneratorCtxField        = "__ctx"        // this generator's own ucontext_t (ptr, malloc'd ucontextLayout()-sized)
+	GeneratorStackField      = "__stack"      // this generator's own fiber stack (ptr, malloc'd fiberStackBytes)
+	GeneratorCallerCtxField  = "__callerCtx"  // where to swapcontext back to on yield/return — reset before every .next() call
+	GeneratorStartedField    = "__started"    // false until the first .next() call
+	GeneratorDoneField       = "__done"       // true once the body has returned or fallen off the end
+	GeneratorYieldedField    = "__yielded"    // what the most recent yield/return produced
+	GeneratorSentField       = "__sent"       // what the current .next(value)/.return(value) call is passing in
 	GeneratorResumeModeField = "__resumeMode" // how the current resume behaves: 0 next (return __sent), 1 throw __thrown, 2 return __sent (TDD-00086)
 	GeneratorThrownField     = "__thrown"     // the error object a .throw(e) injects at the suspension point (ptr, TDD-00086)
 	GeneratorJmpStkField     = "__jmpStk"     // this generator's own isolated jmpbuf stack (ptr, so caller/body try-frames never interleave — TDD-00086)
 	GeneratorJmpTopField     = "__jmpTop"     // the generator's jmpbuf-stack top saved across suspension (i64, TDD-00086)
 	GeneratorGenErrorField   = "__genError"   // an uncaught body throw the outer catch-all captured, re-thrown on the caller side (ptr, TDD-00086)
-	GeneratorThisField      = "__this"      // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
-	GeneratorEnvField       = "__env"       // a nested generator's closure environment (ptr to the captured-cell struct, null when it captures nothing) — TDD-00094
+	GeneratorThisField       = "__this"       // a generator method's receiver (ptr), bound to `this` at body entry (TDD-00063 Stage 2b)
+	GeneratorEnvField        = "__env"        // a nested generator's closure environment (ptr to the captured-cell struct, null when it captures nothing) — TDD-00094
 
 	// Async-generator step state (the spec-faithful step model: synchronous
 	// body start, park-at-await, request queueing). Present on every
@@ -1155,6 +1166,42 @@ func WorkerType(path string) Type {
 	ty := ObjectType([]Field{{Name: "__worker_ctrl", Ty: TypePtr}})
 	ty.IsWorker = true
 	ty.WorkerPath = path
+	return ty
+}
+
+// ChildProcessType is a spawn()/exec()/execFile() ChildProcess handle: a bare
+// pointer to runtime_childprocess.go's cpStructIR, flag-tagged for method and
+// property dispatch (.stdout/.stderr/.stdin/.on/.pid/.kill).
+func ChildProcessType() Type {
+	ty := ObjectType([]Field{{Name: "__cp", Ty: TypePtr}})
+	ty.IsChildProcess = true
+	return ty
+}
+
+// CPStreamType is child.stdout (which 0) / child.stderr (which 1): the same
+// underlying cp pointer, tagged so .on('data'|'end', cb) stores into the
+// correct listener slots.
+func CPStreamType(which int) Type {
+	ty := ChildProcessType()
+	ty.IsChildProcess = false
+	ty.IsCPStream = true
+	ty.CPWhich = which
+	return ty
+}
+
+// CPStdinType is child.stdin: the cp pointer, tagged for .write()/.end().
+func CPStdinType() Type {
+	ty := ChildProcessType()
+	ty.IsChildProcess = false
+	ty.IsCPStdin = true
+	return ty
+}
+
+// ReadlineType is a readline.createInterface() handle: a bare pointer to
+// runtime_readline.go's rlStructIR, flag-tagged for .on/.question/.close.
+func ReadlineType() Type {
+	ty := ObjectType([]Field{{Name: "__rl", Ty: TypePtr}})
+	ty.IsReadline = true
 	return ty
 }
 
@@ -1685,9 +1732,9 @@ type FuncSig struct {
 	// may-suspend one via a coroutine fiber, a non-suspending one via an inline
 	// catch-and-settle wrapper that settles the promise on return / rejects it on
 	// throw. Used to tag a call's result type PromiseTask regardless of MaySuspend.
-	IsAsync bool
-	HasRest bool             // last param is a rest (variadic) parameter
-	Defaults   []ast.Expression // per-param default expression; nil entry means no default
+	IsAsync  bool
+	HasRest  bool             // last param is a rest (variadic) parameter
+	Defaults []ast.Expression // per-param default expression; nil entry means no default
 	// Optional marks a `param?: T` parameter (ADR-00164) — a call site
 	// omitting it (and with no Defaults[i] expression either) gets T's own
 	// zero value (Type.zeroLiteral()) rather than a "missing argument"

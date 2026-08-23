@@ -358,3 +358,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00318](ADR-00318.md) | CryptoKey model + symmetric `crypto.subtle` (HMAC, AES-GCM/CBC, keys, JWK oct) | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 2; extends [ADR-00316](ADR-00316.md) |
 | [00319](ADR-00319.md) | Asymmetric `crypto.subtle` — RSA-OAEP/RSA-PSS/ECDSA, CryptoKeyPair, pkcs8/spki/raw/JWK | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 3; extends [ADR-00316](ADR-00316.md), [ADR-00318](ADR-00318.md) |
 | [00320](ADR-00320.md) | `crypto.subtle.deriveBits`/`deriveKey` — PBKDF2 and HKDF | Implements [TDD-00104](../tdd/TDD-00104.md) Phase 4, completing it; extends [ADR-00316](ADR-00316.md), [ADR-00318](ADR-00318.md) |
+| [00321](ADR-00321.md) | Node `zlib` module — one-shot gzip/deflate/inflate family, sync + callback | Implements [TDD-00049](../tdd/TDD-00049.md); extends [ADR-00302](ADR-00302.md) |
+| [00322](ADR-00322.md) | Async `child_process` — spawn (streaming) / exec / execFile | Extends [ADR-00025](ADR-00025.md), [TDD-00098](../tdd/TDD-00098.md) |
+| [00323](ADR-00323.md) | Interactive `readline` — createInterface, 'line'/'close', question | Extends [ADR-00322](ADR-00322.md) |

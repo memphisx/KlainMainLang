@@ -348,6 +348,15 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	// DataView properties (byteLength/byteOffset/buffer) — dedicated reads
 	// over the hidden header struct, same pattern ArrayBuffer's .byteLength
 	// uses below.
+	if ex.Property == "stdout" || ex.Property == "stderr" || ex.Property == "stdin" || ex.Property == "pid" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsChildProcess {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitChildProcessMember(objVal, ex.Property, ex.GetPos())
+		}
+	}
 	if ex.Property == "byteLength" || ex.Property == "byteOffset" || ex.Property == "buffer" {
 		if objTy := e.inferExprType(ex.Object); objTy.IsDataView {
 			objVal, err := e.emitExpr(ex.Object)

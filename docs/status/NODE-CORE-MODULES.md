@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index. Smaller or lower-priority Node built-in modules, grouped here rather than given a full page each. Split out to its own page (rather than [PROCESS-CLI.md](PROCESS-CLI.md)) once it's substantial enough to need one.
 
-**Coverage**: 2/11 (~18%) · **Strict Coverage**: 1/11 (~9%).
+**Coverage**: 3/11 (~27%) · **Strict Coverage**: 1/11 (~9%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -15,7 +15,7 @@ Format: [Status page format](README.md#status-page-format).
 | `dgram` (UDP sockets) | ❌ | | • Not started |
 | `tls` (TLS-wrapped sockets) | ❌ | | • `fetch`/`http.listen` handle HTTPS/TLS via libcurl internally already; a standalone `tls` module for arbitrary TLS sockets is separate, unstarted work |
 | `dns` (`dns.lookup`, `dns.resolve`, ...) | ❌ | | • `fetch`/libcurl already resolve hostnames internally; no standalone DNS API is exposed to user code |
-| `zlib` (as a Node module — `.gzip`/`.gunzip`/`.deflate` callback/sync APIs) | ❌ | | • Distinct from the WHATWG `CompressionStream`/`DecompressionStream` mention in [STREAMS.md](STREAMS.md) — both would link the same underlying `zlib` C library but expose different call shapes |
+| `zlib` (`gzip`/`gunzip`, `deflate`/`inflate`, `deflateRaw`/`inflateRaw`, `unzip`, each `*Sync` + `(err, result)` callback) | ✅ | • The callback form fires synchronously, not deferred to the next event-loop tick<br>• No Brotli (`brotliCompress*`) — it would pull in `-lbrotli`, a new system dependency this binding deliberately avoids<br>• No class/stream forms (`createGzip()`, `zlib.Gzip`, …) — the WHATWG `CompressionStream`/`DecompressionStream` cover the streaming case ([STREAMS.md](STREAMS.md))<br>• `{ level }` is the only supported option and must be a compile-time constant | • One-shot calls over the same libz backend as `CompressionStream` ([ADR-00302](../adr/ADR-00302.md)), driven by a shared `@__kml_zlib_oneshot` helper ([ADR-00321](../adr/ADR-00321.md))<br>• Input may be a Buffer/TypedArray, ArrayBuffer, DataView, or string (UTF-8); output is always a Buffer |
 | `vm` (`vm.Script`, sandboxed `eval`-like execution) | ❌ | | • Same fundamental blocker as the already-tracked bare `eval()` — see [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md). Opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started |
 | `cluster` (multi-process worker pool sharing a listen socket) | ❌ | | • No process-forking/threading model exists yet — see [CONCURRENCY-WORKERS.md](CONCURRENCY-WORKERS.md) |
 | `http2` | ❌ | | • `http.listen`/`fetch` are HTTP/1.1 only |

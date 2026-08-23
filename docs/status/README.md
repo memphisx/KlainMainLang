@@ -71,17 +71,17 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.listen`/`.close`, `cluster.*`, and this project's own `Memory.free`) require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
-**60 / 81 features, ~74% coverage.**
+**63 / 81 features, ~78% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
 | File System (fs) | 11/13, ~85% | 7/13, ~54% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | • No async variants<br>• `readFileSync`/`copyFileSync` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
-| Process / CLI I/O | 13/23, ~57% | 9/23, ~39% | [PROCESS-CLI.md](PROCESS-CLI.md) | • `process.env` is read-only<br>• `process.on(...)` handles only `'SIGINT'`/`'SIGTERM'`, not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`<br>• No async `child_process`<br>• No interactive `readline` |
+| Process / CLI I/O | 15/23, ~65% | 9/23, ~39% | [PROCESS-CLI.md](PROCESS-CLI.md) | • `process.env` is read-only<br>• `process.on(...)` handles only `'SIGINT'`/`'SIGTERM'`, not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`<br>• No `process.nextTick`/interactive `process.stdin` stream |
 | HTTP Server | 13/13, 100% | 9/13, ~69% | [HTTP-SERVER.md](HTTP-SERVER.md) | • `req.body`/response `body` string fields still truncate at an embedded null byte (`bodyBytes()` accessors are additive, not a fix)<br>• `.close()` in a `{ workers: N }` cluster only stops the calling worker process |
 | `path` | 8/8, 100% | 7/8, ~88% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
 | `os` | 7/7, 100% | 6/7, ~86% | [OS.md](OS.md) | • Verified on Linux and Apple Silicon (M4 Pro)<br>• Darwin `os.cpus()` reports `speed` 0 on M-series (no fixed clock — matches Node) and has no `irq` tick bucket — see [OS.md](OS.md)'s Known Limitations |
 | `events` (`EventEmitter`) | 6/6, 100% | 3/6, 50% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | • Single payload type per emitter, not real Node's variadic `...args`<br>• No overriding `on`/`emit`/etc. in a subclass<br>• `instanceof EventEmitter` is a compile error |
-| Other core modules (`querystring`, `assert`, `util`, `net`/`dgram`/`tls`/`dns`, `zlib`, `vm`, `cluster`, `http2`) | 2/11, ~18% | 1/11, ~9% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | `querystring`/`assert` done; the rest not started, grouped together as lower-individual-priority rather than each getting a full page |
+| Other core modules (`querystring`, `assert`, `zlib`, `util`, `net`/`dgram`/`tls`/`dns`, `vm`, `cluster`, `http2`) | 3/11, ~27% | 1/11, ~9% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | `querystring`/`assert`/`zlib` done; the rest not started, grouped together as lower-individual-priority rather than each getting a full page |
 
 ## Cross-Cutting
 
@@ -175,11 +175,7 @@ Not-yet-implemented items from the [Web Platform APIs](#web-platform-apis) and [
 
 What remains, tiered by effort:
 
-**Low / medium effort (existing subsystem or one small addition):**
-- Async `child_process`, interactive `readline` — both built on `EventEmitter` in real Node. See [EVENT-EMITTER.md](EVENT-EMITTER.md) and [PROCESS-CLI.md](PROCESS-CLI.md).
-
 **Medium effort (new dependency or subsystem):**
-- `zlib` as a Node module (callback/sync `.gzip`/`.gunzip`/`.deflate` shapes) — the `-lz` link and codec machinery exist for `CompressionStream`/`DecompressionStream` ([ADR-00302](../adr/ADR-00302.md)), so this is a surface-binding job, not a new dependency. See [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
 - `util`, `net`/`dgram`/`tls`/`dns`, `vm`, `cluster`, `http2` — lower individual priority, grouped in [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
 
 ### Later — differentiator features, deliberately deprioritized

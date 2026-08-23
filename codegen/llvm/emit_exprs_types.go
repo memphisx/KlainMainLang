@@ -463,6 +463,21 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.MemberExpression:
+		// ChildProcess members — must match emitChildProcessMember.
+		if ex.Property == "stdout" || ex.Property == "stderr" || ex.Property == "stdin" || ex.Property == "pid" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsChildProcess {
+				switch ex.Property {
+				case "stdout":
+					return CPStreamType(0)
+				case "stderr":
+					return CPStreamType(1)
+				case "stdin":
+					return CPStdinType()
+				case "pid":
+					return TypeI64
+				}
+			}
+		}
 		// Response.body — must match emitResponseBodyStream (TDD-00097 St. 4).
 		if ex.Property == "body" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
@@ -1117,6 +1132,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert__kml_builtin" {
 				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "zlib__kml_builtin" {
+				// The *Sync forms return a Buffer; the callback forms return void.
+				if n := len(mem.Property); n > 4 && mem.Property[n-4:] == "Sync" {
+					return TypedArrayType("uint8")
+				}
+				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "childprocess__kml_builtin" {
+				// spawn/exec/execFile all return a ChildProcess handle.
+				return ChildProcessType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "readline__kml_builtin" {
+				return ReadlineType()
 			}
 			if e.isCryptoSubtle(mem.Object) {
 				task := func(inner Type) Type {

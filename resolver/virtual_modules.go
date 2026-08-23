@@ -26,14 +26,17 @@ import "KlainMainLang/ast"
 // scope-aware rename pass ([TDD-00041]) that already handles real
 // file-to-file imports, so shadowing "just works" for free.
 var virtualBuiltinMarkers = map[string]string{
-	"fs":          "fs__kml_builtin",
-	"path":        "path__kml_builtin",
-	"os":          "os__kml_builtin",
-	"querystring": "querystring__kml_builtin",
-	"assert":      "assert__kml_builtin",
-	"http":        "http__kml_builtin",
-	"cluster":     "cluster__kml_builtin",
-	"memory":      "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
+	"fs":            "fs__kml_builtin",
+	"path":          "path__kml_builtin",
+	"os":            "os__kml_builtin",
+	"querystring":   "querystring__kml_builtin",
+	"zlib":          "zlib__kml_builtin",
+	"child_process": "childprocess__kml_builtin",
+	"readline":      "readline__kml_builtin",
+	"assert":        "assert__kml_builtin",
+	"http":          "http__kml_builtin",
+	"cluster":       "cluster__kml_builtin",
+	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
 	// identity (see resolver.go's stream special-case) — `new Readable(...)`
 	// is recognized by name at parse time like every other builtin
@@ -73,6 +76,18 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"totalmem": true, "freemem": true, "cpus": true, "EOL": true,
 	},
 	"querystring": {"parse": true, "stringify": true},
+	"zlib": {
+		"gzipSync": true, "gunzipSync": true,
+		"deflateSync": true, "inflateSync": true,
+		"deflateRawSync": true, "inflateRawSync": true,
+		"unzipSync": true,
+		"gzip":      true, "gunzip": true,
+		"deflate": true, "inflate": true,
+		"deflateRaw": true, "inflateRaw": true,
+		"unzip": true,
+	},
+	"child_process": {"spawn": true, "exec": true, "execFile": true},
+	"readline":      {"createInterface": true},
 	"assert": {
 		"ok": true, "equal": true, "strictEqual": true, "notEqual": true,
 		"notStrictEqual": true, "fail": true, "throws": true,

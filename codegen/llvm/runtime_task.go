@@ -160,6 +160,18 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_chan_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_chan_dispatch() {\nentry:\n  ret void\n}")
 	}
+	// child_process hooks the event loop references unconditionally.
+	if !e.usedChildProcRuntime {
+		e.emitGlobal("define i1 @__kml_cp_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_cp_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_cp_dispatch() {\nentry:\n  ret void\n}")
+	}
+	// readline hooks likewise.
+	if !e.usedReadlineRuntime {
+		e.emitGlobal("define i1 @__kml_rl_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_rl_dispatch() {\nentry:\n  ret void\n}")
+	}
 }
 
 func (e *Emitter) ensureTaskRuntime() {

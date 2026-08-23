@@ -66,6 +66,20 @@ func (e *Emitter) ensureReadDecl() {
 	}
 }
 
+func (e *Emitter) ensureWriteDecl() {
+	if !e.usedWriteDecl {
+		e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+		e.usedWriteDecl = true
+	}
+}
+
+func (e *Emitter) ensureFcntlDecl() {
+	if !e.usedFcntlDecl {
+		e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
+		e.usedFcntlDecl = true
+	}
+}
+
 func (e *Emitter) ensureFflushDecl() {
 	if !e.usedFflushDecl {
 		e.emitGlobal("declare i32 @fflush(ptr noundef)")

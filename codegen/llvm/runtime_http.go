@@ -622,11 +622,11 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.emitGlobal("declare i32 @listen(i32 noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @accept(i32 noundef, ptr noundef, ptr noundef)")
 	e.ensureReadDecl()
-	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+	e.ensureWriteDecl()
 	e.ensureCloseDecl()
 	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i16 @htons(i16 noundef)")
-	e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
+	e.ensureFcntlDecl()
 	e.ensureForkDecl()
 
 	e.emitGlobal("@__kml_listen_fd = internal thread_local global i32 -1, align 4")
@@ -1075,12 +1075,18 @@ afteresreconnect:
   ; registered onmessage handler holds this thread's loop alive until
   ; close() — same no-op-stub mechanism as the worker hook above.
   %ckeep = call i1 @__kml_chan_keepalive()
+  ; child_process: an unfinalized spawned child keeps this loop alive.
+  %cpkeep = call i1 @__kml_cp_keepalive()
+  ; readline: an open interface keeps this loop alive.
+  %rlkeep = call i1 @__kml_rl_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
   %anywork3 = or i1 %anywork2, %hasopenwsc
   %anywork4 = or i1 %anywork3, %wkeep
-  %anywork = or i1 %anywork4, %ckeep
+  %anywork5 = or i1 %anywork4, %ckeep
+  %anywork6 = or i1 %anywork5, %cpkeep
+  %anywork = or i1 %anywork6, %rlkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1231,6 +1237,17 @@ wscsetdone:
   %cfz0 = load i1, ptr %forcezero, align 1
   %cfz1 = or i1 %cfz0, %cfdforce
   store i1 %cfz1, ptr %forcezero, align 1
+  ; child_process: add every live spawned child's stdout/stderr read pipes;
+  ; force a zero timeout when a child is EOF-on-both but not yet reaped.
+  %cpfdforce = call i1 @__kml_cp_fdset_add(ptr %fdset, ptr %maxfd)
+  %cpfz0 = load i1, ptr %forcezero, align 1
+  %cpfz1 = or i1 %cpfz0, %cpfdforce
+  store i1 %cpfz1, ptr %forcezero, align 1
+  ; readline: add stdin (fd 0) while an interface is open.
+  %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
+  %rlfz0 = load i1, ptr %forcezero, align 1
+  %rlfz1 = or i1 %rlfz0, %rlfdforce
+  store i1 %rlfz1, ptr %forcezero, align 1
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -1468,6 +1485,10 @@ afterselectok:
   call void @__kml_worker_dispatch()
   ; TDD-00099: drain channel-endpoint envelopes for this thread likewise.
   call void @__kml_chan_dispatch()
+  ; child_process: drain spawned children's stdout/stderr and finalize exits.
+  call void @__kml_cp_dispatch()
+  ; readline: drain stdin and emit 'line'/'close' events.
+  call void @__kml_rl_dispatch()
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:

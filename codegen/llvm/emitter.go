@@ -57,16 +57,16 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	globals               strings.Builder // global declarations (string constants, printf decl, …)
-	functions             strings.Builder // emitted user-defined function bodies
-	allocas               strings.Builder // alloca instructions for the current function
-	body                  strings.Builder // body instructions for the current function
-	scopes                []scope
+	globals   strings.Builder // global declarations (string constants, printf decl, …)
+	functions strings.Builder // emitted user-defined function bodies
+	allocas   strings.Builder // alloca instructions for the current function
+	body      strings.Builder // body instructions for the current function
+	scopes    []scope
 	// moduleGlobals holds top-level `const`/`let` bindings promoted to LLVM
 	// module globals so a named `function` declaration (emitted with a fresh,
 	// separate scope) can read them — not just an arrow/closure that captures
 	// them (TDD-00093). lookup falls back to this after the function scopes.
-	moduleGlobals         map[string]Symbol
+	moduleGlobals map[string]Symbol
 	// promotedGlobalDecls marks the exact top-level VarDeclaration nodes promoted
 	// to module globals, by pointer identity — so emitVarDecl stores the
 	// initializer into the global for *those* declarations only. A same-named
@@ -115,7 +115,7 @@ type Emitter struct {
 	// Stage 3), instantiated on demand at each use site by substituting concrete
 	// type arguments into the alias body, then resolving the result.
 	genericTypeAliases map[string]*ast.TypeAliasDeclaration
-	genericClasses    map[string]*ast.ClassDeclaration
+	genericClasses     map[string]*ast.ClassDeclaration
 	// generators holds one entry per top-level `function*` declaration
 	// (TDD-00061/ADR-00172), keyed by its bare source name — deliberately
 	// separate from funcs, since constructing a generator (`gen(args)`)
@@ -181,38 +181,41 @@ type Emitter struct {
 	// which would recurse forever at compile time (cf. ADR-00221). A class
 	// name present here is mid-serialization; re-entry serializes it as a
 	// plain object instead of re-dispatching toJSON.
-	jsonToJSONActive         map[string]bool
-	usedAnyEq                bool
-	usedClockGettime         bool
-	usedDateNow              bool
-	usedPerformanceNow       bool
-	usedPerformanceMarkMap   bool
-	usedDateDecompose        bool
-	usedSscanf               bool
-	usedDaysFromCivil        bool
-	usedDateParse            bool
-	usedDateCompose          bool
-	usedDateNameTables       bool
-	usedFetch                bool
-	usedFetchAsync           bool
+	jsonToJSONActive       map[string]bool
+	usedAnyEq              bool
+	usedClockGettime       bool
+	usedDateNow            bool
+	usedPerformanceNow     bool
+	usedPerformanceMarkMap bool
+	usedDateDecompose      bool
+	usedSscanf             bool
+	usedDaysFromCivil      bool
+	usedDateParse          bool
+	usedDateCompose        bool
+	usedDateNameTables     bool
+	usedFetch              bool
+	usedFetchAsync         bool
 	// TDD-00098: Worker (worker_threads) state. workerEntries maps a worker
 	// module's canonical path to its entry symbol + statically-declared
 	// channel types; currentWorkerMod is non-empty while a worker module's
 	// entry function is being emitted (gates parentPort/workerData).
-	usedConnPokeGlobal bool
-	usedWorkerRuntime  bool
-	hasWorkers        bool // set at EmitProgram start from Program.WorkerModules
-	workerEntries     map[string]*workerEntryInfo
-	currentWorkerMod  string
-	workerAdaptCtr    int
+	usedConnPokeGlobal   bool
+	usedChildProcRuntime bool
+	usedReadlineRuntime  bool
+	usedCPKill           bool
+	usedWorkerRuntime    bool
+	hasWorkers           bool // set at EmitProgram start from Program.WorkerModules
+	workerEntries        map[string]*workerEntryInfo
+	currentWorkerMod     string
+	workerAdaptCtr       int
 	// TDD-00099: shared memory + channels.
-	usedGCUncollectable bool
-	usedAtomicsRuntime  bool
-	usedChanRuntime     bool
-	usedPipeDecl        bool
-	usedPthreadMutex    bool
-	usedWorkerFdSetbit  bool
-	bcChannels          map[string]*bcChannelInfo
+	usedGCUncollectable      bool
+	usedAtomicsRuntime       bool
+	usedChanRuntime          bool
+	usedPipeDecl             bool
+	usedPthreadMutex         bool
+	usedWorkerFdSetbit       bool
+	bcChannels               map[string]*bcChannelInfo
 	usedPromiseCombinators   bool
 	usedPendingFinishSettled bool
 	usedFetchAwaitSettled    bool
@@ -248,6 +251,8 @@ type Emitter struct {
 	usedForkDecl             bool
 	usedCloseDecl            bool
 	usedReadDecl             bool
+	usedWriteDecl            bool
+	usedFcntlDecl            bool
 	usedFflushDecl           bool
 	usedHTTPClusterFork      bool
 	usedProcessCwd           bool
@@ -397,6 +402,8 @@ type Emitter struct {
 	usedReqBodyStream        bool
 	usedReqBodyDrain         bool
 	usedZlibStreamRuntime    bool
+	usedZlibOneshot          bool
+	usedZlibExterns          bool
 	usedNodeStreamRuntime    bool
 	usedPromiseAddReaction   bool
 	streamSiteCtr            int
@@ -443,17 +450,17 @@ type Emitter struct {
 	usedExit        bool
 	usedGetenv      bool
 	// Async function state (reset per function, like currentRetType).
-	isAsync          bool
-	coroHdl          string // register holding the malloc'd promise slot
-	asyncPromiseReg  string // non-suspending async fn: the settled task promise it returns (TDD-00084 Part A)
-	asyncCatchLabel  string // non-suspending async fn: the catch-and-reject block label
-	emittingHTTPHandler bool // an http.listen handler arrow is being emitted — keep the old bare-slot async model (connection-fiber-driven, not task-promise), TDD-00084 Part A
+	isAsync             bool
+	coroHdl             string // register holding the malloc'd promise slot
+	asyncPromiseReg     string // non-suspending async fn: the settled task promise it returns (TDD-00084 Part A)
+	asyncCatchLabel     string // non-suspending async fn: the catch-and-reject block label
+	emittingHTTPHandler bool   // an http.listen handler arrow is being emitted — keep the old bare-slot async model (connection-fiber-driven, not task-promise), TDD-00084 Part A
 	// httpHandlerNode pins WHICH arrow/function-expression is the handler:
 	// the bare-slot model applies to it alone — an async callback nested
 	// inside the handler (e.g. a streaming body's pull, TDD-00097 Stage 5)
 	// must get a real settled promise, or its returned slot is an 8-byte
 	// never-settled sentinel that loses every reaction attached to it.
-	httpHandlerNode ast.Node
+	httpHandlerNode  ast.Node
 	currentPromiseTy Type   // T in Promise<T>; void if Promise<void>
 	coroRetLabel     string // label for the async-return block
 }
@@ -1291,7 +1298,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")

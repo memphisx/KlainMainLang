@@ -230,6 +230,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if (mem.Property == "postMessage" || mem.Property == "on" || mem.Property == "terminate") && e.inferExprType(mem.Object).IsWorker {
 			return e.emitWorkerMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if objTy := e.inferExprType(mem.Object); objTy.IsChildProcess || objTy.IsCPStream || objTy.IsCPStdin {
+			return e.emitChildProcessMethodCall(mem.Object, objTy, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsReadline {
+			return e.emitReadlineMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		// TDD-00099: BroadcastChannel / MessagePort surfaces.
 		if mem.Property == "postMessage" || mem.Property == "close" {
 			if objTy := e.inferExprType(mem.Object); objTy.IsBroadcastChannel {
@@ -479,6 +485,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "stringify":
 				return e.emitQuerystringStringify(ex.Args, ex.GetPos())
 			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "zlib__kml_builtin" {
+			return e.emitZlibModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "childprocess__kml_builtin" {
+			return e.emitChildProcessModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "readline__kml_builtin" {
+			return e.emitReadlineModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
