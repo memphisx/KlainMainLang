@@ -83,6 +83,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 			return e.emitMathCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Buffer" && !e.isShadowedByLocal(id.Name) {
+			return e.emitBufferStaticCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Atomics" && !e.isShadowedByLocal(id.Name) {
 			return e.emitAtomicsCall(mem.Property, ex.Args, ex.GetPos())
 		}
@@ -529,6 +532,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitConsoleGroupEnd(ex.Args, ex.GetPos())
 			}
 		}
+		// TDD-00101: a BigInt64Array/BigUint64Array supports only an explicit
+		// allow-list of array methods — the generic HOF/search/sort/mutator
+		// machinery passes raw i64 scalars into callbacks and comparisons, so
+		// any unlisted method is rejected here rather than silently surfacing
+		// a raw scalar as if it were a bigint.
+		if bigIntElemRejectedMethods[mem.Property] && e.inferExprType(mem.Object).BigIntElem {
+			return Value{}, fmt.Errorf("%d:%d: .%s() is not supported on a BigInt64Array/BigUint64Array (supported: indexing, .length/.byteLength, .at/.set/.subarray/.slice/.fill/.reverse, for-of, Atomics.*)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+		}
 		if mem.Property == "push" {
 			return e.emitPush(mem, ex.Args, ex.GetPos())
 		}
@@ -545,7 +556,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitSplice(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "slice" {
-			if e.inferExprType(mem.Object).IsArray {
+			objTy := e.inferExprType(mem.Object)
+			if objTy.IsBlob {
+				return e.emitBlobCall(mem, "slice", ex.Args, ex.GetPos())
+			}
+			if objTy.IsArrayBuffer {
+				return e.emitArrayBufferSlice(mem, ex.Args, ex.GetPos())
+			}
+			if objTy.IsArray {
 				return e.emitArraySlice(mem, ex.Args, ex.GetPos())
 			}
 			return e.emitStringSlice(mem, ex.Args, ex.GetPos())
@@ -704,6 +722,24 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "flatMap" {
 			return e.emitArrayFlatMap(mem, ex.Args, ex.GetPos())
+		}
+		// Buffer instance methods (TDD-00103) — checked before the generic
+		// string/array chains can claim .toString/.write/.copy/.equals/
+		// .compare; everything not named here (indexing, .fill, .indexOf,
+		// .slice, HOFs, …) deliberately falls through to the shared
+		// TypedArray/array machinery.
+		if isBufferMethodName(mem.Property) && e.inferExprType(mem.Object).IsBuffer {
+			return e.emitBufferInstanceCall(mem, mem.Property, ex.Args, ex.GetPos())
+		}
+		// Blob-only methods (TDD-00102) — checked before Response's own
+		// .arrayBuffer()/.text() dispatch below can claim the same names.
+		if e.inferExprType(mem.Object).IsBlob {
+			switch mem.Property {
+			case "arrayBuffer", "bytes", "text":
+				return e.emitBlobCall(mem, mem.Property, ex.Args, ex.GetPos())
+			case "stream":
+				return Value{}, fmt.Errorf("%d:%d: Blob.stream() is not supported — use .bytes()/.arrayBuffer() instead", ex.GetPos().Line, ex.GetPos().Col)
+			}
 		}
 		// DataView accessors (getInt16/setFloat64/..., emit_dataview.go).
 		if op, kind, ok := dataViewMethodKind(mem.Property); ok {

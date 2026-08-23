@@ -175,6 +175,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewHeadersExpression(ex)
 	case *ast.NewDataViewExpression:
 		return e.emitNewDataViewExpression(ex)
+	case *ast.NewBlobExpression:
+		return e.emitNewBlobExpression(ex)
 	case *ast.NewRequestExpression:
 		return e.emitNewRequestExpression(ex)
 	case *ast.NewXMLHttpRequestExpression:

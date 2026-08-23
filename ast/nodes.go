@@ -1410,6 +1410,24 @@ func NewNewDataViewExpression(buffer, byteOffset, byteLength Expression, pos Pos
 	return &NewDataViewExpression{Buffer: buffer, ByteOffset: byteOffset, ByteLength: byteLength, pos: pos}
 }
 
+// NewBlobExpression is `new Blob(parts?, options?)` (TDD-00102) — an
+// immutable binary value with a MIME type. Parts is usually an inline
+// ArrayLiteral of strings/TypedArrays/ArrayBuffers/Blobs; Options an object
+// literal carrying { type }. Both nil-able. A general expression.
+type NewBlobExpression struct {
+	Parts   Expression
+	Options Expression
+	pos     Pos
+}
+
+func (*NewBlobExpression) nodeMarker()   {}
+func (*NewBlobExpression) exprMarker()   {}
+func (n *NewBlobExpression) GetPos() Pos { return n.pos }
+
+func NewNewBlobExpression(parts, options Expression, pos Pos) *NewBlobExpression {
+	return &NewBlobExpression{Parts: parts, Options: options, pos: pos}
+}
+
 type NewArrayBufferExpression struct {
 	ByteLength Expression
 	// Shared marks `new SharedArrayBuffer(byteLength)` — identical layout
@@ -1470,10 +1488,15 @@ func NewNewMessageChannelExpression(typeArg *TypeAnnotation, pos Pos) *NewMessag
 // a number[]/another TypedArray (copy-construct). Like NewArrayExpression/
 // NewMapExpression/NewSetExpression, this is restricted to a variable
 // declaration's initializer — not a general expression.
+// ByteOffset/Length carry the optional 2nd/3rd constructor arguments of the
+// sub-range view form `new XArray(buffer, byteOffset, length?)` — both nil
+// for the single-argument forms.
 type NewTypedArrayExpression struct {
-	ElemKind string
-	Arg      Expression
-	pos      Pos
+	ElemKind   string
+	Arg        Expression
+	ByteOffset Expression
+	Length     Expression
+	pos        Pos
 }
 
 func (*NewTypedArrayExpression) nodeMarker()   {}

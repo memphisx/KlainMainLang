@@ -349,3 +349,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00309](ADR-00309.md) | `BroadcastChannel` + `MessageChannel`/`MessagePort` | Implements [TDD-00099](../tdd/TDD-00099.md); shared pipe-backed endpoint runtime |
 | [00310](ADR-00310.md) | Free-variable scanner missed `new TypedArray/ArrayBuffer/DataView(...)` arguments | Closure capture miscompile found during ADR-00308 |
 | [00311](ADR-00311.md) | URLPattern — route matching over compiled per-component regexes | Implements [TDD-00100](../tdd/TDD-00100.md); merged-Map `.exec` result |
+| [00312](ADR-00312.md) | Binary-data caveat batch — `Atomics.isLockFree`, buffer `.slice`, 3-arg TypedArray views, DataView BigInt accessors | Extends [ADR-00078](ADR-00078.md)/[ADR-00294](ADR-00294.md)/[ADR-00308](ADR-00308.md); adds the bigint u64 ABI half |
+| [00313](ADR-00313.md) | `BigInt64Array`/`BigUint64Array` + `Uint8ClampedArray` — TypedArray store/load conversion layer | Implements [TDD-00101](../tdd/TDD-00101.md) |
+| [00314](ADR-00314.md) | `Blob` — immutable binary data with a MIME type | Implements [TDD-00102](../tdd/TDD-00102.md) |
+| [00315](ADR-00315.md) | Node `Buffer` — a flagged Uint8Array with codecs and binary accessors | Implements [TDD-00103](../tdd/TDD-00103.md); supersedes [ADR-00094](ADR-00094.md)'s "no Buffer class" half |

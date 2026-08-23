@@ -578,8 +578,21 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		// variable" at emission — found via a SharedArrayBuffer view in a
 		// worker handler, TDD-00099).
 		scanExprFV(x.Arg, bound, result)
+		if x.ByteOffset != nil {
+			scanExprFV(x.ByteOffset, bound, result)
+		}
+		if x.Length != nil {
+			scanExprFV(x.Length, bound, result)
+		}
 	case *ast.NewArrayBufferExpression:
 		scanExprFV(x.ByteLength, bound, result)
+	case *ast.NewBlobExpression:
+		if x.Parts != nil {
+			scanExprFV(x.Parts, bound, result)
+		}
+		if x.Options != nil {
+			scanExprFV(x.Options, bound, result)
+		}
 	case *ast.NewDataViewExpression:
 		scanExprFV(x.Buffer, bound, result)
 		scanExprFV(x.ByteOffset, bound, result)

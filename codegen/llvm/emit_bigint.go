@@ -24,6 +24,8 @@ func (e *Emitter) ensureBigInt() {
 		"declare ptr @__kml_bigint_from_str(ptr, i64, i32)",
 		"declare ptr @__kml_bigint_from_i64(i64)",
 		"declare i64 @__kml_bigint_to_i64(ptr)",
+		"declare ptr @__kml_bigint_from_u64(i64)",
+		"declare i64 @__kml_bigint_to_u64(ptr)",
 		"declare ptr @__kml_bigint_to_str(ptr, i32)",
 		"declare ptr @__kml_bigint_add(ptr, ptr)",
 		"declare ptr @__kml_bigint_sub(ptr, ptr)",

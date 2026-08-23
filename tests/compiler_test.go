@@ -61,6 +61,7 @@ func buildBinary(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -118,6 +119,22 @@ func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 		t.Fatalf("write JSON parse-tree source: %v", err)
 	}
 	return append(clangArgs, jsonFile)
+}
+
+// appendBufferCodecs compiles the Buffer codec C file (__kml_buf_* ABI, libc
+// only) into the clang invocation when the program used a Buffer string
+// codec, mirroring main.go so the test build and the real build can't drift
+// (TDD-00103; same rationale as appendJSONParseTree).
+func appendBufferCodecs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesBufferCodecs() {
+		return clangArgs
+	}
+	bcFile := filepath.Join(dir, "bufcodecs.c")
+	if err := os.WriteFile(bcFile, []byte(llvm.BufferCodecsSource()), 0644); err != nil {
+		t.Fatalf("write Buffer codec source: %v", err)
+	}
+	return append(clangArgs, bcFile)
 }
 
 // appendURLPattern compiles the URLPattern runtime C file (__kml_urlpattern_*
@@ -192,6 +209,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -251,6 +269,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -313,6 +332,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -449,6 +469,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -524,6 +545,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -612,6 +634,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -665,6 +688,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -748,6 +772,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
@@ -794,6 +819,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()

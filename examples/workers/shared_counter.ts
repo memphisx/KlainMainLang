@@ -16,3 +16,4 @@ for (let i = 0; i < 1000; i++) {
 }
 const r: string = Atomics.wait(cells, 1, 0, 2000);
 console.log("wait: " + r + ", counter: " + Atomics.load(cells, 0));
+console.log("4-byte ops lock-free: " + Atomics.isLockFree(4));

@@ -253,6 +253,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewTextDecoderBody(pos)
 	case "RegExp":
 		return p.parseNewRegExpBody(pos)
+	case "Blob":
+		return p.parseNewBlobBody(pos)
 	default:
 		if elemKind, ok := typedArrayElemKinds[nameTok.Literal]; ok {
 			return p.parseNewTypedArrayBody(pos, elemKind)
@@ -261,21 +263,24 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	}
 }
 
-// typedArrayElemKinds maps each of the 8 supported TypedArray constructor
+// typedArrayElemKinds maps each of the 11 supported TypedArray constructor
 // names to the element-kind string codegen resolves into a concrete Type
-// (see docs/tdd/TDD-00018.md) — the same lowercase names ResolveTypeName
-// (codegen/llvm/types.go) already understands for JSDoc @type annotations.
-// Uint8ClampedArray/BigInt64Array/BigUint64Array are deliberately absent —
-// out of scope, see the TDD's "Deliberately out of scope" section.
+// (see docs/tdd/TDD-00018.md, and TDD-00101 for the BigInt64Array/
+// BigUint64Array/Uint8ClampedArray additions) — the same lowercase names
+// ResolveTypeName (codegen/llvm/types.go) already understands for JSDoc
+// @type annotations.
 var typedArrayElemKinds = map[string]string{
-	"Int8Array":    "int8",
-	"Uint8Array":   "uint8",
-	"Int16Array":   "int16",
-	"Uint16Array":  "uint16",
-	"Int32Array":   "int32",
-	"Uint32Array":  "uint32",
-	"Float32Array": "float32",
-	"Float64Array": "float64",
+	"Int8Array":         "int8",
+	"Uint8Array":        "uint8",
+	"Uint8ClampedArray": "uint8clamped",
+	"Int16Array":        "int16",
+	"Uint16Array":       "uint16",
+	"Int32Array":        "int32",
+	"Uint32Array":       "uint32",
+	"Float32Array":      "float32",
+	"Float64Array":      "float64",
+	"BigInt64Array":     "bigint64",
+	"BigUint64Array":    "biguint64",
 }
 
 // parseNewGenericBody parses `new ClassName(args)` for anything that isn't
@@ -779,6 +784,30 @@ func (p *Parser) parseNewDataViewBody(pos ast.Pos) (*ast.NewDataViewExpression, 
 	return ast.NewNewDataViewExpression(buffer, byteOffset, byteLength, pos), nil
 }
 
+// parseNewBlobBody parses `new Blob(parts?, options?)` (TDD-00102).
+func (p *Parser) parseNewBlobBody(pos ast.Pos) (*ast.NewBlobExpression, error) {
+	p.advance() // consume 'Blob'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var parts, options ast.Expression
+	var err error
+	if !p.check(lexer.RPAREN) {
+		if parts, err = p.parseAssignment(); err != nil {
+			return nil, err
+		}
+		if p.match(lexer.COMMA) {
+			if options, err = p.parseAssignment(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewBlobExpression(parts, options, pos), nil
+}
+
 func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpression, error) {
 	shared := p.peek().Literal == "SharedArrayBuffer"
 	p.advance() // consume 'ArrayBuffer' / 'SharedArrayBuffer'
@@ -853,10 +882,25 @@ func (p *Parser) parseNewTypedArrayBody(pos ast.Pos, elemKind string) (*ast.NewT
 	if err != nil {
 		return nil, err
 	}
+	nta := ast.NewNewTypedArrayExpression(elemKind, arg, pos)
+	// Optional 2nd/3rd arguments: the sub-range view form
+	// `new XArray(buffer, byteOffset, length?)`.
+	if p.check(lexer.COMMA) {
+		p.advance()
+		if nta.ByteOffset, err = p.parseAssignment(); err != nil {
+			return nil, err
+		}
+		if p.check(lexer.COMMA) {
+			p.advance()
+			if nta.Length, err = p.parseAssignment(); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	return ast.NewNewTypedArrayExpression(elemKind, arg, pos), nil
+	return nta, nil
 }
 
 func (p *Parser) parseNewArrayBody(pos ast.Pos) (*ast.NewArrayExpression, error) {

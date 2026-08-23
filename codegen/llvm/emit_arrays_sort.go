@@ -259,7 +259,14 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sliceLen))
-	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	// A TypedArray's slice is the same TypedArray kind (flags preserved so
+	// e.g. a BigInt64Array's copy still wraps elements — TDD-00101).
+	ty := ArrayOf(elemTy)
+	recvTy := e.inferExprType(mem.Object)
+	ty.IsTypedArray = recvTy.IsTypedArray
+	ty.BigIntElem = recvTy.BigIntElem
+	ty.Clamped = recvTy.Clamped
+	return Value{Ref: r1, Ty: ty}, nil
 }
 
 // emitElemEq emits an i1 register for (a == b) where a and b have type elemTy.

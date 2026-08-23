@@ -164,6 +164,16 @@ func main() {
 	// parser (implementing the __kml_json_* ABI, libc only) alongside the program
 	// — only when it uses JSON.parse/Response.json(). Same shape as bigint above,
 	// minus any external library to link.
+	// Buffer codecs (TDD-00103): hex/base64/latin1, libc only — compiled
+	// alongside only when a program uses a Buffer string codec. Same shape
+	// as the JSON parse-tree file below.
+	if em.UsesBufferCodecs() {
+		bcPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".bufcodecs.c"
+		if err := os.WriteFile(bcPath, []byte(llvm.BufferCodecsSource()), 0644); err != nil {
+			fatal("cannot write Buffer codec source: %v", err)
+		}
+		clangArgs = append(clangArgs, bcPath)
+	}
 	if em.UsesJSONParse() {
 		jsonPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".jsontree.c"
 		if err := os.WriteFile(jsonPath, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {

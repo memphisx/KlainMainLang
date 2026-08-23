@@ -396,6 +396,11 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			}
 		case *ast.NewDataViewExpression:
 			ty = DataViewType()
+		case *ast.NewBlobExpression:
+			ty = BlobType()
+			if gen := e.blobShadowedByClass(init); gen != nil {
+				ty = e.inferExprType(gen)
+			}
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
 		case *ast.NewTextEncoderExpression:

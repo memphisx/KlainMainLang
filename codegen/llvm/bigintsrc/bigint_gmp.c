@@ -40,6 +40,23 @@ long long __kml_bigint_to_i64(void *a) {
 	return (long long)mpz_get_si((mpz_srcptr)a);
 }
 
+void *__kml_bigint_from_u64(unsigned long long v) {
+	mpz_ptr r = bi_new();
+	mpz_set_ui(r, (unsigned long)v);
+	return r;
+}
+
+/* Value mod 2^64 (the spec's ToBigUint64 wrap): fdiv_r_2exp is a floor mod,
+ * always in [0, 2^64), so get_ui is exact. */
+unsigned long long __kml_bigint_to_u64(void *a) {
+	mpz_t t;
+	mpz_init(t);
+	mpz_fdiv_r_2exp(t, (mpz_srcptr)a, 64);
+	unsigned long long r = (unsigned long long)mpz_get_ui(t);
+	mpz_clear(t);
+	return r;
+}
+
 char *__kml_bigint_to_str(void *a, int radix) {
 	return mpz_get_str(NULL, radix, (mpz_srcptr)a); /* GMP mallocs the result */
 }

@@ -97,6 +97,35 @@ try {
 `, "caught: ArrayBuffer length is not a multiple of the element size")
 }
 
+// The 3-argument sub-range view form: new XArray(buffer, byteOffset, length?).
+func TestE2ETypedArraySubRangeView(t *testing.T) {
+	assertOutput(t, `
+const buf = new ArrayBuffer(16)
+const all: Uint8Array = new Uint8Array(buf)
+for (let i = 0; i < 16; i++) { all[i] = i }
+const mid: Uint8Array = new Uint8Array(buf, 4, 8)
+console.log(mid.length, mid[0], mid[7])
+mid[0] = 99
+console.log(all[4])
+const tail: Int32Array = new Int32Array(buf, 8)
+console.log(tail.length, tail.byteLength)
+const one: Int32Array = new Int32Array(buf, 12, 1)
+console.log(one.length)
+`, "8 4 11\n99\n2 8\n1")
+}
+
+func TestE2ETypedArraySubRangeViewRangeErrors(t *testing.T) {
+	assertOutput(t, `
+const buf = new ArrayBuffer(16)
+try { const a: Int32Array = new Int32Array(buf, 3) } catch (e) { console.log("misaligned") }
+try { const b: Int32Array = new Int32Array(buf, 20) } catch (e) { console.log("oob offset") }
+try { const c: Int32Array = new Int32Array(buf, 8, 3) } catch (e) { console.log("oob length") }
+try { const d: Int32Array = new Int32Array(buf, 4, -1) } catch (e) { console.log("neg length") }
+try { const f: Uint16Array = new Uint16Array(buf, 2, 7) } catch (e) { console.log("unreached") }
+console.log("ok")
+`, "misaligned\noob offset\noob length\nneg length\nok")
+}
+
 func TestE2ETypedArraySet(t *testing.T) {
 	assertOutput(t, `
 const a: Uint8Array = new Uint8Array([10, 20, 30, 40, 50])
@@ -192,6 +221,86 @@ const rev = a.reverse()
 console.log(rev[0])
 console.log(a.at(-1))
 `, "2\n150\n20\n2\n50\n10")
+}
+
+// BigInt64Array/BigUint64Array (TDD-00101): raw i64/u64 storage, bigint
+// handles at the language boundary.
+func TestE2EBigInt64ArrayBasics(t *testing.T) {
+	assertOutput(t, `
+const a = new BigInt64Array(3)
+a[0] = 9007199254740993n
+a[1] = -5n
+console.log(a[0], a[1], a[2])
+console.log(a.length, a.byteLength)
+const b = new BigUint64Array([1n, 18446744073709551615n])
+console.log(b[1])
+for (const v of b) { console.log(v) }
+console.log(a.at(1))
+a.fill(7n, 1)
+console.log(a[1], a[2])
+const c = new BigInt64Array(a)
+c[0] = 1n
+console.log(a[0], c[0])
+const sub = a.subarray(1)
+console.log(sub[0])
+const buf = new ArrayBuffer(16)
+const d = new BigInt64Array(buf, 8, 1)
+d[0] = 42n
+console.log(d[0], d.length)
+`, "9007199254740993n -5n 0n\n3 24\n18446744073709551615n\n1n\n18446744073709551615n\n-5n\n7n 7n\n9007199254740993n 1n\n7n\n42n 1")
+}
+
+func TestE2EBigInt64ArrayAtomics(t *testing.T) {
+	assertOutput(t, `
+const sab = new SharedArrayBuffer(16)
+const a = new BigInt64Array(sab)
+Atomics.store(a, 0, 9007199254740993n)
+console.log(Atomics.load(a, 0))
+console.log(Atomics.add(a, 0, 1n))
+console.log(Atomics.compareExchange(a, 0, 9007199254740994n, -1n))
+console.log(Atomics.load(a, 0))
+`, "9007199254740993n\n9007199254740993n\n9007199254740994n\n-1n")
+}
+
+func TestE2EBigInt64ArrayRejections(t *testing.T) {
+	assertChanCompileError(t, `
+const a = new BigInt64Array(2)
+a[0] = 5
+`, "must be a bigint")
+	assertChanCompileError(t, `
+const a = new BigInt64Array(2)
+const m = a.map((x) => x)
+`, "not supported on a BigInt64Array/BigUint64Array")
+	assertChanCompileError(t, `
+const a = new BigInt64Array([1, 2])
+`, "must be a bigint")
+}
+
+// Uint8ClampedArray (TDD-00101): real ToUint8Clamp stores — clamp to
+// [0,255], floats round half to even, NaN → 0.
+func TestE2EUint8ClampedArray(t *testing.T) {
+	assertOutput(t, `
+const a = new Uint8ClampedArray([-1, 300, 254.5, 255.5, NaN, 2.5, 3.5])
+console.log(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+const b = new Uint8ClampedArray(3)
+b[0] = 999
+b[1] = -7
+b[2] = 127.5
+console.log(b[0], b[1], b[2])
+b.fill(300.7, 0, 2)
+console.log(b[0], b[1], b[2])
+const src = new Float64Array([1.2, 500, -3])
+const c = new Uint8ClampedArray(src)
+console.log(c[0], c[1], c[2])
+const d = new Uint8ClampedArray(2)
+d.set(src.subarray(1), 0)
+console.log(d[0], d[1])
+const e = a.map((x: number) => x * 2)
+console.log(e[1])
+b[0] += 200
+console.log(b[0])
+console.log(a.includes(255), a.indexOf(254))
+`, "0 255 254 255 0 2 4\n255 0 128\n255 255 128\n1 255 0\n255 0\n255\n255\ntrue 2")
 }
 
 func TestE2ETypedArrayFloat64(t *testing.T) {

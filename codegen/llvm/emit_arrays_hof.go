@@ -32,7 +32,8 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	// receiver's own (narrower) element stride — found by direct testing,
 	// not by inspection, while verifying "everything already reused for
 	// free" during TDD-00018's implementation.
-	isTypedArray := e.inferExprType(mem.Object).IsTypedArray
+	recvTy := e.inferExprType(mem.Object)
+	isTypedArray := recvTy.IsTypedArray
 	if isTypedArray {
 		retElemTy = elemTy
 	}
@@ -73,7 +74,15 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 		return Value{}, err
 	}
 	if isTypedArray {
-		resultVal = e.coerce(resultVal, retElemTy)
+		// A Uint8ClampedArray's .map() clamp-stores each result (TDD-00101).
+		if recvTy.Clamped {
+			resultVal, err = e.coerceTypedArrayStore(resultVal, recvTy, pos)
+			if err != nil {
+				return Value{}, err
+			}
+		} else {
+			resultVal = e.coerce(resultVal, retElemTy)
+		}
 	}
 
 	outGep := e.freshReg()
@@ -98,6 +107,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
 	resultTy := ArrayOf(retElemTy)
 	resultTy.IsTypedArray = isTypedArray
+	resultTy.Clamped = recvTy.Clamped
 	return Value{Ref: r1, Ty: resultTy}, nil
 }
 

@@ -18,6 +18,12 @@ const tail = new DataView(buf, 6, 6);
 console.log(tail.byteOffset, tail.byteLength, tail.buffer.byteLength);
 console.log(tail.getFloat32(0, true));
 
+// 64-bit integer accessors carry real bigints — no 2^53 precision loss.
+const big = new DataView(new ArrayBuffer(8));
+big.setBigUint64(0, 18446744073709551615n);
+console.log(big.getBigUint64(0)); // 18446744073709551615n
+console.log(big.getBigInt64(0));  // -1n — same bytes, signed reinterpretation
+
 try {
   view.getInt32(10);
 } catch (e) {

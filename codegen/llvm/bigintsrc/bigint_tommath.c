@@ -47,6 +47,20 @@ long long __kml_bigint_to_i64(void *a) {
 	return (long long)mp_get_i64((const mp_int *)a);
 }
 
+void *__kml_bigint_from_u64(unsigned long long v) {
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%llu", v);
+	mp_int *r = bi_new();
+	mp_read_radix(r, buf, 10);
+	return r;
+}
+
+/* Value mod 2^64 (the spec's ToBigUint64 wrap): mp_get_i64 already wraps
+ * two's-complement, so the unsigned cast is exactly the mod. */
+unsigned long long __kml_bigint_to_u64(void *a) {
+	return (unsigned long long)mp_get_i64((const mp_int *)a);
+}
+
 char *__kml_bigint_to_str(void *a, int radix) {
 	int size = 0;
 	mp_radix_size((const mp_int *)a, radix, &size);

@@ -374,6 +374,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return objTy.Fields[idx].Ty
 			}
 		}
+		// TDD-00101: BigInt64Array/BigUint64Array elements surface as bigint.
+		if objTy.BigIntElem {
+			return BigIntType()
+		}
 		if objTy.IsArray && objTy.ElemType != nil {
 			return *objTy.ElemType
 		}
@@ -509,6 +513,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayBufferType()
 				}
 				return TypeI64
+			}
+		}
+		// Blob properties — must match emitBlobProp.
+		if ex.Property == "size" || ex.Property == "type" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsBlob {
+				if ex.Property == "size" {
+					return TypeI64
+				}
+				return TypePtr
 			}
 		}
 		// TS namespace member (TDD-00095) — must match emitMember.
@@ -900,6 +913,24 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if dataViewAccessKinds[kind].float {
 						return TypeF64
 					}
+					if dataViewAccessKinds[kind].bigint {
+						return BigIntType()
+					}
+					return TypeI64
+				}
+			}
+			// Buffer read*/write* accessors — must match emitBufferAccessor.
+			if k, ok2 := bufferAccessorKindFor(mem.Property); ok2 {
+				if e.inferExprType(mem.Object).IsBuffer {
+					if k.write {
+						return TypeI64 // offset + width
+					}
+					if k.float {
+						return TypeF64
+					}
+					if k.bigint {
+						return BigIntType()
+					}
 					return TypeI64
 				}
 			}
@@ -940,17 +971,32 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeF64
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Buffer" && !e.isShadowedByLocal(id.Name) {
+				switch mem.Property {
+				case "from", "alloc", "allocUnsafe", "concat":
+					return BufferType()
+				case "compare", "byteLength":
+					return TypeI64
+				case "isBuffer":
+					return TypeBool
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Atomics" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "wait":
 					return TypePtr // "ok" / "not-equal" / "timed-out"
 				case "notify":
 					return TypeI64
+				case "isLockFree":
+					return TypeBool
 				default:
 					// load/store/RMW/compareExchange return the receiver's
-					// element type.
+					// element type (a bigint for BigInt64/BigUint64Array).
 					if len(ex.Args) > 0 {
 						if taTy := e.inferExprType(ex.Args[0]); taTy.IsTypedArray && taTy.ElemType != nil {
+							if taTy.BigIntElem {
+								return BigIntType()
+							}
 							return *taTy.ElemType
 						}
 					}
@@ -1332,12 +1378,31 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeBool
 				}
 			case "toString":
+				if e.inferExprType(mem.Object).IsBuffer {
+					return TypePtr
+				}
 				if isNumberTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
+			case "write", "copy":
+				if e.inferExprType(mem.Object).IsBuffer {
+					return TypeI64
+				}
+			case "equals":
+				if e.inferExprType(mem.Object).IsBuffer {
+					return TypeBool
+				}
+			case "compare":
+				if e.inferExprType(mem.Object).IsBuffer {
+					return TypeI64
+				}
 			case "text":
-				if e.inferExprType(mem.Object).IsResponse {
+				if ty := e.inferExprType(mem.Object); ty.IsResponse || ty.IsBlob {
 					return TypePtr
+				}
+			case "bytes":
+				if e.inferExprType(mem.Object).IsBlob {
+					return TypedArrayType("uint8")
 				}
 			case "json":
 				if e.inferExprType(mem.Object).IsResponse {
@@ -1347,7 +1412,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			case "arrayBuffer":
-				if e.inferExprType(mem.Object).IsResponse {
+				if ty := e.inferExprType(mem.Object); ty.IsResponse || ty.IsBlob {
 					return ArrayBufferType()
 				}
 			case "encode":
@@ -1392,6 +1457,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypePtr
 			case "at", "findLast":
 				objTy := e.inferExprType(mem.Object)
+				if objTy.BigIntElem {
+					return BigIntType()
+				}
 				if objTy.IsArray && objTy.ElemType != nil {
 					return *objTy.ElemType
 				}
@@ -1412,8 +1480,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					entryTy := TupleType([]Type{TypeI64, *objTy.ElemType})
 					return ArrayOf(entryTy)
 				}
+			case "subarray":
+				// TypedArray-only; a view with the receiver's own type.
+				objTy := e.inferExprType(mem.Object)
+				if objTy.IsTypedArray {
+					return objTy
+				}
 			case "slice":
 				objTy := e.inferExprType(mem.Object)
+				if objTy.IsBlob {
+					return BlobType()
+				}
+				if objTy.IsArrayBuffer {
+					return objTy // copy of the receiver's own buffer kind
+				}
 				if objTy.IsArray {
 					return objTy
 				}
@@ -1623,6 +1703,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return MessageChannelType(TypeI64)
 	case *ast.NewDataViewExpression:
 		return DataViewType()
+	case *ast.NewBlobExpression:
+		if gen := e.blobShadowedByClass(ex); gen != nil {
+			return e.inferExprType(gen)
+		}
+		return BlobType()
 	case *ast.NewTextEncoderExpression:
 		return TextEncoderType()
 	case *ast.NewTextDecoderExpression:

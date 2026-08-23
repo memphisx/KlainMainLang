@@ -2,12 +2,8 @@
 // views over it: Int8Array/Uint8Array/Int16Array/Uint16Array/Int32Array/
 // Uint32Array/Float32Array/Float64Array.
 //
-// Not covered (see docs/tdd/TDD-00018.md): Uint8ClampedArray's real
-// clamp-on-write semantics (non-clamped variants wrap instead, matching
-// real JS's own mod-2^width behavior), DataView, BigInt64Array/
-// BigUint64Array (no bigint support), a TypedArray's `.buffer` property,
-// and the 3-argument `new XArray(buffer, byteOffset, length)` sub-range
-// view form — only whole-buffer views at offset 0 are supported.
+// Not covered (see docs/tdd/TDD-00018.md): a TypedArray's `.buffer`
+// property. DataView lives in examples/basics/dataview.ts.
 
 // ── three ways to construct a TypedArray ─────────────────────────────────────
 
@@ -42,6 +38,21 @@ console.log(bytes[0])          // 42
 const bytesAgain: Uint8Array = new Uint8Array(buf)
 console.log(bytesAgain[0])     // 42
 
+// The sub-range view form: new XArray(buffer, byteOffset, length?) — still
+// a view over buf's own memory, starting at byte 4, 1 element long.
+const subView: Int32Array = new Int32Array(buf, 4, 1)
+console.log(subView.length)    // 1
+subView[0] = 7
+console.log(bytes[4])          // 7 — same memory
+
+// ArrayBuffer.slice(): a COPY of a byte sub-range (negative indices count
+// from the end, like array .slice) — writes to the copy don't touch buf.
+const tail = buf.slice(-4)
+console.log(tail.byteLength)   // 4
+const tailBytes: Uint8Array = new Uint8Array(tail)
+tailBytes[0] = 9
+console.log(bytes[4])          // 7 — buf unchanged by the write to the copy
+
 // ── everything a plain number[] already does works here too, for free ──────
 // (indexing, .length, .fill, .slice, .reverse, .at, .indexOf, .includes,
 // .map/.filter/.reduce/.forEach/.some/.every, for-of, .keys/.values/.entries
@@ -63,3 +74,17 @@ console.log(view.length)        // 3
 view[0] = 99
 console.log(nums[1])            // 99 — the write above is visible through nums too
 console.log(view.byteLength)    // 3 (1 byte per element)
+
+// ── Uint8ClampedArray: stores clamp instead of wrapping ─────────────────────
+// (floats round half to even, NaN becomes 0 — the spec's ToUint8Clamp)
+const clamped = new Uint8ClampedArray([-1, 300, 254.5, 255.5])
+console.log(clamped[0], clamped[1], clamped[2], clamped[3]) // 0 255 254 255
+
+// ── BigInt64Array / BigUint64Array: 64-bit elements as real bigints ─────────
+// No 2^53 precision loss; elements are written and read as bigint (1n) values.
+const bigs = new BigInt64Array(2)
+bigs[0] = 9007199254740993n
+console.log(bigs[0])            // 9007199254740993n
+const ubigs = new BigUint64Array([18446744073709551615n])
+console.log(ubigs[0])           // 18446744073709551615n
+for (const v of bigs.subarray(0, 1)) { console.log(v) } // 9007199254740993n

@@ -208,6 +208,45 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
+		// TDD-00101: BigInt64Array/BigUint64Array/Uint8ClampedArray element
+		// stores go through the conversion layer (bigint unwrap / ToUint8Clamp)
+		// instead of the plain coerce below.
+		if taTy := e.inferExprType(idxEx.Object); taTy.IsTypedArray && (taTy.BigIntElem || taTy.Clamped) {
+			if ex.Op != "=" {
+				if taTy.BigIntElem {
+					return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') is not supported on a BigInt64Array/BigUint64Array element — load, compute, and assign instead", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+				}
+				// Clamped compound: load the u8, apply the op as a plain
+				// number, then clamp-store the result.
+				curReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, elemTy.IR, gepReg, elemTy.Align()))
+				cur := Value{Ref: curReg, Ty: elemTy}
+				rhsVal, err := e.emitExpr(ex.Right)
+				if err != nil {
+					return Value{}, err
+				}
+				res, err := e.emitArith(strings.TrimSuffix(ex.Op, "="), e.coerce(cur, TypeI64), e.coerce(rhsVal, TypeI64), TypeI64, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				stored, err := e.coerceTypedArrayStore(res, taTy, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				e.storeArrayElem(gepReg, elemTy, stored)
+				return stored, nil
+			}
+			rhsVal, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			stored, err := e.coerceTypedArrayStore(rhsVal, taTy, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			e.storeArrayElem(gepReg, elemTy, stored)
+			return rhsVal, nil
+		}
 		if isLogicalAssignOp(ex.Op) {
 			return e.emitLogicalCompoundAssign(ex.Op, gepReg, elemTy, ex.Right)
 		}

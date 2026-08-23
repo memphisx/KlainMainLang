@@ -765,9 +765,22 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.ByteLength != nil {
 			e.ByteLength = rewriteExpr(e.ByteLength, sc, lu)
 		}
+	case *ast.NewBlobExpression:
+		if e.Parts != nil {
+			e.Parts = rewriteExpr(e.Parts, sc, lu)
+		}
+		if e.Options != nil {
+			e.Options = rewriteExpr(e.Options, sc, lu)
+		}
 	case *ast.NewTypedArrayExpression:
 		if e.Arg != nil {
 			e.Arg = rewriteExpr(e.Arg, sc, lu)
+		}
+		if e.ByteOffset != nil {
+			e.ByteOffset = rewriteExpr(e.ByteOffset, sc, lu)
+		}
+		if e.Length != nil {
+			e.Length = rewriteExpr(e.Length, sc, lu)
 		}
 	case *ast.NewTextDecoderExpression:
 		if e.Label != nil {

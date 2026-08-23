@@ -91,6 +91,18 @@ console.log(Atomics.wait(ta, 0, 7, 50));
 `, "10\n10\n15\n12\n99\n7\n7\n0\n6\n4\n1\n0\nnot-equal\ntimed-out")
 }
 
+func TestE2EAtomicsIsLockFree(t *testing.T) {
+	assertOutput(t, `
+console.log(Atomics.isLockFree(1));
+console.log(Atomics.isLockFree(2));
+console.log(Atomics.isLockFree(3));
+console.log(Atomics.isLockFree(4));
+console.log(Atomics.isLockFree(8));
+const n = 5;
+console.log(Atomics.isLockFree(n));
+`, "true\ntrue\nfalse\ntrue\ntrue\nfalse")
+}
+
 func TestE2EAtomicsWaitNotifyAcrossWorker(t *testing.T) {
 	assertMultiFileOutput(t, map[string]string{
 		"waiter.ts": `

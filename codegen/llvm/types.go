@@ -273,6 +273,12 @@ type Type struct {
 	// {ptr data(base+offset), i64 byteLength, i64 byteOffset, ptr bufHdr},
 	// with dedicated property/method dispatch. See emit_dataview.go.
 	IsDataView bool
+	// IsBlob marks `new Blob(parts?, {type}?)` (TDD-00102): an immutable
+	// binary value with a MIME type. Same hidden-heap-struct convention as
+	// IsArrayBuffer — a ptr to { i64 size, ptr data, ptr type }, with
+	// dedicated .size/.type property reads and .slice()/.arrayBuffer()/
+	// .bytes()/.text() method dispatch. See emit_blob.go.
+	IsBlob bool
 	// IsTypedArray marks a TypedArray (Int8Array/Uint8Array/Int16Array/
 	// Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — no
 	// Uint8ClampedArray/BigInt64Array/BigUint64Array, see the TDD's
@@ -287,6 +293,26 @@ type Type struct {
 	// `number[]` does not get. See emit_arraybuffer.go and
 	// docs/tdd/TDD-00018.md.
 	IsTypedArray bool
+	// IsBuffer marks a Node Buffer (TDD-00103): storage-wise it IS a
+	// Uint8Array (IsTypedArray/IsArray/ElemType u8), so the whole array/
+	// TypedArray surface comes free; the flag only additionally enables
+	// Buffer's instance-method dispatch (.toString/.write/.copy/.equals/
+	// .compare and the read*/write* accessors) at emitCall. See
+	// emit_buffer.go.
+	IsBuffer bool
+	// BigIntElem marks a BigInt64Array/BigUint64Array (TDD-00101): storage
+	// is a raw i64/u64 (so all pointer/stride machinery is unchanged), but
+	// every element crossing the language boundary is a `bigint` handle —
+	// loads wrap via __kml_bigint_from_i64/from_u64, stores require an
+	// IsBigInt value and unwrap via to_i64/to_u64. Array methods that would
+	// leak the raw scalar (HOFs/search/sort/join/iterator objects) are a
+	// compile-time rejection; see emit_arraybuffer.go's conversion helpers.
+	BigIntElem bool
+	// Clamped marks a Uint8ClampedArray (TDD-00101): storage is a plain u8
+	// (reads and all read-side methods are unchanged), but stores go through
+	// the spec's ToUint8Clamp — clamp to [0,255], floats round-half-to-even,
+	// NaN → 0 — instead of e.coerce's mod-2^width trunc.
+	Clamped bool
 	// IsTextEncoder marks `new TextEncoder()`'s result: a stateless marker
 	// value (Ref is always the constant "null" — nothing is ever allocated
 	// or read through it) whose only purpose is letting `.encode(str)`
@@ -1110,6 +1136,19 @@ func WorkerType(path string) Type {
 	return ty
 }
 
+// BufferType returns a Node Buffer's type (TDD-00103): a Uint8Array
+// (TypedArrayType("uint8")) with IsBuffer set — see the flag's doc comment.
+func BufferType() Type {
+	ty := TypedArrayType("uint8")
+	ty.IsBuffer = true
+	return ty
+}
+
+// BlobType returns `new Blob(...)`'s result type — see IsBlob's doc comment.
+func BlobType() Type {
+	return Type{IR: "ptr", IsBlob: true}
+}
+
 // typedArrayElemKindToType maps the element-kind strings the parser already
 // produces (parser/parser_literals.go's typedArrayElemKinds, and the same
 // names ResolveTypeName below already understands for JSDoc @type
@@ -1123,6 +1162,12 @@ var typedArrayElemKindToType = map[string]Type{
 	"uint32":  TypeU32,
 	"float32": TypeF32,
 	"float64": TypeF64,
+	// TDD-00101: raw storage scalars; the language-level element semantics
+	// (bigint handles / clamp-on-write) ride on BigIntElem/Clamped, set by
+	// TypedArrayType below.
+	"bigint64":     TypeI64,
+	"biguint64":    TypeU64,
+	"uint8clamped": TypeU8,
 }
 
 // TypedArrayType returns the type behind `new Int8Array(...)`/.../
@@ -1139,6 +1184,12 @@ func TypedArrayType(elemKind string) Type {
 	}
 	ty := ArrayOf(elemTy)
 	ty.IsTypedArray = true
+	switch elemKind {
+	case "bigint64", "biguint64":
+		ty.BigIntElem = true
+	case "uint8clamped":
+		ty.Clamped = true
+	}
 	return ty
 }
 
@@ -1714,6 +1765,14 @@ func ResolveTypeName(name string) Type {
 		return TypedArrayType("float32")
 	case "Float64Array":
 		return TypedArrayType("float64")
+	case "Uint8ClampedArray":
+		return TypedArrayType("uint8clamped")
+	case "Buffer":
+		return BufferType()
+	case "BigInt64Array":
+		return TypedArrayType("bigint64")
+	case "BigUint64Array":
+		return TypedArrayType("biguint64")
 	case "int8":
 		return TypeI8
 	case "int16":

@@ -336,6 +336,10 @@ type Emitter struct {
 	usedBswap16              bool
 	usedBswap32              bool
 	usedBswap64              bool
+	usedRoundEven            bool
+	usesBufferCodecs         bool
+	usedMemcmp               bool
+	declaredBufferCodecs     bool
 	usedWsSpan               bool
 	usedJsPow                bool
 	namespaces               map[string]map[string]bool

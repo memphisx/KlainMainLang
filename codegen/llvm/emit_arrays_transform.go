@@ -141,7 +141,16 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	fillVal = e.coerce(fillVal, elemTy)
+	// TDD-00101: bigint-element / clamped TypedArrays convert the fill value
+	// through the store conversion layer instead of the plain coerce.
+	if taTy := e.inferExprType(mem.Object); taTy.BigIntElem || taTy.Clamped {
+		fillVal, err = e.coerceTypedArrayStore(fillVal, taTy, pos)
+		if err != nil {
+			return Value{}, err
+		}
+	} else {
+		fillVal = e.coerce(fillVal, elemTy)
+	}
 	// Box once, outside the loop below, and store the same box pointer into
 	// every filled slot — real JS's own .fill() semantics for a reference
 	// type share one reference across every slot (`[{}].fill(obj)` doesn't
@@ -260,6 +269,12 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resultAlloca, elemTy.Align()))
+	// TDD-00101: a bigint-element TypedArray's .at() surfaces a bigint
+	// handle (out-of-range gives 0n rather than undefined — same
+	// zero-value convention plain arrays already use here).
+	if taTy := e.inferExprType(mem.Object); taTy.BigIntElem {
+		return e.wrapTypedArrayLoad(Value{Ref: result, Ty: elemTy}, taTy), nil
+	}
 	return Value{Ref: result, Ty: elemTy}, nil
 }
 

@@ -612,11 +612,15 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// and store them into fresh allocas so the loop body can keep reloading.
 	var dataPtrAlloca, lenAlloca string
 	var elemTy Type
+	// TDD-00101: iterating a BigInt64Array/BigUint64Array loads the raw i64
+	// but binds the loop variable as a bigint handle (wrapped per element).
+	var iterTaTy Type
 
 	if id, ok := s.Iterable.(*ast.Identifier); ok {
 		iterSym, found := e.lookup(id.Name)
 		switch {
 		case found && iterSym.Ty.IsArray:
+			iterTaTy = iterSym.Ty
 			dataPtrAlloca = iterSym.Ptr
 			lenAlloca = iterSym.LenPtr
 			elemTy = *iterSym.Ty.ElemType
@@ -641,6 +645,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		}
 		switch {
 		case arrVal.Ty.IsArray && arrVal.Ty.ElemType != nil:
+			iterTaTy = arrVal.Ty
 			elemTy = *arrVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
 		case arrVal.Ty.IsMap || arrVal.Ty.IsSet:
@@ -674,6 +679,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// body below, through the same unpack*PatternInto core every other
 	// destructuring position shares.
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
+	bindTy := elemTy
+	if iterTaTy.BigIntElem {
+		bindTy = BigIntType()
+	}
 	varPtr := e.freshReg()
 	var varLenPtr string
 	if isPattern {
@@ -684,8 +693,8 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
 		e.define(s.VarName, Symbol{Ptr: varPtr, LenPtr: varLenPtr, Ty: elemTy})
 	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -741,7 +750,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			return err
 		}
 	default:
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemVal.Ref, varPtr, elemTy.Align()))
+		if iterTaTy.BigIntElem {
+			elemVal = e.wrapTypedArrayLoad(elemVal, iterTaTy)
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", bindTy.IR, elemVal.Ref, varPtr, bindTy.Align()))
 	}
 
 	if err := e.emitStmt(s.Body); err != nil {

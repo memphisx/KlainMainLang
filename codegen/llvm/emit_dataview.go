@@ -123,16 +123,20 @@ func (e *Emitter) emitDataViewProp(dvVal Value, prop string, pos ast.Pos) (Value
 }
 
 // dataViewAccessKinds maps a DataView method name to its (byte width,
-// signedness, floatness) — shared by the get and set emitters.
+// signedness, floatness, bigint-ness) — shared by the get and set emitters.
+// The BigInt kinds store a raw i64/u64 bit pattern; the language-level value
+// crosses through the __kml_bigint_* ABI (get wraps, set unwraps).
 var dataViewAccessKinds = map[string]struct {
 	width  int
 	signed bool
 	float  bool
+	bigint bool
 }{
-	"Int8": {1, true, false}, "Uint8": {1, false, false},
-	"Int16": {2, true, false}, "Uint16": {2, false, false},
-	"Int32": {4, true, false}, "Uint32": {4, false, false},
-	"Float32": {4, true, true}, "Float64": {8, true, true},
+	"Int8": {1, true, false, false}, "Uint8": {1, false, false, false},
+	"Int16": {2, true, false, false}, "Uint16": {2, false, false, false},
+	"Int32": {4, true, false, false}, "Uint32": {4, false, false, false},
+	"Float32": {4, true, true, false}, "Float64": {8, true, true, false},
+	"BigInt64": {8, true, false, true}, "BigUint64": {8, false, false, true},
 }
 
 func (e *Emitter) ensureBswap(width int) {
@@ -279,6 +283,16 @@ func (e *Emitter) emitDataViewGet(mem *ast.MemberExpression, kind string, args [
 		e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", f64, val))
 		return Value{Ref: f64, Ty: TypeF64}, nil
 	}
+	if spec.bigint {
+		e.ensureBigInt()
+		wrap := "@__kml_bigint_from_i64"
+		if !spec.signed {
+			wrap = "@__kml_bigint_from_u64"
+		}
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr %s(i64 %s)", h, wrap, val))
+		return Value{Ref: h, Ty: BigIntType()}, nil
+	}
 	if spec.width == 8 {
 		return Value{Ref: val, Ty: TypeI64}, nil
 	}
@@ -315,7 +329,20 @@ func (e *Emitter) emitDataViewSet(mem *ast.MemberExpression, kind string, args [
 	}
 	bits := spec.width * 8
 	var narrow string
-	if spec.float {
+	if spec.bigint {
+		// Spec: setBigInt64/setBigUint64 take a BigInt, not a Number
+		// (TypeError otherwise) — enforced at compile time here.
+		if !rawVal.Ty.IsBigInt {
+			return Value{}, fmt.Errorf("%d:%d: DataView.set%s expects a bigint value (e.g. 1n)", pos.Line, pos.Col, kind)
+		}
+		e.ensureBigInt()
+		unwrap := "@__kml_bigint_to_i64"
+		if !spec.signed {
+			unwrap = "@__kml_bigint_to_u64"
+		}
+		narrow = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", narrow, unwrap, rawVal.Ref))
+	} else if spec.float {
 		f := e.coerce(rawVal, TypeF64)
 		if spec.width == 4 {
 			f32 := e.freshReg()

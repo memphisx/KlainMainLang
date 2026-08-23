@@ -332,7 +332,13 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	return e.loadArrayElem(gepReg, elemTy), nil
+	raw := e.loadArrayElem(gepReg, elemTy)
+	// TDD-00101: a BigInt64Array/BigUint64Array element surfaces as a bigint
+	// handle, not the raw stored i64.
+	if taTy := e.inferExprType(ex.Object); taTy.BigIntElem {
+		return e.wrapTypedArrayLoad(raw, taTy), nil
+	}
+	return raw, nil
 }
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
@@ -349,6 +355,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitDataViewProp(objVal, ex.Property, ex.GetPos())
+		}
+	}
+	// Blob properties (size/type, TDD-00102) — same dedicated-read pattern.
+	if ex.Property == "size" || ex.Property == "type" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsBlob {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitBlobProp(objVal, ex.Property, ex.GetPos())
 		}
 	}
 	// TS namespace member in value position (`X.member`, TDD-00095):
