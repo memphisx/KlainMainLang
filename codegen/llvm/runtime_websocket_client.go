@@ -105,8 +105,7 @@ func (e *Emitter) ensureWSClientRuntime() {
 	e.emitGlobal("declare i32 @inet_pton(i32 noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @connect(i32 noundef, ptr noundef, i32 noundef)")
 	if runtime.GOOS != "darwin" {
-		e.emitGlobal("declare i32 @getaddrinfo(ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
-		e.emitGlobal("declare void @freeaddrinfo(ptr noundef)")
+		e.ensureGetaddrinfo()
 	}
 
 	e.emitGlobal("@__kml_wsc_data = internal thread_local global ptr null, align 8")

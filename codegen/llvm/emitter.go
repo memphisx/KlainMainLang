@@ -215,6 +215,7 @@ type Emitter struct {
 	usedProcessHrtime    bool
 	usedProcessLifecycle bool
 	dnsDeclared          bool
+	getaddrinfoDeclared  bool
 	usedCPKill           bool
 	usedWorkerRuntime    bool
 	hasWorkers           bool // set at EmitProgram start from Program.WorkerModules

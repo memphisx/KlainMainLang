@@ -27,6 +27,19 @@ func dnsAiAddrOffset() int {
 	return 24
 }
 
+// ensureGetaddrinfo emits the getaddrinfo/freeaddrinfo externs exactly once.
+// Multiple runtimes (DNS, net, websocket client) need them; without a shared
+// guard, a program pulling in two of them emits duplicate declares and clang
+// rejects the redefinition.
+func (e *Emitter) ensureGetaddrinfo() {
+	if e.getaddrinfoDeclared {
+		return
+	}
+	e.getaddrinfoDeclared = true
+	e.emitGlobal("declare i32 @getaddrinfo(ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
+	e.emitGlobal("declare void @freeaddrinfo(ptr noundef)")
+}
+
 func (e *Emitter) ensureDNSRuntime() {
 	if e.dnsDeclared {
 		return
@@ -37,8 +50,7 @@ func (e *Emitter) ensureDNSRuntime() {
 	e.ensureMemcpy()
 	e.ensureSprintf()
 
-	e.emitGlobal("declare i32 @getaddrinfo(ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @freeaddrinfo(ptr noundef)")
+	e.ensureGetaddrinfo()
 
 	aiAddr := dnsAiAddrOffset()
 	fmtIP := e.internString("%u.%u.%u.%u")
