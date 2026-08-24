@@ -55,7 +55,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
 	e.ensureReadDecl()
 	e.ensureWriteDecl()
-	e.emitGlobal("declare i32 @waitpid(i32 noundef, ptr noundef, i32 noundef)")
+	e.ensureWaitpidDecl()
 	e.ensureFcntlDecl()
 
 	e.emitGlobal("@__kml_cp_data = internal global ptr null, align 8")

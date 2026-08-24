@@ -463,6 +463,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.MemberExpression:
+		// cluster.isPrimary/isWorker (bool), cluster.workerId (i64).
+		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
+			switch ex.Property {
+			case "isPrimary", "isWorker":
+				return TypeBool
+			case "workerId":
+				return TypeI64
+			}
+		}
+		// cluster.fork() Worker's `.id`.
+		if ex.Property == "id" && e.inferExprType(ex.Object).IsClusterWorker {
+			return TypeI64
+		}
 		// ChildProcess members — must match emitChildProcessMember.
 		if ex.Property == "stdout" || ex.Property == "stderr" || ex.Property == "stdin" || ex.Property == "pid" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsChildProcess {
@@ -1146,6 +1159,37 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "readline__kml_builtin" {
 				return ReadlineType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "net__kml_builtin" {
+				// connect/createConnection return a client Socket; createServer a Server.
+				if mem.Property == "connect" || mem.Property == "createConnection" {
+					return NetSocketType()
+				}
+				return NetServerType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "util__kml_builtin" {
+				// inspect/format both return a string.
+				return TypePtr
+			}
+			// dns.promises.lookup(...) resolves to { address, family }.
+			if inner, ok2 := mem.Object.(*ast.MemberExpression); ok2 && mem.Property == "lookup" {
+				if id, ok3 := inner.Object.(*ast.Identifier); ok3 && id.Name == "dns__kml_builtin" && inner.Property == "promises" {
+					qt := PromiseOf(dnsLookupObjType())
+					qt.PromiseTask = true
+					return qt
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "dns__kml_builtin" {
+				// lookup/resolve4/resolve return void (callback-based).
+				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "dgram__kml_builtin" {
+				// createSocket returns a DgramSocket handle.
+				return DgramSocketType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "cluster__kml_builtin" {
+				// fork() returns a Worker handle.
+				return ClusterWorkerType()
 			}
 			if e.isCryptoSubtle(mem.Object) {
 				task := func(inner Type) Type {

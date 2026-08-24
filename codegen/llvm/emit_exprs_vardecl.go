@@ -660,7 +660,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, val.Ref, ptrName, ty.Align()))
 			return nil
 		}
+		// Mark this binding as mid-initialization so a closure emitted inside its
+		// own initializer that captures it (`const s = f(() => use(s))`) seeds its
+		// capture cell with a default rather than by loading the still-unwritten
+		// slot — see promoteCaptureToCell. Restored (not just deleted) so a nested
+		// same-named binding in an outer initializer is unaffected.
+		wasInitializing := e.varsBeingInitialized[v.Name]
+		e.varsBeingInitialized[v.Name] = true
 		val, err := e.emitExprWithObjectHint(v.Init, ty)
+		e.varsBeingInitialized[v.Name] = wasInitializing
 		if err != nil {
 			return err
 		}

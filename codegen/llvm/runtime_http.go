@@ -41,6 +41,22 @@ func httpSockConstants() (solSocket, soReuseAddr int) {
 	return 1, 2
 }
 
+// httpReusePortConst returns SO_REUSEPORT — genuinely platform-specific like
+// SO_REUSEADDR above (Darwin 0x200 = 512, Linux 15, both verified on the
+// machine via a throwaway C probe). Set on a listening socket ONLY by a cluster
+// worker (worker id != 0), so multiple workers can each independently bind the
+// same port (the kernel then distributes accepted connections across them). It
+// is deliberately NOT set for an ordinary single server: there, a second bind
+// to an already-used port must still fail and throw (SO_REUSEPORT would silently
+// let it succeed). The shared-fd `http.listen({workers})` model doesn't need it
+// either (it binds once and inherits the fd).
+func httpReusePortConst() int {
+	if runtime.GOOS == "darwin" {
+		return 0x200
+	}
+	return 15
+}
+
 // httpSockaddrFamilyBytes returns the first two bytes of a struct
 // sockaddr_in, which differ by platform even though the struct's total
 // size (16 bytes) and every field after it are identical: Linux packs
@@ -655,7 +671,17 @@ setopt:
   %%one = alloca i32, align 4
   store i32 1, ptr %%one, align 4
   call i32 @setsockopt(i32 %%fd, i32 %d, i32 %d, ptr %%one, i32 4)
-
+  ; SO_REUSEPORT — set ONLY in a cluster worker (worker id != 0), so several
+  ; workers can each bind the same port (kernel-distributed accepts). It is
+  ; deliberately NOT set for an ordinary single server, where a second bind to
+  ; an in-use port must still fail (that failure is a real, thrown error).
+  %%wid = load i64, ptr @__kml_cluster_worker_id, align 8
+  %%isworker = icmp ne i64 %%wid, 0
+  br i1 %%isworker, label %%reuseport, label %%afteropt
+reuseport:
+  call i32 @setsockopt(i32 %%fd, i32 %d, i32 %d, ptr %%one, i32 4)
+  br label %%afteropt
+afteropt:
   %%addr = alloca [16 x i8], align 4
   call ptr @memset(ptr %%addr, i32 0, i64 16)
   store i8 %d, ptr %%addr, align 1
@@ -700,7 +726,7 @@ failwithfd:
 failnofd:
   call void @__kml_http_throw(ptr %s)
   unreachable
-}`, solSocket, soReuseAddr, fam0, fam1, httpNonblockFlag(),
+}`, solSocket, soReuseAddr, solSocket, httpReusePortConst(), fam0, fam1, httpNonblockFlag(),
 		e.internString("http.listen: failed to bind or listen"),
 		e.internString("http.listen: failed to create socket")))
 
@@ -1079,6 +1105,10 @@ afteresreconnect:
   %cpkeep = call i1 @__kml_cp_keepalive()
   ; readline: an open interface keeps this loop alive.
   %rlkeep = call i1 @__kml_rl_keepalive()
+  ; net: a listening TCP server or an open connection keeps this loop alive.
+  %netkeep = call i1 @__kml_net_keepalive()
+  ; dgram: a bound UDP socket keeps this loop alive.
+  %dgkeep = call i1 @__kml_dgram_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1086,7 +1116,9 @@ afteresreconnect:
   %anywork4 = or i1 %anywork3, %wkeep
   %anywork5 = or i1 %anywork4, %ckeep
   %anywork6 = or i1 %anywork5, %cpkeep
-  %anywork = or i1 %anywork6, %rlkeep
+  %anywork6b = or i1 %anywork6, %rlkeep
+  %anywork6c = or i1 %anywork6b, %netkeep
+  %anywork = or i1 %anywork6c, %dgkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1248,6 +1280,16 @@ wscsetdone:
   %rlfz0 = load i1, ptr %forcezero, align 1
   %rlfz1 = or i1 %rlfz0, %rlfdforce
   store i1 %rlfz1, ptr %forcezero, align 1
+  ; net: add the listen fd and every open connection fd.
+  %netfdforce = call i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd)
+  %netfz0 = load i1, ptr %forcezero, align 1
+  %netfz1 = or i1 %netfz0, %netfdforce
+  store i1 %netfz1, ptr %forcezero, align 1
+  ; dgram: add every bound UDP socket fd.
+  %dgfdforce = call i1 @__kml_dgram_fdset_add(ptr %fdset, ptr %maxfd)
+  %dgfz0 = load i1, ptr %forcezero, align 1
+  %dgfz1 = or i1 %dgfz0, %dgfdforce
+  store i1 %dgfz1, ptr %forcezero, align 1
   ; Merge libcurl's own fd_sets (its in-flight transfers' sockets) into the
   ; same read/write/exc sets, if any await fetch(...) has ever created the
   ; multi handle — curl_multi_fdset ORs its bits in rather than clearing
@@ -1489,6 +1531,10 @@ afterselectok:
   call void @__kml_cp_dispatch()
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
+  ; net: accept new TCP connections and drain readable connection sockets.
+  call void @__kml_net_dispatch()
+  ; dgram: drain readable UDP sockets and fire 'message' listeners.
+  call void @__kml_dgram_dispatch()
   br i1 %hascurl, label %docurlperform, label %checklistener
 
 docurlperform:

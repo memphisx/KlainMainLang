@@ -320,12 +320,31 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		return nil
 	}
 
+	// Mark this binding as mid-initialization so a closure emitted inside its
+	// own initializer that captures it (`const s = f(() => use(s))`) seeds its
+	// capture cell with a default rather than by loading the still-unwritten
+	// slot (see promoteCaptureToCell), and store the final value into the
+	// re-resolved slot below so a boxed self-capture receives the real value.
+	wasInitializing := e.varsBeingInitialized[v.Name]
+	e.varsBeingInitialized[v.Name] = true
+	defer func() { e.varsBeingInitialized[v.Name] = wasInitializing }()
+	// storeObj stores into the variable's *current* storage location — the box
+	// if the initializer promoted this variable (updateSymbolInPlace), else the
+	// original alloca. Mirrors the generic scalar path in emitVarDecl.
+	storeObj := func(ref string) {
+		finalPtr := ptrName
+		if sym, ok := e.lookup(v.Name); ok {
+			finalPtr = sym.Ptr
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ref, finalPtr))
+	}
+
 	// JSON.parse / Response.json() (optionally awaited) projected into ty.
 	if val, ok, err := e.emitDeclJSONProjection(v.Init, ty); ok {
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 	}
 
@@ -335,7 +354,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 
 	case *ast.ArrayLiteral:
@@ -346,14 +365,14 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 			if err != nil {
 				return err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+			storeObj(val.Ref)
 			return nil
 		}
 		val, err := e.emitExpr(init)
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 
 	case *ast.NewErrorExpression:
@@ -361,7 +380,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 
 	case *ast.CallExpression:
@@ -372,7 +391,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 
 	default:
@@ -395,7 +414,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		storeObj(val.Ref)
 		return nil
 	}
 }

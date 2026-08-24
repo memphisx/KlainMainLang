@@ -236,6 +236,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsReadline {
 			return e.emitReadlineMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsNetServer {
+			return e.emitNetServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsNetSocket {
+			return e.emitNetSocketMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsDgramSocket {
+			return e.emitDgramMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		// TDD-00099: BroadcastChannel / MessagePort surfaces.
 		if mem.Property == "postMessage" || mem.Property == "close" {
 			if objTy := e.inferExprType(mem.Object); objTy.IsBroadcastChannel {
@@ -494,6 +503,29 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "readline__kml_builtin" {
 			return e.emitReadlineModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "net__kml_builtin" {
+			return e.emitNetModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "util__kml_builtin" {
+			return e.emitUtilModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		// dns.promises.lookup(...) — a two-level member chain (dns.promises is a
+		// pseudo-namespace, not a bindable value), so it needs its own shape
+		// check like process.stdout.write above.
+		if inner, ok := mem.Object.(*ast.MemberExpression); ok && mem.Property == "lookup" {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "dns__kml_builtin" && inner.Property == "promises" {
+				return e.emitDnsPromisesLookup(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "dns__kml_builtin" {
+			return e.emitDnsModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "dgram__kml_builtin" {
+			return e.emitDgramModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
+			return e.emitClusterModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())

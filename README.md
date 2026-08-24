@@ -218,3 +218,21 @@ Makefile            Build, test, and example targets
 - Judge you for using `var`. It even does `var` *properly* now — function-scoped, hoisted, re-declarable — instead of the old cop-out of quietly pretending it was `let`. Personal growth.
 
 If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, [`docs/status/`](docs/status/README.md) has the receipts.
+
+## License
+
+Copyright (C) 2026 Kyriakos Bompotis.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU Affero General Public License** as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version (`AGPL-3.0-or-later`). See [`LICENSE`](LICENSE) for the full text.
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. The AGPL's §13 additionally requires that anyone who runs a modified
+version to interact with users over a network make the modified source
+available to those users.
+
+As the sole copyright holder, the author reserves the right to offer the
+software under separate commercial terms as well.

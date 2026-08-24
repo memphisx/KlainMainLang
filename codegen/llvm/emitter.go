@@ -74,6 +74,12 @@ type Emitter struct {
 	// and shadows the global normally; scope depth can't distinguish them (a
 	// function body also runs at scopes depth 1).
 	promotedGlobalDecls   map[*ast.VarDeclaration]bool
+	// varsBeingInitialized names the variable(s) whose initializer is currently
+	// being emitted. A closure created inside a variable's own initializer that
+	// captures that same variable (`const s = f(() => use(s))`) must NOT seed its
+	// capture cell by loading the still-uninitialized slot — see
+	// promoteCaptureToCell.
+	varsBeingInitialized  map[string]bool
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
@@ -202,6 +208,10 @@ type Emitter struct {
 	usedConnPokeGlobal   bool
 	usedChildProcRuntime bool
 	usedReadlineRuntime  bool
+	usedNetRuntime       bool
+	usedDgramRuntime     bool
+	usedClusterRuntime   bool
+	dnsDeclared          bool
 	usedCPKill           bool
 	usedWorkerRuntime    bool
 	hasWorkers           bool // set at EmitProgram start from Program.WorkerModules
@@ -250,6 +260,7 @@ type Emitter struct {
 	usedExecFileSync         bool
 	usedForkDecl             bool
 	usedCloseDecl            bool
+	usedWaitpidDecl          bool
 	usedReadDecl             bool
 	usedWriteDecl            bool
 	usedFcntlDecl            bool
@@ -469,7 +480,8 @@ func NewEmitter() *Emitter {
 	e := &Emitter{
 		strConsts:           make(map[string]string),
 		moduleGlobals:       make(map[string]Symbol),
-		promotedGlobalDecls: make(map[*ast.VarDeclaration]bool),
+		promotedGlobalDecls:  make(map[*ast.VarDeclaration]bool),
+		varsBeingInitialized: make(map[string]bool),
 		funcs:               make(map[string]FuncSig),
 		interfaces:          make(map[string]Type),
 		interfaceMethodSigs: make(map[string]map[string]FuncSig),
@@ -1298,7 +1310,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedNetRuntime || e.usedDgramRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
@@ -1363,6 +1375,13 @@ done:
 		e.emitGlobal("define i64 @__kml_fetch_body_write(ptr %p, ptr %c, i64 %t) {\n  ret i64 0\n}")
 		e.emitGlobal("define void @__kml_fetch_body_on_done(ptr %p) {\n  ret void\n}")
 	}
+	// cluster (TDD-00105): the primary blocks until every forked worker exits,
+	// keeping it alive while workers serve (a worker's own table is empty, so
+	// this is a no-op there — and a worker is normally still inside its event
+	// loop and never reaches here anyway).
+	if e.usedClusterRuntime {
+		e.emitInstr("call void @__kml_cluster_wait_all()")
+	}
 	e.emitTerminator("ret i32 0")
 
 	var out strings.Builder
@@ -1377,6 +1396,11 @@ done:
 	}
 	out.WriteString("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
 	out.WriteString(e.allocas.String())
+	// cluster (TDD-00105): a re-exec'd worker carries its id in the environment;
+	// seed @__kml_cluster_worker_id from it before any cluster.isPrimary read.
+	if e.usedClusterRuntime {
+		out.WriteString("  call void @__kml_cluster_seed_id()\n")
+	}
 	out.WriteString(e.body.String())
 	out.WriteString("}\n")
 	return out.String(), nil

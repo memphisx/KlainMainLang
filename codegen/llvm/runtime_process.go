@@ -123,7 +123,7 @@ func (e *Emitter) ensureExecFileSync() {
 	e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
 	e.ensureReadDecl()
-	e.emitGlobal("declare i32 @waitpid(i32 noundef, ptr noundef, i32 noundef)")
+	e.ensureWaitpidDecl()
 
 	fmtExit := e.internString("Command failed with exit code %d: %s")
 	fmtSig := e.internString("Command was terminated by signal %d: %s")

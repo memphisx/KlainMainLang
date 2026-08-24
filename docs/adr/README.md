@@ -361,3 +361,11 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00321](ADR-00321.md) | Node `zlib` module — one-shot gzip/deflate/inflate family, sync + callback | Implements [TDD-00049](../tdd/TDD-00049.md); extends [ADR-00302](ADR-00302.md) |
 | [00322](ADR-00322.md) | Async `child_process` — spawn (streaming) / exec / execFile | Extends [ADR-00025](ADR-00025.md), [TDD-00098](../tdd/TDD-00098.md) |
 | [00323](ADR-00323.md) | Interactive `readline` — createInterface, 'line'/'close', question | Extends [ADR-00322](ADR-00322.md) |
+| [00324](ADR-00324.md) | Node `net` TCP server — createServer/listen + connection sockets | Implements [TDD-00006](../tdd/TDD-00006.md); extends [ADR-00322](ADR-00322.md) |
+| [00325](ADR-00325.md) | Node `util` — `util.inspect` / `util.format` | |
+| [00326](ADR-00326.md) | Node `dns` — `dns.lookup` via getaddrinfo (Darwin ai_addr offset probed) | |
+| [00327](ADR-00327.md) | Node `dgram` — UDP sockets (createSocket/bind/on('message')/send/close) | Implements [TDD-00006](../tdd/TDD-00006.md); extends [ADR-00324](ADR-00324.md) |
+| [00328](ADR-00328.md) | Node `net.connect` — TCP client sockets (blocking connect, reused socket machinery) | Extends [ADR-00324](ADR-00324.md) |
+| [00329](ADR-00329.md) | Node `dns` extras — `resolve4` (all A records) + `promises.lookup` | Extends [ADR-00326](ADR-00326.md) |
+| [00330](ADR-00330.md) | Closure capture of a not-yet-initialized binding (self-reference in initializer) | Extends [ADR-00001](ADR-00001.md); surfaced by [ADR-00328](ADR-00328.md) |
+| [00331](ADR-00331.md) | Node `cluster` module — fork + re-exec worker model | Implements [TDD-00105](../tdd/TDD-00105.md); extends the http.listen({workers}) fork machinery |

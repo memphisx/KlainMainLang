@@ -469,6 +469,43 @@ type CapturedVar struct {
 	IsSelf bool
 }
 
+// promoteCaptureToCell allocates a fresh heap cell for a variable being
+// captured by a closure for the first time, seeds it, retargets the enclosing
+// scope's symbol at the cell (so the outer scope and every capturing closure
+// share one mutable cell by pointer), and returns the cell pointer.
+//
+// Seeding normally copies the variable's current value out of its slot. But
+// when the variable is still being initialized — a closure inside the
+// variable's own initializer captured it, the self-reference idiom
+// `const s = f(() => use(s))` — its slot holds no value yet, so loading it
+// would read uninitialized memory (undefined behavior the optimizer exploits at
+// -O2, e.g. treating a later non-null value as null). In that case the cell is
+// seeded with the type's deterministic default instead; the real value is
+// written into this same shared cell afterward by the variable declaration's
+// own store, which re-resolves to the cell (emit_exprs_vardecl.go). A closure
+// invoked only after the declaration completes therefore observes the assigned
+// value; one invoked synchronously during the initializer (genuine TDZ misuse)
+// observes the default rather than garbage.
+func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isConst bool) string {
+	newCell := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, ty.Align()))
+	if e.varsBeingInitialized[name] {
+		// Seed with the type's deterministic default (a body-block store, since
+		// newCell is a body register — emitVarSlotDefault targets the entry block).
+		if ty.IsDynamic {
+			e.emitInstr(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, newCell, ty.Align()))
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), newCell, ty.Align()))
+		}
+	} else {
+		curVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curVal, ty.IR, srcPtr, ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, curVal, newCell, ty.Align()))
+	}
+	e.updateSymbolInPlace(name, Symbol{Ptr: newCell, Ty: ty, Boxed: true, IsConst: isConst})
+	return newCell
+}
+
 // envStructIR returns the LLVM struct type string for the closure environment.
 // Every slot holds a pointer to a shared heap cell (see emitArrowFunctionWithHints),
 // regardless of the captured variable's own type.
@@ -1497,15 +1534,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 				// First closure to capture this variable: promote it to a heap
 				// cell shared by pointer with the enclosing scope and every
 				// closure that captures it (instead of copying its value).
-				newCell := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, cap.Ty.Align()))
-				curVal := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-					curVal, cap.Ty.IR, cap.Sym.Ptr, cap.Ty.Align()))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-					cap.Ty.IR, curVal, newCell, cap.Ty.Align()))
-				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
-				cellPtr = newCell
+				cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, cap.Sym.Ptr, cap.Sym.IsConst)
 			}
 			slotReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
@@ -1888,15 +1917,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			}
 			cellPtr := cap.Sym.Ptr
 			if !cap.Sym.Boxed {
-				newCell := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, cap.Ty.Align()))
-				curVal := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
-					curVal, cap.Ty.IR, cap.Sym.Ptr, cap.Ty.Align()))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
-					cap.Ty.IR, curVal, newCell, cap.Ty.Align()))
-				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst})
-				cellPtr = newCell
+				cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, cap.Sym.Ptr, cap.Sym.IsConst)
 			}
 			slotReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",

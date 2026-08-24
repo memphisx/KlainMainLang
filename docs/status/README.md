@@ -52,7 +52,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 
 WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. Not part of the JS *language* itself, but not Node-specific either. Filtered to those that make sense outside a browser context; pure browser-only APIs (DOM, Canvas, WebGL, CSS, Gamepad, etc.) are out of scope — see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md).
 
-**44 / 55 features, ~80% coverage.**
+**54 / 55 features, ~98% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
@@ -71,7 +71,7 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.listen`/`.close`, `cluster.*`, and this project's own `Memory.free`) require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
-**63 / 81 features, ~78% coverage.**
+**68 / 81 features, ~84% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
@@ -81,7 +81,7 @@ Node.js-specific runtime globals — not part of any Web/browser standard, but e
 | `path` | 8/8, 100% | 7/8, ~88% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
 | `os` | 7/7, 100% | 6/7, ~86% | [OS.md](OS.md) | • Verified on Linux and Apple Silicon (M4 Pro)<br>• Darwin `os.cpus()` reports `speed` 0 on M-series (no fixed clock — matches Node) and has no `irq` tick bucket — see [OS.md](OS.md)'s Known Limitations |
 | `events` (`EventEmitter`) | 6/6, 100% | 3/6, 50% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | • Single payload type per emitter, not real Node's variadic `...args`<br>• No overriding `on`/`emit`/etc. in a subclass<br>• `instanceof EventEmitter` is a compile error |
-| Other core modules (`querystring`, `assert`, `zlib`, `util`, `net`/`dgram`/`tls`/`dns`, `vm`, `cluster`, `http2`) | 3/11, ~27% | 1/11, ~9% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | `querystring`/`assert`/`zlib` done; the rest not started, grouped together as lower-individual-priority rather than each getting a full page |
+| Other core modules (`querystring`, `assert`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `vm`, `http2`) | 8/11, ~73% | 1/11, ~9% | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) | `querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster` done; `tls`/`vm`/`http2` not started, grouped together as lower-individual-priority rather than each getting a full page |
 
 ## Cross-Cutting
 
@@ -176,7 +176,7 @@ Not-yet-implemented items from the [Web Platform APIs](#web-platform-apis) and [
 What remains, tiered by effort:
 
 **Medium effort (new dependency or subsystem):**
-- `util`, `net`/`dgram`/`tls`/`dns`, `vm`, `cluster`, `http2` — lower individual priority, grouped in [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md).
+- `tls`, `vm`, `http2` — lower individual priority, grouped in [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md). Feasibility (assessed 2026-08-23): `vm` has only a narrow static subset (a compile-time string-literal expression via the existing `eval` fast path); anything dynamic needs the unstarted embedded engine ([TDD-00046](../tdd/TDD-00046.md)). `http2` is a genuine from-scratch subsystem (the server is hand-rolled HTTP/1.1, no nghttp2). `tls` is standalone TLS-wrapped sockets (HTTPS already rides libcurl internally). `net.connect`, the `dns` extras (`resolve4`/`promises.lookup`), and `cluster` now ship.
 
 ### Later — differentiator features, deliberately deprioritized
 

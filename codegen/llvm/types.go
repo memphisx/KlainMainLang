@@ -412,6 +412,17 @@ type Type struct {
 	// IsReadline marks a readline.createInterface() handle (a ptr to
 	// runtime_readline.go's rlStructIR), for .on/.question/.close dispatch.
 	IsReadline bool
+	// IsNetServer marks a net.createServer() handle and IsNetSocket a TCP
+	// connection socket (both ptr to runtime_net.go structs), for .listen/
+	// .on/.write/.end/.close dispatch.
+	IsNetServer bool
+	IsNetSocket bool
+	// IsDgramSocket marks a dgram.createSocket() handle (a ptr to
+	// runtime_dgram.go's dgramSocketIR), for .bind/.on('message')/.send/.close.
+	IsDgramSocket bool
+	// IsClusterWorker marks a cluster.fork() Worker handle (a ptr to
+	// runtime_cluster.go's clusterWorkerIR { id, pid }), for .id access.
+	IsClusterWorker bool
 	// IsBroadcastChannel / IsMessageChannel / IsMessagePort (TDD-00099):
 	// each is a ptr to a runtime channel-endpoint block (runtime_chan.go's
 	// chanEpIR; a MessageChannel value is the port1 half, port1/port2
@@ -1202,6 +1213,39 @@ func CPStdinType() Type {
 func ReadlineType() Type {
 	ty := ObjectType([]Field{{Name: "__rl", Ty: TypePtr}})
 	ty.IsReadline = true
+	return ty
+}
+
+// NetServerType is a net.createServer() handle: a bare pointer to
+// runtime_net.go's netServerIR, flag-tagged for .listen/.on/.close.
+func NetServerType() Type {
+	ty := ObjectType([]Field{{Name: "__netsrv", Ty: TypePtr}})
+	ty.IsNetServer = true
+	return ty
+}
+
+// NetSocketType is a TCP connection socket: a bare pointer to runtime_net.go's
+// netSocketIR, flag-tagged for .on('data'|'end')/.write/.end.
+func NetSocketType() Type {
+	ty := ObjectType([]Field{{Name: "__netsock", Ty: TypePtr}})
+	ty.IsNetSocket = true
+	return ty
+}
+
+// DgramSocketType is a dgram.createSocket() handle: a bare pointer to
+// runtime_dgram.go's dgramSocketIR, flag-tagged for .bind/.on/.send/.close.
+func DgramSocketType() Type {
+	ty := ObjectType([]Field{{Name: "__dgram", Ty: TypePtr}})
+	ty.IsDgramSocket = true
+	return ty
+}
+
+// ClusterWorkerType is a cluster.fork() Worker handle: a bare pointer to
+// runtime_cluster.go's clusterWorkerIR { i64 id, i64 pid }, flag-tagged for
+// `.id` access.
+func ClusterWorkerType() Type {
+	ty := ObjectType([]Field{{Name: "__worker", Ty: TypePtr}})
+	ty.IsClusterWorker = true
 	return ty
 }
 

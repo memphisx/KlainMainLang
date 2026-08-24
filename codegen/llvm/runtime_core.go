@@ -59,6 +59,16 @@ func (e *Emitter) ensureCloseDecl() {
 	}
 }
 
+// ensureWaitpidDecl declares waitpid(2) exactly once — shared by execFileSync
+// (runtime_process.go), child_process (runtime_childprocess.go), and cluster
+// (runtime_cluster.go), any two of which can co-occur in one program.
+func (e *Emitter) ensureWaitpidDecl() {
+	if !e.usedWaitpidDecl {
+		e.emitGlobal("declare i32 @waitpid(i32 noundef, ptr noundef, i32 noundef)")
+		e.usedWaitpidDecl = true
+	}
+}
+
 func (e *Emitter) ensureReadDecl() {
 	if !e.usedReadDecl {
 		e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")

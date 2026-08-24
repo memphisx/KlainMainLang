@@ -295,13 +295,7 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 			}
 			cellPtr := sym.Ptr
 			if !sym.Boxed {
-				newCell := e.freshReg()
-				curVal := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, cap.Ty.Align()))
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curVal, cap.Ty.IR, sym.Ptr, cap.Ty.Align()))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", cap.Ty.IR, curVal, newCell, cap.Ty.Align()))
-				e.updateSymbolInPlace(cap.Name, Symbol{Ptr: newCell, Ty: cap.Ty, Boxed: true, IsConst: sym.IsConst})
-				cellPtr = newCell
+				cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, sym.Ptr, sym.IsConst)
 			}
 			slotReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, env, i))

@@ -172,6 +172,18 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_rl_dispatch() {\nentry:\n  ret void\n}")
 	}
+	// net (TCP server) hooks likewise.
+	if !e.usedNetRuntime {
+		e.emitGlobal("define i1 @__kml_net_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_net_dispatch() {\nentry:\n  ret void\n}")
+	}
+	// dgram (UDP socket) hooks likewise.
+	if !e.usedDgramRuntime {
+		e.emitGlobal("define i1 @__kml_dgram_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_dgram_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_dgram_dispatch() {\nentry:\n  ret void\n}")
+	}
 }
 
 func (e *Emitter) ensureTaskRuntime() {

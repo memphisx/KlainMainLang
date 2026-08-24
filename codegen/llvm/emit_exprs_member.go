@@ -461,9 +461,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		switch ex.Property {
 		case "isPrimary":
 			return e.emitClusterIsPrimary()
+		case "isWorker":
+			return e.emitClusterIsWorker()
 		case "workerId":
 			return e.emitClusterWorkerID()
 		}
+	}
+	if e.inferExprType(ex.Object).IsClusterWorker {
+		return e.emitClusterWorkerMember(ex.Object, ex.Property, ex.GetPos())
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
 		switch ex.Property {
