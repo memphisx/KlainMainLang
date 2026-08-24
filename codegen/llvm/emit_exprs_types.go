@@ -618,9 +618,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch ex.Property {
 				case "argv":
 					return ArrayOf(TypePtr)
-				case "pid":
+				case "pid", "exitCode":
 					return TypeI64
-				case "platform":
+				case "platform", "arch":
 					return TypePtr
 				}
 			case "path__kml_builtin":
@@ -1113,6 +1113,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "readLineSync", "execFileSync", "cwd":
 					return TypePtr
+				case "uptime":
+					return TypeF64
+				case "hrtime":
+					return TupleType([]Type{TypeI64, TypeI64})
+				case "nextTick":
+					return TypeVoid
+				}
+			}
+			// process.hrtime.bigint()
+			if inner, ok2 := mem.Object.(*ast.MemberExpression); ok2 && mem.Property == "bigint" {
+				if id, ok3 := inner.Object.(*ast.Identifier); ok3 && id.Name == "process" && inner.Property == "hrtime" && !e.isShadowedByLocal(id.Name) {
+					return BigIntType()
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "path__kml_builtin" {

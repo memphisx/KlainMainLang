@@ -305,6 +305,157 @@ func nodePlatformName() string {
 	}
 }
 
+// nodeArchName maps Go's GOARCH to Node's process.arch strings (amd64 → x64,
+// 386 → ia32); arm64/arm/ppc64/s390x already match. This compiler builds for
+// the host arch, so the value is a compile-time constant.
+func nodeArchName() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "386":
+		return "ia32"
+	default:
+		return runtime.GOARCH // "arm64", "arm", "ppc64", "s390x", ... already match Node
+	}
+}
+
+// ensureProcessUptime declares the process-start monotonic timestamp global,
+// its capture function (@__kml_proc_uptime_init, called once at main start),
+// and @__kml_process_uptime() → seconds-since-start as a double.
+func (e *Emitter) ensureProcessUptime() {
+	if e.usedProcessUptime {
+		return
+	}
+	e.usedProcessUptime = true
+	e.ensureClockGettime()
+	e.emitGlobal("@__kml_proc_start_ns = internal global i64 0, align 8")
+	clk := monotonicClockID()
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_proc_uptime_init() {
+entry:
+  %%ts = alloca { i64, i64 }, align 8
+  call i32 @clock_gettime(i32 %s, ptr %%ts)
+  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
+  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
+  %%s = load i64, ptr %%sp, align 8
+  %%n = load i64, ptr %%np, align 8
+  %%sns = mul i64 %%s, 1000000000
+  %%tot = add i64 %%sns, %%n
+  store i64 %%tot, ptr @__kml_proc_start_ns, align 8
+  ret void
+}
+define double @__kml_process_uptime() {
+entry:
+  %%ts = alloca { i64, i64 }, align 8
+  call i32 @clock_gettime(i32 %s, ptr %%ts)
+  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
+  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
+  %%s = load i64, ptr %%sp, align 8
+  %%n = load i64, ptr %%np, align 8
+  %%sns = mul i64 %%s, 1000000000
+  %%now = add i64 %%sns, %%n
+  %%start = load i64, ptr @__kml_proc_start_ns, align 8
+  %%diff = sub i64 %%now, %%start
+  %%df = sitofp i64 %%diff to double
+  %%secs = fdiv double %%df, 1000000000.0
+  ret double %%secs
+}`, clk, clk))
+}
+
+// emitProcessLifecycleRuntime emits the process-lifecycle globals and the two
+// hook functions __kml_throw / process.exit / main-end call:
+//   - @__kml_run_exit_handlers(code): runs the registered 'exit' listener once
+//     (a no-op when none is set), used at normal program end, process.exit(),
+//     and after an uncaughtException.
+//   - @__kml_process_uncaught(err) -> i1: runs the registered
+//     'uncaughtException' listener and returns 1 if one was set (so __kml_throw
+//     skips its default "Uncaught: ..." print+exit), else 0.
+// Both no-op naturally when their handler global is null, so this single
+// definition serves whether or not a listener was registered. Emitted whenever
+// exceptions or any process-lifecycle surface is used.
+func (e *Emitter) emitProcessLifecycleRuntime() {
+	e.emitGlobal("@__kml_process_exit_code = internal global i64 0, align 8")
+	e.emitGlobal("@__kml_exit_handler = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_uncaught_handler = internal global ptr null, align 8")
+	e.emitGlobal("@__kml_exit_ran = internal global i1 0, align 1")
+	e.emitGlobal(`
+define void @__kml_run_exit_handlers(i64 %code) {
+entry:
+  %ran = load i1, ptr @__kml_exit_ran, align 1
+  br i1 %ran, label %done, label %run
+run:
+  store i1 1, ptr @__kml_exit_ran, align 1
+  %h = load ptr, ptr @__kml_exit_handler, align 8
+  %has = icmp ne ptr %h, null
+  br i1 %has, label %fire, label %done
+fire:
+  %fp_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void %fp(ptr %ep, i64 %code)
+  br label %done
+done:
+  ret void
+}
+define i1 @__kml_process_uncaught(ptr %err) {
+entry:
+  %h = load ptr, ptr @__kml_uncaught_handler, align 8
+  %has = icmp ne ptr %h, null
+  br i1 %has, label %fire, label %no
+fire:
+  %fp_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void %fp(ptr %ep, ptr %err)
+  ret i1 1
+no:
+  ret i1 0
+}`)
+}
+
+// ensureProcessHrtime declares @__kml_process_hrtime() → a malloc'd { i64 sec,
+// i64 nsec } (the [seconds, nanoseconds] tuple), and @__kml_process_hrtime_ns()
+// → total nanoseconds as an i64 (for hrtime.bigint).
+func (e *Emitter) ensureProcessHrtime() {
+	if e.usedProcessHrtime {
+		return
+	}
+	e.usedProcessHrtime = true
+	e.ensureClockGettime()
+	e.ensureMalloc()
+	clk := monotonicClockID()
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_process_hrtime() {
+entry:
+  %%ts = alloca { i64, i64 }, align 8
+  call i32 @clock_gettime(i32 %s, ptr %%ts)
+  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
+  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
+  %%s = load i64, ptr %%sp, align 8
+  %%n = load i64, ptr %%np, align 8
+  %%t = call ptr @malloc(i64 16)
+  %%t0 = getelementptr { i64, i64 }, ptr %%t, i32 0, i32 0
+  store i64 %%s, ptr %%t0, align 8
+  %%t1 = getelementptr { i64, i64 }, ptr %%t, i32 0, i32 1
+  store i64 %%n, ptr %%t1, align 8
+  ret ptr %%t
+}
+define i64 @__kml_process_hrtime_ns() {
+entry:
+  %%ts = alloca { i64, i64 }, align 8
+  call i32 @clock_gettime(i32 %s, ptr %%ts)
+  %%sp = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 0
+  %%np = getelementptr { i64, i64 }, ptr %%ts, i32 0, i32 1
+  %%s = load i64, ptr %%sp, align 8
+  %%n = load i64, ptr %%np, align 8
+  %%sns = mul i64 %%s, 1000000000
+  %%tot = add i64 %%sns, %%n
+  ret i64 %%tot
+}`, clk, clk))
+}
+
 // ensureProcessCwd declares __kml_process_cwd: the current working directory
 // via POSIX getcwd(NULL, 0) — the glibc/BSD extension where a NULL buffer
 // tells getcwd to malloc a buffer sized exactly as needed itself, avoiding

@@ -1985,6 +1985,11 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		regularCount--
 	}
 
+	// Spread argument (TDD-00106): same V1 rule as a named-function call.
+	if err := e.checkSpreadArgs(args, ty.FuncHasRest, regularCount, pos); err != nil {
+		return Value{}, err
+	}
+
 	// Build arg list: env first, then actual args.
 	argParts := []string{"ptr " + epVal}
 	for i := 0; i < regularCount && i < len(args); i++ {
@@ -2052,7 +2057,18 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if len(restArgs) == 0 {
+		if spread, ok := singleSpread(restArgs); ok {
+			// f(...arr) into a closure's rest slot — forward the array's (ptr,len)
+			// (TDD-00106), the same as the named-function path.
+			ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
+			}
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
 		} else {
 			n := int64(len(restArgs))

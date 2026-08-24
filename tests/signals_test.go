@@ -339,7 +339,7 @@ process.on(name, () => { console.log("x"); });
 // than 'SIGINT'/'SIGTERM' is a clean compile error, not silently ignored.
 func TestE2ESignalUnsupportedEventNameRejected(t *testing.T) {
 	_, err := parseAndCompile(`
-process.on('exit', () => { console.log("x"); });
+process.on('beforeExit', () => { console.log("x"); });
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for an unsupported event name, got none")

@@ -407,6 +407,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessKill(ex.Args, ex.GetPos())
 			case "on":
 				return e.emitProcessOn(ex.Args, ex.GetPos())
+			case "nextTick":
+				return e.emitProcessNextTick(ex.Args, ex.GetPos())
+			case "uptime":
+				return e.emitProcessUptime(ex.Args, ex.GetPos())
+			case "hrtime":
+				return e.emitProcessHrtime(ex.Args, ex.GetPos())
+			}
+		}
+		// process.hrtime.bigint(): a nested two-level member call.
+		if inner, ok := mem.Object.(*ast.MemberExpression); ok && mem.Property == "bigint" {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && inner.Property == "hrtime" && !e.isShadowedByLocal(id.Name) {
+				return e.emitProcessHrtimeBigint(ex.Args, ex.GetPos())
 			}
 		}
 		// process.stdout.write(s) / process.stderr.write(s): a nested
@@ -1127,6 +1139,46 @@ var builtinModuleSpecifiers = map[string]string{
 // unannotated ("Inferred") parameter rejecting a non-numeric argument,
 // default-expression fallback for a missing trailing argument, and rest-
 // parameter packing into a temporary heap array.
+// checkSpreadArgs enforces TDD-00106's V1 spread rule: at most one spread
+// argument, which must be the last argument and land exactly on a rest
+// parameter (after the fixed arguments). Returns nil when there is no spread.
+// singleSpread reports whether restArgs is exactly one spread argument
+// (`f(...arr)`), returning it — the case a rest slot forwards directly.
+func singleSpread(restArgs []ast.Expression) (*ast.SpreadElement, bool) {
+	if len(restArgs) == 1 {
+		if sp, ok := restArgs[0].(*ast.SpreadElement); ok {
+			return sp, true
+		}
+	}
+	return nil, false
+}
+
+func (e *Emitter) checkSpreadArgs(args []ast.Expression, hasRest bool, regularCount int, pos ast.Pos) error {
+	spreadIdx := -1
+	for i, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			if spreadIdx != -1 {
+				return fmt.Errorf("%d:%d: multiple spread arguments are not supported yet — pass one array (V1 spreads a single array into a rest parameter)", a.GetPos().Line, a.GetPos().Col)
+			}
+			spreadIdx = i
+		}
+	}
+	if spreadIdx == -1 {
+		return nil
+	}
+	sp := args[spreadIdx].(*ast.SpreadElement)
+	if spreadIdx != len(args)-1 {
+		return fmt.Errorf("%d:%d: a spread argument must be the last argument (V1 spreads a single array into a rest parameter)", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	}
+	if !hasRest {
+		return fmt.Errorf("%d:%d: spread requires the called function to have a rest parameter (`...`) — spreading into a fixed-arity function is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	}
+	if spreadIdx != regularCount {
+		return fmt.Errorf("%d:%d: a spread argument may only fill the rest parameter, right after the fixed arguments", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	}
+	return nil
+}
+
 func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) (Value, error) {
 	// A may-suspend async function is not called directly — it is spawned as a
 	// coroutine task, returning a pending promise (TDD-00083 Stage 2).
@@ -1138,6 +1190,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 	regularCount := len(sig.ParamTypes)
 	if sig.HasRest {
 		regularCount-- // last param slot is the rest array
+	}
+	// Spread argument (TDD-00106): V1 supports a spread only as the sole filler
+	// of a rest parameter, after exactly the fixed arguments — f(...arr),
+	// f(a, b, ...arr). Anything else (spread into a fixed-arity callee, a
+	// non-last spread, multiple spreads) is a clean error rather than a
+	// miscompile now that the parser accepts it in any argument position.
+	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
+		return Value{}, err
 	}
 	for i := 0; i < regularCount; i++ {
 		var paramTy Type
@@ -1296,7 +1356,19 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if len(restArgs) == 0 {
+		if spread, ok := singleSpread(restArgs); ok {
+			// f(fixed..., ...arr): forward the array's own (ptr, len) buffer
+			// straight into the rest slot — the rest-param ABI is (ptr, i64),
+			// exactly what an array argument already lowers to (TDD-00106).
+			ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
+			}
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
 		} else {
 			n := int64(len(restArgs))

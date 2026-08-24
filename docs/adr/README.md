@@ -369,3 +369,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00329](ADR-00329.md) | Node `dns` extras — `resolve4` (all A records) + `promises.lookup` | Extends [ADR-00326](ADR-00326.md) |
 | [00330](ADR-00330.md) | Closure capture of a not-yet-initialized binding (self-reference in initializer) | Extends [ADR-00001](ADR-00001.md); surfaced by [ADR-00328](ADR-00328.md) |
 | [00331](ADR-00331.md) | Node `cluster` module — fork + re-exec worker model | Implements [TDD-00105](../tdd/TDD-00105.md); extends the http.listen({workers}) fork machinery |
+| [00332](ADR-00332.md) | process introspection + `process.nextTick` (arch/uptime/hrtime/hrtime.bigint) | |
+| [00333](ADR-00333.md) | Writable `process.env` (`process.env.KEY = val`) | |
+| [00334](ADR-00334.md) | process lifecycle — `on('exit'/'uncaughtException')` + `exitCode` | |
+| [00335](ADR-00335.md) | Spread in call arguments (`f(...arr)`) into a rest parameter | Implements [TDD-00106](../tdd/TDD-00106.md) |

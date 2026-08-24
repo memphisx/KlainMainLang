@@ -35,7 +35,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.ensureSprintf()
 	e.ensureGetenv()
 
-	e.emitGlobal("declare i32 @setenv(ptr noundef, ptr noundef, i32 noundef)")
+	e.ensureSetenvDecl()
 	e.emitGlobal("declare i32 @atoi(ptr noundef)")
 	e.emitGlobal("declare i32 @execv(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")

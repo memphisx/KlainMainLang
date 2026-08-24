@@ -69,6 +69,15 @@ func (e *Emitter) ensureWaitpidDecl() {
 	}
 }
 
+// ensureSetenvDecl declares setenv(3) exactly once — shared by cluster's
+// worker-id passing (runtime_cluster.go) and process.env writes (emit_process.go).
+func (e *Emitter) ensureSetenvDecl() {
+	if !e.usedSetenvDecl {
+		e.emitGlobal("declare i32 @setenv(ptr noundef, ptr noundef, i32 noundef)")
+		e.usedSetenvDecl = true
+	}
+}
+
 func (e *Emitter) ensureReadDecl() {
 	if !e.usedReadDecl {
 		e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")

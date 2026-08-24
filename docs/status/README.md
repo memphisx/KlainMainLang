@@ -71,12 +71,12 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.listen`/`.close`, `cluster.*`, and this project's own `Memory.free`) require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
-**68 / 81 features, ~84% coverage.**
+**74 / 82 features, ~90% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
 | File System (fs) | 11/13, ~85% | 7/13, ~54% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | • No async variants<br>• `readFileSync`/`copyFileSync` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
-| Process / CLI I/O | 15/23, ~65% | 9/23, ~39% | [PROCESS-CLI.md](PROCESS-CLI.md) | • `process.env` is read-only<br>• `process.on(...)` handles only `'SIGINT'`/`'SIGTERM'`, not `'exit'`/`'uncaughtException'`/`'unhandledRejection'`<br>• No `process.nextTick`/interactive `process.stdin` stream |
+| Process / CLI I/O | 21/24, ~88% | 11/24, ~46% | [PROCESS-CLI.md](PROCESS-CLI.md) | • `process.env` writes work but there's no `delete` (no dynamic-delete operator)<br>• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)<br>• Streaming `process.stdin` (`.on('data')`), `process.memoryUsage()`, `process.version` still missing |
 | HTTP Server | 13/13, 100% | 9/13, ~69% | [HTTP-SERVER.md](HTTP-SERVER.md) | • `req.body`/response `body` string fields still truncate at an embedded null byte (`bodyBytes()` accessors are additive, not a fix)<br>• `.close()` in a `{ workers: N }` cluster only stops the calling worker process |
 | `path` | 8/8, 100% | 7/8, ~88% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
 | `os` | 7/7, 100% | 6/7, ~86% | [OS.md](OS.md) | • Verified on Linux and Apple Silicon (M4 Pro)<br>• Darwin `os.cpus()` reports `speed` 0 on M-series (no fixed clock — matches Node) and has no `irq` tick bucket — see [OS.md](OS.md)'s Known Limitations |
@@ -102,7 +102,7 @@ This section is core-*language* gaps only. Not-yet-built library/runtime APIs (W
 
 | Feature | Notes |
 |---|---|
-| Spread in call arguments (`f(...arr)`) | A plain top-level call fails to parse (`unexpected token ... in expression`) — nothing array-parameter- or class-specific. Spreading a runtime-length array into a statically-typed rest slot — possibly combined with other positional arguments, multiple spreads, or a non-rest fixed-arity target — is real design space, not a mechanical fix; needs a TDD before implementation. |
+| Spread in call arguments — remaining forms | The common case ships: `f(...arr)` / `f(a, …, ...arr)` spreads an array into a callee's **rest** parameter, for both named functions and closures/arrows ([TDD-00106](../tdd/TDD-00106.md)/[ADR-00335](../adr/ADR-00335.md)). Still unsupported (each a clean compile error, not a miscompile): spread into a **fixed-arity** function (needs per-slot unpack against static arity), **multiple** spreads or a spread mixed with trailing positional args (`f(...a, ...b)`, `f(...a, x)` — needs runtime array concat, the `emitSpreadArrayLitData` primitive wired to calls), and spread into a **variadic builtin** (`console.log(...a)`, `Math.max(...a)`). |
 
 ### High complexity
 

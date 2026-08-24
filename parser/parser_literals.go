@@ -1426,9 +1426,22 @@ func (p *Parser) parseTemplateRest(headQuasi string) ([]string, []ast.Expression
 func (p *Parser) parseArgList() ([]ast.Expression, error) {
 	var args []ast.Expression
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
-		arg, err := p.parseAssignment()
-		if err != nil {
-			return nil, err
+		var arg ast.Expression
+		// A spread argument `f(...arr)` — parsed like an array-literal spread;
+		// codegen restricts which positions it accepts (TDD-00106).
+		if p.check(lexer.ELLIPSIS) {
+			spreadTok := p.advance()
+			inner, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			arg = ast.NewSpreadElement(inner, posOf(spreadTok))
+		} else {
+			var err error
+			arg, err = p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
 		}
 		args = append(args, arg)
 		if !p.match(lexer.COMMA) {
@@ -1523,6 +1536,10 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.ARROW) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA) ||
+			// A parameter list starting with `...` is a rest parameter — a
+			// parenthesized expression can never begin with `...`, so this is
+			// unambiguously an arrow (`(...xs) => …`, `(a, ...xs) => …`).
+			(t1.Type == lexer.ELLIPSIS) ||
 			((t1.Type == lexer.LBRACE || t1.Type == lexer.LBRACKET) && p.destructuredArrowParamLookahead())
 		if isArrow {
 			return p.parseArrowFunction()

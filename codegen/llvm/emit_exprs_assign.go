@@ -164,6 +164,44 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 	}
+	// process.exitCode = N → store the deferred exit code (ADR-00334).
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "exitCode" {
+		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment to process.exitCode is not supported", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			val, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			val = e.coerce(val, TypeI64)
+			e.usedProcessLifecycle = true
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_process_exit_code, align 8", val.Ref))
+			return val, nil
+		}
+	}
+	// process.env.KEY = val / process.env["KEY"] = val → setenv (ADR-00333).
+	// Checked before the generic member/index assignment paths, since
+	// `process.env` is a pseudo-namespace, not a real object. Only plain `=`
+	// (a compound op on an env var is rejected — read-modify-write of a
+	// possibly-unset getenv result is a footgun better made explicit).
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && e.isProcessEnvExpr(memEx.Object) {
+		if ex.Op != "=" {
+			return Value{}, fmt.Errorf("%d:%d: compound assignment to process.env is not supported — read process.env.%s and assign explicitly", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
+		}
+		return e.emitProcessEnvSet(e.internString(memEx.Property), ex.Right, ex.GetPos())
+	}
+	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok && e.isProcessEnvExpr(idxEx.Object) {
+		if ex.Op != "=" {
+			return Value{}, fmt.Errorf("%d:%d: compound assignment to process.env is not supported", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		keyVal, err := e.emitExpr(idxEx.Index)
+		if err != nil {
+			return Value{}, err
+		}
+		keyVal = e.coerce(keyVal, TypePtr)
+		return e.emitProcessEnvSet(keyVal.Ref, ex.Right, ex.GetPos())
+	}
 	// Static field assignment: ClassName.staticField = val (or compound
 	// ops) — TDD-00009 Stage 4. A bare class-name identifier is a
 	// compile-time namespace, never a real runtime value, so this must be

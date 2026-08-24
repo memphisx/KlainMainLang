@@ -336,3 +336,119 @@ func TestE2EProcessStderrWriteWrongArgCountRejected(t *testing.T) {
 		t.Fatal("expected a compile error for process.stderr.write with 2 arguments, got none")
 	}
 }
+
+// --- process introspection + nextTick (ADR-00332) ---
+
+func TestE2EProcessArch(t *testing.T) {
+	// arch is a compile-time constant matching the build machine.
+	want := map[string]string{"amd64": "x64", "386": "ia32"}[runtime.GOARCH]
+	if want == "" {
+		want = runtime.GOARCH
+	}
+	assertOutput(t, `console.log(process.arch)`, want)
+}
+
+func TestE2EProcessNextTickOrdering(t *testing.T) {
+	assertOutput(t, `
+const order: string[] = []
+process.nextTick(() => { order.push("tick") })
+order.push("sync")
+Promise.resolve().then(() => { console.log(order.join(",")) })
+`, "sync,tick")
+}
+
+func TestE2EProcessUptimeNonNegative(t *testing.T) {
+	assertOutput(t, `console.log(process.uptime() >= 0)`, "true")
+}
+
+func TestE2EProcessHrtime(t *testing.T) {
+	assertOutput(t, `
+const hr = process.hrtime()
+console.log(hr.length)
+console.log(hr[0] >= 0 && hr[1] >= 0)
+`, "2\ntrue")
+}
+
+func TestE2EProcessHrtimeBigintMonotonic(t *testing.T) {
+	assertOutput(t, `
+const a = process.hrtime.bigint()
+const b = process.hrtime.bigint()
+console.log(b >= a)
+console.log(typeof a === "bigint")
+`, "true\ntrue")
+}
+
+// --- process.env write (ADR-00333) ---
+
+func TestE2EProcessEnvWrite(t *testing.T) {
+	assertOutput(t, `
+process.env.KML_TEST_VAR = "hello"
+console.log(process.env.KML_TEST_VAR)
+const k = "KML_DYN"
+process.env[k] = "world"
+console.log(process.env["KML_DYN"])
+`, "hello\nworld")
+}
+
+// A written env var is inherited by a child process (the real use case).
+func TestE2EProcessEnvWriteInheritedByChild(t *testing.T) {
+	assertOutput(t, `
+process.env.KML_CHILD_SEES = "yes"
+const out = process.execFileSync("printenv", ["KML_CHILD_SEES"])
+console.log(out.trim())
+`, "yes")
+}
+
+func TestE2EProcessEnvCompoundRejected(t *testing.T) {
+	_, err := parseAndCompile(`process.env.X += "y"`)
+	if err == nil {
+		t.Fatal("expected a compile error for compound assignment to process.env, got none")
+	}
+}
+
+// --- process lifecycle: on('exit'/'uncaughtException') + exitCode (ADR-00334) ---
+
+func TestE2EProcessExitHandlerAndExitCode(t *testing.T) {
+	// The 'exit' listener runs at normal end with the exit code, and the
+	// process returns process.exitCode.
+	out, code := compileAndRunExpectExit(t, `
+process.on('exit', (code: number) => { console.log("exit:" + code) })
+process.exitCode = 3
+console.log("done")
+`)
+	if got := strings.TrimSpace(out); got != "done\nexit:3" {
+		t.Errorf("output: got %q, want %q", got, "done\nexit:3")
+	}
+	if code != 3 {
+		t.Errorf("exit code: got %d, want 3", code)
+	}
+}
+
+func TestE2EProcessExitRunsHandler(t *testing.T) {
+	out, code := compileAndRunExpectExit(t, `
+process.on('exit', (code: number) => { console.log("bye:" + code) })
+process.exit(5)
+console.log("unreachable")
+`)
+	if got := strings.TrimSpace(out); got != "bye:5" {
+		t.Errorf("output: got %q, want %q", got, "bye:5")
+	}
+	if code != 5 {
+		t.Errorf("exit code: got %d, want 5", code)
+	}
+}
+
+func TestE2EProcessUncaughtException(t *testing.T) {
+	// The handler runs (skipping the default "Uncaught: ..." print); the process
+	// still exits 1 (this exception model has already unwound to the top).
+	out, code := compileAndRunExpectExit(t, `
+process.on('uncaughtException', (err) => { console.log("caught:" + err.message) })
+throw new Error("boom")
+`)
+	if got := strings.TrimSpace(out); got != "caught:boom" {
+		t.Errorf("output: got %q, want %q", got, "caught:boom")
+	}
+	if code != 1 {
+		t.Errorf("exit code: got %d, want 1", code)
+	}
+}

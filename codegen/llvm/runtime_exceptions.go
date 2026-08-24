@@ -67,6 +67,18 @@ entry:
   %iszero = icmp eq i32 %top, 0
   br i1 %iszero, label %uncaught, label %jump
 uncaught:
+  ; process.on('uncaughtException', ...) hook: if a listener is registered it
+  ; runs and this returns 1, and we skip the default print — but still exit
+  ; (this exception model has unwound the stack to the top-level catch-all, so
+  ; there is no in-progress computation to resume). Runs the 'exit' listener
+  ; on the way out, like Node. Returns 0 (no listener) → default behavior.
+  %prochandled = call i1 @__kml_process_uncaught(ptr %errObj)
+  br i1 %prochandled, label %procunc, label %defunc
+procunc:
+  call void @__kml_run_exit_handlers(i64 1)
+  call void @exit(i32 1)
+  unreachable
+defunc:
   %msgPtr = getelementptr { i64, ptr, ptr }, ptr %errObj, i32 0, i32 1
   %msg = load ptr, ptr %msgPtr, align 8
   ; TDD-00098 stage 5: on a worker thread this call does NOT return — it

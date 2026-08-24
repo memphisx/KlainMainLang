@@ -452,6 +452,13 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitProcessPid()
 		case "platform":
 			return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
+		case "arch":
+			return Value{Ref: e.internString(nodeArchName()), Ty: TypePtr}, nil
+		case "exitCode":
+			e.usedProcessLifecycle = true
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", r))
+			return Value{Ref: r, Ty: TypeI64}, nil
 		}
 	}
 	if e.isProcessEnvExpr(ex.Object) {

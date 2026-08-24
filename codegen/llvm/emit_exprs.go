@@ -54,7 +54,7 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 	case *ast.MemberExpression:
 		return e.emitMember(ex)
 	case *ast.SpreadElement:
-		return Value{}, fmt.Errorf("%d:%d: spread element must be used inside an array literal", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, fmt.Errorf("%d:%d: a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. f(...arr)) — not here", ex.GetPos().Line, ex.GetPos().Col)
 	case *ast.ArrayLiteral:
 		// No target-type hint available in this bare-dispatch path — falls
 		// back to inferArrayType's first-element inference (unchanged

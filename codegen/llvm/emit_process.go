@@ -31,22 +31,90 @@ func (e *Emitter) emitProcessArgv() (Value, error) {
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
 }
 
-// emitProcessExit implements process.exit(code): calls C exit() and never returns.
+// emitProcessExit implements process.exit(code?): runs the registered 'exit'
+// listener, then calls C exit(). With no argument it exits with the current
+// process.exitCode (0 by default), matching Node.
 func (e *Emitter) emitProcessExit(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: process.exit takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.exit takes 0 or 1 arguments (code?)", pos.Line, pos.Col)
 	}
-	codeVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	e.usedProcessLifecycle = true
+	var codeRef string
+	if len(args) == 1 {
+		codeVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		codeRef = e.coerce(codeVal, TypeI64).Ref
+	} else {
+		codeReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", codeReg))
+		codeRef = codeReg
 	}
-	codeVal = e.coerce(codeVal, TypeI64)
 	e.ensureExit()
+	e.emitInstr(fmt.Sprintf("call void @__kml_run_exit_handlers(i64 %s)", codeRef))
 	code32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", code32, codeVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", code32, codeRef))
 	e.emitInstr(fmt.Sprintf("call void @exit(i32 %s)", code32))
 	e.emitTerminator("unreachable")
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitProcessNextTick implements process.nextTick(fn): enqueue fn onto the
+// microtask queue (drained after the current synchronous run, before timers).
+// V1 accepts a zero-argument callback only (Node forwards extra args to fn).
+func (e *Emitter) emitProcessNextTick(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.nextTick takes exactly 1 argument (a () => void callback)", pos.Line, pos.Col)
+	}
+	cbPtr, err := e.timerCallbackPtr(args[0], "process.nextTick", pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureMicrotasks()
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", cbPtr))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitProcessUptime implements process.uptime(): seconds (a double) since the
+// process started.
+func (e *Emitter) emitProcessUptime(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: process.uptime takes no arguments", pos.Line, pos.Col)
+	}
+	e.ensureProcessUptime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_process_uptime()", r))
+	return Value{Ref: r, Ty: TypeF64}, nil
+}
+
+// emitProcessHrtime implements process.hrtime(): the high-resolution monotonic
+// time as a [seconds, nanoseconds] tuple. V1 takes no argument (the legacy
+// diff-from-a-previous-reading form is not supported — use process.hrtime.bigint
+// and subtract).
+func (e *Emitter) emitProcessHrtime(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: process.hrtime takes no arguments in V1 (use process.hrtime.bigint())", pos.Line, pos.Col)
+	}
+	e.ensureProcessHrtime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_hrtime()", r))
+	return Value{Ref: r, Ty: TupleType([]Type{TypeI64, TypeI64})}, nil
+}
+
+// emitProcessHrtimeBigint implements process.hrtime.bigint(): the monotonic
+// time as total nanoseconds, a bigint.
+func (e *Emitter) emitProcessHrtimeBigint(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: process.hrtime.bigint takes no arguments", pos.Line, pos.Col)
+	}
+	e.ensureProcessHrtime()
+	e.ensureBigInt()
+	ns := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_process_hrtime_ns()", ns))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", r, ns))
+	return Value{Ref: r, Ty: BigIntType()}, nil
 }
 
 // emitGetenvCall calls C getenv() on the given key pointer, returning a
@@ -57,6 +125,24 @@ func (e *Emitter) emitGetenvCall(keyPtr string) Value {
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @getenv(ptr %s)", result, keyPtr))
 	return Value{Ref: result, Ty: TypePtr}
+}
+
+// emitProcessEnvSet implements `process.env.KEY = val` / `process.env["KEY"] =
+// val` via setenv(key, String(val), overwrite=1). The value is coerced to a
+// string (Node stringifies env values).
+func (e *Emitter) emitProcessEnvSet(keyPtr string, valExpr ast.Expression, pos ast.Pos) (Value, error) {
+	valVal, err := e.emitExpr(valExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	strVal, err := e.emitValueToString(valVal)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureSetenvDecl()
+	e.emitInstr(fmt.Sprintf("call i32 @setenv(ptr %s, ptr %s, i32 1)", keyPtr, strVal.Ref))
+	// An assignment expression evaluates to the assigned value.
+	return strVal, nil
 }
 
 // emitProcessEnvGetStatic implements process.env.KEY (dot notation): the key
@@ -170,20 +256,46 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		return Value{}, fmt.Errorf("%d:%d: process.on requires a string literal event name (dynamic event names are not supported)", pos.Line, pos.Col)
 	}
 
-	closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
-	if err != nil {
-		return Value{}, err
-	}
-
 	switch eventLit.Value {
 	case "SIGINT":
+		closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
 		e.ensureSignalRegisteredSigint()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigint_closure", closurePtr))
 	case "SIGTERM":
+		closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
 		e.ensureSignalRegisteredSigterm()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigterm_closure", closurePtr))
+	case "exit":
+		// The 'exit' listener receives the exit code: (code: number) => void.
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypeI64})
+		if err != nil {
+			return Value{}, err
+		}
+		if cb.kind != cbClosure {
+			return Value{}, fmt.Errorf("%d:%d: a process 'exit' listener must be an arrow function literal", pos.Line, pos.Col)
+		}
+		e.usedProcessLifecycle = true
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_exit_handler, align 8", cb.hdrPtr))
+	case "uncaughtException":
+		// The listener receives the thrown Error: (err) => void.
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{errorObjType})
+		if err != nil {
+			return Value{}, err
+		}
+		if cb.kind != cbClosure {
+			return Value{}, fmt.Errorf("%d:%d: a process 'uncaughtException' listener must be an arrow function literal", pos.Line, pos.Col)
+		}
+		e.usedProcessLifecycle = true
+		e.ensureExceptionHelpers() // the hook lives in __kml_throw's uncaught path
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_uncaught_handler, align 8", cb.hdrPtr))
 	default:
-		return Value{}, fmt.Errorf("%d:%d: process.on only supports 'SIGINT'/'SIGTERM' (got %q)", pos.Line, pos.Col, eventLit.Value)
+		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'exit'/'uncaughtException' (got %q)", pos.Line, pos.Col, eventLit.Value)
 	}
 	return Value{Ty: TypeVoid}, nil
 }
