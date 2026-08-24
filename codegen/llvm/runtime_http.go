@@ -1109,6 +1109,8 @@ afteresreconnect:
   %netkeep = call i1 @__kml_net_keepalive()
   ; dgram: a bound UDP socket keeps this loop alive.
   %dgkeep = call i1 @__kml_dgram_keepalive()
+  ; process.stdin: an open stream with a 'data' listener keeps this loop alive.
+  %sdkeep = call i1 @__kml_stdin_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1118,7 +1120,8 @@ afteresreconnect:
   %anywork6 = or i1 %anywork5, %cpkeep
   %anywork6b = or i1 %anywork6, %rlkeep
   %anywork6c = or i1 %anywork6b, %netkeep
-  %anywork = or i1 %anywork6c, %dgkeep
+  %anywork6d = or i1 %anywork6c, %dgkeep
+  %anywork = or i1 %anywork6d, %sdkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1280,6 +1283,11 @@ wscsetdone:
   %rlfz0 = load i1, ptr %forcezero, align 1
   %rlfz1 = or i1 %rlfz0, %rlfdforce
   store i1 %rlfz1, ptr %forcezero, align 1
+  ; process.stdin: add stdin (fd 0) while the stream is open and flowing.
+  %sdfdforce = call i1 @__kml_stdin_fdset_add(ptr %fdset, ptr %maxfd)
+  %sdfz0 = load i1, ptr %forcezero, align 1
+  %sdfz1 = or i1 %sdfz0, %sdfdforce
+  store i1 %sdfz1, ptr %forcezero, align 1
   ; net: add the listen fd and every open connection fd.
   %netfdforce = call i1 @__kml_net_fdset_add(ptr %fdset, ptr %maxfd)
   %netfz0 = load i1, ptr %forcezero, align 1
@@ -1531,6 +1539,8 @@ afterselectok:
   call void @__kml_cp_dispatch()
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
+  ; process.stdin: drain stdin and emit 'data'/'end' events.
+  call void @__kml_stdin_dispatch()
   ; net: accept new TCP connections and drain readable connection sockets.
   call void @__kml_net_dispatch()
   ; dgram: drain readable UDP sockets and fire 'message' listeners.

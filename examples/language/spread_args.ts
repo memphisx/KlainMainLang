@@ -22,3 +22,31 @@ const product = (...nums: number[]): number => {
   return p;
 };
 console.log("product:", product(...[2, 3, 4]));
+
+// Multiple spreads and positional arguments freely mix, concatenating into the
+// rest parameter at runtime in left-to-right order.
+const lows = [1, 2, 3];
+const highs = [100, 200];
+console.log("merged sum:", sum(...lows, 50, ...highs));
+
+// Spread into a class method's rest parameter, instance or static.
+class Stats {
+  totalFrom(base: number, ...nums: number[]): number {
+    let t = base;
+    for (const n of nums) t += n;
+    return t;
+  }
+  static sum(...nums: number[]): number {
+    let t = 0;
+    for (const n of nums) t += n;
+    return t;
+  }
+}
+const stats = new Stats();
+console.log("total from base:", stats.totalFrom(1000, ...lows, ...highs));
+console.log("static sum:", Stats.sum(...lows, ...highs));
+
+// Spread also works into the common variadic builtins, folded at runtime.
+console.log("largest:", Math.max(...lows, ...highs));
+console.log("smallest:", Math.min(0, ...lows));
+console.log("all values:", ...lows, ...highs);

@@ -3,7 +3,7 @@ GO           := go
 CLANG        := clang
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
-EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' | sort)
+EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 

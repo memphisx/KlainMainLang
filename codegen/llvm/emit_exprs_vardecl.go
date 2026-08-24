@@ -24,6 +24,20 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		if !ok {
 			return
 		}
+		// A promoted generic class instance (`const b = new Box<number>()`) needs
+		// its monomorphized ClassInfo (methods, dispatch) registered now, before
+		// Pass 2 emits the function bodies that will call `b.get()` — otherwise
+		// the method dispatch finds no registered class. genericClassInstanceType
+		// (via inferExprType above) only computed the *shape*; instantiateGeneric-
+		// Class does the real, memoized registration (a no-op if the top-level
+		// `new` already forced it). Field access rides the type's own Fields and
+		// needs no registration, but the method side does.
+		if ne, isNew := v.Init.(*ast.NewExpression); isNew {
+			if genDecl, gen := e.genericClasses[ne.ClassName]; gen && len(ne.TypeArgs) == len(genDecl.TypeParams) {
+				subs := e.buildTypeArgSubs(genDecl.TypeParams, ne.TypeArgs)
+				_, _ = e.instantiateGenericClass(genDecl, subs)
+			}
+		}
 		safe := llvmSafeSymbol(v.Name)
 		if ty.IsArray {
 			// An array binding is two slots (data ptr + length) — two globals,
@@ -86,6 +100,12 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			elemTy = e.resolveType(init.ElemType)
 		}
 		return SetType(elemTy), true
+	case *ast.NewTypedArrayExpression:
+		// A TypedArray is a 2-slot `{ptr,i64}` IsArray value — promoted via the
+		// same two-global (data + length) path as a plain array; emitArrayVarDecl
+		// already both constructs a `new Uint8Array(...)` and honors the promoted
+		// globals. Type matches emitVarDecl's own `TypedArrayType(init.ElemKind)`.
+		return TypedArrayType(init.ElemKind), true
 	}
 	if v.TypeAnnot != nil {
 		ty := e.resolveType(v.TypeAnnot)
@@ -102,6 +122,16 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			return ty, true
 		}
 		return Type{}, false
+	}
+	// A `new`-expression that yields a single ptr-sized handle (a class instance,
+	// or a builtin like Blob/Date/URL/RegExp/EventEmitter/…). Its type comes from
+	// the canonical inferExprType, and because every such handle's global IR is
+	// uniformly `ptr`, the pre-declared global can't disagree with emitVarDecl's
+	// store. Generic class instances and Promise are excluded (see
+	// promotableNewExpr), and the single-ptr gate there excludes 2-slot
+	// TypedArray/array shapes.
+	if ty, ok := e.promotableNewExpr(v.Init); ok {
+		return ty, true
 	}
 	// Un-annotated: promote only when the type is fully determinable in the
 	// pre-pass context (see promotableInitInPrePass), then compute it the *same
@@ -159,6 +189,12 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 // from emitVarDecl's — so it is not promoted. This is the invariant the whole
 // feature rests on ("promote iff the type cannot drift"), not a per-symptom gate.
 func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
+	// A promotable `new`-expression handle (class instance / Blob / Date / …) is
+	// fully determinable here: classes are registered (Pass 0.5) before this
+	// pre-pass (Pass 1.7), and a builtin handle's type is a constant.
+	if _, ok := e.promotableNewExpr(expr); ok {
+		return true
+	}
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
 		return !ex.IsBigInt
@@ -207,6 +243,86 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 	return false
 }
 
+// promotableNewExpr returns the type of a top-level binding initialized by a
+// `new`-expression that is promotable to a module global (TDD-00093): a class
+// instance (concrete or a fully-type-argumented generic, `new Box<number>()`),
+// or a single-ptr-slot builtin handle (Blob/Date/URL/RegExp/EventEmitter/
+// Headers/…). It returns ok=false for anything not a single fixed slot (arrays
+// and TypedArrays are 2-slot `{ptr,i64}`), for a dynamic/`any` object, and — as
+// an exclusion — for `new Promise` (task-promise semantics). inferExprType is the
+// canonical type source (it computes a generic instantiation's shape purely);
+// registerModuleGlobals forces the generic class's real registration so a named
+// function's method dispatch finds it.
+func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
+	switch ne := init.(type) {
+	case *ast.NewExpression:
+		if ne.ClassName == "Promise" {
+			return Type{}, false
+		}
+		_, concrete := e.classes[ne.ClassName]
+		genDecl, generic := e.genericClasses[ne.ClassName]
+		if !concrete && !generic {
+			return Type{}, false
+		}
+		// A generic class instance (`new Box<number>()`) promotes too: its shape
+		// comes from genericClassInstanceType via inferExprType below — a *pure*
+		// lookup (no IR emission / no e.classes registration as a side effect),
+		// safe in this pre-pass. Only a full type-argument list is resolvable.
+		if generic && len(ne.TypeArgs) != len(genDecl.TypeParams) {
+			return Type{}, false
+		}
+	default:
+		if !isHandleNewExpr(init) {
+			return Type{}, false
+		}
+	}
+	ty := e.inferExprType(init)
+	// A single fixed slot only: exclude a 2-slot `{ptr,i64}` array/TypedArray
+	// aggregate and a dynamic/`any` object. A ptr handle (Blob/URL/class/…) or a
+	// scalar-backed handle (a `Date` is an i64 epoch) both store into one global
+	// via the shape-appropriate path emitVarDecl already dispatches on.
+	if ty.IsDynamicObject || ty.IsArray || ty.IR == "" || ty.IR == "void" {
+		return Type{}, false
+	}
+	return ty, true
+}
+
+// isHandleNewExpr reports whether init is one of the builtin `new`-handle
+// constructors this promotion covers — the plain value/data handles verified
+// (targeted probes + a full E2E-suite pass) to construct and dispatch correctly
+// as a module global. Class instances (`new C()`) are handled separately in
+// promotableNewExpr and ride the ordinary class object-var path.
+//
+// Deliberately excluded: the connection handles — `Worker`/`WebSocket`/
+// `EventSource` (their construction opens a thread/socket, ill-suited to a
+// module-global-at-startup), `BroadcastChannel`/`MessageChannel`, and
+// `XMLHttpRequest`. They stay `main()` locals (the prior behavior).
+//
+// (Two families used to be excluded and are now in: the event handles
+// `AbortController`/`Event`/`CustomEvent`/`EventTarget` failed only because
+// `inferExprType` lacked their `new`-expression cases and mistyped the global;
+// and the streams + `EventEmitter` use dedicated var-decl emitters that ignored
+// the module global — `storePtrHandleVarDecl` makes those promotion-aware. Both
+// fixes are at the source, so these promote correctly.)
+func isHandleNewExpr(init ast.Expression) bool {
+	switch init.(type) {
+	case *ast.NewBlobExpression, *ast.NewDateExpression,
+		*ast.NewErrorExpression, *ast.NewURLExpression,
+		*ast.NewURLSearchParamsExpression, *ast.NewRegExpExpression,
+		*ast.NewHeadersExpression, *ast.NewArrayBufferExpression,
+		*ast.NewTextEncoderExpression, *ast.NewTextDecoderExpression,
+		*ast.NewDataViewExpression, *ast.NewRequestExpression,
+		*ast.NewURLPatternExpression, *ast.NewAbortControllerExpression,
+		*ast.NewEventTargetExpression, *ast.NewEventExpression,
+		*ast.NewCustomEventExpression,
+		*ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression,
+		*ast.NewTransformStreamExpression, *ast.NewCompressionStreamExpression,
+		*ast.NewNodeStreamExpression, *ast.NewEventEmitterExpression:
+		return true
+	}
+	return false
+}
+
 // moduleGlobalPtrOrLocal returns the storage pointer for a single-ptr binding v
 // (object/`Map`/`Set`): the pre-registered module global (TDD-00093) for a
 // promoted decl — already in e.moduleGlobals and zero-initialized — or a fresh
@@ -250,6 +366,25 @@ func (e *Emitter) emitVarSlotDefault(ptrName string, ty Type) {
 }
 
 // emitVarDecl handles variable declarations (scalar, array, and object).
+// storePtrHandleVarDecl stores a just-built single-ptr handle value (a
+// stream/CompressionStream/… whose var-decl is emitted by a dedicated
+// emitNewX rather than the generic object path) into v's storage: the
+// pre-registered module global when v is promoted (TDD-00093/ADR-00342), else a
+// fresh local ptr alloca with the Symbol defined. Without the promoted branch a
+// promoted binding's global stayed null and a named function reading it saw an
+// empty handle (a promoted `ReadableStream` silently dropped its chunks).
+func (e *Emitter) storePtrHandleVarDecl(v *ast.VarDeclaration, val Value) {
+	var ptrName string
+	if e.promotedGlobalDecls[v] {
+		ptrName = e.moduleGlobals[v.Name].Ptr
+	} else {
+		ptrName = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+}
+
 func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if init, ok := v.Init.(*ast.NewMapExpression); ok {
 		return e.emitMapVarDecl(v, init)
@@ -265,10 +400,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
-		ptrName := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
 	if init, ok := v.Init.(*ast.NewCompressionStreamExpression); ok {
@@ -276,10 +408,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
-		ptrName := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
 	if init, ok := v.Init.(*ast.NewTransformStreamExpression); ok {
@@ -287,10 +416,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
-		ptrName := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
 	if init, ok := v.Init.(*ast.NewWritableStreamExpression); ok {
@@ -298,10 +424,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
-		ptrName := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
 	if init, ok := v.Init.(*ast.NewReadableStreamExpression); ok {
@@ -309,10 +432,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
-		ptrName := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
 

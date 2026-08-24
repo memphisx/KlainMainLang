@@ -22,14 +22,14 @@ import "fmt"
 
 // netServerIR: 0 i64 listenfd (-1 before listen / after close) · 1 ptr
 // connection listener (closure header, or null) · 2 i64 closed (0 open · 1).
-const netServerIR = "{ i64, ptr, i64 }"
+const netServerIR = "{ i64, ptr, i64, ptr }" // field 3 = server SSL_CTX* (null for plaintext; set by tls.createServer, TDD-00110)
 
 // netSocketIR: 0 i64 fd (-1 after close/EOF) · 1 i64 state (0 open · 1 closed)
 // · 2 ptr 'data' listener · 3 ptr 'end' listener · 4 ptr pending 'connect'
 // listener (client sockets only; fired once on the first dispatch pass so it
 // runs after net.connect returns and the socket variable is bound, then
 // cleared — server-accepted sockets leave it null).
-const netSocketIR = "{ i64, i64, ptr, ptr, ptr }"
+const netSocketIR = "{ i64, i64, ptr, ptr, ptr, ptr }" // field 5 = SSL* (null for plaintext; set for a tls.connect socket, TDD-00109)
 
 func (e *Emitter) ensureNetRuntime() {
 	if e.usedNetRuntime {
@@ -195,7 +195,7 @@ connected:
   %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
   %%fln = or i32 %%fl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%fln)
-  %%sk = call ptr @calloc(i64 1, i64 40)
+  %%sk = call ptr @calloc(i64 1, i64 48)
   %%fd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
   %%fd64 = sext i32 %%fd to i64
   store i64 %%fd64, ptr %%fd_p, align 8
@@ -219,6 +219,14 @@ entry:
   br i1 %%open, label %%wr, label %%ret
 wr:
   %%fd = trunc i64 %%fd64 to i32
+  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl = load ptr, ptr %%ssl_p, align 8
+  %%istls = icmp ne ptr %%ssl, null
+  br i1 %%istls, label %%wtls, label %%wraw
+wtls:
+  call i64 @__kml_tls_write(ptr %%ssl, ptr %%data, i64 %%n)
+  br label %%ret
+wraw:
   call i64 @write(i32 %%fd, ptr %%data, i64 %%n)
   br label %%ret
 ret:
@@ -232,6 +240,15 @@ entry:
   br i1 %%open, label %%cl, label %%ret
 cl:
   %%fd = trunc i64 %%fd64 to i32
+  %%ssl_p = getelementptr %s, ptr %%sock, i32 0, i32 5
+  %%ssl = load ptr, ptr %%ssl_p, align 8
+  %%istls = icmp ne ptr %%ssl, null
+  br i1 %%istls, label %%cfree, label %%craw
+cfree:
+  call void @__kml_tls_free(ptr %%ssl)
+  store ptr null, ptr %%ssl_p, align 8
+  br label %%craw
+craw:
   call i32 @close(i32 %%fd)
   store i64 -1, ptr %%fd_p, align 8
   %%st_p = getelementptr %s, ptr %%sock, i32 0, i32 1
@@ -239,7 +256,7 @@ cl:
   br label %%ret
 ret:
   ret void
-}`, sock, sock, sock))
+}`, sock, sock, sock, sock, sock))
 
 	// __kml_net_keepalive(): true while any server is listening (fd >= 0,
 	// not closed) or any connection is still open.
@@ -393,15 +410,32 @@ acc:
   %%accok = icmp sge i32 %%newfd, 0
   br i1 %%accok, label %%onconn, label %%snext
 onconn:
+  ; TLS server (TDD-00110): if the server has an SSL_CTX, do a blocking SSL_accept
+  ; on the still-blocking accepted fd; drop the connection on handshake failure.
+  %%ctx_p = getelementptr { i64, ptr, i64, ptr }, ptr %%srv, i32 0, i32 3
+  %%sctx = load ptr, ptr %%ctx_p, align 8
+  %%istls = icmp ne ptr %%sctx, null
+  br i1 %%istls, label %%tlsacc, label %%doconn
+tlsacc:
+  %%ssl = call ptr @__kml_tls_server_accept(ptr %%sctx, i32 %%newfd)
+  %%sslok = icmp ne ptr %%ssl, null
+  br i1 %%sslok, label %%doconn, label %%tlsfail
+tlsfail:
+  call i32 @close(i32 %%newfd)
+  br label %%acc
+doconn:
+  %%sslval = phi ptr [ null, %%onconn ], [ %%ssl, %%tlsacc ]
   ; make the accepted fd non-blocking
   %%nfl = call i32 (i32, i32, ...) @fcntl(i32 %%newfd, i32 3)
   %%nfln = or i32 %%nfl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%newfd, i32 4, i32 %%nfln)
   ; build the socket handle
-  %%sk = call ptr @calloc(i64 1, i64 40)
+  %%sk = call ptr @calloc(i64 1, i64 48)
   %%skfd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
   %%newfd64 = sext i32 %%newfd to i64
   store i64 %%newfd64, ptr %%skfd_p, align 8
+  %%sk_ssl_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr }, ptr %%sk, i32 0, i32 5
+  store ptr %%sslval, ptr %%sk_ssl_p, align 8
   call void @__kml_net_conn_register(ptr %%sk)
   ; fire the server's connection listener (socket)
   %%cl_p = getelementptr %s, ptr %%srv, i32 0, i32 1
@@ -456,7 +490,18 @@ rloop:
   br i1 %%closed, label %%cnext, label %%doread
 doread:
   %%fd = trunc i64 %%fd64 to i32
-  %%n = call i64 @read(i32 %%fd, ptr %%chunkptr, i64 4096)
+  %%rssl_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr }, ptr %%sk2, i32 0, i32 5
+  %%rssl = load ptr, ptr %%rssl_p, align 8
+  %%ristls = icmp ne ptr %%rssl, null
+  br i1 %%ristls, label %%rtls, label %%rraw
+rtls:
+  %%ntls = call i64 @__kml_tls_read(ptr %%rssl, ptr %%chunkptr, i64 4096)
+  br label %%readdone
+rraw:
+  %%nraw = call i64 @read(i32 %%fd, ptr %%chunkptr, i64 4096)
+  br label %%readdone
+readdone:
+  %%n = phi i64 [ %%ntls, %%rtls ], [ %%nraw, %%rraw ]
   %%hasdata = icmp sgt i64 %%n, 0
   br i1 %%hasdata, label %%ondata, label %%ckeof
 ondata:
@@ -477,6 +522,9 @@ ckeof:
   %%iseof = icmp eq i64 %%n, 0
   br i1 %%iseof, label %%oneof, label %%cnext
 oneof:
+  %%essl_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr }, ptr %%sk2, i32 0, i32 5
+  %%essl = load ptr, ptr %%essl_p, align 8
+  call void @__kml_tls_free(ptr %%essl)
   call i32 @close(i32 %%fd)
   store i64 -1, ptr %%fd_p, align 8
   %%st_p = getelementptr %s, ptr %%sk2, i32 0, i32 1

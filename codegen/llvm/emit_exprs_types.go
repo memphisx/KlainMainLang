@@ -622,6 +622,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeI64
 				case "platform", "arch":
 					return TypePtr
+				case "stdin":
+					return StdinType()
 				}
 			case "path__kml_builtin":
 				switch ex.Property {
@@ -1067,8 +1069,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					}
 				case "min", "max":
 					// Any float argument promotes the whole fold to a double
-					// (llvm.minimum/maximum) — must match emitMathMinMax.
+					// (llvm.minimum/maximum) — must match emitMathMinMax. A
+					// spread argument contributes its array's element type.
 					for _, a := range ex.Args {
+						if sp, ok := a.(*ast.SpreadElement); ok {
+							at := e.inferExprType(sp.Arg)
+							if at.ElemType != nil && at.ElemType.Float {
+								return TypeF64
+							}
+							continue
+						}
 						if e.inferExprType(a).Float {
 							return TypeF64
 						}
@@ -1107,6 +1117,29 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeBool
 				case "readdirSync":
 					return ArrayOf(TypePtr)
+				case "createReadStream":
+					return NodeReadableType(TypePtr)
+				case "createWriteStream":
+					return NodeWritableType(TypePtr)
+				}
+				// Async callback form (TDD-00107): fs.readFile(path, cb) etc.
+				// return void — the result is delivered through the callback.
+				if _, ok := fsAsyncOps()[mem.Property]; ok {
+					return TypeVoid
+				}
+			}
+			// Promise form (TDD-00107): fs.promises.<op>(...) and the
+			// fs/promises named import both return a settled task Promise.
+			if inner, ok2 := mem.Object.(*ast.MemberExpression); ok2 {
+				if id, ok3 := inner.Object.(*ast.Identifier); ok3 && id.Name == "fs__kml_builtin" && inner.Property == "promises" {
+					if qt, ok := fsAsyncPromiseResult(mem.Property); ok {
+						return qt
+					}
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fspromises__kml_builtin" {
+				if qt, ok := fsAsyncPromiseResult(mem.Property); ok {
+					return qt
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
@@ -1178,6 +1211,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return NetSocketType()
 				}
 				return NetServerType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "tls__kml_builtin" {
+				// tls.connect returns a (net-shaped) TLS client Socket; createServer a Server.
+				if mem.Property == "createServer" {
+					return NetServerType()
+				}
+				return NetSocketType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "util__kml_builtin" {
 				// inspect/format both return a string.
@@ -1538,6 +1578,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if e.inferExprType(mem.Object).IsBlob {
 					return TypedArrayType("uint8")
 				}
+			case "stream":
+				if e.inferExprType(mem.Object).IsBlob {
+					return ReadableStreamType(TypedArrayType("uint8"))
+				}
 			case "json":
 				if e.inferExprType(mem.Object).IsResponse {
 					// No declaration context here to parse into (that's
@@ -1848,6 +1892,24 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return TextDecoderType()
 	case *ast.NewRegExpExpression:
 		return RegExpType()
+	case *ast.NewEventEmitterExpression:
+		payload := TypePtr
+		if ex.PayloadType != nil {
+			payload = e.resolveEventEmitterPayloadType(ex.PayloadType)
+		}
+		return EventEmitterType(payload)
+	case *ast.NewAbortControllerExpression:
+		return AbortControllerType()
+	case *ast.NewEventTargetExpression:
+		return EventTargetType()
+	case *ast.NewEventExpression:
+		return EventType()
+	case *ast.NewCustomEventExpression:
+		detailTy := TypePtr
+		if ex.Detail != nil {
+			detailTy = e.inferExprType(ex.Detail)
+		}
+		return CustomEventType(detailTy)
 	case *ast.NewEventSourceExpression:
 		return EventSourceType()
 	case *ast.NewWebSocketExpression:

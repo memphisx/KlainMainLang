@@ -373,3 +373,14 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00333](ADR-00333.md) | Writable `process.env` (`process.env.KEY = val`) | |
 | [00334](ADR-00334.md) | process lifecycle — `on('exit'/'uncaughtException')` + `exitCode` | |
 | [00335](ADR-00335.md) | Spread in call arguments (`f(...arr)`) into a rest parameter | Implements [TDD-00106](../tdd/TDD-00106.md) |
+| [00336](ADR-00336.md) | Deduplicate the getaddrinfo/freeaddrinfo externs | |
+| [00337](ADR-00337.md) | Spread in call arguments V2 — multiple/mixed spreads into a rest parameter | Implements [TDD-00106](../tdd/TDD-00106.md) |
+| [00338](ADR-00338.md) | Spread into the variadic builtins `console.*` and `Math.min`/`Math.max` | Implements [TDD-00106](../tdd/TDD-00106.md) |
+| [00339](ADR-00339.md) | Streaming `process.stdin` — the `'data'`/`'end'` events | Extends [ADR-00323](ADR-00323.md) |
+| [00340](ADR-00340.md) | Asynchronous `fs` — callback and Promise (`fs/promises`) forms | Implements [TDD-00107](../tdd/TDD-00107.md) |
+| [00341](ADR-00341.md) | `Blob.stream()` — a ReadableStream over a blob's bytes | Extends [ADR-00314](ADR-00314.md) |
+| [00342](ADR-00342.md) | Promote top-level class-instance / Blob / Date bindings to module globals | Extends [TDD-00093](../tdd/TDD-00093.md) |
+| [00343](ADR-00343.md) | `fs.createReadStream` / `fs.createWriteStream` | Implements [TDD-00108](../tdd/TDD-00108.md) |
+| [00344](ADR-00344.md) | `tls` module — `tls.connect` (TLS client) | Implements [TDD-00109](../tdd/TDD-00109.md) |
+| [00345](ADR-00345.md) | `tls.createServer` (TLS server) | Implements [TDD-00110](../tdd/TDD-00110.md) |
+| [00346](ADR-00346.md) | `wss://` — the WebSocket client over TLS | Extends [TDD-00039](../tdd/TDD-00039.md) |

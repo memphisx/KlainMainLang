@@ -285,8 +285,43 @@ func (e *Emitter) emitBlobCall(mem *ast.MemberExpression, method string, args []
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nulSlot, buf, size))
 		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nulSlot))
 		return Value{Ref: buf, Ty: TypePtr}, nil
+
+	case "stream":
+		// A ReadableStream<Uint8Array> over the blob's bytes: a single owned-copy
+		// chunk, then closed. An empty blob yields no chunk (WHATWG), so the
+		// enqueue is guarded on size > 0.
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("%d:%d: Blob.stream takes no arguments", pos.Line, pos.Col)
+		}
+		e.ensureStreamRuntime()
+		elemTy := TypedArrayType("uint8")
+		fulfillFn := e.emitStreamFulfillThunk(elemTy)
+		s := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", s, fulfillFn))
+
+		hasData := e.freshReg()
+		enqL := e.freshLabel("blob.stream.enq")
+		closeL := e.freshLabel("blob.stream.close")
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", hasData, size))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasData, enqL, closeL))
+
+		e.emitLabel(enqL)
+		copyRef := e.emitBlobCopyData(size, data)
+		c0 := e.freshReg()
+		c1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", c0, copyRef))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", c1, c0, size))
+		v0, v1 := e.streamChunkWords(Value{Ref: c1, Ty: elemTy})
+		enq := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue(ptr %s, i64 %s, i64 %s)", enq, s, v0, v1))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", closeL))
+
+		e.emitLabel(closeL)
+		closed := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, s))
+		return Value{Ref: s, Ty: ReadableStreamType(elemTy)}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Blob method '%s' (slice/arrayBuffer/bytes/text; .stream() is not supported)", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: unknown Blob method '%s' (slice/arrayBuffer/bytes/text/stream)", pos.Line, pos.Col, method)
 }
 
 // emitBlobCopyData mallocs a copy of size bytes at data (Blob results are

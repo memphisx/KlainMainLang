@@ -234,6 +234,12 @@ func (e *Emitter) emitMathBinaryFloat(fn string, args []ast.Expression, pos ast.
 }
 
 func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// A spread argument (Math.max(...arr), Math.min(a, ...arr, b)) folds the
+	// array at runtime instead of over a static, compile-time-known arg list
+	// (TDD-00106 V2). Any argument count is valid then, including a lone spread.
+	if anySpread(args) {
+		return e.emitMathMinMaxSpread(fn, args, pos)
+	}
 	if len(args) < 2 {
 		return Value{}, fmt.Errorf("%d:%d: Math.%s expects at least 2 arguments", pos.Line, pos.Col, fn)
 	}
@@ -285,6 +291,133 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 		result = Value{Ref: r, Ty: TypeI64}
 	}
 	return result, nil
+}
+
+// emitMathMinMaxSpread folds Math.min/Math.max over a mix of static arguments
+// and runtime-length spread arrays (TDD-00106 V2). It seeds an accumulator with
+// the reduction identity (±Infinity for a float result, INT64_MIN/MAX for an
+// integer one), folds each static arg, and loops over each spread array folding
+// element by element — so Math.max(...arr), Math.min(a, ...arr, b), and multiple
+// spreads all work. An empty fold (Math.max(...[])) yields the seed: ±Infinity
+// for a float result exactly matches JS; an i64 result has no Infinity, so it
+// yields the extreme i64 value, the same concrete-type stand-in ADR-00157 uses.
+func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	type mmItem struct {
+		spread bool
+		ptr    string
+		length string
+		elemTy Type
+		val    Value
+	}
+	// Pass 1: evaluate every argument once, in source order; decide float vs int.
+	items := make([]mmItem, 0, len(args))
+	anyFloat := false
+	for _, arg := range args {
+		if sp, ok := arg.(*ast.SpreadElement); ok {
+			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(sp.Arg, sp.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if elemTy.IsArray || elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: Math.%s cannot spread an array of arrays or objects", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col, fn)
+			}
+			if elemTy.Float {
+				anyFloat = true
+			}
+			items = append(items, mmItem{spread: true, ptr: ptrReg, length: lenReg, elemTy: elemTy})
+		} else {
+			v, err := e.emitExpr(arg)
+			if err != nil {
+				return Value{}, err
+			}
+			if v.Ty.Float {
+				anyFloat = true
+			}
+			items = append(items, mmItem{val: v})
+		}
+	}
+
+	resTy := TypeI64
+	if anyFloat {
+		resTy = TypeF64
+	}
+	acc := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", acc, resTy.IR))
+	var seed string
+	switch {
+	case anyFloat && fn == "max":
+		seed = "0xFFF0000000000000" // -Infinity
+	case anyFloat:
+		seed = "0x7FF0000000000000" // +Infinity
+	case fn == "max":
+		seed = "-9223372036854775808" // INT64_MIN
+	default:
+		seed = "9223372036854775807" // INT64_MAX
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resTy.IR, seed, acc))
+	if anyFloat {
+		e.ensureFloatMinMaxIntrinsics()
+	}
+
+	// combine folds one already-result-typed value into the accumulator.
+	combine := func(nextRef string) {
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", cur, resTy.IR, acc))
+		r := e.freshReg()
+		if anyFloat {
+			intrinsic := "llvm.minimum.f64"
+			if fn == "max" {
+				intrinsic = "llvm.maximum.f64"
+			}
+			e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, intrinsic, cur, nextRef))
+		} else {
+			cmp := e.freshReg()
+			op := "icmp slt"
+			if fn == "max" {
+				op = "icmp sgt"
+			}
+			e.emitInstr(fmt.Sprintf("%s = %s i64 %s, %s", cmp, op, cur, nextRef))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, cmp, cur, nextRef))
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resTy.IR, r, acc))
+	}
+
+	for _, it := range items {
+		if !it.spread {
+			nv := e.coerce(it.val, resTy)
+			combine(nv.Ref)
+			continue
+		}
+		// Loop over the spread array, folding each element into the accumulator.
+		idxAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		condL := e.freshLabel("mm.cond")
+		bodyL := e.freshLabel("mm.body")
+		doneL := e.freshLabel("mm.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		idxVal := e.freshReg()
+		done := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, it.length))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+		e.emitLabel(bodyL)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, it.elemTy.IR, it.ptr, idxVal))
+		elem := e.loadArrayElem(gep, it.elemTy)
+		ev := e.coerce(elem, resTy)
+		combine(ev.Ref)
+		idxNext := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+	}
+
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", result, resTy.IR, acc))
+	return Value{Ref: result, Ty: resTy}, nil
 }
 
 func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error) {

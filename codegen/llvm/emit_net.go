@@ -86,7 +86,7 @@ func (e *Emitter) emitNetCreateServer(args []ast.Expression, pos ast.Pos) (Value
 		return Value{}, fmt.Errorf("%d:%d: net.createServer takes (connectionListener?)", pos.Line, pos.Col)
 	}
 	srv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 24)", srv))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 32)", srv))
 	// field 0 listenfd = -1 (calloc zeroed it; set explicitly for clarity)
 	lfd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", lfd, netServerIR, srv))

@@ -65,10 +65,7 @@ func (e *Emitter) emitEventEmitterVarDecl(v *ast.VarDeclaration, init *ast.NewEv
 	if err != nil {
 		return err
 	}
-	ptrName := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: val.Ty, IsConst: v.Kind == "const"})
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+	e.storePtrHandleVarDecl(v, val)
 	return nil
 }
 

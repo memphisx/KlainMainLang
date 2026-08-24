@@ -459,6 +459,13 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_process_exit_code, align 8", r))
 			return Value{Ref: r, Ty: TypeI64}, nil
+		case "stdin":
+			// The streaming process.stdin handle (.on('data'|'end')). Idempotent:
+			// every access returns the one active handle (runtime_stdin.go).
+			e.ensureStdinRuntime()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_stdin_create()", r))
+			return Value{Ref: r, Ty: StdinType()}, nil
 		}
 	}
 	if e.isProcessEnvExpr(ex.Object) {

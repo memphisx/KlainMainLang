@@ -236,6 +236,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsReadline {
 			return e.emitReadlineMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsStdin {
+			return e.emitStdinMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.inferExprType(mem.Object).IsNetServer {
 			return e.emitNetServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -459,6 +462,16 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsCopyFileSync(ex.Args, ex.GetPos())
 			case "readdirSync":
 				return e.emitFsReaddirSync(ex.Args, ex.GetPos())
+			case "createReadStream":
+				return e.emitFsCreateReadStream(ex.Args, ex.GetPos())
+			case "createWriteStream":
+				return e.emitFsCreateWriteStream(ex.Args, ex.GetPos())
+			default:
+				// Async callback form: fs.readFile(path, cb), fs.writeFile(...),
+				// … (TDD-00107). The trailing callback receives (err[, data]).
+				if _, ok := fsAsyncOps()[mem.Property]; ok {
+					return e.emitFsAsyncCallback(mem.Property, ex.Args, ex.GetPos())
+				}
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
@@ -519,8 +532,30 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "net__kml_builtin" {
 			return e.emitNetModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "tls__kml_builtin" {
+			return e.emitTLSModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "util__kml_builtin" {
 			return e.emitUtilModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		// fs.promises.<op>(...) — a two-level member chain (fs.promises is a
+		// pseudo-namespace, like dns.promises below), the Promise form of the
+		// async fs operations (TDD-00107).
+		if inner, ok := mem.Object.(*ast.MemberExpression); ok {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "fs__kml_builtin" && inner.Property == "promises" {
+				if _, ok := fsAsyncOps()[mem.Property]; ok {
+					return e.emitFsAsyncPromise(mem.Property, ex.Args, ex.GetPos())
+				}
+				return Value{}, fmt.Errorf("%d:%d: fs.promises.%s is not supported", mem.GetPos().Line, mem.GetPos().Col, mem.Property)
+			}
+		}
+		// `import { readFile } from 'fs/promises'` — the same Promise form via
+		// the fs/promises virtual module marker.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "fspromises__kml_builtin" {
+			if _, ok := fsAsyncOps()[mem.Property]; ok {
+				return e.emitFsAsyncPromise(mem.Property, ex.Args, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: fs/promises.%s is not supported", mem.GetPos().Line, mem.GetPos().Col, mem.Property)
 		}
 		// dns.promises.lookup(...) — a two-level member chain (dns.promises is a
 		// pseudo-namespace, not a bindable value), so it needs its own shape
@@ -797,10 +832,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// .arrayBuffer()/.text() dispatch below can claim the same names.
 		if e.inferExprType(mem.Object).IsBlob {
 			switch mem.Property {
-			case "arrayBuffer", "bytes", "text":
+			case "arrayBuffer", "bytes", "text", "stream":
 				return e.emitBlobCall(mem, mem.Property, ex.Args, ex.GetPos())
-			case "stream":
-				return Value{}, fmt.Errorf("%d:%d: Blob.stream() is not supported — use .bytes()/.arrayBuffer() instead", ex.GetPos().Line, ex.GetPos().Col)
 			}
 		}
 		// DataView accessors (getInt16/setFloat64/..., emit_dataview.go).
@@ -1153,28 +1186,118 @@ func singleSpread(restArgs []ast.Expression) (*ast.SpreadElement, bool) {
 	return nil, false
 }
 
-func (e *Emitter) checkSpreadArgs(args []ast.Expression, hasRest bool, regularCount int, pos ast.Pos) error {
-	spreadIdx := -1
-	for i, a := range args {
+// anySpread reports whether restArgs contains at least one spread argument —
+// used to pick the runtime-concat rest buffer (TDD-00106 V2) over the plain
+// malloc-and-store-N-scalars path a spread-free trailing arg list uses.
+func anySpread(restArgs []ast.Expression) bool {
+	for _, a := range restArgs {
 		if _, ok := a.(*ast.SpreadElement); ok {
-			if spreadIdx != -1 {
-				return fmt.Errorf("%d:%d: multiple spread arguments are not supported yet — pass one array (V1 spreads a single array into a rest parameter)", a.GetPos().Line, a.GetPos().Col)
-			}
-			spreadIdx = i
+			return true
 		}
 	}
-	if spreadIdx == -1 {
-		return nil
+	return false
+}
+
+// emitRestArgBuffer builds the rest-parameter backing buffer for a call whose
+// rest region mixes ordinary positional arguments with one or more spread
+// arguments (`f(...a, ...b)`, `f(x, ...arr, y)` — TDD-00106 V2). It allocates
+// one contiguous buffer sized at runtime (each static arg counts as 1, each
+// spread adds its runtime length) and fills it with a write cursor — memcpy per
+// spread, store per static arg — returning the (ptr, len) operands the rest ABI
+// takes. Every argument is evaluated once, left to right, before any copy, so
+// JS evaluation order is preserved. Mirrors emitSpreadArrayLitData's cursor
+// technique, but keyed off a call's arg list (resolveArrayForHOF spreads, so an
+// array-returning expression works, not only a bare array variable).
+func (e *Emitter) emitRestArgBuffer(restArgs []ast.Expression, elemTy Type) (dataReg, lenReg string, err error) {
+	type restItem struct {
+		spread bool
+		ptr    string // spread: source data pointer
+		length string // spread: source length register
+		val    Value  // static: coerced element value
 	}
-	sp := args[spreadIdx].(*ast.SpreadElement)
-	if spreadIdx != len(args)-1 {
-		return fmt.Errorf("%d:%d: a spread argument must be the last argument (V1 spreads a single array into a rest parameter)", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	// Pass 1: evaluate every argument once, in source order.
+	items := make([]restItem, 0, len(restArgs))
+	staticCount := int64(0)
+	for _, arg := range restArgs {
+		if sp, ok := arg.(*ast.SpreadElement); ok {
+			ptrReg, srcLenReg, srcElemTy, rerr := e.resolveArrayForHOF(sp.Arg, sp.Arg.GetPos())
+			if rerr != nil {
+				return "", "", rerr
+			}
+			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
+				return "", "", fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+			}
+			items = append(items, restItem{spread: true, ptr: ptrReg, length: srcLenReg})
+		} else {
+			val, verr := e.emitExprWithObjectHint(arg, elemTy)
+			if verr != nil {
+				return "", "", verr
+			}
+			val = e.coerce(val, elemTy)
+			items = append(items, restItem{val: val})
+			staticCount++
+		}
 	}
-	if !hasRest {
-		return fmt.Errorf("%d:%d: spread requires the called function to have a rest parameter (`...`) — spreading into a fixed-arity function is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	// Total length = staticCount + sum(spread lengths).
+	totalReg := fmt.Sprintf("%d", staticCount)
+	for _, it := range items {
+		if !it.spread {
+			continue
+		}
+		nt := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", nt, totalReg, it.length))
+		totalReg = nt
 	}
-	if spreadIdx != regularCount {
-		return fmt.Errorf("%d:%d: a spread argument may only fill the rest parameter, right after the fixed arguments", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+	// Allocate one contiguous buffer.
+	e.ensureMalloc()
+	bytesReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, totalReg, elemTy.Align()))
+	dataReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, bytesReg))
+	// Fill via a write cursor.
+	cursorPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", cursorPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", cursorPtr))
+	for _, it := range items {
+		cVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
+		dstReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstReg, elemTy.IR, dataReg, cVal))
+		if it.spread {
+			copyBytes := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, it.length, elemTy.Align()))
+			e.ensureMemcpy()
+			e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %s)", dstReg, it.ptr, copyBytes))
+			newC := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newC, cVal, it.length))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
+		} else {
+			e.storeArrayElem(dstReg, elemTy, it.val)
+			newC := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newC, cVal))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
+		}
+	}
+	return dataReg, totalReg, nil
+}
+
+func (e *Emitter) checkSpreadArgs(args []ast.Expression, hasRest bool, regularCount int, pos ast.Pos) error {
+	// V2 (TDD-00106): any number of spreads, in any order, freely mixed with
+	// ordinary positional arguments — but only within the rest region. A spread
+	// still cannot fill a fixed parameter slot (that needs a runtime split
+	// against static arity), and a callee with no rest parameter can't take a
+	// spread at all.
+	for i, a := range args {
+		sp, ok := a.(*ast.SpreadElement)
+		if !ok {
+			continue
+		}
+		if !hasRest {
+			return fmt.Errorf("%d:%d: spread requires the called function to have a rest parameter (`...`) — spreading into a fixed-arity function is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+		}
+		if i < regularCount {
+			return fmt.Errorf("%d:%d: a spread argument may only fill the rest parameter, not a fixed parameter slot — place it after the %d fixed argument(s)", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col, regularCount)
+		}
 	}
 	return nil
 }
@@ -1370,6 +1493,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
+		} else if anySpread(restArgs) {
+			// f(fixed..., ...a, x, ...b): a runtime-length mix of spreads and
+			// positional args feeding the rest slot — concat into one buffer.
+			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()

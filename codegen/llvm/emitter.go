@@ -208,6 +208,7 @@ type Emitter struct {
 	usedConnPokeGlobal   bool
 	usedChildProcRuntime bool
 	usedReadlineRuntime  bool
+	usedStdinRuntime     bool
 	usedNetRuntime       bool
 	usedDgramRuntime     bool
 	usedClusterRuntime   bool
@@ -241,6 +242,11 @@ type Emitter struct {
 	usedFsThrow              bool
 	usedFsReadFile           bool
 	usedFsReadFileRaw        bool
+	usedFsReadStream         bool
+	usedFread                bool
+	usedFsWriteStream        bool
+	usedTLS                  bool
+	usedTLSRuntime           bool
 	usedFsWriteFile          bool
 	usedFsAppendFile         bool
 	usedFsWriteFileBytes     bool
@@ -555,6 +561,10 @@ func (e *Emitter) CryptoBackend() string {
 // UsesCrypto reports whether the emitted program actually used crypto.subtle,
 // so main.go only compiles+links a crypto backend for programs that need one.
 func (e *Emitter) UsesCrypto() bool { return e.usesCrypto }
+
+// UsesTLS reports whether the program used the `tls` module, so main.go only
+// compiles tlssrc/tls.c and links libssl for programs that need it (TDD-00109).
+func (e *Emitter) UsesTLS() bool { return e.usedTLS }
 
 // UsesBigInt reports whether the emitted program actually used bigint, so
 // main.go only compiles+links a backend for programs that need one.
@@ -1315,7 +1325,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedNetRuntime || e.usedDgramRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
@@ -1329,6 +1339,11 @@ entry:
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.
 	e.emitLoopTaskStubs()
+	// TDD-00109: the net runtime's read/write/close branch on a socket's SSL*
+	// and call the __kml_tls_* ABI. Declare it (libssl provides it via tlssrc/
+	// tls.c) when `tls` is used, else define no-op stubs so a plain-net program
+	// links — its sockets always have a null SSL*, so the stubs are never run.
+	e.emitTLSNetSymbols()
 	// TDD-00098 stage 5: @__kml_throw's uncaught path references
 	// @__kml_worker_uncaught unconditionally; no-op stub without workers.
 	if e.usedExceptionHelpers && !e.usedWorkerRuntime {

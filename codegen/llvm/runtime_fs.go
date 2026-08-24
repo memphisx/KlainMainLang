@@ -66,6 +66,14 @@ func (e *Emitter) ensureFclose() {
 	e.emitGlobal("declare i32 @fclose(ptr noundef)")
 }
 
+func (e *Emitter) ensureFread() {
+	if e.usedFread {
+		return
+	}
+	e.usedFread = true
+	e.emitGlobal("declare i64 @fread(ptr noundef, i64 noundef, i64 noundef, ptr noundef)")
+}
+
 func (e *Emitter) ensureFwrite() {
 	if e.usedFwrite {
 		return
@@ -117,7 +125,7 @@ func (e *Emitter) ensureFsReadFileRaw() {
 	e.ensureFclose()
 	e.emitGlobal("declare i32 @fseek(ptr noundef, i64 noundef, i32 noundef)")
 	e.emitGlobal("declare i64 @ftell(ptr noundef)")
-	e.emitGlobal("declare i64 @fread(ptr noundef, i64 noundef, i64 noundef, ptr noundef)")
+	e.ensureFread()
 	modePtr := e.internString("rb")
 	opDescPtr := e.internString("cannot open file for reading")
 	e.emitGlobal(fmt.Sprintf(`

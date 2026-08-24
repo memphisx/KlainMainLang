@@ -36,3 +36,47 @@ u8[0] = 0;
 console.log((await mixed.bytes())[0]);
 `, "8\n8\n8 72 63 33\n72")
 }
+
+// Blob.stream() (ADR-00341): a ReadableStream<Uint8Array> over the blob's
+// bytes — one owned-copy chunk, then closed; an empty blob yields no chunk.
+func TestE2EBlobStreamForAwait(t *testing.T) {
+	assertOutput(t, `
+async function run(): Promise<void> {
+  const b = new Blob(["Hello, ", "streamed ", "world"]);
+  let bytes = 0;
+  let chunks = 0;
+  for await (const chunk of b.stream()) {
+    chunks += 1;
+    for (let i = 0; i < chunk.length; i++) bytes += 1;
+  }
+  console.log(chunks + " " + bytes);
+}
+run();
+`, "1 21")
+}
+
+func TestE2EBlobStreamReader(t *testing.T) {
+	assertOutput(t, `
+async function run(): Promise<void> {
+  const b = new Blob(["abc"]);
+  const reader = b.stream().getReader();
+  const r1 = await reader.read();
+  console.log(r1.done ? "done" : "len " + r1.value.length);
+  const r2 = await reader.read();
+  console.log(r2.done ? "closed" : "more");
+}
+run();
+`, "len 3\nclosed")
+}
+
+func TestE2EBlobStreamEmpty(t *testing.T) {
+	assertOutput(t, `
+async function run(): Promise<void> {
+  const empty = new Blob([]);
+  let chunks = 0;
+  for await (const c of empty.stream()) { chunks += 1; }
+  console.log(chunks);
+}
+run();
+`, "0")
+}

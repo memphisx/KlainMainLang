@@ -27,6 +27,7 @@ import "KlainMainLang/ast"
 // file-to-file imports, so shadowing "just works" for free.
 var virtualBuiltinMarkers = map[string]string{
 	"fs":            "fs__kml_builtin",
+	"fs/promises":   "fspromises__kml_builtin",
 	"path":          "path__kml_builtin",
 	"os":            "os__kml_builtin",
 	"querystring":   "querystring__kml_builtin",
@@ -34,6 +35,7 @@ var virtualBuiltinMarkers = map[string]string{
 	"child_process": "childprocess__kml_builtin",
 	"readline":      "readline__kml_builtin",
 	"net":           "net__kml_builtin",
+	"tls":           "tls__kml_builtin",
 	"util":          "util__kml_builtin",
 	"dns":           "dns__kml_builtin",
 	"dgram":         "dgram__kml_builtin",
@@ -69,6 +71,17 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"appendFileSync": true, "existsSync": true, "unlinkSync": true,
 		"mkdirSync": true, "rmdirSync": true, "renameSync": true,
 		"copyFileSync": true, "readdirSync": true,
+		"createReadStream": true, "createWriteStream": true,
+		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
+		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
+		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
+		"readdir": true,
+	},
+	// Async Promise form (TDD-00107): import { readFile } from 'fs/promises'.
+	"fs/promises": {
+		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
+		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
+		"readdir": true,
 	},
 	"path": {
 		"join": true, "resolve": true, "dirname": true, "basename": true,
@@ -93,6 +106,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"child_process": {"spawn": true, "exec": true, "execFile": true},
 	"readline":      {"createInterface": true},
 	"net":           {"createServer": true, "connect": true, "createConnection": true},
+	"tls":           {"connect": true, "createServer": true},
 	"util":          {"inspect": true, "format": true},
 	"dns":           {"lookup": true, "resolve4": true, "resolve": true},
 	"dgram":         {"createSocket": true},

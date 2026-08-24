@@ -1773,6 +1773,12 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	if sig.HasRest {
 		regularCount--
 	}
+	// Spread argument (TDD-00106): same rule as the free-function/closure paths
+	// — a spread may only fill the rest slot (after the fixed args), never a
+	// fixed parameter or a rest-less method.
+	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
+		return Value{}, err
+	}
 	// minRequired excludes any trailing regular param that has a default
 	// expression — found alongside the rest-param fix above: emitClassCall
 	// had no default-value handling at all (sig.Defaults was written by
@@ -1890,8 +1896,25 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if len(restArgs) == 0 {
+		if spread, ok := singleSpread(restArgs); ok {
+			// obj.m(...arr): forward the array's own (ptr, len) into the rest
+			// slot, the same fast path the free-function call uses (TDD-00106).
+			ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
+			}
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
+		} else if anySpread(restArgs) {
+			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()
@@ -2070,6 +2093,10 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	if sig.HasRest {
 		regularCount--
 	}
+	// Spread argument (TDD-00106): same rule as every other call path.
+	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
+		return Value{}, err
+	}
 	minRequired := regularCount
 	for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
 		(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
@@ -2166,8 +2193,23 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if len(restArgs) == 0 {
+		if spread, ok := singleSpread(restArgs); ok {
+			ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
+			}
+			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
+		} else if anySpread(restArgs) {
+			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()

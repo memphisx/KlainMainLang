@@ -172,6 +172,12 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_rl_dispatch() {\nentry:\n  ret void\n}")
 	}
+	// process.stdin streaming hooks likewise.
+	if !e.usedStdinRuntime {
+		e.emitGlobal("define i1 @__kml_stdin_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_stdin_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_stdin_dispatch() {\nentry:\n  ret void\n}")
+	}
 	// net (TCP server) hooks likewise.
 	if !e.usedNetRuntime {
 		e.emitGlobal("define i1 @__kml_net_keepalive() {\nentry:\n  ret i1 0\n}")

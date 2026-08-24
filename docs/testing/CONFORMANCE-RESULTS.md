@@ -25,10 +25,10 @@ Where each failing file died in the pipeline. Near-misses (already compiled and 
 
 | Failing files | Phase |
 |---|---|
-| 660 | runtime (ran, wrong result — near-miss) |
+| 661 | runtime (ran, wrong result — near-miss) |
 | 564 | clang (invalid IR — codegen bug) |
 | 675 | wrongly-accepted (negative test compiled/ran) |
-| 45841 | compile (front-end parse/resolve/codegen) |
+| 45840 | compile (front-end parse/resolve/codegen) |
 | 1 | runtime (timeout) |
 
 ## Blocked-by histogram (compile-phase)
@@ -51,7 +51,7 @@ Each row is one concrete identifier/API whose absence was the *first* compile er
 | 261 | `f` | `annexB/language/eval-code/direct/global-block-decl-eval-global-skip-early-err-block.js` |
 | 251 | `of` | `language/statements/for-in/head-let-destructuring.js` |
 | 228 | `for await` | `language/module-code/top-level-await/syntax/for-await-await-expr-array-literal.js` |
-| 183 | `x` | `built-ins/RegExp/S15.10.4.1_A1_T2.js` |
+| 182 | `x` | `built-ins/RegExp/S15.10.4.1_A1_T2.js` |
 | 181 | `new` | `annexB/built-ins/RegExp/prototype/compile/this-subclass-instance.js` |
 | 179 | `Function` | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
 | 151 | `$262` | `annexB/built-ins/Object/is/emulates-undefined.js` |
@@ -63,7 +63,7 @@ Each row is one concrete identifier/API whose absence was the *first* compile er
 | 92 | `a` | `annexB/language/comments/single-line-html-close-unicode-separators.js` |
 | 90 | `get` | `built-ins/Iterator/prototype/chunks/get-next-method-throws.js` |
 | 88 | `globalThis` | `built-ins/ShadowRealm/prototype/evaluate/nested-realms.js` |
-| 85 | `$DONE` | `built-ins/AsyncGeneratorPrototype/throw/throw-suspendedStart-promise.js` |
+| 86 | `$DONE` | `built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-rejected.js` |
 | 81 | `method` | `language/arguments-object/cls-decl-async-gen-meth-static-args-trailing-comma-multiple.js` |
 | 80 | `Date` | `annexB/built-ins/Date/prototype/getYear/this-not-date.js` |
 | 80 | `TestIterator` | `built-ins/Iterator/prototype/chunks/exhaustion-does-not-call-return.js` |
@@ -74,14 +74,14 @@ Each row is one concrete identifier/API whose absence was the *first* compile er
 | 76 | `y` | `built-ins/Date/value-symbol-to-prim-err.js` |
 | 75 | `delete` | `built-ins/Array/prototype/every/15.4.4.16-7-3.js` |
 | 74 | `Subclass` | `built-ins/Uint8Array/fromBase64/ignores-receiver.js` |
+| 71 | `value` | `built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-unwrap-promise.js` |
 | 67 | `C` | `annexB/language/statements/class/subclass/superclass-prototype-emulates-undefined.js` |
-| 66 | `value` | `built-ins/AsyncFromSyncIteratorPrototype/next/iterator-result-unwrap-promise.js` |
 | 63 | `arr` | `built-ins/AggregateError/order-of-args-evaluation.js` |
 | 56 | `WeakMap` | `built-ins/Map/prototype/getOrInsertComputed/does-not-have-mapdata-internal-slot-weakmap.js` |
 | 55 | `constructor` | `built-ins/AsyncFunction/AsyncFunction-construct.js` |
 | 49 | `with` | `language/expressions/arrow-function/arrow/capturing-closure-variables-2.js` |
 | 47 | `DummyError` | `language/expressions/assignment/target-member-computed-reference-null.js` |
-| 45 | `executor` | `built-ins/Promise/all/invoke-resolve-return.js` |
+| 46 | `executor` | `built-ins/Promise/all/invoke-resolve-return.js` |
 | 44 | `Test262Error` | `built-ins/Array/prototype/every/15.4.4.16-7-c-ii-7.js` |
 | 43 | `T` | `built-ins/Array/prototype/filter/call-with-boolean.js` |
 | 42 | `Math` | `built-ins/Array/prototype/every/15.4.4.16-7-c-iii-20.js` |
@@ -104,19 +104,19 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 
 | Count | Phase | Reason | Example |
 |---|---|---|---|
-| 7152 | compile | COMPILE_ERROR: only simple function calls are supported | `annexB/built-ins/Date/prototype/getYear/nan.js` |
+| 7159 | compile | COMPILE_ERROR: only simple function calls are supported | `annexB/built-ins/Date/prototype/getYear/nan.js` |
 | 6241 | compile | COMPILE_ERROR: expected (, got . | `annexB/built-ins/Date/prototype/getYear/not-a-constructor.js` |
-| 5900 | compile | COMPILE_ERROR: undefined variable '%s' | `annexB/built-ins/Date/prototype/getYear/B.2.4.js` |
+| 5886 | compile | COMPILE_ERROR: undefined variable '%s' | `annexB/built-ins/Date/prototype/getYear/B.2.4.js` |
 | 4424 | compile | COMPILE_ERROR: a destructured parameter requires an explicit type annotation | `built-ins/Function/prototype/toString/function-declaration-non-simple-parameter-list.js` |
 | 2459 | compile | COMPILE_ERROR: expected ), got , | `annexB/built-ins/TypedArrayConstructors/from/iterator-method-emulates-undefined.js` |
 | 1472 | compile | COMPILE_ERROR: unexpected character '%s' | `built-ins/Function/prototype/toString/unicode.js` |
 | 1453 | compile | COMPILE_ERROR: unknown class '%s' | `built-ins/AggregateError/newtarget-proto-custom.js` |
-| 896 | compile | COMPILE_ERROR: field access on non-object (no field '%s') | `built-ins/AggregateError/newtarget-proto-fallback.js` |
+| 901 | compile | COMPILE_ERROR: field access on non-object (no field '%s') | `built-ins/AggregateError/newtarget-proto-fallback.js` |
 | 669 | neg-accepted | expected a parse-phase rejection but this compiled | `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` |
 | 657 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
-| 635 | compile | COMPILE_ERROR: field assignment on non-object | `annexB/built-ins/RegExp/RegExp-decimal-escape-class-range.js` |
+| 642 | compile | COMPILE_ERROR: field assignment on non-object | `annexB/built-ins/RegExp/RegExp-decimal-escape-class-range.js` |
 | 619 | compile | COMPILE_ERROR: '%s' is only valid inside a method or constructor body | `built-ins/Array/from/Array.from_forwards-length-for-array-likes.js` |
-| 578 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
+| 579 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
 | 557 | compile | COMPILE_ERROR: expected }, got [ | `annexB/language/statements/for-await-of/iterator-close-return-emulates-undefined-throws-when-called.js` |
 | 517 | compile | COMPILE_ERROR: expected }, got IDENT | `built-ins/AggregateError/errors-iterabletolist.js` |
 | 478 | compile | COMPILE_ERROR: dynamic import() is not yet supported | `language/expressions/dynamic-import/always-create-new-promise.js` |
@@ -125,12 +125,12 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 409 | compile | COMPILE_ERROR: expected IDENT, got [ | `language/expressions/async-generator/dstr/ary-ptrn-rest-ary-elem.js` |
 | 373 | compile | COMPILE_ERROR: class '%s' extends unknown class '%s' | `annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js` |
 | 370 | compile | COMPILE_ERROR: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… | `built-ins/Function/prototype/toString/async-generator-method-class-expression-static.js` |
-| 344 | compile | COMPILE_ERROR: '%s' is not an array | `annexB/built-ins/Array/from/iterator-method-emulates-undefined.js` |
+| 345 | compile | COMPILE_ERROR: '%s' is not an array | `annexB/built-ins/Array/from/iterator-method-emulates-undefined.js` |
 | 341 | compile | COMPILE_ERROR: unexpected token , in expression | `built-ins/Array/from/from-array.js` |
 | 326 | compile | COMPILE_ERROR: class field '%s' requires a type annotation or an initializer | `built-ins/Function/prototype/toString/async-method-class-expression-static.js` |
 | 307 | compile | COMPILE_ERROR: no field '%s' | `built-ins/Array/prototype/concat/S15.4.4.4_A2_T2.js` |
 | 299 | compile | COMPILE_ERROR: expected property name, got async | `built-ins/Array/fromAsync/async-iterable-input-does-not-await-input.js` |
-| 296 | compile | COMPILE_ERROR: Test262Error constructor expects 1 argument(s), got 0 | `annexB/built-ins/Date/prototype/setYear/year-to-number-err.js` |
+| 297 | compile | COMPILE_ERROR: Test262Error constructor expects 1 argument(s), got 0 | `annexB/built-ins/Date/prototype/setYear/year-to-number-err.js` |
 | 282 | compile | COMPILE_ERROR: '%s' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or … | `language/statements/for-await-of/async-func-dstr-const-async-ary-name-iter-val.js` |
 | 268 | compile | COMPILE_ERROR: unexpected token + in expression | `built-ins/Array/prototype/every/15.4.4.16-3-4.js` |
 | 255 | compile | COMPILE_ERROR: expected property name, got * | `built-ins/Function/prototype/toString/generator-method.js` |

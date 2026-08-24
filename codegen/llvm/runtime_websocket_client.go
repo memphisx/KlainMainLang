@@ -113,6 +113,16 @@ func (e *Emitter) ensureWSClientRuntime() {
 	e.emitGlobal("@__kml_wsc_cap = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_wsc_active = internal thread_local global i64 0, align 8")
 
+	// wss:// support (TDD-00039 Stage 4): an fd→SSL* registry so a wss socket's
+	// reads/writes go through libssl while ws:// stays raw. Every WS I/O site
+	// calls @__kml_wsc_io_read/@__kml_wsc_io_write(fd, …), which look the fd up
+	// here — a null result (a ws:// socket, or a cleared entry) means raw
+	// read/write. usedTLS (→ link libssl) is set by the `new WebSocket` emit site
+	// (emit_websocket_client.go), not here: the HTTP event loop pulls this runtime
+	// in for every event-loop program, but only a program that actually
+	// constructs a WebSocket needs the wss path — the rest get __kml_tls_* stubs.
+	e.emitWSClientTLSRegistry()
+
 	e.emitWSClientConnect()
 	e.emitWSClientOpen()
 	e.emitWSClientScan()
@@ -247,6 +257,137 @@ func wsClientArrayAppend(uniq, entryReg string) string {
 // entry — see this file's own top doc comment for field meanings.
 const wsClientEntryStructIR = "{ i64, i64, i64, ptr, i64, ptr }"
 
+// emitWSClientTLSRegistry declares the fd→SSL* registry and the io read/write
+// helpers every WS I/O site routes through (TDD-00039 Stage 4 / TDD-00109's
+// libssl). A ws:// socket has no entry (get → null) and takes the raw read/write
+// path; a wss:// socket's SSL* (set after the TLS handshake) routes through
+// SSL_read/SSL_write. Entries are { i64 fd, ptr ssl } pairs; a cleared entry
+// keeps its fd with a null ssl (so a plaintext connection reusing the fd stays
+// raw, and a new wss connection reuses the slot).
+func (e *Emitter) emitWSClientTLSRegistry() {
+	e.emitGlobal("@__kml_wsc_tls_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_wsc_tls_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_wsc_tls_cap = internal thread_local global i64 0, align 8")
+
+	e.emitGlobal(`
+define void @__kml_wsc_tls_set(i32 %fd, ptr %ssl) {
+entry:
+  %fd64 = sext i32 %fd to i64
+  %len = load i64, ptr @__kml_wsc_tls_len, align 8
+  %data = load ptr, ptr @__kml_wsc_tls_data, align 8
+  %i = alloca i64, align 8
+  store i64 0, ptr %i, align 8
+  br label %scan
+scan:
+  %iv = load i64, ptr %i, align 8
+  %inb = icmp slt i64 %iv, %len
+  br i1 %inb, label %chk, label %append
+chk:
+  %ep = getelementptr { i64, ptr }, ptr %data, i64 %iv
+  %efd = load i64, ptr %ep, align 8
+  %match = icmp eq i64 %efd, %fd64
+  br i1 %match, label %reuse, label %advance
+advance:
+  %inx = add i64 %iv, 1
+  store i64 %inx, ptr %i, align 8
+  br label %scan
+reuse:
+  %rsp = getelementptr { i64, ptr }, ptr %data, i64 %iv, i32 1
+  store ptr %ssl, ptr %rsp, align 8
+  ret void
+append:
+  %cap = load i64, ptr @__kml_wsc_tls_cap, align 8
+  %needgrow = icmp sge i64 %len, %cap
+  br i1 %needgrow, label %grow, label %store
+grow:
+  %ncap0 = mul i64 %cap, 2
+  %atleast4 = icmp sgt i64 %ncap0, 4
+  %ncap = select i1 %atleast4, i64 %ncap0, i64 4
+  %bytes = mul i64 %ncap, 16
+  %nd = call ptr @realloc(ptr %data, i64 %bytes)
+  store ptr %nd, ptr @__kml_wsc_tls_data, align 8
+  store i64 %ncap, ptr @__kml_wsc_tls_cap, align 8
+  br label %store
+store:
+  %d2 = load ptr, ptr @__kml_wsc_tls_data, align 8
+  %sfd = getelementptr { i64, ptr }, ptr %d2, i64 %len
+  store i64 %fd64, ptr %sfd, align 8
+  %sssl = getelementptr { i64, ptr }, ptr %d2, i64 %len, i32 1
+  store ptr %ssl, ptr %sssl, align 8
+  %len1 = add i64 %len, 1
+  store i64 %len1, ptr @__kml_wsc_tls_len, align 8
+  ret void
+}
+
+define ptr @__kml_wsc_tls_get(i32 %fd) {
+entry:
+  %fd64 = sext i32 %fd to i64
+  %len = load i64, ptr @__kml_wsc_tls_len, align 8
+  %data = load ptr, ptr @__kml_wsc_tls_data, align 8
+  %i = alloca i64, align 8
+  store i64 0, ptr %i, align 8
+  br label %scan
+scan:
+  %iv = load i64, ptr %i, align 8
+  %inb = icmp slt i64 %iv, %len
+  br i1 %inb, label %chk, label %none
+chk:
+  %ep = getelementptr { i64, ptr }, ptr %data, i64 %iv
+  %efd = load i64, ptr %ep, align 8
+  %match = icmp eq i64 %efd, %fd64
+  br i1 %match, label %hit, label %advance
+advance:
+  %inx = add i64 %iv, 1
+  store i64 %inx, ptr %i, align 8
+  br label %scan
+hit:
+  %sslp = getelementptr { i64, ptr }, ptr %data, i64 %iv, i32 1
+  %ssl = load ptr, ptr %sslp, align 8
+  ret ptr %ssl
+none:
+  ret ptr null
+}
+
+define void @__kml_wsc_tls_clear(i32 %fd) {
+entry:
+  %ssl = call ptr @__kml_wsc_tls_get(i32 %fd)
+  %has = icmp ne ptr %ssl, null
+  br i1 %has, label %free, label %ret
+free:
+  call void @__kml_tls_free(ptr %ssl)
+  call void @__kml_wsc_tls_set(i32 %fd, ptr null)
+  br label %ret
+ret:
+  ret void
+}
+
+define i64 @__kml_wsc_io_read(i32 %fd, ptr %buf, i64 %n) {
+entry:
+  %ssl = call ptr @__kml_wsc_tls_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  %rt = call i64 @__kml_tls_read(ptr %ssl, ptr %buf, i64 %n)
+  ret i64 %rt
+raw:
+  %rr = call i64 @read(i32 %fd, ptr %buf, i64 %n)
+  ret i64 %rr
+}
+
+define i64 @__kml_wsc_io_write(i32 %fd, ptr %buf, i64 %n) {
+entry:
+  %ssl = call ptr @__kml_wsc_tls_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  %wt = call i64 @__kml_tls_write(ptr %ssl, ptr %buf, i64 %n)
+  ret i64 %wt
+raw:
+  %wr = call i64 @write(i32 %fd, ptr %buf, i64 %n)
+  ret i64 %wr
+}`)
+}
+
 // emitWSClientOpen declares __kml_ws_client_open — see this file's own doc
 // comment for the full design, including why a failed connect/handshake
 // still builds and registers a (CLOSED) entry rather than returning null.
@@ -281,14 +422,31 @@ func (e *Emitter) emitWSClientOpen() {
 	}
 
 	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_ws_client_open(ptr %%host, i32 %%port, ptr %%request, i64 %%requestLen, ptr %%expectedAccept, ptr %%instance) {
+define ptr @__kml_ws_client_open(ptr %%host, i32 %%port, ptr %%request, i64 %%requestLen, ptr %%expectedAccept, ptr %%instance, i32 %%tls) {
 entry:
   %%fd = call i32 @__kml_ws_client_connect(ptr %%host, i32 %%port)
   %%connfailed = icmp slt i32 %%fd, 0
-  br i1 %%connfailed, label %%closedentry, label %%dohandshake
+  br i1 %%connfailed, label %%closedentry, label %%tlscheck
+
+tlscheck:
+  %%istls = icmp ne i32 %%tls, 0
+  br i1 %%istls, label %%dotls, label %%dohandshake
+
+dotls:
+  %%ssl = call ptr @__kml_tls_client_connect(i32 %%fd, ptr %%host, i32 1, ptr null)
+  %%sslok = icmp ne ptr %%ssl, null
+  br i1 %%sslok, label %%tlsset, label %%tlsfailclose
+
+tlsset:
+  call void @__kml_wsc_tls_set(i32 %%fd, ptr %%ssl)
+  br label %%dohandshake
+
+tlsfailclose:
+  call i32 @close(i32 %%fd)
+  br label %%closedentry
 
 dohandshake:
-  call i64 @write(i32 %%fd, ptr %%request, i64 %%requestLen)
+  call i64 @__kml_wsc_io_write(i32 %%fd, ptr %%request, i64 %%requestLen)
   %%bufptrA = alloca ptr, align 8
   %%bufcapA = alloca i64, align 8
   %%buflenA = alloca i64, align 8
@@ -324,7 +482,7 @@ doread:
   %%rptr = getelementptr i8, ptr %%rbuf, i64 %%rlen
   %%rspace = sub i64 %%rcap, %%rlen
   %%rspacem1 = sub i64 %%rspace, 1
-  %%n = call i64 @read(i32 %%fd, ptr %%rptr, i64 %%rspacem1)
+  %%n = call i64 @__kml_wsc_io_read(i32 %%fd, ptr %%rptr, i64 %%rspacem1)
   %%ngood = icmp sgt i64 %%n, 0
   br i1 %%ngood, label %%accum, label %%handshakefail
 
@@ -564,7 +722,7 @@ doreadactual:
   %%ra_len = load i64, ptr %%bs_len_p, align 8
   %%ra_ptr = getelementptr i8, ptr %%ra_data, i64 %%ra_len
   %%ra_space = sub i64 %%ra_cap, %%ra_len
-  %%n = call i64 @read(i32 %%dr_fd32, ptr %%ra_ptr, i64 %%ra_space)
+  %%n = call i64 @__kml_wsc_io_read(i32 %%dr_fd32, ptr %%ra_ptr, i64 %%ra_space)
   %%ngood = icmp sgt i64 %%n, 0
   br i1 %%ngood, label %%accumulate, label %%checkreaderr
 

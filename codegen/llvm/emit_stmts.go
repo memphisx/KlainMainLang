@@ -477,6 +477,22 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			}
 			return e.emitForAwaitOfStream(s, objTy, streamVal, condL, bodyL, incL, endL)
 		}
+		// A Node Readable (fs.createReadStream, Readable.from, …) — unwrap to its
+		// inner WHATWG rstream (field 0) and reuse the stream for-await path
+		// (TDD-00108). Its chunk type is StreamOut.
+		if objTy.IsNodeReadable {
+			nsVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			chunkTy := TypeI64
+			if objTy.StreamOut != nil {
+				chunkTy = *objTy.StreamOut
+			}
+			rsTy := ReadableStreamType(chunkTy)
+			rsPtr := e.nodeStreamSide(nsVal.Ref, 0)
+			return e.emitForAwaitOfStream(s, rsTy, Value{Ref: rsPtr, Ty: rsTy}, condL, bodyL, incL, endL)
+		}
 		if objTy.IsClass {
 			if info, ok := e.classes[objTy.ClassName]; ok {
 				if _, ok := info.MethodSigs[asyncIteratorMethodName]; ok {

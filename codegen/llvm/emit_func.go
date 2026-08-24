@@ -2070,6 +2070,14 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
 			argParts = append(argParts, "ptr null", "i64 0")
+		} else if anySpread(restArgs) {
+			// A runtime-length mix of spreads and positional args feeding the
+			// closure's rest slot (TDD-00106 V2) — same concat as the named path.
+			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
+			if err != nil {
+				return Value{}, err
+			}
+			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()

@@ -24,3 +24,16 @@ const bytes = await packet.bytes()        // a Uint8Array copy
 console.log(bytes[0], bytes.length)       // 72 16
 const buf = await packet.arrayBuffer()    // an ArrayBuffer copy
 console.log(buf.byteLength)               // 16
+
+// .stream() exposes the blob's bytes as a ReadableStream<Uint8Array>,
+// consumable with `for await` (or `.getReader()`). V1 delivers the whole
+// blob as one chunk.
+async function streamDemo(): Promise<void> {
+  const doc = new Blob(["stream ", "me ", "please"])
+  let bytes = 0
+  for await (const chunk of doc.stream()) {
+    bytes += chunk.length
+  }
+  console.log("streamed bytes:", bytes)   // 16
+}
+streamDemo()

@@ -412,6 +412,9 @@ type Type struct {
 	// IsReadline marks a readline.createInterface() handle (a ptr to
 	// runtime_readline.go's rlStructIR), for .on/.question/.close dispatch.
 	IsReadline bool
+	// IsStdin marks the process.stdin streaming handle (a ptr to
+	// runtime_stdin.go's stdinStructIR), for .on('data'|'end') dispatch.
+	IsStdin bool
 	// IsNetServer marks a net.createServer() handle and IsNetSocket a TCP
 	// connection socket (both ptr to runtime_net.go structs), for .listen/
 	// .on/.write/.end/.close dispatch.
@@ -1213,6 +1216,14 @@ func CPStdinType() Type {
 func ReadlineType() Type {
 	ty := ObjectType([]Field{{Name: "__rl", Ty: TypePtr}})
 	ty.IsReadline = true
+	return ty
+}
+
+// StdinType is the process.stdin streaming handle: a bare pointer to
+// runtime_stdin.go's stdinStructIR, flag-tagged for .on('data'|'end') dispatch.
+func StdinType() Type {
+	ty := ObjectType([]Field{{Name: "__stdin", Ty: TypePtr}})
+	ty.IsStdin = true
 	return ty
 }
 

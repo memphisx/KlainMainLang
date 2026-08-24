@@ -78,7 +78,7 @@ func (e *Emitter) ensureOSReadProcFile() {
 	e.ensureRealloc()
 	e.ensureFopen()
 	e.ensureFclose()
-	e.emitGlobal("declare i64 @fread(ptr noundef, i64 noundef, i64 noundef, ptr noundef)")
+	e.ensureFread()
 	modePtr := e.internString("rb")
 	opDescPtr := e.internString("cannot open file for reading")
 

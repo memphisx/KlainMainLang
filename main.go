@@ -195,6 +195,22 @@ func main() {
 		clangArgs = append(clangArgs, cflags...)
 		clangArgs = append(clangArgs, libs...)
 	}
+	// tls module (TDD-00109): compile tlssrc/tls.c (the libssl client helper)
+	// alongside and link libssl — only when the program uses `tls`. OpenSSL-only:
+	// CommonCrypto has no TLS API, so reject that backend when tls is used.
+	if em.UsesTLS() {
+		if em.CryptoBackend() == "commoncrypto" {
+			fatal("tls: the `tls` module requires the OpenSSL crypto backend (CommonCrypto has no TLS API); build without -crypto=commoncrypto")
+		}
+		tlsPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".tls.c"
+		if err := os.WriteFile(tlsPath, []byte(llvm.TLSClientSource()), 0644); err != nil {
+			fatal("cannot write tls helper source: %v", err)
+		}
+		clangArgs = append(clangArgs, tlsPath)
+		cflags, libs := llvm.LocateTLS()
+		clangArgs = append(clangArgs, cflags...)
+		clangArgs = append(clangArgs, libs...)
+	}
 	// JSON parse-tree (TDD-00077 Track P): compile the self-contained JSON
 	// parser (implementing the __kml_json_* ABI, libc only) alongside the program
 	// — only when it uses JSON.parse/Response.json(). Same shape as bigint above,

@@ -16,6 +16,13 @@ import (
 // prefix), and each argument's own print ends with a space except the last,
 // which ends the line with "\n".
 func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string) (Value, error) {
+	// A spread argument (console.log(...arr), console.log(a, ...arr)) expands to
+	// a runtime number of tokens, so it can't use the static, index-based
+	// last-token detection below — it takes a dedicated runtime-separator path
+	// (TDD-00106 V2).
+	if anySpread(args) {
+		return e.emitConsolePrintSpread(args, fd, prefix)
+	}
 	if fd == 2 {
 		e.ensureDprintf()
 	} else {
@@ -41,122 +48,213 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 		if i < len(args)-1 {
 			term = " "
 		}
-		// An un-narrowed nullable-scalar local prints its value or the literal
-		// `null` (TDD-00064 Stage 2), rather than the payload 0 the bare
-		// representation used to surface for a null. A narrowed local is known
-		// present and falls through to the ordinary path below.
-		if sym, ok := e.nullableScalarLValue(arg); ok && !sym.NarrowedNonNull {
-			if err := e.emitConsoleNullableScalar(sym, fd, term); err != nil {
-				return Value{}, err
-			}
-			continue
-		}
-		val, err := e.emitExpr(arg)
-		if err != nil {
+		if err := e.emitConsolePrintArgToken(arg, fd, term); err != nil {
 			return Value{}, err
 		}
-		// A nullable-scalar aggregate value (a T|null return/field) prints
-		// null-aware, same as a boxed local (TDD-00064 Stage 3).
-		if isNullableScalar(val.Ty) {
-			if err := e.emitConsoleNullableScalarAgg(val, fd, term); err != nil {
-				return Value{}, err
-			}
-			continue
-		}
-		// A tuple prints as its comma-joined elements (TDD-00066) — checked
-		// before the array rejection, since a tuple is a fixed-shape value with
-		// a well-defined rendering, unlike a general homogeneous array.
-		if val.Ty.IsTuple {
-			strVal, err := e.emitValueToString(val)
-			if err != nil {
-				return Value{}, err
-			}
-			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-			continue
-		}
-		// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
-		// a hard rejection; now rendered via the inspector (TDD-00075/ADR-00218).
-		if val.Ty.IsArray {
-			strVal, err := e.emitInspectArray(val, 0)
-			if err != nil {
-				return Value{}, err
-			}
-			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-			continue
-		}
-		// A class instance / object literal prints Node-style: `Foo { x: 1 }`
-		// (util.inspect), in both -compat modes. See TDD-00075/emit_inspect.go.
-		if isInspectableObject(val.Ty) {
-			strVal, err := e.emitInspectObject(val, 0)
-			if err != nil {
-				return Value{}, err
-			}
-			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-			continue
-		}
-		if val.Ty.IsDynamic {
-			strVal, err := e.emitDynamicToString(val)
-			if err != nil {
-				return Value{}, err
-			}
-			fmtPtr := e.internString("%s" + term)
-			e.emitConsolePrintVal(strVal, fmtPtr, fd)
-			continue
-		}
-		if val.Ty.IsBigInt {
-			// console.log(10n) shows the trailing `n` (String(10n) does not).
-			strVal, err := e.emitBigIntToString(val, true)
-			if err != nil {
-				return Value{}, err
-			}
-			fmtPtr := e.internString("%s" + term)
-			e.emitConsolePrintVal(strVal, fmtPtr, fd)
-			continue
-		}
-		if val.Ty.IsSymbol {
-			strVal, err := e.emitSymbolToString(val)
-			if err != nil {
-				return Value{}, err
-			}
-			fmtPtr := e.internString("%s" + term)
-			e.emitConsolePrintVal(strVal, fmtPtr, fd)
-			continue
-		}
-		// A boolean prints as `true`/`false`, matching real JS/TS — not the
-		// raw i1's 0/1. emitValueToString already does exactly this conversion
-		// (template-literal interpolation of a bool has always printed
-		// true/false); console.log had simply never routed through it, using
-		// the numeric PrintfFmt directly instead. See ADR-00183.
-		// A boolean prints true/false, and a float prints via the JS-faithful
-		// shortest-round-trip formatter (TDD-00080) — both live in
-		// emitValueToString, so route through it rather than PrintfFmt's raw
-		// i1/%g. (%g truncated to 6 significant digits.)
-		if val.Ty.IR == "i1" || val.Ty.Float {
-			strVal, err := e.emitValueToString(val)
-			if err != nil {
-				return Value{}, err
-			}
-			if val.Ty.Float {
-				// console.log(-0) displays `-0` (Node's util.inspect), even
-				// though String(-0) — what emitValueToString computes — is
-				// "0". Detected by exact bit pattern (only -0.0 has just the
-				// sign bit set), so no other value pays for the check.
-				f64 := e.coerce(val, TypeF64)
-				bits := e.freshReg()
-				isNegZero := e.freshReg()
-				sel := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
-				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
-				strVal = Value{Ref: sel, Ty: TypePtr}
-			}
-			fmtPtr := e.internString("%s" + term)
-			e.emitConsolePrintVal(strVal, fmtPtr, fd)
-			continue
-		}
-		fmtPtr := e.internString(val.Ty.PrintfFmt() + term)
-		e.emitConsolePrintVal(val, fmtPtr, fd)
 	}
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitConsolePrintArgToken prints one console.* argument followed by term (a
+// separator " " or the line-ending "\n"). Split out of emitConsolePrint's loop
+// so the runtime-separator spread path (emitConsolePrintSpread) can reuse the
+// exact same per-argument type dispatch.
+func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term string) error {
+	// An un-narrowed nullable-scalar local prints its value or the literal
+	// `null` (TDD-00064 Stage 2), rather than the payload 0 the bare
+	// representation used to surface for a null. A narrowed local is known
+	// present and falls through to the ordinary path below.
+	if sym, ok := e.nullableScalarLValue(arg); ok && !sym.NarrowedNonNull {
+		return e.emitConsoleNullableScalar(sym, fd, term)
+	}
+	val, err := e.emitExpr(arg)
+	if err != nil {
+		return err
+	}
+	return e.emitConsolePrintValueToken(val, fd, term)
+}
+
+// emitConsolePrintValueToken prints one already-evaluated value followed by
+// term — the type-dispatch half shared by a direct argument
+// (emitConsolePrintArgToken) and a spread array's elements
+// (emitConsolePrintSpread).
+func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) error {
+	// A nullable-scalar aggregate value (a T|null return/field) prints
+	// null-aware, same as a boxed local (TDD-00064 Stage 3).
+	if isNullableScalar(val.Ty) {
+		return e.emitConsoleNullableScalarAgg(val, fd, term)
+	}
+	// A tuple prints as its comma-joined elements (TDD-00066) — checked
+	// before the array rejection, since a tuple is a fixed-shape value with
+	// a well-defined rendering, unlike a general homogeneous array.
+	if val.Ty.IsTuple {
+		strVal, err := e.emitValueToString(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
+	// a hard rejection; now rendered via the inspector (TDD-00075/ADR-00218).
+	if val.Ty.IsArray {
+		strVal, err := e.emitInspectArray(val, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// A class instance / object literal prints Node-style: `Foo { x: 1 }`
+	// (util.inspect), in both -compat modes. See TDD-00075/emit_inspect.go.
+	if isInspectableObject(val.Ty) {
+		strVal, err := e.emitInspectObject(val, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsDynamic {
+		strVal, err := e.emitDynamicToString(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsBigInt {
+		// console.log(10n) shows the trailing `n` (String(10n) does not).
+		strVal, err := e.emitBigIntToString(val, true)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsSymbol {
+		strVal, err := e.emitSymbolToString(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// A boolean prints true/false, and a float prints via the JS-faithful
+	// shortest-round-trip formatter (TDD-00080) — both live in
+	// emitValueToString, so route through it rather than PrintfFmt's raw
+	// i1/%g. (%g truncated to 6 significant digits.) See ADR-00183.
+	if val.Ty.IR == "i1" || val.Ty.Float {
+		strVal, err := e.emitValueToString(val)
+		if err != nil {
+			return err
+		}
+		if val.Ty.Float {
+			// console.log(-0) displays `-0` (Node's util.inspect), even
+			// though String(-0) — what emitValueToString computes — is
+			// "0". Detected by exact bit pattern (only -0.0 has just the
+			// sign bit set), so no other value pays for the check.
+			f64 := e.coerce(val, TypeF64)
+			bits := e.freshReg()
+			isNegZero := e.freshReg()
+			sel := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
+			strVal = Value{Ref: sel, Ty: TypePtr}
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	e.emitConsolePrintVal(val, e.internString(val.Ty.PrintfFmt()+term), fd)
+	return nil
+}
+
+// emitConsolePrintSpread renders console.* output when the argument list holds
+// one or more spread arguments (console.log(...arr), console.log(a, ...xs, b) —
+// TDD-00106 V2). Because a spread expands to a runtime number of tokens, the
+// last-token detection the static loop uses (index vs len) doesn't apply: each
+// token is printed with no terminator, a single separator space is emitted
+// *before* every token except the first (tracked by a runtime flag, so an empty
+// spread contributes nothing), and one trailing newline closes the line — so
+// the output is exactly `a b c\n` for any positional/spread mix.
+func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix string) (Value, error) {
+	if fd == 2 {
+		e.ensureDprintf()
+	} else {
+		e.ensurePrintf()
+	}
+	e.emitConsoleGroupIndent(fd)
+	if prefix != "" {
+		pfxPtr := e.internString(prefix)
+		fmtStr := e.internString("%s")
+		if fd == 2 {
+			e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, pfxPtr))
+		} else {
+			e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtStr, pfxPtr))
+		}
+	}
+	startedPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", startedPtr))
+	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", startedPtr))
+	// emitSep prints one space before a token when one has already been printed.
+	emitSep := func() {
+		started := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", started, startedPtr))
+		sepL := e.freshLabel("log.sep")
+		contL := e.freshLabel("log.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", started, sepL, contL))
+		e.emitLabel(sepL)
+		e.emitConsolePrintVal(Value{Ref: e.internString(" "), Ty: TypePtr}, e.internString("%s"), fd)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+		e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", startedPtr))
+	}
+	for _, arg := range args {
+		if sp, ok := arg.(*ast.SpreadElement); ok {
+			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(sp.Arg, sp.Arg.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			if elemTy.IsArray || elemTy.IsObject {
+				return Value{}, fmt.Errorf("%d:%d: console spread of an array of arrays or objects is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
+			}
+			idxAlloca := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+			condL := e.freshLabel("log.cond")
+			bodyL := e.freshLabel("log.body")
+			doneL := e.freshLabel("log.done")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(condL)
+			idxVal := e.freshReg()
+			done := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+			e.emitLabel(bodyL)
+			emitSep()
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+			elem := e.loadArrayElem(gep, elemTy)
+			if err := e.emitConsolePrintValueToken(elem, fd, ""); err != nil {
+				return Value{}, err
+			}
+			idxNext := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(doneL)
+			continue
+		}
+		emitSep()
+		if err := e.emitConsolePrintArgToken(arg, fd, ""); err != nil {
+			return Value{}, err
+		}
+	}
+	// Trailing newline — a bare newline even if nothing printed, matching
+	// console.log() and console.log(...[]).
+	e.emitConsolePrintVal(Value{Ref: e.internString(""), Ty: TypePtr}, e.internString("%s\n"), fd)
 	return Value{Ty: TypeVoid}, nil
 }
 

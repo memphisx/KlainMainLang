@@ -30,6 +30,13 @@ import (
 // pointer into the object's hidden WebSocketClientHandleField.
 func (e *Emitter) emitNewWebSocketClientExpression(ex *ast.NewWebSocketExpression) (Value, error) {
 	e.ensureWSClientRuntime()
+	// A WebSocket's scheme (ws:// vs wss://) is a runtime value, so any program
+	// that actually constructs a WebSocket links libssl for the wss path. (The
+	// WS-client *runtime* is also pulled in transitively by the HTTP event loop
+	// for every event-loop program; those get no-op __kml_tls_* stubs instead —
+	// emitTLSNetSymbols — so a plain http.listen/worker program never links
+	// libssl.)
+	e.usedTLS = true
 	e.ensureCurlURL()
 	e.ensureMalloc()
 	e.ensureExceptionHelpers()
@@ -63,32 +70,38 @@ func (e *Emitter) emitNewWebSocketClientExpression(ex *ast.NewWebSocketExpressio
 
 	e.emitLabel(okL)
 
+	// Scheme: ws:// (tls=0) or wss:// (tls=1); anything else is a clean throw.
+	// tlsFlagA holds the flag through to the open call and the default-port pick.
+	tlsFlagA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", tlsFlagA))
+	e.emitInstr(fmt.Sprintf("store i32 0, ptr %s, align 4", tlsFlagA))
 	schemeRaw, _ := e.curlURLGetPart(handle, curluPartScheme)
 	wantScheme := e.internString("ws")
 	schemeCmp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", schemeCmp, schemeRaw, wantScheme))
-	badScheme := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", badScheme, schemeCmp))
+	isWs := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isWs, schemeCmp))
 
-	schemeBadL := e.freshLabel("wsc.badscheme")
 	schemeOkL := e.freshLabel("wsc.okscheme")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badScheme, schemeBadL, schemeOkL))
+	notWsL := e.freshLabel("wsc.notws")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isWs, schemeOkL, notWsL))
 
-	e.emitLabel(schemeBadL)
+	e.emitLabel(notWsL)
 	wssScheme := e.internString("wss")
 	wssCmp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", wssCmp, schemeRaw, wssScheme))
 	isWss := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isWss, wssCmp))
-	wssL := e.freshLabel("wsc.wssnotsupported")
+	wssL := e.freshLabel("wsc.wss")
 	otherSchemeL := e.freshLabel("wsc.otherscheme")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isWss, wssL, otherSchemeL))
 
 	e.emitLabel(wssL)
-	e.emitInternalThrow(e.internString("wss:// is not supported yet (TDD-00039 Stage 3 is ws:// only)"))
+	e.emitInstr(fmt.Sprintf("store i32 1, ptr %s, align 4", tlsFlagA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", schemeOkL))
 
 	e.emitLabel(otherSchemeL)
-	e.emitInternalThrow(e.internString("WebSocket URL must use the ws:// scheme"))
+	e.emitInternalThrow(e.internString("WebSocket URL must use the ws:// or wss:// scheme"))
 
 	e.emitLabel(schemeOkL)
 
@@ -103,7 +116,13 @@ func (e *Emitter) emitNewWebSocketClientExpression(ex *ast.NewWebSocketExpressio
 	e.emitLabel(hostOkL)
 
 	portRaw, portPresent := e.curlURLGetPart(handle, curluPartPort)
-	defaultPort := e.internString("80")
+	// Default port depends on the scheme: 443 for wss://, 80 for ws://.
+	tlsForPort := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", tlsForPort, tlsFlagA))
+	isWssPort := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", isWssPort, tlsForPort))
+	defaultPort := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", defaultPort, isWssPort, e.internString("443"), e.internString("80")))
 	portStr, err := e.emitStrBranch(portPresent,
 		func() (string, error) { return portRaw, nil },
 		func() (string, error) { return defaultPort, nil })
@@ -220,9 +239,11 @@ func (e *Emitter) emitNewWebSocketClientExpression(ex *ast.NewWebSocketExpressio
 	reqLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", reqLen, req8.Ref))
 
+	tlsArg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", tlsArg, tlsFlagA))
 	entryReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_client_open(ptr %s, i32 %s, ptr %s, i64 %s, ptr %s, ptr %s)",
-		entryReg, hostRaw, portNum32, req8.Ref, reqLen, expectedAccept.Ref, objReg))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_client_open(ptr %s, i32 %s, ptr %s, i64 %s, ptr %s, ptr %s, i32 %s)",
+		entryReg, hostRaw, portNum32, req8.Ref, reqLen, expectedAccept.Ref, objReg, tlsArg))
 	storeField(WebSocketClientHandleField, "ptr", entryReg)
 
 	e.usedWSClient = true
@@ -277,7 +298,7 @@ func (e *Emitter) emitWSClientSend(objExpr ast.Expression, args []ast.Expression
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", frameBuf, frame))
 	frameLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", frameLen, frame))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, frameBuf, frameLen))
+	e.emitInstr(fmt.Sprintf("call i64 @__kml_wsc_io_write(i32 %s, ptr %s, i64 %s)", fd32, frameBuf, frameLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", frameBuf))
 
 	return Value{Ty: TypeVoid}, nil
@@ -360,8 +381,9 @@ func (e *Emitter) emitWSClientClose(objExpr ast.Expression, pos ast.Pos) (Value,
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", closeEncBuf, closeEnc))
 	closeEncLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", closeEncLen, closeEnc))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, closeEncBuf, closeEncLen))
+	e.emitInstr(fmt.Sprintf("call i64 @__kml_wsc_io_write(i32 %s, ptr %s, i64 %s)", fd32, closeEncBuf, closeEncLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", closeEncBuf))
+	e.emitInstr(fmt.Sprintf("call void @__kml_wsc_tls_clear(i32 %s)", fd32))
 	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
 
 	e.emitInstr(fmt.Sprintf("store i64 2, ptr %s, align 8", statePtr))

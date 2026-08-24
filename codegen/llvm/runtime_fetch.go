@@ -259,6 +259,11 @@ havemulti:
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 52, i64 1)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 13, i64 30)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 99, i64 1)
+  ; CURLOPT_HTTP_VERSION (84) = CURL_HTTP_VERSION_2TLS (4): negotiate HTTP/2 over
+  ; TLS via ALPN, HTTP/1.1 over cleartext. libcurl does ALPN+HPACK internally and
+  ; transparently falls back to 1.1; a libcurl built without nghttp2 rejects this
+  ; option (return code ignored, as elsewhere) and proceeds as 1.1.
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 84, i64 4)
 
   %hasmethod = icmp ne ptr %method, null
   br i1 %hasmethod, label %setmethod, label %skipmethod
