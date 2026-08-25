@@ -229,11 +229,24 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 	e.emitLabel(okL)
 	statusReg := e.freshReg()
 	bodyPtrReg := e.freshReg()
+	bodyLenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 1", statusReg, resultReg))
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 2", bodyPtrReg, resultReg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i1, i64, ptr, ptr, i64 } %s, 4", bodyLenReg, resultReg))
+	// TDD-00120: the curl body is a raw buffer — copy it into a length-prefixed
+	// header string so responseText's binary-safe consumers (=== / .split read
+	// ptr-8) work. bodyLen (tuple index 4) is the exact byte count.
+	e.ensureStrHeaderRuntime()
+	e.ensureMemcpy()
+	respTextReg := e.freshReg()
+	respNulReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", respTextReg, bodyLenReg))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", respTextReg, bodyPtrReg, bodyLenReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", respNulReg, respTextReg, bodyLenReg))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", respNulReg))
 	e.xhrStoreField(objVal, "status", Value{Ref: statusReg, Ty: TypeI64})
-	e.xhrStoreField(objVal, "responseText", Value{Ref: bodyPtrReg, Ty: TypePtr})
-	e.xhrStoreField(objVal, "response", Value{Ref: bodyPtrReg, Ty: TypePtr})
+	e.xhrStoreField(objVal, "responseText", Value{Ref: respTextReg, Ty: TypePtr})
+	e.xhrStoreField(objVal, "response", Value{Ref: respTextReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "readyState", Value{Ref: "4", Ty: TypeI64})
 	if err := e.emitXHRFireCallback(objVal, "onreadystatechange", pos); err != nil {
 		return Value{}, err

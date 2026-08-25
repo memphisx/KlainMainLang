@@ -178,6 +178,14 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Desugar a top-level static `require('<literal>')` into the equivalent
+		// import declaration so the resolver/codegen handle it unchanged. Only
+		// at top level — a nested `require` stays an ordinary call (the lazy
+		// form, out of scope for this static rewrite).
+		stmt, err = p.desugarRequire(stmt)
+		if err != nil {
+			return nil, err
+		}
 		prog.Body = append(prog.Body, stmt)
 		if len(p.pendingTopLevel) > 0 {
 			prog.Body = append(prog.Body, p.pendingTopLevel...)

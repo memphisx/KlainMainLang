@@ -162,10 +162,7 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, re
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", templateLen, templateVal.Ref))
 	upperBound := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", upperBound, templateLen, totalGroupLen))
-	bufSize := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bufSize, upperBound))
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	buf := e.emitStringScratchReg(upperBound) // TDD-00120: len set at return
 
 	srcAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", srcAlloca))
@@ -327,6 +324,7 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, re
 	termGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, buf, finalDst))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
+	e.emitStringSetLen(buf, finalDst) // TDD-00120: exact expanded length
 
 	return buf, finalDst
 }
@@ -370,10 +368,7 @@ func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer r
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", prefixPlusRepl, startReg, replLenReg))
 	outLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", outLen, prefixPlusRepl, tailLen))
-	outSize := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", outSize, outLen))
-	outBuf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outBuf, outSize))
+	outBuf := e.emitStringAlloc(outLen) // TDD-00120: length-prefixed
 
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", outBuf, strVal.Ref, startReg))
 	replDst := e.freshReg()
@@ -543,10 +538,7 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", preTrailingTotal, totalAlloca))
 	grandTotal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", grandTotal, preTrailingTotal, trailingLen))
-	outSize := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", outSize, grandTotal))
-	outBuf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outBuf, outSize))
+	outBuf := e.emitStringAlloc(grandTotal) // TDD-00120: length-prefixed
 
 	// Copy loop: gap-then-replacement per match, then the trailing gap.
 	copyLastPosAlloca := e.freshReg()

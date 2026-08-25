@@ -86,6 +86,17 @@ func httpNonblockFlag() int {
 	return 0x800
 }
 
+// mmapSharedAnonFlags returns MAP_SHARED|MAP_ANONYMOUS for the host. MAP_SHARED
+// is 0x1 on both; MAP_ANONYMOUS is 0x1000 on Darwin, 0x20 on Linux — the cluster
+// close-flag page (TDD-00117) is mmap'd with these before the worker fork so all
+// forked processes share one physical word.
+func mmapSharedAnonFlags() int {
+	if runtime.GOOS == "darwin" {
+		return 0x1001
+	}
+	return 0x21
+}
+
 // httpEagainErrno returns EAGAIN/EWOULDBLOCK's numeric value (35 on Darwin;
 // 11 on Linux, where EAGAIN and EWOULDBLOCK are the same value — both
 // verified the same way as httpNonblockFlag). A per-connection fiber's read
@@ -150,6 +161,7 @@ func (e *Emitter) ensureHTTPThrow() {
 	e.ensureStrerror()
 	fmtPtr := e.internString("%s: %s")
 	errNamePtr := e.internString("Error")
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_throw(ptr %%opdesc) {
 entry:
@@ -160,8 +172,9 @@ entry:
   %%len_err = call i64 @strlen(ptr %%errmsg)
   %%sum = add i64 %%len_op, %%len_err
   %%bufsize = add i64 %%sum, 8
-  %%buf = call ptr @malloc(i64 %%bufsize)
+  %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%errmsg)
+  call void @__kml_str_finalize(ptr %%buf)
   %%errobj = call ptr @malloc(i64 24)
   %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
   store i64 0, ptr %%errobj.kind, align 8
@@ -191,6 +204,7 @@ func (e *Emitter) ensureSplitFirst() {
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define {ptr, ptr} @__kml_split_first(ptr %s, ptr %sep) {
 entry:
@@ -198,7 +212,13 @@ entry:
   %hit = icmp ne ptr %found, null
   br i1 %hit, label %split, label %nosep
 nosep:
-  %r0 = insertvalue {ptr, ptr} undef, ptr %s, 0
+  ; TDD-00120: return a length-prefixed copy of %s (it may be a raw request-line
+  ; pointer with no header).
+  %ns_len = call i64 @strlen(ptr %s)
+  %ns_copy = call ptr @__kml_str_alloc(i64 %ns_len)
+  %ns_len1 = add i64 %ns_len, 1
+  call ptr @memcpy(ptr %ns_copy, ptr %s, i64 %ns_len1)
+  %r0 = insertvalue {ptr, ptr} undef, ptr %ns_copy, 0
   %r1 = insertvalue {ptr, ptr} %r0, ptr null, 1
   ret {ptr, ptr} %r1
 split:
@@ -206,14 +226,19 @@ split:
   %s_int = ptrtoint ptr %s to i64
   %f_int = ptrtoint ptr %found to i64
   %before_len = sub i64 %f_int, %s_int
-  %alloc = add i64 %before_len, 1
-  %before_buf = call ptr @malloc(i64 %alloc)
+  %before_buf = call ptr @__kml_str_alloc(i64 %before_len)
   call ptr @memcpy(ptr %before_buf, ptr %s, i64 %before_len)
   %nullp = getelementptr i8, ptr %before_buf, i64 %before_len
   store i8 0, ptr %nullp, align 1
-  %after = getelementptr i8, ptr %found, i64 %sep_len
+  ; TDD-00120: after is a fresh length-prefixed copy (not an interior pointer
+  ; into s), so both halves behave like every other length-prefixed string.
+  %after_start = getelementptr i8, ptr %found, i64 %sep_len
+  %after_len = call i64 @strlen(ptr %after_start)
+  %after_buf = call ptr @__kml_str_alloc(i64 %after_len)
+  %after_len1 = add i64 %after_len, 1
+  call ptr @memcpy(ptr %after_buf, ptr %after_start, i64 %after_len1)
   %r2 = insertvalue {ptr, ptr} undef, ptr %before_buf, 0
-  %r3 = insertvalue {ptr, ptr} %r2, ptr %after, 1
+  %r3 = insertvalue {ptr, ptr} %r2, ptr %after_buf, 1
   ret {ptr, ptr} %r3
 }`)
 }
@@ -245,7 +270,9 @@ func (e *Emitter) ensureHTTPParseHeaders() {
 	e.emitGlobal(`
 define void @__kml_http_parse_headers(ptr %headerBlock, ptr %map) {
 entry:
-  %lines = call {ptr, i64} @__kml_split(ptr %headerBlock, ptr ` + crlf + `)
+  %hblen = call i64 @strlen(ptr %headerBlock)
+  %crlflen = call i64 @strlen(ptr ` + crlf + `)
+  %lines = call {ptr, i64} @__kml_split(ptr %headerBlock, i64 %hblen, ptr ` + crlf + `, i64 %crlflen)
   %ldata = extractvalue {ptr, i64} %lines, 0
   %lcount = extractvalue {ptr, i64} %lines, 1
   br label %loop
@@ -303,7 +330,9 @@ func (e *Emitter) ensureHTTPParseQuery() {
 	e.emitGlobal(`
 define void @__kml_http_parse_query(ptr %q, ptr %map) {
 entry:
-  %pairs = call {ptr, i64} @__kml_split(ptr %q, ptr ` + amp + `)
+  %qlen = call i64 @strlen(ptr %q)
+  %amplen = call i64 @strlen(ptr ` + amp + `)
+  %pairs = call {ptr, i64} @__kml_split(ptr %q, i64 %qlen, ptr ` + amp + `, i64 %amplen)
   %pdata = extractvalue {ptr, i64} %pairs, 0
   %pcount = extractvalue {ptr, i64} %pairs, 1
   br label %loop
@@ -534,19 +563,43 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	e.usedHTTPClusterFork = true
 	e.ensureForkDecl()
 	e.ensureFflushDecl()
+	e.ensureMmapDecl()
 	e.emitGlobal("@__kml_cluster_worker_id = internal global i64 0, align 8")
-	e.emitGlobal(`
-define void @__kml_http_cluster_fork(i64 %numWorkers) {
+	// TDD-00117: shared close flags. Null until __kml_http_cluster_fork mmaps a
+	// MAP_SHARED region (only when it actually forks workers); every worker's
+	// event loop polls it. Two i64 words: [0] set by http.close() (close the
+	// listener), [1] set by http.closeAllConnections() (force-close in-flight
+	// connections). Null in a single-process program, where every access below
+	// is a guarded no-op.
+	e.emitGlobal("@__kml_cluster_close_flag = internal global ptr null, align 8")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_cluster_fork(i64 %%numWorkers) {
 entry:
-  %ip = alloca i64, align 8
-  store i64 1, ptr %ip, align 8
-  %needsfork = icmp sgt i64 %numWorkers, 1
-  br i1 %needsfork, label %forkloop, label %done
+  %%ip = alloca i64, align 8
+  store i64 1, ptr %%ip, align 8
+  %%needsfork = icmp sgt i64 %%numWorkers, 1
+  br i1 %%needsfork, label %%mkflag, label %%done
+
+mkflag:
+  ; Allocate the shared close-flag page (two i64 words) BEFORE forking so every
+  ; worker inherits the same physical mapping. MAP_FAILED ((void*)-1) leaves the
+  ; flag null — cross-worker close degrades to the caller's own process, no boot
+  ; fail.
+  %%mm = call ptr @mmap(ptr null, i64 16, i32 3, i32 %d, i32 -1, i64 0)
+  %%mmfail = icmp eq ptr %%mm, inttoptr (i64 -1 to ptr)
+  br i1 %%mmfail, label %%forkloop, label %%storeflag
+
+storeflag:
+  store i64 0, ptr %%mm, align 8
+  %%mmw1 = getelementptr i64, ptr %%mm, i64 1
+  store i64 0, ptr %%mmw1, align 8
+  store ptr %%mm, ptr @__kml_cluster_close_flag, align 8
+  br label %%forkloop
 
 forkloop:
-  %i = load i64, ptr %ip, align 8
-  %cont = icmp slt i64 %i, %numWorkers
-  br i1 %cont, label %doforkw, label %done
+  %%i = load i64, ptr %%ip, align 8
+  %%cont = icmp slt i64 %%i, %%numWorkers
+  br i1 %%cont, label %%doforkw, label %%done
 
 doforkw:
   ; fflush(NULL) (flushes every open output stream, including stdout) right
@@ -560,22 +613,22 @@ doforkw:
   ; (examples/http/http_cluster.ts) printing its startup banner N times
   ; instead of once when piped (not run at a real terminal).
   call i32 @fflush(ptr null)
-  %pid = call i32 @fork()
-  %ischild = icmp eq i32 %pid, 0
-  br i1 %ischild, label %child, label %parentnext
+  %%pid = call i32 @fork()
+  %%ischild = icmp eq i32 %%pid, 0
+  br i1 %%ischild, label %%child, label %%parentnext
 
 child:
-  store i64 %i, ptr @__kml_cluster_worker_id, align 8
-  br label %done
+  store i64 %%i, ptr @__kml_cluster_worker_id, align 8
+  br label %%done
 
 parentnext:
-  %inext = add i64 %i, 1
-  store i64 %inext, ptr %ip, align 8
-  br label %forkloop
+  %%inext = add i64 %%i, 1
+  store i64 %%inext, ptr %%ip, align 8
+  br label %%forkloop
 
 done:
   ret void
-}`)
+}`, mmapSharedAnonFlags()))
 }
 
 func (e *Emitter) ensureHTTPRuntime() {
@@ -731,6 +784,12 @@ failnofd:
 		e.internString("http.listen: failed to create socket")))
 
 	e.ensureHTTPClusterFork()
+	// __kml_event_loop_run below unconditionally calls
+	// @__kml_http_shutdown_local_conns in its cluster-flag poll (whether or not
+	// this program ever calls http.closeAllConnections), so its definition must
+	// exist — same "always pull in the machinery the loop references" reasoning
+	// as ensureFetchAsync/ensurePromiseCombinators above.
+	e.ensureHTTPCloseAllConns()
 
 	// __kml_http_append_conn: appends a new { i64 fd, ptr ctx, ptr stack,
 	// ptr pendingFetch, ptr pendingGroup } entry (growable, realloc-doubling,
@@ -1065,6 +1124,41 @@ esconsiderreconnect:
   br label %afteresreconnect
 
 afteresreconnect:
+  ; TDD-00117: a sibling worker in a {workers:N} cluster may have called
+  ; http.close(), which sets the shared MAP_SHARED flag. Poll it each iteration;
+  ; if set and this worker still holds its listener, run the same local teardown
+  ; http.close() does here — the drain logic below then lets it finish in-flight
+  ; connections and exit. Null flag (single-process) → skip entirely.
+  %ccflag = load ptr, ptr @__kml_cluster_close_flag, align 8
+  %cchas = icmp ne ptr %ccflag, null
+  br i1 %cchas, label %ccpoll, label %ccdone
+
+ccpoll:
+  ; word[1]: a sibling's http.closeAllConnections() → force-close our own conns.
+  %ccw1 = getelementptr i64, ptr %ccflag, i64 1
+  %ccv1 = load atomic i64, ptr %ccw1 seq_cst, align 8
+  %ccforce = icmp ne i64 %ccv1, 0
+  br i1 %ccforce, label %ccforceclose, label %ccpoll0
+
+ccforceclose:
+  call void @__kml_http_shutdown_local_conns()
+  br label %ccpoll0
+
+ccpoll0:
+  ; word[0]: a sibling's http.close() → close our own listener.
+  %ccv = load atomic i64, ptr %ccflag seq_cst, align 8
+  %ccset = icmp ne i64 %ccv, 0
+  %cclfd = load i32, ptr @__kml_listen_fd, align 4
+  %cclopen = icmp sge i32 %cclfd, 0
+  %ccshould = and i1 %ccset, %cclopen
+  br i1 %ccshould, label %ccclose, label %ccdone
+
+ccclose:
+  call i32 @close(i32 %cclfd)
+  store i32 -1, ptr @__kml_listen_fd, align 4
+  br label %ccdone
+
+ccdone:
   %havetimer = or i1 %havetimer_js, %hasesreconnect
   %listenfd = load i32, ptr @__kml_listen_fd, align 4
   %haslistener = icmp sge i32 %listenfd, 0
@@ -1461,7 +1555,14 @@ cmtodone:
   %usetimer1 = or i1 %usetimer0, %havefetchdlv
   %cmdlv0 = load i64, ptr %cmdlabs, align 8
   %hascmdl = icmp ne i64 %cmdlv0, 0
-  %usetimer = or i1 %usetimer1, %hascmdl
+  %usetimer2 = or i1 %usetimer1, %hascmdl
+  ; TDD-00117: in a {workers:N} cluster, never block in select() with an infinite
+  ; timeout — an idle sibling worker must wake periodically to poll the shared
+  ; close flag a sibling's http.close() may have set. Force the bounded
+  ; timeoutpath (capped to 200ms below) whenever the shared flag exists.
+  %ccflagT = load ptr, ptr @__kml_cluster_close_flag, align 8
+  %clustermode = icmp ne ptr %ccflagT, null
+  %usetimer = or i1 %usetimer2, %clustermode
   br i1 %usetimer, label %timeoutpath, label %notimeoutpath
 
 timeoutpath:
@@ -1488,7 +1589,12 @@ timeoutpath:
   ; present (e.g. this exact program's own setTimeout) sets %bestfire to
   ; its own real, distant fire time, silently overriding the "wait zero"
   ; intent by the time this path's normal wait computation runs.
-  %waitns = select i1 %needimmediate, i64 0, i64 %waitns0
+  ; TDD-00117: cap the wait at 200ms in cluster mode so an idle worker re-polls
+  ; the shared close flag promptly (%clustermode computed above the branch).
+  %clustercap = select i1 %clustermode, i64 200000000, i64 9223372036854775807
+  %capsooner = icmp slt i64 %clustercap, %waitns0
+  %waitns0c = select i1 %capsooner, i64 %clustercap, i64 %waitns0
+  %waitns = select i1 %needimmediate, i64 0, i64 %waitns0c
   %waitsec = sdiv i64 %waitns, 1000000000
   %waitnsrem = srem i64 %waitns, 1000000000
   %waitusec = sdiv i64 %waitnsrem, 1000
@@ -1769,6 +1875,17 @@ func (e *Emitter) ensureHTTPClose() {
 	e.emitGlobal(`
 define void @__kml_http_close() {
 entry:
+  ; TDD-00117: in a {workers:N} cluster, set the shared close flag so every other
+  ; worker's event loop closes its own listener too. Null (single-process) → skip.
+  %flag = load ptr, ptr @__kml_cluster_close_flag, align 8
+  %hasflag = icmp ne ptr %flag, null
+  br i1 %hasflag, label %setflag, label %local
+
+setflag:
+  store atomic i64 1, ptr %flag seq_cst, align 8
+  br label %local
+
+local:
   %fd = load i32, ptr @__kml_listen_fd, align 4
   %active = icmp sge i32 %fd, 0
   br i1 %active, label %doclose, label %done
@@ -1779,6 +1896,86 @@ doclose:
   br label %done
 
 done:
+  ret void
+}`)
+}
+
+// ensureHTTPCloseAllConns declares http.closeAllConnections() (TDD-00118): the
+// forceful counterpart to http.close()'s graceful drain — it terminates every
+// in-flight connection instead of letting it finish. Rather than tear down each
+// connection's suspended fiber (a ucontext_t + malloc'd stack, parked mid-read)
+// from outside — the dangerous path — it shutdown(fd, SHUT_RDWR)s each active
+// connection's socket. The socket then reads EOF, so the fiber unwinds through
+// its own existing end-of-request finish path (read()==0 → close + active--) the
+// next time the event loop resumes it, which happens promptly since a shutdown
+// socket becomes readable immediately. No external fiber/stack teardown.
+//
+// __kml_http_shutdown_local_conns does the local pass; __kml_http_close_all_conns
+// is the public entry, which first sets the shared force-close word (word[1] of
+// the cluster flag region, TDD-00117) so every worker force-closes its own
+// connections too — symmetric with how http.close() propagates. Both are no-ops
+// when there are no active connections / no cluster.
+func (e *Emitter) ensureHTTPCloseAllConns() {
+	if e.usedHTTPCloseAllConns {
+		return
+	}
+	e.usedHTTPCloseAllConns = true
+	if !e.usedShutdownDecl {
+		e.emitGlobal("declare i32 @shutdown(i32 noundef, i32 noundef)")
+		e.usedShutdownDecl = true
+	}
+	e.emitGlobal(`
+define void @__kml_http_shutdown_local_conns() {
+entry:
+  %len = load i64, ptr @__kml_conn_len, align 8
+  %data = load ptr, ptr @__kml_conn_data, align 8
+  %ip = alloca i64, align 8
+  store i64 0, ptr %ip, align 8
+  br label %loop
+
+loop:
+  %i = load i64, ptr %ip, align 8
+  %inb = icmp slt i64 %i, %len
+  br i1 %inb, label %body, label %done
+
+body:
+  %slot = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %data, i64 %i
+  %fd_p = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %slot, i32 0, i32 0
+  %fdv = load i64, ptr %fd_p, align 8
+  %open = icmp sge i64 %fdv, 0
+  br i1 %open, label %doshut, label %next
+
+doshut:
+  ; SHUT_RDWR = 2 on both host targets. Ignore the return — an already-closed or
+  ; not-fully-connected fd (ENOTCONN/EBADF) is a harmless no-op here; the fiber's
+  ; own finish path still owns the actual close() and the active-- bookkeeping.
+  %fd32 = trunc i64 %fdv to i32
+  call i32 @shutdown(i32 %fd32, i32 2)
+  br label %next
+
+next:
+  %inext = add i64 %i, 1
+  store i64 %inext, ptr %ip, align 8
+  br label %loop
+
+done:
+  ret void
+}
+define void @__kml_http_close_all_conns() {
+entry:
+  ; TDD-00117: in a {workers:N} cluster, set the shared force-close word so every
+  ; other worker force-closes its own connections too. Null (single-process) → skip.
+  %flag = load ptr, ptr @__kml_cluster_close_flag, align 8
+  %hasflag = icmp ne ptr %flag, null
+  br i1 %hasflag, label %setflag, label %local
+
+setflag:
+  %w1 = getelementptr i64, ptr %flag, i64 1
+  store atomic i64 1, ptr %w1 seq_cst, align 8
+  br label %local
+
+local:
+  call void @__kml_http_shutdown_local_conns()
   ret void
 }`)
 }

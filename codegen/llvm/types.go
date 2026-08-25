@@ -1462,6 +1462,12 @@ func (t Type) VisibleFields() []Field {
 		fields = fields[1:]
 	case t.IsXHR && len(fields) > 2:
 		fields = fields[3:]
+	case t.IsRequest && len(fields) > 5:
+		// HttpRequest's first five fields (method/path/query/headers/body) are
+		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are
+		// implementation-only (backing .bodyBytes()/.stream()) and must not leak
+		// through Object.keys/JSON.stringify/spread (TDD-00118 follow-up).
+		fields = fields[:5]
 	}
 	hasPrivate := false
 	for _, f := range fields {
@@ -1596,6 +1602,12 @@ func StructFieldIR(ty Type) string {
 // size == align already holds.
 func StructFieldSize(ty Type) int64 {
 	if ty.IsArray {
+		return 16
+	}
+	// A dynamic/union field's storage is the { i8, i64 } box — 16 bytes (the i8
+	// tag padded to the i64's 8-byte alignment, plus the i64 payload), not the
+	// 8 bytes ty.Align() alone would suggest (TDD-00119).
+	if ty.IsDynamic {
 		return 16
 	}
 	// A nullable-scalar field's { i1, T } slot occupies the payload's alignment

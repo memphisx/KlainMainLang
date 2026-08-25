@@ -959,9 +959,11 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 
 		var eqReg string
 		if discIsStr {
-			e.ensureStrcmp()
+			// Binary-safe switch: __kml_str_cmp compares over header lengths, so a
+			// discriminant or case label with an embedded NUL matches correctly.
+			e.ensureStrHeaderRuntime()
 			cmpRes := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmpRes, disc.Ref, caseVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmpRes, disc.Ref, caseVal.Ref))
 			eqReg = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", eqReg, cmpRes))
 		} else {

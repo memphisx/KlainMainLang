@@ -53,6 +53,44 @@ server.listen(8951, () => {})
 	}
 }
 
+// TestE2ENetStringChunkEcho: a 'data' listener that declares (chunk: string)
+// and concatenates it must see exactly the received bytes. KML strings are
+// NUL-terminated (concat goes through strlen), so the chunk buffer the dispatch
+// hands the listener must be NUL-terminated — otherwise strlen runs past the
+// read length into trailing heap garbage (ADR-00358: the intermittent
+// "echo:helloV" TLS-server failure). The Uint8Array/TextDecoder path above
+// carries an explicit length and never exercised this.
+func TestE2ENetStringChunkEcho(t *testing.T) {
+	src := `
+import net from 'net'
+const server = net.createServer((socket) => {
+  socket.on('data', (chunk: string) => {
+    socket.write("echo:" + chunk)
+  })
+})
+server.listen(8956, () => {})
+`
+	startHTTPServer(t, src, 8956)
+
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:8956", 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got, want := string(buf[:n]), "echo:hello"; got != want {
+		t.Errorf("echo: got %q, want %q", got, want)
+	}
+}
+
 // TestE2ENetMultipleConnections: each connection gets its own socket with its
 // own 'data' listener, proving the per-connection registry keeps sockets
 // independent rather than sharing one handler/fd.

@@ -614,6 +614,96 @@ http.listen(18653, async (req: HttpRequest) => {
 	}
 }
 
+// TestE2EStreamsRequestBodyAfterStreamThrows (ADR-00362): reading req.body after
+// req.stream() has consumed the same request's body throws a catchable
+// TypeError (WHATWG "body already disturbed"), rather than silently returning the
+// pre-stream prefix.
+func TestE2EStreamsRequestBodyAfterStreamThrows(t *testing.T) {
+	src := `
+import http from 'http';
+async function handle(req: HttpRequest): Promise<string> {
+  let total = 0;
+  for await (const c of req.stream()) { total = total + c.length; }
+  try {
+    const leftover = req.body;
+    return "no-throw:" + leftover;
+  } catch (e) {
+    return "threw:" + e.name;
+  }
+}
+http.listen(18654, async (req: HttpRequest) => {
+  return { status: 200, body: await handle(req) };
+});
+`
+	startHTTPServer(t, src, 18654)
+	resp, err := http.Post("http://127.0.0.1:18654/", "text/plain", strings.NewReader("0123456789"))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != "threw:TypeError" {
+		t.Fatalf("body-after-stream = %q, want %q (a catchable TypeError)", got, "threw:TypeError")
+	}
+}
+
+// TestE2EHTTPUnionResponseBody (TDD-00119): a handler whose declared response
+// `body` field is `string | ReadableStream<Uint8Array>` may return either shape
+// across branches — the response writer branches on the union tag at runtime,
+// buffered write for a string and chunked transfer for a stream.
+func TestE2EHTTPUnionResponseBodyString(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string | ReadableStream<Uint8Array> }
+http.listen(18655, (req: HttpRequest): Res => {
+  if (req.path === '/stream') {
+    return { status: 200, body: req.stream() }
+  }
+  return { status: 201, body: "plain body" }
+})
+`
+	startHTTPServer(t, src, 18655)
+	resp, err := http.Get("http://127.0.0.1:18655/plain")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Errorf("status = %d, want 201", resp.StatusCode)
+	}
+	if string(got) != "plain body" {
+		t.Errorf("string branch body = %q, want %q", got, "plain body")
+	}
+}
+
+func TestE2EHTTPUnionResponseBodyStream(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string | ReadableStream<Uint8Array> }
+http.listen(18656, (req: HttpRequest): Res => {
+  if (req.path === '/stream') {
+    return { status: 200, body: req.stream() }
+  }
+  return { status: 200, body: "plain" }
+})
+`
+	startHTTPServer(t, src, 18656)
+	payload := bytes.Repeat([]byte("q"), 3*1024*1024)
+	resp, err := http.Post("http://127.0.0.1:18656/stream", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("stream branch echo mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
 // TDD-00097 Stage 6: CompressionStream / DecompressionStream (zlib).
 
 func TestE2EStreamsGzipRoundtrip(t *testing.T) {

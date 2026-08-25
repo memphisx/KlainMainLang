@@ -73,8 +73,11 @@ func (e *Emitter) emitBigIntLiteral(lit *ast.NumberLiteral) (Value, error) {
 // String(10n) / `${10n}` → "10", the same console-vs-String split symbol uses.
 func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 	e.ensureBigInt()
-	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 10)", reg, val.Ref))
+	e.ensureStrHeaderRuntime()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 10)", raw, val.Ref))
+	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", reg, raw))
 	s := Value{Ref: reg, Ty: TypePtr}
 	if !suffix {
 		return s, nil
@@ -287,8 +290,11 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", radixReg, w.Ref))
 		radixRef = radixReg
 	}
-	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 %s)", reg, recv.Ref, radixRef))
+	e.ensureStrHeaderRuntime()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 %s)", raw, recv.Ref, radixRef))
+	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", reg, raw))
 	return Value{Ref: reg, Ty: TypePtr}, nil
 }
 

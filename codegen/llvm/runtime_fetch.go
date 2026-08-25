@@ -26,6 +26,7 @@ func (e *Emitter) ensureFetch() {
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
 
 	e.emitGlobal("declare void @curl_global_init(i64 noundef)")
@@ -172,6 +173,7 @@ func (e *Emitter) ensureFetchAsync() {
 	}
 	e.usedFetchAsync = true
 	e.ensureFetch()
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureFiberRuntime()
 	e.ensureCurrentTaskGlobal() // @__kml_current_task, read by the may-suspend task-park path below
 	e.ensureExceptionHelpers()
@@ -411,11 +413,12 @@ entry:
 neterror:
   %result32b = trunc i64 %result to i32
   %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %errstr_hdr = call ptr @__kml_str_from_cstr(ptr %errstr)
   %errobj = call ptr @malloc(i64 24)
   %errobj.kind = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
   store i64 0, ptr %errobj.kind, align 8
   %errobj.msg = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
-  store ptr %errstr, ptr %errobj.msg, align 8
+  store ptr %errstr_hdr, ptr %errobj.msg, align 8
   %errobj.name = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
   store ptr ` + errNamePtr + `, ptr %errobj.name, align 8
   call void @__kml_throw(ptr %errobj)
@@ -868,11 +871,12 @@ body:
   %%res = load i64, ptr %%res_p, align 8
   %%res32 = trunc i64 %%res to i32
   %%errstr = call ptr @curl_easy_strerror(i32 %%res32)
+  %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_k = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
   store i64 0, ptr %%eo_k, align 8
   %%eo_m = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
-  store ptr %%errstr, ptr %%eo_m, align 8
+  store ptr %%errstr_hdr, ptr %%eo_m, align 8
   %%eo_n = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
   store ptr %s, ptr %%eo_n, align 8
   %%dst = getelementptr ptr, ptr %%errArr, i64 %%i
@@ -978,10 +982,11 @@ entry:
 neterror:
   %result32b = trunc i64 %result to i32
   %errstr = call ptr @curl_easy_strerror(i32 %result32b)
+  %errstr_hdr = call ptr @__kml_str_from_cstr(ptr %errstr)
   %rf1 = insertvalue { i1, i64, ptr, ptr, i64 } undef, i1 1, 0
   %rf2 = insertvalue { i1, i64, ptr, ptr, i64 } %rf1, i64 0, 1
   %rf3 = insertvalue { i1, i64, ptr, ptr, i64 } %rf2, ptr null, 2
-  %rf4 = insertvalue { i1, i64, ptr, ptr, i64 } %rf3, ptr %errstr, 3
+  %rf4 = insertvalue { i1, i64, ptr, ptr, i64 } %rf3, ptr %errstr_hdr, 3
   %rf5 = insertvalue { i1, i64, ptr, ptr, i64 } %rf4, i64 0, 4
   ret { i1, i64, ptr, ptr, i64 } %rf5
 

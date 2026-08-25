@@ -18,6 +18,7 @@ func (e *Emitter) ensureFsThrow() {
 	e.ensureMalloc()
 	e.ensureStrlen()
 	e.ensureSprintf()
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
 	accessor := errnoAccessor()
 	e.ensureErrnoAccessor()
@@ -36,8 +37,9 @@ entry:
   %%sum1 = add i64 %%len_op, %%len_path
   %%sum2 = add i64 %%sum1, %%len_err
   %%bufsize = add i64 %%sum2, 32
-  %%buf = call ptr @malloc(i64 %%bufsize)
+  %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%path, ptr %%errmsg)
+  call void @__kml_str_finalize(ptr %%buf)
   %%errobj = call ptr @malloc(i64 24)
   %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
   store i64 0, ptr %%errobj.kind, align 8
@@ -96,12 +98,24 @@ func (e *Emitter) ensureFsReadFile() {
 	}
 	e.usedFsReadFile = true
 	e.ensureFsReadFileRaw()
+	e.ensureStrHeaderRuntime()
+	e.ensureMemcpy()
+	// TDD-00120: the raw buffer is dual-use (also the readFileSyncBytes path), so
+	// copy it into a length-prefixed string sized by the real byte count (the
+	// header carries the true length for a future binary-safe read), then free
+	// the plain raw buffer.
 	e.emitGlobal(`
 define ptr @__kml_fs_read_file(ptr %path) {
 entry:
   %raw = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %path)
   %buf = extractvalue { ptr, i64 } %raw, 0
-  ret ptr %buf
+  %size = extractvalue { ptr, i64 } %raw, 1
+  %dst = call ptr @__kml_str_alloc(i64 %size)
+  call ptr @memcpy(ptr %dst, ptr %buf, i64 %size)
+  %np = getelementptr i8, ptr %dst, i64 %size
+  store i8 0, ptr %np, align 1
+  call void @free(ptr %buf)
+  ret ptr %dst
 }`)
 }
 
@@ -429,6 +443,7 @@ func (e *Emitter) ensureFsReaddir() {
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureStrcmp()
+	e.ensureStrHeaderRuntime() // TDD-00120: entry names are header-copied strings
 	e.emitGlobal("declare ptr @opendir(ptr noundef)")
 	e.emitGlobal("declare ptr @readdir(ptr noundef)")
 	e.emitGlobal("declare i32 @closedir(ptr noundef)")
@@ -491,7 +506,7 @@ grow:
 
 storeit:
   %%dataNow = load ptr, ptr %%data_p, align 8
-  %%namecopy = call ptr @strdup(ptr %%nameptr)
+  %%namecopy = call ptr @__kml_str_from_cstr(ptr %%nameptr)
   %%slot = getelementptr ptr, ptr %%dataNow, i64 %%curlen
   store ptr %%namecopy, ptr %%slot, align 8
   %%newlen = add i64 %%curlen, 1

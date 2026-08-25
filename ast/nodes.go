@@ -1636,12 +1636,12 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
-	Name       string
+	Name                 string
 	TypeParams           []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
-	Fields     []AnnotField
-	Methods    []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
-	pos        Pos
+	Fields               []AnnotField
+	Methods              []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
+	pos                  Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()   {}
@@ -1671,10 +1671,10 @@ type InterfaceMethodSig struct {
 // receiver every one of them has is a codegen-time concern (TDD-00009 Stage
 // 1), not part of this node's shape.
 type ClassDeclaration struct {
-	Name       string
+	Name                 string
 	TypeParams           []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
-	BaseClass  string   // "" if no `extends` clause (TDD-00009 Stage 3)
+	BaseClass            string // "" if no `extends` clause (TDD-00009 Stage 3)
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
 	BaseTypeArgs []*TypeAnnotation

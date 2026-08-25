@@ -81,7 +81,7 @@ type Emitter struct {
 	// local inside a function or a nested block (a different node) is unaffected
 	// and shadows the global normally; scope depth can't distinguish them (a
 	// function body also runs at scopes depth 1).
-	promotedGlobalDecls   map[*ast.VarDeclaration]bool
+	promotedGlobalDecls map[*ast.VarDeclaration]bool
 	// varsBeingInitialized names the variable(s) whose initializer is currently
 	// being emitted. A closure created inside a variable's own initializer that
 	// captures that same variable (`const s = f(() => use(s))`) must NOT seed its
@@ -213,24 +213,28 @@ type Emitter struct {
 	// module's canonical path to its entry symbol + statically-declared
 	// channel types; currentWorkerMod is non-empty while a worker module's
 	// entry function is being emitted (gates parentPort/workerData).
-	usedConnPokeGlobal   bool
-	usedChildProcRuntime bool
-	usedReadlineRuntime  bool
-	usedStdinRuntime     bool
-	usedNetRuntime       bool
-	usedDgramRuntime     bool
-	usedClusterRuntime   bool
-	usedProcessUptime    bool
-	usedProcessHrtime    bool
-	usedProcessLifecycle bool
-	dnsDeclared          bool
-	getaddrinfoDeclared  bool
-	usedCPKill           bool
-	usedWorkerRuntime    bool
-	hasWorkers           bool // set at EmitProgram start from Program.WorkerModules
-	workerEntries        map[string]*workerEntryInfo
-	currentWorkerMod     string
-	workerAdaptCtr       int
+	usedConnPokeGlobal     bool
+	usedChildProcRuntime   bool
+	usedReadlineRuntime    bool
+	usedStdinRuntime       bool
+	usedNetRuntime         bool
+	usedDgramRuntime       bool
+	usedClusterRuntime     bool
+	usedProcessUptime      bool
+	usedProcessHrtime      bool
+	usedProcessLifecycle   bool
+	usedTestRuntime        bool // TDD-00122: the `test` module's mustCall registry + exit verifier
+	testTrampolines        map[string]bool
+	testSkipFmtEmitted     bool
+	testMustNotCallEmitted bool
+	dnsDeclared            bool
+	getaddrinfoDeclared    bool
+	usedCPKill             bool
+	usedWorkerRuntime      bool
+	hasWorkers             bool // set at EmitProgram start from Program.WorkerModules
+	workerEntries          map[string]*workerEntryInfo
+	currentWorkerMod       string
+	workerAdaptCtr         int
 	// TDD-00099: shared memory + channels.
 	usedGCUncollectable      bool
 	usedWeakHelpers          bool
@@ -282,6 +286,10 @@ type Emitter struct {
 	usedForkDecl             bool
 	usedCloseDecl            bool
 	usedWaitpidDecl          bool
+	usedMmapDecl             bool
+	usedShutdownDecl         bool
+	usedHTTPCloseAllConns    bool
+	usedStrHeaderRuntime     bool
 	usedSetenvDecl           bool
 	usedReadDecl             bool
 	usedWriteDecl            bool
@@ -500,25 +508,26 @@ type Emitter struct {
 
 func NewEmitter() *Emitter {
 	e := &Emitter{
-		strConsts:           make(map[string]string),
-		moduleGlobals:       make(map[string]Symbol),
+		strConsts:            make(map[string]string),
+		moduleGlobals:        make(map[string]Symbol),
 		promotedGlobalDecls:  make(map[*ast.VarDeclaration]bool),
 		varsBeingInitialized: make(map[string]bool),
-		funcs:               make(map[string]FuncSig),
-		interfaces:          make(map[string]Type),
-		interfaceMethodSigs: make(map[string]map[string]FuncSig),
-		classes:             make(map[string]ClassInfo),
-		enums:               make(map[string]map[string]Value),
-		enumBacking:         make(map[string]Type),
-		jsonToJSONActive:    make(map[string]bool),
-		genericFuncs:        make(map[string]*ast.FunctionDeclaration),
-		genericInterfaces:   make(map[string]*ast.InterfaceDeclaration),
-		genericTypeAliases:  make(map[string]*ast.TypeAliasDeclaration),
-		genericClasses:      make(map[string]*ast.ClassDeclaration),
-		generators:          make(map[string]*GeneratorInfo),
-		asyncGenStepFns:     make(map[string]string),
-		fnValueTrampolines:  make(map[string]bool),
-		currentRetType:      TypeI32, // main returns i32
+		funcs:                make(map[string]FuncSig),
+		interfaces:           make(map[string]Type),
+		interfaceMethodSigs:  make(map[string]map[string]FuncSig),
+		classes:              make(map[string]ClassInfo),
+		enums:                make(map[string]map[string]Value),
+		enumBacking:          make(map[string]Type),
+		jsonToJSONActive:     make(map[string]bool),
+		genericFuncs:         make(map[string]*ast.FunctionDeclaration),
+		genericInterfaces:    make(map[string]*ast.InterfaceDeclaration),
+		genericTypeAliases:   make(map[string]*ast.TypeAliasDeclaration),
+		genericClasses:       make(map[string]*ast.ClassDeclaration),
+		generators:           make(map[string]*GeneratorInfo),
+		asyncGenStepFns:      make(map[string]string),
+		fnValueTrampolines:   make(map[string]bool),
+		testTrampolines:      make(map[string]bool),
+		currentRetType:       TypeI32, // main returns i32
 	}
 	e.pushScope()
 	return e
@@ -734,15 +743,22 @@ func (e *Emitter) emitLabel(label string) {
 // --- String constants ---
 
 func (e *Emitter) internString(s string) string {
-	if name, ok := e.strConsts[s]; ok {
-		return name
+	if ref, ok := e.strConsts[s]; ok {
+		return ref
 	}
 	name := fmt.Sprintf("@.s%d", e.strIdx)
 	e.strIdx++
 	esc, length := escapeLLVM(s)
-	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant [%d x i8] c\"%s\", align 1", name, length, esc))
-	e.strConsts[s] = name
-	return name
+	dataLen := length - 1 // escapeLLVM's length includes the trailing NUL
+	// TDD-00120 Stage 2: a string literal carries the same 8-byte length header
+	// as a heap string — `{ i64 len, [N x i8] bytes }` — and the string *value*
+	// is a pointer to the bytes (field 1), so `__kml_str_len(ptr)` reads the true
+	// length from ptr-8 uniformly for literals and heap strings alike. The bytes
+	// stay NUL-terminated, so every strlen consumer keeps working meanwhile.
+	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\" }, align 8", name, length, dataLen, length, esc))
+	ref := fmt.Sprintf("getelementptr inbounds ({ i64, [%d x i8] }, ptr %s, i32 0, i32 1)", length, name)
+	e.strConsts[s] = ref
+	return ref
 }
 
 // --- Link flags ---
@@ -1280,7 +1296,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	e.emitGlobal("@__argv_len = internal global i64 0, align 8")
 	argc64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
-	e.emitInstr(fmt.Sprintf("store ptr %%argv, ptr @__argv_ptr, align 8"))
+	// TDD-00120: the OS argv[] entries are foreign char* with no length header;
+	// copy them into length-prefixed strings so process.argv[i] behaves like every
+	// other string (its .length reads the header, not strlen).
+	e.ensureStrHeaderRuntime()
+	argvHdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_argv_headerize(i64 %s, ptr %%argv)", argvHdr, argc64))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__argv_ptr, align 8", argvHdr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__argv_len, align 8", argc64))
 
 	// gc mode: snapshot Boehm's GC_stackbottom (the process's real stack

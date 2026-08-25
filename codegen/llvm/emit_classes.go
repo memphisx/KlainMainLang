@@ -525,6 +525,7 @@ func classHasOwnFieldInit(cd *ast.ClassDeclaration) (any, all bool) {
 //	  Virtual) and assign slot indices to every Virtual slot.
 //	Pass 3: finalize each class's real Ty (field layout now depends on
 //	  Pass 2's HasVTable decision) and publish it into e.interfaces.
+//
 // registerClassNamePlaceholders records the same name-only ClassType placeholder
 // registerClasses' Pass 0 does, but a step earlier — before registerInterfaces —
 // so a class used as an interface/type-alias field type is already resolvable as

@@ -106,9 +106,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		return e.emitInspectObject(v, 0)
 	}
 	e.ensureSprintf()
-	e.ensureMalloc()
-	scratch := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", scratch))
+	scratch := e.emitStringScratch(32) // TDD-00120: length-prefixed; finalized below
 	switch {
 	case v.Ty.IR == "i1":
 		truePtr := e.internString("true")
@@ -143,6 +141,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("cannot convert type %s to string in template literal", v.Ty.IR)
 	}
+	e.emitStringFinalizeLen(scratch)
 	return Value{Ref: scratch, Ty: TypePtr}, nil
 }
 
@@ -1195,6 +1194,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "assert__kml_builtin" {
 				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "test__kml_builtin" {
+				// mustCall/mustNotCall/… return a wrapper with the SAME function
+				// type as the wrapped callback, so a `const cb = mustCall(fn)` is
+				// callable exactly like fn; the rest are void (TDD-00122).
+				switch mem.Property {
+				case "mustCall", "mustCallAtLeast", "mustSucceed":
+					if len(ex.Args) >= 1 {
+						return e.inferExprType(ex.Args[0])
+					}
+					return TypeVoid
+				case "mustNotCall":
+					return FuncType(nil, TypeVoid) // a zero-arg () => void wrapper
+				default:
+					return TypeVoid
+				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "zlib__kml_builtin" {
 				// The *Sync forms return a Buffer; the callback forms return void.

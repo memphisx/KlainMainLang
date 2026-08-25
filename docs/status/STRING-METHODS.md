@@ -33,7 +33,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.match()` / `.matchAll()` | ✅ | • `.matchAll()` returns an eager `string[][]` rather than a lazy iterator ([REGEXP.md](REGEXP.md)) | • PCRE2-backed; `.match()` is real JS-shaped ([REGEXP.md](REGEXP.md)) |
 | `.search(pattern)` | ✅ | • A plain-string `pattern` isn't coerced to a `RegExp` as in real JS — it falls back to the pre-`RegExp` `.indexOf()`-shaped behavior ([ADR-00028](../adr/ADR-00028.md)/[REGEXP.md](REGEXP.md)) | • A `RegExp` `pattern` runs a real PCRE2 search |
 | `.replaceAll()` | ✅ | • An empty search is a no-op, not JS's insert-between-chars behavior ([ADR-00003](../adr/ADR-00003.md)) | |
-| `.localeCompare(other)` | ✅ | • Byte-order comparison via `strcmp` (normalized to exactly `-1`/`0`/`1`), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md)) | |
+| `.localeCompare(other)` | ✅ | • Length-aware byte-order comparison (normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL — [TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md)) | |
 | `String.fromCharCode(n)` | ✅ | | |
 | `String.fromCodePoint(n)` | ✅ | | |
 | `String.raw` tag | ❌ | | |
@@ -41,3 +41,4 @@ Format: [Status page format](README.md#status-page-format).
 ## Known limitations
 
 - The regex-accepting methods (`.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`) carry additional caveats in [REGEXP.md](REGEXP.md) (backreference/callback scope, no implicit string-to-RegExp coercion, etc.), not repeated per row.
+- Comparison (`===`/`<`/`switch`/`.localeCompare`) and substring search (`.indexOf`/`.includes`/`.split`/`.replace`/`.replaceAll`) are binary-safe: they read a length header and search with `memmem`, so an embedded null byte no longer cuts the operation short ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)). The one string consumer still bounded by the NUL is `console.log`'s display — see [CONSOLE.md](CONSOLE.md).

@@ -395,3 +395,17 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00355](ADR-00355.md) | Object members in union types (usable via narrowing) | Implements [TDD-00115](../tdd/TDD-00115.md) |
 | [00356](ADR-00356.md) | Discriminated unions (tagged object unions) | Implements [TDD-00116](../tdd/TDD-00116.md) |
 | [00357](ADR-00357.md) | HTTP/2 server — h2c (cleartext) via nghttp2 | Implements [TDD-00111](../tdd/TDD-00111.md) Stage 3a |
+| [00358](ADR-00358.md) | NUL-terminate the net dispatch 'data' chunk buffer | |
+| [00359](ADR-00359.md) | Cross-worker `http.close()` via a shared mmap flag | Implements [TDD-00117](../tdd/TDD-00117.md) |
+| [00360](ADR-00360.md) | `http.closeAllConnections()` via socket shutdown | Implements [TDD-00118](../tdd/TDD-00118.md) |
+| [00361](ADR-00361.md) | Hide HttpRequest's internal fields from Object.keys/JSON | |
+| [00362](ADR-00362.md) | `req.body` after `req.stream()` throws (body already disturbed) | Extends [ADR-00301](ADR-00301.md), [ADR-00307](ADR-00307.md) |
+| [00363](ADR-00363.md) | Union response bodies (`string \| ReadableStream`) for `http.listen` | Implements [TDD-00119](../tdd/TDD-00119.md) |
+| [00364](ADR-00364.md) | Binary-safe string consumers — length/compare/search switch | Implements [TDD-00120](../tdd/TDD-00120.md) |
+| [00365](ADR-00365.md) | In-scope Test262 subset counter beside the raw full-corpus number | Implements [TDD-00121](../tdd/TDD-00121.md) |
+| [00366](ADR-00366.md) | Node-core conformance track — pure-module corpus runner | Implements [TDD-00121](../tdd/TDD-00121.md) |
+| [00367](ADR-00367.md) | TypeScript acceptance oracle — front-end accept/reject vs baselines | Implements [TDD-00121](../tdd/TDD-00121.md) |
+| [00368](ADR-00368.md) | path.basename suffix strip is binary-safe (length header, not NUL) | Extends [ADR-00364](ADR-00364.md), Implements [TDD-00120](../tdd/TDD-00120.md) |
+| [00369](ADR-00369.md) | Static CommonJS `require('<literal>')` desugars to an ES import | Extends [ADR-00135](ADR-00135.md) |
+| [00370](ADR-00370.md) | Native `test` builtin — `mustCall` family via a counting-closure trampoline | Implements [TDD-00122](../tdd/TDD-00122.md) |
+| [00371](ADR-00371.md) | TypeScript type assertions (`as T` / `as const` / `satisfies`) — parsed and erased | |

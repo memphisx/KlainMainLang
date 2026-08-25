@@ -579,6 +579,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assert__kml_builtin" {
 			return e.emitAssertModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
+			return e.emitTestModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.isCryptoSubtle(mem.Object) {
 			return e.emitCryptoSubtleCall(mem.Property, ex.Args, ex.GetPos())
 		}
@@ -599,6 +602,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitHTTPListen(ex.Args, ex.GetPos())
 			case "close":
 				return e.emitHTTPClose(ex.Args, ex.GetPos())
+			case "closeAllConnections":
+				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" && !e.isShadowedByLocal(id.Name) {

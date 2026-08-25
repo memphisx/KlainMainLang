@@ -2,13 +2,13 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 11/12 (~92%) · **Strict Coverage**: 8/12 (~67%).
+**Coverage**: 11/12 (~92%) · **Strict Coverage**: 7/12 (~58%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `console.log(...)` | ✅ | | • Multiple arguments join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `"0"`) — [ADR-00285](../adr/ADR-00285.md) |
+| `console.log(...)` | ✅ | • A printed string is written via `printf`'s `"%s"`, so a value with an embedded null byte truncates *on display* at the first `\0` — the stored string is intact (`.length` and every operation see the full bytes); a binary-safe `fwrite` print is deferred as display-only, low-value ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)). Use `process.stdout.write` for binary output | • Multiple arguments join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `"0"`) — [ADR-00285](../adr/ADR-00285.md) |
 | `console.error(...)` | ✅ | | • Writes to stderr |
 | `console.warn(...)` | ✅ | | • Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/ADR-00285.md)) |
 | `console.info(...)` | ✅ | | |

@@ -22,6 +22,7 @@ func (e *Emitter) ensurePathNormalize() {
 	e.ensureRealloc()
 	e.ensureMemcpy()
 	e.ensureStrlen()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define void @__kml_path_stack_append(ptr %stackslot, ptr %item) {
 entry:
@@ -67,14 +68,14 @@ emptycase:
   br i1 %is_absolute, label %rootcase, label %dotcase
 
 rootcase:
-  %rootbuf = call ptr @malloc(i64 2)
+  %rootbuf = call ptr @__kml_str_alloc(i64 1)
   store i8 47, ptr %rootbuf, align 1
   %rootnull = getelementptr i8, ptr %rootbuf, i64 1
   store i8 0, ptr %rootnull, align 1
   ret ptr %rootbuf
 
 dotcase:
-  %dotbuf = call ptr @malloc(i64 2)
+  %dotbuf = call ptr @__kml_str_alloc(i64 1)
   store i8 46, ptr %dotbuf, align 1
   %dotnull = getelementptr i8, ptr %dotbuf, i64 1
   store i8 0, ptr %dotnull, align 1
@@ -103,8 +104,8 @@ appendfirst:
 
 appendfirstabs:
   %seglen_f = call i64 @strlen(ptr %seg)
-  %totalf = add i64 %seglen_f, 2
-  %buff = call ptr @malloc(i64 %totalf)
+  %buffdata = add i64 %seglen_f, 1
+  %buff = call ptr @__kml_str_alloc(i64 %buffdata)
   store i8 47, ptr %buff, align 1
   %destf = getelementptr i8, ptr %buff, i64 1
   %seglen_f1 = add i64 %seglen_f, 1
@@ -121,8 +122,8 @@ appendrest:
   %alen = call i64 @strlen(ptr %accr)
   %slen2 = call i64 @strlen(ptr %seg)
   %sumlen = add i64 %alen, %slen2
-  %totalr = add i64 %sumlen, 2
-  %bufr = call ptr @malloc(i64 %totalr)
+  %bufrdata = add i64 %sumlen, 1
+  %bufr = call ptr @__kml_str_alloc(i64 %bufrdata)
   call ptr @memcpy(ptr %bufr, ptr %accr, i64 %alen)
   %sepp = getelementptr i8, ptr %bufr, i64 %alen
   store i8 47, ptr %sepp, align 1
@@ -207,7 +208,7 @@ dd_push_or_drop:
   br i1 %is_absolute, label %done, label %dd_push_dotdot
 
 dd_push_dotdot:
-  %ddbuf = call ptr @malloc(i64 3)
+  %ddbuf = call ptr @__kml_str_alloc(i64 2)
   store i8 46, ptr %ddbuf, align 1
   %ddp1 = getelementptr i8, ptr %ddbuf, i64 1
   store i8 46, ptr %ddp1, align 1
@@ -217,8 +218,7 @@ dd_push_dotdot:
   br label %done
 
 pushplain:
-  %plen1 = add i64 %seglen, 1
-  %pbuf = call ptr @malloc(i64 %plen1)
+  %pbuf = call ptr @__kml_str_alloc(i64 %seglen)
   %psrc = getelementptr i8, ptr %raw, i64 %start
   call ptr @memcpy(ptr %pbuf, ptr %psrc, i64 %seglen)
   %pnullp = getelementptr i8, ptr %pbuf, i64 %seglen
@@ -290,6 +290,7 @@ func (e *Emitter) ensurePathDirname() {
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.ensureStrlen()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_path_dirname(ptr %path) {
 entry:
@@ -298,7 +299,7 @@ entry:
   br i1 %lenzero, label %ret_dot, label %trimtrail_init
 
 ret_dot:
-  %dotbuf = call ptr @malloc(i64 2)
+  %dotbuf = call ptr @__kml_str_alloc(i64 1)
   store i8 46, ptr %dotbuf, align 1
   %dotnull = getelementptr i8, ptr %dotbuf, i64 1
   store i8 0, ptr %dotnull, align 1
@@ -331,7 +332,7 @@ trimtrail_done:
   br i1 %allslash, label %ret_root, label %findslash_init
 
 ret_root:
-  %rootbuf = call ptr @malloc(i64 2)
+  %rootbuf = call ptr @__kml_str_alloc(i64 1)
   store i8 47, ptr %rootbuf, align 1
   %rootnull = getelementptr i8, ptr %rootbuf, i64 1
   store i8 0, ptr %rootnull, align 1
@@ -349,7 +350,7 @@ findslash_check:
   br i1 %scanlt0, label %ret_dot2, label %findslash_test
 
 ret_dot2:
-  %dotbuf2 = call ptr @malloc(i64 2)
+  %dotbuf2 = call ptr @__kml_str_alloc(i64 1)
   store i8 46, ptr %dotbuf2, align 1
   %dotnull2 = getelementptr i8, ptr %dotbuf2, i64 1
   store i8 0, ptr %dotnull2, align 1
@@ -372,7 +373,7 @@ findslash_done:
   br i1 %isroot, label %ret_root2, label %ret_substr
 
 ret_root2:
-  %rootbuf2 = call ptr @malloc(i64 2)
+  %rootbuf2 = call ptr @__kml_str_alloc(i64 1)
   store i8 47, ptr %rootbuf2, align 1
   %rootnull2 = getelementptr i8, ptr %rootbuf2, i64 1
   store i8 0, ptr %rootnull2, align 1
@@ -380,7 +381,7 @@ ret_root2:
 
 ret_substr:
   %sublen1 = add i64 %slashpos, 1
-  %subbuf = call ptr @malloc(i64 %sublen1)
+  %subbuf = call ptr @__kml_str_alloc(i64 %slashpos)
   call ptr @memcpy(ptr %subbuf, ptr %path, i64 %slashpos)
   %subnull = getelementptr i8, ptr %subbuf, i64 %slashpos
   store i8 0, ptr %subnull, align 1
@@ -419,7 +420,7 @@ trimtrail_entry:
   br i1 %lenzero, label %ret_empty0, label %trimtrail_init
 
 ret_empty0:
-  %ebuf0 = call ptr @malloc(i64 1)
+  %ebuf0 = call ptr @__kml_str_alloc(i64 0)
   store i8 0, ptr %ebuf0, align 1
   ret ptr %ebuf0
 
@@ -450,7 +451,7 @@ trimtrail_done:
   br i1 %allslash, label %ret_empty1, label %findslash_init
 
 ret_empty1:
-  %ebuf1 = call ptr @malloc(i64 1)
+  %ebuf1 = call ptr @__kml_str_alloc(i64 0)
   store i8 0, ptr %ebuf1, align 1
   ret ptr %ebuf1
 
@@ -481,7 +482,7 @@ findslash_done:
   %start = add i64 %slashpos, 1
   %baselen = sub i64 %endfinal, %start
   %baselen1 = add i64 %baselen, 1
-  %basebuf = call ptr @malloc(i64 %baselen1)
+  %basebuf = call ptr @__kml_str_alloc(i64 %baselen)
   %basesrc = getelementptr i8, ptr %path, i64 %start
   call ptr @memcpy(ptr %basebuf, ptr %basesrc, i64 %baselen)
   %basenull = getelementptr i8, ptr %basebuf, i64 %baselen
@@ -504,8 +505,15 @@ sufcheck:
   br i1 %matches, label %truncate, label %done
 
 truncate:
-  store i8 0, ptr %sufp, align 1
-  br label %done
+  ; The suffix matched: return a base of length %sufoffset. A bare NUL store
+  ; would not work — length-carrying strings (TDD-00120) read their i64 header,
+  ; not a terminator, so .length/=== would still see the full untruncated length.
+  ; Allocate a correctly-headered buffer instead.
+  %tbuf = call ptr @__kml_str_alloc(i64 %sufoffset)
+  call ptr @memcpy(ptr %tbuf, ptr %basebuf, i64 %sufoffset)
+  %tnull = getelementptr i8, ptr %tbuf, i64 %sufoffset
+  store i8 0, ptr %tnull, align 1
+  ret ptr %tbuf
 
 done:
   ret ptr %basebuf
@@ -541,7 +549,7 @@ scancheck:
   br i1 %scanlt0, label %ret_empty, label %scantest
 
 ret_empty:
-  %ebuf = call ptr @malloc(i64 1)
+  %ebuf = call ptr @__kml_str_alloc(i64 0)
   store i8 0, ptr %ebuf, align 1
   ret ptr %ebuf
 
@@ -562,14 +570,14 @@ gotdot:
   br i1 %atstart, label %ret_empty2, label %ret_ext
 
 ret_empty2:
-  %ebuf2 = call ptr @malloc(i64 1)
+  %ebuf2 = call ptr @__kml_str_alloc(i64 0)
   store i8 0, ptr %ebuf2, align 1
   ret ptr %ebuf2
 
 ret_ext:
   %extlen = sub i64 %blen, %dotpos
   %extlen1 = add i64 %extlen, 1
-  %extbuf = call ptr @malloc(i64 %extlen1)
+  %extbuf = call ptr @__kml_str_alloc(i64 %extlen)
   %extsrc = getelementptr i8, ptr %base, i64 %dotpos
   call ptr @memcpy(ptr %extbuf, ptr %extsrc, i64 %extlen1)
   ret ptr %extbuf

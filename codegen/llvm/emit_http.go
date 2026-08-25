@@ -316,6 +316,24 @@ func (e *Emitter) emitHTTPClose(args []ast.Expression, pos ast.Pos) (Value, erro
 	return Value{Ty: TypeVoid}, nil
 }
 
+// emitHTTPCloseAllConnections implements http.closeAllConnections() (TDD-00118):
+// the forceful counterpart to http.close() — it terminates in-flight connections
+// (via shutdown(2), letting each fiber unwind through its own EOF finish path)
+// rather than letting them drain. Like http.close() it's a bare global reachable
+// only from inside the running event loop, and it propagates across a
+// { workers: N } cluster. ensureHTTPRuntime() (idempotent) guarantees the
+// runtime and the shared cluster flag exist even if this is registered textually
+// before http.listen (e.g. inside a process.on('SIGINT', ...) handler).
+func (e *Emitter) emitHTTPCloseAllConnections(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: http.closeAllConnections takes no arguments", pos.Line, pos.Col)
+	}
+	e.ensureHTTPRuntime()
+	e.ensureHTTPCloseAllConns()
+	e.emitInstr("call void @__kml_http_close_all_conns()")
+	return Value{Ty: TypeVoid}, nil
+}
+
 // emitClusterIsPrimary/emitClusterWorkerID implement the read-only
 // cluster.isPrimary/cluster.workerId globals (TDD-00025) — 0 for the
 // original process, 1..N-1 for each fork spawned by
@@ -774,14 +792,13 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	bufFinal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufFinal, bufPtrA))
 
-
 	e.ensureSscanf()
-	methodPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", methodPtr))
+	methodPtr := e.emitStringScratch(16) // TDD-00120: req.method is length-prefixed
 	pathPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 2048)", pathPtr))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 2048)", pathPtr)) // intermediate; split_first copies out
 	scanFmt := e.internString("%15s %2047s")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sscanf(ptr %s, ptr %s, ptr %s, ptr %s)", bufFinal, scanFmt, methodPtr, pathPtr))
+	e.emitStringFinalizeLen(methodPtr)
 
 	qMark := e.internString("?")
 	qSplit := e.freshReg()
@@ -838,10 +855,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 4", bodyStartFinal, headerEndFinal))
 	bodySrc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", bodySrc, bufFinal, bodyStartFinal))
-	bodyAlloc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bodyAlloc, contentLenFinal))
-	bodyBuf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", bodyBuf, bodyAlloc))
+	// TDD-00120: req.body is length-prefixed (its .length now reads the header),
+	// binary-safe past an embedded NUL. bodyBytes() uses the same buffer with the
+	// exact bodyLength, unaffected.
+	bodyBuf := e.emitStringAlloc(contentLenFinal)
 	// Copy only what has actually arrived (== Content-Length in buffered
 	// mode; possibly less under Stage 5b's headers-complete dispatch).
 	trFinal := e.freshReg()
@@ -946,6 +963,24 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	// stream ends. A slow producer therefore never blocks other connections.
 	streamingBody := bodyTy.IsReadableStream
 
+	// A union body `string | ReadableStream<...>` (TDD-00119): the body field is
+	// a runtime { i8, i64 } box. The compile-time buffered-vs-chunked choice
+	// becomes a runtime branch on the box's tag (kmlTagStream vs kmlTagString) —
+	// handled in its own tail below, skipping the single-shape buffered/bodyBytes
+	// length machinery entirely.
+	unionBody := bodyTy.IsDynamic && len(bodyTy.UnionMembers) > 0
+	var unionStreamMember *Type
+	if unionBody {
+		for i := range bodyTy.UnionMembers {
+			if bodyTy.UnionMembers[i].IsReadableStream {
+				unionStreamMember = &bodyTy.UnionMembers[i]
+			}
+		}
+		if unionStreamMember == nil {
+			return fmt.Errorf("a union http response body must include a ReadableStream member (e.g. string | ReadableStream<Uint8Array>)")
+		}
+	}
+
 	// Optional binary response body (TDD-00026/ADR-00106): bodyBytes wins
 	// over body's own strlen-computed length whenever it's present at the
 	// type level *and* non-null at runtime (a null bodyBytes falls back to
@@ -957,8 +992,9 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	// binary payload (embedded null bytes and all) reaches the socket whole
 	// — see runtime_http.go.
 	var bodyDataRef, bodyLenRef string
-	if bbIdx, bbTy, ok := retTy.FieldIndex("bodyBytes"); streamingBody {
-		// The buffered body refs are unused on the streaming tail below.
+	if bbIdx, bbTy, ok := retTy.FieldIndex("bodyBytes"); streamingBody || unionBody {
+		// The buffered body refs are unused on the streaming/union tails below
+		// (the union tail computes its own from the unboxed string payload).
 		bodyDataRef, bodyLenRef = "null", "0"
 	} else if ok {
 		bbGep := e.freshReg()
@@ -985,9 +1021,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeBBL))
 
 		e.emitLabel(noBBL)
-		e.ensureStrlen()
-		strLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", strLen, bodyReg))
+		strLen := e.emitStrLenHeader(bodyReg) // TDD-00120: binary-safe response body length
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeBBL))
 
 		e.emitLabel(mergeBBL)
@@ -998,9 +1032,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		bodyDataRef = dataFinal
 		bodyLenRef = lenFinal
 	} else {
-		e.ensureStrlen()
-		strLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", strLen, bodyReg))
+		strLen := e.emitStrLenHeader(bodyReg) // TDD-00120: binary-safe response body length
 		bodyDataRef = bodyReg
 		bodyLenRef = strLen
 	}
@@ -1020,7 +1052,54 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", activeNew))
 	}
 
-	if streamingBody {
+	if unionBody {
+		// TDD-00119: the body box's tag picks the tail at runtime — kmlTagStream
+		// → chunked writer (unbox the stream pointer), otherwise → buffered writer
+		// (unbox the string pointer). bodyReg is the { i8, i64 } box.
+		tagReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", tagReg, bodyReg))
+		payloadReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 1", payloadReg, bodyReg))
+		isStreamReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStreamReg, tagReg, kmlTagStream))
+		streamL := e.freshLabel("http.unionstream")
+		bufferL := e.freshLabel("http.unionbuffer")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStreamReg, streamL, bufferL))
+
+		// Stream branch — same chunked tail as the statically-streaming case.
+		e.emitLabel(streamL)
+		streamPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", streamPtr, payloadReg))
+		chunkTy := TypeI64
+		if unionStreamMember.StreamChunk != nil {
+			chunkTy = *unionStreamMember.StreamChunk
+		}
+		isText := "1"
+		if chunkTy.IsArray {
+			isText = "0"
+		} else if chunkTy.IR != "ptr" {
+			return fmt.Errorf("a streaming http response body must be ReadableStream<Uint8Array> or ReadableStream<string>")
+		}
+		e.ensureHTTPStreamRuntime()
+		decode := e.emitStreamDecodeThunk(chunkTy)
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_stream_head(i32 %s, i64 %s, ptr %s)", fd32, statusVal.Ref, extraHeadersRef))
+		ufd64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", ufd64, fd32))
+		e.emitInstr(fmt.Sprintf("call void @__kml_hws_start(i64 %s, ptr %s, ptr %s, i64 %s)", ufd64, streamPtr, decode, isText))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+		e.emitTerminator("ret void")
+
+		// Buffered branch — unbox the string and write it whole via strlen.
+		e.emitLabel(bufferL)
+		strPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", strPtr, payloadReg))
+		e.ensureStrlen()
+		uStrLen := e.emitStrLenHeader(strPtr) // TDD-00120: binary-safe
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, strPtr, uStrLen, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+		emitConnActiveDecrement()
+		e.emitTerminator("ret void")
+	} else if streamingBody {
 		// TDD-00097 Stage 5: chunked-transfer tail. Send the chunked head,
 		// hand the fd to the reaction-driven %kml.hws writer, and return —
 		// the writer closes the fd and decrements the active-connection
@@ -1194,9 +1273,24 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
 		// query map (query parsing off the h2 path is a follow-on).
 		emptyQuery := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyQuery))
+		// TDD-00120: method/path/body arrive as foreign nghttp2 char* with no
+		// length header — copy them into length-prefixed strings (body keeps its
+		// exact byte count, so it's binary-safe).
+		e.ensureStrHeaderRuntime()
+		e.ensureMemcpy()
+		mh := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %%method)", mh))
+		ph := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %%path)", ph))
+		bh := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %%bodyLen)", bh))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %%body, i64 %%bodyLen)", bh))
+		bnul := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %%bodyLen", bnul, bh))
+		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", bnul))
 		resp := e.emitHTTPCallHandler(paramTy, retTy, isAsyncHandler, httpReqInputs{
-			method: "%method", path: "%path", query: emptyQuery,
-			headers: "%headers", body: "%body", bodyLength: "%bodyLen",
+			method: mh, path: ph, query: emptyQuery,
+			headers: "%headers", body: bh, bodyLength: "%bodyLen",
 			bodyctx: "null",
 		})
 		return "ret ptr " + resp

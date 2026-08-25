@@ -39,15 +39,84 @@ import (
 // always a fixed two-key indented block) not to need one.
 type frontmatter struct {
 	Includes      []string
-	NegativePhase string // "parse", "resolution", or "runtime" — empty if not a negative test
+	Features      []string // the `features: [...]` tag list — drives the in-scope subset filter
+	Flags         []string // the `flags: [...]` list (onlyStrict/noStrict/module/raw/async/…)
+	NegativePhase string   // "parse", "resolution", or "runtime" — empty if not a negative test
 }
 
 var (
 	reIncludes = regexp.MustCompile(`(?m)^includes:\s*\[([^\]]*)\]`)
+	reFeatures = regexp.MustCompile(`(?m)^features:\s*\[([^\]]*)\]`)
+	reFlags    = regexp.MustCompile(`(?m)^flags:\s*\[([^\]]*)\]`)
 	reNegPhase = regexp.MustCompile(`(?m)^negative:\s*\n\s*phase:\s*(\S+)`)
 	rePos      = regexp.MustCompile(`^\d+:\d+:\s*`)
 	reQuoted   = regexp.MustCompile(`'[^']*'`)
 )
+
+// outOfScopeFeature lists Test262 `features` tags that name capabilities this
+// compiler deliberately does not target, so a file tagged with one is excluded
+// from the in-scope subset (see inScope). This is the honest denominator: the
+// raw full-corpus number counts these; the in-scope number does not, because
+// failing them is a scope decision, not a per-feature bug. Kept deliberately
+// conservative — when in doubt a feature is left IN scope (which can only lower
+// the in-scope number, never inflate it) — and grouped by the reason it's out.
+// Intl.* and Temporal.* are matched by prefix in inScope, not enumerated here.
+var outOfScopeFeature = map[string]bool{
+	// Dynamic code / dynamic module loading — eval and dynamic import() are an
+	// opt-in embedded-engine path (TDD-00046), not started.
+	"dynamic-import":    true,
+	"import-assertions": true,
+	"import-attributes": true,
+	"IsHTMLDDA":         true, // the [[IsHTMLDDA]] document.all sentinel — legacy web-compat
+	// Dynamic object model — no Proxy / Reflect / prototype mutation
+	// (fixed-shape struct object model; TDD-00068 deferred).
+	"Proxy":                  true,
+	"proxy-missing-checks":   true,
+	"Reflect":                true,
+	"Reflect.construct":      true,
+	"Reflect.set":            true,
+	"Reflect.setPrototypeOf": true,
+	"__proto__":              true,
+	"__getter__":             true,
+	"__setter__":             true,
+	// Realms / cross-realm evaluation — no ShadowRealm.
+	"ShadowRealm": true,
+	// Resource management (`using` / `await using`) — not targeted.
+	"explicit-resource-management": true,
+	// Engine-internal optimizations with no observable typed-subset surface.
+	"tail-call-optimization": true,
+	// Runtime decorators / decorator metadata — not targeted at runtime.
+	"decorators": true,
+}
+
+// inScope decides whether a Test262 file belongs to this compiler's target
+// (the typed, no-eval, no-dynamic-object, no-Intl subset). It is a purely
+// mechanical filter over the file's own frontmatter — category, flags, and
+// features — so the in-scope denominator is reproducible and auditable, never
+// hand-curated per file.
+func inScope(fm frontmatter, category string) bool {
+	switch category {
+	case "intl402", "annexB", "staging":
+		return false // internationalization / legacy web-compat / not-yet-standard proposals
+	}
+	for _, fl := range fm.Flags {
+		switch fl {
+		case "raw", // no harness at all — usually an engine/parse detail
+			"async",  // async harness path deferred until measured (not that it can't run)
+			"module": // module-graph negative/semantics tests beyond the single-entry model
+			return false
+		}
+	}
+	for _, ft := range fm.Features {
+		if strings.HasPrefix(ft, "Intl") || strings.HasPrefix(ft, "Temporal") {
+			return false
+		}
+		if outOfScopeFeature[ft] {
+			return false
+		}
+	}
+	return true
+}
 
 // regexModeFlag mirrors klainmain's -regex flag (TDD-00067) for the compiled
 // test binaries, so a conformance run can measure a specific RegExp dialect
@@ -64,18 +133,29 @@ func parseFrontmatter(src string) frontmatter {
 		return fm
 	}
 	block := src[start:end]
-	if m := reIncludes.FindStringSubmatch(block); m != nil {
-		for _, inc := range strings.Split(m[1], ",") {
-			inc = strings.TrimSpace(inc)
-			if inc != "" {
-				fm.Includes = append(fm.Includes, inc)
-			}
-		}
-	}
+	fm.Includes = parseFlowList(reIncludes, block)
+	fm.Features = parseFlowList(reFeatures, block)
+	fm.Flags = parseFlowList(reFlags, block)
 	if m := reNegPhase.FindStringSubmatch(block); m != nil {
 		fm.NegativePhase = m[1]
 	}
 	return fm
+}
+
+// parseFlowList extracts a single-line `key: [a, b, c]` flow list from the
+// frontmatter block — the shape Test262 uses for includes/features/flags.
+func parseFlowList(re *regexp.Regexp, block string) []string {
+	m := re.FindStringSubmatch(block)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, item := range strings.Split(m[1], ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // normalizeReason buckets a failure so the report can surface the single
@@ -96,6 +176,7 @@ type result struct {
 	Path     string // relative to <corpus>/test
 	Category string // first path segment: language, built-ins, intl402, staging, annexB
 	Pass     bool
+	InScope  bool   // this file is in this compiler's target subset (see inScope) — drives the in-scope counter
 	Reason   string // empty when Pass
 	Blocker  string // compile-phase failures only: the concrete identifier/API the file died on (see blockerOf)
 }
@@ -142,8 +223,26 @@ func main() {
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
+	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), or ts (TypeScript acceptance oracle, Track C)")
 	flag.Parse()
 	regexModeFlag = *regexMode
+
+	// TDD-00121 Tracks B/C run entirely different corpora with different oracles
+	// (Node behavioral run; TS front-end accept/reject) — dispatch to their own
+	// runners, which reuse the shared helpers (killableCommand/firstLine/…) but
+	// not the Test262 file walk below.
+	switch *suite {
+	case "test262":
+		// fall through to the Test262 runner below
+	case "node":
+		runNodeSuite(*workDir, *perFileTimeout)
+		return
+	case "ts":
+		runTSSuite(*workDir, *perFileTimeout)
+		return
+	default:
+		fatal("unknown -suite %q (want test262, node, or ts)", *suite)
+	}
 
 	testDir := filepath.Join(*corpus, "test")
 	harnessDir := filepath.Join(*corpus, "harness")
@@ -319,6 +418,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		return res
 	}
 	fm := parseFrontmatter(string(src))
+	res.InScope = inScope(fm, res.Category)
 
 	full := defaultHarness
 	for _, inc := range fm.Includes {
@@ -515,7 +615,8 @@ func writeReport(path string, all []result) error {
 
 	total := len(all)
 	passed := 0
-	byCat := map[string]*struct{ total, pass int }{}
+	inTotal, inPassed := 0, 0
+	byCat := map[string]*struct{ total, pass, inTotal, inPass int }{}
 	byReason := map[string]int{}
 	byPhase := map[string]int{}
 	byBlocker := map[string]int{}
@@ -524,10 +625,18 @@ func writeReport(path string, all []result) error {
 	for _, r := range all {
 		c, ok := byCat[r.Category]
 		if !ok {
-			c = &struct{ total, pass int }{}
+			c = &struct{ total, pass, inTotal, inPass int }{}
 			byCat[r.Category] = c
 		}
 		c.total++
+		if r.InScope {
+			inTotal++
+			c.inTotal++
+			if r.Pass {
+				inPassed++
+				c.inPass++
+			}
+		}
 		if r.Pass {
 			passed++
 			c.pass++
@@ -552,7 +661,21 @@ func writeReport(path string, all []result) error {
 	}
 	fmt.Fprintf(&b, "## Overall\n\n%d / %d passed (%.1f%%)\n\n", passed, total, pct)
 
-	b.WriteString("## By top-level category\n\n| Category | Passed | Total | % | What it covers |\n|---|---|---|---|---|\n")
+	// In-scope subset — the honest apples-to-apples number. Sits *beside* the
+	// raw overall above, never replacing it: the raw number is the full corpus
+	// (most of which is out of this compiler's target by construction), while
+	// this is the pass rate over only the files the compiler actually targets,
+	// filtered mechanically from each file's own frontmatter (see inScope). The
+	// two bound the same thing from opposite ends — the raw number is the floor,
+	// this is what "in-scope correctness" actually measures.
+	inPct := 0.0
+	if inTotal > 0 {
+		inPct = 100 * float64(inPassed) / float64(inTotal)
+	}
+	outTotal := total - inTotal
+	fmt.Fprintf(&b, "## In-scope subset\n\n**%d / %d passed (%.1f%%)** over the in-scope subset — the files this compiler targets, selected mechanically by frontmatter (excluding `intl402`/`annexB`/`staging`, the `raw`/`async`/`module` flags, and out-of-scope `features` like `Temporal`/`Intl.*`/`dynamic-import`/`Proxy`/`Reflect`/`explicit-resource-management`). The remaining %d files are out of scope by design and are excluded here but still counted in the raw **Overall** number above. This is not a curated pass-list: it is a reproducible filter over the corpus's own tags.\n\n", inPassed, inTotal, inPct, outTotal)
+
+	b.WriteString("## By top-level category\n\n| Category | Passed | Total | % | In-scope pass | In-scope total | In-scope % | What it covers |\n|---|---|---|---|---|---|---|---|\n")
 	cats := make([]string, 0, len(byCat))
 	for c := range byCat {
 		cats = append(cats, c)
@@ -564,11 +687,15 @@ func writeReport(path string, all []result) error {
 		if s.total > 0 {
 			p = 100 * float64(s.pass) / float64(s.total)
 		}
+		ip := 0.0
+		if s.inTotal > 0 {
+			ip = 100 * float64(s.inPass) / float64(s.inTotal)
+		}
 		desc := categoryDesc[c]
 		if desc == "" {
 			desc = "—"
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %s |\n", c, s.pass, s.total, p, desc)
+		fmt.Fprintf(&b, "| %s | %d | %d | %.1f%% | %d | %d | %.1f%% | %s |\n", c, s.pass, s.total, p, s.inPass, s.inTotal, ip, desc)
 	}
 
 	// Failures grouped by the pipeline phase they died in — the single most

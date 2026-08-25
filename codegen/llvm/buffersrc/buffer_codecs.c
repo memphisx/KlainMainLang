@@ -11,11 +11,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* TDD-00120: length-prefixed heap string — [i64 len][bytes][\0], value ptr at
+ * base+8, so KML string ops read the true length via ptr-8. The codec encoders
+ * (hex/base64/latin1 -> string) return one of these; the decoders (-> byte
+ * buffer) keep plain malloc. */
+static char *kml_str_hdr_alloc(long len) {
+	char *base = (char *)malloc((size_t)(8 + len + 1));
+	if (!base) return base;
+	*(long *)base = len;
+	return base + 8;
+}
+
 /* ---- hex ---- */
 
 char *__kml_buf_hex_enc(const unsigned char *src, long long n) {
 	static const char digits[] = "0123456789abcdef";
-	char *out = (char *)malloc((size_t)(n * 2 + 1));
+	char *out = kml_str_hdr_alloc(n * 2);
 	for (long long i = 0; i < n; i++) {
 		out[i * 2] = digits[src[i] >> 4];
 		out[i * 2 + 1] = digits[src[i] & 0xF];
@@ -53,7 +64,7 @@ char *__kml_buf_b64_enc(const unsigned char *src, long long n, int urlsafe) {
 	static const char url_al[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 	const char *al = urlsafe ? url_al : std_al;
 	long long groups = (n + 2) / 3;
-	char *out = (char *)malloc((size_t)(groups * 4 + 1));
+	char *out = kml_str_hdr_alloc(groups * 4);
 	long long o = 0;
 	for (long long i = 0; i < n; i += 3) {
 		unsigned v = (unsigned)src[i] << 16;
@@ -106,7 +117,7 @@ long long __kml_buf_b64_dec(const char *s, unsigned char **out) {
 /* bytes -> UTF-8 string: 0x00–0x7F pass through, 0x80–0xFF become the
  * 2-byte UTF-8 encoding of U+0080–U+00FF. */
 char *__kml_buf_latin1_str(const unsigned char *src, long long n) {
-	char *out = (char *)malloc((size_t)(n * 2 + 1));
+	char *out = kml_str_hdr_alloc(n * 2); /* max; actual length set below */
 	long long o = 0;
 	for (long long i = 0; i < n; i++) {
 		unsigned char b = src[i];
@@ -118,6 +129,7 @@ char *__kml_buf_latin1_str(const unsigned char *src, long long n) {
 		}
 	}
 	out[o] = 0;
+	*(long *)(out - 8) = o; /* TDD-00120: actual UTF-8 length */
 	return out;
 }
 

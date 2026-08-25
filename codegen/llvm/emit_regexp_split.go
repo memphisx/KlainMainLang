@@ -226,10 +226,7 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	storeSegment := func(startReg, endReg string) {
 		segLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", segLen, endReg, startReg))
-		segLenPlus1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", segLenPlus1, segLen))
-		buf := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, segLenPlus1))
+		buf := e.emitStringAlloc(segLen) // TDD-00120: length-prefixed
 		srcPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcPtr, strVal.Ref, startReg))
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, srcPtr, segLen))

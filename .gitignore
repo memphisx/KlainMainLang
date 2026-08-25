@@ -33,6 +33,11 @@ examples/**
 # ~263MB, pinned by commit SHA in fetch.sh itself, not vendored into git.
 /.test262/
 
+# Fetched Node.js + TypeScript conformance corpora (TDD-00121, fetch.sh) —
+# pinned by release tag in fetch.sh, sparse/blobless, not vendored into git.
+/.node-tests/
+/.ts-tests/
+
 # Generated conformance-run artifacts (tools/conformance) — the committed
 # deliverable is docs/testing/CONFORMANCE-RESULTS.md, not these raw logs.
 /.conformance-out/

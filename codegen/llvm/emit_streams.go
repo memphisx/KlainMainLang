@@ -284,7 +284,6 @@ func objectLiteralProp(ol *ast.ObjectLiteral, key string) ast.Expression {
 	return nil
 }
 
-
 // resolveStreamStrategy destructures a queuing-strategy argument —
 // {highWaterMark, size}, or a CountQueuingStrategy/ByteLengthQueuingStrategy
 // construction — into the evaluated high-water-mark ref (a double), the size

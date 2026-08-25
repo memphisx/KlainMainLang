@@ -38,11 +38,18 @@ func (e *Emitter) ensureReqBodyRuntime() {
 	e.ensureMemcpy()
 	e.ensureErrnoAccessor()
 	e.ensureCurrentTaskGlobal()
+	e.ensureExceptionHelpers() // __kml_reqbody_drain throws a TypeError when disturbed
 
 	rb := reqbodyStructIR
 	rs := rstreamStructIR
 	earlyEndMsg := e.internString("unexpected end of request body")
 	errName := e.internString("Error")
+	// TDD-00097 Stage 5b follow-up (ADR-00362): reading req.body/.bodyBytes()
+	// after req.stream() has consumed the body throws, matching the WHATWG
+	// "body already disturbed" TypeError rather than silently returning the
+	// pre-stream prefix.
+	disturbedMsg := e.internString("request body already consumed by req.stream()")
+	typeErrName := e.internString("TypeError")
 
 	e.emitGlobal("@__kml_reqbody_data = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_reqbody_len = internal thread_local global i64 0, align 8")
@@ -361,7 +368,7 @@ ckstream:
   %%st_p = getelementptr %s, ptr %%ctx, i32 0, i32 4
   %%stream = load ptr, ptr %%st_p, align 8
   %%streamed = icmp ne ptr %%stream, null
-  br i1 %%streamed, label %%ret, label %%loop
+  br i1 %%streamed, label %%disturbed, label %%loop
 loop:
   %%rem_p = getelementptr %s, ptr %%ctx, i32 0, i32 1
   %%rem = load i64, ptr %%rem_p, align 8
@@ -406,7 +413,17 @@ ckconn:
 yield:
   call void @__kml_reqbody_yield_fiber()
   br label %%loop
+disturbed:
+  %%do = call ptr @malloc(i64 24)
+  %%do_kind = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 0
+  store i64 0, ptr %%do_kind, align 8
+  %%do_msg = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 1
+  store ptr %s, ptr %%do_msg, align 8
+  %%do_name = getelementptr { i64, ptr, ptr }, ptr %%do, i32 0, i32 2
+  store ptr %s, ptr %%do_name, align 8
+  call void @__kml_throw(ptr %%do)
+  unreachable
 ret:
   ret void
-}`, rb, rb, rb, rb, rb, errnoAccessor(), httpEagainErrno()))
+}`, rb, rb, rb, rb, rb, errnoAccessor(), httpEagainErrno(), disturbedMsg, typeErrName))
 }

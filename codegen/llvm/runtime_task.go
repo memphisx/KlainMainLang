@@ -32,20 +32,20 @@ import "fmt"
 
 // task struct field indices (LLVM `{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr }`).
 const (
-	taskCtx           = 0
-	taskStack         = 1
-	taskPromiseSlot   = 2
-	taskState         = 3
-	taskPendingFetch  = 4
-	taskPendingGroup  = 5
-	taskPendingProm   = 6
-	taskFn            = 7
-	taskArgs          = 8
-	taskResumerCtx    = 9
-	taskJmpStk        = 10 // this task's own jmpbuf stack (fiber-safe exceptions)
-	taskSavedJmpTop   = 11 // jmp_top saved across suspension
-	taskStructBytes   = 96
-	taskStructIR      = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }"
+	taskCtx          = 0
+	taskStack        = 1
+	taskPromiseSlot  = 2
+	taskState        = 3
+	taskPendingFetch = 4
+	taskPendingGroup = 5
+	taskPendingProm  = 6
+	taskFn           = 7
+	taskArgs         = 8
+	taskResumerCtx   = 9
+	taskJmpStk       = 10 // this task's own jmpbuf stack (fiber-safe exceptions)
+	taskSavedJmpTop  = 11 // jmp_top saved across suspension
+	taskStructBytes  = 96
+	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }"
 	// promise resolved: 0 = pending, 1 = fulfilled (v0/v1 hold the value), 2 =
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
@@ -197,15 +197,15 @@ func (e *Emitter) ensureTaskRuntime() {
 		return
 	}
 	e.usedTaskRuntime = true
-	e.ensurePromiseRuntime()    // promise struct + __kml_task_alloc_promise (+ microtasks/exceptions)
+	e.ensurePromiseRuntime() // promise struct + __kml_task_alloc_promise (+ microtasks/exceptions)
 	e.ensureMalloc()
 	e.ensureFree()
-	e.ensureFiberRuntime()      // getcontext/makecontext/swapcontext + @__kml_main_ctx
-	e.ensureCurrentTaskGlobal() // @__kml_current_task
-	e.ensureConnPokeGlobal()    // task completion pokes parked connection fibers
-	e.ensureExceptionHelpers()  // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
+	e.ensureFiberRuntime()       // getcontext/makecontext/swapcontext + @__kml_main_ctx
+	e.ensureCurrentTaskGlobal()  // @__kml_current_task
+	e.ensureConnPokeGlobal()     // task completion pokes parked connection fibers
+	e.ensureExceptionHelpers()   // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
 	e.usedAwaitTimerDrive = true // __kml_task_await_ready's top-level drive fires timers (TDD-00088)
-	e.ensureMicrotasks()        // .then/.catch/.finally reactions drain here
+	e.ensureMicrotasks()         // .then/.catch/.finally reactions drain here
 	// The top-level scheduler drive pumps libcurl; a may-suspend program always
 	// uses fetch, so pull in that runtime (idempotent) for @__kml_curl_multi /
 	// curl_multi_perform / __kml_curl_drain_messages rather than re-declaring.

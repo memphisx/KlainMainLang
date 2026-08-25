@@ -191,12 +191,8 @@ func (e *Emitter) emitTextDecoderDecode(objExpr ast.Expression, args []ast.Expre
 		return Value{}, fmt.Errorf("%d:%d: decode expects a Uint8Array or ArrayBuffer", pos.Line, pos.Col)
 	}
 
-	e.ensureMalloc()
 	e.ensureMemcpy()
-	outLenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", outLenReg, byteLenReg))
-	outReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outReg, outLenReg))
+	outReg := e.emitStringAlloc(byteLenReg) // TDD-00120: length-prefixed string
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", outReg, dataReg, byteLenReg))
 	termReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termReg, outReg, byteLenReg))

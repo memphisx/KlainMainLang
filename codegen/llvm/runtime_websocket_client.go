@@ -774,8 +774,7 @@ dcheckdata:
 ddispatch:
   %%dpayload = extractvalue { i32, i32, ptr, i64, i64 } %%decres, 2
   %%dpayloadlen = extractvalue { i32, i32, ptr, i64, i64 } %%decres, 3
-  %%dstrlen = add i64 %%dpayloadlen, 1
-  %%dstrbuf = call ptr @malloc(i64 %%dstrlen)
+  %%dstrbuf = call ptr @__kml_str_alloc(i64 %%dpayloadlen)
   call ptr @memcpy(ptr %%dstrbuf, ptr %%dpayload, i64 %%dpayloadlen)
   %%dtermp = getelementptr i8, ptr %%dstrbuf, i64 %%dpayloadlen
   store i8 0, ptr %%dtermp, align 1

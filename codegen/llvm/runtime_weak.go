@@ -22,6 +22,7 @@
 //     disappearing link in gc mode. A live entry's referent is *cell->link; a
 //     collected referent reads back NULL there.
 //   - val is the WeakMap value (unused for WeakSet).
+//
 // WeakRef is just a bare link cell; deref() loads it.
 //
 // A linked list (not a growable array) keeps every link cell's address stable,

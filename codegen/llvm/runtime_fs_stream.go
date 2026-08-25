@@ -19,6 +19,7 @@ func (e *Emitter) ensureFsReadStream() {
 		return
 	}
 	e.usedFsReadStream = true
+	e.ensureStrHeaderRuntime()
 	e.ensureFsThrow()
 	e.ensureMalloc()
 	e.ensureFree()
@@ -38,19 +39,25 @@ fail:
   call void @__kml_fs_throw(ptr %s, ptr %%path)
   unreachable
 loop:
-  %%sz = add i64 %%hwm, 1
-  %%buf = call ptr @malloc(i64 %%sz)
+  %%buf = call ptr @__kml_str_alloc(i64 %%hwm)
   %%n = call i64 @fread(ptr %%buf, i64 1, i64 %%hwm, ptr %%f)
   %%has = icmp sgt i64 %%n, 0
   br i1 %%has, label %%enq, label %%done
 enq:
+  ; TDD-00120: set the header to the exact bytes read (binary-safe, may be < hwm),
+  ; so a (c: string) chunk's .length is correct. Enqueued chunks are leaked (the
+  ; stream never frees them), so the header raises no free-offset issue.
+  %%hdrp = getelementptr i8, ptr %%buf, i64 -8
+  store i64 %%n, ptr %%hdrp, align 8
   %%term = getelementptr i8, ptr %%buf, i64 %%n
   store i8 0, ptr %%term, align 1
   %%pi = ptrtoint ptr %%buf to i64
   %%ig = call i64 @__kml_rs_enqueue(ptr %%rs, i64 %%pi, i64 0)
   br label %%loop
 done:
-  call void @free(ptr %%buf)
+  ; the final (EOF) buf was never enqueued; free its length-prefixed base.
+  %%base = getelementptr i8, ptr %%buf, i64 -8
+  call void @free(ptr %%base)
   call i32 @fclose(ptr %%f)
   ret void
 }`, modePtr, opDescPtr))

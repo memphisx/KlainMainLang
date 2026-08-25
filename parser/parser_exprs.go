@@ -45,6 +45,26 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		return nil, err
 	}
 
+	// TypeScript type assertions (ADR-00371): `expr as T`, `expr as const`,
+	// `expr satisfies T`. `as`/`satisfies` are contextual keywords (plain
+	// IDENT tokens). Left-associative postfix, looser than the ternary chain.
+	for p.check(lexer.IDENT) && (p.peek().Literal == "as" || p.peek().Literal == "satisfies") {
+		kw := p.advance()
+		// TypeScript type assertions are **erased**: `as T`, `as const`, and
+		// `satisfies T` are all identity at runtime, and this compiler keeps the
+		// expression's own inferred type rather than adopting the asserted one
+		// (a sound reinterpret across differing representations isn't modeled
+		// here). The syntax is consumed and dropped so real TS compiles; the
+		// assertion has no static effect (ADR-00371).
+		if kw.Literal == "as" && p.check(lexer.CONST) {
+			p.advance() // `as const`
+			continue
+		}
+		if _, terr := p.parseTypeAnnotation("as"); terr != nil {
+			return nil, terr
+		}
+	}
+
 	switch p.peek().Type {
 	case lexer.ASSIGN,
 		lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.POW_ASSIGN, lexer.SLASH_ASSIGN, lexer.PERCENT_ASSIGN,

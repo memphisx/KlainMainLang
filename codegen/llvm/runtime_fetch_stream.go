@@ -28,6 +28,7 @@ func (e *Emitter) ensureFetchBodyStream() {
 	e.ensureStreamRuntime()
 	e.ensureAwaitFetchHeaders()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	errName := e.internString("Error")
 
 	pendIR := "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }"
@@ -84,11 +85,12 @@ ck:
 err:
   %%result32 = trunc i64 %%result to i32
   %%errstr = call ptr @curl_easy_strerror(i32 %%result32)
+  %%errstr_hdr = call ptr @__kml_str_from_cstr(ptr %%errstr)
   %%eo = call ptr @malloc(i64 24)
   %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
   store i64 0, ptr %%eo_kind, align 8
   %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
-  store ptr %%errstr, ptr %%eo_msg, align 8
+  store ptr %%errstr_hdr, ptr %%eo_msg, align 8
   %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
   store ptr %s, ptr %%eo_name, align 8
   %%ebits = ptrtoint ptr %%eo to i64

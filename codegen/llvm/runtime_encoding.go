@@ -36,6 +36,7 @@ func (e *Emitter) ensureBase64Encode() {
 	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureBase64Alphabet()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_btoa(ptr %str) {
 entry:
@@ -43,8 +44,7 @@ entry:
   %len_plus2 = add i64 %len, 2
   %ngroups = udiv i64 %len_plus2, 3
   %outlen = mul i64 %ngroups, 4
-  %outlen_plus1 = add i64 %outlen, 1
-  %out = call ptr @malloc(i64 %outlen_plus1)
+  %out = call ptr @__kml_str_alloc(i64 %outlen)
   br label %loopcheck
 
 loopcheck:
@@ -144,14 +144,14 @@ func (e *Emitter) ensureBase64EncodeBytes() {
 	e.usedBase64EncodeBytes = true
 	e.ensureMalloc()
 	e.ensureBase64Alphabet()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_base64_encode_bytes(ptr %str, i64 %len) {
 entry:
   %len_plus2 = add i64 %len, 2
   %ngroups = udiv i64 %len_plus2, 3
   %outlen = mul i64 %ngroups, 4
-  %outlen_plus1 = add i64 %outlen, 1
-  %out = call ptr @malloc(i64 %outlen_plus1)
+  %out = call ptr @__kml_str_alloc(i64 %outlen)
   br label %loopcheck
 
 loopcheck:
@@ -267,6 +267,7 @@ func (e *Emitter) ensureBase64Decode() {
 	for i, v := range table {
 		entries[i] = fmt.Sprintf("i8 %d", v)
 	}
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(fmt.Sprintf("@__kml_base64_decode_table = private unnamed_addr constant [256 x i8] [%s]", strings.Join(entries, ", ")))
 	e.emitGlobal(`
 define ptr @__kml_atob(ptr %str) {
@@ -274,8 +275,7 @@ entry:
   %len = call i64 @strlen(ptr %str)
   %ngroups = udiv i64 %len, 4
   %outlen_est = mul i64 %ngroups, 3
-  %outlen_est_plus1 = add i64 %outlen_est, 1
-  %out = call ptr @malloc(i64 %outlen_est_plus1)
+  %out = call ptr @__kml_str_alloc(i64 %outlen_est)
   br label %loopcheck
 
 loopcheck:
@@ -352,6 +352,8 @@ loopbody:
 done:
   %termp = getelementptr i8, ptr %out, i64 %oi
   store i8 0, ptr %termp, align 1
+  %hdrp = getelementptr i8, ptr %out, i64 -8
+  store i64 %oi, ptr %hdrp, align 8
   ret ptr %out
 }`)
 }
@@ -422,14 +424,14 @@ func (e *Emitter) ensurePercentEncode(used *bool, fnName, safeChars string) {
 		entries[i] = fmt.Sprintf("i8 %d", v)
 	}
 	tableName := fmt.Sprintf("@__kml_uri_safe_table_%s", fnName)
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant [256 x i8] [%s]", tableName, strings.Join(entries, ", ")))
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @%s(ptr %%str) {
 entry:
   %%len = call i64 @strlen(ptr %%str)
   %%len3 = mul i64 %%len, 3
-  %%outlen_plus1 = add i64 %%len3, 1
-  %%out = call ptr @malloc(i64 %%outlen_plus1)
+  %%out = call ptr @__kml_str_alloc(i64 %%len3)
   br label %%loopcheck
 
 loopcheck:
@@ -479,6 +481,8 @@ hexwrite:
 done:
   %%termp = getelementptr i8, ptr %%out, i64 %%oi
   store i8 0, ptr %%termp, align 1
+  %%hdrp = getelementptr i8, ptr %%out, i64 -8
+  store i64 %%oi, ptr %%hdrp, align 8
   ret ptr %%out
 }`, fnName, tableName))
 }
@@ -524,6 +528,7 @@ func (e *Emitter) ensurePercentDecode(used *bool, fnName string, checkReserved b
 			entries[i] = fmt.Sprintf("i8 %d", v)
 		}
 		tableName := fmt.Sprintf("@__kml_uri_reserved_table_%s", fnName)
+		e.ensureStrHeaderRuntime()
 		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant [256 x i8] [%s]", tableName, strings.Join(entries, ", ")))
 		pctdoneLabel = "pctdone"
 		reservedBlock = fmt.Sprintf(`
@@ -569,8 +574,7 @@ pctdone:
 define ptr @%s(ptr %%str) {
 entry:
   %%len = call i64 @strlen(ptr %%str)
-  %%outlen_plus1 = add i64 %%len, 1
-  %%out = call ptr @malloc(i64 %%outlen_plus1)
+  %%out = call ptr @__kml_str_alloc(i64 %%len)
   br label %%loopcheck
 
 loopcheck:
@@ -626,6 +630,8 @@ plain:
 done:
   %%termp = getelementptr i8, ptr %%out, i64 %%oi
   store i8 0, ptr %%termp, align 1
+  %%hdrp = getelementptr i8, ptr %%out, i64 -8
+  store i64 %%oi, ptr %%hdrp, align 8
   ret ptr %%out
 }`, fnName, pctdoneLabel, pctdoneLabel, reservedBlock))
 }

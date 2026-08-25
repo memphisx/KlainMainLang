@@ -460,10 +460,7 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i32, i32, ptr, i64, i64 } %s, 2", payload, decodeRes))
 	payloadLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i32, i32, ptr, i64, i64 } %s, 3", payloadLen, decodeRes))
-	strLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", strLen, payloadLen))
-	strBuf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", strBuf, strLen))
+	strBuf := e.emitStringAlloc(payloadLen) // TDD-00120: message payload is length-prefixed
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", strBuf, payload, payloadLen))
 	termPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termPtr, strBuf, payloadLen))

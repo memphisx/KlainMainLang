@@ -57,9 +57,7 @@ func (e *Emitter) emitOSHostname(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, fmt.Errorf("%d:%d: os.hostname() takes no arguments", pos.Line, pos.Col)
 	}
 	e.ensureGethostname()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 256)", buf))
+	buf := e.emitStringScratch(256) // TDD-00120: length-prefixed, finalized below
 	rc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @gethostname(ptr %s, i64 256)", rc, buf))
 	failed := e.freshReg()
@@ -70,6 +68,7 @@ func (e *Emitter) emitOSHostname(args []ast.Expression, pos ast.Pos) (Value, err
 	e.emitLabel(failL)
 	e.emitInternalThrow(e.internString("could not determine hostname"))
 	e.emitLabel(okL)
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 

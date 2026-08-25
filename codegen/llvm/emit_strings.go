@@ -44,24 +44,105 @@ func (e *Emitter) emitStringNullToLiteral(v Value) Value {
 // called strlen()/memcpy() on the raw pointer unconditionally, so any
 // nullable-typed string that was actually null (an optional param, `T |
 // null`, a missing Map/collection lookup, ...) segfaulted here instead.
+// emitStrLenHeader returns a register holding a KML string's byte length read
+// from its 8-byte header (TDD-00120 Stage 2), the binary-safe replacement for a
+// strlen call — an embedded NUL no longer truncates the reported length. Use it
+// wherever a *KML string value's* length is needed (`.length`, concat/slice/
+// indexOf operands); producer-internal strlen that establishes a header (see
+// emitStringFinalizeLen) stays on strlen.
+func (e *Emitter) emitStrLenHeader(ref string) string {
+	e.ensureStrHeaderRuntime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", r, ref))
+	return r
+}
+
+// emitStringAlloc allocates a length-prefixed string buffer for dataLenReg
+// content bytes (TDD-00120 Stage 1): malloc(8 + dataLen + 1), store dataLen as an
+// i64 header at offset 0, and return the register pointing at the bytes (base+8).
+// The caller fills + NUL-terminates relative to the returned pointer exactly as
+// before — only the allocation and the returned pointer's origin change. The
+// header lets binary-safe length reads (Stage 2+) find the true length via
+// ptr-8; the retained NUL keeps every existing strlen consumer and C-interop
+// boundary working unchanged in the meantime. Free such a buffer with
+// emitStringFree (free base = ptr-8), never free(ptr).
+func (e *Emitter) emitStringAlloc(dataLenReg string) string {
+	e.ensureStrHeaderRuntime()
+	dataPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", dataPtr, dataLenReg))
+	return dataPtr
+}
+
+// emitStringScratch allocates a length-prefixed buffer with `capBytes` of data
+// capacity (TDD-00120) for producers that write via sprintf and only learn the
+// length afterward (number/float/function formatting). Returns the data pointer
+// (base+8); the header is uninitialized until emitStringFinalizeLen is called
+// once the bytes are written. capBytes must include room for the NUL.
+func (e *Emitter) emitStringScratch(capBytes int) string {
+	return e.emitStringScratchReg(fmt.Sprintf("%d", capBytes))
+}
+
+// emitStringScratchReg is emitStringScratch with a register (or constant)
+// capacity expression, for producers whose scratch size is only known at runtime.
+func (e *Emitter) emitStringScratchReg(capExpr string) string {
+	e.ensureStrHeaderRuntime()
+	e.ensureMalloc()
+	sz := e.freshReg()
+	base := e.freshReg()
+	dataPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 8", sz, capExpr))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", base, sz))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", dataPtr, base))
+	return dataPtr
+}
+
+// emitStringSetLen stores a known length register into the header at dataPtr-8,
+// for a scratch buffer whose exact byte count is computed during the fill (so no
+// strlen is needed, and an embedded NUL in the content is preserved).
+func (e *Emitter) emitStringSetLen(dataPtr, lenReg string) {
+	hp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, dataPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, hp))
+}
+
+// emitStringFinalizeLen stores strlen(dataPtr) into the length header at
+// dataPtr-8, for a scratch buffer written via sprintf (whose content never
+// contains an embedded NUL, so strlen is the true length). Pairs with
+// emitStringScratch.
+func (e *Emitter) emitStringFinalizeLen(dataPtr string) {
+	e.ensureStrlen()
+	l := e.freshReg()
+	hp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", l, dataPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, dataPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, hp))
+}
+
+// emitStringFree frees a length-prefixed heap string (TDD-00120): the malloc base
+// is 8 bytes before the value pointer. Freeing the value pointer directly would
+// corrupt the heap (interior free).
+func (e *Emitter) emitStringFree(ptrRef string) {
+	e.ensureStrHeaderRuntime()
+	e.emitInstr(fmt.Sprintf("call void @__kml_str_free(ptr %s)", ptrRef))
+}
+
 func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	e.ensureStrlen()
-	e.ensureMalloc()
 	e.ensureMemcpy()
 	left = e.emitStringNullToLiteral(left)
 	right = e.emitStringNullToLiteral(right)
+	// NOTE (TDD-00120): still strlen-based — a fully binary-safe concat needs
+	// every string producer to carry a length header first (the consumer switch
+	// is gated on 100% producer coverage; see the TDD's Stage-2 notes).
 	n1 := e.freshReg()
 	n2 := e.freshReg()
 	total := e.freshReg()
-	total1 := e.freshReg()
-	buf := e.freshReg()
 	dst := e.freshReg()
 	n2p1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", n1, left.Ref))
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", n2, right.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", n1, left.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", n2, right.Ref))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", total, n1, n2))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", total1, total))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, total1))
+	buf := e.emitStringAlloc(total)
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, left.Ref, n1))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, buf, n1))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n2p1, n2))
@@ -75,10 +156,12 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 	case "+":
 		return e.emitStringConcat(left, right)
 	case "==", "===", "!=", "!==", "<", ">", "<=", ">=":
-		e.ensureStrcmp()
+		// Binary-safe: __kml_str_cmp uses the header lengths + memcmp, so an
+		// embedded NUL no longer stops the comparison early (TDD-00120 Stage 2).
+		e.ensureStrHeaderRuntime()
 		cmp := e.freshReg()
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmp, left.Ref, right.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, left.Ref, right.Ref))
 		iop := map[string]string{
 			"==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
 			"<": "slt", ">": "sgt", "<=": "sle", ">=": "sge",
@@ -92,12 +175,9 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 // emitStringExtract allocates a new heap string containing src[start..start+length)
 // and returns a ptr value. startReg and lenReg are i64 register references.
 func (e *Emitter) emitStringExtract(srcRef, startReg, lenReg string) Value {
-	allocSize := e.freshReg()
-	buf := e.freshReg()
 	srcPtr := e.freshReg()
 	nullSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", allocSize, lenReg))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, allocSize))
+	buf := e.emitStringAlloc(lenReg)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcPtr, srcRef, startReg))
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, srcPtr, lenReg))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nullSlot, buf, lenReg))
@@ -146,7 +226,7 @@ func (e *Emitter) emitStringSlice(mem *ast.MemberExpression, args []ast.Expressi
 	e.ensureMemcpy()
 
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 
 	startRaw, err := e.emitExpr(args[0])
 	if err != nil {
@@ -193,7 +273,7 @@ func (e *Emitter) emitStringSubstring(mem *ast.MemberExpression, args []ast.Expr
 	e.ensureMemcpy()
 
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 
 	// clampSubstr: negative → 0, > sLen → sLen
 	clamp := func(raw Value) string {
@@ -256,19 +336,12 @@ func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStrstr()
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", result, objVal.Ref, needleVal.Ref))
-	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", found, result))
-	haystackInt := e.freshReg()
-	resultInt := e.freshReg()
-	offset := e.freshReg()
+	// Binary-safe: __kml_str_indexof searches via memmem over the header lengths,
+	// so an embedded NUL in either operand doesn't cut the search short. Returns
+	// the byte index or -1 directly (TDD-00120 Stage 2).
+	e.ensureStrHeaderRuntime()
 	final := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", haystackInt, objVal.Ref))
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", resultInt, result))
-	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", offset, resultInt, haystackInt))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 -1", final, found, offset))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
 	return Value{Ref: final, Ty: TypeI64}, nil
 }
 
@@ -288,11 +361,12 @@ func (e *Emitter) emitStringIncludes(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStrstr()
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", result, objVal.Ref, needleVal.Ref))
+	// Binary-safe includes: memmem-based index, then test for >= 0 (TDD-00120).
+	e.ensureStrHeaderRuntime()
+	idx := e.freshReg()
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", found, result))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", idx, objVal.Ref, needleVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", found, idx))
 	return Value{Ref: found, Ty: TypeBool}, nil
 }
 
@@ -317,7 +391,7 @@ func (e *Emitter) emitStringCharCodeAt(mem *ast.MemberExpression, args []ast.Exp
 	// the allocation — at worst the NUL terminator) and its value discarded.
 	e.ensureStrlen()
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, strVal.Ref))
 	geZero := e.freshReg()
 	ltLen := e.freshReg()
 	inBounds := e.freshReg()
@@ -366,7 +440,7 @@ func (e *Emitter) emitStringCharAtMethod(mem *ast.MemberExpression, args []ast.E
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 	geZero := e.freshReg()
 	ltLen := e.freshReg()
 	inBounds := e.freshReg()
@@ -448,9 +522,10 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 		return Value{}, err
 	}
 	otherVal = e.coerce(otherVal, TypePtr)
-	e.ensureStrcmp()
+	// Binary-safe byte-order compare via the header lengths (TDD-00120 Stage 2).
+	e.ensureStrHeaderRuntime()
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", raw, objVal.Ref, otherVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", raw, objVal.Ref, otherVal.Ref))
 	isNeg := e.freshReg()
 	isPos := e.freshReg()
 	step1 := e.freshReg()
@@ -569,7 +644,7 @@ func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Exp
 	prefixLen := e.freshReg()
 	cmp := e.freshReg()
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", prefixLen, prefixVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", prefixLen, prefixVal.Ref))
 	e.emitInstr(fmt.Sprintf("%s = call i32 @strncmp(ptr %s, ptr %s, i64 %s)", cmp, objVal.Ref, prefixVal.Ref, prefixLen))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", result, cmp))
 	return Value{Ref: result, Ty: TypeBool}, nil
@@ -601,8 +676,8 @@ func (e *Emitter) emitStringEndsWith(mem *ast.MemberExpression, args []ast.Expre
 	cmp := e.freshReg()
 	eq := e.freshReg()
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sufLen, suffixVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sufLen, suffixVal.Ref))
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", diff, sLen, sufLen))
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", ge, sLen, sufLen))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", safeDiff, ge, diff))
@@ -636,8 +711,11 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 		return Value{}, err
 	}
 	e.ensureStringReplace()
+	sLen := e.emitStrLenHeader(objVal.Ref)
+	searchLen := e.emitStrLenHeader(searchVal.Ref)
+	repLen := e.emitStrLenHeader(repVal.Ref)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace(ptr %s, ptr %s, ptr %s)", result, objVal.Ref, searchVal.Ref, repVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -664,8 +742,11 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 		return Value{}, err
 	}
 	e.ensureStringReplaceAll()
+	sLen := e.emitStrLenHeader(objVal.Ref)
+	searchLen := e.emitStrLenHeader(searchVal.Ref)
+	repLen := e.emitStrLenHeader(repVal.Ref)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace_all(ptr %s, ptr %s, ptr %s)", result, objVal.Ref, searchVal.Ref, repVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_replace_all(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -693,8 +774,10 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		return Value{}, err
 	}
 	e.ensureStringSplit()
+	sLen := e.emitStrLenHeader(objVal.Ref)
+	sepLen := e.emitStrLenHeader(sepVal.Ref)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_split(ptr %s, ptr %s)", result, objVal.Ref, sepVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_split(ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, sepVal.Ref, sepLen))
 	return Value{Ref: result, Ty: ArrayOf(TypePtr)}, nil
 }
 
@@ -712,9 +795,7 @@ func (e *Emitter) emitStringCharAt(strPtr string, indexExpr ast.Expression) (Val
 	charVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", charVal, charPtr))
 
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 2)", buf))
+	buf := e.emitStringAlloc("1") // TDD-00120: 1-char length-prefixed string
 	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", charVal, buf))
 	nullPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 1", nullPtr, buf))
@@ -738,10 +819,8 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, pos ast.Pos) (Va
 	if len(args) == 0 {
 		return Value{Ref: e.internString(""), Ty: TypePtr}, nil
 	}
-	e.ensureMalloc()
 	n := int64(len(args))
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", buf, n+1))
+	buf := e.emitStringAlloc(fmt.Sprintf("%d", n)) // TDD-00120: n-char length-prefixed
 	for i, arg := range args {
 		val, err := e.emitExpr(arg)
 		if err != nil {
@@ -788,13 +867,10 @@ func (e *Emitter) emitStringRepeat(mem *ast.MemberExpression, args []ast.Express
 	e.ensureMemcpy()
 
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 	totalLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %s", totalLen, sLen, cntVal.Ref))
-	bufSize := e.freshReg()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bufSize, totalLen))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	buf := e.emitStringAlloc(totalLen) // TDD-00120: length-prefixed
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -844,7 +920,7 @@ func (e *Emitter) emitStringAt(mem *ast.MemberExpression, args []ast.Expression,
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 	idxRaw, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -877,7 +953,7 @@ func (e *Emitter) emitStringPad(mem *ast.MemberExpression, args []ast.Expression
 	e.ensureMemcpy()
 
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sLen, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
 
 	// Resolve fill string first: default is a space. Must happen before padLen
 	// is finalized, since an empty fill string means "no padding" in JS (and,
@@ -890,7 +966,7 @@ func (e *Emitter) emitStringPad(mem *ast.MemberExpression, args []ast.Expression
 		}
 		fillPtr = fv.Ref
 		fLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", fLen, fillPtr))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", fLen, fillPtr))
 		fillPLen = fLen
 	} else {
 		fillPtr = e.internString(" ")
@@ -911,10 +987,7 @@ func (e *Emitter) emitStringPad(mem *ast.MemberExpression, args []ast.Expression
 
 	effectiveLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", effectiveLen, padLen, sLen))
-	bufSize := e.freshReg()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", bufSize, effectiveLen))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	buf := e.emitStringAlloc(effectiveLen) // TDD-00120: length-prefixed
 
 	// Fill loop: for j = 0; j < padLen; j++ { buf[dstOff+j] = fillStr[j % fillPLen] }
 	var fillDst string // where in buf to write the pad
@@ -1012,11 +1085,10 @@ func (e *Emitter) emitNumberToFixed(mem *ast.MemberExpression, args []ast.Expres
 	digitsI32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, digitsI64))
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", buf))
+	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%.*f")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", buf, fmtPtr, digitsI32, dblReg))
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -1055,11 +1127,10 @@ func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.
 	digitsI32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", buf))
+	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%.*e")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", buf, fmtPtr, digitsI32, dblReg))
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -1089,9 +1160,7 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 	digitsI32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, e.coerce(digitsVal, TypeI64).Ref))
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", buf))
+	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%#.*g")
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", lenReg, buf, fmtPtr, digitsI32, dblReg))
@@ -1116,6 +1185,7 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 
+	e.emitStringFinalizeLen(buf) // TDD-00120: length after the optional '.' trim
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -1232,7 +1302,20 @@ func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", startIdx, finalIdx))
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", result, buf, startIdx))
-	return Value{Ref: result, Ty: TypePtr}, nil
+	// TDD-00120: the digits were filled backward into an interior slice of `buf`,
+	// ending at index 69 (the first digit overwrote the preset NUL), so `result`
+	// is not a header-prefixed base. Copy it out into a proper length-prefixed
+	// string (data length = 70 - startIdx). This also gives it a real NUL
+	// terminator, fixing the original path's 1-byte over-read past buf[69].
+	e.ensureMemcpy()
+	rlen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 70, %s", rlen, startIdx))
+	dst := e.emitStringAlloc(rlen)
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, result, rlen))
+	dnull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dnull, dst, rlen))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", dnull))
+	return Value{Ref: dst, Ty: TypePtr}, nil
 }
 
 // writeDigitAndDecrement stores an i64-valued byte (truncated to i8) at

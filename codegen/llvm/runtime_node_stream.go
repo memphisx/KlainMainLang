@@ -6,16 +6,17 @@
 // `__kml_ee_list_*`), and `.pipe()`/`pipeline` ride Stage 3's pipe machine.
 //
 // %kml.nodestream (80 B):
-//  0 rstream ptr    (null for a Writable)
-//  1 wstream ptr    (null for a Readable)
-//  2 emap ptr       event name → listener list (the EventEmitter registry)
-//  3 flowing i64    0 not started · 1 flowing · 2 paused
-//  4 invokeData ptr compiler thunk: void (ptr listenerClo, i64 v0, i64 v1)
-//  5 decodeFn ptr   {i64,i64,i64} (ptr rec) — Stage 3's record decoder
-//  6 endEmitted i64
-//  7 drainArmed i64
-//  8 wRegistered i64 (writable completion reaction armed)
-//  9 reserved
+//
+//	0 rstream ptr    (null for a Writable)
+//	1 wstream ptr    (null for a Readable)
+//	2 emap ptr       event name → listener list (the EventEmitter registry)
+//	3 flowing i64    0 not started · 1 flowing · 2 paused
+//	4 invokeData ptr compiler thunk: void (ptr listenerClo, i64 v0, i64 v1)
+//	5 decodeFn ptr   {i64,i64,i64} (ptr rec) — Stage 3's record decoder
+//	6 endEmitted i64
+//	7 drainArmed i64
+//	8 wRegistered i64 (writable completion reaction armed)
+//	9 reserved
 package llvm
 
 import "fmt"

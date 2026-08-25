@@ -37,6 +37,7 @@ func (e *Emitter) ensureReadlineRuntime() {
 
 	nonblock := httpNonblockFlag()
 
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal("@__kml_rl_active = internal global ptr null, align 8")
 
 	// __kml_rl_append(rl, src, n): append n bytes to the line buffer (field 4).
@@ -180,8 +181,7 @@ ckcr:
   br label %mkline
 mkline:
   %llen = phi i64 [ %linelen0, %found ], [ %linelen, %ckcr ]
-  %allocsz = add i64 %llen, 1
-  %line = call ptr @malloc(i64 %allocsz)
+  %line = call ptr @__kml_str_alloc(i64 %llen)
   call ptr @memcpy(ptr %line, ptr %data, i64 %llen)
   %term = getelementptr i8, ptr %line, i64 %llen
   store i8 0, ptr %term, align 1
@@ -245,8 +245,7 @@ flush:
 tail:
   %data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %data = load ptr, ptr %data_p, align 8
-  %alloctail = add i64 %len, 1
-  %tailline = call ptr @malloc(i64 %alloctail)
+  %tailline = call ptr @__kml_str_alloc(i64 %len)
   call ptr @memcpy(ptr %tailline, ptr %data, i64 %len)
   %tterm = getelementptr i8, ptr %tailline, i64 %len
   store i8 0, ptr %tterm, align 1

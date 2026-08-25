@@ -58,6 +58,7 @@ func (e *Emitter) ensureDNSRuntime() {
 	// @__kml_dns_lookup(host): getaddrinfo(host, NULL, {AF_INET, SOCK_STREAM}),
 	// read the first result's sockaddr_in.sin_addr (4 bytes at ai_addr+4),
 	// format as a dotted quad. Returns a malloc'd string or null on failure.
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_dns_lookup(ptr %%host) {
 entry:
@@ -89,8 +90,9 @@ extract:
   %%b1i = zext i8 %%b1 to i32
   %%b2i = zext i8 %%b2 to i32
   %%b3i = zext i8 %%b3 to i32
-  %%buf = call ptr @malloc(i64 16)
+  %%buf = call ptr @__kml_str_alloc(i64 16)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i32 %%b0i, i32 %%b1i, i32 %%b2i, i32 %%b3i)
+  call void @__kml_str_finalize(ptr %%buf)
   call void @freeaddrinfo(ptr %%res)
   ret ptr %%buf
 fail:
@@ -162,8 +164,9 @@ fill:
   %%f1i = zext i8 %%f1 to i32
   %%f2i = zext i8 %%f2 to i32
   %%f3i = zext i8 %%f3 to i32
-  %%s = call ptr @malloc(i64 16)
+  %%s = call ptr @__kml_str_alloc(i64 16)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%s, ptr %s, i32 %%f0i, i32 %%f1i, i32 %%f2i, i32 %%f3i)
+  call void @__kml_str_finalize(ptr %%s)
   %%iv = load i64, ptr %%islot, align 8
   %%eslot = getelementptr ptr, ptr %%arr, i64 %%iv
   store ptr %%s, ptr %%eslot, align 8

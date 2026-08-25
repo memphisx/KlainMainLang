@@ -71,9 +71,11 @@ func (e *Emitter) emitJSONParseTree(jsonText Value) string {
 	offReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", offReg, errSlot))
 	msgBuf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", msgBuf))
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 64)", msgBuf))
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)",
 		msgBuf, e.internString("Unexpected token in JSON at position %lld"), offReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", msgBuf))
 	errReg := e.buildErrorObj(errorKindIDs["SyntaxError"], msgBuf, e.internString("SyntaxError"))
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
 	e.emitTerminator("unreachable")

@@ -59,6 +59,16 @@ func (e *Emitter) ensureCloseDecl() {
 	}
 }
 
+// ensureMmapDecl declares mmap(2) exactly once — used by the cluster close-flag
+// page (runtime_http.go, TDD-00117). Prototyped with the POSIX signature; the
+// off_t last arg is i64 on both host targets (arm64 Darwin, x86-64/arm64 Linux).
+func (e *Emitter) ensureMmapDecl() {
+	if !e.usedMmapDecl {
+		e.emitGlobal("declare ptr @mmap(ptr noundef, i64 noundef, i32 noundef, i32 noundef, i32 noundef, i64 noundef)")
+		e.usedMmapDecl = true
+	}
+}
+
 // ensureWaitpidDecl declares waitpid(2) exactly once — shared by execFileSync
 // (runtime_process.go), child_process (runtime_childprocess.go), and cluster
 // (runtime_cluster.go), any two of which can co-occur in one program.

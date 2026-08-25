@@ -122,8 +122,13 @@ func (e *Emitter) emitProcessHrtimeBigint(args []ast.Expression, pos ast.Pos) (V
 // as emitArrayFind: a plain TypePtr the caller compares against null.
 func (e *Emitter) emitGetenvCall(keyPtr string) Value {
 	e.ensureGetenv()
+	e.ensureStrHeaderRuntime()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @getenv(ptr %s)", raw, keyPtr))
+	// TDD-00120: getenv returns a foreign pointer into the environ block with no
+	// length header — copy it into a length-prefixed string (null stays null).
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @getenv(ptr %s)", result, keyPtr))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", result, raw))
 	return Value{Ref: result, Ty: TypePtr}
 }
 

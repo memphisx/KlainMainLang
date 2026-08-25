@@ -54,6 +54,7 @@ func (e *Emitter) ensureCryptoFillNumberArray() {
 	e.ensureCryptoRandomBytes()
 	e.ensureMalloc()
 	e.ensureFree()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define void @__kml_crypto_fill_number_array(ptr %arr, i64 %len) {
 entry:
@@ -93,6 +94,7 @@ func (e *Emitter) ensureCryptoRandomUUID() {
 	e.ensureCryptoRandomBytes()
 	e.ensureMalloc()
 	e.ensureSprintf()
+	e.ensureStrHeaderRuntime()
 
 	var loads strings.Builder
 	args := make([]string, 16)
@@ -127,7 +129,7 @@ entry:
   %%buf = alloca [16 x i8], align 1
   %%bufp = getelementptr [16 x i8], ptr %%buf, i32 0, i32 0
   call void @__kml_crypto_random_bytes(ptr %%bufp, i64 16)%s%s%s
-  %%out = call ptr @malloc(i64 37)
+  %%out = call ptr @__kml_str_alloc(i64 36)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%out, ptr %s, %s)
   ret ptr %%out
 }`, loads.String(), fixup, zexts.String(), fmtPtr, strings.Join(args, ", ")))

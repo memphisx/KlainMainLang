@@ -1113,7 +1113,9 @@ done:
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_eventsource_dispatch_record(ptr %%ent, ptr %%record) {
 entry:
-  %%lines = call {ptr, i64} @__kml_split(ptr %%record, ptr %[1]s)
+  %%reclen = call i64 @strlen(ptr %%record)
+  %%seplen = call i64 @strlen(ptr %[1]s)
+  %%lines = call {ptr, i64} @__kml_split(ptr %%record, i64 %%reclen, ptr %[1]s, i64 %%seplen)
   %%linesdata = extractvalue {ptr, i64} %%lines, 0
   %%numlines = extractvalue {ptr, i64} %%lines, 1
 

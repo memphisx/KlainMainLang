@@ -464,13 +464,31 @@ console.log(arr.length)
 	}
 }
 
-func TestE2EUnionInterfaceFieldRejected(t *testing.T) {
+// TestE2EUnionObjectField: a constrained-union object field (TDD-00119's general
+// enablement, on top of TDD-00043) now works — construction boxes each member,
+// reads unbox, and typeof narrowing selects the member.
+func TestE2EUnionObjectField(t *testing.T) {
+	assertOutput(t, `
+interface Item { value: string | number }
+const a: Item = { value: 42 }
+const va = a.value
+if (typeof va === "number") { console.log("num " + (va + 1)) } else { console.log("str " + va) }
+const b: Item = { value: "hi" }
+const vb = b.value
+if (typeof vb === "string") { console.log("str " + vb) } else { console.log("num") }
+`, "num 43\nstr hi")
+}
+
+// TestE2EUnionObjectFieldInvalidMemberRejected: assigning a non-member value to a
+// union object field is a clean compile error (the member-set check is wired at
+// object-literal-field construction).
+func TestE2EUnionObjectFieldInvalidMemberRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 interface Item { value: string | number }
-let it: Item = { value: "hi" }
+let it: Item = { value: true }
 console.log(it.value)
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a union as an object field type (not yet supported nested in a container), got none")
+		t.Fatal("expected a compile error assigning a boolean to a string|number union field, got none")
 	}
 }

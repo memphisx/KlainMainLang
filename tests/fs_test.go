@@ -65,6 +65,27 @@ try {
 	assertOutputImports(t, src, "caught")
 }
 
+// TDD-00120: an error's .message is built raw (strerror + sprintf); after the
+// binary-safe consumer switch, concatenating or searching it (the common
+// `'prefix: ' + e.message` idiom) reads a length header at message-8. If the
+// producer isn't headered that's garbage → truncation or an intermittent
+// SIGBUS (caught by examples/fs/fs.ts before this test existed). Header the
+// message and the idiom works: includes() finds the path, and concat keeps the
+// full length.
+func TestE2EFsErrorMessageConcatBinarySafe(t *testing.T) {
+	src := `
+import fs from 'fs'
+try {
+    fs.readFileSync("/definitely/does/not/exist/kml-test-file.txt")
+} catch (e) {
+    const m: string = e.message
+    console.log(m.includes("kml-test-file.txt"))
+    console.log(("caught: " + m).length === 8 + m.length)
+}
+`
+	assertOutputImports(t, src, "true\ntrue")
+}
+
 func TestE2EFsReadFileSyncNonexistentUncaughtExitsNonZero(t *testing.T) {
 	_, exitCode := compileAndRunExpectExitImports(t, `
 import fs from 'fs'

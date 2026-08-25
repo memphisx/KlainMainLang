@@ -21,6 +21,7 @@ func (e *Emitter) ensureStdinRuntime() {
 		return
 	}
 	e.usedStdinRuntime = true
+	e.ensureStrHeaderRuntime()
 	e.ensureMalloc()
 	e.ensureCalloc()
 	e.ensureMemcpy()
@@ -78,9 +79,9 @@ readloop:
   %hasdata = icmp sgt i64 %n, 0
   br i1 %hasdata, label %fire, label %ckeof
 fire:
-  ; deliver a NUL-terminated string copy of the chunk to the 'data' listener.
-  %sz = add i64 %n, 1
-  %s = call ptr @malloc(i64 %sz)
+  ; deliver a length-prefixed string copy of the chunk to the 'data' listener
+  ; (TDD-00120): header carries the exact read length, still NUL-terminated.
+  %s = call ptr @__kml_str_alloc(i64 %n)
   call ptr @memcpy(ptr %s, ptr %cp, i64 %n)
   %term = getelementptr i8, ptr %s, i64 %n
   store i8 0, ptr %term, align 1

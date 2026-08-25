@@ -127,13 +127,13 @@ four:
 // true UTF-16 code-unit positions instead, so a supplementary code point
 // (4-byte UTF-8, one surrogate *pair* in UTF-16) counts as two units.
 //
-//   __kml_regex_byte_to_utf16(str, byteLen): UTF-16 code units in str[0:byteLen].
-//   __kml_regex_utf16_to_byte(str, target):  byte offset of the target-th UTF-16
-//     unit, stopping at the NUL terminator so an out-of-range target clamps to
-//     the string end rather than reading past it. A target landing mid-surrogate
-//     (only reachable via a hand-set lastIndex) resolves to the following code
-//     point's byte start — a best-effort for a pathological input, never a read
-//     past the end.
+//	__kml_regex_byte_to_utf16(str, byteLen): UTF-16 code units in str[0:byteLen].
+//	__kml_regex_utf16_to_byte(str, target):  byte offset of the target-th UTF-16
+//	  unit, stopping at the NUL terminator so an out-of-range target clamps to
+//	  the string end rather than reading past it. A target landing mid-surrogate
+//	  (only reachable via a hand-set lastIndex) resolves to the following code
+//	  point's byte start — a best-effort for a pathological input, never a read
+//	  past the end.
 //
 // Both walk code points via __kml_regex_utf8_width; callers must have already
 // screened the PCRE2 "no match" sentinel (-1) — byte_to_utf16 assumes a

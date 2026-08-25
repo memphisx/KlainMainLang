@@ -36,6 +36,7 @@ func (e *Emitter) ensureNetRuntime() {
 		return
 	}
 	e.usedNetRuntime = true
+	e.ensureStrHeaderRuntime()
 	e.ensureMalloc()
 	e.ensureCalloc()
 	e.ensureRealloc()
@@ -510,8 +511,14 @@ ondata:
   %%hasdl = icmp ne ptr %%dl, null
   br i1 %%hasdl, label %%firedata, label %%rloop
 firedata:
-  %%buf = call ptr @malloc(i64 %%n)
+  ; TDD-00120: length-prefixed chunk. A (chunk: string) listener binds this
+  ; pointer directly, so it carries the 8-byte length header (ptr-8) like every
+  ; other string, and stays NUL-terminated for strlen consumers. The listener is
+  ; still called with length n, so Buffer consumers are unaffected.
+  %%buf = call ptr @__kml_str_alloc(i64 %%n)
   call ptr @memcpy(ptr %%buf, ptr %%chunkptr, i64 %%n)
+  %%bufend = getelementptr i8, ptr %%buf, i64 %%n
+  store i8 0, ptr %%bufend, align 1
   %%dfp_p = getelementptr { ptr, ptr }, ptr %%dl, i32 0, i32 0
   %%dfp = load ptr, ptr %%dfp_p, align 8
   %%dep_p = getelementptr { ptr, ptr }, ptr %%dl, i32 0, i32 1

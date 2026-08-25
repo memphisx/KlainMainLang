@@ -69,8 +69,13 @@ func (e *Emitter) curlURLGetPart(handle string, part int) (ptrReg, present strin
 	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 0)", code, handle, part, slot))
 	present = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", present, code))
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", raw, slot))
+	// TDD-00120: curl returns a foreign char* with no length header — copy it into
+	// a length-prefixed string (null stays null when the part is absent).
+	e.ensureStrHeaderRuntime()
 	ptrReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, slot))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", ptrReg, raw))
 	return ptrReg, present
 }
 

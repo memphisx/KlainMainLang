@@ -103,13 +103,9 @@ func (e *Emitter) emitBufferEncodeString(ptrRef, lenRef, enc string) Value {
 	case "utf8":
 		// Copy + NUL-terminate (embedded NULs truncate — the standard
 		// string-boundary caveat).
-		e.ensureMalloc()
 		e.ensureMemcpy()
-		n1 := e.freshReg()
-		buf := e.freshReg()
 		nul := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n1, lenRef))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, n1))
+		buf := e.emitStringAlloc(lenRef) // TDD-00120: length-prefixed string
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, ptrRef, lenRef))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nul, buf, lenRef))
 		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nul))

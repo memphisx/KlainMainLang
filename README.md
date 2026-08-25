@@ -12,10 +12,10 @@ The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/REA
 
 Broad strokes:
 
-- **Core TypeScript — solid.** Control flow, operators, closures, full classes (inheritance, access modifiers, getters/setters), generics, enums, interfaces, destructuring, generators, tuples, unions, `bigint`, `RegExp`.
-- **Node.js APIs — substantial.** `fs`, `process`, `path`, `os`, `http.listen`, `EventEmitter`, `worker_threads` (real OS threads).
-- **Web Platform APIs — a mixed bag.** `fetch`, `URL`, `WebSocket`, `ArrayBuffer`/TypedArrays are in; plenty around them isn't.
-- **Gaps you'll trip over first.** Async is mostly synchronous under the hood except `await fetch`; no `Proxy` or dynamic property bags, by design.
+- **The language itself is basically all there (~97%).** Classes, generics, closures, `async`/`await`, the whole type-system circus (unions, generics with constraints, mapped and conditional types) — if it's core TypeScript, it probably compiles. The handful of holdouts are the genuinely hard ones: `Proxy`, decorators, `eval`.
+- **You can write a real server (~94% of the Node surface targeted).** `http.listen` speaks HTTP/1.1 and HTTP/2 out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
+- **The browser-shaped APIs that make sense off the browser all work.** `fetch`, `URL`, `WebSocket`, Web Crypto, Streams, `AbortController`, timers. The actually-browser-only stuff (DOM, Canvas, WebGL) is out, on purpose.
+- **What'll bite you.** A bare `: number` is a 64-bit integer, not a double — reach for `float64` when you mean fractions. Concurrency is cooperative (one fiber at a time per thread, no preemption). And nothing here is dynamic: no `Proxy`, no adding properties to an object at runtime. All deliberate. `docs/status/` has the honest corner-cases for everything above.
 
 Oh, and it fuzzes itself — lexer, parser, and the whole parse-to-binary pipeline (`make fuzz` / `fuzz-codegen` / `fuzz-all`).
 
@@ -35,6 +35,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - a bigint backend library, needed only if the compiled program uses `bigint` — `libtommath` by default (`brew install libtommath` / `apt-get install libtommath-dev` / `apk add libtommath-dev`), or GMP with `-bigint=gmp` (`brew install gmp` / `apt-get install libgmp-dev`). Same conditional-linking convention: a program without bigint stays plain-libc. See [docs/tdd/TDD-00074.md](docs/tdd/TDD-00074.md)
 - a crypto backend library, needed only if the compiled program uses `crypto.subtle` — OpenSSL 3's libcrypto by default (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`), or Apple CommonCrypto + Security.framework with `-crypto=commoncrypto` (macOS only, ships with the OS — no install at all). Same conditional-linking convention: a program without `crypto.subtle` stays plain-libc (`crypto.getRandomValues`/`randomUUID` use the OS CSPRNG directly, no library). See [docs/tdd/TDD-00104.md](docs/tdd/TDD-00104.md)
 - OpenSSL 3's **libssl**, needed only if the compiled program uses the `tls` module (`tls.connect`/`tls.createServer`) or a `WebSocket` (its URL scheme — `ws://` vs `wss://` — is a runtime value, so any WebSocket program links libssl) — ships alongside libcrypto (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`). `tls` is OpenSSL-only (`-crypto=commoncrypto` is rejected for it). Same conditional-linking convention: a program that doesn't use `tls` never links libssl. See [docs/tdd/TDD-00109.md](docs/tdd/TDD-00109.md)
+- **libnghttp2**, needed if the compiled program calls `http.listen` — the server transparently accepts cleartext HTTP/2 (h2c) via nghttp2's session API, so every `http.listen` program links `-lnghttp2` (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). Same conditional-linking convention: a program without `http.listen` never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
@@ -139,8 +140,8 @@ Run `klainmain` with no file (or `klainmain --help`) to print this list with
 the full per-flag descriptions.
 
 Every other compiled binary is dynamically linked (libSystem on macOS, glibc
-on Linux, plus `libcurl` for `fetch`/`http.listen` and `libpcre2-8` for
-`RegExp`) — closer to typical C/C++ toolchain output than a self-contained Go
+on Linux, plus `libcurl` for `fetch`/`http.listen`, `libnghttp2` for `http.listen`, and
+`libpcre2-8` for `RegExp`) — closer to typical C/C++ toolchain output than a self-contained Go
 binary. `--static` closes that gap on Linux, verified end-to-end in real
 `scratch` Docker builds (`docker/Dockerfile*`). One caveat: a `fetch`-using
 static binary needs curl's *entire* dependency chain spelled out at link time,
@@ -219,6 +220,35 @@ Makefile            Build, test, and example targets
 - Judge you for using `var`. It even does `var` *properly* now — function-scoped, hoisted, re-declarable — instead of the old cop-out of quietly pretending it was `let`. Personal growth.
 
 If any of that sounds like a dealbreaker, this was never going to be your compiler anyway, and that's fine. For everything it *does* do, [`docs/status/`](docs/status/README.md) has the receipts.
+
+## Prior art, and the obvious alternative
+
+If you found this project while actually shopping for a TypeScript-to-native compiler rather than reading a
+stranger's compiler diary, you should know about **[PerryTS](https://www.perryts.com/)**
+([github.com/PerryTS/perry](https://github.com/PerryTS/perry)) — a Rust project with the same core idea
+(TypeScript → SWC → LLVM → native binary) and a very large head start: a real team, native GUI on ~11
+platforms, dozens of npm packages reimplemented natively, and shipped production apps. If you need something
+broad and battle-tested today, that is very likely the tool you want, and this section is not sour grapes —
+it's a signpost.
+
+This project is deliberately a different, narrower animal. The honest head-to-head:
+
+| | KlainMainLang (this) | PerryTS |
+|---|---|---|
+| Written in | Go, emitting LLVM IR text | Rust (SWC + LLVM) |
+| Value model | **static** — typed subset; no dynamic value model (`any`/`unknown` are boxed, everything else is statically typed) | **NaN-boxed dynamic** — emulates full JS; optional embedded V8 (`--enable-js-runtime`) for the untyped tail |
+| Numeric types | **sized machine types** — `number` is `i64`, with JSDoc `/** @type {int8…int64, uint8…uint64, float32, float64} */` for exact width/signedness control | every number is a 64-bit double (NaN-boxed) |
+| Semantics | **opinionated, safer-than-JS by default** (`-compat=strict`), JS-faithful mode opt-in (`-compat=js`) | run all JS/TS faithfully |
+| Memory | **no GC by default** (`-mm=manual`), Boehm GC opt-in (`-mm=gc`) | generational GC by default |
+| Tunable knobs | memory mode, compat mode, crypto/bigint/regex backends, link-only-when-used deps | few knobs, opinionated defaults |
+| Targets | POSIX, host arch (CLI tools + Docker microservices) | ~11 incl. mobile + native GUI |
+| npm packages | none yet | 30–50 reimplemented natively |
+| Maturity | one-person experiment | mature, many contributors, production apps |
+
+Short version: PerryTS optimizes for **breadth and running all the JavaScript**; this project optimizes for
+a **small, deterministic, statically-typed binary where you pick the trade-offs per compile**. Different
+bets: reach for PerryTS to bring an existing JavaScript codebase to native; reach for KlainMainLang when
+you're writing fresh TypeScript and want a small, predictable binary that holds you to the type system.
 
 ## License
 

@@ -314,13 +314,12 @@ func (e *Emitter) emitDateToISOString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", month, month0))
 
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", buf))
+	buf := e.emitStringScratch(32) // TDD-00120
 	fmtPtr := e.internString("%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lldZ")
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s, i64 %s)",
 		buf, fmtPtr, year, month, day, hour, minute, sec, millis))
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -357,13 +356,12 @@ func (e *Emitter) emitDateToDateString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", monthName, monthGep))
 
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", buf))
+	buf := e.emitStringScratch(32) // TDD-00120
 	fmtPtr := e.internString("%s %s %02lld %04lld")
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, i64 %s)",
 		buf, fmtPtr, wdayName, monthName, day, year))
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -389,13 +387,12 @@ func (e *Emitter) emitDateToLocaleDateString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", month, month0))
 
 	e.ensureSprintf()
-	e.ensureMalloc()
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", buf))
+	buf := e.emitStringScratch(32) // TDD-00120
 	fmtPtr := e.internString("%lld/%lld/%lld")
 	e.emitInstr(fmt.Sprintf(
 		"call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s)",
 		buf, fmtPtr, month, day, year))
+	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -544,10 +541,10 @@ func (e *Emitter) emitMissingMarkGuard(has, namePtr string) {
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", nameLen, namePtr))
 	bufSize := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", bufSize, nameLen))
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	buf := e.emitStringScratchReg(bufSize) // TDD-00120
 	msgFmt := e.internString("performance.measure: no mark named '%s'")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", buf, msgFmt, namePtr))
+	e.emitStringFinalizeLen(buf)
 	e.emitInternalThrow(buf) // ends with `unreachable`, so missL needs no branch of its own
 
 	e.emitLabel(okL)

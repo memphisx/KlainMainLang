@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"runtime"
 )
 
 // emitOptionalMember emits `obj?.property`. For ptr-typed objects it emits a
@@ -95,7 +96,7 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Property == "length" {
 		e.ensureStrlen()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", r, objVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", r, objVal.Ref))
 		propVal = Value{Ref: r, Ty: TypeI64}
 	} else if isAccessor {
 		v, err := e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", ex.Property), nil, ex.GetPos(), false)
@@ -492,6 +493,24 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(":"), Ty: TypePtr}, nil
 		}
 	}
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
+		// Environment probes (TDD-00122) — constant booleans. This compiler is
+		// POSIX-only; hasCrypto/hasIntl reflect the built-in surface.
+		switch ex.Property {
+		case "isWindows":
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		case "isLinux":
+			return Value{Ref: testHostBool(runtime.GOOS == "linux"), Ty: TypeBool}, nil
+		case "isMacOS":
+			return Value{Ref: testHostBool(runtime.GOOS == "darwin"), Ty: TypeBool}, nil
+		case "hasCrypto":
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		case "hasIntl":
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		case "isMainThread":
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {
 		switch ex.Property {
 		case "EOL":
@@ -634,7 +653,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		if objVal.Ty.IR == "ptr" && !objVal.Ty.IsObject && !objVal.Ty.IsFunc {
 			e.ensureStrlen()
 			reg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", reg, objVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", reg, objVal.Ref))
 			return Value{Ref: reg, Ty: TypeI64}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)

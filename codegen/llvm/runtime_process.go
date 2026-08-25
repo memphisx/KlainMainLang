@@ -32,6 +32,8 @@ func (e *Emitter) ensureReadLineSync() {
 	}
 	e.usedReadLineSync = true
 	e.ensureStrlen()
+	e.ensureStrHeaderRuntime()
+	e.ensureFree()
 	stdinName := stdinGlobalName()
 	e.emitGlobal(fmt.Sprintf("@%s = external global ptr", stdinName))
 	e.emitGlobal("declare i64 @getline(ptr noundef, ptr noundef, ptr noundef)")
@@ -80,7 +82,9 @@ stripcr:
   br label %%done
 
 done:
-  ret ptr %%buf
+  %%bufh = call ptr @__kml_str_from_cstr(ptr %%buf)
+  call void @free(ptr %%buf)
+  ret ptr %%bufh
 }`, stdinName))
 }
 
@@ -115,6 +119,7 @@ func (e *Emitter) ensureExecFileSync() {
 	e.ensureStrlen()
 	e.ensureSprintf()
 	e.ensureExceptionHelpers()
+	e.ensureStrHeaderRuntime() // TDD-00120: header-copy the returned stdout string
 
 	e.emitGlobal("declare i32 @pipe(ptr noundef)")
 	e.ensureForkDecl()
@@ -237,10 +242,11 @@ checkexitcode:
 throwexit:
   %msgbuf1len = call i64 @strlen(ptr %file)
   %msgbuf1size = add i64 %msgbuf1len, 64
-  %msgbuf1 = call ptr @malloc(i64 %msgbuf1size)
+  %msgbuf1 = call ptr @__kml_str_alloc(i64 %msgbuf1size)
   call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf1, ptr `
 
 	part2 := `, i32 %exitcode8, ptr %file)
+  call void @__kml_str_finalize(ptr %msgbuf1)
   %errobj1 = call ptr @malloc(i64 24)
   %errobj1.kind = getelementptr { i64, ptr, ptr }, ptr %errobj1, i32 0, i32 0
   store i64 0, ptr %errobj1.kind, align 8
@@ -255,10 +261,11 @@ signaled:
   %sig = and i32 %status, 127
   %msgbuf2len = call i64 @strlen(ptr %file)
   %msgbuf2size = add i64 %msgbuf2len, 64
-  %msgbuf2 = call ptr @malloc(i64 %msgbuf2size)
+  %msgbuf2 = call ptr @__kml_str_alloc(i64 %msgbuf2size)
   call i32 (ptr, ptr, ...) @sprintf(ptr %msgbuf2, ptr `
 
 	part3 := `, i32 %sig, ptr %file)
+  call void @__kml_str_finalize(ptr %msgbuf2)
   %errobj2 = call ptr @malloc(i64 24)
   %errobj2.kind = getelementptr { i64, ptr, ptr }, ptr %errobj2, i32 0, i32 0
   store i64 0, ptr %errobj2.kind, align 8
@@ -284,7 +291,8 @@ havebody:
 
 done:
   %result = phi ptr [ %emptystr, %emptyresult ], [ %finaldata, %havebody ]
-  ret ptr %result
+  %resulth = call ptr @__kml_str_from_cstr(ptr %result)
+  ret ptr %resulth
 }`
 
 	e.emitGlobal(part1 + fmtExit + part2 + fmtSig + part3)
@@ -370,6 +378,7 @@ entry:
 //   - @__kml_process_uncaught(err) -> i1: runs the registered
 //     'uncaughtException' listener and returns 1 if one was set (so __kml_throw
 //     skips its default "Uncaught: ..." print+exit), else 0.
+//
 // Both no-op naturally when their handler global is null, so this single
 // definition serves whether or not a listener was registered. Emitted whenever
 // exceptions or any process-lifecycle surface is used.
@@ -378,6 +387,14 @@ func (e *Emitter) emitProcessLifecycleRuntime() {
 	e.emitGlobal("@__kml_exit_handler = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_uncaught_handler = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_exit_ran = internal global i1 0, align 1")
+	// The test-module's exit-time verifier (TDD-00122) runs once, in the guarded
+	// `run` path, AFTER any user `process.on('exit')` handler — so a user
+	// handler's own assertions still surface, and a failed mustCall expectation
+	// exits the process non-zero from here.
+	testVerify := ""
+	if e.usedTestRuntime {
+		testVerify = "  call void @__kml_test_verify()\n"
+	}
 	e.emitGlobal(`
 define void @__kml_run_exit_handlers(i64 %code) {
 entry:
@@ -387,14 +404,16 @@ run:
   store i1 1, ptr @__kml_exit_ran, align 1
   %h = load ptr, ptr @__kml_exit_handler, align 8
   %has = icmp ne ptr %h, null
-  br i1 %has, label %fire, label %done
+  br i1 %has, label %fire, label %post
 fire:
   %fp_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 0
   %fp = load ptr, ptr %fp_p, align 8
   %ep_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 1
   %ep = load ptr, ptr %ep_p, align 8
   call void %fp(ptr %ep, i64 %code)
-  br label %done
+  br label %post
+post:
+` + testVerify + `  br label %done
 done:
   ret void
 }
@@ -535,6 +554,7 @@ func (e *Emitter) ensureProcessKill() {
 	e.ensureMalloc()
 	e.ensureStrlen()
 	e.ensureSprintf()
+	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
@@ -557,8 +577,9 @@ fail:
   %%errmsg = call ptr @strerror(i32 %%errno_val)
   %%errlen = call i64 @strlen(ptr %%errmsg)
   %%bufsize = add i64 %%errlen, 48
-  %%buf = call ptr @malloc(i64 %%bufsize)
+  %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%pid, i64 %%sig, ptr %%errmsg)
+  call void @__kml_str_finalize(ptr %%buf)
   %%errobj = call ptr @malloc(i64 24)
   %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
   store i64 0, ptr %%errobj.kind, align 8

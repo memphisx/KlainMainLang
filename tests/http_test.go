@@ -773,6 +773,37 @@ http.listen(8961, (req: HttpRequest): Res => {
 // req.bodyBytes()/Res.bodyBytes carry the real byte count instead (an
 // ArrayBuffer, TDD-00018), so echoing a binary payload straight through both
 // accessors must come back byte-for-byte, null and all.
+// TestE2EHTTPListenStringBodySurvivesEmbeddedNull is the TDD-00120 Stage 4
+// payoff: the *plain string* req.body (not req.bodyBytes()) now round-trips an
+// embedded null byte, because the request buffer, the string value, and the
+// response writer all carry/read the header length instead of a strlen bound.
+// Before the binary-safe consumer switch this truncated at the first \0, which
+// is exactly why bodyBytes() existed as the escape hatch. Returned as body:
+// string, so both the stored string and the string→socket write are exercised.
+func TestE2EHTTPListenStringBodySurvivesEmbeddedNull(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string }
+http.listen(8971, (req: HttpRequest): Res => {
+  return { status: 200, body: req.body }
+})
+`
+	startHTTPServer(t, src, 8971)
+	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
+	resp, err := http.Post("http://127.0.0.1:8971/", "application/octet-stream", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, payload) {
+		t.Errorf("body: got %v, want %v — an embedded null byte should survive the round trip through the plain string req.body", got, payload)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != fmt.Sprintf("%d", len(payload)) {
+		t.Errorf("Content-Length: got %q, want %q", cl, fmt.Sprintf("%d", len(payload)))
+	}
+}
+
 func TestE2EHTTPListenBodyBytesRoundTripSurvivesEmbeddedNull(t *testing.T) {
 	src := `
 import http from 'http'
@@ -987,6 +1018,56 @@ http.listen(8965, (req: HttpRequest): Res => {
 	}
 }
 
+// TestE2EHTTPListenClusterCloseReachesAllWorkers is the decisive test for
+// TDD-00117: a single http.close() from one worker of a { workers: N } cluster
+// must shut the whole cluster down, not just the process that served the call.
+// The N workers share one inherited listening socket (fork duplicates the fd),
+// so the port stays accepting until *every* worker closes its own copy — a
+// connection-refused on the port after a single /shutdown therefore proves all
+// three workers closed, i.e. the shared close flag reached the siblings. Before
+// TDD-00117 the other N-1 workers kept the socket open and this would hang until
+// the deadline.
+func TestE2EHTTPListenClusterCloseReachesAllWorkers(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string }
+http.listen(8974, (req: HttpRequest): Res => {
+  if (req.path === '/shutdown') {
+    http.close()
+    return { status: 200, body: "shutting down" }
+  }
+  return { status: 200, body: process.pid.toString() }
+}, { workers: 3 })
+`
+	startHTTPClusterServer(t, src, 8974)
+
+	resp, err := http.Get("http://127.0.0.1:8974/shutdown")
+	if err != nil {
+		t.Fatalf("GET /shutdown: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "shutting down" {
+		t.Errorf("body = %q, want %q", body, "shutting down")
+	}
+
+	// Every worker polls the shared flag on a ≤200ms cadence and then drains, so
+	// the port should stop accepting well within a few seconds. If cross-worker
+	// close were broken, the two workers that didn't serve /shutdown would keep
+	// the inherited socket open and this loop would never see a refusal.
+	addr := "127.0.0.1:8974"
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err != nil {
+			return // refused/unreachable — the whole cluster stopped accepting
+		}
+		conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("port %s still accepting 5s after a single /shutdown — the other workers never closed (cross-worker close did not reach them)", addr)
+}
+
 // TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs is the GC-mode
 // counterpart of TestE2EHTTPListenClusteringMultipleWorkerPIDs and
 // TestE2EHTTPListenGCModeConcurrentChurn combined: proves multi-process
@@ -1052,6 +1133,36 @@ http.listen(8966, (req: HttpRequest): Res => {
 	}
 	if len(seenPIDs) < 2 {
 		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID under -mm=gc, got only %v", n, seenPIDs)
+	}
+}
+
+// TestE2EHTTPRequestObjectKeysHidesInternals: Object.keys(req) must expose only
+// the user-facing HttpRequest surface (method/path/query/headers/body), not the
+// implementation-only bodyLength/__kml_bodyctx fields that back .bodyBytes() and
+// .stream() (VisibleFields' IsRequest case).
+func TestE2EHTTPRequestObjectKeysHidesInternals(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string }
+http.listen(8976, (req: HttpRequest): Res => {
+  return { status: 200, body: Object.keys(req).join(",") }
+})
+`
+	startHTTPServer(t, src, 8976)
+	resp, err := http.Get("http://127.0.0.1:8976/hi")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	if got != "method,path,query,headers,body" {
+		t.Errorf("Object.keys(req) = %q, want %q (internal fields must not leak)", got, "method,path,query,headers,body")
+	}
+	for _, internal := range []string{"bodyLength", "__kml_bodyctx"} {
+		if strings.Contains(got, internal) {
+			t.Errorf("Object.keys(req) leaked internal field %q: %q", internal, got)
+		}
 	}
 }
 
@@ -1127,6 +1238,67 @@ console.log("after listen returned")
 	code := waitExit(t, cmd, out, 5*time.Second)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
+	}
+}
+
+// TestE2EHTTPCloseAllConnectionsTerminatesInFlight is the decisive test for
+// TDD-00118: http.closeAllConnections() must forcefully terminate an in-flight
+// connection, not wait for it to finish. A raw client sends only a partial
+// request (no terminating blank line), so its server-side fiber parks mid-read
+// with the connection still open. A second request then calls
+// http.closeAllConnections(); the partial connection must be shut down — the
+// raw client's next read returns EOF promptly. Without the force-close it would
+// sit parked until the read deadline.
+func TestE2EHTTPCloseAllConnectionsTerminatesInFlight(t *testing.T) {
+	src := `
+import http from 'http'
+interface Res { status: number; body: string }
+http.listen(8975, (req: HttpRequest): Res => {
+  if (req.path === '/closeall') {
+    http.closeAllConnections()
+    return { status: 200, body: "closed all" }
+  }
+  return { status: 200, body: "ok" }
+})
+`
+	startHTTPServer(t, src, 8975)
+
+	// A raw connection that never completes its request — the server fiber parks
+	// mid-read, keeping this connection in the active registry.
+	raw, err := net.DialTimeout("tcp", "127.0.0.1:8975", 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial raw: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Write([]byte("GET /wait HTTP/1.1\r\nHost: x\r\n")); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+
+	// Trigger the force-close from a second connection. The /closeall response
+	// may not arrive (that connection is force-closed too, matching Node), so
+	// don't assert on it — fire it and move on.
+	go func() {
+		c := &http.Client{Timeout: 2 * time.Second}
+		if resp, err := c.Get("http://127.0.0.1:8975/closeall"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// The partial connection must now hit EOF promptly.
+	raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 64)
+	n, err := raw.Read(buf)
+	if err == nil && n > 0 {
+		// A well-behaved force-close may first flush a partial/empty response,
+		// but the connection must still end — one more read must reach EOF.
+		raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, err = raw.Read(buf)
+	}
+	if err == nil {
+		t.Fatalf("in-flight connection was not force-closed by closeAllConnections() — read succeeded instead of hitting EOF")
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("in-flight connection was not force-closed — read timed out instead of EOF (%v)", err)
 	}
 }
 

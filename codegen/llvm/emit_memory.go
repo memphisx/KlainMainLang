@@ -85,6 +85,12 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 	case ty.IsFunc:
 		e.ensureClosureFree()
 		e.emitInstr(fmt.Sprintf("call void @__kml_closure_free(ptr %s)", ptrReg))
+	case isStringTy(ty) && !ty.IsPromise && !ty.IsDynamic:
+		// A heap string is length-prefixed (TDD-00120): its malloc base is 8
+		// bytes before the value pointer, so free the base, not the value ptr.
+		// (An interned literal is static and never legitimately freed here — a
+		// pre-existing Memory.free-on-a-literal misuse stays undefined.)
+		e.emitStringFree(ptrReg)
 	case ty.IsObject || ty.IsPromise || (ty.IR == "ptr" && !ty.IsDynamic && !ty.IsArray):
 		// A plain single heap pointer: string, object literal/interface
 		// value, or an un-awaited Promise's malloc'd slot.

@@ -17,12 +17,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto)
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev
+      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2)
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev
 
       - run: go build .
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -timeout 20m ./...
       - run: make examples
 
   release:

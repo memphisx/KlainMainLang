@@ -195,6 +195,7 @@ func (e *Emitter) ensureOSCpusLinux() {
 	e.ensureStrstr()
 	e.ensureSscanf()
 	e.ensureMalloc()
+	e.ensureStrHeaderRuntime() // model string must be headered for binary-safe === (TDD-00120)
 	e.emitGlobal("declare ptr @strchr(ptr noundef, i32 noundef)")
 
 	f := newCPUInfoFieldIndexes()
@@ -251,8 +252,9 @@ func (e *Emitter) ensureOSCpusLinux() {
 	fmt.Fprintf(&b, "  %%model_colon = call ptr @strchr(ptr %%model_at, i32 58)\n")
 	fmt.Fprintf(&b, "  %%modelbuf = call ptr @malloc(i64 256)\n")
 	fmt.Fprintf(&b, "  %%mrc = call i32 (ptr, ptr, ...) @sscanf(ptr %%model_colon, ptr %s, ptr %%modelbuf)\n", modelScanFmtPtr)
+	fmt.Fprintf(&b, "  %%model_hdr = call ptr @__kml_str_from_cstr(ptr %%modelbuf)\n")
 	fmt.Fprintf(&b, "  %%model_slot1 = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.modelIdx)
-	fmt.Fprintf(&b, "  store ptr %%modelbuf, ptr %%model_slot1, align 8\n")
+	fmt.Fprintf(&b, "  store ptr %%model_hdr, ptr %%model_slot1, align 8\n")
 	fmt.Fprintf(&b, "  br label %%speed\n")
 
 	// speed
@@ -360,6 +362,7 @@ func (e *Emitter) ensureOSCpusDarwin() {
 	e.ensureMachVM()
 	e.ensureSysctlbyname()
 	e.ensureMalloc()
+	e.ensureStrHeaderRuntime() // model string must be headered for binary-safe === (TDD-00120)
 
 	f := newCPUInfoFieldIndexes()
 	brandKeyPtr := e.internString("machdep.cpu.brand_string")
@@ -405,8 +408,9 @@ func (e *Emitter) ensureOSCpusDarwin() {
 	fmt.Fprintf(&b, "  %%entry_obj = call ptr @malloc(i64 %d)\n", f.infoSize)
 	fmt.Fprintf(&b, "  %%times_obj = call ptr @malloc(i64 %d)\n", f.timesSize)
 
+	fmt.Fprintf(&b, "  %%model_hdr = call ptr @__kml_str_from_cstr(ptr %%modelbuf)\n")
 	fmt.Fprintf(&b, "  %%model_slot = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.modelIdx)
-	fmt.Fprintf(&b, "  store ptr %%modelbuf, ptr %%model_slot, align 8\n")
+	fmt.Fprintf(&b, "  store ptr %%model_hdr, ptr %%model_slot, align 8\n")
 	fmt.Fprintf(&b, "  %%speed_slot = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.speedIdx)
 	fmt.Fprintf(&b, "  store i64 %%freqmhz, ptr %%speed_slot, align 8\n")
 

@@ -38,6 +38,7 @@ func (e *Emitter) ensureChildProcRuntime() {
 		return
 	}
 	e.usedChildProcRuntime = true
+	e.ensureStrHeaderRuntime()
 	e.ensureMalloc()
 	e.ensureCalloc()
 	e.ensureRealloc()
@@ -126,8 +127,10 @@ fire:
   %hasL = icmp ne ptr %dataL, null
   br i1 %hasL, label %docall, label %loop
 docall:
-  %buf = call ptr @malloc(i64 %n)
+  %buf = call ptr @__kml_str_alloc(i64 %n)
   call ptr @memcpy(ptr %buf, ptr %chunkptr, i64 %n)
+  %bufnul = getelementptr i8, ptr %buf, i64 %n
+  store i8 0, ptr %bufnul, align 1
   %dfp_p = getelementptr { ptr, ptr }, ptr %dataL, i32 0, i32 0
   %dfp = load ptr, ptr %dfp_p, align 8
   %dep_p = getelementptr { ptr, ptr }, ptr %dataL, i32 0, i32 1
@@ -273,7 +276,15 @@ chk:
 empty:
   ret ptr %s
 ret:
-  ret ptr %%d
+  ; TDD-00120: return a length-prefixed copy of the accumulator's raw bytes
+  ; (len field, i32 1) so binary-safe consumers (.split/=== read ptr-8) work.
+  %%len_p = getelementptr { ptr, i64, i64 }, ptr %%acc, i32 0, i32 1
+  %%lenv = load i64, ptr %%len_p, align 8
+  %%hdr = call ptr @__kml_str_alloc(i64 %%lenv)
+  call ptr @memcpy(ptr %%hdr, ptr %%d, i64 %%lenv)
+  %%nul = getelementptr i8, ptr %%hdr, i64 %%lenv
+  store i8 0, ptr %%nul, align 1
+  ret ptr %%hdr
 }`, emptyStr))
 
 	// __kml_cp_exec_errmsg(code): "Command failed with exit code N"
@@ -282,8 +293,9 @@ ret:
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_cp_exec_errmsg(i64 %%code) {
 entry:
-  %%buf = call ptr @malloc(i64 64)
+  %%buf = call ptr @__kml_str_alloc(i64 64)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%code)
+  call void @__kml_str_finalize(ptr %%buf)
   ret ptr %%buf
 }`, fmtExec))
 

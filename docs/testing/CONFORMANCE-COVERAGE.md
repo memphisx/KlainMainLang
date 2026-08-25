@@ -8,6 +8,8 @@ Tracks how much of two official external conformance suites has been reviewed fo
 
 Type-checker output only — no expected-stdout oracle anywhere in the suite. Categories here are reviewed for *edge-case ideas*, never ported directly.
 
+> **Now also measured automatically ([TDD-00121](../tdd/TDD-00121.md) Track C).** The absence of an *execution* oracle does not mean the absence of *any* oracle: each case's `tests/baselines/reference/*.errors.txt` is an **accept/reject** oracle for the compiler front-end (a case with an errors baseline should be rejected; one without should compile clean). `tools/conformance -suite=ts` scores that agreement across the whole corpus — see [CONFORMANCE-RESULTS-TS.md](CONFORMANCE-RESULTS-TS.md). This complements the manual edge-case scan below; it does not replace it (message/position fidelity is still a manual concern).
+
 | Category | In scope? | Status | Tests derived | Notes |
 |---|---|---|---|---|
 | `expressions/binaryOperators/arithmeticOperator` | Yes | Scanned | 0 | Upstream files are pure type-declaration matrices (`any`/`number` × every operator), no concrete executed values. The exhaustive any/number × `<<`/`>>`/`>>>`/etc. layout directly maps to the shift-semantics bug already found and fixed (see [ADR-00047](../adr/ADR-00047.md)) — worth deriving concrete shift/arithmetic edge-case tests from (Test262's `left-shift`/`right-shift`/`unsigned-right-shift`, below, are the actual source for those values). |

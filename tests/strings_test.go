@@ -14,6 +14,47 @@ console.log(a + ', ' + b + '!')
 `, "hello, world!")
 }
 
+// TDD-00120 Stage 2: comparison, switch, and substring search must read
+// through an embedded NUL, not stop at it. Every operand below has a real
+// byte past the \0 that changes the answer — length is 5 not 2, the two
+// strings differ only in their last byte, "cd" lives entirely past the NUL,
+// and the switch label must match the full 5-byte string rather than the
+// "ab" prefix. Proves __kml_str_cmp / __kml_str_indexof are wired in place
+// of the strlen-bounded strcmp/strstr they replaced.
+func TestE2EStringBinarySafePrimitives(t *testing.T) {
+	assertOutput(t, `
+const a: string = "ab\0cd"
+const b: string = "ab\0ce"
+console.log(a.length)
+console.log(a === b)
+console.log(a < b)
+console.log(a.indexOf("cd"))
+console.log(a.includes("cd"))
+switch (a) {
+  case "ab": console.log("truncated"); break
+  case "ab\0cd": console.log("full"); break
+  default: console.log("default")
+}
+`, "5\nfalse\ntrue\n3\ntrue\nfull")
+}
+
+// TDD-00120 Stage 3: split/replace/replaceAll search the subject with memmem
+// over the header length, so a separator or match past an embedded NUL is
+// still found. "aXbXc\0dXe" has three X's, the last one *after* the \0 — a
+// strlen-bounded strstr would stop at the NUL and see only two, dropping the
+// "dXe" tail. Binary-safe: split yields 4 parts and replaceAll (X→"--", +1
+// byte each of 3) yields length 12.
+func TestE2EStringBinarySafeSplitReplace(t *testing.T) {
+	assertOutput(t, `
+const s: string = "aXbXc\0dXe"
+console.log(s.split("X").length)
+const ra: string = s.replaceAll("X", "--")
+console.log(ra.length)
+console.log("a,b,c".split(",").length)
+console.log("hello world".replaceAll("o", "0"))
+`, "4\n12\n3\nhell0 w0rld")
+}
+
 func TestE2EStringPlusNumberConcat(t *testing.T) {
 	// Regression test: "+" with exactly one string operand must stringify
 	// the other side (matching real JS), not blindly reinterpret it as

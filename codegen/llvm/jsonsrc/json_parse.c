@@ -387,8 +387,13 @@ KmlJsonNode *__kml_json_item(const KmlJsonNode *n, long i) {
 char *__kml_json_string_dup(const KmlJsonNode *n) {
     const char *s = (n && n->kind == KJSON_STRING && n->str_val) ? n->str_val : "";
     long len = (long)strlen(s);
-    char *out = (char *)malloc(len + 1);
-    if (out) memcpy(out, s, len + 1);
+    /* TDD-00120: length-prefixed heap string — [i64 len][bytes][\0], value ptr
+       at base+8, so KML string ops can read the true length via ptr-8. */
+    char *base = (char *)malloc(8 + len + 1);
+    if (!base) return base;
+    *(long *)base = len;
+    char *out = base + 8;
+    memcpy(out, s, len + 1);
     return out;
 }
 

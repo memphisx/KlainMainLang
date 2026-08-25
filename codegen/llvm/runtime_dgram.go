@@ -30,6 +30,7 @@ func (e *Emitter) ensureDgramRuntime() {
 		return
 	}
 	e.usedDgramRuntime = true
+	e.ensureStrHeaderRuntime()
 	e.ensureMalloc()
 	e.ensureCalloc()
 	e.ensureRealloc()
@@ -276,8 +277,10 @@ onmsg:
   %%hasml = icmp ne ptr %%ml, null
   br i1 %%hasml, label %%firemsg, label %%rloop
 firemsg:
-  %%buf = call ptr @malloc(i64 %%n)
+  %%buf = call ptr @__kml_str_alloc(i64 %%n)
   call ptr @memcpy(ptr %%buf, ptr %%chunkptr, i64 %%n)
+  %%bufnul = getelementptr i8, ptr %%buf, i64 %%n
+  store i8 0, ptr %%bufnul, align 1
   ; rinfo.address from src sin_addr (offset 4), rinfo.port from sin_port (offset 2)
   %%sap = getelementptr i8, ptr %%src, i64 4
   %%a0p = getelementptr i8, ptr %%sap, i64 0

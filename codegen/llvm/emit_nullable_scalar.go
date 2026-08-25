@@ -244,6 +244,17 @@ func (e *Emitter) storeScalarOrNullableField(gepReg string, fieldTy Type, val Va
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy)))
 		return
 	}
+	// A constrained-union field (TDD-00119) holds an { i8, i64 } box: box the
+	// concrete value into it rather than coercing (coerce doesn't box). Already-
+	// boxed dynamic values pass through emitBoxValue unchanged.
+	if fieldTy.IsDynamic && len(fieldTy.UnionMembers) > 0 {
+		boxed, err := e.emitBoxValue(val)
+		if err == nil {
+			val = boxed
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+		return
+	}
 	val = e.coerce(val, fieldTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
 }
@@ -266,6 +277,20 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 	val, err := e.emitExprWithObjectHint(expr, fieldTy)
 	if err != nil {
 		return err
+	}
+	// A constrained-union field (TDD-00119) holds an { i8, i64 } box: check the
+	// value's type against the member set, then box it (coerce doesn't box).
+	if fieldTy.IsDynamic && len(fieldTy.UnionMembers) > 0 {
+		if !val.Ty.IsDynamic && !unionAllowsAssignmentFrom(fieldTy, val.Ty) {
+			return fmt.Errorf("%d:%d: value's type is not a member of the field's union type", expr.GetPos().Line, expr.GetPos().Col)
+		}
+		boxed, err := e.emitBoxValue(val)
+		if err != nil {
+			return err
+		}
+		val = boxed
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+		return nil
 	}
 	val = e.coerce(val, fieldTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))

@@ -241,7 +241,13 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
-	return Value{Ref: r, Ty: fieldTy}, nil
+	// TDD-00120: the raw body field is the dual-use curl buffer (also .body /
+	// .arrayBuffer()), with no length header. Hand text()/json() a length-prefixed
+	// copy (strlen-bounded, matching text()'s existing NUL semantics).
+	e.ensureStrHeaderRuntime()
+	rc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", rc, r))
+	return Value{Ref: rc, Ty: fieldTy}, nil
 }
 
 // emitResponseDriveToDone (TDD-00097 Stage 4): a headers-resolved Response

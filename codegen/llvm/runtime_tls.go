@@ -15,8 +15,8 @@ func (e *Emitter) ensureTLSRuntime() {
 		return
 	}
 	e.usedTLSRuntime = true
-	e.usedTLS = true      // triggers tlssrc/tls.c compile + -lssl (main.go) and the extern decls
-	e.ensureNetRuntime()  // socket/connect/register/dns decls + the socket struct + event loop
+	e.usedTLS = true     // triggers tlssrc/tls.c compile + -lssl (main.go) and the extern decls
+	e.ensureNetRuntime() // socket/connect/register/dns decls + the socket struct + event loop
 
 	fam0, fam1 := httpSockaddrFamilyBytes()
 	nonblock := httpNonblockFlag()

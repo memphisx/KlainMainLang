@@ -1,13 +1,17 @@
 BINARY       := klainmain
 GO           := go
 CLANG        := clang
+# The tests/ E2E suite (each case spawns clang + a compiled binary) runs well
+# past Go's default 600s `go test` timeout on a slower box — override it here so
+# a full run doesn't die mid-suite with a timeout panic. Matches test-par's 20m.
+TEST_TIMEOUT ?= 20m
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
 EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance help
+.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts help
 
 ## all: build the compiler
 all: build
@@ -22,7 +26,7 @@ install:
 
 ## test: run Go unit tests
 test:
-	$(GO) test ./...
+	$(GO) test -timeout $(TEST_TIMEOUT) ./...
 
 ## test-par: run the tests/ suite sharded across SHARDS parallel processes
 ## (~1.5-2x faster than serial — the suite is subprocess/IO-bound, not CPU-bound,
@@ -153,6 +157,14 @@ conformance-fetch:
 ## conformance: regenerate docs/testing/CONFORMANCE-RESULTS.md by running the full Test262 corpus through this compiler's own pipeline (fetches the corpus first if needed; self-contained — go run, not the klainmain binary)
 conformance: conformance-fetch
 	$(GO) run ./tools/conformance
+
+## conformance-node: regenerate docs/testing/CONFORMANCE-RESULTS-NODE.md — Node pure-module behavioral tests (TDD-00121 Track B)
+conformance-node: conformance-fetch
+	$(GO) run ./tools/conformance -suite=node
+
+## conformance-ts: regenerate docs/testing/CONFORMANCE-RESULTS-TS.md — TypeScript accept/reject oracle (TDD-00121 Track C)
+conformance-ts: conformance-fetch
+	$(GO) run ./tools/conformance -suite=ts
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

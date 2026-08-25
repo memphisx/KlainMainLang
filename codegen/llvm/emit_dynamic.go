@@ -55,13 +55,26 @@ func isUnconstrainedDynamic(ty Type) bool {
 // already defers object/array *members* past V1 for a related reason); union
 // *elements*/*fields* nested in an otherwise-concrete container are a
 // separate, still-open gap from that, left for whenever this is revisited.
+// objectFieldDynamicRejected reports whether a dynamic type is disallowed as an
+// OBJECT FIELD. Bare any/unknown (nil UnionMembers) is rejected; a *constrained*
+// union (TDD-00119) is allowed, since its member set is checked and boxed at
+// object-literal-field construction (storeScalarOrNullableField +
+// unionAllowsAssignmentFrom) and at the return boundary.
+func objectFieldDynamicRejected(ty Type) bool {
+	return ty.IsDynamic && len(ty.UnionMembers) == 0
+}
+
 func containsDynamicElement(ty Type) bool {
 	if ty.IsArray && ty.ElemType != nil {
+		// Array elements reject ANY dynamic — bare any/unknown AND a constrained
+		// union — since element-level union checking/boxing isn't wired yet
+		// (array-literal element construction and HOF element passing would skip
+		// the member-set check). Still a deliberate scope cut (TDD-00043).
 		return ty.ElemType.IsDynamic || containsDynamicElement(*ty.ElemType)
 	}
 	if ty.IsObject {
 		for _, f := range ty.Fields {
-			if f.Ty.IsDynamic || containsDynamicElement(f.Ty) {
+			if objectFieldDynamicRejected(f.Ty) || containsDynamicElement(f.Ty) {
 				return true
 			}
 		}
@@ -111,12 +124,18 @@ func validateUnionMembers(ty Type, line, col int) error {
 		if scalarTypeKind(m) != "" {
 			continue
 		}
+		// A ReadableStream member (TDD-00119) is boxed under its own tag
+		// (kmlTagStream), so it is runtime-distinguishable on its own and does not
+		// count toward the "2+ object members need a discriminant" rule below.
+		if m.IsReadableStream {
+			continue
+		}
 		// An object/interface/class member is allowed (TDD-00115), boxed as tag 6.
 		if isUnionObjectMember(m) {
 			objectMembers = append(objectMembers, m)
 			continue
 		}
-		return fmt.Errorf("%d:%d: union member types are limited to number, string, boolean (plus null/undefined) and object/interface/class types", line, col)
+		return fmt.Errorf("%d:%d: union member types are limited to number, string, boolean (plus null/undefined), object/interface/class, and ReadableStream types", line, col)
 	}
 	// One object member: usable via `typeof x === "object"` narrowing (TDD-00115).
 	// Two or more: allowed only as a *discriminated* union (TDD-00116) — every
@@ -216,6 +235,17 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 		}
 		return false
 	}
+	// A ReadableStream value matches a ReadableStream member (TDD-00119). Chunk
+	// element type isn't part of the match — the response writer treats any
+	// stream member uniformly, and stream chunk types aren't otherwise narrowed.
+	if valTy.IsReadableStream {
+		for _, m := range unionTy.UnionMembers {
+			if m.IsReadableStream {
+				return true
+			}
+		}
+		return false
+	}
 	// An object value matches the union's object member when it is structurally
 	// assignable to it (width subtyping — extra fields ok), the same test used
 	// for generic constraints (TDD-00115).
@@ -285,6 +315,12 @@ const (
 	// same-tag equality in __kml_any_eq — a plain payload compare — is exact:
 	// interned strings are deduplicated per module, one global per name.
 	kmlTagFuncRef = 8
+	// kmlTagStream boxes a ReadableStream (TDD-00119): a ptr-shaped runtime value
+	// that must NOT collide with kmlTagString (both are `IR=="ptr"`). The payload
+	// is the stream pointer ptrtoint'd; `typeof` → "object", `===` → reference
+	// equality on the pointer (like an array). Lets `string | ReadableStream`
+	// round-trip through a union box — e.g. an http.listen response `body` field.
+	kmlTagStream = 9
 )
 
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
@@ -343,6 +379,13 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		payload = r
 	case v.Ty.IsObject:
 		tag = kmlTagObject
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
+		payload = r
+	case v.Ty.IsReadableStream:
+		// TDD-00119: box distinctly from a string (both are IR "ptr") so a
+		// `string | ReadableStream` union box can tell them apart at runtime.
+		tag = kmlTagStream
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
 		payload = r
@@ -406,21 +449,21 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 
 	matchL, nextL := e.emitTagCheck(tag, kmlTagInt, "dynstr.int")
 	e.emitLabel(matchL)
-	scratch := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", scratch))
+	scratch := e.emitStringScratch(32) // TDD-00120
 	fmtInt := e.internString("%lld")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", scratch, fmtInt, payload))
+	e.emitStringFinalizeLen(scratch)
 	store(scratch)
 	e.emitLabel(nextL)
 
 	matchL, nextL = e.emitTagCheck(tag, kmlTagFloat, "dynstr.float")
 	e.emitLabel(matchL)
-	fscratch := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", fscratch))
+	fscratch := e.emitStringScratch(32) // TDD-00120
 	fdouble := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", fdouble, payload))
 	e.ensureDtoa() // JS-faithful shortest round-trip (TDD-00080)
 	e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", fscratch, fdouble))
+	e.emitStringFinalizeLen(fscratch)
 	store(fscratch)
 	e.emitLabel(nextL)
 
@@ -465,10 +508,10 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	matchL, nextL = e.emitTagCheck(tag, kmlTagFuncRef, "dynstr.funcref")
 	e.emitLabel(matchL)
 	fnName := e.freshReg()
-	fnBuf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", fnName, payload))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", fnBuf))
+	fnBuf := e.emitStringScratch(64) // TDD-00120
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", fnBuf, e.internString("function %s() { [native code] }"), fnName))
+	e.emitStringFinalizeLen(fnBuf)
 	store(fnBuf)
 	e.emitLabel(nextL)
 

@@ -11,12 +11,14 @@ func (e *Emitter) ensureJSONStringifyNum() {
 	e.usedJSONStringifyNum = true
 	e.ensureMalloc()
 	e.ensureSprintf()
+	e.ensureStrHeaderRuntime()
 	fmtName := e.internString("%lld")
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_json_str_num(i64 %%n) {
 entry:
-  %%buf = call ptr @malloc(i64 32)
+  %%buf = call ptr @__kml_str_alloc(i64 32)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%n)
+  call void @__kml_str_finalize(ptr %%buf)
   ret ptr %%buf
 }`, fmtName))
 }
@@ -28,13 +30,14 @@ func (e *Emitter) ensureJSONStringifyStr() {
 	e.usedJSONStringifyStr = true
 	e.ensureStrlen()
 	e.ensureMalloc()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_json_str_str(ptr %s) {
 entry:
   %len = call i64 @strlen(ptr %s)
   %max = mul i64 %len, 2
   %total = add i64 %max, 3
-  %buf = call ptr @malloc(i64 %total)
+  %buf = call ptr @__kml_str_alloc(i64 %total)
   store i8 34, ptr %buf, align 1
   br label %loop
 loop:
@@ -80,6 +83,7 @@ close:
   %jn = add i64 %j, 1
   %np = getelementptr i8, ptr %buf, i64 %jn
   store i8 0, ptr %np, align 1
+  call void @__kml_str_finalize(ptr %buf)
   ret ptr %buf
 }`)
 }

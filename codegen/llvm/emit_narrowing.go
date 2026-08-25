@@ -266,4 +266,3 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 		return Value{Ref: payload, Ty: target}
 	}
 }
-

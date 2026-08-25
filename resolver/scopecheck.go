@@ -84,8 +84,8 @@ func checkVarLexicalIntersection(body []ast.Statement, lexicalNames map[string]b
 // declarations of one block/function body, then recurses into every nested
 // scope each of those statements opens.
 func checkScopeBody(path string, body []ast.Statement) error {
-	seen := map[string]string{}    // name -> kind of its first declaration in this scope
-	lexical := map[string]bool{}   // subset of seen declared with a lexical kind
+	seen := map[string]string{}  // name -> kind of its first declaration in this scope
+	lexical := map[string]bool{} // subset of seen declared with a lexical kind
 	for _, stmt := range body {
 		for _, d := range declaredNamesOf(stmt) {
 			if prev, dup := seen[d.name]; dup {

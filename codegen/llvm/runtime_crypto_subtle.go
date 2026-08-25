@@ -224,7 +224,9 @@ skip:
 
 // CryptoKey hidden-header layout (TDD-00104): 7 words —
 // { i64 algId, i64 param, i64 usages, i64 extractable, i64 kind,
-//   ptr keyData, i64 keyLen }. kind: 0 secret / 1 public / 2 private.
+//
+//	ptr keyData, i64 keyLen }. kind: 0 secret / 1 public / 2 private.
+//
 // param is the hash id for HMAC/RSA-OAEP/RSA-PSS keys and the curve id for
 // ECDSA keys (Web Crypto binds hash to RSA keys but curve to EC keys —
 // ECDSA's hash arrives per sign/verify call instead).

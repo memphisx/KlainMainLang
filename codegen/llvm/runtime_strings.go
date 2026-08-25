@@ -109,6 +109,7 @@ func (e *Emitter) ensureStringTrim() {
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.ensureWsSpan()
+	e.ensureStrHeaderRuntime() // TDD-00120: length-prefixed result
 	// Forward scan: skip the leading whitespace run, then walk to the end
 	// tracking the exclusive end of the last non-whitespace byte — this is
 	// what lets multi-byte whitespace work without a backwards UTF-8 decoder.
@@ -145,8 +146,7 @@ scan_step:
   br label %scan
 done:
   %tl = sub i64 %end, %i
-  %asz = add i64 %tl, 1
-  %buf = call ptr @malloc(i64 %asz)
+  %buf = call ptr @__kml_str_alloc(i64 %tl)
   %sp = getelementptr i8, ptr %s, i64 %i
   call ptr @memcpy(ptr %buf, ptr %sp, i64 %tl)
   %np = getelementptr i8, ptr %buf, i64 %tl
@@ -166,6 +166,7 @@ func (e *Emitter) ensureStringTrimStart() {
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.ensureWsSpan()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_trim_start(ptr %s) {
 entry:
@@ -183,7 +184,7 @@ done:
   %sp = getelementptr i8, ptr %s, i64 %i
   %rl = call i64 @strlen(ptr %sp)
   %asz = add i64 %rl, 1
-  %buf = call ptr @malloc(i64 %asz)
+  %buf = call ptr @__kml_str_alloc(i64 %rl)
   call ptr @memcpy(ptr %buf, ptr %sp, i64 %asz)
   ret ptr %buf
 }`)
@@ -200,6 +201,7 @@ func (e *Emitter) ensureStringTrimEnd() {
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	e.ensureWsSpan()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_trim_end(ptr %s) {
 entry:
@@ -221,8 +223,7 @@ scan_step:
   %end_next = select i1 %is_ws, i64 %end, i64 %j_next
   br label %scan
 done:
-  %asz = add i64 %end, 1
-  %buf = call ptr @malloc(i64 %asz)
+  %buf = call ptr @__kml_str_alloc(i64 %end)
   call ptr @memcpy(ptr %buf, ptr %s, i64 %end)
   %np = getelementptr i8, ptr %buf, i64 %end
   store i8 0, ptr %np, align 1
@@ -237,12 +238,12 @@ func (e *Emitter) ensureStringToUpper() {
 	e.usedStringToUpper = true
 	e.ensureStrlen()
 	e.ensureMalloc()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_toupper(ptr %s) {
 entry:
   %len = call i64 @strlen(ptr %s)
-  %alloc = add i64 %len, 1
-  %buf = call ptr @malloc(i64 %alloc)
+  %buf = call ptr @__kml_str_alloc(i64 %len)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i_next, %body ]
@@ -274,12 +275,12 @@ func (e *Emitter) ensureStringToLower() {
 	e.usedStringToLower = true
 	e.ensureStrlen()
 	e.ensureMalloc()
+	e.ensureStrHeaderRuntime()
 	e.emitGlobal(`
 define ptr @__kml_tolower(ptr %s) {
 entry:
   %len = call i64 @strlen(ptr %s)
-  %alloc = add i64 %len, 1
-  %buf = call ptr @malloc(i64 %alloc)
+  %buf = call ptr @__kml_str_alloc(i64 %len)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i_next, %body ]
@@ -309,34 +310,35 @@ func (e *Emitter) ensureStringReplace() {
 		return
 	}
 	e.usedStringReplace = true
-	e.ensureStrstr()
-	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime() // memmem + __kml_str_alloc (binary-safe, TDD-00120 Stage 3)
+	// Lengths are explicit parameters, not read from the header: user .replace()
+	// passes __kml_str_len(...), but internal callers (HTTP header/query parsing,
+	// SSE) pass strlen() of a raw, headerless request buffer. Reading ptr-8 on
+	// those would be garbage — this keeps the search memmem-bounded either way.
 	e.emitGlobal(`
-define ptr @__kml_replace(ptr %s, ptr %search, ptr %rep) {
+define ptr @__kml_replace(ptr %s, i64 %slen, ptr %search, i64 %search_len, ptr %rep, i64 %rep_len) {
 entry:
-  %found = call ptr @strstr(ptr %s, ptr %search)
+  %found = call ptr @memmem(ptr %s, i64 %slen, ptr %search, i64 %search_len)
   %is_found = icmp ne ptr %found, null
   br i1 %is_found, label %do_replace, label %no_replace
 no_replace:
-  %slen0 = call i64 @strlen(ptr %s)
-  %salloc0 = add i64 %slen0, 1
-  %sbuf0 = call ptr @malloc(i64 %salloc0)
-  call ptr @memcpy(ptr %sbuf0, ptr %s, i64 %salloc0)
+  %sbuf0 = call ptr @__kml_str_alloc(i64 %slen)
+  call ptr @memcpy(ptr %sbuf0, ptr %s, i64 %slen)
+  %n0 = getelementptr i8, ptr %sbuf0, i64 %slen
+  store i8 0, ptr %n0, align 1
   ret ptr %sbuf0
 do_replace:
   %s_int = ptrtoint ptr %s to i64
   %f_int = ptrtoint ptr %found to i64
   %prefix_len = sub i64 %f_int, %s_int
-  %search_len = call i64 @strlen(ptr %search)
-  %rep_len = call i64 @strlen(ptr %rep)
   %suffix_ptr = getelementptr i8, ptr %found, i64 %search_len
-  %suffix_len = call i64 @strlen(ptr %suffix_ptr)
+  %pfx_plus_search = add i64 %prefix_len, %search_len
+  %suffix_len = sub i64 %slen, %pfx_plus_search
   %total0 = add i64 %prefix_len, %rep_len
   %total1 = add i64 %total0, %suffix_len
-  %total = add i64 %total1, 1
-  %buf = call ptr @malloc(i64 %total)
+  %buf = call ptr @__kml_str_alloc(i64 %total1)
   call ptr @memcpy(ptr %buf, ptr %s, i64 %prefix_len)
   %rep_dst = getelementptr i8, ptr %buf, i64 %prefix_len
   call ptr @memcpy(ptr %rep_dst, ptr %rep, i64 %rep_len)
@@ -360,48 +362,50 @@ func (e *Emitter) ensureStringReplaceAll() {
 		return
 	}
 	e.usedStringReplaceAll = true
-	e.ensureStrstr()
-	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime() // memmem + __kml_str_len (binary-safe, TDD-00120 Stage 3)
 	e.emitGlobal(`
-define ptr @__kml_replace_all(ptr %s, ptr %search, ptr %rep) {
+define ptr @__kml_replace_all(ptr %s, i64 %slen, ptr %search, i64 %search_len, ptr %rep, i64 %rep_len) {
 entry:
-  %search_len = call i64 @strlen(ptr %search)
   %is_empty_search = icmp eq i64 %search_len, 0
   br i1 %is_empty_search, label %copy_unchanged, label %count_setup
 copy_unchanged:
-  %slen_u = call i64 @strlen(ptr %s)
-  %salloc_u = add i64 %slen_u, 1
-  %sbuf_u = call ptr @malloc(i64 %salloc_u)
-  call ptr @memcpy(ptr %sbuf_u, ptr %s, i64 %salloc_u)
+  %sbuf_u = call ptr @__kml_str_alloc(i64 %slen)
+  call ptr @memcpy(ptr %sbuf_u, ptr %s, i64 %slen)
+  %nu = getelementptr i8, ptr %sbuf_u, i64 %slen
+  store i8 0, ptr %nu, align 1
   ret ptr %sbuf_u
 count_setup:
-  %rep_len = call i64 @strlen(ptr %rep)
   br label %cnt_loop
 cnt_loop:
   %cur_c = phi ptr [ %s, %count_setup ], [ %nxt_c, %cnt_body ]
+  %rem_c = phi i64 [ %slen, %count_setup ], [ %remnxt_c, %cnt_body ]
   %cnt = phi i64 [ 0, %count_setup ], [ %cnt1, %cnt_body ]
-  %found_c = call ptr @strstr(ptr %cur_c, ptr %search)
+  %found_c = call ptr @memmem(ptr %cur_c, i64 %rem_c, ptr %search, i64 %search_len)
   %has_c = icmp ne ptr %found_c, null
   br i1 %has_c, label %cnt_body, label %cnt_done
 cnt_body:
   %cnt1 = add i64 %cnt, 1
   %nxt_c = getelementptr i8, ptr %found_c, i64 %search_len
+  %fc_int = ptrtoint ptr %found_c to i64
+  %cc_int = ptrtoint ptr %cur_c to i64
+  %skip_c = sub i64 %fc_int, %cc_int
+  %consumed_c = add i64 %skip_c, %search_len
+  %remnxt_c = sub i64 %rem_c, %consumed_c
   br label %cnt_loop
 cnt_done:
-  %slen = call i64 @strlen(ptr %s)
   %removed = mul i64 %cnt, %search_len
   %added = mul i64 %cnt, %rep_len
   %base = sub i64 %slen, %removed
   %total0 = add i64 %base, %added
-  %total = add i64 %total0, 1
-  %buf = call ptr @malloc(i64 %total)
+  %buf = call ptr @__kml_str_alloc(i64 %total0)
   br label %fill_loop
 fill_loop:
   %cur_f = phi ptr [ %s, %cnt_done ], [ %nxt_f, %fill_body ]
+  %rem_f = phi i64 [ %slen, %cnt_done ], [ %remnxt_f, %fill_body ]
   %out_f = phi ptr [ %buf, %cnt_done ], [ %out_nxt, %fill_body ]
-  %found_f = call ptr @strstr(ptr %cur_f, ptr %search)
+  %found_f = call ptr @memmem(ptr %cur_f, i64 %rem_f, ptr %search, i64 %search_len)
   %has_f = icmp ne ptr %found_f, null
   br i1 %has_f, label %fill_body, label %fill_last
 fill_body:
@@ -413,11 +417,12 @@ fill_body:
   call ptr @memcpy(ptr %out_after_part, ptr %rep, i64 %rep_len)
   %out_nxt = getelementptr i8, ptr %out_after_part, i64 %rep_len
   %nxt_f = getelementptr i8, ptr %found_f, i64 %search_len
+  %consumed_f = add i64 %part_len, %search_len
+  %remnxt_f = sub i64 %rem_f, %consumed_f
   br label %fill_loop
 fill_last:
-  %last_len = call i64 @strlen(ptr %cur_f)
-  call ptr @memcpy(ptr %out_f, ptr %cur_f, i64 %last_len)
-  %out_last_end = getelementptr i8, ptr %out_f, i64 %last_len
+  call ptr @memcpy(ptr %out_f, ptr %cur_f, i64 %rem_f)
+  %out_last_end = getelementptr i8, ptr %out_f, i64 %rem_f
   store i8 0, ptr %out_last_end, align 1
   ret ptr %buf
 }`)
@@ -428,18 +433,15 @@ func (e *Emitter) ensureStringSplit() {
 		return
 	}
 	e.usedStringSplit = true
-	e.ensureStrstr()
-	e.ensureStrlen()
 	e.ensureMalloc()
 	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime() // memmem + __kml_str_len (binary-safe, TDD-00120 Stage 3)
 	e.emitGlobal(`
-define {ptr, i64} @__kml_split(ptr %s, ptr %sep) {
+define {ptr, i64} @__kml_split(ptr %s, i64 %slen_c, ptr %sep, i64 %sep_len) {
 entry:
-  %sep_len = call i64 @strlen(ptr %sep)
   %is_empty_sep = icmp eq i64 %sep_len, 0
   br i1 %is_empty_sep, label %char_split, label %cnt_loop
 char_split:
-  %slen_c = call i64 @strlen(ptr %s)
   %carr_bytes = mul i64 %slen_c, 8
   %carr = call ptr @malloc(i64 %carr_bytes)
   br label %char_loop
@@ -448,7 +450,7 @@ char_loop:
   %cdone = icmp eq i64 %ci, %slen_c
   br i1 %cdone, label %char_done, label %char_body
 char_body:
-  %cbuf = call ptr @malloc(i64 2)
+  %cbuf = call ptr @__kml_str_alloc(i64 1)
   %csrc = getelementptr i8, ptr %s, i64 %ci
   %cval = load i8, ptr %csrc, align 1
   store i8 %cval, ptr %cbuf, align 1
@@ -464,13 +466,19 @@ char_done:
   ret {ptr, i64} %rc1
 cnt_loop:
   %cur_c = phi ptr [ %s, %entry ], [ %nxt_c, %cnt_body ]
+  %rem_c = phi i64 [ %slen_c, %entry ], [ %remnxt_c, %cnt_body ]
   %cnt = phi i64 [ 0, %entry ], [ %cnt1, %cnt_body ]
-  %found_c = call ptr @strstr(ptr %cur_c, ptr %sep)
+  %found_c = call ptr @memmem(ptr %cur_c, i64 %rem_c, ptr %sep, i64 %sep_len)
   %has_c = icmp ne ptr %found_c, null
   br i1 %has_c, label %cnt_body, label %cnt_done
 cnt_body:
   %cnt1 = add i64 %cnt, 1
   %nxt_c = getelementptr i8, ptr %found_c, i64 %sep_len
+  %fc_int = ptrtoint ptr %found_c to i64
+  %cc_int = ptrtoint ptr %cur_c to i64
+  %skip_c = sub i64 %fc_int, %cc_int
+  %consumed_c = add i64 %skip_c, %sep_len
+  %remnxt_c = sub i64 %rem_c, %consumed_c
   br label %cnt_loop
 cnt_done:
   %num_parts = add i64 %cnt, 1
@@ -479,16 +487,16 @@ cnt_done:
   br label %fill_loop
 fill_loop:
   %cur_f = phi ptr [ %s, %cnt_done ], [ %nxt_f, %fill_body ]
+  %rem_f = phi i64 [ %slen_c, %cnt_done ], [ %remnxt_f, %fill_body ]
   %idx = phi i64 [ 0, %cnt_done ], [ %idx1, %fill_body ]
-  %found_f = call ptr @strstr(ptr %cur_f, ptr %sep)
+  %found_f = call ptr @memmem(ptr %cur_f, i64 %rem_f, ptr %sep, i64 %sep_len)
   %has_f = icmp ne ptr %found_f, null
   br i1 %has_f, label %fill_body, label %fill_last
 fill_body:
   %cur_int = ptrtoint ptr %cur_f to i64
   %fnd_int = ptrtoint ptr %found_f to i64
   %part_len = sub i64 %fnd_int, %cur_int
-  %part_alloc = add i64 %part_len, 1
-  %part_buf = call ptr @malloc(i64 %part_alloc)
+  %part_buf = call ptr @__kml_str_alloc(i64 %part_len)
   call ptr @memcpy(ptr %part_buf, ptr %cur_f, i64 %part_len)
   %part_null = getelementptr i8, ptr %part_buf, i64 %part_len
   store i8 0, ptr %part_null, align 1
@@ -496,13 +504,13 @@ fill_body:
   store ptr %part_buf, ptr %slot_f, align 8
   %idx1 = add i64 %idx, 1
   %nxt_f = getelementptr i8, ptr %found_f, i64 %sep_len
+  %consumed_f = add i64 %part_len, %sep_len
+  %remnxt_f = sub i64 %rem_f, %consumed_f
   br label %fill_loop
 fill_last:
-  %last_len = call i64 @strlen(ptr %cur_f)
-  %last_alloc = add i64 %last_len, 1
-  %last_buf = call ptr @malloc(i64 %last_alloc)
-  call ptr @memcpy(ptr %last_buf, ptr %cur_f, i64 %last_len)
-  %last_null = getelementptr i8, ptr %last_buf, i64 %last_len
+  %last_buf = call ptr @__kml_str_alloc(i64 %rem_f)
+  call ptr @memcpy(ptr %last_buf, ptr %cur_f, i64 %rem_f)
+  %last_null = getelementptr i8, ptr %last_buf, i64 %rem_f
   store i8 0, ptr %last_null, align 1
   %last_slot = getelementptr ptr, ptr %arr, i64 %idx
   store ptr %last_buf, ptr %last_slot, align 8

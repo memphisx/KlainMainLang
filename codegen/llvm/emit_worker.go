@@ -22,11 +22,11 @@ import (
 // workerEntryInfo is one worker module's compile-time channel record, keyed
 // by canonical file path in e.workerEntries.
 type workerEntryInfo struct {
-	Symbol string // entry function name, __kml_worker_entry_<i>
-	InTy   Type   // parent → worker message type (worker's .on annotation)
-	InSet  bool
-	OutTy  Type // worker → parent message type (worker's postMessage args)
-	OutSet bool
+	Symbol  string // entry function name, __kml_worker_entry_<i>
+	InTy    Type   // parent → worker message type (worker's .on annotation)
+	InSet   bool
+	OutTy   Type // worker → parent message type (worker's postMessage args)
+	OutSet  bool
 	DataTy  Type // workerData type (worker's annotated decl)
 	DataSet bool
 }

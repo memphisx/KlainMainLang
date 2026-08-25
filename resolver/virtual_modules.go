@@ -55,6 +55,8 @@ var virtualBuiltinMarkers = map[string]string{
 	// `parentPort`/`workerData` are reserved identifiers codegen only
 	// accepts inside a worker entry module.
 	"worker_threads": "workerthreads__kml_builtin",
+	// TDD-00122: native testing helpers (`import { mustCall } from 'test'`).
+	"test": "test__kml_builtin",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -122,6 +124,14 @@ var virtualModuleMembers = map[string]map[string]bool{
 	},
 	"stream/promises": {"pipeline": true, "finished": true},
 	"worker_threads":  {"Worker": true, "parentPort": true, "workerData": true},
+	"test": {
+		// call helpers
+		"mustCall": true, "mustCallAtLeast": true, "mustNotCall": true,
+		"mustSucceed": true, "skip": true, "expectsError": true, "expectWarning": true,
+		// value probes
+		"isWindows": true, "isLinux": true, "isMacOS": true, "hasCrypto": true,
+		"hasIntl": true, "isMainThread": true,
+	},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds
