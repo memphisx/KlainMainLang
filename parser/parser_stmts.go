@@ -326,12 +326,14 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 	// but isn't specially instantiated yet (same "parse ahead of codegen"
 	// shape parseNewGenericBody already uses for classes).
 	var typeParams []string
+	var typeParamConstraints []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, err := p.parseTypeParamList(name + "<T>")
+		tp, tc, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
 			return nil, err
 		}
 		typeParams = tp
+		typeParamConstraints = tc
 	}
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
@@ -356,7 +358,7 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 	if bodyOptional && p.check(lexer.SEMICOLON) {
 		p.advance()
 		fd := &ast.FunctionDeclaration{
-			Name: name, TypeParams: typeParams, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
+			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
 		}
 		fd.SetPos(pos)
 		return fd, nil
@@ -392,7 +394,7 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 	}
 
 	fd := &ast.FunctionDeclaration{
-		Name: name, TypeParams: typeParams, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
+		Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: body, IsAsync: isAsync,
 	}
 	fd.SetPos(pos)
 	return fd, nil

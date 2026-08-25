@@ -50,3 +50,62 @@ let b: string | number = 5
 console.log(a === b)     // 1
 let c: string | number = "5"
 console.log(a === c)     // 0
+
+// --- flow narrowing (TDD-00114): typeof/truthiness refine a union in-branch ---
+function describeVal(x: string | number): string {
+	if (typeof x === "string") {
+		return "str:" + x.toUpperCase();   // x is string here
+	} else {
+		return "num:" + (x + 1);           // x is number here
+	}
+}
+console.log(describeVal("hi"));  // str:HI
+console.log(describeVal(41));    // num:42
+
+// nested else-if refines the remaining members; early return narrows the rest
+function label(v: string | number | boolean): string {
+	if (typeof v === "boolean") {
+		return v ? "yes" : "no";
+	}
+	if (typeof v === "number") {
+		return "n" + (v * 2);
+	}
+	return "s" + v.length;             // v is string here
+}
+console.log(label(true));   // yes
+console.log(label(10));     // n20
+console.log(label("abc"));  // s3
+
+// --- object union members (TDD-00115): one object member, usable via narrowing ---
+interface Point { x: number; y: number; }
+function render(v: string | Point): string {
+	if (typeof v === "object") {
+		return "(" + v.x + "," + v.y + ")";   // v is Point here
+	}
+	return v.toUpperCase();                  // v is string here
+}
+console.log(render({ x: 3, y: 4 }));  // (3,4)
+console.log(render("hi"));            // HI
+
+// Point | null with truthiness narrowing + object rest
+function sumRest(p: Point | null): number {
+	if (p) {
+		const { x, ...rest } = p;
+		return x + rest.y;
+	}
+	return -1;
+}
+console.log(sumRest({ x: 10, y: 20 }));  // 30
+console.log(sumRest(null));              // -1
+
+// --- discriminated unions (TDD-00116): a shared literal tag field ---
+interface Circle { kind: "circle"; r: number; }
+interface Square { kind: "square"; side: number; }
+function area(sh: Circle | Square): number {
+	if (sh.kind === "circle") {
+		return 3 * sh.r * sh.r;   // sh is Circle here
+	}
+	return sh.side * sh.side;    // sh is Square here (early-return narrowed)
+}
+console.log(area({ kind: "circle", r: 2 }));    // 12
+console.log(area({ kind: "square", side: 3 })); // 9

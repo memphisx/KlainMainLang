@@ -168,6 +168,14 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 	for _, tp := range f.TypeParams {
 		sc.bind(tp)
 	}
+	// A `<T extends X>` constraint references type names (`X`) that need the same
+	// per-file rewrite as any other type annotation (TDD-00113); a reference to
+	// a sibling type parameter stays bound (won't be renamed).
+	for _, c := range f.TypeParamConstraints {
+		if c != nil {
+			rewriteType(c, sc, lu)
+		}
+	}
 	bindParams(f.Params, sc, lu, f.GetPos())
 	rewritePatternDefaults(f.Params, sc, lu)
 	for i := range f.Params {
@@ -239,6 +247,11 @@ func rewriteInterfaceDecl(i *ast.InterfaceDeclaration, lu lookupTable) {
 	for _, tp := range i.TypeParams {
 		sc.bind(tp)
 	}
+	for _, c := range i.TypeParamConstraints {
+		if c != nil {
+			rewriteType(c, sc, lu)
+		}
+	}
 	for fi := range i.Fields {
 		rewriteType(i.Fields[fi].Type, sc, lu)
 	}
@@ -263,6 +276,11 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu lookupTable) {
 	sc.push()
 	for _, tp := range c.TypeParams {
 		sc.bind(tp)
+	}
+	for _, tc := range c.TypeParamConstraints {
+		if tc != nil {
+			rewriteType(tc, sc, lu)
+		}
 	}
 
 	if c.BaseClass != "" && !sc.bound(c.BaseClass) {
@@ -636,7 +654,28 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.ValType != nil {
 			rewriteType(e.ValType, sc, lu)
 		}
+		if e.Init != nil {
+			e.Init = rewriteExpr(e.Init, sc, lu)
+		}
 	case *ast.NewSetExpression:
+		if e.ElemType != nil {
+			rewriteType(e.ElemType, sc, lu)
+		}
+		if e.Init != nil {
+			e.Init = rewriteExpr(e.Init, sc, lu)
+		}
+	case *ast.NewWeakMapExpression:
+		if e.KeyType != nil {
+			rewriteType(e.KeyType, sc, lu)
+		}
+		if e.ValType != nil {
+			rewriteType(e.ValType, sc, lu)
+		}
+	case *ast.NewWeakSetExpression:
+		if e.ElemType != nil {
+			rewriteType(e.ElemType, sc, lu)
+		}
+	case *ast.NewWeakRefExpression:
 		if e.ElemType != nil {
 			rewriteType(e.ElemType, sc, lu)
 		}

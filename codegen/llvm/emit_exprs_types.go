@@ -340,6 +340,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return argTy
 	case *ast.Identifier:
 		if sym, ok := e.lookup(ex.Name); ok {
+			// A union local flow-narrowed in this region reads as its narrowed
+			// type (TDD-00114), matching emitIdent's own unboxing.
+			if sym.NarrowedTo != nil {
+				return *sym.NarrowedTo
+			}
 			return sym.Ty
 		}
 		switch ex.Name {
@@ -1440,6 +1445,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayOf(TypePtr)
 				case "hasOwn":
 					return TypeBool
+				case "fromEntries":
+					// Object.fromEntries(entries) → a dynamic object (a
+					// Map<string,V>-backed value, docs/tdd/TDD-00012.md);
+					// V comes from the [string, V][] entries' tuple field 1.
+					valTy := TypeI64
+					if len(ex.Args) >= 1 {
+						if elemTy := e.inferExprType(ex.Args[0]); elemTy.IsArray && elemTy.ElemType != nil &&
+							elemTy.ElemType.IsTuple && len(elemTy.ElemType.Fields) == 2 {
+							valTy = elemTy.ElemType.Fields[1].Ty
+						}
+					}
+					keyTy := TypePtr
+					return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
 				case "assign", "freeze", "seal":
 					if len(ex.Args) >= 1 {
 						return e.inferExprType(ex.Args[0])
@@ -1464,6 +1482,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if !haveObjTy {
 				objTy, haveObjTy = e.inferExprType(mem.Object), true
+			}
+			if haveObjTy && objTy.IsWeakRef {
+				if mem.Property == "deref" && objTy.MapKey != nil {
+					return *objTy.MapKey
+				}
 			}
 			if haveObjTy && objTy.IsMap {
 				switch mem.Property {
@@ -1838,15 +1861,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		return ReadableStreamType(TypeI64)
 	case *ast.NewMapExpression:
-		// Mirrors emitNewMapValue's defaults (string keys, number values).
-		keyTy := TypePtr
-		valTy := TypeI64
-		if ex.KeyType != nil {
-			keyTy = e.resolveType(ex.KeyType)
-		}
-		if ex.ValType != nil {
-			valTy = e.resolveType(ex.ValType)
-		}
+		// Mirrors emitNewMapValue's K/V resolution (mapKVTypes): explicit
+		// `<K, V>` wins, else infer from an initial `[K, V][]` entries array,
+		// else the string-key/number-value defaults.
+		keyTy, valTy := e.mapKVTypes(ex.KeyType, ex.ValType, ex.Init)
 		return MapType(keyTy, valTy)
 	case *ast.NewSetExpression:
 		// Mirrors emitNewSetValue's shape without emitting the initializer;
@@ -1857,6 +1875,30 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			elemTy = e.resolveType(ex.ElemType)
 		}
 		return SetType(elemTy)
+	case *ast.NewWeakMapExpression:
+		keyTy := TypePtr
+		valTy := TypeI64
+		if ex.KeyType != nil {
+			keyTy = e.resolveType(ex.KeyType)
+		}
+		if ex.ValType != nil {
+			valTy = e.resolveType(ex.ValType)
+		}
+		return WeakMapType(keyTy, valTy)
+	case *ast.NewWeakSetExpression:
+		elemTy := TypePtr
+		if ex.ElemType != nil {
+			elemTy = e.resolveType(ex.ElemType)
+		}
+		return WeakSetType(elemTy)
+	case *ast.NewWeakRefExpression:
+		referentTy := TypePtr
+		if ex.ElemType != nil {
+			referentTy = e.resolveType(ex.ElemType)
+		} else if ex.Init != nil {
+			referentTy = e.inferExprType(ex.Init)
+		}
+		return WeakRefType(referentTy)
 	case *ast.NewErrorExpression:
 		return errorObjType
 	case *ast.NewDateExpression:

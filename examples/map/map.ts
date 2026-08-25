@@ -59,3 +59,18 @@ console.log(scores.size); // 0
 console.log(scores.has("alice")); // 0
 scores.set("dave", 100);
 console.log(scores.size); // 1
+
+// ── new Map(entries): seed a map from a [key, value][] array of 2-tuples ─────
+// K/V are inferred from the entries when no <K, V> is given (here string/number)
+const prices = new Map([["pen", 2], ["notebook", 5], ["eraser", 1]]);
+console.log(prices.get("notebook")); // 5
+console.log(prices.size);            // 3
+
+// An explicit <K, V> wins over inference
+const codes = new Map<number, string>([[404, "Not Found"], [200, "OK"]]);
+console.log(codes.get(200)); // OK
+
+// The entries source can be an already-declared [K, V][] variable
+const pairs: [string, number][] = [["x", 10], ["y", 20]];
+const coords = new Map(pairs);
+console.log(coords.get("y")); // 20

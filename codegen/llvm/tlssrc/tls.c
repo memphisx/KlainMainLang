@@ -103,6 +103,54 @@ void __kml_tls_free(void *ssl) {
 
 // --- server (tls.createServer, TDD-00110) ---
 
+// alpn_select_cb negotiates ALPN on the server side (TDD-00111 Stage 2): prefer
+// "h2" (HTTP/2), else "http/1.1", scanning the client's length-prefixed protocol
+// list. Returns NOACK when neither is offered (the connection proceeds without a
+// negotiated protocol — a plain TLS line-protocol client that offers no ALPN
+// never triggers this, so tls.createServer is behavior-unchanged for them).
+static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                          const unsigned char *in, unsigned int inlen, void *arg) {
+	(void)ssl;
+	(void)arg;
+	for (unsigned int i = 0; i + 1 <= inlen;) {
+		unsigned int l = in[i];
+		if (i + 1 + l > inlen) break;
+		if (l == 2 && memcmp(&in[i + 1], "h2", 2) == 0) {
+			*out = &in[i + 1];
+			*outlen = 2;
+			return SSL_TLSEXT_ERR_OK;
+		}
+		i += 1 + l;
+	}
+	for (unsigned int i = 0; i + 1 <= inlen;) {
+		unsigned int l = in[i];
+		if (i + 1 + l > inlen) break;
+		if (l == 8 && memcmp(&in[i + 1], "http/1.1", 8) == 0) {
+			*out = &in[i + 1];
+			*outlen = 8;
+			return SSL_TLSEXT_ERR_OK;
+		}
+		i += 1 + l;
+	}
+	return SSL_TLSEXT_ERR_NOACK;
+}
+
+// __kml_tls_alpn_selected returns the negotiated ALPN protocol (e.g. "h2" or
+// "http/1.1") as a malloc'd NUL-terminated string, or NULL if none was
+// negotiated. The caller frees it. Lets the accept path branch h2 vs 1.1 after
+// the handshake (TDD-00111 Stage 2).
+char *__kml_tls_alpn_selected(void *ssl) {
+	const unsigned char *proto = NULL;
+	unsigned int len = 0;
+	SSL_get0_alpn_selected((SSL *)ssl, &proto, &len);
+	if (!proto || len == 0) return NULL;
+	char *s = malloc((size_t)len + 1);
+	if (!s) return NULL;
+	memcpy(s, proto, len);
+	s[len] = '\0';
+	return s;
+}
+
 // __kml_tls_server_ctx builds a server SSL_CTX from a PEM certificate and
 // private key (as strings, the way Node's { cert, key } are). Returns the ctx,
 // or NULL + a message in *errout on failure.
@@ -113,6 +161,7 @@ void *__kml_tls_server_ctx(const char *cert_pem, const char *key_pem, char **err
 		return NULL;
 	}
 	SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+	SSL_CTX_set_alpn_select_cb(ctx, alpn_select_cb, NULL);
 	BIO *cbio = BIO_new_mem_buf(cert_pem, -1);
 	X509 *cert = cbio ? PEM_read_bio_X509(cbio, NULL, NULL, NULL) : NULL;
 	if (cbio) BIO_free(cbio);

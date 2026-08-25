@@ -74,6 +74,12 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewMapValue(ex)
 	case *ast.NewSetExpression:
 		return e.emitNewSetValue(ex)
+	case *ast.NewWeakMapExpression:
+		return e.emitNewWeakMapValue(ex)
+	case *ast.NewWeakSetExpression:
+		return e.emitNewWeakSetValue(ex)
+	case *ast.NewWeakRefExpression:
+		return e.emitNewWeakRefValue(ex)
 	case *ast.NewEventEmitterExpression:
 		return e.emitNewEventEmitterValue(ex)
 	case *ast.NewReadableStreamExpression:
@@ -260,6 +266,14 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			return Value{Ref: r1, Ty: TypeAny}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
+	}
+	if sym.NarrowedTo != nil {
+		// A union-typed local flow-narrowed in this region (TDD-00114): load the
+		// { i8, i64 } box and unbox it to the concrete narrowed type, so the
+		// value reads as a real string/number/boolean (or a smaller union).
+		box := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load { i8, i64 }, ptr %s, align 8", box, sym.Ptr))
+		return e.emitUnboxBoxToType(box, *sym.NarrowedTo), nil
 	}
 	if sym.Ty.IsArray {
 		// A named array variable is stored as two separate allocas

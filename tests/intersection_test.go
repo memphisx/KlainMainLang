@@ -163,5 +163,5 @@ interface B { b: number }
 interface C { c: number }
 const v: A & B | C = { a: 1, b: 2 }
 console.log(1)
-`, "union member")
+`, "discriminated union")
 }

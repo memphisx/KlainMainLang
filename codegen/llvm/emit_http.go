@@ -200,6 +200,14 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	// proceeds identically from here on — see TDD-00025's Design section.
 	e.emitInstr(fmt.Sprintf("call void @__kml_http_cluster_fork(i64 %s)", workersRef))
 
+	// HTTP/2 server (TDD-00111 Stage 3): an http.listen server transparently
+	// accepts h2c (cleartext prior-knowledge) connections — the nghttp2 driver
+	// (http2src/http2.c) is compiled + linked, and the connection path routes a
+	// request whose first bytes are the h2 preface into it. Enabling this makes
+	// nghttp2 a link dependency for http.listen programs.
+	e.usedHTTP2 = true
+	e.emitHTTP2ServerDecls()
+
 	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler, hasWSHandler); err != nil {
 		return Value{}, err
 	}
@@ -386,6 +394,74 @@ const maxHTTPRequestBytes = 10 * 1024 * 1024
 // — false means none of that extra branching is emitted at all, so a
 // program with no `ws` handler is byte-for-byte what it was before this
 // feature existed.
+// httpReqInputs carries the register names of a parsed request's parts — the
+// inputs to emitHTTPCallHandler. Both the HTTP/1.1 fiber dispatcher and (Stage 3)
+// the nghttp2 driver populate these their own way (socket parse vs nghttp2
+// callbacks), then share the same handler-invocation core.
+type httpReqInputs struct {
+	method, path, query, headers, body, bodyLength, bodyctx string
+}
+
+// emitHTTPCallHandler builds the HttpRequest record from an already-parsed
+// request (whatever produced its parts), invokes the user handler, and returns
+// the response object's register (unwrapping a Promise<T> for an async handler).
+// Factored out of buildHTTPDispatcher (TDD-00111 Stage 3 groundwork) so the
+// nghttp2 server path can reuse the exact same request-build + handler-call
+// without the HTTP/1.1 socket I/O — the response is then read/written by each
+// caller its own way (1.1 write vs nghttp2 submit). Emits byte-identical IR for
+// the 1.1 path (the code moved here unchanged).
+func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, in httpReqInputs) string {
+	reqTy := RequestType()
+	reqReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reqReg, reqTy.StructSize()))
+	reqStructIR := reqTy.StructIR()
+	storeReqField := func(name, ref string) {
+		idx, fieldTy, _ := reqTy.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, reqStructIR, reqReg, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
+	}
+	storeReqField("method", in.method)
+	storeReqField("path", in.path)
+	storeReqField("query", in.query)
+	storeReqField("headers", in.headers)
+	storeReqField("body", in.body)
+	storeReqField("bodyLength", in.bodyLength)
+	storeReqField("__kml_bodyctx", in.bodyctx)
+	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
+
+	handlerPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_handler, align 8", handlerPtr))
+	fpSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, handlerPtr))
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpSlot))
+	epSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, handlerPtr))
+	ep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
+
+	callReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call %s (ptr, %s) %s(ptr %s, %s %s)",
+		callReg, retTy.LLVMRetType(), paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref))
+
+	// An async handler's call above doesn't return until its body has fully
+	// run (any internal `await` yields this same connection fiber via
+	// swapcontext, transparent to this call) — callReg is then a Promise<T>
+	// slot pointer, not T directly, needing one more unwrap (matching
+	// emitAwait's own generic, non-fetch unwrap: load then free the slot).
+	// Promise<T> and a plain object T share IR="ptr", so the call syntax
+	// above is identical either way — only this extra indirection differs.
+	respReg := callReg
+	if isAsyncHandler {
+		respReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", respReg, callReg))
+		e.ensureFree()
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", callReg))
+	}
+	return respReg
+}
+
 func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWSHandler bool) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -607,6 +683,12 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.emitLabel(findHeaderEndL)
 	bufForFind := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufForFind, bufPtrA))
+	// HTTP/2 (h2c, TDD-00111 Stage 3): divert an h2-preface connection to the
+	// nghttp2 driver BEFORE the 1.1 header scan below (which would crash on the
+	// preface's binary frames). Falls through to 1.1 when it isn't h2.
+	if e.usedHTTP2 {
+		e.emitHTTP2PrefaceDivert(fd32, fdPtr, bufForFind, totalReadA)
+	}
 	blankLine := e.internString("\r\n\r\n")
 	foundBlank := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @strstr(ptr %s, ptr %s)", foundBlank, bufForFind, blankLine))
@@ -691,6 +773,8 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.emitLabel(parseL)
 	bufFinal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bufFinal, bufPtrA))
+
+
 	e.ensureSscanf()
 	methodPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", methodPtr))
@@ -797,54 +881,11 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		bodyCtxRef = ctxReg
 	}
 
-	reqTy := RequestType()
-	reqReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reqReg, reqTy.StructSize()))
-	reqStructIR := reqTy.StructIR()
-	storeReqField := func(name, ref string) {
-		idx, fieldTy, _ := reqTy.FieldIndex(name)
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, reqStructIR, reqReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
-	}
-	storeReqField("method", methodPtr)
-	storeReqField("path", pathOnly)
-	storeReqField("query", queryMapFinal)
-	storeReqField("headers", headersMapFinal)
-	storeReqField("body", bodyBuf)
-	storeReqField("bodyLength", contentLenFinal)
-	storeReqField("__kml_bodyctx", bodyCtxRef)
-	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
-
-	handlerPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_handler, align 8", handlerPtr))
-	fpSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, handlerPtr))
-	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpSlot))
-	epSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, handlerPtr))
-	ep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
-
-	callReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call %s (ptr, %s) %s(ptr %s, %s %s)",
-		callReg, retTy.LLVMRetType(), paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref))
-
-	// An async handler's call above doesn't return until its body has fully
-	// run (any internal `await` yields this same connection fiber via
-	// swapcontext, transparent to this call) — callReg is then a Promise<T>
-	// slot pointer, not T directly, needing one more unwrap (matching
-	// emitAwait's own generic, non-fetch unwrap: load then free the slot).
-	// Promise<T> and a plain object T share IR="ptr", so the call syntax
-	// above is identical either way — only this extra indirection differs.
-	respReg := callReg
-	if isAsyncHandler {
-		respReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", respReg, callReg))
-		e.ensureFree()
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", callReg))
-	}
+	respReg := e.emitHTTPCallHandler(paramTy, retTy, isAsyncHandler, httpReqInputs{
+		method: methodPtr, path: pathOnly, query: queryMapFinal,
+		headers: headersMapFinal, body: bodyBuf, bodyLength: contentLenFinal,
+		bodyctx: bodyCtxRef,
+	})
 
 	statusIdx, statusTy, _ := retTy.FieldIndex("status")
 	statusGep := e.freshReg()
@@ -1028,5 +1069,169 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	e.scopes = savedScopes
 	e.currentRetType = savedRetType
 	e.blockDone = savedBlockDone
+
+	// HTTP/2 server bridge (TDD-00111 Stage 3): the C nghttp2 driver calls these
+	// to run the shared handler core and read the response. Emitted only when the
+	// h2 server path is used.
+	if e.usedHTTP2 {
+		e.buildHTTP2Bridge(paramTy, retTy, isAsyncHandler)
+	}
 	return nil
+}
+
+// emitStandaloneFunc emits a top-level IR function with the given signature and
+// a body produced by fn (which emits into e.body/e.allocas and returns the
+// terminator, e.g. "ret ptr %x"). Uses the same builder-swap pattern as
+// buildHTTPDispatcher so a helper can be assembled mid-compilation.
+func (e *Emitter) emitStandaloneFunc(signature string, fn func() string) {
+	sa, sb := e.allocas, e.body
+	sr, sl, ss := e.regCtr, e.labelCtr, e.scopes
+	srt, sbd := e.currentRetType, e.blockDone
+	e.allocas, e.body = strings.Builder{}, strings.Builder{}
+	e.regCtr, e.labelCtr, e.scopes = 0, 0, nil
+	e.blockDone = false
+	e.pushScope()
+	term := fn()
+	e.functions.WriteString("\ndefine " + signature + " {\nentry:\n")
+	e.functions.WriteString(e.allocas.String())
+	e.functions.WriteString(e.body.String())
+	e.functions.WriteString("  " + term + "\n}\n")
+	e.allocas, e.body = sa, sb
+	e.regCtr, e.labelCtr, e.scopes = sr, sl, ss
+	e.currentRetType, e.blockDone = srt, sbd
+}
+
+// emitHTTP2PrefaceDivert emits, at the point where a request's bytes are first
+// scanned, a check for the HTTP/2 client preface ("PRI * HTTP/2.0\r\n...") — when
+// matched, the connection is driven as an nghttp2 session (TDD-00111 Stage 3)
+// instead of parsed as HTTP/1.1, and the fiber returns when it's done. Must run
+// BEFORE any 1.1 header parsing (the preface's binary frames would crash the 1.1
+// header splitter). Control falls through to the caller's 1.1 path when it isn't
+// h2. bufReg is the (NUL-terminated) request buffer; totalReadA holds the bytes
+// read so far; fd32/fdPtr are the connection's fd and its slot in the conn table.
+func (e *Emitter) emitHTTP2PrefaceDivert(fd32, fdPtr, bufReg, totalReadA string) {
+	e.ensureMemcmp()
+	e.ensureCloseDecl()
+	prefacePtr := e.internString("PRI * HTTP/2.0\r\n")
+	trReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", trReg, totalReadA))
+	bigEnough := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 16", bigEnough, trReg))
+	h2checkL := e.freshLabel("http.h2check")
+	contL := e.freshLabel("http.h2cont1")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bigEnough, h2checkL, contL))
+
+	e.emitLabel(h2checkL)
+	mc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @memcmp(ptr %s, ptr %s, i64 16)", mc, bufReg, prefacePtr))
+	isH2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isH2, mc))
+	h2driveL := e.freshLabel("http.h2drive")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isH2, h2driveL, contL))
+
+	e.emitLabel(h2driveL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_h2_set_blocking(i32 %s)", fd32))
+	sess := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_h2_session_server_new(i32 %s, ptr null, ptr null, ptr null)", sess, fd32))
+	e.emitInstr(fmt.Sprintf("call void @__kml_h2_session_feed(ptr %s, ptr %s, i64 %s)", sess, bufReg, trReg))
+	loopL := e.freshLabel("http.h2loop")
+	recvL := e.freshLabel("http.h2recv")
+	doneL := e.freshLabel("http.h2done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
+
+	e.emitLabel(loopL)
+	srx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_h2_session_send(ptr %s)", srx, sess))
+	sbad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i32 %s, 0", sbad, srx))
+	contL2 := e.freshLabel("http.h2cont2")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sbad, doneL, contL2))
+
+	e.emitLabel(contL2)
+	wr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_h2_session_want_read(ptr %s)", wr, sess))
+	ww := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_h2_session_want_write(ptr %s)", ww, sess))
+	wsum := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i32 %s, %s", wsum, wr, ww))
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", more, wsum))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, recvL, doneL))
+
+	e.emitLabel(recvL)
+	rrc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_h2_session_recv(ptr %s)", rrc, sess))
+	rbad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i32 %s, 0", rbad, rrc))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rbad, doneL, loopL))
+
+	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_h2_session_del(ptr %s)", sess))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @close(i32 %s)", e.freshReg(), fd32))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
+	actNow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_conn_active, align 8", actNow))
+	actNew := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", actNew, actNow))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_conn_active, align 8", actNew))
+	e.emitTerminator("ret void")
+
+	e.emitLabel(contL)
+}
+
+// buildHTTP2Bridge emits the C-callable ABI the nghttp2 driver (http2src/http2.c)
+// invokes per completed request: __kml_h2_dispatch builds the HttpRequest from
+// the nghttp2-parsed parts and runs the handler (reusing emitHTTPCallHandler),
+// and three getters read the response object's status/body. Specialized to the
+// handler's paramTy/retTy, like the 1.1 dispatcher.
+func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool) {
+	e.ensureMapStrHelpers()
+	e.ensureStrlen()
+
+	// ptr @__kml_h2_dispatch(ptr %method, ptr %path, ptr %headers, ptr %body, i64 %bodyLen)
+	e.emitStandaloneFunc("ptr @__kml_h2_dispatch(ptr %method, ptr %path, ptr %headers, ptr %body, i64 %bodyLen)", func() string {
+		// h2's :path carries any query string; V1 hands the handler an empty
+		// query map (query parsing off the h2 path is a follow-on).
+		emptyQuery := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyQuery))
+		resp := e.emitHTTPCallHandler(paramTy, retTy, isAsyncHandler, httpReqInputs{
+			method: "%method", path: "%path", query: emptyQuery,
+			headers: "%headers", body: "%body", bodyLength: "%bodyLen",
+			bodyctx: "null",
+		})
+		return "ret ptr " + resp
+	})
+
+	// i64 @__kml_h2_resp_status(ptr %resp)
+	statusIdx, statusTy, _ := retTy.FieldIndex("status")
+	e.emitStandaloneFunc("i64 @__kml_h2_resp_status(ptr %resp)", func() string {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), statusIdx))
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", v, statusTy.IR, gep, statusTy.Align()))
+		out := e.coerce(Value{Ref: v, Ty: statusTy}, TypeI64)
+		return "ret i64 " + out.Ref
+	})
+
+	// ptr @__kml_h2_resp_body(ptr %resp)
+	bodyIdx, bodyFieldTy, _ := retTy.FieldIndex("body")
+	e.emitStandaloneFunc("ptr @__kml_h2_resp_body(ptr %resp)", func() string {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), bodyIdx))
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align %d", v, gep, bodyFieldTy.Align()))
+		return "ret ptr " + v
+	})
+
+	// i64 @__kml_h2_resp_bodylen(ptr %resp) — strlen of the body string (V1;
+	// binary bodyBytes is a follow-on, matching the 1.1 path's own default).
+	e.emitStandaloneFunc("i64 @__kml_h2_resp_bodylen(ptr %resp)", func() string {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%resp, i32 0, i32 %d", gep, retTy.StructIR(), bodyIdx))
+		bp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align %d", bp, gep, bodyFieldTy.Align()))
+		n := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", n, bp))
+		return "ret i64 " + n
+	})
 }

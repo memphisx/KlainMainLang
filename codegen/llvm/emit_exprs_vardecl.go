@@ -82,6 +82,14 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 	// mismatch; a `new Set<T>()`/`new Set()` is unambiguous.
 	switch init := v.Init.(type) {
 	case *ast.NewMapExpression:
+		// A `new Map([…])` whose K/V come from the initializer entries is
+		// skipped for the same reason the Set case below is: replicating that
+		// inference here risks an IR-type mismatch with emitMapVarDecl's store,
+		// and it must run in source order anyway so the entries source is in
+		// scope. A `new Map<K,V>()`/`new Map()` is unambiguous.
+		if init.Init != nil {
+			return Type{}, false
+		}
 		keyTy := TypePtr
 		valTy := TypeI64
 		if init.KeyType != nil {
@@ -100,6 +108,31 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			elemTy = e.resolveType(init.ElemType)
 		}
 		return SetType(elemTy), true
+	case *ast.NewWeakMapExpression:
+		keyTy, valTy := TypePtr, TypeI64
+		if init.KeyType != nil {
+			keyTy = e.resolveType(init.KeyType)
+		}
+		if init.ValType != nil {
+			valTy = e.resolveType(init.ValType)
+		}
+		return WeakMapType(keyTy, valTy), true
+	case *ast.NewWeakSetExpression:
+		elemTy := TypePtr
+		if init.ElemType != nil {
+			elemTy = e.resolveType(init.ElemType)
+		}
+		return WeakSetType(elemTy), true
+	case *ast.NewWeakRefExpression:
+		// The referent init runs in source order in main(); the global is a
+		// single ptr slot, so its IR can't disagree with storePtrHandleVarDecl.
+		referentTy := TypePtr
+		if init.ElemType != nil {
+			referentTy = e.resolveType(init.ElemType)
+		} else if init.Init != nil {
+			referentTy = e.inferExprType(init.Init)
+		}
+		return WeakRefType(referentTy), true
 	case *ast.NewTypedArrayExpression:
 		// A TypedArray is a 2-slot `{ptr,i64}` IsArray value — promoted via the
 		// same two-global (data + length) path as a plain array; emitArrayVarDecl
@@ -394,6 +427,30 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	}
 	if init, ok := v.Init.(*ast.NewEventEmitterExpression); ok {
 		return e.emitEventEmitterVarDecl(v, init)
+	}
+	if init, ok := v.Init.(*ast.NewWeakMapExpression); ok {
+		val, err := e.emitNewWeakMapValue(init)
+		if err != nil {
+			return err
+		}
+		e.storePtrHandleVarDecl(v, val)
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewWeakSetExpression); ok {
+		val, err := e.emitNewWeakSetValue(init)
+		if err != nil {
+			return err
+		}
+		e.storePtrHandleVarDecl(v, val)
+		return nil
+	}
+	if init, ok := v.Init.(*ast.NewWeakRefExpression); ok {
+		val, err := e.emitNewWeakRefValue(init)
+		if err != nil {
+			return err
+		}
+		e.storePtrHandleVarDecl(v, val)
+		return nil
 	}
 	if init, ok := v.Init.(*ast.NewNodeStreamExpression); ok {
 		val, err := e.emitNewNodeStream(init)

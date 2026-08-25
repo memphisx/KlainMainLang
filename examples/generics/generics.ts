@@ -67,3 +67,34 @@ console.log(intContainer.get());  // 200
 const anotherIntContainer = new Container<number>(1);
 console.log(anotherIntContainer.get());  // 1
 console.log(intContainer.get());         // 200 (unchanged)
+
+// ── Object type arguments (TDD-00069): a generic over a record type ──────────
+interface Point { x: number; y: number; }
+
+function identity<T>(x: T): T { return x; }
+function first<T>(xs: T[]): T { return xs[0]; }
+
+const p: Point = { x: 3, y: 4 };
+console.log(identity(p).x);      // 3
+
+const pts: Point[] = [{ x: 1, y: 2 }, { x: 5, y: 6 }];
+console.log(first(pts).y);       // 2
+
+const boxedPoint = new Container<Point>({ x: 10, y: 20 });
+console.log(boxedPoint.get().x); // 10
+
+// ── Constrained type parameters (TDD-00113): `<T extends X>` ─────────────────
+// The constraint is enforced at the call/construction site, and the constrained
+// shape's members are usable on a T-typed value.
+interface HasId { id: number; }
+
+function pluck<T extends HasId>(x: T): number { return x.id; }
+console.log(pluck({ id: 42, name: "widget" }));  // 42
+
+class Registry<T extends HasId> {
+  last: T;
+  constructor(seed: T) { this.last = seed; }
+  lastId(): number { return this.last.id; }
+}
+const reg = new Registry<HasId>({ id: 7 });
+console.log(reg.lastId());       // 7

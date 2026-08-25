@@ -108,33 +108,38 @@ func (p *Parser) expectGT(context string) error {
 }
 
 // parseTypeParamList parses a declaration-site `<T>` or `<K, V>`
-// type-parameter list — shared by function/interface/class declarations
-// (TDD-00010 V1, extended to N parameters by TDD-00037). Assumes the caller
-// has already checked the current token is '<'. Type parameters remain
-// unconstrained — `<T extends Base>` produces a clear error rather than
-// being silently mis-parsed, still out of scope (see docs/tdd/TDD-00010.md's
-// and TDD-00037's Open Questions).
-func (p *Parser) parseTypeParamList(context string) ([]string, error) {
+// type-parameter list — shared by function/interface/class/type-alias
+// declarations (TDD-00010 V1, extended to N parameters by TDD-00037). Assumes
+// the caller has already checked the current token is '<'. A type parameter may
+// carry a `extends X` constraint (TDD-00113); the returned constraints slice is
+// positionally aligned with names (a nil entry means unconstrained).
+func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnotation, error) {
 	p.advance() // consume '<'
 	var names []string
+	var constraints []*ast.TypeAnnotation
 	for {
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		names = append(names, nameTok.Literal)
+		var constraint *ast.TypeAnnotation
 		if p.check(lexer.EXTENDS) {
-			t := p.peek()
-			return nil, fmt.Errorf("%d:%d: type parameter constraints on %s are not yet supported", t.Line, t.Col, context)
+			p.advance() // consume 'extends'
+			constraint, err = p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, nil, err
+			}
 		}
+		constraints = append(constraints, constraint)
 		if !p.match(lexer.COMMA) {
 			break
 		}
 	}
 	if err := p.expectGT(context); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return names, nil
+	return names, constraints, nil
 }
 
 func (p *Parser) consumeSemicolon() {

@@ -460,12 +460,14 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	}
 	// Optional `<T>` type-parameter list (TDD-00010 V1).
 	var typeParams []string
+	var typeParamConstraints []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		tp, tc, err := p.parseTypeParamList(nameTok.Literal + "<T>")
 		if err != nil {
 			return nil, err
 		}
 		typeParams = tp
+		typeParamConstraints = tc
 	}
 	// Skip optional `extends Base` clause.
 	if p.peek().Type == lexer.EXTENDS {
@@ -534,6 +536,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	}
 	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
 	decl.TypeParams = typeParams
+	decl.TypeParamConstraints = typeParamConstraints
 	return decl, nil
 }
 
@@ -546,12 +549,14 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	}
 	// Optional `<T>` type-parameter list — a generic type alias (TDD-00079).
 	var typeParams []string
+	var typeParamConstraints []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, err := p.parseTypeParamList(nameTok.Literal + "<T>")
+		tp, tc, err := p.parseTypeParamList(nameTok.Literal + "<T>")
 		if err != nil {
 			return nil, err
 		}
 		typeParams = tp
+		typeParamConstraints = tc
 	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
@@ -563,6 +568,7 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	p.consumeSemicolon()
 	decl := ast.NewTypeAliasDeclaration(nameTok.Literal, ta, pos)
 	decl.TypeParams = typeParams
+	decl.TypeParamConstraints = typeParamConstraints
 	return decl, nil
 }
 

@@ -1610,6 +1610,9 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly %d explicit type argument(s) (e.g. new %s<%s>(...)) — inference isn't supported for class construction", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(genDecl.TypeParams), ex.ClassName, strings.Join(genDecl.TypeParams, ", "))
 			}
 			subs := e.buildTypeArgSubs(genDecl.TypeParams, ex.TypeArgs)
+			if err := e.checkTypeParamConstraints(genDecl.TypeParams, genDecl.TypeParamConstraints, subs, "class", genDecl.Name, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
 			mangled, err := e.instantiateGenericClass(genDecl, subs)
 			if err != nil {
 				return Value{}, err

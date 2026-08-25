@@ -384,3 +384,14 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00344](ADR-00344.md) | `tls` module — `tls.connect` (TLS client) | Implements [TDD-00109](../tdd/TDD-00109.md) |
 | [00345](ADR-00345.md) | `tls.createServer` (TLS server) | Implements [TDD-00110](../tdd/TDD-00110.md) |
 | [00346](ADR-00346.md) | `wss://` — the WebSocket client over TLS | Extends [TDD-00039](../tdd/TDD-00039.md) |
+| [00347](ADR-00347.md) | `new Map(entries)` — the `[K, V][]` initial-entries constructor overload | Implements [TDD-00066](../tdd/TDD-00066.md); extends [ADR-00159](ADR-00159.md) |
+| [00348](ADR-00348.md) | `Object.fromEntries` — a dynamic object from a `[string, V][]` array | Implements [TDD-00012](../tdd/TDD-00012.md); extends [ADR-00347](ADR-00347.md) |
+| [00349](ADR-00349.md) | `WeakMap`/`WeakSet`/`WeakRef` — mode-dependent weak collections | Implements [TDD-00112](../tdd/TDD-00112.md) |
+| [00350](ADR-00350.md) | Fix `-mm=gc` collection crash on class-instance churn (thread-local frozen set unscanned by Boehm) | Extends [ADR-00055](ADR-00055.md) |
+| [00351](ADR-00351.md) | Fix Linux `-mm=gc` + `Worker` exit crash (GC shim `free()` on a foreign OpenSSL pointer) | Extends [ADR-00071](ADR-00071.md), [ADR-00100](ADR-00100.md) |
+| [00352](ADR-00352.md) | Object type arguments in generics (structural instantiation mangling) | Implements [TDD-00069](../tdd/TDD-00069.md) |
+| [00353](ADR-00353.md) | Generic type-parameter constraints (`<T extends X>`) | Implements [TDD-00113](../tdd/TDD-00113.md) |
+| [00354](ADR-00354.md) | Flow-based narrowing of union types | Implements [TDD-00114](../tdd/TDD-00114.md) |
+| [00355](ADR-00355.md) | Object members in union types (usable via narrowing) | Implements [TDD-00115](../tdd/TDD-00115.md) |
+| [00356](ADR-00356.md) | Discriminated unions (tagged object unions) | Implements [TDD-00116](../tdd/TDD-00116.md) |
+| [00357](ADR-00357.md) | HTTP/2 server — h2c (cleartext) via nghttp2 | Implements [TDD-00111](../tdd/TDD-00111.md) Stage 3a |

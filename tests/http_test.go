@@ -1160,3 +1160,52 @@ http.close(1)`)
 		t.Fatal("expected a compile error for http.close with an argument, got none")
 	}
 }
+
+// TestE2EHTTPListenHTTP2Cleartext exercises the nghttp2 h2c server (TDD-00111
+// Stage 3a): an http.listen server transparently serves an HTTP/2 cleartext
+// (prior-knowledge) client, dispatching through the same handler as HTTP/1.1.
+// Uses curl --http2-prior-knowledge (skipped if curl is absent), the same
+// posture the tls tests take toward an external client.
+func TestE2EHTTPListenHTTP2Cleartext(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	src := `
+import http from 'http'
+interface Res { status: number; body: string }
+http.listen(8961, (req: HttpRequest): Res => {
+  return { status: 200, body: "h2:" + req.method + ":" + req.path + ":" + req.body }
+})
+`
+	startHTTPServer(t, src, 8961)
+
+	// h2c GET
+	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+		"http://127.0.0.1:8961/hello", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2c GET: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2:GET:/hello:|2" {
+		t.Errorf("h2c GET: got %q, want %q", got, "h2:GET:/hello:|2")
+	}
+
+	// h2c POST with a body
+	out, err = exec.Command("curl", "-s", "--http2-prior-knowledge",
+		"-d", "payload", "http://127.0.0.1:8961/submit", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2c POST: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2:POST:/submit:payload|2" {
+		t.Errorf("h2c POST: got %q, want %q", got, "h2:POST:/submit:payload|2")
+	}
+
+	// HTTP/1.1 on the same server still works
+	out, err = exec.Command("curl", "-s", "--http1.1",
+		"http://127.0.0.1:8961/one", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl 1.1: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2:GET:/one:|1.1" {
+		t.Errorf("1.1: got %q, want %q", got, "h2:GET:/one:|1.1")
+	}
+}

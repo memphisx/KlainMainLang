@@ -42,15 +42,143 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 // given explicitly, since there's no var-decl annotation to infer from in
 // a general expression position.
 func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
-	keyTy := TypePtr // default: string keys
-	valTy := TypeI64 // default: number values
-	if init.KeyType != nil {
-		keyTy = e.resolveType(init.KeyType)
+	keyTy, valTy := e.mapKVTypes(init.KeyType, init.ValType, init.Init)
+
+	mapPtr := e.emitMapOrSetCreate(keyTy)
+	if init.Init != nil {
+		if err := e.emitMapSeedFromEntries(mapPtr, init.Init, keyTy, valTy, init.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
-	if init.ValType != nil {
-		valTy = e.resolveType(init.ValType)
+	return Value{Ref: mapPtr, Ty: MapType(keyTy, valTy)}, nil
+}
+
+// mapKVTypes resolves a `new Map(...)`'s key/value types: an explicit
+// `<K, V>` wins; otherwise, when initial entries are given, K/V are inferred
+// from the source's `[K, V][]` element type — a bare array literal of pairs
+// (`[[k, v], ...]`) is read positionally, since it carries no tuple type of
+// its own without a contextual hint; otherwise the bare-form
+// string-key/number-value defaults stand.
+func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Expression) (keyTy, valTy Type) {
+	keyTy, valTy = TypePtr, TypeI64 // defaults: string keys, number values
+	if keyAnn == nil && valAnn == nil && entries != nil {
+		if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 {
+			if pair, ok := lit.Elements[0].(*ast.ArrayLiteral); ok && len(pair.Elements) == 2 {
+				keyTy = e.inferExprType(pair.Elements[0])
+				valTy = e.inferExprType(pair.Elements[1])
+			}
+		} else if elemTy := e.inferExprType(entries); elemTy.IsArray && elemTy.ElemType != nil &&
+			elemTy.ElemType.IsTuple && len(elemTy.ElemType.Fields) == 2 {
+			keyTy = elemTy.ElemType.Fields[0].Ty
+			valTy = elemTy.ElemType.Fields[1].Ty
+		}
 	}
-	return Value{Ref: e.emitMapOrSetCreate(keyTy), Ty: MapType(keyTy, valTy)}, nil
+	if keyAnn != nil {
+		keyTy = e.resolveType(keyAnn)
+	}
+	if valAnn != nil {
+		valTy = e.resolveType(valAnn)
+	}
+	return keyTy, valTy
+}
+
+// resolveMapEntriesArray normalizes the entries source to (ptr, len, elemTy),
+// like resolveArrayForHOF, but supplies the `[keyTy, valTy]` tuple hint a bare
+// array-literal source (`[[k, v], ...]`) needs — its inner `[k, v]` arrays
+// carry no tuple type of their own without that contextual push (the same
+// hinted-array-literal path an annotated `[K, V][]` var decl already uses). A
+// non-literal source (an annotated variable) already carries its element type
+// and goes through resolveArrayForHOF unchanged.
+func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Type, pos ast.Pos) (ptrReg, lenReg string, elemTy Type, err error) {
+	if lit, ok := entries.(*ast.ArrayLiteral); ok {
+		// A bare array literal carries no tuple type of its own, so validate its
+		// shape here before forcing the `[K, V]` element hint: every element must
+		// be a 2-element array literal, else the hinted store would miscompile a
+		// scalar as a tuple pointer.
+		for _, el := range lit.Elements {
+			pair, isArr := el.(*ast.ArrayLiteral)
+			if !isArr || len(pair.Elements) != 2 {
+				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-element pairs", pos.Line, pos.Col)
+			}
+		}
+		tupleTy := TupleType([]Type{keyTy, valTy})
+		var val Value
+		val, err = e.emitArrayLiteralAggregate(lit, &tupleTy)
+		if err != nil {
+			return
+		}
+		elemTy = tupleTy
+		ptrReg = e.freshReg()
+		lenReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		return
+	}
+	return e.resolveArrayForHOF(entries, pos)
+}
+
+// emitMapSeedFromEntries populates an already-created map from a `[K, V][]`
+// entries array (`new Map([[k, v], ...])`, TDD-00066): it walks the source
+// array, and for each 2-tuple element GEPs out field 0 (key) and field 1
+// (value), converting each to the map's stored representation and calling the
+// same str/num set helper `map.set()` uses. The source's element type must be
+// a 2-tuple whose fields match the map's K/V; anything else is a clean
+// compile error.
+func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, keyTy, valTy Type, pos ast.Pos) error {
+	srcPtr, srcLen, elemTy, err := e.resolveMapEntriesArray(entries, keyTy, valTy, pos)
+	if err != nil {
+		return err
+	}
+	if !elemTy.IsTuple || len(elemTy.Fields) != 2 {
+		return fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-tuples", pos.Line, pos.Col)
+	}
+	strKey := isStringTy(keyTy)
+	tupleIR := elemTy.StructIR()
+
+	idxPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	condL := e.freshLabel("map.init.cond")
+	bodyL := e.freshLabel("map.init.body")
+	endL := e.freshLabel("map.init.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	idxReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxReg, idxPtr))
+	condReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxReg, srcLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
+
+	e.emitLabel(bodyL)
+	// The source array holds one ptr per tuple (a tuple's IR is "ptr" — a heap
+	// struct), so load the tuple pointer, then GEP its two fields.
+	slotGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotGep, elemTy.IR, srcPtr, idxReg))
+	tuplePtr := e.loadArrayElem(slotGep, elemTy)
+
+	kGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kGep, tupleIR, tuplePtr.Ref))
+	kVal := e.loadScalarOrNullableField(kGep, keyTy)
+	vGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vGep, tupleIR, tuplePtr.Ref))
+	vVal := e.loadScalarOrNullableField(vGep, valTy)
+
+	kRef := e.valueToMapKey(kVal, keyTy)
+	vRef := e.valueToMapVal(vVal, valTy)
+	if strKey {
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, vRef))
+	} else {
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_num_set(ptr %s, i64 %s, i64 %s)", mapPtr, kRef, vRef))
+	}
+
+	nextIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(endL)
+	return nil
 }
 
 // emitSetVarDecl handles `const s = new Set<T>()`.

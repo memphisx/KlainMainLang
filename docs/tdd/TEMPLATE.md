@@ -1,7 +1,13 @@
 # TDD-NNNNN: <Short title>
 
-- **Status**: Not Started | In Progress | Partially Implemented (see ADR-NNNNN) | Implemented (see ADR-NNNNN) | Superseded by TDD-NNNNN
+- **Status**: Not Started | In Progress | Partially Implemented | Implemented | Superseded
 - **Date**: YYYY-MM-DD
+
+<!-- Status is a PURE enum — exactly one of the words above, nothing appended.
+No "(see ADR-NNNNN)", no "Superseded by TDD-NNNNN". Any such detail (the
+implementing ADRs, what superseded this) goes in prose below or, in the TDD
+index table, in its Related ADRs / Notes columns — never in Status. -->
+
 
 ## Context
 

@@ -176,6 +176,19 @@ void free(void *ptr) {
 	if (isBumpPtr(ptr)) {
 		return; // no-op: bump-allocated memory is never individually freed
 	}
+	// GC_free is only safe on a pointer Boehm actually owns. A foreign pointer
+	// reaching this shim's free() — a library that allocated through a private
+	// arena (e.g. OpenSSL's CRYPTO_secure_malloc) and frees it via libc free(),
+	// notably in an atexit OPENSSL_cleanup handler — is NOT a GC object, and
+	// GC_free would dereference GC block metadata for an out-of-heap address and
+	// crash. This bit any -mm=gc program linking OpenSSL (fetch/tls, and the
+	// worker runtime via libcurl) at process exit. GC_base returns the base of
+	// the GC object containing ptr, or NULL if ptr isn't in the GC heap — so
+	// guard on it and simply drop a foreign free (the process is collecting or
+	// exiting anyway; nothing needs an explicit release).
+	if (GC_base(ptr) == NULL) {
+		return;
+	}
 	// Documented by Boehm as always safe to call explicitly, as a latency
 	// optimization (early-release a block known dead now rather than
 	// waiting for the next collection cycle) — this is what makes

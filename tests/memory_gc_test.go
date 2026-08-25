@@ -50,6 +50,76 @@ func TestE2EGCModeCorrectnessUnderChurn(t *testing.T) {
 	}
 }
 
+// TestE2EGCModeClassChurn is a regression for the frozen-set collection crash:
+// under -mm=gc, allocating class instances in a loop segfaulted once Boehm's
+// first collection ran (~50k allocations). The object-field-write frozen-set
+// check (Object.freeze enforcement) held its map only through a thread_local
+// pointer, which Boehm does not scan as a root, so the map was collected
+// mid-use. Fixed by allocating the frozen-set header GC_malloc_uncollectable
+// (ADR-00350). Churns 200,000 class instances — well past the crash threshold.
+func TestE2EGCModeClassChurn(t *testing.T) {
+	const src = `
+class Box { n: number; constructor(n: number) { this.n = n; } }
+let sink = 0;
+for (let i = 0; i < 200000; i = i + 1) { const t = new Box(i); sink = sink + t.n; }
+console.log(sink);
+`
+	binFile := buildBinaryGC(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// sum of 0..199999 = 199999*200000/2 = 19999900000
+	got := strings.TrimRight(string(out), "\n")
+	if got != "19999900000" {
+		t.Errorf("got %q, want %q", got, "19999900000")
+	}
+}
+
+// TestE2EGCModeWeakCollected proves the -mm=gc weak path is genuinely weak
+// (TDD-00112): a WeakRef/WeakMap referent that becomes unreachable is dropped
+// after a forced collection, while a still-reachable one survives. The referent
+// is created in a separate function so its pointer leaves the caller's stack
+// frame (conservative scanning would otherwise keep it), and gc() forces a full
+// Boehm collection. Object literals (not class instances) are used as referents
+// deliberately — see the class-allocation gc crash noted on the status page.
+func TestE2EGCModeWeakCollected(t *testing.T) {
+	const src = `
+interface Box { v: number }
+function makeOrphanRef(): WeakRef<Box> {
+  const tmp: Box = { v: 99 };
+  return new WeakRef(tmp);
+}
+const wm = new WeakMap<Box, string>();
+function orphanEntry(): void {
+  const tmp: Box = { v: 1 };
+  wm.set(tmp, "gone");
+}
+const kept: Box = { v: 7 };
+const keptRef = new WeakRef(kept);
+wm.set(kept, "stays");
+const orphanRef = makeOrphanRef();
+orphanEntry();
+gc();
+gc();
+console.log(keptRef.deref() === null);
+console.log(orphanRef.deref() === null);
+console.log(wm.has(kept));
+console.log(wm.get(kept));
+`
+	binFile := buildBinaryGC(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.TrimRight(string(out), "\n")
+	// kept survives (false), orphan collected (true), map key kept (true, "stays").
+	want := "false\ntrue\ntrue\nstays"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 // TestE2EGCModeBoundsMemory checks that peak RSS stays far below the ~216MB
 // actually churned by gcChurnProgram — proof that collections actually
 // happened, not just that the program didn't crash. /usr/bin/time's report

@@ -290,15 +290,168 @@ console.log(toStr(true))
 `, "5\ntrue")
 }
 
-func TestE2EUnionObjectFieldMember(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EUnionNarrowByTypeof(t *testing.T) {
+	// Flow narrowing (TDD-00114): inside each typeof branch the value is usable
+	// as the concrete member (method call, arithmetic).
+	assertOutput(t, `
+function describe(x: string | number): string {
+  if (typeof x === "string") {
+    return "str:" + x.toUpperCase()
+  } else {
+    return "num:" + (x + 1)
+  }
+}
+console.log(describe("hi"))
+console.log(describe(41))
+`, "str:HI\nnum:42")
+}
+
+func TestE2EUnionNarrowThreeMembersNested(t *testing.T) {
+	// Nested else-if composes: each branch refines the remaining members.
+	assertOutput(t, `
+function label(v: string | number | boolean): string {
+  if (typeof v === "boolean") {
+    return v ? "yes" : "no"
+  } else if (typeof v === "number") {
+    return "n" + (v * 2)
+  } else {
+    return "s" + v.length
+  }
+}
+console.log(label(true))
+console.log(label(10))
+console.log(label("abc"))
+`, "yes\nn20\ns3")
+}
+
+func TestE2EUnionNarrowEarlyReturn(t *testing.T) {
+	// Early-return narrowing: after `if (guard) return`, the remainder of the
+	// scope is narrowed to the complement.
+	assertOutput(t, `
+function describe(x: string | number): string {
+  if (typeof x === "string") {
+    return "str:" + x.toUpperCase()
+  }
+  return "num:" + (x + 1)
+}
+console.log(describe("hi"))
+console.log(describe(41))
+`, "str:HI\nnum:42")
+}
+
+func TestE2EUnionNarrowTruthiness(t *testing.T) {
+	// `if (x)` on a nullable single-member union narrows out null.
+	assertOutput(t, `
+function len(s: string | null): number {
+  if (s) {
+    return s.length
+  }
+  return -1
+}
+console.log(len("abcd"))
+console.log(len(null))
+`, "4\n-1")
+}
+
+func TestE2EUnionObjectMemberNarrowed(t *testing.T) {
+	// A single object member in a union is allowed (TDD-00115) and usable via
+	// `typeof x === "object"` narrowing.
+	assertOutput(t, `
 interface Point { x: number; y: number }
-let v: string | Point = "hi"
-console.log(v)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for an interface member in a union (V1 is scalar-only), got none")
-	}
+function describe(v: string | Point): string {
+  if (typeof v === "object") {
+    return "pt:" + (v.x + v.y)
+  } else {
+    return "str:" + v.toUpperCase()
+  }
+}
+const p: Point = { x: 3, y: 4 }
+console.log(describe(p))
+console.log(describe("hi"))
+`, "pt:7\nstr:HI")
+}
+
+func TestE2EUnionObjectNullTruthinessNarrow(t *testing.T) {
+	assertOutput(t, `
+interface Point { x: number; y: number }
+function dist(p: Point | null): number {
+  if (p) { return p.x + p.y }
+  return -1
+}
+console.log(dist({ x: 10, y: 20 }))
+console.log(dist(null))
+`, "30\n-1")
+}
+
+func TestE2EUnionObjectRestAfterNarrow(t *testing.T) {
+	// TDD-00065 Stage 3c object-union source: narrow a Rec|null to Rec, then
+	// object-rest it.
+	assertOutput(t, `
+interface Rec { a: number; b: string }
+function f(v: Rec | null): void {
+  if (v) {
+    const { a, ...rest } = v
+    console.log(a)
+    console.log(rest.b)
+  }
+}
+f({ a: 5, b: "hi" })
+`, "5\nhi")
+}
+
+func TestE2EUnionTwoUndiscriminatedObjectsRejected(t *testing.T) {
+	// Two object members without a common literal tag aren't a discriminated
+	// union — a clean rejection (TDD-00116).
+	mustCompileError(t, `
+interface A { x: number }
+interface B { y: number }
+let v: A | B = { x: 1 }
+`, "discriminated union")
+}
+
+func TestE2EDiscriminatedUnion(t *testing.T) {
+	assertOutput(t, `
+interface Circle { kind: "circle"; r: number }
+interface Square { kind: "square"; s: number }
+function area(sh: Circle | Square): number {
+  if (sh.kind === "circle") {
+    return 3 * sh.r * sh.r
+  } else {
+    return sh.s * sh.s
+  }
+}
+console.log(area({ kind: "circle", r: 2 }))
+console.log(area({ kind: "square", s: 3 }))
+`, "12\n9")
+}
+
+func TestE2EDiscriminatedUnionThreeWayAndTagRead(t *testing.T) {
+	assertOutput(t, `
+interface A { t: "a"; x: number }
+interface B { t: "b"; y: number }
+interface C { t: "c"; z: number }
+function f(v: A | B | C): string {
+  console.log(v.t)
+  if (v.t === "a") { return "A" + v.x }
+  else if (v.t === "b") { return "B" + v.y }
+  else { return "C" + v.z }
+}
+console.log(f({ t: "a", x: 1 }))
+console.log(f({ t: "b", y: 2 }))
+`, "a\nA1\nb\nB2")
+}
+
+func TestE2EDiscriminatedUnionEarlyReturn(t *testing.T) {
+	assertOutput(t, `
+interface Ok { status: "ok"; value: number }
+interface Err { status: "err"; msg: string }
+function handle(r: Ok | Err): string {
+  if (r.status === "err") { return "E:" + r.msg }
+  return "V:" + r.value
+}
+console.log(handle({ status: "ok", value: 7 }))
+console.log(handle({ status: "err", msg: "bad" }))
+`, "V:7\nE:bad")
 }
 
 func TestE2EUnionArrayElementRejected(t *testing.T) {

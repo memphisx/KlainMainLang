@@ -592,6 +592,10 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		scanExprFV(x.Size, bound, result)
 	case *ast.NewSetExpression:
 		scanExprFV(x.Init, bound, result)
+	case *ast.NewMapExpression:
+		scanExprFV(x.Init, bound, result)
+	case *ast.NewWeakRefExpression:
+		scanExprFV(x.Init, bound, result)
 	case *ast.TemplateLiteral:
 		for _, ex := range x.Exprs {
 			scanExprFV(ex, bound, result)

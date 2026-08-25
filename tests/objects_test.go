@@ -259,6 +259,32 @@ for (const [k, v] of entries) {
 `, "host=localhost\nport=8080")
 }
 
+func TestE2EObjectFromEntries(t *testing.T) {
+	assertOutput(t, `
+const entries: [string, number][] = [['a', 1], ['b', 2]]
+const obj = Object.fromEntries(entries)
+console.log(obj.a)
+console.log(obj['b'])
+`, "1\n2")
+}
+
+func TestE2EObjectFromEntriesBareLiteral(t *testing.T) {
+	assertOutput(t, `
+const obj = Object.fromEntries([['x', 10], ['y', 20]])
+console.log(obj.x)
+console.log(obj.y)
+`, "10\n20")
+}
+
+func TestE2EObjectFromEntriesRoundTrip(t *testing.T) {
+	assertOutput(t, `
+const obj = Object.fromEntries([['a', 1], ['b', 2]])
+for (const [k, v] of Object.entries(obj)) {
+  console.log(k + '=' + v)
+}
+`, "a=1\nb=2")
+}
+
 func TestE2EObjectAssign(t *testing.T) {
 	assertOutput(t, `
 interface Point { x: number; y: number; label: string }

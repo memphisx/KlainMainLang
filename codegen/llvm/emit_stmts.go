@@ -386,6 +386,7 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 	// Flow narrowing (TDD-00064 Stage 2): a nullable-scalar local proven
 	// present by the guard is treated as definitely-T inside the branch.
 	e.applyBranchNarrowing(s.Test, true)
+	e.applyUnionBranchNarrowing(s.Test, true)
 	if err := e.emitStmt(s.Consequent); err != nil {
 		return err
 	}
@@ -397,6 +398,7 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 		e.emitLabel(elseL)
 		e.pushScope()
 		e.applyBranchNarrowing(s.Test, false)
+		e.applyUnionBranchNarrowing(s.Test, false)
 		if err := e.emitStmt(s.Alternate); err != nil {
 			return err
 		}
@@ -411,6 +413,10 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 		if name, nonNullWhenTrue, ok := e.narrowingFromCondition(s.Test); ok && !nonNullWhenTrue {
 			e.narrowNonNullInCurrentScope(name)
 		}
+		// Union early-exit narrowing (TDD-00114): when the guard's true branch
+		// always exits, the code below runs only in its false branch, so narrow
+		// the union to that branch's type in the current (enclosing) scope.
+		e.applyUnionBranchNarrowing(s.Test, false)
 	}
 	return nil
 }

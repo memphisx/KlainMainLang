@@ -86,15 +86,102 @@ console.log(make());
 	}
 }
 
+func TestE2EGenericObjectArgInterfaceClassAndArray(t *testing.T) {
+	// Named interface arg, T[] arg, and a generic class over an object arg
+	// (TDD-00069), alongside scalar instantiations of the same function.
+	assertOutput(t, `
+interface Point { x: number; y: number; }
+class Box<T> { v: T; constructor(v: T) { this.v = v; } get(): T { return this.v; } }
+function identity<T>(x: T): T { return x; }
+function first<T>(xs: T[]): T { return xs[0]; }
+const p: Point = { x: 3, y: 4 };
+console.log(identity(p).x + identity(p).y);
+const pts: Point[] = [{ x: 1, y: 2 }, { x: 5, y: 6 }];
+console.log(first(pts).x);
+const b = new Box<Point>({ x: 10, y: 20 });
+console.log(b.get().y);
+console.log(identity(99));
+console.log(identity("hi"));
+`, "7\n1\n20\n99\nhi")
+}
+
+func TestE2EGenericObjectRestInBody(t *testing.T) {
+	// Object rest over a generic-T source (TDD-00065 Stage 3c, generic-T case)
+	// now works: object type args monomorphize T to a concrete object, so
+	// `{ a, ...rest }` rides Stage 3b's bindObjectRest.
+	assertOutput(t, `
+interface Rec { a: number; b: string; c: number; }
+function pluckRest<T>(o: T): void {
+  const { a, ...rest } = o;
+  console.log(a);
+  console.log(rest.b);
+  console.log(rest.c);
+}
+const r: Rec = { a: 1, b: "hello", c: 3 };
+pluckRest(r);
+`, "1\nhello\n3")
+}
+
+func TestE2EGenericObjectArgAnonymousLiteral(t *testing.T) {
+	// An anonymous object-literal argument works via structural mangling.
+	assertOutput(t, `
+function pluck<T>(x: T): number { return x.id; }
+console.log(pluck({ id: 5, name: "a" }));
+`, "5")
+}
+
+func TestE2EGenericConstraintSatisfied(t *testing.T) {
+	assertOutput(t, `
+interface HasId { id: number; }
+function pluck<T extends HasId>(x: T): number { return x.id; }
+class Box<T extends HasId> { v: T; constructor(v: T) { this.v = v; } id(): number { return this.v.id; } }
+const a = { id: 42, name: "x" };
+console.log(pluck(a));
+const b = new Box<HasId>({ id: 7 });
+console.log(b.id());
+`, "42\n7")
+}
+
+func TestE2EGenericConstraintViolatedFunction(t *testing.T) {
+	mustCompileError(t, `
+interface HasId { id: number; }
+function pluck<T extends HasId>(x: T): number { return x.id; }
+const bad = { name: "no id" };
+console.log(pluck(bad));
+`, "does not satisfy the constraint")
+}
+
+func TestE2EGenericConstraintViolatedClass(t *testing.T) {
+	mustCompileError(t, `
+interface HasId { id: number; }
+interface NoId { name: string; }
+class Box<T extends HasId> { v: T; constructor(v: T) { this.v = v; } }
+const b = new Box<NoId>({ name: "x" });
+`, "does not satisfy the constraint")
+}
+
+func TestE2EGenericFunctionObjectTypeArgument(t *testing.T) {
+	// An object/interface type argument is supported (TDD-00069): the generic
+	// body is monomorphized against the concrete shape, so field access on a
+	// T-typed value resolves.
+	assertOutput(t, `
+interface Foo { a: number }
+function pluckA<T>(x: T): number { return x.a; }
+const f: Foo = { a: 1 };
+console.log(pluckA(f));
+`, "1")
+}
+
 func TestE2EGenericFunctionUnsupportedConcreteTypeRejected(t *testing.T) {
+	// A Map (and other non-object heap handles) is still an unsupported type
+	// argument — a clean compile error, not a miscompile.
 	_, err := parseAndCompile(`
 function identity<T>(x: T): T { return x; }
-interface Foo { a: number }
-const f: Foo = { a: 1 };
-console.log(identity(f));
+const m = new Map<string, number>();
+console.log(identity(m));
 `)
 	if err == nil {
-		t.Fatal("expected a compile error instantiating a generic function with an unsupported (object) type argument, got none")
+		t.Fatal("expected a compile error instantiating a generic function with an unsupported (Map) type argument, got none")
 	}
 }
 

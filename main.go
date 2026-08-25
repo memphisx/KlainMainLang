@@ -211,6 +211,19 @@ func main() {
 		clangArgs = append(clangArgs, cflags...)
 		clangArgs = append(clangArgs, libs...)
 	}
+	// HTTP/2 server (TDD-00111 Stage 3): compile http2src/http2.c (the nghttp2
+	// session driver) alongside and link -lnghttp2 — only when the program uses
+	// the h2 server path. Same shape as the tls block above.
+	if em.UsesHTTP2() {
+		h2Path := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".http2.c"
+		if err := os.WriteFile(h2Path, []byte(llvm.HTTP2ServerSource()), 0644); err != nil {
+			fatal("cannot write http2 helper source: %v", err)
+		}
+		clangArgs = append(clangArgs, h2Path)
+		cflags, libs := llvm.LocateHTTP2()
+		clangArgs = append(clangArgs, cflags...)
+		clangArgs = append(clangArgs, libs...)
+	}
 	// JSON parse-tree (TDD-00077 Track P): compile the self-contained JSON
 	// parser (implementing the __kml_json_* ABI, libc only) alongside the program
 	// — only when it uses JSON.parse/Response.json(). Same shape as bigint above,

@@ -59,6 +59,12 @@ type Type struct {
 	IsSet  bool
 	MapKey *Type
 	MapVal *Type
+	// Weak marks a WeakMap<K,V>/WeakSet<T> (IsMap/IsSet also set): keyed on
+	// object-pointer identity, not iterable, mode-dependent backing (TDD-00112).
+	// IsWeakRef marks a WeakRef<T> (a one-word referent box); MapKey holds the
+	// referent type.
+	Weak      bool
+	IsWeakRef bool
 	// IsDynamicObject marks an object literal that had at least one computed
 	// property key (`{ [expr]: value }`). Storage-wise it IS a real
 	// Map<string,V> (IsMap is also set, MapKey is TypePtr) — IsDynamicObject
@@ -119,6 +125,12 @@ type Type struct {
 	// (ADR-00008); IsDynamic with a non-nil UnionMembers is allowed in those
 	// positions instead, since the member set makes it fully checkable there.
 	UnionMembers []Type
+	// IsStrLiteral marks a string-literal type (`"circle"`): string-shaped at
+	// runtime (IR "ptr", isStringTy true), with the literal in LitValue. Used as
+	// the discriminant of a discriminated union (TDD-00116); elsewhere it behaves
+	// exactly as string.
+	IsStrLiteral bool
+	LitValue     string
 	// IntersectionMembers carries the resolved members of an A & B & ...
 	// intersection (TDD-00078). Unlike UnionMembers, this is NOT a runtime
 	// shape: an object-type intersection is already collapsed into this Type's
@@ -542,6 +554,23 @@ func MapType(key, val Type) Type {
 // SetType returns a Set<elem> type.
 func SetType(elem Type) Type {
 	return Type{IR: "ptr", IsSet: true, MapKey: &elem}
+}
+
+// WeakMapType returns a WeakMap<key,val> type (TDD-00112) — an object-identity-
+// keyed, non-iterable map with mode-dependent backing.
+func WeakMapType(key, val Type) Type {
+	return Type{IR: "ptr", IsMap: true, Weak: true, MapKey: &key, MapVal: &val}
+}
+
+// WeakSetType returns a WeakSet<elem> type (TDD-00112).
+func WeakSetType(elem Type) Type {
+	return Type{IR: "ptr", IsSet: true, Weak: true, MapKey: &elem}
+}
+
+// WeakRefType returns a WeakRef<referent> type (TDD-00112) — a one-word box
+// whose referent may be collected under -mm=gc (MapKey holds the referent type).
+func WeakRefType(referent Type) Type {
+	return Type{IR: "ptr", IsWeakRef: true, MapKey: &referent}
 }
 
 // PromiseOf returns a Promise<T> type (the coroutine handle ptr).

@@ -63,6 +63,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -130,6 +131,25 @@ func appendTLSBackend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	}
 	clangArgs = append(clangArgs, tlsFile)
 	cflags, libs := llvm.LocateTLS()
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	return clangArgs
+}
+
+// appendHTTP2Backend mirrors main.go's UsesHTTP2() block: compile
+// http2src/http2.c and link -lnghttp2 when the program uses the h2 server
+// (TDD-00111), so the test build path doesn't drift from the CLI's.
+func appendHTTP2Backend(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesHTTP2() {
+		return clangArgs
+	}
+	h2File := filepath.Join(dir, "http2.c")
+	if err := os.WriteFile(h2File, []byte(llvm.HTTP2ServerSource()), 0644); err != nil {
+		t.Fatalf("write http2 helper: %v", err)
+	}
+	clangArgs = append(clangArgs, h2File)
+	cflags, libs := llvm.LocateHTTP2()
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	return clangArgs
@@ -262,6 +282,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -320,6 +341,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -392,6 +414,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -607,6 +630,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
@@ -694,6 +718,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -753,6 +778,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -842,6 +868,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -894,6 +921,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
@@ -961,6 +989,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
+	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)

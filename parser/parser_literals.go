@@ -175,6 +175,12 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewMapBody(pos)
 	case "Set":
 		return p.parseNewSetBody(pos)
+	case "WeakMap":
+		return p.parseNewWeakMapBody(pos)
+	case "WeakSet":
+		return p.parseNewWeakSetBody(pos)
+	case "WeakRef":
+		return p.parseNewWeakRefBody(pos)
 	case "EventEmitter":
 		return p.parseNewEventEmitterBody(pos)
 	case "ReadableStream":
@@ -958,15 +964,111 @@ func (p *Parser) parseNewMapBody(pos ast.Pos) (*ast.NewMapExpression, error) {
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
-	// Optional initial entries (we don't support them yet; just consume closing paren)
+	// Optional initial-entries argument (`new Map([[k, v], ...])`) — an
+	// iterable of [K, V] pairs per the real spec, narrowed here to "an array
+	// of 2-tuples" (this compiler's own array + tuple machinery, TDD-00066,
+	// is the only iterable/pair concept it has for a general expression here).
+	var init ast.Expression
 	if !p.check(lexer.RPAREN) {
-		return nil, fmt.Errorf("%d:%d: new Map() does not accept arguments", pos.Line, pos.Col)
+		var err error
+		init, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
 
-	return ast.NewNewMapExpression(keyType, valType, pos), nil
+	return ast.NewNewMapExpression(keyType, valType, init, pos), nil
+}
+
+func (p *Parser) parseNewWeakMapBody(pos ast.Pos) (*ast.NewWeakMapExpression, error) {
+	p.advance() // consume 'WeakMap'
+	var keyType, valType *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		var err error
+		keyType, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if p.match(lexer.COMMA) {
+			valType, err = p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	// WeakMap's initial-entries argument is out of V1 scope (an iterable of
+	// [obj, V] pairs) — a bare `new WeakMap()` only.
+	if !p.check(lexer.RPAREN) {
+		return nil, fmt.Errorf("%d:%d: new WeakMap() does not accept arguments", pos.Line, pos.Col)
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewWeakMapExpression(keyType, valType, pos), nil
+}
+
+func (p *Parser) parseNewWeakSetBody(pos ast.Pos) (*ast.NewWeakSetExpression, error) {
+	p.advance() // consume 'WeakSet'
+	var elemType *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		var err error
+		elemType, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	if !p.check(lexer.RPAREN) {
+		return nil, fmt.Errorf("%d:%d: new WeakSet() does not accept arguments", pos.Line, pos.Col)
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewWeakSetExpression(elemType, pos), nil
+}
+
+func (p *Parser) parseNewWeakRefBody(pos ast.Pos) (*ast.NewWeakRefExpression, error) {
+	p.advance() // consume 'WeakRef'
+	var elemType *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		var err error
+		elemType, err = p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.GT); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	// The referent argument is required.
+	init, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewWeakRefExpression(elemType, init, pos), nil
 }
 
 func (p *Parser) parseNewSetBody(pos ast.Pos) (*ast.NewSetExpression, error) {

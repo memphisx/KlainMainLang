@@ -142,6 +142,119 @@ console.log(m.get('a') === null)
 `, "0\nnull\n0\n99\ntrue\nfalse")
 }
 
+// --- new Map(entries) — the [K, V][] initial-entries constructor overload ---
+
+func TestE2ENewMapFromEntriesStringKey(t *testing.T) {
+	assertOutput(t, `
+const m = new Map([['a', 1], ['b', 2], ['c', 3]])
+console.log(m.size)
+console.log(m.get('a'))
+console.log(m.get('c'))
+console.log(m.has('b'))
+`, "3\n1\n3\ntrue")
+}
+
+func TestE2ENewMapFromEntriesExplicitTypeArgs(t *testing.T) {
+	// Explicit <K, V> drives the key/value types even when they differ from
+	// the string-key/number-value inference defaults.
+	assertOutput(t, `
+const m = new Map<number, string>([[1, 'one'], [2, 'two']])
+console.log(m.get(1))
+console.log(m.get(2))
+`, "one\ntwo")
+}
+
+func TestE2ENewMapFromEntriesVariable(t *testing.T) {
+	// Same resolver-rename bug the NewSetFromArrayVariable test documents:
+	// the rename pass had no case for NewMapExpression.Init, so a reference
+	// to an already-declared [K, V][] variable inside new Map(pairs) was
+	// never rewritten to pairs's mangled top-level name.
+	assertOutput(t, `
+const pairs: [string, number][] = [['x', 10], ['y', 20]]
+const m = new Map(pairs)
+console.log(m.get('y'))
+console.log(m.size)
+`, "20\n2")
+}
+
+func TestE2ENewMapFromEntriesEmpty(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, number>([])
+console.log(m.size)
+`, "0")
+}
+
+func TestE2ENewMapFromEntriesDuplicateKeyLastWins(t *testing.T) {
+	assertOutput(t, `
+const m = new Map([['a', 1], ['a', 2]])
+console.log(m.get('a'))
+console.log(m.size)
+`, "2\n1")
+}
+
+func TestE2ENewMapFromEntriesIterate(t *testing.T) {
+	assertOutput(t, `
+const m = new Map([['x', 10], ['y', 20]])
+for (const [k, v] of m.entries()) {
+  console.log(k + '=' + v)
+}
+`, "x=10\ny=20")
+}
+
+// --- WeakMap / WeakSet / WeakRef (TDD-00112) — manual-mode semantics ---
+// (Under -mm=manual a weak reference is strong: nothing is collected, so
+// .deref() never nulls and keys persist. The -mm=gc disappearing-link path is
+// exercised separately.)
+
+func TestE2EWeakMapBasic(t *testing.T) {
+	assertOutput(t, `
+class N { id: number; constructor(id: number) { this.id = id } }
+const a = new N(1)
+const b = new N(2)
+const c = new N(3)
+const wm = new WeakMap<N, string>()
+wm.set(a, 'alpha')
+wm.set(b, 'beta')
+console.log(wm.get(a))
+console.log(wm.get(b))
+console.log(wm.has(c))
+console.log(wm.has(a))
+wm.delete(a)
+console.log(wm.has(a))
+`, "alpha\nbeta\nfalse\ntrue\nfalse")
+}
+
+func TestE2EWeakSetBasic(t *testing.T) {
+	assertOutput(t, `
+class N { id: number; constructor(id: number) { this.id = id } }
+const a = new N(1)
+const b = new N(2)
+const ws = new WeakSet<N>()
+ws.add(a)
+console.log(ws.has(a))
+console.log(ws.has(b))
+ws.delete(a)
+console.log(ws.has(a))
+`, "true\nfalse\nfalse")
+}
+
+func TestE2EWeakRefDeref(t *testing.T) {
+	assertOutput(t, `
+class N { id: number; constructor(id: number) { this.id = id } }
+const b = new N(42)
+const ref = new WeakRef(b)
+const got = ref.deref()
+console.log(got.id)
+`, "42")
+}
+
+func TestE2EWeakMapPrimitiveKeyRejected(t *testing.T) {
+	mustCompileError(t, `
+const wm = new WeakMap<string, number>()
+wm.set('x', 1)
+`, "must be an object")
+}
+
 // --- Set<T> ---
 
 func TestE2ESetString(t *testing.T) {

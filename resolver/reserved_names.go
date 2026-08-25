@@ -41,7 +41,8 @@ var reservedTier1 = map[string]bool{
 // typedArrayElemKinds map — same maintenance model TDD-00049's
 // virtualModuleMembers already established.
 var reservedTier2 = map[string]bool{
-	"Map": true, "Set": true, "Date": true, "EventEmitter": true,
+	"Map": true, "Set": true, "WeakMap": true, "WeakSet": true, "WeakRef": true,
+	"Date": true, "EventEmitter": true,
 	"Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
 	"EvalError": true, "URIError": true, "ReferenceError": true,
 	"RegExp": true, "URL": true, "EventSource": true, "WebSocket": true,

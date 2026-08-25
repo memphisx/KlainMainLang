@@ -695,6 +695,33 @@ func (e *Emitter) ensureFrozenSet() {
 	e.usedFrozenSet = true
 	e.ensureMapNumHelpers()
 	e.emitGlobal(`@__kml_frozen_set = internal thread_local global ptr null, align 8`)
+
+	// The frozen set is a per-thread global (thread_local) checked on every
+	// object-field write. Its sole live reference is the thread_local pointer —
+	// but Boehm does NOT scan thread-local storage as a GC root, so under
+	// -mm=gc the plain-malloc'd map header (and thus its keys/vals arrays)
+	// would be collected mid-use, faulting the next field-write check (found via
+	// a class-allocation churn crash). Fix: allocate the header with
+	// GC_malloc_uncollectable — never collected, but still *scanned*, so the
+	// header keeps its keys/vals arrays (ordinary GC_malloc) reachable, and
+	// realloc'd-on-growth arrays stay reachable through the same scanned header.
+	// Manual mode is unchanged (plain __kml_map_num_create). The header layout
+	// matches __kml_map_num_create's: {size i64, cap i64, keys ptr, vals ptr}.
+	create := "  %new = call ptr @__kml_map_num_create()\n"
+	if e.isGCMode() {
+		e.ensureGCUncollectable()
+		create = "" +
+			"  %new = call ptr @GC_malloc_uncollectable(i64 32)\n" +
+			"  store i64 0, ptr %new, align 8\n" +
+			"  %cap_p = getelementptr i8, ptr %new, i64 8\n" +
+			"  store i64 8, ptr %cap_p, align 8\n" +
+			"  %keys = call ptr @malloc(i64 64)\n" +
+			"  %keys_p = getelementptr i8, ptr %new, i64 16\n" +
+			"  store ptr %keys, ptr %keys_p, align 8\n" +
+			"  %vals = call ptr @malloc(i64 64)\n" +
+			"  %vals_p = getelementptr i8, ptr %new, i64 24\n" +
+			"  store ptr %vals, ptr %vals_p, align 8\n"
+	}
 	e.emitGlobal(`
 define ptr @__kml_frozen_set_get() {
 entry:
@@ -703,8 +730,7 @@ entry:
   br i1 %isnull, label %init, label %have
 
 init:
-  %new = call ptr @__kml_map_num_create()
-  store ptr %new, ptr @__kml_frozen_set, align 8
+` + create + `  store ptr %new, ptr @__kml_frozen_set, align 8
   br label %have
 
 have:

@@ -40,6 +40,14 @@ type Symbol struct {
 	// test and treat the value as definitely a T. popScope discards the shadow,
 	// restoring the nullable view.
 	NarrowedNonNull bool
+	// NarrowedTo marks a union-typed binding (TDD-00114) that flow analysis has
+	// narrowed to a specific member type in the current region — a shadow copy
+	// defined into the guarded block's own scope, sharing the outer binding's
+	// storage Ptr but read as the concrete narrowed type (the union box is
+	// unboxed to it at every use site). nil = not narrowed. popScope discards
+	// the shadow, restoring the union view. Generalizes NarrowedNonNull from a
+	// bool to a target type.
+	NarrowedTo *Type
 }
 
 // isNullableScalarLocal reports whether this binding is a nullable non-pointer
@@ -225,6 +233,9 @@ type Emitter struct {
 	workerAdaptCtr       int
 	// TDD-00099: shared memory + channels.
 	usedGCUncollectable      bool
+	usedWeakHelpers          bool
+	usedGCGcollect           bool
+	usedHTTP2                bool
 	usedAtomicsRuntime       bool
 	usedChanRuntime          bool
 	usedPipeDecl             bool
@@ -804,7 +815,10 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// string; the literal value is only consumed at the AST level by
 	// Pick/Omit/Record key collection, not here.
 	if ta.IsStringLiteral {
-		return TypePtr
+		// String-shaped, but carry the literal value so a discriminated-union
+		// tag field can be matched at compile time (TDD-00116). Behaves as
+		// string everywhere else (isStringTy checks IR "ptr").
+		return Type{IR: "ptr", IsStrLiteral: true, LitValue: ta.LiteralValue}
 	}
 	// keyof / indexed access / mapped types (TDD-00079 Stage 2) — each evaluates
 	// to a concrete type off a concrete operand.
@@ -924,6 +938,38 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	}
 	if ta.Name == "Set" && ta.ElemType != nil {
 		return SetType(e.resolveType(ta.ElemType))
+	}
+	// WeakMap<K,V> / WeakSet<T> / WeakRef<T> annotations (TDD-00112). The type
+	// args arrive via TypeArgs (the generic path) since these names aren't
+	// special-cased in the type-annotation parser the way Map/Set are; a bare
+	// form (no args) falls back to object-key / number-value defaults.
+	if ta.Name == "WeakMap" {
+		keyTy, valTy := TypePtr, TypeI64
+		if len(ta.TypeArgs) >= 1 {
+			keyTy = e.resolveType(ta.TypeArgs[0])
+		}
+		if len(ta.TypeArgs) >= 2 {
+			valTy = e.resolveType(ta.TypeArgs[1])
+		}
+		return WeakMapType(keyTy, valTy)
+	}
+	if ta.Name == "WeakSet" {
+		elemTy := TypePtr
+		if len(ta.TypeArgs) >= 1 {
+			elemTy = e.resolveType(ta.TypeArgs[0])
+		} else if ta.ElemType != nil {
+			elemTy = e.resolveType(ta.ElemType)
+		}
+		return WeakSetType(elemTy)
+	}
+	if ta.Name == "WeakRef" {
+		referentTy := TypePtr
+		if len(ta.TypeArgs) >= 1 {
+			referentTy = e.resolveType(ta.TypeArgs[0])
+		} else if ta.ElemType != nil {
+			referentTy = e.resolveType(ta.ElemType)
+		}
+		return WeakRefType(referentTy)
 	}
 	// MessagePort<T> (TDD-00099) — the worker-side annotation for a port
 	// received through workerData/postMessage.

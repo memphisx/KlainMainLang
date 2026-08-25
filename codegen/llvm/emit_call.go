@@ -375,6 +375,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitObjectValues(ex.Args, ex.GetPos())
 			case "entries":
 				return e.emitObjectEntries(ex.Args, ex.GetPos())
+			case "fromEntries":
+				return e.emitObjectFromEntries(ex.Args, ex.GetPos())
 			case "assign":
 				return e.emitObjectAssign(ex.Args, ex.GetPos())
 			case "freeze":
@@ -909,6 +911,23 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// catches a Map/Set-typed field access, array index, or call result
 		// (e.g. `c.scores.get(...)` where `scores: Map<K,V>`), which
 		// resolveMapOrSetForCall then evaluates for real.
+		// Weak collections (TDD-00112) — checked before the plain Map/Set
+		// dispatch below, since WeakMap/WeakSet also carry IsMap/IsSet. WeakRef
+		// carries neither, so it gets its own check.
+		if objTy := e.inferExprType(mem.Object); objTy.IsWeakRef {
+			ptr, err := e.resolveWeakRefForCall(mem.Object, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitWeakRefCall(objTy, ptr, mem.Property, ex.Args, ex.GetPos())
+		}
+		if objTy := e.inferExprType(mem.Object); (objTy.IsMap || objTy.IsSet) && objTy.Weak {
+			ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitWeakCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
+		}
 		if objTy := e.inferExprType(mem.Object); objTy.IsMap || objTy.IsSet {
 			ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
 			if err != nil {
@@ -1032,6 +1051,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitClearTimer(ex.Args, "clearInterval", ex.GetPos())
 		case "clearImmediate":
 			return e.emitClearTimer(ex.Args, "clearImmediate", ex.GetPos())
+		case "gc":
+			return e.emitGlobalGC(ex.Args, ex.GetPos())
 		case "structuredClone":
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		case "Symbol":

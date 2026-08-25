@@ -668,6 +668,21 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		keyExpr := ast.NewStringLiteral(ex.Property, ex.GetPos())
 		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, keyExpr, ex.GetPos())
 	}
+	// Discriminant read on an un-narrowed discriminated union (TDD-00116): the
+	// only field readable before narrowing is the shared first-position tag. All
+	// members hold it at offset 0 (a string), so unbox the tag-6 pointer and load
+	// field 0. Every other field is member-specific and needs narrowing first.
+	if objVal.Ty.IsDynamic && len(objVal.Ty.UnionMembers) > 0 {
+		if name, dTy, ok := unionDiscriminantField(objVal.Ty); ok && ex.Property == name {
+			_, payload := e.emitUnboxTagPayload(objVal)
+			objptr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objptr, payload))
+			val := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", val, objptr))
+			return Value{Ref: val, Ty: dTy}, nil
+		}
+		return Value{}, fmt.Errorf("%d:%d: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.%s === ...)` or `typeof`)", ex.GetPos().Line, ex.GetPos().Col, ex.Property, ex.Property)
+	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 	}

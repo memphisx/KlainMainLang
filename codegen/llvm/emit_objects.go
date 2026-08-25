@@ -977,6 +977,41 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	return Value{Ref: r1, Ty: ArrayOf(entryTy)}, nil
 }
 
+// emitObjectFromEntries implements Object.fromEntries(entries): the inverse of
+// Object.entries, building a *dynamic object* (a Map<string,V>-backed value —
+// see emitDynamicObjectLiteral and docs/tdd/TDD-00012.md) from a `[string, V][]`
+// entries array. The keys aren't known at compile time, so a fixed-shape struct
+// can't represent the result — but the dynamic-object representation exists for
+// exactly this, and the entries source drops straight onto the same
+// `emitMapSeedFromEntries` walker `new Map(entries)` uses (ADR-00347). Reads
+// afterward go through `obj.field` / `obj[key]` (emitDynamicObjectGet). Keys
+// must be strings (real JS stringifies them; here a non-string key type is a
+// clean compile error).
+func (e *Emitter) emitObjectFromEntries(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Object.fromEntries takes 1 argument", pos.Line, pos.Col)
+	}
+	// Value type from the [string, V][] tuple's field 1; key forced to string.
+	valTy := TypeI64
+	if elemTy := e.inferExprType(args[0]); elemTy.IsArray && elemTy.ElemType != nil &&
+		elemTy.ElemType.IsTuple && len(elemTy.ElemType.Fields) == 2 {
+		if kt := elemTy.ElemType.Fields[0].Ty; !isStringTy(kt) {
+			return Value{}, fmt.Errorf("%d:%d: Object.fromEntries requires string keys (a [string, V][] entries array)", pos.Line, pos.Col)
+		}
+		valTy = elemTy.ElemType.Fields[1].Ty
+	}
+	keyTy := TypePtr
+	ty := Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
+
+	e.ensureMapStrHelpers()
+	mapPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
+	if err := e.emitMapSeedFromEntries(mapPtr, args[0], keyTy, valTy, pos); err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: mapPtr, Ty: ty}, nil
+}
+
 // emitObjectAssign implements Object.assign(target, ...sources): copies each
 // source's fields into target, in argument order, later sources overwriting
 // earlier ones on a shared field name — real JS's own last-write-wins

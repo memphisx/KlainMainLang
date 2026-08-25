@@ -106,12 +106,84 @@ func validateUnionMembers(ty Type, line, col int) error {
 	if ty.UnionMembers == nil {
 		return nil
 	}
+	var objectMembers []Type
 	for _, m := range ty.UnionMembers {
-		if scalarTypeKind(m) == "" {
-			return fmt.Errorf("%d:%d: union member types are currently limited to number, string, and boolean (plus null/undefined)", line, col)
+		if scalarTypeKind(m) != "" {
+			continue
+		}
+		// An object/interface/class member is allowed (TDD-00115), boxed as tag 6.
+		if isUnionObjectMember(m) {
+			objectMembers = append(objectMembers, m)
+			continue
+		}
+		return fmt.Errorf("%d:%d: union member types are limited to number, string, boolean (plus null/undefined) and object/interface/class types", line, col)
+	}
+	// One object member: usable via `typeof x === "object"` narrowing (TDD-00115).
+	// Two or more: allowed only as a *discriminated* union (TDD-00116) — every
+	// object member shares a first-position string-literal tag field with a
+	// distinct value, narrowed by `x.tag === "..."`.
+	if len(objectMembers) >= 2 {
+		if _, ok := unionDiscriminant(objectMembers); !ok {
+			return fmt.Errorf("%d:%d: a union with two or more object members must be a discriminated union — every member needs a common first-position string-literal tag field with a distinct value (e.g. `{ kind: \"a\", ... } | { kind: \"b\", ... }`)", line, col)
 		}
 	}
 	return nil
+}
+
+// unionDiscriminantField reports a union type's discriminant tag field: its name
+// and its (string) value type. ok=false unless the union's object members form a
+// discriminated union (TDD-00116).
+func unionDiscriminantField(u Type) (name string, valTy Type, ok bool) {
+	var objs []Type
+	for _, m := range u.UnionMembers {
+		if isUnionObjectMember(m) {
+			objs = append(objs, m)
+		}
+	}
+	n, okd := unionDiscriminant(objs)
+	if !okd {
+		return "", Type{}, false
+	}
+	return n, TypePtr, true
+}
+
+// unionDiscriminant returns the discriminant tag field name shared by a set of
+// object union members, or ok=false if they don't form a discriminated union
+// (TDD-00116). V1 rule: every member's FIRST field has the same name and a
+// string-literal type, and the literal values are all distinct.
+func unionDiscriminant(members []Type) (string, bool) {
+	if len(members) < 2 {
+		return "", false
+	}
+	var name string
+	seen := map[string]bool{}
+	for i, m := range members {
+		if len(m.Fields) == 0 {
+			return "", false
+		}
+		f := m.Fields[0]
+		if !f.Ty.IsStrLiteral {
+			return "", false
+		}
+		if i == 0 {
+			name = f.Name
+		} else if f.Name != name {
+			return "", false
+		}
+		if seen[f.Ty.LitValue] {
+			return "", false // duplicate tag value
+		}
+		seen[f.Ty.LitValue] = true
+	}
+	return name, true
+}
+
+// isUnionObjectMember reports whether a union member is a plain
+// object/interface/class type (boxable as tag 6, usable via narrowing) — as
+// opposed to an array, Map/Set, or other non-boxable aggregate.
+func isUnionObjectMember(m Type) bool {
+	return m.IsObject && !m.IsArray && !m.IsMap && !m.IsSet && !m.IsTuple &&
+		!m.IsDynamicObject && !m.IsGroupMap
 }
 
 // unionAllowsAssignmentFrom reports whether a value of type valTy may be
@@ -136,15 +208,66 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 		return true
 	}
 	valKind := scalarTypeKind(valTy)
-	if valKind == "" {
+	if valKind != "" {
+		for _, m := range unionTy.UnionMembers {
+			if scalarTypeKind(m) == valKind {
+				return true
+			}
+		}
 		return false
 	}
-	for _, m := range unionTy.UnionMembers {
-		if scalarTypeKind(m) == valKind {
-			return true
+	// An object value matches the union's object member when it is structurally
+	// assignable to it (width subtyping — extra fields ok), the same test used
+	// for generic constraints (TDD-00115).
+	if isUnionObjectMember(valTy) {
+		for _, m := range unionTy.UnionMembers {
+			if isUnionObjectMember(m) && objectStructurallyAssignable(valTy, m) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// objectStructurallyAssignable reports whether an object value of type val may
+// be assigned to an object member type m — width subtyping: val must carry every
+// field m declares, with a matching kind (scalar kind, or a recursively
+// assignable object; arrays match on element kind). val may have extra fields.
+func objectStructurallyAssignable(val, m Type) bool {
+	for _, mf := range m.Fields {
+		vf, ok := fieldByName(val, mf.Name)
+		if !ok {
+			return false
+		}
+		switch {
+		case isUnionObjectMember(mf.Ty):
+			if !isUnionObjectMember(vf.Ty) || !objectStructurallyAssignable(vf.Ty, mf.Ty) {
+				return false
+			}
+		case mf.Ty.IsArray:
+			if !vf.Ty.IsArray {
+				return false
+			}
+		case scalarTypeKind(mf.Ty) != "":
+			if scalarTypeKind(vf.Ty) != scalarTypeKind(mf.Ty) {
+				return false
+			}
+		default:
+			if vf.Ty.IR != mf.Ty.IR {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func fieldByName(t Type, name string) (Field, bool) {
+	for _, f := range t.Fields {
+		if f.Name == name {
+			return f, true
+		}
+	}
+	return Field{}, false
 }
 
 const (

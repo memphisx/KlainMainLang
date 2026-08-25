@@ -37,8 +37,27 @@ func mangleTypeArg(t Type) (string, error) {
 	if t.IR == "i1" {
 		return "bool", nil
 	}
-	if t.IsObject || t.IsMap || t.IsSet || t.IsPromise || t.IsFunc || t.IsDynamicObject || t.IsGroupMap || t.IsClass || t.IsDynamic {
-		return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these)")
+	// A class type argument (TDD-00069): mangle by ClassName — the concrete
+	// class identity the per-instantiation body needs for method dispatch, made
+	// unique per file by the resolver ([TDD-00041](../../tdd/TDD-00041.md)).
+	if t.IsClass && !t.IsDynamic {
+		if t.ClassName == "" {
+			return "", fmt.Errorf("an anonymous class type argument is not supported (give it a name)")
+		}
+		return "cls" + llvmSafeSymbol(t.ClassName), nil
+	}
+	// An object/interface type argument (TDD-00069): a resolved named interface
+	// is a structural ObjectType carrying no name (Type has no Name field), so
+	// mangle *structurally* — a deterministic encoding of the (ordered) field
+	// names and types. This is stronger than the TDD's nominal-only V1 plan: it
+	// also handles an anonymous inline object type and a bare object-literal
+	// argument (`f({ x: 1 })`), since structurally-identical shapes correctly
+	// share one monomorphization. Recurses through mangleTypeArg for field types.
+	if t.IsObject && !t.IsDynamicObject && !t.IsMap && !t.IsSet && !t.IsGroupMap && !t.IsDynamic {
+		return mangleObjectStructural(t)
+	}
+	if t.IsMap || t.IsSet || t.IsPromise || t.IsFunc || t.IsDynamicObject || t.IsGroupMap || t.IsDynamic {
+		return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/class types)")
 	}
 	if isNumberTy(t) {
 		return "num", nil
@@ -47,6 +66,26 @@ func mangleTypeArg(t Type) (string, error) {
 		return "str", nil
 	}
 	return "", fmt.Errorf("type argument is not supported in V1 (only number, string, boolean, and arrays of these)")
+}
+
+// mangleObjectStructural produces a deterministic, LLVM-safe suffix for an
+// object/interface type argument from its field list — field count, then each
+// field's name and (recursively mangled) type, in declaration order. Two
+// structurally-identical shapes (whatever their source names) mangle the same,
+// which is exactly right for monomorphization: they produce identical code and
+// should share one instantiation. A field whose own type isn't a supported
+// argument type propagates that rejection.
+func mangleObjectStructural(t Type) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "obj%d", len(t.Fields))
+	for _, f := range t.Fields {
+		fieldMangle, err := mangleTypeArg(f.Ty)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "_%s%s", llvmSafeSymbol(f.Name), fieldMangle)
+	}
+	return b.String(), nil
 }
 
 // mangleTypeArgs joins one mangleTypeArg suffix per entry of typeParams, in
@@ -220,10 +259,38 @@ func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, a
 // inferGenericCallConcreteTypes, instantiate (or reuse a memoized prior
 // instantiation), and dispatch exactly like a call to a concrete named
 // function.
+// checkTypeParamConstraints enforces each `<T extends X>` bound (TDD-00113): the
+// concrete type inferred/supplied for a constrained type parameter must
+// structurally satisfy its constraint annotation (reusing matchExtends, the same
+// structural-subtype test conditional types use — width subtyping, so an object
+// with extra fields still satisfies a smaller shape). An unconstrained parameter
+// (nil entry) is always fine. constraints is positionally aligned with
+// typeParams; a nil/short slice means no constraints. declKind/declName/pos are
+// for the error message.
+func (e *Emitter) checkTypeParamConstraints(typeParams []string, constraints []*ast.TypeAnnotation, subs map[string]Type, declKind, declName string, pos ast.Pos) error {
+	for i, name := range typeParams {
+		if i >= len(constraints) || constraints[i] == nil {
+			continue
+		}
+		concrete, ok := subs[name]
+		if !ok {
+			continue
+		}
+		if !e.matchExtends(concrete, constraints[i], map[string]Type{}) {
+			return fmt.Errorf("%d:%d: type argument for '%s' does not satisfy the constraint '%s extends %s' on %s '%s'",
+				pos.Line, pos.Col, name, name, inspectClassName(constraints[i].Name), declKind, inspectClassName(declName))
+		}
+	}
+	return nil
+}
+
 func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, pos ast.Pos) (Value, error) {
 	subs, missing, ok := e.inferGenericCallConcreteTypes(decl, args)
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from (explicit call-site type arguments aren't supported yet)", pos.Line, pos.Col, missing, decl.Name, missing, missing)
+	}
+	if err := e.checkTypeParamConstraints(decl.TypeParams, decl.TypeParamConstraints, subs, "function", decl.Name, pos); err != nil {
+		return Value{}, err
 	}
 	mangled, sig, err := e.instantiateGenericFunc(decl, subs)
 	if err != nil {

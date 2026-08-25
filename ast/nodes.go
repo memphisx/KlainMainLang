@@ -121,6 +121,9 @@ func NewVarDeclarationList(decls []*VarDeclaration, pos Pos) *VarDeclarationList
 type FunctionDeclaration struct {
 	Name       string
 	TypeParams []string // e.g. ["T"] for `function identity<T>(...)` — TDD-00010 V1, single param only
+	// TypeParamConstraints[i] is the `extends X` bound on TypeParams[i] (nil if
+	// unconstrained), e.g. `function pluck<T extends HasId>(...)` — TDD-00113.
+	TypeParamConstraints []*TypeAnnotation
 	// Erased is TDD-00010 V2: set when a `/** @erased */` JSDoc annotation
 	// precedes the declaration, opting a generic function out of V1's
 	// default monomorphization into compiling its body exactly once, with
@@ -916,10 +919,13 @@ func NewTaggedTemplateExpression(tag Expression, quasis []string, exprs []Expres
 	return &TaggedTemplateExpression{Tag: tag, Quasis: quasis, Exprs: exprs, pos: pos}
 }
 
-// NewMapExpression — new Map<K, V>()
+// NewMapExpression — new Map<K, V>() or new Map<K, V>(entries) where entries
+// is a [K, V][] array (TDD-00066). Init is the optional initial-entries
+// argument, nil for the no-argument form.
 type NewMapExpression struct {
 	KeyType *TypeAnnotation
 	ValType *TypeAnnotation
+	Init    Expression
 	pos     Pos
 }
 
@@ -927,8 +933,8 @@ func (*NewMapExpression) nodeMarker()   {}
 func (*NewMapExpression) exprMarker()   {}
 func (n *NewMapExpression) GetPos() Pos { return n.pos }
 
-func NewNewMapExpression(key, val *TypeAnnotation, pos Pos) *NewMapExpression {
-	return &NewMapExpression{KeyType: key, ValType: val, pos: pos}
+func NewNewMapExpression(key, val *TypeAnnotation, init Expression, pos Pos) *NewMapExpression {
+	return &NewMapExpression{KeyType: key, ValType: val, Init: init, pos: pos}
 }
 
 // NewSetExpression — new Set<T>() or new Set<T>(iterable) (ADR-00159:
@@ -946,6 +952,51 @@ func (n *NewSetExpression) GetPos() Pos { return n.pos }
 
 func NewNewSetExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewSetExpression {
 	return &NewSetExpression{ElemType: elem, Init: init, pos: pos}
+}
+
+// NewWeakMapExpression — new WeakMap<K, V>() (TDD-00112). Object-identity-keyed,
+// no initial-entries argument (unlike Map).
+type NewWeakMapExpression struct {
+	KeyType *TypeAnnotation
+	ValType *TypeAnnotation
+	pos     Pos
+}
+
+func (*NewWeakMapExpression) nodeMarker()   {}
+func (*NewWeakMapExpression) exprMarker()   {}
+func (n *NewWeakMapExpression) GetPos() Pos { return n.pos }
+
+func NewNewWeakMapExpression(key, val *TypeAnnotation, pos Pos) *NewWeakMapExpression {
+	return &NewWeakMapExpression{KeyType: key, ValType: val, pos: pos}
+}
+
+// NewWeakSetExpression — new WeakSet<T>() (TDD-00112).
+type NewWeakSetExpression struct {
+	ElemType *TypeAnnotation
+	pos      Pos
+}
+
+func (*NewWeakSetExpression) nodeMarker()   {}
+func (*NewWeakSetExpression) exprMarker()   {}
+func (n *NewWeakSetExpression) GetPos() Pos { return n.pos }
+
+func NewNewWeakSetExpression(elem *TypeAnnotation, pos Pos) *NewWeakSetExpression {
+	return &NewWeakSetExpression{ElemType: elem, pos: pos}
+}
+
+// NewWeakRefExpression — new WeakRef(obj) (TDD-00112). Init is the referent.
+type NewWeakRefExpression struct {
+	ElemType *TypeAnnotation
+	Init     Expression
+	pos      Pos
+}
+
+func (*NewWeakRefExpression) nodeMarker()   {}
+func (*NewWeakRefExpression) exprMarker()   {}
+func (n *NewWeakRefExpression) GetPos() Pos { return n.pos }
+
+func NewNewWeakRefExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewWeakRefExpression {
+	return &NewWeakRefExpression{ElemType: elem, Init: init, pos: pos}
 }
 
 // NewEventEmitterExpression — `new EventEmitter<T>()` (TDD-00023). Like
@@ -1586,7 +1637,8 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
 	Name       string
-	TypeParams []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
+	TypeParams           []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
+	TypeParamConstraints []*TypeAnnotation
 	Fields     []AnnotField
 	Methods    []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
 	pos        Pos
@@ -1620,7 +1672,8 @@ type InterfaceMethodSig struct {
 // 1), not part of this node's shape.
 type ClassDeclaration struct {
 	Name       string
-	TypeParams []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
+	TypeParams           []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
+	TypeParamConstraints []*TypeAnnotation
 	BaseClass  string   // "" if no `extends` clause (TDD-00009 Stage 3)
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
@@ -1665,10 +1718,11 @@ func NewSuperExpression(pos Pos) *SuperExpression { return &SuperExpression{pos:
 // TypeAliasDeclaration — `type Name = TypeAnnotation`, optionally generic
 // (`type Name<T> = ...`, TDD-00079 Stage 3).
 type TypeAliasDeclaration struct {
-	Name       string
-	TypeParams []string
-	Type       *TypeAnnotation
-	pos        Pos
+	Name                 string
+	TypeParams           []string
+	TypeParamConstraints []*TypeAnnotation
+	Type                 *TypeAnnotation
+	pos                  Pos
 }
 
 func (*TypeAliasDeclaration) nodeMarker()   {}

@@ -86,12 +86,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	}
 	// Optional `<T>` type-parameter list (TDD-00010 V1).
 	var typeParams []string
+	var typeParamConstraints []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
-		tp, err := p.parseTypeParamList(name + "<T>")
+		tp, tc, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
 			return nil, err
 		}
 		typeParams = tp
+		typeParamConstraints = tc
 	}
 	var baseClass string
 	var baseTypeArgs []*ast.TypeAnnotation
@@ -380,5 +382,6 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	}
 	decl := ast.NewClassDeclaration(name, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
 	decl.TypeParams = typeParams
+	decl.TypeParamConstraints = typeParamConstraints
 	return decl, nil
 }
