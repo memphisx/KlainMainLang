@@ -1,0 +1,27 @@
+.DS_Store
+.thumbs.db
+node_modules
+
+# Quasar / Vite build output
+/dist
+/.quasar
+/src-capacitor
+/src-cordova
+/.vite
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Env
+.env.local
+.env.*.local

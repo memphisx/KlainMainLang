@@ -1,0 +1,22 @@
+@import './brand.scss';
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background: var(--km-black);
+  color: var(--km-white);
+}
+
+::selection { background: var(--km-gold); color: var(--km-black); }
+
+// Editorial body copy defaults.
+p { line-height: 1.7; }
+
+// Thin, quiet scrollbars.
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--km-line) transparent;
+}

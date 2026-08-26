@@ -1,0 +1,33 @@
+{
+  "name": "klainmain-website",
+  "version": "0.1.0",
+  "description": "Marketing + documentation website for the KlainMainLang compiler",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen:examples": "node scripts/gen-examples.mjs",
+    "dev": "npm run gen:examples && quasar dev",
+    "dev:ssg": "npm run gen:examples && quasar dev -m ssg",
+    "build": "npm run gen:examples && quasar build -m ssg",
+    "build:spa": "npm run gen:examples && quasar build"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.1.0",
+    "@fontsource/jetbrains-mono": "^5.1.0",
+    "@fontsource/jost": "^5.1.0",
+    "@quasar/extras": "^1.16.0",
+    "highlight.js": "^11.10.0",
+    "quasar": "^2.17.0",
+    "vue": "^3.5.0",
+    "vue-router": "^5.0.0"
+  },
+  "devDependencies": {
+    "@quasar/app-vite": "^3.8.1",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "sass-embedded": "^1.80.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

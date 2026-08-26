@@ -1,0 +1,33 @@
+// Quasar SCSS variable overrides — pulled in before Quasar's own styles.
+// The brand is monochrome (black + white) with a single Vergina-gold accent.
+
+$primary   : #c6a03c; // Vergina gold
+$secondary : #0a0a0a; // near-black
+$accent    : #9c7a22; // deep gold
+
+$dark      : #0a0a0a;
+$dark-page : #0a0a0a;
+
+$positive  : #3d9a5a;
+$negative  : #c0473b;
+$info      : #c6a03c;
+$warning   : #c6a03c;
+
+// Editorial, tight typography.
+$typography-font-family: 'Inter', 'Helvetica Neue', Arial, 'Arial Narrow', sans-serif;
+
+$button-border-radius: 0;
+$generic-border-radius: 0;
+
+// Brand tokens (also mirrored as CSS custom props in brand.scss).
+$km-black    : #0a0a0a;
+$km-ink      : #141414;
+$km-panel    : #171717;
+$km-line     : #2a2a2a;
+$km-white    : #ffffff;
+$km-stone    : #f4f1ea;
+$km-stone-2  : #e8e3d7;
+$km-gold     : #c6a03c;
+$km-gold-lt  : #dcbf6a;
+$km-gold-dk  : #9c7a22;
+$km-blue     : #0d5eaf; // Greek-flag blue, used only inside the flag asset

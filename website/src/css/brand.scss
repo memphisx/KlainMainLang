@@ -1,0 +1,202 @@
+// Brand layer — the editorial / fashion-house look on top of Quasar.
+// Everything here is deliberately monochrome; gold is a rare, precise accent.
+
+:root {
+  --km-black:   #0a0a0a;
+  --km-ink:     #141414;
+  --km-panel:   #171717;
+  --km-line:    #2a2a2a;
+  --km-white:   #ffffff;
+  --km-stone:   #f4f1ea;
+  --km-stone-2: #e8e3d7;
+  --km-gold:    #c6a03c;
+  --km-gold-lt: #dcbf6a;
+  --km-gold-dk: #9c7a22;
+  --km-blue:    #0d5eaf;
+
+  --km-maxw: 1200px;
+  --km-gutter: clamp(20px, 5vw, 64px);
+
+  /* Type: geometric Futura-register display + wordmark (Jost); Jura only
+     supplies the single λ glyph Jost lacks. */
+  --km-font-display: 'Jost', 'Century Gothic', 'Helvetica Neue', Arial, sans-serif;
+  --km-font-wordmark: 'Jost', 'Century Gothic', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* ---- Type ramp --------------------------------------------------------- */
+
+.km-display {
+  font-family: var(--km-font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 0.94;
+  text-transform: uppercase;
+}
+
+.km-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+}
+
+.km-kicker-num {
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  opacity: 0.35;
+}
+
+.km-mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- Layout helpers ---------------------------------------------------- */
+
+.km-wrap {
+  width: 100%;
+  max-width: var(--km-maxw);
+  margin: 0 auto;
+  padding-inline: var(--km-gutter);
+}
+
+.km-section {
+  padding-block: clamp(64px, 9vw, 132px);
+}
+
+.km-on-black { background: var(--km-black); color: var(--km-white); }
+.km-on-white { background: var(--km-white); color: var(--km-black); }
+.km-on-stone { background: var(--km-stone); color: var(--km-black); }
+
+.km-gold { color: var(--km-gold); }
+.km-rule { height: 1px; background: currentColor; opacity: 0.14; border: 0; }
+
+/* ---- Wordmark (Κλάιν Μάιν, the Calvin-Klein-register lockup) ----------- */
+
+.km-wordmark {
+  font-family: var(--km-font-wordmark);
+  font-weight: 600;
+  text-transform: none;      /* mixed case, keep the tonos — Κλάιν Μάιν */
+  letter-spacing: 0.005em;
+  line-height: 0.98;
+  display: inline-flex;
+  flex-direction: column;
+}
+.km-wordmark > span { display: block; }
+
+.km-monogram {
+  font-family: var(--km-font-display);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+/* ---- Buttons: flat, tracked, gold underline on hover ------------------- */
+
+.km-btn {
+  --km-btn-fg: var(--km-black);
+  --km-btn-bg: var(--km-white);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 26px;
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--km-btn-fg);
+  background: var(--km-btn-bg);
+  border: 1px solid var(--km-btn-bg);
+  transition: transform .18s ease, background .18s ease, color .18s ease, border-color .18s ease;
+  cursor: pointer;
+}
+.km-btn:hover { transform: translateY(-2px); }
+.km-btn--ghost {
+  --km-btn-bg: transparent;
+  --km-btn-fg: currentColor;
+  border-color: currentColor;
+}
+.km-btn--ghost:hover { background: var(--km-gold); border-color: var(--km-gold); color: var(--km-black); }
+.km-btn--gold { --km-btn-bg: var(--km-gold); --km-btn-fg: var(--km-black); border-color: var(--km-gold); }
+
+/* ---- Links ------------------------------------------------------------- */
+
+.km-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(198,160,60,0.5);
+  transition: border-color .15s ease, color .15s ease;
+}
+.km-link:hover { color: var(--km-gold); border-color: var(--km-gold); }
+
+/* ---- Code -------------------------------------------------------------- */
+
+.km-code {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 0.88rem;
+  line-height: 1.65;
+}
+
+/* Restyle highlight.js to the monochrome-plus-gold palette. */
+.hljs { color: #e6e6e6; background: transparent; }
+.hljs-comment, .hljs-quote { color: #6b6b6b; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-name { color: var(--km-gold-lt); }
+.hljs-string, .hljs-template-string, .hljs-regexp, .hljs-addition { color: #cdb98a; }
+.hljs-number, .hljs-literal { color: #d8d8d8; }
+.hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #ffffff; font-weight: 600; }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-params { color: #cfcfcf; }
+.hljs-type, .hljs-meta { color: var(--km-gold); }
+.hljs-punctuation, .hljs-operator { color: #8a8a8a; }
+
+/* ---- Quasar component de-materialisation ------------------------------- */
+
+.q-card { box-shadow: none; border-radius: 0; }
+.q-btn { border-radius: 0; }
+.q-markup-table { box-shadow: none; }
+
+/* Reduce Material chrome in a couple of spots. */
+.km-flat .q-field__control::before { border-color: var(--km-line); }
+
+/* ---- Documentation prose ---------------------------------------------- */
+
+.km-doc { color: #d2d2d2; font-size: 1.02rem; }
+.km-doc__eyebrow { color: var(--km-gold); }
+.km-doc h1 {
+  font-weight: 900; letter-spacing: -0.02em; line-height: 1.02;
+  font-size: clamp(2.2rem, 6vw, 3.4rem); color: #fff;
+  margin: 10px 0 18px; text-transform: none;
+}
+.km-doc .km-doc__lede { font-size: 1.2rem; color: #a9a9a9; margin-bottom: 40px; max-width: 44rem; }
+.km-doc h2 {
+  font-weight: 800; font-size: 1.55rem; color: #fff;
+  margin: 52px 0 16px; padding-top: 20px; border-top: 1px solid var(--km-line);
+}
+.km-doc h3 { font-weight: 700; font-size: 1.16rem; color: #fff; margin: 30px 0 10px; }
+.km-doc p { margin: 0 0 16px; }
+.km-doc a:not(.km-btn) {
+  color: #fff; text-decoration: none; border-bottom: 1px solid rgba(198,160,60,0.5);
+}
+.km-doc a:not(.km-btn):hover { color: var(--km-gold); border-color: var(--km-gold); }
+.km-doc ul, .km-doc ol { margin: 0 0 18px; padding-left: 22px; }
+.km-doc li { margin-bottom: 8px; }
+.km-doc strong { color: #fff; }
+.km-doc code {
+  font-family: 'JetBrains Mono', monospace; font-size: 0.85em;
+  background: #1c1c1c; border: 1px solid var(--km-line);
+  padding: 2px 6px; color: var(--km-gold-lt); border-radius: 2px;
+}
+.km-doc .km-codeblock { margin: 0 0 24px; }
+.km-doc .km-codeblock code { background: none; border: 0; padding: 0; color: inherit; }
+.km-doc blockquote {
+  margin: 0 0 22px; padding: 14px 20px; border-left: 3px solid var(--km-gold);
+  background: rgba(198,160,60,0.06); color: #c9c9c9;
+}
+.km-doc blockquote p:last-child { margin-bottom: 0; }
+.km-doc table { width: 100%; border-collapse: collapse; margin: 0 0 24px; font-size: 0.92rem; }
+.km-doc th, .km-doc td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--km-line); }
+.km-doc th { color: #fff; font-weight: 700; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.08em; }
+.km-doc td code { font-size: 0.82em; }
+
+.km-doc__nextrow {
+  display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--km-line);
+}
