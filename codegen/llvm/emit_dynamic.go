@@ -330,6 +330,28 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IsDynamic {
 		return v, nil
 	}
+	// A nullable scalar (`number | null`, …) is a { i1, T } aggregate, not a bare
+	// scalar — box the payload (recursively, as its own scalar) when present, or
+	// `undefined` when absent. Without this the Float/i64 payload path below
+	// bitcasts the whole aggregate and produces invalid IR (TDD-00123: surfaced
+	// once `number|null` became { i1, double }).
+	if isNullableScalar(v.Ty) {
+		present, payload := e.nullableScalarAggParts(v)
+		boxedVal, err := e.emitBoxValue(payload)
+		if err != nil {
+			return Value{}, err
+		}
+		vtag, vpl := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", vtag, boxedVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 1", vpl, boxedVal.Ref))
+		tag, pl := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i8 %s, i8 %d", tag, present, vtag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", pl, present, vpl))
+		r0, r1 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %s, 0", r0, tag))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pl))
+		return Value{Ref: r1, Ty: TypeAny}, nil
+	}
 	// An array value is a { ptr, i64 } aggregate (data pointer + length), which
 	// doesn't fit the box's single i64 payload slot. Box its *data pointer* as
 	// the identity: arrays are reference types in JS, so `===` on two boxed

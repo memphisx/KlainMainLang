@@ -1436,11 +1436,11 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			// unannotated-param default just below, which would be wrong
 			// for a rest param specifically (it always collects into an
 			// array, never a bare scalar).
-			paramTypes[i] = ArrayOf(TypeI64)
+			paramTypes[i] = ArrayOf(TypeF64)
 		} else if p.Type == nil && i < len(hints) {
 			paramTypes[i] = hints[i]
 		} else if p.Type == nil {
-			paramTypes[i] = TypeI64
+			paramTypes[i] = TypeF64
 			paramTypes[i].Inferred = true // no annotation, no hint — see docs/adr/ADR-00042.md
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
@@ -1490,7 +1490,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			// Stage 6's pull callbacks using early-return).
 			retTy = TypeVoid
 		} else {
-			retTy = TypeI64 // block body: scalar default, caller may override via annotation
+			retTy = TypeF64 // block body: scalar default, caller may override via annotation
 		}
 	} else {
 		retTy = TypeVoid // block body with no reachable return (e.g. forEach callback)
@@ -1617,11 +1617,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	paramTypes := make([]Type, len(fe.Params))
 	for i, p := range fe.Params {
 		if p.Rest && p.Type == nil {
-			paramTypes[i] = ArrayOf(TypeI64)
+			paramTypes[i] = ArrayOf(TypeF64)
 		} else if p.Type == nil && i < len(hints) {
 			paramTypes[i] = hints[i]
 		} else if p.Type == nil {
-			paramTypes[i] = TypeI64
+			paramTypes[i] = TypeF64
 			paramTypes[i].Inferred = true
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
@@ -1659,7 +1659,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		} else if firstReturnExprInBlock(fe.Body) == nil {
 			retTy = TypeVoid // every return is bare — see the arrow variant above
 		} else {
-			retTy = TypeI64
+			retTy = TypeF64
 		}
 	} else {
 		retTy = TypeVoid
@@ -1806,7 +1806,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
-				elemTy := TypeI64
+				elemTy := TypeF64
 				if pty.ElemType != nil {
 					elemTy = *pty.ElemType
 				}
@@ -2033,6 +2033,9 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 				return Value{}, err
 			}
 		} else {
+			if !coerciblePure(val.Ty, paramTy) {
+				return Value{}, fmt.Errorf("%d:%d: argument %d has a type incompatible with the parameter's declared type — this compiler is a typed subset", arg.GetPos().Line, arg.GetPos().Col, i+1)
+			}
 			val = e.coerce(val, paramTy)
 		}
 		// An array-typed parameter decomposes into two LLVM args (ptr, i64
@@ -2057,7 +2060,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	if ty.FuncHasRest {
 		restArgs := args[regularCount:]
 		restTy := ty.FuncParams[len(ty.FuncParams)-1]
-		elemTy := TypeI64
+		elemTy := TypeF64
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}

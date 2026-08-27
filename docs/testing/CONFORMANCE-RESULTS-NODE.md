@@ -76,25 +76,26 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 10 | COMPILE_ERROR: test.mustCall takes 1-2 arguments |
 | 10 | COMPILE_ERROR: unknown Readable option '%s' |
 | 9 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
-| 9 | COMPILE_ERROR: unknown stream method '%s' |
 | 9 | COMPILE_ERROR: unsupported assert.deepStrictEqual |
 | 8 | COMPILE_ERROR: child_process.spawn takes (command, args?) |
 | 8 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 7 | COMPILE_ERROR: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/node0.ts: 9:24: new Worker… |
+| 8 | COMPILE_ERROR: unknown stream method '%s' |
+| 7 | COMPILE_ERROR: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/node5.ts: 9:24: new Worker… |
 | 7 | COMPILE_ERROR: a ReadableStream's write callback must be an arrow function or function expression |
 | 7 | COMPILE_ERROR: a net socket has no method '%s' |
 | 6 | COMPILE_ERROR: '%s' is not an array |
 | 6 | COMPILE_ERROR: a dgram socket has no method '%s' |
 | 6 | COMPILE_ERROR: child_process.spawnSync is not supported |
 | 6 | COMPILE_ERROR: net.Server is not supported |
+| 6 | COMPILE_ERROR: on'%s's payload type |
 | 6 | COMPILE_ERROR: unknown Writable option '%s' |
 | 6 | COMPILE_ERROR: zlib.createGzip is not supported |
 | 5 | COMPILE_ERROR: Buffer.alloc's fill must be a number (string fills are not supported) |
 | 5 | COMPILE_ERROR: a net.Server has no method '%s' |
 | 5 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
-| 5 | COMPILE_ERROR: on'%s's payload type |
 | 5 | COMPILE_ERROR: process.stdin has no method '%s' (supported: on) |
 | 5 | COMPILE_ERROR: unsupported assert.match |
+| 4 | COMPILE_ERROR: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/node6.ts: 7:23: expected (… |
 | 4 | COMPILE_ERROR: a net socket supports '%s' and '%s' (got '%s') |
 | 4 | COMPILE_ERROR: instanceof is only supported against user-defined classes; '%s' is not a registered c… |
 | 4 | COMPILE_ERROR: socket.bind takes (port, callback?) |
@@ -102,7 +103,6 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 4 | RUNTIME_NONZERO_EXIT:  |
 | 3 | CLANG_ERROR: warning: overriding the module target triple with arm64-apple-macosx26.0.0 [-Woverride-… |
 | 3 | COMPILE_ERROR: '%s' is a reserved built-in name — pass -compat=js to allow shadowing it (matches r… |
-| 3 | COMPILE_ERROR: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/node0.ts: 10:11: new Worke… |
 
 ## Top skip reasons
 

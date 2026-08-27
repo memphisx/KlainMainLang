@@ -30,8 +30,9 @@ var reTSMultiFile = regexp.MustCompile(`(?mi)^//\s*@filename:`)
 type tsResult struct {
 	Case   string
 	Group  string // compiler | conformance
-	Status string // MATCH_ACCEPT | MATCH_REJECT | MISMATCH_FALSE_REJECT | MISMATCH_FALSE_ACCEPT | SKIP_OUT_OF_SCOPE
-	Reason string
+	Status  string // MATCH_ACCEPT | MATCH_REJECT | MISMATCH_FALSE_REJECT | MISMATCH_FALSE_ACCEPT | SKIP_OUT_OF_SCOPE
+	Reason  string
+	Blocker string // false-reject only: concrete identifier/character the case died on (see blockerOf)
 }
 
 func runTSSuite(workDir string, timeout time.Duration) {
@@ -119,6 +120,7 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 		res.Status = "MISMATCH_FALSE_REJECT" // TS accepts, we rejected — usually an unsupported-feature scope gap
 		if cerr != nil {
 			res.Reason = normalizeReason("REJECTED", cerr.Error())
+			res.Blocker = blockerOf(cerr.Error())
 		}
 	}
 	return res
@@ -200,6 +202,70 @@ func writeTSReport(path string, all []tsResult) error {
 	}
 	if len(fa) > limit {
 		fmt.Fprintf(&b, "| … | +%d more |\n", len(fa)-limit)
+	}
+
+	// The false-reject *reasons*, bucketed — the leverage map for which valid-TS
+	// features cost the most agreement. Mirrors the Node runner's failure
+	// histogram: one unsupported construct rejects a whole case, so ranking the
+	// rejection messages by frequency shows which front-end gaps to close first.
+	reasonCount := map[string]int{}
+	for _, r := range all {
+		if r.Status == "MISMATCH_FALSE_REJECT" && r.Reason != "" {
+			reasonCount[r.Reason]++
+		}
+	}
+	type rc struct {
+		reason string
+		n      int
+	}
+	reasons := make([]rc, 0, len(reasonCount))
+	for k, v := range reasonCount {
+		reasons = append(reasons, rc{k, v})
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		if reasons[i].n != reasons[j].n {
+			return reasons[i].n > reasons[j].n
+		}
+		return reasons[i].reason < reasons[j].reason
+	})
+	b.WriteString("\n## False-reject reasons (TypeScript accepts, this compiler rejected)\n\nBucketed rejection message for each false-reject — the leverage map for which valid-TS features to implement next. A single unsupported construct rejects a whole case, so the highest-count rows gate the most agreement. (Some are genuinely out-of-scope by design; the point is to see the shape of what's missing.)\n\n| Count | Reason |\n|---|---|\n")
+	rlimit := 60
+	for i, r := range reasons {
+		if i >= rlimit {
+			fmt.Fprintf(&b, "| … | +%d more distinct reasons |\n", len(reasons)-rlimit)
+			break
+		}
+		fmt.Fprintf(&b, "| %d | %s |\n", r.n, strings.ReplaceAll(r.reason, "|", "\\|"))
+	}
+
+	// Blocker histogram: the concrete identifier/character each false-reject died
+	// on, un-masked (normalizeReason collapses these to '%s'). Names the actual
+	// missing globals/operators/characters — Symbol, decorators (@), JSX (<),
+	// enum, namespace, etc. — which the reason buckets hide.
+	blockerCount := map[string]int{}
+	for _, r := range all {
+		if r.Status == "MISMATCH_FALSE_REJECT" && r.Blocker != "" {
+			blockerCount[r.Blocker]++
+		}
+	}
+	blockers := make([]rc, 0, len(blockerCount))
+	for k, v := range blockerCount {
+		blockers = append(blockers, rc{k, v})
+	}
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].n != blockers[j].n {
+			return blockers[i].n > blockers[j].n
+		}
+		return blockers[i].reason < blockers[j].reason
+	})
+	b.WriteString("\n## False-reject blockers (concrete identifier/character)\n\nThe un-masked token each false-reject died on — the actual missing globals, keywords, operators, and characters behind the bucketed reasons above.\n\n| Count | Blocker |\n|---|---|\n")
+	blimit := 60
+	for i, r := range blockers {
+		if i >= blimit {
+			fmt.Fprintf(&b, "| … | +%d more distinct blockers |\n", len(blockers)-blimit)
+			break
+		}
+		fmt.Fprintf(&b, "| %d | `%s` |\n", r.n, strings.ReplaceAll(r.reason, "|", "\\|"))
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

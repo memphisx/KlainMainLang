@@ -36,7 +36,7 @@ console.log(identity(3));
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	if n := strings.Count(ir, "define i64 @identity__num("); n != 1 {
+	if n := strings.Count(ir, "define double @identity__num("); n != 1 {
 		t.Fatalf("expected exactly one specialization of identity for number, got %d\n%s", n, ir)
 	}
 }

@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"strings"
 )
 
 // registerModuleGlobals promotes each top-level `const`/`let`/`var` of a simple
@@ -98,6 +97,14 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		if init.ValType != nil {
 			valTy = e.resolveType(init.ValType)
 		}
+		// A bare `new Map()` under an annotated `Map<K,V>`/`Record<string,V>`
+		// takes K/V from the annotation (matching emitMapVarDecl) — the default
+		// value type i64 no longer equals `number` (float64, TDD-00123).
+		if init.KeyType == nil && init.ValType == nil && v.TypeAnnot != nil {
+			if annTy := e.resolveType(v.TypeAnnot); annTy.IsMap && annTy.MapKey != nil && annTy.MapVal != nil {
+				keyTy, valTy = *annTy.MapKey, *annTy.MapVal
+			}
+		}
 		return MapType(keyTy, valTy), true
 	case *ast.NewSetExpression:
 		if init.Init != nil {
@@ -176,10 +183,13 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 	}
 	switch init := v.Init.(type) {
 	case *ast.NumberLiteral:
-		if strings.ContainsRune(init.Value, '.') {
-			return TypeF64, true
+		// TDD-00123: every numeric literal is a `number` (float64). A `123n`
+		// bigint literal is a ptr handle that stays a local (not promoted),
+		// matching emitVarDecl.
+		if init.IsBigInt {
+			return Type{}, false
 		}
-		return TypeI64, true
+		return TypeF64, true
 	case *ast.StringLiteral, *ast.TemplateLiteral:
 		return TypePtr, true // a string is a plain ptr slot
 	case *ast.BooleanLiteral:
@@ -774,14 +784,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		return e.emitObjectVarDecl(v, ty)
 	}
 
-	// With no explicit type, a numeric-literal initializer refines the i64
-	// default: a `123n` BigInt literal → bigint, a `3.14` float literal → f64.
+	// With no explicit type, a numeric-literal initializer is a `number`
+	// (float64, TDD-00123) — or a bigint for a `123n` literal. Every numeric
+	// literal is a double, so an integer-looking `1` gets an f64 slot too, not
+	// the old i64 default (which corrupted a store-back or closure capture of an
+	// unannotated `let a = 1`).
 	if v.TypeAnnot == nil {
 		if nl, ok := v.Init.(*ast.NumberLiteral); ok {
-			switch {
-			case nl.IsBigInt:
+			if nl.IsBigInt {
 				ty = BigIntType()
-			case strings.ContainsRune(nl.Value, '.'):
+			} else {
 				ty = TypeF64
 			}
 		}
@@ -849,6 +861,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		if err != nil {
 			return err
 		}
+		// A void-typed initializer (a call to a function/method that returns
+		// nothing, e.g. `arr.forEach(...)`) has no value to bind — reject cleanly
+		// rather than emitting a store of an empty/void operand (invalid IR).
+		if val.Ty.IR == "void" {
+			return fmt.Errorf("%d:%d: cannot assign the result of a void expression to a variable — the initializer returns no value", v.GetPos().Line, v.GetPos().Col)
+		}
 		if ty.IsDynamic {
 			if ty.UnionMembers != nil && !unionAllowsAssignmentFrom(ty, val.Ty) {
 				return fmt.Errorf("%d:%d: value's type is not a member of the declared union type", v.GetPos().Line, v.GetPos().Col)
@@ -858,6 +876,9 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				return err
 			}
 		} else {
+			if !coerciblePure(val.Ty, ty) {
+				return fmt.Errorf("%d:%d: initializer's type is incompatible with the variable's type — this compiler is a typed subset", v.GetPos().Line, v.GetPos().Col)
+			}
 			val = e.coerce(val, ty)
 		}
 		// Re-resolve the variable's current storage location rather than

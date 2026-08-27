@@ -12,12 +12,13 @@
           </h1>
           <p class="km-hero__lede">
             You write <code class="km-mono">.ts</code>. It writes LLVM IR, hands it to
-            <code class="km-mono">clang</code>, and out comes a real executable —
-            your operating system is none the wiser. No runtime. No V8. No Electron.
+            <code class="km-mono">clang</code>, and out comes a real executable.
+            Your operating system is none the wiser. No runtime. No V8. No Electron.
           </p>
           <div class="km-hero__cta">
             <router-link to="/docs/getting-started" class="km-btn km-btn--gold">Get started</router-link>
-            <a :href="gh" target="_blank" rel="noopener" class="km-btn km-btn--ghost">View on GitHub</a>
+            <router-link to="/docs/install" class="km-btn km-btn--ghost">Install</router-link>
+            <a :href="gh" target="_blank" rel="noopener" class="km-btn km-btn--ghost">GitHub</a>
           </div>
           <p class="km-hero__note km-mono">
             Single-developer, experimental, AGPL-3.0. Built for CLI tools &amp; Docker microservices.
@@ -45,7 +46,7 @@
           </div>
         </div>
         <p class="km-stats__foot">
-          These are curated feature-area checklists — “does the core case work?” — not external
+          These are curated feature-area checklists, “does the core case work?”, not external
           conformance. They mirror the project's own
           <router-link to="/docs/coverage" class="km-link">status matrix</router-link>, caveats and all.
         </p>
@@ -61,7 +62,7 @@
         <p class="km-stats__foot">
           Low on purpose, and shown on purpose. This is a <strong>typed subset</strong>: most of
           Test262 is <code>eval</code>-based untyped JS, and Node's suite is dynamic JavaScript
-          against the full platform — both largely out of scope by design, not silent failures.
+          against the full platform. Both largely out of scope by design, not silent failures.
           <router-link to="/docs/coverage" class="km-link">The honest breakdown.</router-link>
         </p>
       </div>
@@ -75,8 +76,7 @@
           <h2 class="km-display km-secthead__title">Why it exists</h2>
         </header>
         <div class="km-props">
-          <article v-for="(p, i) in props" :key="p.title" class="km-prop">
-            <span class="km-prop__idx km-mono">0{{ i + 1 }}</span>
+          <article v-for="p in props" :key="p.title" class="km-prop">
             <q-icon :name="p.icon" size="26px" class="km-prop__icon" />
             <h3 class="km-prop__title">{{ p.title }}</h3>
             <p class="km-prop__body">{{ p.body }}</p>
@@ -93,8 +93,8 @@
           <h2 class="km-display km-secthead__title">Real TypeScript in,<br>real binaries out</h2>
         </header>
         <p class="km-showcase__lede">
-          Every snippet below is an actual file under <code class="km-mono">examples/</code> —
-          it compiles and runs, verified on every build. No slideware.
+          Every snippet below is an actual file under <code class="km-mono">examples/</code>.
+          It compiles and runs, verified on every build. No slideware.
         </p>
 
         <div class="km-showcase">
@@ -145,21 +145,33 @@
           <span class="km-kicker-num km-display">04</span>
           <h2 class="km-display km-secthead__title">What actually works</h2>
         </header>
+        <div class="km-cov__legend">
+          <span class="km-cov__key"><i class="km-cov__sw km-cov__sw--strict"></i> Exact match to JS</span>
+          <span class="km-cov__key"><i class="km-cov__sw km-cov__sw--caveat"></i> Works, with minor differences</span>
+        </div>
         <div class="km-cov">
-          <div v-for="row in coverage" :key="row.area" class="km-cov__row">
+          <router-link
+            v-for="row in coverage"
+            :key="row.area"
+            to="/docs/coverage"
+            class="km-cov__row"
+          >
             <span class="km-cov__area">{{ row.area }}</span>
             <span class="km-cov__group km-mono">{{ row.group }}</span>
-            <span class="km-cov__bar">
-              <span class="km-cov__fill" :style="{ width: row.pct + '%' }"></span>
+            <span class="km-cov__bar" :title="`${row.strict}% exact match · ${row.pct - row.strict}% with minor differences`">
+              <span class="km-cov__fill km-cov__fill--caveat" :style="{ width: row.pct + '%' }"></span>
+              <span class="km-cov__fill km-cov__fill--strict" :style="{ width: row.strict + '%' }"></span>
             </span>
             <span class="km-cov__pct km-mono">{{ row.pct }}%</span>
-          </div>
+          </router-link>
         </div>
         <div class="km-cov__foot">
           <router-link to="/docs/coverage" class="km-btn">Full status matrix</router-link>
           <p class="km-mono">
-            A bare <code>: number</code> is a 64-bit int — reach for <code>float64</code> when you
-            mean fractions. Concurrency is cooperative. Nothing is dynamic. All deliberate.
+            A bare <code>: number</code> is a JS-faithful 64-bit float. Reach for a JSDoc
+            <code>int8…uint64</code> width when you mean real integers. Memory is manual by
+            default (<code>-mm=gc</code> for a collector). Concurrency is cooperative. Nothing
+            is dynamic. All deliberate.
           </p>
         </div>
       </div>
@@ -172,15 +184,19 @@
           <span class="km-eyebrow km-gold">The name is the mission statement</span>
           <Wordmark tag="h2" :stacked="false" size="lg" class="km-origin__wm" />
           <p class="km-origin__body">
-            <strong>Κλάιν Μάιν</strong> (Klain Main) is Greek slang for
-            <em>“I don't care.”</em> Build it anyway, for no better reason than
-            <em>because I can.</em> It's why the compiler exists — “how would I
-            even build a compiler” turned out to be a far better rabbit hole than
-            whatever the day's actual plan was.
+            Not German. Not a clothing brand. <strong>Klain Main</strong> isn't
+            <em>“klein Main”</em> (a cute little <code>main()</code>), and it isn't
+            the Augsburg
+            <a href="https://klainmain.com" target="_blank" rel="noopener" class="km-origin__link">streetwear label</a>.
+             <em>It's Greek</em>.
           </p>
           <p class="km-origin__body">
-            The wordmark borrows a certain minimalist fashion-house discipline; the mark
-            beside it is the Vergina Sun.
+            <strong>Κλάιν Μάιν</strong> is slang for <em>“I don't care”</em>, the
+            good kind: do the thing anyway, even when everyone tells you it's futile,
+            for no better reason than <em>because you can.</em>
+            That's the whole reason this compiler exists, because
+            “how would I even build one” turned out to be a far better rabbit hole
+            than whatever the day's actual plan was.
           </p>
           <router-link to="/docs" class="km-btn km-btn--ghost">Read the docs</router-link>
         </div>
@@ -218,14 +234,15 @@ const tab = ref('server')
 const tabs = [
   { key: 'server', file: 'http_server.ts', blurb: 'An HTTP/1.1 + HTTP/2 server' },
   { key: 'fetch', file: 'fetch.ts', blurb: 'async / await + typed JSON' },
-  { key: 'generics', file: 'generics.ts', blurb: 'Generics & interfaces' }
+  { key: 'generics', file: 'generics.ts', blurb: 'Generics & interfaces' },
+  { key: 'numbers', file: 'jsdoc-widths.ts', blurb: 'JSDoc numeric widths' }
 ]
 
 const props = [
-  { icon: 'bolt', title: 'No runtime, no VM', body: 'The output is a native executable from clang -O2 — not a bundled interpreter. Zero startup warmup, small binaries, plain libc by default.' },
+  { icon: 'bolt', title: 'No runtime, no VM', body: 'The output is a native executable from clang -O2, not a bundled interpreter. Zero startup warmup, small binaries, plain libc by default.' },
   { icon: 'dns', title: 'Real servers', body: 'http.listen speaks HTTP/1.1 and HTTP/2 (h2c) on one port. fs, worker_threads and cluster give you real OS threads and processes. TLS on both ends.' },
-  { icon: 'public', title: 'Browser-shaped APIs, off-browser', body: 'fetch, URL, WebSocket, Web Crypto, Streams, AbortController, timers — the web APIs that make sense without a DOM, and none of the ones that don\'t.' },
-  { icon: 'tune', title: 'You pick the trade-offs', body: 'Memory mode, compat mode, crypto / bigint / regex backends — chosen per compile. Sized machine types: number is i64, with JSDoc widths when you need them.' }
+  { icon: 'public', title: 'Browser-shaped APIs, off-browser', body: 'fetch, URL, WebSocket, Web Crypto, Streams, AbortController, timers, the web APIs that make sense without a DOM, and none of the ones that don\'t.' },
+  { icon: 'tune', title: 'You pick the trade-offs', body: 'number is a JS-faithful 64-bit float by default, opt into sized machine ints (int8…uint64) with a JSDoc width when you want them. Memory is manual by default (never frees, perfect for short-lived CLIs); pass -mm=gc for a real Boehm collector. Crypto / bigint / regex backends chosen per compile.' }
 ]
 
 const pipeline = [
@@ -241,7 +258,7 @@ const pipeline = [
 code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 
 /* ---- HERO ---- */
-.km-hero { position: relative; overflow: hidden; padding-top: 132px; padding-bottom: clamp(60px, 9vw, 120px); }
+.km-hero { position: relative; overflow: hidden; padding-top: 104px; padding-bottom: clamp(48px, 6vw, 88px); }
 .km-hero__grain {
   position: absolute; inset: 0;
   background:
@@ -257,13 +274,20 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 /* Keep long code lines from stretching the grid tracks past the wrap. */
 .km-hero__copy, .km-hero__art { min-width: 0; }
 .km-hero__terminal { max-width: 100%; overflow: hidden; }
-.km-hero__title { font-size: clamp(3.4rem, 11vw, 8.5rem); margin: 18px 0 26px; }
-.km-hero__lede { max-width: 30rem; font-size: 1.12rem; color: #cfcfcf; }
-.km-hero__cta { display: flex; gap: 14px; flex-wrap: wrap; margin: 34px 0 20px; }
+.km-hero__title { font-size: clamp(3rem, 8vw, 6.2rem); margin: 14px 0 22px; }
+.km-hero__lede { max-width: 30rem; font-size: 1.05rem; color: #cfcfcf; }
+.km-hero__cta { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0 16px; }
 .km-hero__note { color: #6f6f6f; font-size: 0.76rem; letter-spacing: 0.04em; }
 .km-hero__art { position: relative; display: flex; flex-direction: column; align-items: center; }
 .km-hero__sun { color: var(--km-gold); opacity: 0.9; filter: drop-shadow(0 0 40px rgba(198,160,60,0.25)); }
 .km-hero__terminal { width: 100%; margin-top: -60px; }
+/* On desktop, widen the terminal and pull it left so long commands (git clone)
+   fit on one line instead of forcing a scrollbar. */
+@media (min-width: 901px) {
+  .km-hero__terminal { width: calc(100% + 180px); margin-left: -180px; }
+  .km-hero__terminal :deep(.km-code) { font-size: 0.72rem; }
+  .km-hero__terminal :deep(pre) { padding: 20px 20px; }
+}
 @media (max-width: 900px) {
   .km-hero__inner { grid-template-columns: 1fr; }
   .km-hero__sun { display: none; }
@@ -294,8 +318,7 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 /* ---- PROPS ---- */
 .km-props { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--km-line); border: 1px solid var(--km-line); }
 .km-prop { background: var(--km-black); padding: clamp(24px, 3.4vw, 44px); }
-.km-prop__idx { color: var(--km-gold); font-size: 0.78rem; }
-.km-prop__icon { color: var(--km-gold); margin: 16px 0 14px; display: block; }
+.km-prop__icon { color: var(--km-gold); margin: 0 0 14px; display: block; }
 .km-prop__title { font-size: 1.34rem; font-weight: 800; margin-bottom: 10px; }
 .km-prop__body { color: #b6b6b6; font-size: 0.98rem; }
 @media (max-width: 700px) { .km-props { grid-template-columns: 1fr; } }
@@ -326,26 +349,52 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 }
 
 /* ---- PIPELINE ---- */
-.km-pipe { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--km-line); border: 1px solid var(--km-line); }
-.km-pipe__step { background: var(--km-black); padding: 26px 22px; }
+.km-pipe { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; align-items: stretch; column-gap: 34px; row-gap: 20px; }
+.km-pipe__step {
+  flex: 1 1 150px; min-width: 150px; position: relative;
+  background: var(--km-black); border: 1px solid var(--km-line); padding: 22px 20px;
+}
+/* Flow connector: a gold arrow sitting in the column-gap between steps. */
+.km-pipe__step:not(:last-child)::after {
+  content: '→'; color: var(--km-gold); font-size: 1.4rem; font-weight: 700; line-height: 1;
+  position: absolute; right: -26px; top: 50%; transform: translateY(-50%); z-index: 2;
+}
 .km-pipe__num { color: var(--km-gold); font-size: 0.86rem; }
 .km-pipe__name { font-size: 1.12rem; font-weight: 800; margin: 12px 0 8px; }
 .km-pipe__desc { color: #a8a8a8; font-size: 0.88rem; }
 .km-pipe__tail { margin-top: 26px; color: var(--km-gold); font-size: 0.9rem; }
 .km-pipe__tail code { color: #fff; }
-@media (max-width: 860px) { .km-pipe { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 480px) { .km-pipe { grid-template-columns: 1fr; } }
+@media (max-width: 860px) {
+  .km-pipe { flex-direction: column; row-gap: 30px; }
+  .km-pipe__step { flex-basis: auto; }
+  .km-pipe__step:not(:last-child)::after {
+    content: '↓'; right: auto; left: 50%; top: auto; bottom: -26px; transform: translateX(-50%);
+  }
+}
 
 /* ---- COVERAGE ---- */
 .km-cov { border-top: 1px solid rgba(0,0,0,0.14); }
 .km-cov__row {
   display: grid; grid-template-columns: 1.4fr 0.8fr 3fr auto; gap: 18px; align-items: center;
   padding: 13px 0; border-bottom: 1px solid rgba(0,0,0,0.08);
+  text-decoration: none; color: inherit; cursor: pointer;
+  transition: background .15s ease;
 }
+.km-cov__row:hover { background: rgba(0,0,0,0.03); }
+.km-cov__row:hover .km-cov__area { color: var(--km-gold-dk); }
 .km-cov__area { font-weight: 600; }
 .km-cov__group { color: #8a8a82; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em; }
-.km-cov__bar { height: 6px; background: rgba(0,0,0,0.08); position: relative; }
-.km-cov__fill { position: absolute; inset: 0 auto 0 0; background: var(--km-black); }
+.km-cov__bar { height: 8px; background: rgba(0,0,0,0.08); position: relative; overflow: hidden; }
+.km-cov__fill { position: absolute; inset: 0 auto 0 0; }
+/* Caveat layer (wider) sits under the strict layer (narrower), so the bar reads
+   as: gold = faithful, amber = works-with-caveats, empty = not implemented. */
+.km-cov__fill--caveat { background: var(--km-gold); opacity: 0.42; z-index: 1; }
+.km-cov__fill--strict { background: var(--km-gold-dk); z-index: 2; }
+.km-cov__legend { display: flex; flex-wrap: wrap; gap: 8px 26px; margin-bottom: 18px; }
+.km-cov__key { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8rem; color: #55524a; }
+.km-cov__sw { width: 14px; height: 10px; display: inline-block; border-radius: 2px; }
+.km-cov__sw--strict { background: var(--km-gold-dk); }
+.km-cov__sw--caveat { background: var(--km-gold); opacity: 0.42; }
 .km-cov__pct { font-weight: 700; min-width: 3.2em; text-align: right; }
 .km-cov__foot { display: flex; align-items: center; gap: 24px; margin-top: 32px; flex-wrap: wrap; }
 .km-cov__foot p { color: #55524a; font-size: 0.82rem; max-width: 34rem; }
@@ -366,6 +415,9 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-origin__body { color: #b6b6b6; max-width: 34rem; margin-bottom: 18px; }
 .km-origin__body em { color: var(--km-gold); font-style: normal; }
 .km-origin__body strong { color: #fff; }
+.km-origin__body code { color: #fff; }
+.km-origin__link { color: var(--km-gold); text-decoration: underline; text-underline-offset: 2px; }
+.km-origin__link:hover { color: #fff; }
 .km-origin__flag { display: flex; justify-content: center; }
 @media (max-width: 820px) { .km-origin__grid { grid-template-columns: 1fr; } .km-origin__flag { order: -1; } }
 

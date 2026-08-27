@@ -9,6 +9,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -204,28 +205,67 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 		return e.emitBigIntLiteral(n)
 	}
 	v := n.Value
+	// TDD-00123 Stage 1: every JS number literal is a double, so a numeric
+	// literal is TypeF64 regardless of whether it has a fractional part. A
+	// decimal fraction passes through verbatim (LLVM rounds to nearest double);
+	// an integer/hex/bin/oct literal is converted to its float64 value (rounded
+	// past 2^53 exactly as JS does). Real integers come from the explicit
+	// `/** @type {intN/uintN} */` types, not literals.
 	if strings.ContainsRune(v, '.') {
 		return Value{Ref: v, Ty: TypeF64}, nil
 	}
-	// Hex (0x), binary (0b), octal (0o) — convert to decimal for LLVM IR.
+	// Hex (0x), binary (0b), octal (0o).
 	if len(v) >= 2 && v[0] == '0' && (v[1]|32 == 'x' || v[1]|32 == 'b' || v[1]|32 == 'o') {
 		n64, err := strconv.ParseInt(v, 0, 64)
 		if err != nil {
 			return Value{}, fmt.Errorf("invalid numeric literal %q: %v", v, err)
 		}
-		return Value{Ref: fmt.Sprintf("%d", n64), Ty: TypeI64}, nil
+		return Value{Ref: llvmDoubleLit(float64(n64)), Ty: TypeF64}, nil
 	}
-	// A decimal integer literal that doesn't fit i64 (e.g.
-	// 92233720368620160000) becomes a double, as in JS — every JS number
-	// literal is a double anyway; the exact-i64 model applies only to the
-	// range i64 can actually hold. Previously the oversized literal passed
-	// through verbatim and silently wrapped at the LLVM layer.
-	if _, err := strconv.ParseInt(v, 10, 64); err != nil {
-		if f, ferr := strconv.ParseFloat(v, 64); ferr == nil {
-			return Value{Ref: strconv.FormatFloat(f, 'e', -1, 64), Ty: TypeF64}, nil
+	// Decimal integer literal.
+	if n64, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return Value{Ref: llvmDoubleLit(float64(n64)), Ty: TypeF64}, nil
+	}
+	// Oversize decimal (beyond i64) — parse as float directly.
+	if f, ferr := strconv.ParseFloat(v, 64); ferr == nil {
+		return Value{Ref: llvmDoubleLit(f), Ty: TypeF64}, nil
+	}
+	return Value{}, fmt.Errorf("invalid numeric literal %q", v)
+}
+
+// emitInt64LiteralForTarget handles a numeric literal whose target is an
+// explicit 64-bit integer type (`int64`/`uint64`). Every literal is otherwise a
+// `float64` (TDD-00123 Stage 1), so a value above 2^53 would round when it went
+// through the double model on its way into the integer slot — defeating the
+// escape hatch, whose whole purpose is exact integers. Here the original digit
+// string is parsed straight to a 64-bit integer, preserving the full value
+// (e.g. `let a: int64 = 9007199254740993` stays exact). Returns ok=false for a
+// bigint literal, a non-64-bit or float target, or a fractional/exponent/
+// out-of-range literal — all of which fall back to the normal double path
+// (correct there, since values ≤ 2^53 and narrow-int targets lose nothing).
+func (e *Emitter) emitInt64LiteralForTarget(n *ast.NumberLiteral, ty Type) (Value, bool) {
+	if n.IsBigInt || ty.Float || ty.IR != "i64" {
+		return Value{}, false
+	}
+	if ty.Signed {
+		if i, err := strconv.ParseInt(n.Value, 0, 64); err == nil {
+			return Value{Ref: strconv.FormatInt(i, 10), Ty: ty}, true
 		}
+		return Value{}, false
 	}
-	return Value{Ref: v, Ty: TypeI64}, nil
+	if u, err := strconv.ParseUint(n.Value, 0, 64); err == nil {
+		return Value{Ref: strconv.FormatUint(u, 10), Ty: ty}, true
+	}
+	return Value{}, false
+}
+
+// llvmDoubleLit formats a float64 as an LLVM `double` constant using the
+// hexadecimal bit-pattern form (`0x` + 16 upper-hex digits) — exact and
+// unambiguous for every value, avoiding the decimal-point/exponent pitfalls of
+// FormatFloat (e.g. `7e+00`, which LLVM reads as an integer constant in a
+// double slot). TDD-00123.
+func llvmDoubleLit(f float64) string {
+	return fmt.Sprintf("0x%016X", math.Float64bits(f))
 }
 
 func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {

@@ -41,3 +41,4 @@ examples/**
 # Generated conformance-run artifacts (tools/conformance) — the committed
 # deliverable is docs/testing/CONFORMANCE-RESULTS.md, not these raw logs.
 /.conformance-out/
+conformance

@@ -96,7 +96,8 @@ func (e *Emitter) emitRegexSearch(strVal, regexVal Value) Value {
 	e.emitRegexStoreLastIndex(regexVal, originalLastIndex)
 	// startReg is a byte offset (or -1 for no match); report it in the mode's
 	// index space — UTF-16 code units for es-utf16, passing -1 through.
-	return Value{Ref: e.regexByteToUTF16Signed(strVal.Ref, startReg), Ty: TypeI64}
+	// The search index is a Number in JS (TDD-00123 Stage 3).
+	return e.countToNumber(Value{Ref: e.regexByteToUTF16Signed(strVal.Ref, startReg), Ty: TypeI64})
 }
 
 // emitRegexSplitScan runs str.split()'s own local search loop once,

@@ -26,7 +26,18 @@ func (e *Emitter) emitMapOrSetCreate(keyTy Type) string {
 
 // emitMapVarDecl handles `const m = new Map<K, V>()`.
 func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpression) error {
-	val, err := e.emitNewMapValue(init)
+	keyTy, valTy := e.mapKVTypes(init.KeyType, init.ValType, init.Init)
+	// A bare `new Map()` assigned to an annotated `Map<K,V>`/`Record<string,V>`
+	// takes its K/V from the annotation — the `new`-expression carries no type
+	// args here. Latent before TDD-00123 (the value default i64 happened to equal
+	// `number`); now `number` is float64, so the annotation must win to keep the
+	// stored value type and the read-back type in agreement.
+	if init.KeyType == nil && init.ValType == nil && v.TypeAnnot != nil {
+		if annTy := e.resolveType(v.TypeAnnot); annTy.IsMap && annTy.MapKey != nil && annTy.MapVal != nil {
+			keyTy, valTy = *annTy.MapKey, *annTy.MapVal
+		}
+	}
+	val, err := e.emitNewMapValueTyped(init, keyTy, valTy)
 	if err != nil {
 		return err
 	}
@@ -43,7 +54,12 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 // a general expression position.
 func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
 	keyTy, valTy := e.mapKVTypes(init.KeyType, init.ValType, init.Init)
+	return e.emitNewMapValueTyped(init, keyTy, valTy)
+}
 
+// emitNewMapValueTyped builds the map with explicit key/value types (so a
+// var-decl can override them from its annotation — emitMapVarDecl).
+func (e *Emitter) emitNewMapValueTyped(init *ast.NewMapExpression, keyTy, valTy Type) (Value, error) {
 	mapPtr := e.emitMapOrSetCreate(keyTy)
 	if init.Init != nil {
 		if err := e.emitMapSeedFromEntries(mapPtr, init.Init, keyTy, valTy, init.GetPos()); err != nil {
@@ -571,11 +587,27 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 		if v.Ty.IR == "ptr" {
 			return v.Ref
 		}
+		// A non-ptr value inttoptr's to a ptr — coerce to i64 first so a float
+		// `number` (whose Ref is an LLVM hex-double `0x…`, not a valid i64
+		// operand) becomes a real i64 before the inttoptr (TDD-00123). This only
+		// arises when a number is used where a string key is expected — a
+		// type-confusion the compiler doesn't reject, kept consistent so add and
+		// has/get agree.
+		v = e.coerce(v, TypeI64)
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, v.Ref))
 		return r
 	}
-	// Number key: coerce to i64.
+	// Number key. A `number` (float64) key bitcasts to i64 so the full double
+	// bit-pattern is the opaque map key — `1.5` and `1` stay distinct and the
+	// value round-trips exactly (TDD-00123). An explicit integer-typed key
+	// (`int32`, …) sign/zero-extends to i64 as before.
+	if keyTy.Float {
+		v = e.coerce(v, TypeF64)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", r, v.Ref))
+		return r
+	}
 	v = e.coerce(v, TypeI64)
 	return v.Ref
 }

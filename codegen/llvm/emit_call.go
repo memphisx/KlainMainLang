@@ -1429,6 +1429,9 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 						return Value{}, err
 					}
 				} else if paramTy.IR != "" {
+					if !coerciblePure(val.Ty, paramTy) {
+						return Value{}, fmt.Errorf("%d:%d: argument %d has a type incompatible with the parameter's declared type — this compiler is a typed subset", arg.GetPos().Line, arg.GetPos().Col, i+1)
+					}
 					val = e.coerce(val, paramTy)
 				}
 				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))

@@ -12,9 +12,9 @@
           <router-link to="/docs/getting-started" class="km-navlink gt-sm">Get started</router-link>
           <router-link to="/docs/coverage" class="km-navlink gt-sm">Coverage</router-link>
           <a :href="gh" target="_blank" rel="noopener" class="km-navlink">GitHub</a>
-          <a :href="gh" target="_blank" rel="noopener" class="km-btn km-btn--gold km-header__cta">
+          <router-link to="/docs/getting-started" class="km-btn km-btn--gold km-header__cta">
             <q-icon name="download" size="16px" /> Install
-          </a>
+          </router-link>
         </nav>
       </div>
     </q-header>

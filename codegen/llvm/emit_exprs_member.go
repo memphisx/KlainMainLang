@@ -601,14 +601,22 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsTypedArray {
 				lenReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
-				return e.emitTypedArrayByteLength(lenReg, *sym.Ty.ElemType)
+				bl, err := e.emitTypedArrayByteLength(lenReg, *sym.Ty.ElemType)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.countToNumber(bl), nil
 			}
 		} else if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer {
 			objVal, err := e.emitExpr(ex.Object)
 			if err != nil {
 				return Value{}, err
 			}
-			return e.emitArrayBufferByteLength(objVal)
+			bl, err := e.emitArrayBufferByteLength(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.countToNumber(bl), nil
 		} else if objTy.IsTypedArray {
 			objVal, err := e.emitExpr(ex.Object)
 			if err != nil {
@@ -616,7 +624,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			}
 			lenReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, objVal.Ref))
-			return e.emitTypedArrayByteLength(lenReg, *objTy.ElemType)
+			bl, err := e.emitTypedArrayByteLength(lenReg, *objTy.ElemType)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.countToNumber(bl), nil
 		}
 	}
 	if ex.Property == "length" {
@@ -625,12 +637,12 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			if sym, found := e.lookup(id.Name); found {
 				// A tuple has a fixed, compile-time-known arity (TDD-00066).
 				if sym.Ty.IsTuple {
-					return Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}, nil
+					return e.countToNumber(Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}), nil
 				}
 				if sym.Ty.IsArray {
 					reg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.LenPtr))
-					return Value{Ref: reg, Ty: TypeI64}, nil
+					return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
 				}
 			}
 		}
@@ -641,20 +653,20 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		}
 		// Tuple value (fixed arity).
 		if objVal.Ty.IsTuple {
-			return Value{Ref: fmt.Sprintf("%d", len(objVal.Ty.Fields)), Ty: TypeI64}, nil
+			return e.countToNumber(Value{Ref: fmt.Sprintf("%d", len(objVal.Ty.Fields)), Ty: TypeI64}), nil
 		}
 		// Array aggregate (e.g. from Object.keys(), arr.slice(), call result): extract field 1.
 		if objVal.Ty.IsArray {
 			reg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", reg, objVal.Ref))
-			return Value{Ref: reg, Ty: TypeI64}, nil
+			return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
 		}
 		// String: call strlen.
 		if objVal.Ty.IR == "ptr" && !objVal.Ty.IsObject && !objVal.Ty.IsFunc {
 			e.ensureStrlen()
 			reg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", reg, objVal.Ref))
-			return Value{Ref: reg, Ty: TypeI64}, nil
+			return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)
 	}

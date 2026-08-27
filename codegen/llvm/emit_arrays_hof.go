@@ -283,6 +283,11 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
+	// A reduce callback must return the accumulator value; a void callback would
+	// leave nothing to store back into the accumulator (invalid IR otherwise).
+	if rt := cb.retType(); rt.IR == "void" || rt.IR == "" {
+		return Value{}, fmt.Errorf("%d:%d: reduce callback must return the accumulator value", pos.Line, pos.Col)
+	}
 
 	var accTy Type
 	accAlloca := e.freshReg()
@@ -374,10 +379,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	foundAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
 	// Zero-initialise: 0 for numbers, null for pointers.
-	zeroVal := "0"
-	if elemTy.IR == "ptr" {
-		zeroVal = "null"
-	}
+	zeroVal := zeroRef(elemTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, foundAlloca, elemTy.Align()))
 
 	idxAlloca := e.freshReg()

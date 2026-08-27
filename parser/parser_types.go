@@ -170,6 +170,21 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		})
 	}
 
+	// `readonly T[]` / `readonly [T, U]` — the TS readonly array/tuple modifier.
+	// Immutability isn't enforced here (the same stance as `Readonly<T>` and the
+	// mapped-type `readonly` modifier), so erase the keyword and parse the
+	// underlying type unchanged. `readonly` is contextual; the guard requires a
+	// type to follow, and the mapped-type `{ readonly [K in T]: V }` form is
+	// consumed earlier in the object-type path, so it never reaches here. See
+	// ADR-00372.
+	if tok.Type == lexer.IDENT && tok.Literal == "readonly" {
+		switch p.peekNth(1).Type {
+		case lexer.IDENT, lexer.STRING, lexer.LBRACKET, lexer.LPAREN, lexer.LBRACE:
+			p.advance() // consume 'readonly'
+			return p.parseTypeAnnotationAtom(source)
+		}
+	}
+
 	// keyof T (TDD-00079): the operand's key set. `keyof` is a contextual
 	// identifier, not a reserved word (same convention as for-in/of).
 	if tok.Type == lexer.IDENT && tok.Literal == "keyof" {
@@ -525,7 +540,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		// `/** @type {float64} */` comment.
 		if doc != nil {
 			if t := doc.GetType(); t != "" {
-				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
+				ft = jsdocTypeAnnotation(t)
 			}
 		}
 		fields = append(fields, ast.AnnotField{Name: fieldTok.Literal, Type: ft})

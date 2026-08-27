@@ -435,11 +435,15 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	var ir string
 	var cerr error
 	var linkLibs []string
+	var cSources []llvm.CSource
 	if perr == nil {
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
 		ir, cerr = em.EmitProgram(prog)
 		linkLibs = em.LinkLibs()
+		if cerr == nil {
+			cSources, cerr = em.EmbeddedCSources()
+		}
 	}
 	compileErr := perr
 	if compileErr == nil {
@@ -470,6 +474,20 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range linkLibs {
 		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	// Compile+link the embedded C runtime files the program's IR depends on
+	// (dtoa float formatter, bigint/crypto/JSON/… backends) — the same set the
+	// CLI driver links. Without these, any test needing one fails to *link*
+	// (e.g. every number-to-string via dtoa) even though the IR is valid.
+	for _, cs := range cSources {
+		cPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.c", workerID, cs.Name))
+		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+			res.Reason = normalizeReason("WRITE_ERROR", err.Error())
+			return res
+		}
+		clangArgs = append(clangArgs, cPath)
+		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, cs.Libs...)
 	}
 
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)

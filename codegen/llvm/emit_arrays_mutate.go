@@ -489,7 +489,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
 	if len(vals) == 0 {
-		return Value{Ref: curLen, Ty: TypeI64}, nil
+		return e.countToNumber(Value{Ref: curLen, Ty: TypeI64}), nil
 	}
 
 	newLen := e.freshReg()
@@ -519,7 +519,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 
-	return Value{Ref: newLen, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }
 
 // emitPush implements arr.push(val): realloc, store at [len], update ptr+len.
@@ -549,7 +549,7 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
 	if len(vals) == 0 {
-		return Value{Ref: curLen, Ty: TypeI64}, nil
+		return e.countToNumber(Value{Ref: curLen, Ty: TypeI64}), nil
 	}
 
 	newLen := e.freshReg()
@@ -572,5 +572,5 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
 
-	return Value{Ref: newLen, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }

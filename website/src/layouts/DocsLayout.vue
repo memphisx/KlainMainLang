@@ -80,6 +80,7 @@ const nav = [
     label: 'Start',
     items: [
       { to: '/docs', text: 'Overview' },
+      { to: '/docs/install', text: 'Installation' },
       { to: '/docs/getting-started', text: 'Getting started' }
     ]
   },

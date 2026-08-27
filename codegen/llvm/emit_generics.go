@@ -485,7 +485,6 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	// type-arg set, so it builds a fresh constructor/body rather than
 	// splicing into the shared template AST (which the non-generic
 	// registerClasses path, running exactly once per class, does instead).
-	_, allFieldsInit := classHasOwnFieldInit(decl)
 	switch {
 	case decl.Constructor != nil:
 		sig := e.buildGenericParamSig(decl.Constructor.Params, subs)
@@ -497,14 +496,17 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		}
 		info.Constructor = ctor
 		info.CtorSig = sig
-	case len(ownFields) > 0 && allFieldsInit:
+	case len(ownFields) > 0:
+		// ADR-00373: no explicit constructor and at least one own field —
+		// synthesize a constructor running whatever field initializers exist
+		// (`classFieldInitStmts` skips uninitialized fields); the rest stay at
+		// their calloc'd deterministic-zero value (ADR-00157). A generic class
+		// can't `extends`, so there is never a super() to sequence first.
 		body := ast.NewBlockStatement(classFieldInitStmts(decl), decl.GetPos())
 		sig := e.buildGenericParamSig(nil, subs)
 		sig.RetType = TypeVoid
 		info.Constructor = &ast.FunctionDeclaration{Name: "constructor", Body: body}
 		info.CtorSig = sig
-	case len(ownFields) > 0:
-		return "", fmt.Errorf("%d:%d: class '%s' has a field with no initializer and no constructor to initialize it", decl.GetPos().Line, decl.GetPos().Col, decl.Name)
 	}
 
 	for _, m := range decl.Methods {

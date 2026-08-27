@@ -246,11 +246,7 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resultAlloca, elemTy.Align()))
 	} else {
-		zeroVal := "0"
-		if elemTy.IR == "ptr" {
-			zeroVal = "null"
-		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, resultAlloca, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroRef(elemTy), resultAlloca, elemTy.Align()))
 	}
 
 	inBounds := e.freshReg()

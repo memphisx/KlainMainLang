@@ -31,7 +31,7 @@
       <li><strong>The language is basically all there (~95%).</strong> Classes, generics, closures, <code>async</code>/<code>await</code>, unions, generics with constraints, mapped &amp; conditional types.</li>
       <li><strong>You can write a real server.</strong> <code>http.listen</code> speaks HTTP/1.1 and HTTP/2, <code>fs</code> reads and writes, <code>worker_threads</code> and <code>cluster</code> give you real OS threads and processes, TLS on both ends.</li>
       <li><strong>Browser-shaped APIs that make sense off-browser.</strong> <code>fetch</code>, <code>URL</code>, <code>WebSocket</code>, Web Crypto, Streams, <code>AbortController</code>, timers.</li>
-      <li><strong>What'll bite you.</strong> A bare <code>: number</code> is a 64-bit integer, not a double. Concurrency is cooperative. Nothing is dynamic. All deliberate — see the <router-link to="/docs/coverage">coverage matrix</router-link>.</li>
+      <li><strong>What'll bite you.</strong> A bare <code>: number</code> is a JS-faithful double; reach for a sized <code>int8</code>…<code>uint64</code> type when you want integer semantics. Concurrency is cooperative. Nothing is dynamic. All deliberate — see the <router-link to="/docs/coverage">coverage matrix</router-link>.</li>
     </ul>
 
     <div class="km-doc__nextrow">

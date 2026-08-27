@@ -278,7 +278,9 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigterm_closure", closurePtr))
 	case "exit":
 		// The 'exit' listener receives the exit code: (code: number) => void.
-		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypeI64})
+		// The param is a `number` (float64, TDD-00123) — the runtime's
+		// __kml_run_exit_handlers sitofp's the i64 code to a double at the call.
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypeF64})
 		if err != nil {
 			return Value{}, err
 		}

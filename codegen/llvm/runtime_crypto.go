@@ -71,8 +71,9 @@ loopbody:
   %bp = getelementptr i8, ptr %tmpbuf, i64 %i
   %b8 = load i8, ptr %bp, align 1
   %b64 = zext i8 %b8 to i64
-  %ap = getelementptr i64, ptr %arr, i64 %i
-  store i64 %b64, ptr %ap, align 8
+  %bd = sitofp i64 %b64 to double
+  %ap = getelementptr double, ptr %arr, i64 %i
+  store double %bd, ptr %ap, align 8
   %i_next = add i64 %i, 1
   br label %loopcheck
 

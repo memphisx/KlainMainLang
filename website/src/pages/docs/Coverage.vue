@@ -63,7 +63,7 @@
 
     <h2>Known sharp edges</h2>
     <ul>
-      <li>A bare <code>: number</code> is a 64-bit integer — use <code>float64</code>/<code>float32</code> for fractions.</li>
+      <li>A bare <code>: number</code> is a JS-faithful IEEE-754 double — use a sized <code>int8</code>…<code>uint64</code> type (or a JSDoc width) for integer semantics.</li>
       <li>Concurrency is cooperative — one fiber at a time per thread, no preemption.</li>
       <li>Nothing is dynamic — no <code>Proxy</code>, no runtime property add/delete.</li>
       <li>Whole-program compile only — there's no separate compilation or link step.</li>

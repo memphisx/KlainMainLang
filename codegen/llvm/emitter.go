@@ -1272,7 +1272,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 		}
 		e.emitClassVTable(cd.Name)
 		e.emitClassStaticFieldGlobals(cd.Name)
-		if len(cd.StaticBlocks) > 0 {
+		if len(cd.StaticBlocks) > 0 || classHasStaticFieldInit(cd) {
 			if err := e.emitClassStaticInit(cd); err != nil {
 				return "", err
 			}

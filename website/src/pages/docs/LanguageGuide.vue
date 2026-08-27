@@ -7,12 +7,14 @@
       and the deliberate sharp edges worth knowing before you lean on them.
     </p>
 
-    <h2>Numbers are sized machine types</h2>
+    <h2>Numbers: JS-faithful by default, sized when you want</h2>
     <p>
-      A bare <code>: number</code> is an <code>i64</code>, not a double. A fractional value
-      truncates — <code>const x: number = 0.1 + 0.2</code> yields <code>0</code>. Reach for
-      <code>float64</code>/<code>float32</code>, or a JSDoc width override, when you mean real
-      floating-point arithmetic.
+      A bare <code>: number</code> is a JS-faithful IEEE-754 double, so untyped arithmetic
+      matches JavaScript exactly — <code>0.1 + 0.2</code> yields
+      <code>0.30000000000000004</code>, <code>10 / 3</code> yields
+      <code>3.3333333333333335</code>. Reach for a sized integer type
+      (<code>int8</code>…<code>int64</code>, <code>uint8</code>…<code>uint64</code>), or a JSDoc
+      width override, when you want real machine-integer semantics.
     </p>
     <CodeBlock filename="numbers.ts" :code="numbersCode" />
 
@@ -77,8 +79,9 @@
 import CodeBlock from 'components/CodeBlock.vue'
 import { samples } from 'src/lib/content.js'
 
-const numbersCode = `const count: number = 42;          // i64
-const ratio: float64 = 0.1 + 0.2;  // real double → 0.3
+const numbersCode = `const ratio: number = 0.1 + 0.2;   // 0.30000000000000004 (JS-faithful)
+const q: number = 10 / 3;          // 3.3333333333333335
+let count: int32 = 7;              // opt-in integer semantics: 7 / 2 -> 3
 /** @type {uint8} */
-const byte = 255;                  // exact width via JSDoc`
+let byte = 255;                    // exact width via JSDoc: 255 + 1 -> 0`
 </script>

@@ -223,3 +223,19 @@ func TestUnexpectedCharError(t *testing.T) {
 		t.Fatal("expected error for '@', got nil")
 	}
 }
+
+func TestLeadingBOM(t *testing.T) {
+	// A UTF-8 BOM (U+FEFF) at the start of a file is common in editor output and
+	// is whitespace in ECMAScript; it must not derail tokenization.
+	assertTokens(t, "\uFEFFconst x = 5", []tok{
+		{lexer.CONST, "const"},
+		{lexer.IDENT, "x"},
+		{lexer.ASSIGN, "="},
+		{lexer.NUMBER, "5"},
+	})
+	// A stray BOM mid-stream is likewise treated as whitespace.
+	assertTokens(t, "a\uFEFFb", []tok{
+		{lexer.IDENT, "a"},
+		{lexer.IDENT, "b"},
+	})
+}

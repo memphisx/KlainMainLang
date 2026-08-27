@@ -56,7 +56,11 @@ func (l *Lexer) advance() rune {
 }
 
 func (l *Lexer) skipWhitespace() {
-	for l.pos < len(l.src) && unicode.IsSpace(l.peek()) {
+	// U+FEFF (BOM / ZWNBSP) is part of ECMAScript's WhiteSpace production but is
+	// not covered by unicode.IsSpace, so a leading BOM (common in editor output)
+	// or a stray one would otherwise be an "unexpected character" — treat it as
+	// whitespace, matching real JS/TS.
+	for l.pos < len(l.src) && (unicode.IsSpace(l.peek()) || l.peek() == '\uFEFF') {
 		l.advance()
 	}
 }

@@ -158,111 +158,23 @@ func main() {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
-	// bigint: compile the selected backend's C file (which implements the
-	// __kml_bigint_* ABI) alongside the program and link its library — only when
-	// the program actually used bigint. Same shape as the -mm=gc shim above.
-	if em.UsesBigInt() {
-		backend := em.BigIntBackend()
-		src, ok := llvm.BigIntBackendSource(backend)
-		if !ok {
-			fatal("bigint: unknown backend %q", backend)
-		}
-		biPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".bigint.c"
-		if err := os.WriteFile(biPath, []byte(src), 0644); err != nil {
-			fatal("cannot write bigint backend source: %v", err)
-		}
-		clangArgs = append(clangArgs, biPath)
-		cflags, libs := llvm.LocateBigInt(backend)
-		clangArgs = append(clangArgs, cflags...)
-		clangArgs = append(clangArgs, libs...)
+	// Every embedded C runtime file this program's IR depends on (bigint / crypto
+	// / tls / http2 / Buffer codecs / JSON parse-tree / URLPattern / dtoa float
+	// formatter) — resolved from the one shared source of truth the conformance
+	// runner uses too (EmbeddedCSources), so the CLI and the runner can never
+	// drift on which .c files get linked.
+	cSources, cerr := em.EmbeddedCSources()
+	if cerr != nil {
+		fatal("%v", cerr)
 	}
-	// crypto.subtle (TDD-00104): compile the selected crypto backend's C file
-	// (which implements the __kml_crypto_* subtle ABI) alongside the program
-	// and link its library/frameworks — only when the program actually used
-	// crypto.subtle. Same shape as bigint above.
-	if em.UsesCrypto() {
-		backend := em.CryptoBackend()
-		src, ok := llvm.CryptoBackendSource(backend)
-		if !ok {
-			fatal("crypto: unknown backend %q", backend)
+	for _, cs := range cSources {
+		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + ".c"
+		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+			fatal("cannot write %s source: %v", cs.Name, err)
 		}
-		crPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".crypto.c"
-		if err := os.WriteFile(crPath, []byte(src), 0644); err != nil {
-			fatal("cannot write crypto backend source: %v", err)
-		}
-		clangArgs = append(clangArgs, crPath)
-		cflags, libs := llvm.LocateCrypto(backend)
-		clangArgs = append(clangArgs, cflags...)
-		clangArgs = append(clangArgs, libs...)
-	}
-	// tls module (TDD-00109): compile tlssrc/tls.c (the libssl client helper)
-	// alongside and link libssl — only when the program uses `tls`. OpenSSL-only:
-	// CommonCrypto has no TLS API, so reject that backend when tls is used.
-	if em.UsesTLS() {
-		if em.CryptoBackend() == "commoncrypto" {
-			fatal("tls: the `tls` module requires the OpenSSL crypto backend (CommonCrypto has no TLS API); build without -crypto=commoncrypto")
-		}
-		tlsPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".tls.c"
-		if err := os.WriteFile(tlsPath, []byte(llvm.TLSClientSource()), 0644); err != nil {
-			fatal("cannot write tls helper source: %v", err)
-		}
-		clangArgs = append(clangArgs, tlsPath)
-		cflags, libs := llvm.LocateTLS()
-		clangArgs = append(clangArgs, cflags...)
-		clangArgs = append(clangArgs, libs...)
-	}
-	// HTTP/2 server (TDD-00111 Stage 3): compile http2src/http2.c (the nghttp2
-	// session driver) alongside and link -lnghttp2 — only when the program uses
-	// the h2 server path. Same shape as the tls block above.
-	if em.UsesHTTP2() {
-		h2Path := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".http2.c"
-		if err := os.WriteFile(h2Path, []byte(llvm.HTTP2ServerSource()), 0644); err != nil {
-			fatal("cannot write http2 helper source: %v", err)
-		}
-		clangArgs = append(clangArgs, h2Path)
-		cflags, libs := llvm.LocateHTTP2()
-		clangArgs = append(clangArgs, cflags...)
-		clangArgs = append(clangArgs, libs...)
-	}
-	// JSON parse-tree (TDD-00077 Track P): compile the self-contained JSON
-	// parser (implementing the __kml_json_* ABI, libc only) alongside the program
-	// — only when it uses JSON.parse/Response.json(). Same shape as bigint above,
-	// minus any external library to link.
-	// Buffer codecs (TDD-00103): hex/base64/latin1, libc only — compiled
-	// alongside only when a program uses a Buffer string codec. Same shape
-	// as the JSON parse-tree file below.
-	if em.UsesBufferCodecs() {
-		bcPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".bufcodecs.c"
-		if err := os.WriteFile(bcPath, []byte(llvm.BufferCodecsSource()), 0644); err != nil {
-			fatal("cannot write Buffer codec source: %v", err)
-		}
-		clangArgs = append(clangArgs, bcPath)
-	}
-	if em.UsesJSONParse() {
-		jsonPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".jsontree.c"
-		if err := os.WriteFile(jsonPath, []byte(llvm.JSONParseTreeSource()), 0644); err != nil {
-			fatal("cannot write JSON parse-tree source: %v", err)
-		}
-		clangArgs = append(clangArgs, jsonPath)
-	}
-	// URLPattern (TDD-00100): the pattern-compile/match runtime (pcre2 + curl,
-	// both already added via LinkLibs above when used) — only when the program
-	// constructs a URLPattern. Same shape as the JSON parse-tree file.
-	if em.UsesURLPattern() {
-		upPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".urlpattern.c"
-		if err := os.WriteFile(upPath, []byte(llvm.URLPatternSource()), 0644); err != nil {
-			fatal("cannot write URLPattern runtime source: %v", err)
-		}
-		clangArgs = append(clangArgs, upPath)
-	}
-	// Float formatter (TDD-00080): the JS-faithful shortest-round-trip dtoa,
-	// compiled alongside the program only when it prints a float (libc only).
-	if em.UsesFloatFmt() {
-		dtoaPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".dtoa.c"
-		if err := os.WriteFile(dtoaPath, []byte(llvm.DtoaSource()), 0644); err != nil {
-			fatal("cannot write dtoa source: %v", err)
-		}
-		clangArgs = append(clangArgs, dtoaPath)
+		clangArgs = append(clangArgs, cPath)
+		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, cs.Libs...)
 	}
 	cmd := exec.Command("clang", clangArgs...)
 	cmd.Stdout = os.Stdout

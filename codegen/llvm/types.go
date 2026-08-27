@@ -644,7 +644,7 @@ func NodeTransformType(in, out Type) Type {
 // documented public surface (real Fetch has no such field either).
 func ResponseType() Type {
 	ty := ObjectType([]Field{
-		{Name: "status", Ty: TypeI64},
+		{Name: "status", Ty: TypeF64}, // a `number` (TDD-00123)
 		{Name: "ok", Ty: TypeBool},
 		{Name: "body", Ty: TypePtr},
 		{Name: "bodyLength", Ty: TypeI64},
@@ -1774,6 +1774,12 @@ func (t Type) PrintfFmt() string {
 	case "i8", "i16", "i32":
 		return "%d"
 	case "i64":
+		// An unsigned 64-bit value with its high bit set (`uint64` above 2^63)
+		// needs `%llu`; `%lld` would print it as negative (TDD-00123 — the
+		// integer escape hatch).
+		if !t.Signed {
+			return "%llu"
+		}
 		return "%lld"
 	case "float", "double":
 		return "%g"
@@ -1851,7 +1857,10 @@ func ResolveTypeName(name string) Type {
 	}
 	switch name {
 	case "number":
-		return TypeI64
+		// TDD-00123 Stage 1: `number` is a JS-faithful IEEE-754 double. The
+		// integer types (`int8..int64`, `uint8..uint64`) remain the opt-in
+		// escape hatch for real integers.
+		return TypeF64
 	case "string":
 		return TypePtr
 	case "boolean":

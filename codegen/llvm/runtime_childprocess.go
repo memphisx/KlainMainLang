@@ -209,7 +209,8 @@ callexit:
   %%xfp = load ptr, ptr %%xfp_p, align 8
   %%xep_p = getelementptr { ptr, ptr }, ptr %%exitL, i32 0, i32 1
   %%xep = load ptr, ptr %%xep_p, align 8
-  call void %%xfp(ptr %%xep, i64 %%code64)
+  %%xcode_d = sitofp i64 %%code64 to double
+  call void %%xfp(ptr %%xep, double %%xcode_d)
   br label %%aftexit
 aftexit:
   %%closeL_p = getelementptr %s, ptr %%cp, i32 0, i32 10
@@ -221,7 +222,8 @@ callclose:
   %%cfp = load ptr, ptr %%cfp_p, align 8
   %%cep_p = getelementptr { ptr, ptr }, ptr %%closeL, i32 0, i32 1
   %%cep = load ptr, ptr %%cep_p, align 8
-  call void %%cfp(ptr %%cep, i64 %%code64)
+  %%ccode_d = sitofp i64 %%code64 to double
+  call void %%cfp(ptr %%cep, double %%ccode_d)
   br label %%ret
 bufcb:
   %%cb_p = getelementptr %s, ptr %%cp, i32 0, i32 16

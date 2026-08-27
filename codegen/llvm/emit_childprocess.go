@@ -237,7 +237,7 @@ func (e *Emitter) emitCPHandleMethod(objVal Value, method string, args []ast.Exp
 		}
 		switch evt {
 		case "close", "exit":
-			cb, err := e.cpArrowClosure(args[1], []Type{TypeI64}, pos)
+			cb, err := e.cpArrowClosure(args[1], []Type{TypeF64}, pos)
 			if err != nil {
 				return Value{}, err
 			}

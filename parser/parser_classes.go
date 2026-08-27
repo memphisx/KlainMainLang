@@ -359,7 +359,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		}
 		if doc != nil {
 			if t := doc.GetType(); t != "" {
-				ft = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
+				ft = jsdocTypeAnnotation(t)
 			}
 		}
 		var initializer ast.Expression

@@ -340,6 +340,13 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 // destructuring) so there's exactly one implementation of "malloc N *
 // elemSize, store each element" rather than one per caller.
 func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (dataReg string, n int64, err error) {
+	// A nullable-scalar or union element type (`(number | null)[]`, `(A | B)[]`)
+	// isn't a supported array element shape (its `{ i1, T }` / boxed storage has
+	// never been wired into the array-element path) — reject cleanly rather than
+	// emitting an invalid store of the aggregate into a bare-scalar slot.
+	if isNullableScalar(elemTy) || elemTy.UnionMembers != nil {
+		return "", 0, fmt.Errorf("%d:%d: a nullable or union array element type (e.g. `(number | null)[]`) is not yet supported — a union is usable as an object field, but not yet as an array element", lit.GetPos().Line, lit.GetPos().Col)
+	}
 	n = int64(len(lit.Elements))
 	e.ensureMalloc()
 	dataReg = e.freshReg()
@@ -350,6 +357,16 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 			return "", 0, verr
 		}
 		val = e.coerce(val, elemTy)
+		// A heterogeneous array literal (`[obj, 0, "s"]`) reaches here with an
+		// element whose type coerce couldn't convert to the array's element type
+		// (e.g. a number into a ptr/string element) — reject cleanly instead of
+		// emitting an invalid `store <elemTy> <mismatchedRef>`. Composite element
+		// types (nested array, object, Map/Set, any, nullable scalar) legitimately
+		// carry a different storage IR than their Type.IR, so they're exempt —
+		// storeArrayElem handles those. This compiler's arrays are homogeneous.
+		if val.Ty.IR != elemTy.IR && !elemTy.IsArray && !elemTy.IsDynamic && !isNullableScalar(elemTy) {
+			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
+		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 		e.storeArrayElem(gepReg, elemTy, val)

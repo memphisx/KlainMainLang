@@ -79,7 +79,7 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
 	}
-	if !sym.Ty.IsArray || sym.Ty.ElemType == nil || sym.Ty.ElemType.IR != "i64" {
+	if !sym.Ty.IsArray || sym.Ty.ElemType == nil || sym.Ty.ElemType.IR != "double" {
 		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires a TypedArray, an ArrayBuffer, or a number[] array", pos.Line, pos.Col)
 	}
 

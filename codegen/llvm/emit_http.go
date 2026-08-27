@@ -162,10 +162,12 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 				return Value{}, fmt.Errorf("%d:%d: http.listen's { workers: N } fork-clustering cannot be combined with Worker threads in the same program", pos.Line, pos.Col)
 			}
 			idx, fieldTy, _ := optsVal.Ty.FieldIndex("workers")
-			if fieldTy.IR != "i64" || fieldTy.Float {
+			if !fieldTy.Float && !isIntegerNumberTy(fieldTy) {
 				return Value{}, fmt.Errorf("%d:%d: http.listen's 'workers' field must be a number", pos.Line, pos.Col)
 			}
-			workersRef = e.loadFieldValue(optsVal, idx, fieldTy).Ref
+			// `workers` is a `number` (float64, TDD-00123); the worker count is an
+			// integer, so coerce it (truncating) to i64.
+			workersRef = e.coerce(e.loadFieldValue(optsVal, idx, fieldTy), TypeI64).Ref
 		}
 		idx, fieldTy, hasWSField := optsVal.Ty.FieldIndex("ws")
 		if hasWSField {

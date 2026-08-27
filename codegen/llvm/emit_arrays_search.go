@@ -64,7 +64,7 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resultAlloca))
-	return Value{Ref: result, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
 }
 
 // emitArrayIncludes implements arr.includes(val): returns true if val is present.
@@ -194,7 +194,7 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resultAlloca))
-	return Value{Ref: result, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
 }
 
 // emitArrayFindLast implements arr.findLast(pred): same as .find(), but
@@ -214,10 +214,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 		return Value{}, err
 	}
 
-	zeroVal := "0"
-	if elemTy.IR == "ptr" {
-		zeroVal = "null"
-	}
+	zeroVal := zeroRef(elemTy)
 	foundAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, foundAlloca, elemTy.Align()))
@@ -342,7 +339,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resultAlloca))
-	return Value{Ref: result, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
 }
 
 // emitArrayConcat implements arr.concat(other): returns a new array containing

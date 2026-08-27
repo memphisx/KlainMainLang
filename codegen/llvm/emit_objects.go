@@ -38,6 +38,16 @@ func (e *Emitter) emitObjectLiteral(lit *ast.ObjectLiteral) (Value, error) {
 // `[1, 2, 3]` passed into a `float64[]`-typed slot gets every element
 // coerced to double rather than left as the literal's own self-inferred i64.
 func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value, error) {
+	// A numeric literal bound into an explicit int64/uint64 slot is parsed
+	// straight to a 64-bit integer, so a value above 2^53 stays exact rather
+	// than rounding through the default float64 literal model (TDD-00123 — the
+	// integer escape hatch). Narrow-int targets and values ≤ 2^53 lose nothing
+	// on the normal path, so this only intercepts the 64-bit case.
+	if nl, ok := expr.(*ast.NumberLiteral); ok {
+		if v, done := e.emitInt64LiteralForTarget(nl, hint); done {
+			return v, nil
+		}
+	}
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
 		return e.emitObjectLiteralWithHint(lit, &hint)
 	}
@@ -116,6 +126,9 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
 		}
+		if !coerciblePure(val.Ty, fieldTy) {
+			return fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", lit.GetPos().Line, lit.GetPos().Col, name)
+		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
 		e.storeScalarOrNullableField(gepReg, fieldTy, val)
@@ -129,6 +142,9 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		idx, fieldTy, ok := ty.FieldIndex(name)
 		if !ok {
 			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
+		}
+		if !coerciblePure(e.inferExprType(expr), fieldTy) {
+			return fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", lit.GetPos().Line, lit.GetPos().Col, name)
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))

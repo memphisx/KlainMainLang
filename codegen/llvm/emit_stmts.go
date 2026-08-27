@@ -195,7 +195,9 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			// `return;` in a `T | null` function yields undefined -> absent.
 			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", nullableScalarStorageIR(e.currentRetType)))
 		default:
-			e.emitTerminator(fmt.Sprintf("ret %s 0", e.currentRetType.IR))
+			// zeroRef gives the type-correct zero (0.0 for a float `number`,
+			// null for a ptr, false for i1) — a bare `ret double 0` is invalid IR.
+			e.emitTerminator(fmt.Sprintf("ret %s %s", e.currentRetType.IR, zeroRef(e.currentRetType)))
 		}
 		return nil
 	}

@@ -196,10 +196,15 @@ console.log(big > 9007199254740992.0)
 
 // --- Deliberate rejections (compile errors) ---
 
-func TestE2EBigIntFloatComparisonRejected(t *testing.T) {
-	// Comparing a bigint with a float is a clean compile error by default
-	// (a -compat design choice, not a caveat — TDD-00075).
-	mustCompileError(t, `console.log(10n < 5.5)`, "floating-point")
+func TestE2EBigIntNumberComparisonIsExact(t *testing.T) {
+	// `number` is a double (TDD-00123); JS permits bigint↔number comparison with
+	// exact real-number semantics, including a fractional operand (10n > 5.5).
+	assertOutput(t, `
+console.log(10n < 5.5)
+console.log(10n > 5.5)
+console.log(10n == 10)
+console.log(10n < 10.5)
+`, "false\ntrue\ntrue\ntrue")
 }
 
 func TestE2EBigIntMixingIsError(t *testing.T) {

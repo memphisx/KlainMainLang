@@ -33,6 +33,7 @@ const routes = [
     component: () => import('layouts/DocsLayout.vue'),
     children: [
       { path: '', name: 'docs', component: () => import('pages/docs/DocsIndex.vue') },
+      { path: 'install', name: 'install', component: () => import('pages/docs/Install.vue') },
       { path: 'getting-started', name: 'getting-started', component: () => import('pages/docs/GettingStarted.vue') },
       { path: 'language', name: 'language', component: () => import('pages/docs/LanguageGuide.vue') },
       { path: 'stdlib', name: 'stdlib', component: () => import('pages/docs/StdLib.vue') },

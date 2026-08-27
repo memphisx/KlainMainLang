@@ -169,10 +169,75 @@ func (p *Parser) takeDoc() *jsdoc.Comment {
 	return d
 }
 
+// collectTypedefs scans every JSDoc comment token in the stream and turns each
+// `@typedef`/`@callback` into a synthesized `type Name = ...` declaration
+// (TDD-00125 Stage 2). Runs as a pre-pass because `peek()` collapses a run of
+// adjacent comments to only the last, so a `@typedef` comment immediately
+// followed by, say, a `@param` comment would otherwise be lost. The comments
+// are left in place for their normal `@type`/`@param` attachment; a `@typedef`
+// carries no such per-statement meaning, so double-processing is harmless.
+func (p *Parser) collectTypedefs() []ast.Statement {
+	var out []ast.Statement
+	for _, tok := range p.tokens {
+		if tok.Type != lexer.JSDOC {
+			continue
+		}
+		defs := jsdoc.Parse(tok.Literal).Typedefs()
+		for _, d := range defs {
+			if stmt := p.synthTypedef(d, ast.Pos{}); stmt != nil {
+				out = append(out, stmt)
+			}
+		}
+	}
+	return out
+}
+
+// synthTypedef builds the `type Name = ...` AST node for one JSDoc typedef.
+func (p *Parser) synthTypedef(d jsdoc.TypedefDecl, pos ast.Pos) ast.Statement {
+	if d.Name == "" {
+		return nil
+	}
+	var ta *ast.TypeAnnotation
+	switch d.Kind {
+	case "alias":
+		ta = jsdocTypeAnnotation(d.Base)
+	case "object":
+		fields := make([]ast.AnnotField, 0, len(d.Fields))
+		for _, f := range d.Fields {
+			fields = append(fields, ast.AnnotField{Name: f.Name, Type: jsdocTypeAnnotation(f.Type)})
+		}
+		ta = &ast.TypeAnnotation{Source: "jsdoc", Fields: fields}
+	case "callback":
+		params := make([]ast.TypeAnnotation, 0, len(d.Fields))
+		for _, f := range d.Fields {
+			params = append(params, *jsdocTypeAnnotation(f.Type))
+		}
+		ret := jsdocTypeAnnotation(d.Return)
+		if ret == nil {
+			ret = &ast.TypeAnnotation{Name: "void", Source: "jsdoc"}
+		}
+		ta = &ast.TypeAnnotation{
+			Source:      "jsdoc",
+			IsFuncType:  true,
+			FuncParams:  params,
+			FuncRetType: ret,
+		}
+	default:
+		return nil
+	}
+	return ast.NewTypeAliasDeclaration(d.Name, ta, pos)
+}
+
 // --- Program ---
 
 func (p *Parser) ParseProgram() (*ast.Program, error) {
 	prog := &ast.Program{}
+	// A `@typedef`/`@callback` comment declares a named type, not documentation
+	// for the next statement. Collect them in a pre-pass over every JSDoc token
+	// (peek() keeps only the last of a run of adjacent comments, so they can't
+	// be drained reliably from pendingDoc) and prepend the synthesized type
+	// aliases, so they are registered before any use site (TDD-00125 Stage 2).
+	prog.Body = append(prog.Body, p.collectTypedefs()...)
 	for !p.check(lexer.EOF) {
 		stmt, err := p.parseStatement()
 		if err != nil {

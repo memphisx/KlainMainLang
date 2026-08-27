@@ -167,6 +167,16 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 	}
 
+	// Date duration arithmetic runs in the i64 millisecond domain regardless of
+	// operand order — a `number` operand is a float64 (TDD-00123), so coerce
+	// both sides to i64 so `500 + d1` computes with `add i64`, not `fadd double`
+	// (which would then be mislabeled as a Date). The resultTy below still
+	// becomes TypeDate from the leftIsDate/rightIsDate flags captured above.
+	if leftIsDate || rightIsDate {
+		left = e.coerce(left, TypeI64)
+		right = e.coerce(right, TypeI64)
+	}
+
 	// Unify types (promote right to left's type for now)
 	right = e.coerce(right, left.Ty)
 	ty := left.Ty
@@ -176,6 +186,19 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	isNullCheck := left.Ty.IsNull || right.Ty.IsNull
 	if ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !isNullCheck {
 		return e.emitStringBinary(ex.Op, left, right, ex.GetPos())
+	}
+
+	// After unification the operands still have incompatible storage types (e.g.
+	// a number and a string, where coerce had no conversion): a cross-type
+	// operation untyped JS permits but this typed subset — like TypeScript's own
+	// checker for a cross-type `===`/arithmetic — does not. Reject cleanly rather
+	// than emit an invalid mixed-type operand (`add i64 %n, <string const>`).
+	// Null/undefined checks, dynamic (`any`) operands, and composite types
+	// (handled by their own paths) are exempt.
+	if !isNullCheck && right.Ty.IR != ty.IR &&
+		!ty.IsObject && !ty.IsArray && !ty.IsFunc && !ty.IsDynamic && !ty.IsDate &&
+		!right.Ty.IsObject && !right.Ty.IsArray && !right.Ty.IsFunc && !right.Ty.IsDynamic {
+		return Value{}, fmt.Errorf("%d:%d: operator '%s' between incompatible types is not supported — this compiler is a typed subset (a value of one type cannot be combined with an incompatible one the way untyped JS allows)", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 	}
 
 	reg := e.freshReg()
@@ -315,22 +338,17 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// && / || are handled up-front by emitShortCircuit (they short-circuit and
 	// so must not fall through to the eager both-operands path above).
 
-	// Bitwise — operands coerced to i64
-	case "&":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "|":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = or i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "^":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
+	// Bitwise (TDD-00123 Stage 2) — JS computes `& | ^` in the ToInt32 domain
+	// (both operands truncated to a signed 32-bit int) but the *result is a
+	// Number* (a double). Keeping it i64 would make `(a & b) / c` do integer
+	// division; instead the 32-bit result is `sitofp`'d back to a double so it
+	// participates in float arithmetic like every other `number`.
+	case "&", "|", "^":
+		l32 := e.toInt32(left)
+		r32 := e.toInt32(right)
+		iop := map[string]string{"&": "and", "|": "or", "^": "xor"}[ex.Op]
+		e.emitInstr(fmt.Sprintf("%s = %s i32 %s, %s", reg, iop, l32, r32))
+		return e.int32ToNumber(reg), nil
 	case "<<", ">>", ">>>":
 		return e.emitBitShift(ex.Op, left, right)
 	}
@@ -370,13 +388,54 @@ func (e *Emitter) emitBitShift(op string, left, right Value) (Value, error) {
 		return Value{}, fmt.Errorf("unknown shift operator '%s'", op)
 	}
 
+	// The i32 shift result is a Number (double) in JS (TDD-00123 Stage 2), so
+	// convert it to a double: `<<`/`>>` produce a signed Int32 (`sitofp`),
+	// while `>>>` produces an unsigned Uint32 (zero-extend to i64 first, then
+	// `sitofp` the non-negative value — a bare `sitofp i32` would misread a
+	// result ≥ 2^31 as negative, e.g. `-1 >>> 0` must be 4294967295).
 	result := e.freshReg()
 	if op == ">>>" {
-		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", result, res32))
+		wide := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", wide, res32))
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", result, wide))
 	} else {
-		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", result, res32))
+		e.emitInstr(fmt.Sprintf("%s = sitofp i32 %s to double", result, res32))
 	}
-	return Value{Ref: result, Ty: TypeI64}, nil
+	return Value{Ref: result, Ty: TypeF64}, nil
+}
+
+// toInt32 applies JS's ToInt32 to a value: coerce to the integer domain and
+// keep the low 32 bits (trunc gives the mod-2^32 wraparound regardless of
+// sign). Returns an i32 SSA register. Shared by the bitwise operators and
+// `emitBitShift`.
+func (e *Emitter) toInt32(v Value) string {
+	i := e.coerce(v, TypeI64)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", r, i.Ref))
+	return r
+}
+
+// int32ToNumber converts a signed 32-bit bitwise result back to a `number`
+// (double), the type JS bitwise operators produce (TDD-00123 Stage 2).
+func (e *Emitter) int32ToNumber(i32 string) Value {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i32 %s to double", r, i32))
+	return Value{Ref: r, Ty: TypeF64}
+}
+
+// countToNumber converts an integer-valued count/index result (`.length`,
+// `indexOf`, `charCodeAt`, `codePointAt`, `search`, `localeCompare`, …) to a
+// `number` (double) — the type JS produces for these (TDD-00123 Stage 3).
+// Consumers that need an integer (array indices, slice/substring bounds, count
+// args) already `coerce(..., TypeI64)` at their use site, `fptosi`-ing it back.
+// A value that is already a float (or not an integer) passes through unchanged.
+func (e *Emitter) countToNumber(v Value) Value {
+	if v.Ty.Float || v.Ty.IR != "i64" {
+		return v
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", r, v.Ref))
+	return Value{Ref: r, Ty: TypeF64}
 }
 
 // typeofString maps a compiled type to its TypeScript typeof string. The
@@ -573,9 +632,11 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", reg, b.Ref))
 		return Value{Ref: reg, Ty: TypeBool}, nil
 	case "~":
-		v := e.coerce(arg, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, -1", reg, v.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
+		// JS `~x` is `ToInt32(x) ^ -1`, yielding a Number (double) — see the
+		// binary bitwise ops (TDD-00123 Stage 2).
+		x32 := e.toInt32(arg)
+		e.emitInstr(fmt.Sprintf("%s = xor i32 %s, -1", reg, x32))
+		return e.int32ToNumber(reg), nil
 	}
 	return Value{}, fmt.Errorf("unknown unary operator '%s'", ex.Op)
 }
@@ -583,7 +644,16 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 	ident, ok := ex.Arg.(*ast.Identifier)
 	if !ok {
-		return Value{}, fmt.Errorf("update expression requires an identifier")
+		// A member or index target (`obj.x++`, `this.x++`, `C.staticField++`,
+		// `arr[i]++`) desugars to the equivalent compound assignment (`… += 1` /
+		// `… -= 1`), reusing every member/index/static-field assignment path
+		// emitAssign already implements (ADR-00376). Prefix returns the new
+		// value; postfix returns the old value, read before the update.
+		switch ex.Arg.(type) {
+		case *ast.MemberExpression, *ast.IndexExpression:
+			return e.emitTargetUpdate(ex)
+		}
+		return Value{}, fmt.Errorf("update expression requires an identifier, member, or index target")
 	}
 	sym, ok := e.lookup(ident.Name)
 	if !ok {
@@ -634,6 +704,46 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 		return Value{Ref: newReg, Ty: sym.Ty}, nil
 	}
 	return Value{Ref: oldReg, Ty: sym.Ty}, nil
+}
+
+// emitTargetUpdate implements `++`/`--` on a member or index target by
+// desugaring to the equivalent compound assignment (`target += 1` / `-= 1`),
+// which reuses emitAssign's existing static-field / instance-field / index
+// assignment machinery (ADR-00376). The step literal matches the target's type
+// so a bigint field steps by `1n`. Prefix returns the post-update value (the
+// compound assignment's result); postfix returns the value read before the
+// update.
+//
+// Caveat: for a postfix update whose value is consumed, the target's object is
+// evaluated twice (once for the pre-read, once inside the compound assignment),
+// so an object sub-expression with side effects (`makeObj().x++` as a value)
+// would run those twice — use a simple receiver. A statement-position postfix
+// (the common case) discards the pre-read, so it is dead-code-eliminated.
+func (e *Emitter) emitTargetUpdate(ex *ast.UpdateExpression) (Value, error) {
+	op := "+="
+	if ex.Op == "--" {
+		op = "-="
+	}
+	pos := ex.GetPos()
+	var one ast.Expression
+	if e.inferExprType(ex.Arg).IsBigInt {
+		one = ast.NewBigIntLiteral("1", pos)
+	} else {
+		one = ast.NewNumberLiteral("1", pos)
+	}
+	assign := ast.NewAssignmentExpression(op, ex.Arg, one, pos)
+
+	if ex.Prefix {
+		return e.emitAssign(assign)
+	}
+	old, err := e.emitExpr(ex.Arg)
+	if err != nil {
+		return Value{}, err
+	}
+	if _, err := e.emitAssign(assign); err != nil {
+		return Value{}, err
+	}
+	return old, nil
 }
 
 // dateCompoundAssignGuard rejects compound-assigning one Date into another
@@ -740,21 +850,15 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 				e.emitInstr(fmt.Sprintf("%s = urem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 			}
 		}
-	case "&":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "|":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = or i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
-	case "^":
-		li := e.coerce(left, TypeI64)
-		ri := e.coerce(right, TypeI64)
-		e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %s", reg, li.Ref, ri.Ref))
-		return Value{Ref: reg, Ty: TypeI64}, nil
+	case "&", "|", "^":
+		// Lockstep with emitBinary's bitwise ops (TDD-00123 Stage 2): compute
+		// in the ToInt32 domain, return a Number (double). The compound-assign
+		// store coerces back to the target binding's type.
+		l32 := e.toInt32(left)
+		r32 := e.toInt32(right)
+		iop := map[string]string{"&": "and", "|": "or", "^": "xor"}[op]
+		e.emitInstr(fmt.Sprintf("%s = %s i32 %s, %s", reg, iop, l32, r32))
+		return e.int32ToNumber(reg), nil
 	case "**":
 		// Backs `**=`; mirrors emitBinary's `**` — libm pow() for float, exact
 		// i64 exponentiation-by-squaring otherwise. See emitBinary for the

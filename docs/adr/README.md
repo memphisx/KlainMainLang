@@ -409,3 +409,16 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00369](ADR-00369.md) | Static CommonJS `require('<literal>')` desugars to an ES import | Extends [ADR-00135](ADR-00135.md) |
 | [00370](ADR-00370.md) | Native `test` builtin — `mustCall` family via a counting-closure trampoline | Implements [TDD-00122](../tdd/TDD-00122.md) |
 | [00371](ADR-00371.md) | TypeScript type assertions (`as T` / `as const` / `satisfies`) — parsed and erased | |
+| [00372](ADR-00372.md) | Treat a UTF-8 BOM as whitespace; TS false-reject leverage map | Implements [TDD-00121](../tdd/TDD-00121.md) |
+| [00373](ADR-00373.md) | Parse-and-erase `debugger`, `readonly T[]`, and a `this` parameter | Extends [ADR-00372](ADR-00372.md) |
+| [00374](ADR-00374.md) | Accept a class with bare (uninitialized) fields and no constructor | Extends [ADR-00157](ADR-00157.md) |
+| [00375](ADR-00375.md) | Static field initializers (`static x = expr`) | Extends [ADR-00374](ADR-00374.md) |
+| [00376](ADR-00376.md) | `++`/`--` on a member or index target | Extends [ADR-00375](ADR-00375.md) |
+| [00377](ADR-00377.md) | `number` defaults to IEEE-754 double (Stage 1) | Implements [TDD-00123](../tdd/TDD-00123.md) |
+| [00378](ADR-00378.md) | Invalid-IR hardening + conformance-runner C-runtime linking | Extends [ADR-00377](ADR-00377.md) |
+| [00379](ADR-00379.md) | Bitwise/count results return `number`; exact int64 literals (Stages 2–3, 5) | Extends [ADR-00377](ADR-00377.md); Implements [TDD-00123](../tdd/TDD-00123.md) |
+| [00380](ADR-00380.md) | `@param`/`@returns` JSDoc typing for untyped functions | Implements [TDD-00125](../tdd/TDD-00125.md) |
+| [00381](ADR-00381.md) | `@typedef`/`@callback` synthesized into type aliases (Stage 2) | Extends [ADR-00380](ADR-00380.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
+| [00382](ADR-00382.md) | `@template` JSDoc generics (Stage 3) | Extends [ADR-00380](ADR-00380.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
+| [00383](ADR-00383.md) | JSDoc type-expression sub-parser (Stage 4) | Extends [ADR-00380](ADR-00380.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
+| [00384](ADR-00384.md) | JSDoc class/documentation tags + `import()` types (Stages 5–6) | Extends [ADR-00380](ADR-00380.md), [ADR-00383](ADR-00383.md); Implements [TDD-00125](../tdd/TDD-00125.md) |

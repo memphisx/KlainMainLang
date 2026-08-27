@@ -2,9 +2,9 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: Type primitives 12/12 (100%) · Type system features 14/17 (~82%).
+**Coverage**: Type primitives 12/12 (100%) · Type system features 15/19 (~79%).
 
-**Strict Coverage**: Type primitives 7/12 (~58%) · Type system features 7/17 (~41%). A row counts toward Strict only when its **Caveats** column is empty.
+**Strict Coverage**: Type primitives 7/12 (~58%) · Type system features 7/19 (~37%). A row counts toward Strict only when its **Caveats** column is empty.
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -12,7 +12,7 @@ Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `number` → `i64` | ✅ | • A bare `: number` is `i64`, not TypeScript's IEEE-754 double, so a fractional literal or float-valued expression assigned to one **truncates to its integer part** — `const x: number = 0.1 + 0.2` yields `0` (not `0.30000000000000004`), and `const x: number = 3.9` yields `3`. Use an explicit `float64`/`float32` annotation (or `/** @type {float64} */`) for real double arithmetic | • `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides the default per-binding<br>• *Mixed* int/float arithmetic (`i * 1.5`) promotes both operands to double, as real JS ([ADR-00292](../adr/ADR-00292.md)); the truncation caveat here is only about a value *assigned into* a declared `: number`/`i64` slot |
+| `number` → `double` | ✅ | • A plain `number` past 2^53 loses precision exactly as JS does (`9007199254740993` is `…992`) — inherent to the double model, not a defect (use `int64`/`uint64` for exact 64-bit integers)<br>• Mixing an explicit integer type with a bare literal promotes to double (`int32 / 2` is `3.5`); use two integer-typed operands for integer division | • `number` is a JS-faithful IEEE-754 double — `0.1 + 0.2` is `0.30000000000000004`, `10 / 3` is `3.3333333333333335`, `2 ** -1` is `0.5`, `1 / 0` is `Infinity` (TDD-00123 Stage 1 / [ADR-00377](../adr/ADR-00377.md))<br>• `/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides per-binding — the integer types are the escape hatch for real integer semantics (integer `/`, exact >2^53, bit-width storage)<br>• Bitwise `& \| ^ ~ << >> >>>` use JS 32-bit semantics and their result is a `number` (`(7 & 6) / (7 & 5)` is `1.2`), as are the count/index builtins `.length`/`indexOf`/`lastIndexOf`/`findIndex`/`search`/`charCodeAt`/`push` (`arr.length / other.length` is a float divide) — TDD-00123 Stages 2–3 / [ADR-00379](../adr/ADR-00379.md) |
 | `string` → `ptr` | ✅ | | |
 | `boolean` → `i1` | ✅ | | |
 | `void` | ✅ | | |
@@ -46,3 +46,5 @@ Format: [Status page format](README.md#status-page-format).
 | `typeof` type queries (`type T = typeof x`) | ❌ | • Not parsed — `typeof` in a *type* position is a parse error (`expected type name, got typeof`). Only the runtime `typeof x` operator is supported |
 | Type assertions (`x as T`, `as const`, `satisfies T`) | ✅ | • **Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect ([ADR-00371](../adr/ADR-00371.md)) | • Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity |
 | Template literal types (`` `a-${T}` ``) | ❌ | • Not parsed in a type position (`expected type name, got TEMPLATE_HEAD`). Distinct from template literal *values*, which work |
+| `readonly T[]` array-type modifier | ✅ | • **Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered ([ADR-00373](../adr/ADR-00373.md)) |
+| Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`) | ❌ | • A `declare` statement is not parsed (`'const' declaration 'x' must be initialized`, since `declare const foo: number` has no initializer). Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so the intended handling is to parse and erase them. Surfaced by the TS accept/reject oracle ([ADR-00372](../adr/ADR-00372.md)) |

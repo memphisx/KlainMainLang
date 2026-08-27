@@ -142,13 +142,14 @@ func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Va
 		return Value{Ref: "1", Ty: TypeBool}, nil
 	case "<", ">", "<=", ">=", "==", "!=":
 		if other.Ty.Float {
-			if e.compatJS() {
-				return e.emitBigIntFloatCompare(op, left, right, pos)
-			}
-			return Value{}, fmt.Errorf("%d:%d: comparing a bigint with a floating-point number is rejected by default (it is almost always a bug) — convert explicitly with BigInt(x)/Number(x), or use -compat=js for JS's exact comparison", pos.Line, pos.Col)
+			// `number` is a double (TDD-00123), and JS permits bigint↔number
+			// comparison with exact real-number semantics — so compare exactly
+			// (no rounding, even past 2^53) rather than rejecting it. This is the
+			// same path -compat=js already used for a float operand.
+			return e.emitBigIntFloatCompare(op, left, right, pos)
 		}
 		if !isIntegerNumberTy(other.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: a bigint can only be compared with another bigint or an integer number, not this type", pos.Line, pos.Col)
+			return Value{}, fmt.Errorf("%d:%d: a bigint can only be compared with another bigint or a number, not this type", pos.Line, pos.Col)
 		}
 		return e.emitBigIntBinary(op, e.bigintOperand(left), e.bigintOperand(right), pos)
 	default:
@@ -282,9 +283,10 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		if err != nil {
 			return Value{}, err
 		}
-		if rv.Ty.IsBigInt || isStringTy(rv.Ty) || rv.Ty.Float {
-			return Value{}, fmt.Errorf("%d:%d: BigInt.toString()'s radix must be an integer (2–36)", pos.Line, pos.Col)
+		if rv.Ty.IsBigInt || isStringTy(rv.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: BigInt.toString()'s radix must be a number (2–36)", pos.Line, pos.Col)
 		}
+		// A `number` radix is a double (TDD-00123); coerce truncates it to i64.
 		w := e.coerce(rv, TypeI64)
 		radixReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", radixReg, w.Ref))
@@ -332,6 +334,34 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 		wide := e.coerce(arg, TypeI64)
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, wide.Ref))
+		return Value{Ref: reg, Ty: BigIntType()}, nil
+	case arg.Ty.Float:
+		// `number` is a double (TDD-00123). BigInt(x) converts an integer-valued,
+		// finite, in-i64-range double; a fractional/NaN/Infinity/out-of-range
+		// value is a RangeError in JS, thrown here as a catchable Error. The
+		// range guard (< |2^63|, which excludes NaN/Inf since every fcmp against
+		// them is false) precedes the fptosi so it is never out-of-range UB, then
+		// a fptosi→sitofp round-trip confirms integrality.
+		d := e.coerce(arg, TypeF64)
+		inLo, inHi, inRange := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 0xC3E0000000000000", inLo, d.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0x43E0000000000000", inHi, d.Ref))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inRange, inLo, inHi))
+		rangeOkL := e.freshLabel("bigint.num.range_ok")
+		badL := e.freshLabel("bigint.num.bad")
+		buildL := e.freshLabel("bigint.num.build")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inRange, rangeOkL, badL))
+		e.emitLabel(rangeOkL)
+		iReg, backReg, isInt := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", iReg, d.Ref))
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", backReg, iReg))
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", isInt, d.Ref, backReg))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isInt, buildL, badL))
+		e.emitLabel(badL)
+		e.emitInternalThrow(e.internString("Cannot convert a non-integer number to a BigInt"))
+		e.emitLabel(buildL)
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, iReg))
 		return Value{Ref: reg, Ty: BigIntType()}, nil
 	default:
 		return Value{}, fmt.Errorf("%d:%d: BigInt() accepts an integer number or a string, not this type (a non-integer number is a RangeError in JS)", pos.Line, pos.Col)

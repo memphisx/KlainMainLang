@@ -410,7 +410,8 @@ fire:
   %fp = load ptr, ptr %fp_p, align 8
   %ep_p = getelementptr { ptr, ptr }, ptr %h, i32 0, i32 1
   %ep = load ptr, ptr %ep_p, align 8
-  call void %fp(ptr %ep, i64 %code)
+  %code_d = sitofp i64 %code to double
+  call void %fp(ptr %ep, double %code_d)
   br label %post
 post:
 ` + testVerify + `  br label %done

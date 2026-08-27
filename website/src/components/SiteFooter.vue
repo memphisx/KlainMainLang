@@ -4,7 +4,7 @@
       <div class="km-footer__top">
         <div class="km-footer__brand">
           <Wordmark :stacked="true" size="lg" />
-          <p class="km-footer__mission km-mono">Κλάιν Μάιν — “build it anyway, because I can.”</p>
+          <p class="km-footer__mission km-mono">Κλάιν Μάιν — “build it in TypeScript anyway, because you can.”</p>
         </div>
 
         <div class="km-footer__cols">
@@ -32,7 +32,7 @@
 
       <div class="km-footer__bottom">
         <span>© {{ year }} Kyriakos Bompotis · AGPL-3.0-or-later</span>
-        <span class="km-mono">A personal, experimental compiler. No warranty, enthusiastically.</span>
+        <span class="km-mono">TypeScript, minus the runtime. Native binaries, no apologies.</span>
       </div>
     </div>
   </footer>

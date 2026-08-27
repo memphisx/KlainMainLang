@@ -184,7 +184,10 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, respReg, idx))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, ref, gep, align))
 	}
-	storeField("status", "i64", status, 8)
+	// status is a `number` (float64) field (TDD-00123); the runtime hands an i64.
+	statusF := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", statusF, status))
+	storeField("status", "double", statusF, 8)
 	storeField("ok", "i1", ok, 1)
 	storeField("body", "ptr", body, 8)
 	storeField("bodyLength", "i64", bodyLen, 8)

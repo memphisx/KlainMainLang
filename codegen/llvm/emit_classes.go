@@ -477,27 +477,35 @@ func classFieldInitStmts(cd *ast.ClassDeclaration) []ast.Statement {
 	return stmts
 }
 
-// classHasOwnFieldInit reports whether cd declares at least one own instance
-// field with an initializer, and whether *every* own instance field has one
-// — the two facts registerClasses' constructor-synthesis rules need to decide
-// whether a class with fields but no explicit constructor is now legal
-// (TDD-00063 Stage 1 relaxes the previous "fields require a constructor"
-// rule exactly when every field initializes itself).
-func classHasOwnFieldInit(cd *ast.ClassDeclaration) (any, all bool) {
-	all = true
-	sawInstanceField := false
+// classStaticFieldInitStmts lowers each `static x = expr` field to a
+// `ClassName.x = expr` assignment, in field-declaration order — the statements
+// emitClassStaticInit runs (ahead of any `static {}` block) so a static field's
+// initializer executes once at program start (ADR-00375). Reuses the same
+// static-field member-assignment codegen a `static {}` block already uses.
+func classStaticFieldInitStmts(cd *ast.ClassDeclaration) []ast.Statement {
+	var stmts []ast.Statement
 	for _, f := range cd.Fields {
-		if f.Static {
+		if !f.Static || f.Initializer == nil {
 			continue
 		}
-		sawInstanceField = true
-		if f.Initializer != nil {
-			any = true
-		} else {
-			all = false
+		pos := f.Initializer.GetPos()
+		target := ast.NewMemberExpression(ast.NewIdentifier(cd.Name, pos), f.Name, pos)
+		assign := ast.NewAssignmentExpression("=", target, f.Initializer, pos)
+		stmts = append(stmts, ast.NewExpressionStatement(assign, pos))
+	}
+	return stmts
+}
+
+// classHasStaticFieldInit reports whether cd declares at least one `static x =
+// expr` field — used to decide whether a class needs a staticinit function even
+// when it has no `static {}` block.
+func classHasStaticFieldInit(cd *ast.ClassDeclaration) bool {
+	for _, f := range cd.Fields {
+		if f.Static && f.Initializer != nil {
+			return true
 		}
 	}
-	return any, all && sawInstanceField
+	return false
 }
 
 // registerClasses pre-scans all top-level class declarations, resolving
@@ -693,14 +701,20 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal EventEmitter listener map", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassEventEmitterField)
 			}
 			if f.Static {
-				// TDD-00063 Stage 1 covers instance-field initializers only
-				// (they lower into the constructor); a static field's
-				// initializer would have to run in the class's staticinit
-				// instead, a separate mechanism left for a later stage.
-				if f.Initializer != nil {
-					return fmt.Errorf("%d:%d: static field initializer on '%s' is not yet supported (class '%s') — assign it in a `static { ... }` block instead", cd.GetPos().Line, cd.GetPos().Col, f.Name, cd.Name)
+				// A static field's initializer (`static x = expr`) runs in the
+				// class's staticinit (emitClassStaticInit), lowered to a
+				// `ClassName.x = expr` assignment ahead of any `static {}` block
+				// (ADR-00375). An unannotated static field takes its type from
+				// the initializer, the same inference an instance `x = expr`
+				// field (line below) and a `let x = expr` use.
+				var fty Type
+				if f.Type != nil {
+					fty = e.resolveType(f.Type)
+				} else if f.Initializer != nil {
+					fty = e.inferExprType(f.Initializer)
+				} else {
+					fty = e.resolveType(f.Type)
 				}
-				fty := e.resolveType(f.Type)
 				staticFieldTypes[f.Name] = fty
 				staticFieldOwner[f.Name] = cd.Name
 				ownStaticFieldTypes[f.Name] = fty
@@ -1050,7 +1064,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			baseCtor = baseInfo.Constructor
 			baseCtorSig = baseInfo.CtorSig
 		}
-		_, allFieldsInit := classHasOwnFieldInit(cd)
 		switch {
 		case cd.Constructor != nil:
 			callsSuper := hasTopLevelSuperCall(cd.Constructor.Body)
@@ -1083,12 +1096,18 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				cd.Constructor.Body.Body = spliced
 			}
 
-		case len(ownFields) > 0 && allFieldsInit && (baseCtor == nil || !baseCtorSig.HasRest):
-			// TDD-00063 Stage 1: a class whose every own field carries an
-			// initializer no longer needs an explicit constructor — synthesize
-			// one that runs the initializers, forwarding to super(...) first
-			// when the base has a constructor (exactly the pass-through shape
-			// the case below builds, with the initializers appended).
+		case len(ownFields) > 0 && (baseCtor == nil || !baseCtorSig.HasRest):
+			// TDD-00063 Stage 1 (relaxed, ADR-00373): a class with own fields
+			// and no explicit constructor no longer needs *every* field to carry
+			// an initializer — synthesize a constructor that runs whatever
+			// initializers exist (`classFieldInitStmts` skips uninitialized
+			// fields) and leaves the rest at their calloc'd deterministic-zero
+			// value (the same ADR-00157 under-assigned-field convention a class
+			// *with* a constructor already relies on). This accepts the very
+			// common `class C { x: number }` bare-field-declaration form. The
+			// synthesized ctor forwards to super(...) first when the base has a
+			// constructor (the pass-through shape the case below builds, with the
+			// initializers appended).
 			var stmts []ast.Statement
 			var params []ast.Param
 			if baseCtor != nil {
@@ -1133,14 +1152,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			info.CtorSig = baseCtorSig
 
 		case len(ownFields) > 0:
-			// A class with fields but no constructor would leave every
-			// instance's fields as uninitialized (garbage) malloc'd memory.
-			// TDD-00063 Stage 1 now lets a field initialize itself (`x =
-			// expr`), handled by the synthesis case above when *every* own
-			// field does so; reaching here means at least one own field has
-			// neither an initializer nor a constructor to assign it — still
-			// rejected, the same "no silently uninitialized state" philosophy.
-			return fmt.Errorf("%d:%d: class '%s' has a field with no initializer and no constructor to initialize it", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+			// Only reachable now when the class adds own fields *and* the base
+			// has a rest-parameter constructor: a pass-through
+			// `constructor(...args) { super(...args) }` isn't representable
+			// without a general spread-call mechanism this compiler lacks, so an
+			// explicit derived constructor is required (same limitation the
+			// no-own-fields pass-through case below carries).
+			return fmt.Errorf("%d:%d: class '%s' adds fields but its base class has a rest-parameter constructor — write an explicit constructor that calls super(...)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 		}
 
 		e.classes[cd.Name] = info
@@ -1323,6 +1341,15 @@ func (e *Emitter) emitClassStaticInit(cd *ast.ClassDeclaration) error {
 	e.pushScope()
 	e.define("__kml_enclosing_class", Symbol{Ty: e.classes[cd.Name].Ty})
 
+	// Static field initializers run first, in declaration order (ADR-00375),
+	// then the `static {}` block(s). A class mixing the two runs all field
+	// initializers ahead of any block rather than interleaving by exact source
+	// position (an AnnotField carries no position) — a rare combination.
+	for _, stmt := range classStaticFieldInitStmts(cd) {
+		if err := e.emitStmt(stmt); err != nil {
+			return err
+		}
+	}
 	for _, block := range cd.StaticBlocks {
 		for _, stmt := range block.Body {
 			if err := e.emitStmt(stmt); err != nil {

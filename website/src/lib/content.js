@@ -45,6 +45,27 @@ http.listen(8080, (req: HttpRequest): Res => {
 })`
   },
 
+  numbers: {
+    filename: 'jsdoc-widths.ts',
+    code: `// Valid TypeScript — the JSDoc @type is erasable, so tsc still accepts it.
+// This compiler reads the width and gives 'number' real machine-int semantics.
+
+// An 8-bit unsigned integer wraps at its width, like C / a typed array.
+/** @type {uint8} */
+let r = 255
+r = r + 1
+console.log(r)              // 0  (wrapped at 8 bits)
+
+// Single-precision float, narrower than the default IEEE-754 double.
+/** @type {float32} */
+let ratio = 1 / 3
+console.log(ratio)         // 0.3333333432674408
+
+// A bare 'number' stays a JS-faithful double — same 2**53 ceiling as JS.
+let big = 9007199254740993 // 2**53 + 1
+console.log(big)           // 9007199254740992  (precision loss, as in JS)`
+  },
+
   fetch: {
     filename: 'fetch.ts',
     code: `const r = await fetch('http://127.0.0.1:8765/get')
@@ -60,39 +81,43 @@ console.log(data.origin)`
   }
 }
 
-export const terminal = `$ make build           # → ./klainmain
+export const terminal = `$ git clone https://github.com/memphisx/KlainMainLang
+$ cd KlainMainLang && make build   # → ./klainmain
 $ ./klainmain app.ts   # → native binary
 $ ./app
 hello, native world`
 
-// Coverage figures — source: docs/status/README.md (2026-08-25).
+// Coverage figures — source: docs/status/README.md (2026-08-26).
+//   pct    = Coverage      (works for its core case; real caveats disclosed)
+//   strict = Strict Coverage (works with ZERO known caveats/bugs of any severity)
+// The gap between the two is "works, but with a documented divergence from JS".
 export const coverage = [
-  { area: 'Async / Promise', pct: 100, group: 'Language' },
-  { area: 'Classes / OOP', pct: 100, group: 'Language' },
-  { area: 'Array methods', pct: 100, group: 'Language' },
-  { area: 'Number / Math', pct: 100, group: 'Language' },
-  { area: 'Type primitives', pct: 100, group: 'Language' },
-  { area: 'Object & collections', pct: 97, group: 'Language' },
-  { area: 'Modules', pct: 94, group: 'Language' },
-  { area: 'String methods', pct: 93, group: 'Language' },
-  { area: 'JSON', pct: 87, group: 'Language' },
-  { area: 'Type system features', pct: 82, group: 'Language' },
+  { area: 'Async / Promise', pct: 100, strict: 100, group: 'Language' },
+  { area: 'Classes / OOP', pct: 100, strict: 59, group: 'Language' },
+  { area: 'Array methods', pct: 100, strict: 71, group: 'Language' },
+  { area: 'Number / Math', pct: 100, strict: 74, group: 'Language' },
+  { area: 'Type primitives', pct: 100, strict: 58, group: 'Language' },
+  { area: 'Object & collections', pct: 97, strict: 59, group: 'Language' },
+  { area: 'Modules', pct: 94, strict: 50, group: 'Language' },
+  { area: 'String methods', pct: 93, strict: 69, group: 'Language' },
+  { area: 'JSON', pct: 87, strict: 67, group: 'Language' },
+  { area: 'Type system features', pct: 82, strict: 37, group: 'Language' },
 
-  { area: 'Networking (fetch, WS, SSE)', pct: 100, group: 'Web platform' },
-  { area: 'Streams', pct: 100, group: 'Web platform' },
-  { area: 'Web Crypto', pct: 100, group: 'Web platform' },
-  { area: 'Workers / Concurrency', pct: 100, group: 'Web platform' },
-  { area: 'Binary data & Typed Arrays', pct: 100, group: 'Web platform' },
-  { area: 'URL', pct: 100, group: 'Web platform' },
-  { area: 'Timers', pct: 100, group: 'Web platform' },
+  { area: 'Networking (fetch, WS, SSE)', pct: 100, strict: 17, group: 'Web platform' },
+  { area: 'Streams', pct: 100, strict: 13, group: 'Web platform' },
+  { area: 'Web Crypto', pct: 100, strict: 13, group: 'Web platform' },
+  { area: 'Workers / Concurrency', pct: 100, strict: 0, group: 'Web platform' },
+  { area: 'Binary data & Typed Arrays', pct: 100, strict: 11, group: 'Web platform' },
+  { area: 'URL', pct: 100, strict: 0, group: 'Web platform' },
+  { area: 'Timers', pct: 100, strict: 50, group: 'Web platform' },
 
-  { area: 'HTTP Server', pct: 100, group: 'Node.js' },
-  { area: 'events (EventEmitter)', pct: 100, group: 'Node.js' },
-  { area: 'path', pct: 100, group: 'Node.js' },
-  { area: 'os', pct: 100, group: 'Node.js' },
-  { area: 'File System (fs)', pct: 93, group: 'Node.js' },
-  { area: 'Process / CLI I/O', pct: 92, group: 'Node.js' },
-  { area: 'Other core modules', pct: 92, group: 'Node.js' }
+  { area: 'HTTP Server', pct: 100, strict: 100, group: 'Node.js' },
+  { area: 'events (EventEmitter)', pct: 100, strict: 50, group: 'Node.js' },
+  { area: 'path', pct: 100, strict: 88, group: 'Node.js' },
+  { area: 'os', pct: 100, strict: 86, group: 'Node.js' },
+  { area: 'File System (fs)', pct: 93, strict: 50, group: 'Node.js' },
+  { area: 'Process / CLI I/O', pct: 92, strict: 46, group: 'Node.js' },
+  { area: 'Other core modules', pct: 92, strict: 8, group: 'Node.js' }
 ]
 
 // Headline area figures (docs/status/README.md section totals). These are

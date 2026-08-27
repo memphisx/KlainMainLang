@@ -27,24 +27,26 @@ try {
 }
 
 func TestE2EDivisionByZeroThrows(t *testing.T) {
+	// `number` is an IEEE-754 double (TDD-00123), so number division by zero
+	// yields Infinity/NaN as in JS — it does NOT throw. Integer-typed division
+	// (the explicit escape-hatch types) still traps on a zero divisor.
 	assertOutput(t, `
+console.log(10 / 0)
+console.log(-10 / 0)
+console.log(10 % 0)
+let a: int64 = 10
+let b: int64 = 0
 try {
-  console.log(10 / 0)
+  console.log(a / b)
 } catch (e) {
   console.log('err: ' + e.message)
 }
 try {
-  console.log(10 % 0)
+  console.log(a % b)
 } catch (e) {
   console.log('err: ' + e.message)
 }
-let x: number = 10
-try {
-  x /= 0
-} catch (e) {
-  console.log('err: ' + e.message)
-}
-`, "err: Division by zero\nerr: Division by zero\nerr: Division by zero")
+`, "Infinity\n-Infinity\nNaN\nerr: Division by zero\nerr: Division by zero")
 }
 
 // TestE2EDivisionOverflowThrows covers LLVM sdiv/srem's second documented
@@ -54,9 +56,12 @@ try {
 // i64). Unsigned division has no equivalent case (no negative divisor to
 // trigger it), so only /, %, and /= on a signed value are exercised here.
 func TestE2EDivisionOverflowThrows(t *testing.T) {
+	// This trap is an integer-division concern — `number` is now a float
+	// (TDD-00123) with no such overflow — so it's exercised with the explicit
+	// `int64` escape-hatch type.
 	assertOutput(t, `
-const minVal: number = -9223372036854775808
-const negOne: number = -1
+let minVal: int64 = -9223372036854775808
+let negOne: int64 = -1
 try {
   console.log(minVal / negOne)
 } catch (e) {
@@ -67,15 +72,17 @@ try {
 } catch (e) {
   console.log('err: ' + e.message)
 }
-let x: number = -9223372036854775808
+let x: int64 = -9223372036854775808
 try {
   x /= negOne
 } catch (e) {
   console.log('err: ' + e.message)
 }
-console.log(10 / -1)
-console.log(-9223372036854775807 / -1)
-`, "err: Division overflow\nerr: Division overflow\nerr: Division overflow\n-10\n9223372036854775807")
+let y: int64 = 10
+console.log(y / negOne)
+let z: int64 = -100
+console.log(z / negOne)
+`, "err: Division overflow\nerr: Division overflow\nerr: Division overflow\n-10\n100")
 }
 
 func TestE2EOptionalCatchBinding(t *testing.T) {

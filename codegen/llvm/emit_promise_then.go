@@ -259,6 +259,7 @@ try:
   %%oklow = icmp sge i64 %%status, 200
   %%okhigh = icmp slt i64 %%status, 300
   %%ok = and i1 %%oklow, %%okhigh
+  %%statusd = sitofp i64 %%status to double
   %%resp = call ptr @malloc(i64 %d)
 %s%s%s%s%s  %%bits = ptrtoint ptr %%resp to i64
   %%v0_p = getelementptr %s, ptr %%prom, i32 0, i32 2
@@ -274,7 +275,7 @@ catch:
   ret void
 }`,
 		respTy.StructSize(),
-		fieldStore("status", "i64", "%status", 8),
+		fieldStore("status", "double", "%statusd", 8),
 		fieldStore("ok", "i1", "%ok", 1),
 		fieldStore("body", "ptr", "null", 8),
 		fieldStore("bodyLength", "i64", "0", 8),

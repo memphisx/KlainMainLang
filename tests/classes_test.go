@@ -133,17 +133,17 @@ console.log(u.double(21))
 `, "42")
 }
 
-func TestE2EClassFieldsWithoutConstructorIsError(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EClassFieldsWithoutConstructorCompiles(t *testing.T) {
+	// ADR-00373: a class with declared-but-uninitialized fields and no explicit
+	// constructor is accepted (calloc zero-fills the instance); this used to be
+	// a compile error. Runtime behavior is covered by the TestE2EClassBareField*
+	// tests above.
+	if _, err := parseAndCompile(`
 class Foo {
   x: number;
 }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a class with fields but no constructor")
-	}
-	if !strings.Contains(err.Error(), "no constructor to initialize it") {
-		t.Errorf("unexpected error message: %v", err)
+`); err != nil {
+		t.Fatalf("expected a class with a bare field to compile, got: %v", err)
 	}
 }
 
@@ -1813,20 +1813,16 @@ console.log(new Box<number>(3).count);
 `, "7\n7")
 }
 
-// A static field with an initializer is a clean, specific rejection (Stage 1
-// covers instance fields only).
-func TestE2EStaticFieldInitializerRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// ADR-00375: a static field with an initializer now compiles (it used to be a
+// clean rejection); the initializer runs in the class's staticinit.
+func TestE2EStaticFieldInitializerWithConstructorCompiles(t *testing.T) {
+	if _, err := parseAndCompile(`
 class C {
   static x = 5;
   constructor() {}
 }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a static field initializer")
-	}
-	if !strings.Contains(err.Error(), "static field initializer") {
-		t.Errorf("unexpected error message: %v", err)
+`); err != nil {
+		t.Fatalf("expected a static field initializer to compile, got: %v", err)
 	}
 }
 
@@ -2114,4 +2110,103 @@ f(class {});
 	if !strings.Contains(err.Error(), "class expression is only supported") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+}
+
+// --- ADR-00373: a class with declared-but-uninitialized fields and no explicit
+// constructor. calloc zero-fills, so `class C { x: number }` is accepted; any
+// field initializers that DO exist still run. ---
+
+func TestE2EClassBareFieldNoConstructor(t *testing.T) {
+	assertOutput(t, `
+class C { x: number; y: number; }
+const c = new C();
+console.log(c.x);
+console.log(c.y);
+`, "0\n0")
+}
+
+func TestE2EClassMixedInitAndBareFields(t *testing.T) {
+	assertOutput(t, `
+class Config { retries = 3; timeout: number; verbose = true; level: number; }
+const cfg = new Config();
+console.log(cfg.retries);
+console.log(cfg.timeout);
+console.log(cfg.verbose);
+console.log(cfg.level);
+`, "3\n0\ntrue\n0")
+}
+
+func TestE2EClassBareNullableRefField(t *testing.T) {
+	assertOutput(t, `
+class Node { value: number = 7; next: Node | null; }
+const n = new Node();
+console.log(n.value);
+console.log(n.next === null);
+`, "7\ntrue")
+}
+
+func TestE2EGenericClassBareField(t *testing.T) {
+	assertOutput(t, `
+class Box<T> { value: T; count: number; }
+const b = new Box<number>();
+console.log(b.value);
+console.log(b.count);
+`, "0\n0")
+}
+
+// --- ADR-00375: static field initializers (`static x = expr`). Lowered to
+// `ClassName.x = expr` assignments run once in the class's staticinit, ahead of
+// any `static {}` block. ---
+
+func TestE2EStaticFieldInitializerBasic(t *testing.T) {
+	assertOutput(t, `
+class C { static count = 5; }
+console.log(C.count);
+`, "5")
+}
+
+func TestE2EStaticFieldInitializerTypedAndExpr(t *testing.T) {
+	assertOutput(t, `
+class C {
+  static n: number = 3 * 4;
+  static label = "hi";
+}
+console.log(C.n);
+console.log(C.label);
+`, "12\nhi")
+}
+
+func TestE2EStaticFieldInitializerReadInMethod(t *testing.T) {
+	assertOutput(t, `
+class C {
+  static base = 10;
+  static describe(): number { return C.base + 5; }
+}
+console.log(C.describe());
+`, "15")
+}
+
+func TestE2EStaticFieldInitializerWithStaticBlock(t *testing.T) {
+	// Field initializers run first (declaration order), then the static block.
+	assertOutput(t, `
+class C {
+  static a = 1;
+  static b = 2;
+  static { C.a = C.a + C.b; }
+}
+console.log(C.a);
+console.log(C.b);
+`, "3\n2")
+}
+
+func TestE2EStaticFieldInitializerMutableViaCompound(t *testing.T) {
+	assertOutput(t, `
+class C {
+  static count = 0;
+  static inc(): void { C.count += 1; }
+}
+C.inc();
+C.inc();
+console.log(C.count);
+`, "2")
 }

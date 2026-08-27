@@ -342,7 +342,7 @@ func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expres
 	e.ensureStrHeaderRuntime()
 	final := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
-	return Value{Ref: final, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: final, Ty: TypeI64}), nil
 }
 
 // emitStringIncludes implements s.includes(needle): returns true iff needle appears in s.
@@ -536,7 +536,7 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 1, i32 0", step1, isPos))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 -1, i32 %s", result32, isNeg, step1))
 	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", result64, result32))
-	return Value{Ref: result64, Ty: TypeI64}, nil
+	return e.countToNumber(Value{Ref: result64, Ty: TypeI64}), nil
 }
 
 func (e *Emitter) emitStringTrim(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {

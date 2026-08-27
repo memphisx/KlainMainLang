@@ -281,6 +281,9 @@ func (e *Emitter) ensureSortTrampolineF64() {
 	}
 	e.usedSortTrampolineF64 = true
 	e.ensureSortClosGlobal()
+	// The comparator returns a `number` (double, TDD-00123). Read it as a
+	// double and reduce to qsort's -1/0/1 sign — fptosi would wrongly collapse a
+	// fractional difference (e.g. 0.5) to 0.
 	e.emitGlobal(`define i32 @__kml_sort_tramp_f64(ptr %pa, ptr %pb) {
   %clos = load ptr, ptr @__kml_sort_clos, align 8
   %a = load double, ptr %pa, align 8
@@ -289,8 +292,11 @@ func (e *Emitter) ensureSortTrampolineF64() {
   %fp = load ptr, ptr %fp_slot, align 8
   %ep_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 1
   %ep = load ptr, ptr %ep_slot, align 8
-  %r = call i64 (ptr, double, double) %fp(ptr %ep, double %a, double %b)
-  %ri = trunc i64 %r to i32
+  %r = call double (ptr, double, double) %fp(ptr %ep, double %a, double %b)
+  %neg = fcmp olt double %r, 0.0
+  %pos = fcmp ogt double %r, 0.0
+  %s1 = select i1 %pos, i32 1, i32 0
+  %ri = select i1 %neg, i32 -1, i32 %s1
   ret i32 %ri
 }`)
 }
@@ -301,6 +307,7 @@ func (e *Emitter) ensureSortTrampolineStr() {
 	}
 	e.usedSortTrampolineStr = true
 	e.ensureSortClosGlobal()
+	// A string comparator also returns a `number` (double, TDD-00123).
 	e.emitGlobal(`define i32 @__kml_sort_tramp_str(ptr %pa, ptr %pb) {
   %clos = load ptr, ptr @__kml_sort_clos, align 8
   %a = load ptr, ptr %pa, align 8
@@ -309,8 +316,11 @@ func (e *Emitter) ensureSortTrampolineStr() {
   %fp = load ptr, ptr %fp_slot, align 8
   %ep_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 1
   %ep = load ptr, ptr %ep_slot, align 8
-  %r = call i64 (ptr, ptr, ptr) %fp(ptr %ep, ptr %a, ptr %b)
-  %ri = trunc i64 %r to i32
+  %r = call double (ptr, ptr, ptr) %fp(ptr %ep, ptr %a, ptr %b)
+  %neg = fcmp olt double %r, 0.0
+  %pos = fcmp ogt double %r, 0.0
+  %s1 = select i1 %pos, i32 1, i32 0
+  %ri = select i1 %neg, i32 -1, i32 %s1
   ret i32 %ri
 }`)
 }

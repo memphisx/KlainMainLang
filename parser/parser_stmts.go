@@ -93,6 +93,15 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 			if p.peekNth(1).Type == lexer.IDENT {
 				return p.parseNamespaceDecl()
 			}
+		case "debugger":
+			// `debugger;` — a no-op in AOT-compiled native output (there is no
+			// attached inspector to break into), so parse and erase it to an
+			// empty statement. `debugger` is a reserved word in JS/TS, so it can
+			// never legitimately be an identifier here. See ADR-00372.
+			pos := posOf(p.peek())
+			p.advance()
+			p.consumeSemicolon()
+			return ast.NewBlockStatement(nil, pos), nil
 		}
 		// label: statement (e.g. `outer: for (...) { ... }`)
 		if p.peekNth(1).Type == lexer.COLON {
@@ -244,7 +253,7 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 	// JSDoc overrides TS annotation
 	if doc != nil {
 		if t := doc.GetType(); t != "" {
-			ta = &ast.TypeAnnotation{Name: t, Source: "jsdoc"}
+			ta = jsdocTypeAnnotation(t)
 		}
 	}
 
@@ -293,6 +302,10 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		return nil, err
 	}
 	fd.IsGenerator = isGenerator
+	// TDD-00125: type an otherwise-untyped parameter / return from a leading
+	// `@param {T} name` / `@returns {T}`, the "typed JS" workflow. Fills in
+	// only where there is no inline annotation (an inline `: T` wins).
+	applyJSDocFuncTypes(fd, doc)
 	// TDD-00010 V2: `/** @erased */` opts a generic function out of default
 	// monomorphization. Validated here (not deferred to codegen) so the
 	// error points at the declaration itself, same as every other JSDoc
@@ -304,6 +317,51 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		fd.Erased = true
 	}
 	return fd, nil
+}
+
+// applyJSDocFuncTypes fills an untyped function's parameter and return types
+// from its leading JSDoc `@param {T} name` / `@returns {T}` tags (TDD-00125).
+// It only fills a slot that has no inline annotation — an inline `: T` always
+// wins — and skips destructured parameters (a pattern has no single name to
+// key a @param by, and already requires an explicit annotation). A JSDoc type
+// string flows through the same `TypeAnnotation{Name, Source:"jsdoc"}` seam an
+// inline annotation and `@type` produce, so codegen needs no change and the
+// supported type grammar is exactly `@type`'s.
+func applyJSDocFuncTypes(fd *ast.FunctionDeclaration, doc *jsdoc.Comment) {
+	if fd == nil || doc == nil {
+		return
+	}
+	// `@template T` declares a generic type parameter — the JSDoc form of a
+	// `<T>` list (TDD-00125 Stage 3). An inline `<T>` wins; otherwise the
+	// function becomes generic, driving the same monomorphization a TS generic
+	// does (its `@param {T}`/`@returns {T}` positions are filled below).
+	if len(fd.TypeParams) == 0 {
+		if tps := doc.Templates(); len(tps) > 0 {
+			for _, tp := range tps {
+				fd.TypeParams = append(fd.TypeParams, tp.Name)
+				if tp.Constraint != "" {
+					fd.TypeParamConstraints = append(fd.TypeParamConstraints,
+						&ast.TypeAnnotation{Name: tp.Constraint, Source: "jsdoc"})
+				} else {
+					fd.TypeParamConstraints = append(fd.TypeParamConstraints, nil)
+				}
+			}
+		}
+	}
+	for i := range fd.Params {
+		prm := &fd.Params[i]
+		if prm.Type != nil || prm.ArrayPattern != nil || prm.ObjectPattern != nil {
+			continue
+		}
+		if t := doc.ParamType(prm.Name); t != "" {
+			prm.Type = jsdocTypeAnnotation(t)
+		}
+	}
+	if fd.ReturnType == nil {
+		if t := doc.ReturnType(); t != "" {
+			fd.ReturnType = jsdocTypeAnnotation(t)
+		}
+	}
 }
 
 // parseFunctionRest parses the `(params) : retType? { body }` tail shared by
@@ -514,6 +572,26 @@ func strictBindingErrorStmt(s ast.Statement) error {
 func (p *Parser) parseParamList() ([]ast.Param, error) {
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		// A leading `this` parameter (`function f(this: T, x: number)`) is TS's
+		// explicit-`this` typing form — purely a type-checker annotation that
+		// real TS erases at emit and that is never a runtime argument. It is only
+		// valid as the first parameter. Consume it (and its annotation) and drop
+		// it, so the remaining parameters bind by their real positions. `this` is
+		// the reserved THIS token, not an IDENT. See ADR-00372.
+		if len(params) == 0 && p.check(lexer.THIS) {
+			p.advance() // consume 'this'
+			if p.check(lexer.COLON) {
+				p.advance()
+				if _, err := p.parseTypeAnnotation("ts"); err != nil {
+					return nil, err
+				}
+			}
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
+
 		rest := p.match(lexer.ELLIPSIS)
 
 		// Destructured parameter (`{x, y}: T` / `[a, b]: T[]`, and nested

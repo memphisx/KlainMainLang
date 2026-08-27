@@ -515,7 +515,8 @@ callecb:
   %%eep_p = getelementptr { ptr, ptr }, ptr %%ecb, i32 0, i32 1
   %%efp = load ptr, ptr %%efp_p, align 8
   %%eep = load ptr, ptr %%eep_p, align 8
-  call void %%efp(ptr %%eep, i64 %%w0, i64 %%w1)
+  %%ecode_d = sitofp i64 %%w0 to double
+  call void %%efp(ptr %%eep, double %%ecode_d, i64 %%w1)
   br label %%loop
 
 notexit:

@@ -3,8 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"strconv"
-	"strings"
 )
 
 // emitTemplateLiteral builds the concatenated result of a template literal.
@@ -127,16 +125,25 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", scratch, val.Ref))
 	case v.Ty.IsInteger():
 		val := v
+		unsigned := !v.Ty.Signed
 		if v.Ty.IR != "i64" {
 			r := e.freshReg()
 			ext := "sext"
-			if !v.Ty.Signed {
+			if unsigned {
 				ext = "zext"
 			}
 			e.emitInstr(fmt.Sprintf("%s = %s %s %s to i64", r, ext, v.Ty.IR, v.Ref))
 			val = Value{Ref: r, Ty: TypeI64}
 		}
-		fmtPtr := e.internString("%lld")
+		// An unsigned 64-bit value with its high bit set (`uint64` above 2^63)
+		// must print via `%llu`; `%lld` would render it as a negative number.
+		// Narrow unsigned types zext to a non-negative i64, so `%llu` is correct
+		// for every unsigned width (TDD-00123 — the integer escape hatch).
+		intFmt := "%lld"
+		if unsigned {
+			intFmt = "%llu"
+		}
+		fmtPtr := e.internString(intFmt)
 		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", scratch, fmtPtr, val.Ref))
 	default:
 		return Value{}, fmt.Errorf("cannot convert type %s to string in template literal", v.Ty.IR)
@@ -148,7 +155,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 // inferArrayType picks an element type by looking at the first element of a literal.
 func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 	if len(lit.Elements) == 0 {
-		return ArrayOf(TypeI64) // default: number[]
+		return ArrayOf(TypeF64) // default: number[] (TDD-00123: number is float64)
 	}
 	first := lit.Elements[0]
 	if sp, ok := first.(*ast.SpreadElement); ok {
@@ -156,7 +163,7 @@ func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 		if ty := e.inferExprType(sp.Arg); ty.IsArray {
 			return ty
 		}
-		return ArrayOf(TypeI64)
+		return ArrayOf(TypeF64)
 	}
 	return ArrayOf(e.inferExprType(first))
 }
@@ -258,16 +265,60 @@ func taskTaggedRet(sig FuncSig) Type {
 	return sig.RetType
 }
 
-func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
+// callbackReturnType infers a callback's return type for the array/promise
+// method return-type inference. The optional paramHints supply the caller's
+// known parameter types (e.g. a HOF receiver's element type) so an unannotated
+// param resolves to the same type the actual emission (emitArrowFunctionWithHints)
+// binds it to — without them an unannotated param would default to a scalar and
+// the inferred type would disagree with the emitted one (TDD-00123: matters now
+// that `number` is float64, so a mis-defaulted i64 corrupts the read type).
+// hofElemHint returns the element type of an array/HOF receiver expression, to
+// hint a callback's first parameter type during return-type inference. Falls
+// back to TypeF64 (a bare `number`) when the receiver's element type isn't
+// statically known — the correct default now that `number` is a double.
+func (e *Emitter) hofElemHint(recv ast.Expression) Type {
+	if ty := e.inferExprType(recv); ty.IsArray && ty.ElemType != nil {
+		return *ty.ElemType
+	}
+	return TypeF64
+}
+
+func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Type, bool) {
+	hintFor := func(i int, pt *ast.TypeAnnotation) Type {
+		if pt != nil {
+			return e.resolveType(pt)
+		}
+		if i < len(paramHints) {
+			return paramHints[i]
+		}
+		return TypeF64
+	}
 	switch cb := arg.(type) {
 	case *ast.ArrowFunction:
 		if cb.RetType != nil {
 			return e.resolveType(cb.RetType), true
 		}
 		if cb.Body != nil {
-			return e.inferExprType(cb.Body), true
+			e.pushScope()
+			for i, p := range cb.Params {
+				e.define(p.Name, Symbol{Ty: hintFor(i, p.Type)})
+			}
+			rt := e.inferExprType(cb.Body)
+			e.popScope()
+			return rt, true
 		}
-		return TypeI64, true
+		if cb.Block != nil {
+			paramNames := make([]string, len(cb.Params))
+			paramTypes := make([]Type, len(cb.Params))
+			for i, p := range cb.Params {
+				paramNames[i] = p.Name
+				paramTypes[i] = hintFor(i, p.Type)
+			}
+			if inferred, ok := e.inferUnannotatedReturnType(cb.Block, paramNames, paramTypes); ok {
+				return inferred, true
+			}
+		}
+		return TypeF64, true
 	case *ast.FunctionExpression:
 		if cb.RetType != nil {
 			return e.resolveType(cb.RetType), true
@@ -276,11 +327,7 @@ func (e *Emitter) callbackReturnType(arg ast.Expression) (Type, bool) {
 		paramTypes := make([]Type, len(cb.Params))
 		for i, p := range cb.Params {
 			paramNames[i] = p.Name
-			if p.Type != nil {
-				paramTypes[i] = e.resolveType(p.Type)
-			} else {
-				paramTypes[i] = TypeI64
-			}
+			paramTypes[i] = hintFor(i, p.Type)
 		}
 		if inferred, ok := e.inferUnannotatedReturnType(cb.Body, paramNames, paramTypes); ok {
 			return inferred, true
@@ -303,17 +350,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.IsBigInt {
 			return BigIntType()
 		}
-		if strings.ContainsRune(ex.Value, '.') {
-			return TypeF64
-		}
-		// An integer literal too large for i64 is a double — must match
-		// emitNumberLit's own overflow rule.
-		if len(ex.Value) >= 19 && !strings.HasPrefix(ex.Value, "0x") && !strings.HasPrefix(ex.Value, "0b") && !strings.HasPrefix(ex.Value, "0o") {
-			if _, err := strconv.ParseInt(ex.Value, 10, 64); err != nil {
-				return TypeF64
-			}
-		}
-		return TypeI64
+		// TDD-00123 Stage 1: every numeric literal is a double (mirrors
+		// emitNumberLit). Real integers come from the explicit intN/uintN types.
+		return TypeF64
 	case *ast.BooleanLiteral:
 		return TypeBool
 	case *ast.StringLiteral:
@@ -464,9 +503,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			return lt
 		case "&", "|", "^", "<<", ">>", ">>>":
-			return TypeI64
+			// JS bitwise/shift ops compute in the 32-bit integer domain but
+			// return a Number (double) — TDD-00123 Stage 2. Must mirror
+			// emitBinary/emitBitShift's sitofp-to-double result.
+			return TypeF64
 		}
 	case *ast.MemberExpression:
+		// `.length` on an array/string/tuple/typed-array is a Number (double)
+		// — TDD-00123 Stage 3. Must mirror emitMemberExpr's `.length` sites,
+		// which sitofp the i64 count to double. (An object field literally
+		// named `length` is resolved by the field-lookup path further below.)
+		if ex.Property == "length" {
+			ot := e.inferExprType(ex.Object)
+			if ot.IsArray || ot.IsTuple || ot.IsTypedArray || isStringTy(ot) {
+				return TypeF64
+			}
+		}
 		// cluster.isPrimary/isWorker (bool), cluster.workerId (i64).
 		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "cluster__kml_builtin" {
 			switch ex.Property {
@@ -1661,8 +1713,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
-			case "indexOf", "findIndex", "findLastIndex", "search", "localeCompare":
-				return TypeI64
+			case "indexOf", "lastIndexOf", "findIndex", "findLastIndex", "search", "localeCompare":
+				// JS index/count results are Numbers (doubles) — TDD-00123
+				// Stage 3. Must mirror the emit sites, which sitofp to double.
+				return TypeF64
 			case "charCodeAt", "codePointAt":
 				// A double so an out-of-range index can be NaN — must match
 				// emitStringCharCodeAt.
@@ -1725,7 +1779,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return recvTy
 				}
 				if len(ex.Args) == 1 {
-					if retTy, ok := e.callbackReturnType(ex.Args[0]); ok {
+					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object)); ok {
 						return ArrayOf(retTy)
 					}
 				}
@@ -1772,7 +1826,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				// mirrors emitArrayFlatMap exactly.
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray && len(ex.Args) == 1 {
-					if retTy, ok := e.callbackReturnType(ex.Args[0]); ok {
+					if retTy, ok := e.callbackReturnType(ex.Args[0], e.hofElemHint(mem.Object)); ok {
 						if retTy.IsArray && retTy.ElemType != nil {
 							return ArrayOf(*retTy.ElemType)
 						}
@@ -1781,8 +1835,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return objTy
 				}
 			case "push", "unshift":
-				// Returns the new length (i64), matching JS semantics.
-				return TypeI64
+				// Returns the new length — a Number (double) in JS (TDD-00123
+				// Stage 3); must mirror emitPush/emitUnshift.
+				return TypeF64
 			case "pop", "shift":
 				// Returns the removed element (or the element type's zero
 				// value on an empty array).  Must match emitPop/emitShift's

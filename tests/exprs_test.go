@@ -38,7 +38,7 @@ console.log(a - b)
 console.log(a * b)
 console.log(a / b)
 console.log(a % b)
-`, "13\n7\n30\n3\n1")
+`, "13\n7\n30\n3.3333333333333335\n1")
 }
 
 func TestE2EBoolean(t *testing.T) {
@@ -161,14 +161,13 @@ console.log(10 ** 3 + 1)
 `, "1024\n27\n1\n512\n50\n1001")
 }
 
-// TestE2EExponentiationNegativeExponentIsZero pins the integer-model choice: a
-// negative exponent truncates to 0 (the integer analogue of `1 / base**|n|`),
-// consistent with this compiler's truncating integer `/`.
-func TestE2EExponentiationNegativeExponentIsZero(t *testing.T) {
+// TestE2EExponentiationNegativeExponent: `number` is a double (TDD-00123), so a
+// negative exponent yields the real fractional power, as in JS.
+func TestE2EExponentiationNegativeExponent(t *testing.T) {
 	assertOutput(t, `
 console.log(2 ** -1)
 console.log(10 ** -3)
-`, "0\n0")
+`, "0.5\n0.001")
 }
 
 // TestE2EExponentiationFloat uses float operands, which route through libm
@@ -258,6 +257,20 @@ console.log(x)
 x ^= 3
 console.log(x)
 `, "6\n14\n13")
+}
+
+// TestE2EBitwiseResultIsNumber: a JS bitwise/shift result is a Number (double),
+// not an integer, so it participates in float division (TDD-00123 Stage 2). The
+// integer-valued results still print without a trailing `.0`.
+func TestE2EBitwiseResultIsNumber(t *testing.T) {
+	assertOutput(t, `
+console.log((7 & 6) / (7 & 5))
+console.log((1 << 4) / (1 << 1))
+console.log(~5 / 2)
+console.log((6 | 1) / 2)
+console.log((6 ^ 3) / 2)
+console.log((-1 >>> 0) / 2)
+`, "1.2\n8\n-3\n3.5\n2.5\n2147483647.5")
 }
 
 // --- Bitwise shift 32-bit semantics (ToInt32/ToUint32, shift count masked to 0-31) ---
@@ -998,4 +1011,275 @@ console.log(1 ** e2, (-1) ** -e2, Math.pow(1, e2), 2 ** 0.5);
 console.log(92233720368620160000, typeof 92233720368620160000);
 console.log(92233720368620160000 === 92233720368620160000);
 `, "[abc]\n[x]\n[x]\n0\nNaN NaN NaN 1.4142135623730951\n92233720368620160000 number\ntrue")
+}
+
+// --- ADR-00376: ++/-- on a member or index target (previously identifier-only).
+// Desugars to the equivalent compound assignment; postfix returns the old value. ---
+
+func TestE2EUpdateInstanceField(t *testing.T) {
+	assertOutput(t, `
+class C { x = 0; bump(): void { this.x++; } }
+const c = new C();
+c.bump();
+c.bump();
+console.log(c.x);
+`, "2")
+}
+
+func TestE2EUpdateStaticField(t *testing.T) {
+	assertOutput(t, `
+class C { static n = 0; static inc(): void { C.n++; } }
+C.inc();
+C.inc();
+C.inc();
+console.log(C.n);
+`, "3")
+}
+
+func TestE2EUpdateObjectField(t *testing.T) {
+	assertOutput(t, `
+const o = { k: 5 };
+o.k++;
+o.k--;
+o.k--;
+console.log(o.k);
+`, "4")
+}
+
+func TestE2EUpdateIndexTarget(t *testing.T) {
+	assertOutput(t, `
+const a = [10, 20];
+a[0]++;
+console.log(a[0]);
+console.log(a[1]);
+`, "11\n20")
+}
+
+func TestE2EUpdatePostfixReturnsOldValue(t *testing.T) {
+	assertOutput(t, `
+const o = { k: 5 };
+const r = o.k++;
+console.log(r);
+console.log(o.k);
+`, "5\n6")
+}
+
+func TestE2EUpdatePrefixReturnsNewValue(t *testing.T) {
+	assertOutput(t, `
+const o = { k: 5 };
+const r = ++o.k;
+console.log(r);
+console.log(o.k);
+`, "6\n6")
+}
+
+func TestE2EUpdateIndexPostfixSideEffect(t *testing.T) {
+	assertOutput(t, `
+const a = [0, 0, 0];
+let i = 0;
+a[i++] = 9;
+console.log(a[0]);
+console.log(i);
+`, "9\n1")
+}
+
+func TestE2EUpdateFloatField(t *testing.T) {
+	assertOutput(t, `
+class C { /** @type {float64} */ x = 1.5; }
+const c = new C();
+c.x++;
+console.log(c.x);
+`, "2.5")
+}
+
+func TestE2EUpdateBigIntField(t *testing.T) {
+	assertOutput(t, `
+class C { count: bigint = 10n; }
+const c = new C();
+c.count++;
+c.count++;
+console.log(c.count);
+`, "12n")
+}
+
+// --- TDD-00123 Stage 1: `number` is an IEEE-754 double (JS-faithful) ---
+
+func TestE2ENumberIsDouble(t *testing.T) {
+	assertOutput(t, `
+console.log(0.1 + 0.2)
+console.log(10 / 3)
+console.log(5 / 2)
+console.log(2 ** -1)
+console.log(7 % 3)
+const x: number = 3.75
+console.log(x * 2)
+`, "0.30000000000000004\n3.3333333333333335\n2.5\n0.5\n1\n7.5")
+}
+
+func TestE2ENumberIntegerEscapeHatch(t *testing.T) {
+	// The explicit integer types keep integer semantics; a bare literal is a
+	// `number` (double), so mixing promotes to float.
+	assertOutput(t, `
+let a: int32 = 7
+let b: int32 = 2
+console.log(a / b)
+console.log(a / 2)
+`, "3\n3.5")
+}
+
+// TestE2EIntegerEscapeHatchExactLiterals: an int64/uint64 binding initialized
+// from a literal above 2^53 stays exact — the literal is parsed straight to a
+// 64-bit integer rather than rounding through the default float64 literal model
+// (TDD-00123). A plain `number` at the same magnitude still rounds, matching JS.
+func TestE2EIntegerEscapeHatchExactLiterals(t *testing.T) {
+	assertOutput(t, `
+let a: int64 = 9007199254740993
+console.log(a)
+let b: number = 9007199254740993
+console.log(b)
+let u: uint64 = 18446744073709551615
+console.log(u)
+function f(x: int64): int64 { return x }
+console.log(f(9007199254740993))
+`, "9007199254740993\n9007199254740992\n18446744073709551615\n9007199254740993")
+}
+
+// TestE2EJSDocParamReturnTyping: an untyped function is typed from its
+// `@param`/`@returns` JSDoc — the "typed JS" workflow (TDD-00125). An `int32`
+// @param gives integer division; a `string` @param enables `.length`; an
+// inline annotation still wins over a conflicting @param.
+func TestE2EJSDocParamReturnTyping(t *testing.T) {
+	assertOutput(t, `
+/**
+ * @param {int32} x
+ * @param {int32} y
+ * @returns {int32}
+ */
+function divi(x, y) { return x / y }
+console.log(divi(7, 2))
+
+/** @param {string} s */
+function len(s) { return s.length }
+console.log(len("hello"))
+
+/** @param {int32} x */
+function half(x: number) { return x / 2 }
+console.log(half(7))
+`, "3\n5\n3.5")
+}
+
+// TestE2EJSDocTypedefCallback: `@typedef {Object}`+`@property` declares a
+// named object type and `@callback` a named function type, both usable wherever
+// a type name is — via `@param`/`@type` (TDD-00125 Stage 2).
+func TestE2EJSDocTypedefCallback(t *testing.T) {
+	assertOutput(t, `
+/**
+ * @typedef {Object} Point
+ * @property {number} x
+ * @property {number} y
+ */
+/** @param {Point} p */
+function sum(p) { return p.x + p.y }
+console.log(sum({x: 3, y: 4}))
+
+/**
+ * @callback Combine
+ * @param {number} a
+ * @param {number} b
+ * @returns {number}
+ */
+/** @param {Combine} fn */
+function run(fn) { return fn(10, 5) }
+console.log(run((a, b) => a * b))
+`, "7\n50")
+}
+
+// TestE2EJSDocTemplateGeneric: `@template T` declares a generic function — the
+// JSDoc form of `<T>` — monomorphized per concrete type like a TS generic
+// (TDD-00125 Stage 3).
+func TestE2EJSDocTemplateGeneric(t *testing.T) {
+	assertOutput(t, `
+/**
+ * @template T
+ * @param {T} x
+ * @returns {T}
+ */
+function identity(x) { return x }
+console.log(identity(42))
+console.log(identity("hi"))
+
+/**
+ * @template T
+ * @param {T[]} arr
+ * @returns {T}
+ */
+function head(arr) { return arr[0] }
+console.log(head([10, 20, 30]))
+`, "42\nhi\n10")
+}
+
+// TestE2EJSDocTypeExpressions: JSDoc type strings are parsed by the real type
+// parser (TDD-00125 Stage 4) — union, nullable `?T`, non-null `!T`, `*`,
+// inline object shapes, `Array.<T>`, and `function(...)` types all resolve.
+func TestE2EJSDocTypeExpressions(t *testing.T) {
+	assertOutput(t, `
+/** @param {number | string} v */
+function kind(v) { return typeof v }
+console.log(kind(3))
+console.log(kind("x"))
+
+/** @param {{x: number, y: number}} p */
+function sum(p) { return p.x + p.y }
+console.log(sum({x: 3, y: 4}))
+
+/** @param {Array.<number>} a */
+function firstOf(a) { return a[0] }
+console.log(firstOf([9, 8]))
+
+/** @param {function(number, number): number} fn */
+function run(fn) { return fn(6, 7) }
+console.log(run((a, b) => a * b))
+`, "number\nstring\n7\n9\n42")
+}
+
+// TestE2EJSDocClassAndDocTags: the class/visibility tags (`@implements`,
+// `@private`, `@readonly`, `@override`) and the documentation-only tags
+// (`@deprecated`, `@see`) are accepted and erased — matching how TypeScript
+// erases them at runtime and this compiler erases the equivalent modifiers —
+// and never interfere with the typing tags on the same declaration
+// (TDD-00125 Stage 5).
+func TestE2EJSDocClassAndDocTags(t *testing.T) {
+	assertOutput(t, `
+interface Named { name: string }
+/** @implements {Named} */
+class Person implements Named {
+  /** @readonly */
+  name: string = "Thessaloniki"
+  /** @private @type {int32} */
+  age: number = 40
+  /** @returns {int32} */
+  getAge() { return this.age }
+}
+const p = new Person()
+console.log(p.name)
+console.log(p.getAge())
+
+/**
+ * @deprecated use half2 instead
+ * @see https://example.com
+ * @param {int32} x
+ */
+function half(x) { return x }
+console.log(half(9))
+`, "Thessaloniki\n40\n9")
+}
+
+func TestE2ENumberLiteralForms(t *testing.T) {
+	assertOutput(t, `
+console.log(0xff)
+console.log(0b101)
+console.log(0o17)
+console.log(100)
+console.log(3.14)
+`, "255\n5\n15\n100\n3.14")
 }
