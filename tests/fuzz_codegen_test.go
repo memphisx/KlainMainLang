@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,20 +20,21 @@ import (
 // small integer literals, returning both its KlainMainLang source text
 // (fully parenthesized, so the generated precedence never depends on
 // matching the parser's own precedence table) and its expected value
-// computed with Go's native int64 arithmetic — the same wraparound
-// add/sub/mul and truncating-toward-zero sdiv/srem this compiler's codegen
-// targets for the default `number` (i64) type (see codegen/llvm/emit_exprs.go).
+// computed with Go's native float64 arithmetic — the IEEE-754 double
+// semantics the default `number` type targets (TDD-00123): fdiv/frem, so
+// `/` produces fractions and `%` is fmod (Go's math.Mod), not the old
+// truncating i64 sdiv/srem this oracle asserted before that change.
 //
-// Literal magnitude is clamped to keep the oracle unambiguous: LLVM's sdiv/
-// srem are undefined behavior not just on a zero divisor (guarded at
-// runtime since ADR-00069, so this generator substitutes 1 instead) but
-// also when the dividend is exactly math.MinInt64 and the divisor is -1 —
-// astronomically unlikely to occur by chance with clamped small literals,
-// so deliberately not defended against here (see TDD-00014).
-func genArithExpr(rng *rand.Rand, depth int) (string, int64) {
+// A zero divisor is substituted with 1 (for `%` too): float division by
+// zero is well-defined but would drag Infinity/NaN — and their interaction
+// with every operator — into the oracle for no coverage gain. With that
+// guard and leaf magnitudes clamped to [-1000, 1000] at depth 5, every
+// intermediate stays finite (|v| is bounded by the product of at most 32
+// leaf magnitudes, far below the float64 max), so Infinity/NaN never occur.
+func genArithExpr(rng *rand.Rand, depth int) (string, float64) {
 	if depth <= 0 || rng.Intn(3) == 0 {
-		v := int64(rng.Intn(2001) - 1000) // [-1000, 1000]
-		return fmt.Sprintf("%d", v), v
+		v := rng.Intn(2001) - 1000 // [-1000, 1000]
+		return fmt.Sprintf("%d", v), float64(v)
 	}
 	if rng.Intn(6) == 0 {
 		// Unary negation. The space after '-' matters: a negative literal's
@@ -51,7 +54,7 @@ func genArithExpr(rng *rand.Rand, depth int) (string, int64) {
 		r = "1"
 	}
 
-	var want int64
+	var want float64
 	switch op {
 	case "+":
 		want = lv + rv
@@ -62,9 +65,43 @@ func genArithExpr(rng *rand.Rand, depth int) (string, int64) {
 	case "/":
 		want = lv / rv
 	case "%":
-		want = lv % rv
+		want = math.Mod(lv, rv)
 	}
 	return fmt.Sprintf("(%s %s %s)", l, op, r), want
+}
+
+// formatJSNumber renders a float64 the way JS's Number-to-string (and this
+// compiler's dtoa-backed console.log — verified byte-identical against
+// node for the fixed/exponential/-0 cases) does: shortest round-trip
+// digits, fixed notation for 1e-6 ≤ |v| < 1e21, exponential outside that
+// range with no zero-padded exponent ("1e-7", not Go's "1e-07"), and a
+// signed "-0". Infinity/NaN are unreachable here (see genArithExpr) but
+// handled for completeness.
+func formatJSNumber(v float64) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "Infinity"
+	case math.IsInf(v, -1):
+		return "-Infinity"
+	case v == 0:
+		if math.Signbit(v) {
+			return "-0"
+		}
+		return "0"
+	}
+	abs := math.Abs(v)
+	if abs >= 1e21 || abs < 1e-6 {
+		s := strconv.FormatFloat(v, 'e', -1, 64)
+		// Go pads the exponent to two digits; JS doesn't ("1e-7").
+		if i := strings.LastIndexAny(s, "+-"); i > 0 {
+			exp := strings.TrimLeft(s[i+1:], "0")
+			s = s[:i+1] + exp
+		}
+		return s
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 func FuzzArithmeticCorrectness(f *testing.F) {
@@ -78,7 +115,7 @@ func FuzzArithmeticCorrectness(f *testing.F) {
 		src := fmt.Sprintf("console.log(%s);", expr)
 
 		got := compileAndRun(t, src)
-		wantStr := fmt.Sprintf("%d", want)
+		wantStr := formatJSNumber(want)
 		if got != wantStr {
 			t.Fatalf("seed %d: %s => got %q, want %q", seed, src, got, wantStr)
 		}

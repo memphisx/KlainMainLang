@@ -420,6 +420,13 @@ sizebody:
 alloc:
   %bufsz = add i64 %total, 1
   %buf = call ptr @malloc(i64 %bufsz)
+  ; NUL-terminate up front: with an empty map the fill loop never runs, so
+  ; nothing else would ever write the terminator and send_response's strlen
+  ; would walk uninitialized heap (glibc hands back dirty memory; macOS's
+  ; zeroed small allocations masked this). The last sprintf below writes its
+  ; own NUL at this same final offset, so pre-writing is always correct.
+  %endp = getelementptr i8, ptr %buf, i64 %total
+  store i8 0, ptr %endp, align 1
   br label %fillloop
 fillloop:
   %fi = phi i64 [ 0, %alloc ], [ %fi1, %fillbody ]

@@ -274,6 +274,8 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return Value{Ref: reg, Ty: ty}, nil
 	case "%":
 		if ty.Float {
+			// frem lowers to a libcall to fmod — needs libm on Linux.
+			e.requireLink("m")
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
 			e.emitDivZeroGuard(ty, left, right)
@@ -841,6 +843,8 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 		// reachable; see the lexer/token.go and lexer/lexer.go changes
 		// alongside this one.
 		if ty.Float {
+			// frem lowers to a libcall to fmod — needs libm on Linux.
+			e.requireLink("m")
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
 			e.emitDivZeroGuard(ty, left, right)

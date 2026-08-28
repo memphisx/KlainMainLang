@@ -458,3 +458,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00418](ADR-00418.md) | Node oracle — "dynamic require" mislabel decomposed; static member/bare forms handled; named skip reasons | Extends [ADR-00409](ADR-00409.md), [ADR-00369](ADR-00369.md) |
 | [00419](ADR-00419.md) | node:test runner — test/describe/TestContext/hooks + `node:` specifier aliases | Implements [TDD-00140](../tdd/TDD-00140.md); Extends [TDD-00122](../tdd/TDD-00122.md) |
 | [00420](ADR-00420.md) | diagnostics_channel V1 — named pub/sub, string messages | Extends [ADR-00412](ADR-00412.md) |
+| [00421](ADR-00421.md) | Linux CI fixes — empty-header-block NUL, libm for frem, float fuzz oracle | Extends [ADR-00072](ADR-00072.md), [TDD-00123](../tdd/TDD-00123.md), [TDD-00014](../tdd/TDD-00014.md) |
