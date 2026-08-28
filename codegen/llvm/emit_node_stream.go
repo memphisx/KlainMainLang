@@ -62,6 +62,46 @@ func destructureNodeStreamOptions(opts ast.Expression, allowed map[string]bool, 
 	return out, nil
 }
 
+// streamHWMOperand resolves a stream's `highWaterMark` option to a `double`
+// LLVM operand (the value `__kml_rs_alloc`/`__kml_ws_alloc` already take as
+// their queue watermark), defaulting to 1.0 when absent. `objectMode`, if
+// present, is validated as a boolean and otherwise ignored: this compiler's
+// chunks are already typed by the `<T>` argument (effectively always
+// object-mode), so the flag has no representational effect — accepting it is
+// pure Node-fidelity (TDD-00132). Both are consumed out of `opts`.
+func (e *Emitter) streamHWMOperand(opts map[string]ast.Expression, pos ast.Pos) (string, error) {
+	if omExpr, ok := opts["objectMode"]; ok {
+		v, err := e.emitExpr(omExpr)
+		if err != nil {
+			return "", err
+		}
+		if v.Ty.IR != "i1" {
+			return "", fmt.Errorf("%d:%d: a stream's objectMode option must be a boolean", pos.Line, pos.Col)
+		}
+	}
+	hwmExpr, ok := opts["highWaterMark"]
+	if !ok {
+		return "1.0", nil
+	}
+	v, err := e.emitExpr(hwmExpr)
+	if err != nil {
+		return "", err
+	}
+	d := e.coerce(v, TypeF64)
+	return d.Ref, nil
+}
+
+// nodeStreamOptionKeys is the shared allowed-option set every Node-stream
+// constructor accepts on top of its own callbacks (TDD-00132): the queue
+// watermark and the object-mode flag.
+func nodeStreamOptionKeys(extra ...string) map[string]bool {
+	m := map[string]bool{"highWaterMark": true, "objectMode": true}
+	for _, k := range extra {
+		m[k] = true
+	}
+	return m
+}
+
 // emitNewNodeStream implements the three constructors.
 func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, error) {
 	pos := ex.GetPos()
@@ -77,13 +117,17 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 
 	switch ex.Kind {
 	case "readable":
-		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"read": true}, "Readable", pos)
+		opts, err := destructureNodeStreamOptions(ex.Options, nodeStreamOptionKeys("read"), "Readable", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		hwm, err := e.streamHWMOperand(opts, pos)
 		if err != nil {
 			return Value{}, err
 		}
 		fulfill := e.emitStreamFulfillThunk(outTy)
 		rs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfill))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double %s, ptr %s)", rs, hwm, fulfill))
 		inv := e.emitNodeInvokeDataThunk(outTy)
 		dec := e.emitStreamDecodeThunk(outTy)
 		nsTy := NodeReadableType(outTy)
@@ -116,12 +160,16 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 		return Value{Ref: nsReg, Ty: nsTy}, nil
 
 	case "writable":
-		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"write": true, "final": true}, "Writable", pos)
+		opts, err := destructureNodeStreamOptions(ex.Options, nodeStreamOptionKeys("write", "final"), "Writable", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		hwm, err := e.streamHWMOperand(opts, pos)
 		if err != nil {
 			return Value{}, err
 		}
 		ws := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double %s)", ws, hwm))
 		if writeExpr, ok := opts["write"]; ok {
 			userClo, err := e.streamCallbackClosure(writeExpr, []Type{inTy}, "write callback", pos)
 			if err != nil {
@@ -159,7 +207,11 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 		return Value{Ref: nsReg, Ty: nsTy}, nil
 
 	case "transform":
-		opts, err := destructureNodeStreamOptions(ex.Options, map[string]bool{"transform": true, "flush": true}, "Transform", pos)
+		opts, err := destructureNodeStreamOptions(ex.Options, nodeStreamOptionKeys("transform", "flush"), "Transform", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		hwm, err := e.streamHWMOperand(opts, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -167,7 +219,7 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 		rs := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 0.0, ptr %s)", rs, fulfill))
 		ws := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double %s)", ws, hwm))
 
 		ctx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
@@ -307,12 +359,32 @@ func nodeEventPayload(ty Type, event string, pos ast.Pos) (Type, bool, error) {
 	return Type{}, false, fmt.Errorf("%d:%d: unsupported stream event '%s' (data, end, error, close, finish, drain)", pos.Line, pos.Col, event)
 }
 
+// nodeStreamMethodNames are the stream methods hand-dispatched by name
+// (emit_call.go) against a Node-stream handle — reserved as class method
+// names for a `class X extends Readable/Writable` (TDD-00132), unlike the
+// `_read`/`_write`/`_transform` override hooks which are ordinary methods.
+var nodeStreamMethodNames = map[string]bool{
+	"on": true, "once": true, "push": true, "pause": true,
+	"resume": true, "write": true, "end": true, "pipe": true,
+}
+
+func isNodeStreamMethodName(name string) bool { return nodeStreamMethodNames[name] }
+
 // emitNodeStreamCall dispatches node-stream method calls.
 func (e *Emitter) emitNodeStreamCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	ty, ptr, err := e.resolveNodeStreamForCall(objExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	return e.emitNodeStreamCallOn(ty, ptr, method, args, pos)
+}
+
+// emitNodeStreamCallOn is the dispatch core given an already-resolved
+// node-stream handle (ptr) and its node-stream Type (ty). The receiver-
+// resolution split lets a `class X extends Readable` instance (TDD-00132)
+// reuse the same dispatch: it loads the hidden handle field, synthesizes a
+// NodeReadable/Writable ty, and calls here directly.
+func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensureNodeStreamRuntime()
 	self := Value{Ref: ptr, Ty: ty}
 	outTy := TypeI64
@@ -450,6 +522,7 @@ func (e *Emitter) emitNodeStreamCall(objExpr ast.Expression, method string, args
 		if err != nil {
 			return Value{}, err
 		}
+		dv = e.asNodeStreamValue(dv)
 		if !dv.Ty.IsNodeWritable {
 			return Value{}, fmt.Errorf("%d:%d: pipe()'s destination must be a Writable (or Transform)", pos.Line, pos.Col)
 		}
@@ -554,6 +627,7 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 		if err != nil {
 			return Value{}, err
 		}
+		v = e.asNodeStreamValue(v)
 		cp, err := closedPromOf(v)
 		if err != nil {
 			return Value{}, err
@@ -570,6 +644,7 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 			if err != nil {
 				return Value{}, err
 			}
+			v = e.asNodeStreamValue(v)
 			if !v.Ty.IsNodeReadable && !v.Ty.IsNodeWritable {
 				return Value{}, fmt.Errorf("%d:%d: pipeline() arguments must be Node streams", pos.Line, pos.Col)
 			}

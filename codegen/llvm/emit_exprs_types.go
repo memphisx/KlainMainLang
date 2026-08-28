@@ -402,6 +402,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypePtr
 		}
 		objTy := e.inferExprType(ex.Object)
+		// String-keyed Map bracket access yields the value type (TDD-00139).
+		if objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
+			if objTy.MapVal != nil {
+				return *objTy.MapVal
+			}
+			return TypePtr
+		}
 		if objTy.IsGroupMap {
 			if objTy.ElemType != nil {
 				return ArrayOf(*objTy.ElemType)
@@ -509,6 +516,28 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeF64
 		}
 	case *ast.MemberExpression:
+		if objTy := e.inferExprType(ex.Object); objTy.IsDCChannel {
+			if ex.Property == "hasSubscribers" {
+				return TypeBool
+			}
+			if ex.Property == "name" {
+				return TypePtr
+			}
+		}
+		// http2.constants members (TDD-00139 Stage 4).
+		if e.isH2ConstantsExpr(ex.Object) {
+			if c, ok := h2Constants[ex.Property]; ok && c.isStr {
+				return TypePtr
+			}
+			return TypeF64
+		}
+		if ex.Property == "constants" {
+			if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "http2__kml_builtin" {
+				ty := TypeI64
+				ty.IsH2Constants = true
+				return ty
+			}
+		}
 		// `.length` on an array/string/tuple/typed-array is a Number (double)
 		// — TDD-00123 Stage 3. Must mirror emitMemberExpr's `.length` sites,
 		// which sitofp the i64 count to double. (An object field literally
@@ -676,8 +705,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return ArrayOf(TypePtr)
 				case "pid", "exitCode":
 					return TypeI64
-				case "platform", "arch":
+				case "platform", "arch", "execPath", "version":
 					return TypePtr
+				case "versions":
+					return processVersionsType()
 				case "stdin":
 					return StdinType()
 				}
@@ -827,6 +858,39 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "stream" {
 			if e.inferExprType(mem.Object).IsRequest {
 				return ReadableStreamType(TypedArrayType("uint8"))
+			}
+		}
+		// Function.prototype.call/.apply on a function value (TDD-00137) →
+		// the function's own return type.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && (mem.Property == "call" || mem.Property == "apply") {
+			if objTy := e.inferExprType(mem.Object); objTy.IsFunc {
+				if objTy.FuncRetType != nil {
+					return *objTy.FuncRetType
+				}
+				return TypeVoid
+			}
+		}
+		// Function.prototype.bind (TDD-00137 Stage C) → a new function value
+		// with the leading bound parameters removed.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "bind" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsFunc && !objTy.FuncHasRest {
+				boundCount := len(ex.Args) - 1
+				if boundCount < 0 {
+					boundCount = 0
+				}
+				if boundCount <= len(objTy.FuncParams) {
+					ret := TypeVoid
+					if objTy.FuncRetType != nil {
+						ret = *objTy.FuncRetType
+					}
+					return FuncType(objTy.FuncParams[boundCount:], ret)
+				}
+			}
+		}
+		// net.Server/net.Socket .address() → { address, family, port } (TDD-00131).
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "address" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsNetServer || objTy.IsNetSocket || objTy.IsHTTPServer || objTy.IsDgramSocket {
+				return netAddressType()
 			}
 		}
 		// Node-stream method results (TDD-00097 Stage 8).
@@ -1271,7 +1335,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeVoid
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "childprocess__kml_builtin" {
-				// spawn/exec/execFile all return a ChildProcess handle.
+				// The blocking forms return a result record / stdout string;
+				// spawn/exec/execFile return a ChildProcess handle.
+				switch mem.Property {
+				case "spawnSync":
+					return cpSpawnSyncResultType()
+				case "execSync", "execFileSync":
+					return TypePtr
+				}
 				return ChildProcessType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "readline__kml_builtin" {
@@ -1279,10 +1350,65 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "net__kml_builtin" {
 				// connect/createConnection return a client Socket; createServer a Server.
-				if mem.Property == "connect" || mem.Property == "createConnection" {
+				switch mem.Property {
+				case "connect", "createConnection":
 					return NetSocketType()
+				case "isIP":
+					return TypeF64
+				case "isIPv4", "isIPv6":
+					return TypeBool
 				}
 				return NetServerType()
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "http__kml_builtin" {
+				// http.get/request deliver the response to a callback and return
+				// void in V1 (the ClientRequest return is a follow-on, TDD-00138).
+				if mem.Property == "get" || mem.Property == "request" {
+					return TypeVoid
+				}
+				// Variable-bound http.createServer(cb) returns a Server handle.
+				if mem.Property == "createServer" {
+					return HTTPServerType()
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "diagch__kml_builtin" {
+				switch mem.Property {
+				case "channel":
+					return DiagChannelType()
+				case "hasSubscribers", "unsubscribe":
+					return TypeBool
+				}
+				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "https__kml_builtin" {
+				// https.get/request mirror the http client: callback-based, void.
+				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "http2__kml_builtin" {
+				// http2.createServer shares the http server handle (TDD-00139 Stage 1);
+				// connect returns a client session (Stage 3).
+				if mem.Property == "createServer" {
+					return HTTPServerType()
+				}
+				if mem.Property == "connect" {
+					return Http2ClientSessionType()
+				}
+				if mem.Property == "getDefaultSettings" || mem.Property == "getUnpackedSettings" {
+					return h2SettingsObjectType()
+				}
+				if mem.Property == "getPackedSettings" {
+					return BufferType()
+				}
+				return TypeVoid
+			}
+			// session.request returns a ClientHttp2Stream (TDD-00139 Stage 3).
+			if e.inferExprType(mem.Object).IsH2ClientSession && mem.Property == "request" {
+				return Http2ClientStreamType()
+			}
+			// res.on(...)/setEncoding(...) on an http IncomingMessage chain back
+			// to the same object (TDD-00138).
+			if e.inferExprType(mem.Object).IsIncomingMessage {
+				return IncomingMessageType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "tls__kml_builtin" {
 				// tls.connect returns a (net-shaped) TLS client Socket; createServer a Server.

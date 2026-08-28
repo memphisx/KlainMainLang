@@ -51,6 +51,14 @@ var (
 	reNegPhase = regexp.MustCompile(`(?m)^negative:\s*\n\s*phase:\s*(\S+)`)
 	rePos      = regexp.MustCompile(`^\d+:\d+:\s*`)
 	reQuoted   = regexp.MustCompile(`'[^']*'`)
+	// reFilePosPrefix strips a parse error's leading `<abspath>: line:col: `
+	// file-position prefix (the per-worker temp scratch file the front-end
+	// read) so the reason buckets by message and doesn't leak the local
+	// machine's directory layout into the report.
+	reFilePosPrefix = regexp.MustCompile(`^/[\w.\-/]+:\s*\d+:\d+:\s*`)
+	// reAbsPath collapses any remaining absolute filesystem path to a stable
+	// placeholder (a path that appears mid-message rather than as the prefix).
+	reAbsPath = regexp.MustCompile(`/[\w.\-]+(?:/[\w.\-]+)+`)
 )
 
 // outOfScopeFeature lists Test262 `features` tags that name capabilities this
@@ -164,7 +172,9 @@ func parseFlowList(re *regexp.Regexp, block string) []string {
 // single-quoted identifier/token to a placeholder so e.g. "undefined
 // variable 'x'" and "undefined variable 'y'" fall into one bucket.
 func normalizeReason(kind, msg string) string {
+	msg = reFilePosPrefix.ReplaceAllString(msg, "")
 	msg = rePos.ReplaceAllString(msg, "")
+	msg = reAbsPath.ReplaceAllString(msg, "<path>")
 	msg = reQuoted.ReplaceAllString(msg, "'%s'")
 	if len(msg) > 120 {
 		msg = msg[:120] + "…"

@@ -171,6 +171,26 @@ type Emitter struct {
 	// entered into the flat, whole-program e.funcs map.
 	nestedFuncScopes     []nestedFuncScope
 	nestedFuncCtr        int
+	// prog is the whole program AST, retained for `typeof value` resolution
+	// (finding a referenced value's top-level declaration before value scope is
+	// populated).
+	prog *ast.Program
+	// typeofResolving guards against infinite recursion while resolving a
+	// self- or mutually-referential `typeof value` query (ADR-00389).
+	typeofResolving map[string]bool
+	// resolveTypeDepth bounds resolveType recursion so a self-referential type
+	// bails to a fallback instead of overflowing the stack.
+	resolveTypeDepth int
+	// enclosingCapturables (TDD-00129 Stage 1) is a stack parallel to
+	// nestedFuncScopes: one frame per enclosing function/closure body, holding
+	// the names of that body's *capturable* bindings — its parameters plus its
+	// var/let/const (and destructured) locals, but NOT its function/class
+	// declarations (those are resolved by name, never closed over). A nested
+	// function declaration counts as "capturing" when a free variable of its
+	// body is present in any frame here, driving the classification in
+	// pushNestedFuncScope. Purely syntactic, since pre-scan runs before the
+	// enclosing scope's params/locals are define()d.
+	enclosingCapturables []map[string]bool
 	usedStrlen           bool
 	usedMemcpy           bool
 	usedMemset           bool
@@ -240,6 +260,17 @@ type Emitter struct {
 	usedWeakHelpers          bool
 	usedGCGcollect           bool
 	usedHTTP2                bool
+	// usedSpawnSync links the embedded C behind child_process's *Sync forms.
+	usedSpawnSync bool
+	// usedH2Client marks the http2 client-session runtime (TDD-00139 Stage 3).
+	usedH2Client bool
+	usedH2ClientBridge bool
+	// usedNodeTestRuntime: the node:test runner bookkeeping (TDD-00140).
+	usedNodeTestRuntime bool
+	// usedDiagChRuntime: diagnostics_channel pub/sub core.
+	usedDiagChRuntime bool
+	// nodeTestPrefix is the compile-time describe/suite name stack.
+	nodeTestPrefix []string // the generic __kml_h2c_on_* IR callbacks http2.c references
 	usedAtomicsRuntime       bool
 	usedChanRuntime          bool
 	usedPipeDecl             bool
@@ -299,6 +330,11 @@ type Emitter struct {
 	usedProcessCwd           bool
 	usedProcessChdir         bool
 	usedGetpid               bool
+	usedExecPath             bool
+	usedProcessWarning       bool
+	usedHTTPClientReactions  bool
+	usedHTTPCFlushHook       bool // post-event-loop client-reaction flush hook global
+	usedNtohs                bool // shared ntohs libc declaration (net + dgram)
 	usedProcessKill          bool
 	usedSignalHandler        bool
 	usedSignalSigint         bool
@@ -384,6 +420,10 @@ type Emitter struct {
 	// duplicate @__kml_http_dispatch definition the LLVM backend would
 	// reject with a confusing symbol-collision error.
 	httpListenCallSeen       bool
+	// httpServerHandlerPending marks a zero-arg http.createServer() handle
+	// still waiting for its request handler via server.on('request', cb);
+	// server.listen rejects until one is registered.
+	httpServerHandlerPending bool
 	usedHTTPThrow            bool
 	usedSplitFirst           bool
 	usedHTTPParseHeaders     bool
@@ -448,6 +488,7 @@ type Emitter struct {
 	usedNodeStreamRuntime    bool
 	usedPromiseAddReaction   bool
 	streamSiteCtr            int
+	noopCallbackEmitted      bool
 	usedOSReadProcFile       bool
 	usedOSCpusLinux          bool
 	usedOSCpusDarwin         bool
@@ -496,6 +537,19 @@ type Emitter struct {
 	asyncPromiseReg     string // non-suspending async fn: the settled task promise it returns (TDD-00084 Part A)
 	asyncCatchLabel     string // non-suspending async fn: the catch-and-reject block label
 	emittingHTTPHandler bool   // an http.listen handler arrow is being emitted — keep the old bare-slot async model (connection-fiber-driven, not task-promise), TDD-00084 Part A
+	// httpResMode marks the dispatcher as Node's http.createServer `(req, res)`
+	// shape (TDD-00131): the handler takes a second `res` arg and returns void;
+	// the dispatcher creates `res`, calls handler(req, res), and reads the
+	// accumulated response off `res` (a ServerResponseType object) — otherwise
+	// identical to the bespoke return-object path.
+	httpResMode bool
+	// httpStreamMode marks the dispatcher as the http2 core-streams shape:
+	// handler(stream, headers) with the response read off the stream object
+	// (TDD-00139 Stage 2).
+	httpStreamMode bool
+	// httpStreamHandlerArity: 2 or 3 — whether the stream listener declares
+	// Node's optional third `flags` parameter.
+	httpStreamHandlerArity int
 	// httpHandlerNode pins WHICH arrow/function-expression is the handler:
 	// the bare-slot model applies to it alone — an async callback nested
 	// inside the handler (e.g. a streaming body's pull, TDD-00097 Stage 5)
@@ -823,9 +877,139 @@ func escapeLLVM(s string) (string, int) {
 
 // --- Type resolution ---
 
+// resolveValueType finds the type of a value binding by name — an in-scope
+// local, a module global, a top-level function (its function type), or, as a
+// fallback usable before value scope is populated (eager type-alias
+// registration), the value's own top-level `const`/`let`/`var` declaration in
+// the program AST (its annotation, else its inferred initializer type).
+func (e *Emitter) resolveValueType(name string) (Type, bool) {
+	// Cycle guard: a self-referential `typeof` (e.g. `function f(): typeof f`, or
+	// a mutually-referential pair) would otherwise recurse forever through
+	// buildFunctionSig → resolveType → resolveValueType. Bail if already
+	// resolving this name.
+	if e.typeofResolving[name] {
+		return Type{}, false
+	}
+	if e.typeofResolving == nil {
+		e.typeofResolving = map[string]bool{}
+	}
+	e.typeofResolving[name] = true
+	defer delete(e.typeofResolving, name)
+	// A top-level declaration is checked first, from the AST, so `typeof value`
+	// resolves to the *same* type whether it runs at eager registration (before
+	// value scope exists) or at emit time — a promoted global's stored handle
+	// type can differ from its structural shape, which would desync the two
+	// passes. (A function-local of the same name shadowing a top-level binding is
+	// a rare case not distinguished here.)
+	if e.prog != nil {
+		match := func(vd *ast.VarDeclaration) (Type, bool) {
+			// Top-level names carry the resolver's per-file `__kml_mod<N>`
+			// mangling suffix, while a `typeof value` query keeps the source
+			// name — compare against the unmangled declaration name.
+			declName := vd.Name
+			if i := strings.LastIndex(declName, "__kml_mod"); i > 0 {
+				declName = declName[:i]
+			}
+			if declName != name {
+				return Type{}, false
+			}
+			if vd.TypeAnnot != nil {
+				return e.resolveType(vd.TypeAnnot), true
+			}
+			if vd.Init != nil {
+				return e.inferExprType(vd.Init), true
+			}
+			return Type{}, false
+		}
+		for _, st := range e.prog.Body {
+			switch d := st.(type) {
+			case *ast.VarDeclaration:
+				if ty, ok := match(d); ok {
+					return ty, true
+				}
+			case *ast.VarDeclarationList:
+				for _, vd := range d.Decls {
+					if ty, ok := match(vd); ok {
+						return ty, true
+					}
+				}
+			case *ast.FunctionDeclaration:
+				declName := d.Name
+				if i := strings.LastIndex(declName, "__kml_mod"); i > 0 {
+					declName = declName[:i]
+				}
+				if declName == name && len(d.TypeParams) == 0 {
+					sig := e.buildFunctionSig(d)
+					return FuncType(sig.ParamTypes, sig.RetType), true
+				}
+			}
+		}
+	}
+	if sym, ok := e.lookup(name); ok {
+		return sym.Ty, true
+	}
+	if sym, ok := e.moduleGlobals[name]; ok {
+		return sym.Ty, true
+	}
+	if _, sig, ok := e.resolveFuncRef(name); ok {
+		return FuncType(sig.ParamTypes, sig.RetType), true
+	}
+	return Type{}, false
+}
+
+// resolveTypeofType resolves a `typeof value` type query (ADR-00389) to the
+// referenced value's type, walking any trailing member path. An unresolvable
+// query falls back to the number default rather than failing (resolveType has
+// no error channel).
+func (e *Emitter) resolveTypeofType(ta *ast.TypeAnnotation) Type {
+	base, ok := e.resolveValueType(ta.TypeofName)
+	if !ok {
+		return TypeI64
+	}
+	for _, seg := range ta.TypeofPath {
+		next, found := Type{}, false
+		for _, f := range base.Fields {
+			if f.Name == seg {
+				next, found = f.Ty, true
+				break
+			}
+		}
+		if !found {
+			return TypeI64
+		}
+		base = next
+	}
+	return base
+}
+
+// indexSignatureType builds the map-backed dynamic-object type for a string
+// index signature `{ [k: string]: V }` (TDD-00130), matching
+// inferDynamicObjectType's shape so the shared read/write/iterate machinery
+// (TDD-00012) applies unchanged.
+func (e *Emitter) indexSignatureType(valAnnot *ast.TypeAnnotation) Type {
+	keyTy := TypePtr
+	valTy := e.resolveType(valAnnot)
+	return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}
+}
+
 func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta == nil {
 		return TypeI64 // default for untyped numeric variables
+	}
+	// Depth guard against a self-referential type (`type T = { next: T }`, a
+	// recursive generic alias, a recursive index signature) — a fixed-shape
+	// struct can't represent an infinitely-recursive type anyway, so bail to a
+	// generic pointer rather than overflowing the stack. The limit is far beyond
+	// any real type nesting.
+	e.resolveTypeDepth++
+	defer func() { e.resolveTypeDepth-- }()
+	if e.resolveTypeDepth > 300 {
+		return TypePtr
+	}
+	// `typeof value` type query (ADR-00389): resolve the referenced value's type,
+	// then walk any trailing member path (`typeof a.b`).
+	if ta.IsTypeof {
+		return e.resolveTypeofType(ta)
 	}
 	// String-literal type (`"north"`, TDD-00079): as a value type it is just a
 	// string; the literal value is only consumed at the AST level by
@@ -896,7 +1080,9 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		if ta.FuncRetType != nil {
 			ret = e.resolveType(ta.FuncRetType)
 		}
-		return FuncType(params, ret)
+		ft := FuncType(params, ret)
+		ft.FuncHasRest = ta.FuncHasRest
+		return ft
 	}
 	// Promise<T>/Map<K,V>/Set<T> must be checked before the generic ElemType
 	// fallback below (which treats any non-nil ElemType as a plain array —
@@ -1051,6 +1237,12 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ta.ElemType != nil {
 		return ArrayOf(e.resolveType(ta.ElemType))
 	}
+	// A string index signature `{ [k: string]: V }` (TDD-00130) resolves to the
+	// existing map-backed dynamic-object representation (TDD-00012), giving it
+	// `d[key]` read/write sugar and map iteration for free.
+	if ta.IndexSig != nil {
+		return e.indexSignatureType(ta.IndexSig)
+	}
 	if len(ta.Fields) > 0 {
 		fields := make([]Field, len(ta.Fields))
 		for i, af := range ta.Fields {
@@ -1166,6 +1358,10 @@ func (e *Emitter) rewriteTopLevelGeneratorExpressions(prog *ast.Program) {
 }
 
 func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
+	// Retained so a `typeof value` type query can resolve the referenced value's
+	// type from its top-level declaration even at eager type-alias registration
+	// (Pass 0), before module globals are bound.
+	e.prog = prog
 	// TS namespaces (TDD-00095): the parser desugared members into flat
 	// mangled declarations; the member table is what use sites resolve
 	// through (emitCall/emitMember/inferExprType).
@@ -1573,6 +1769,12 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			// emit_generics.go); never entered into e.interfaces itself.
 			if len(s.TypeParams) > 0 {
 				e.genericInterfaces[s.Name] = s
+				continue
+			}
+			// A string index signature interface (TDD-00130) registers as the
+			// map-backed dynamic-object type.
+			if s.IndexSig != nil {
+				e.interfaces[s.Name] = e.indexSignatureType(s.IndexSig)
 				continue
 			}
 			fields := make([]Field, len(s.Fields))

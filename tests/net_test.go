@@ -220,3 +220,115 @@ try {
 }
 `, "caught")
 }
+
+// TDD-00131 (net.Server): server.address() reports the actual bound port,
+// making the `listen(0)` ephemeral-port idiom usable — bind picks the port,
+// address() reads it back via getsockname, and a self-connect round-trips.
+func TestE2ENetServerAddressEphemeralPort(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+const dec = new TextDecoder()
+const server = net.createServer((socket) => {
+  socket.on('data', (chunk: Uint8Array) => { socket.write("pong") })
+})
+server.listen(0, () => {
+  const addr = server.address()
+  console.log(addr.family, addr.address, addr.port > 0)
+  const client = net.connect(addr.port, "127.0.0.1", () => { client.write("ping") })
+  client.on('data', (chunk: Uint8Array) => {
+    console.log("roundtrip", dec.decode(chunk))
+    client.end()
+    server.close()
+  })
+})
+`, "IPv4 0.0.0.0 true\nroundtrip pong")
+}
+
+// TDD-00131 (net.Server): socket.address() reports the socket's real local
+// address+port, and server.on('listening') fires when the server binds.
+func TestE2ENetSocketAddressAndListening(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+const dec = new TextDecoder()
+const server = net.createServer((sock) => {
+  sock.on('data', (c: Uint8Array) => { sock.write("pong") })
+})
+server.on('listening', () => { console.log("listening") })
+server.listen(0, () => {
+  const client = net.connect(server.address().port, "127.0.0.1", () => {
+    const ca = client.address()
+    console.log("local", ca.address, ca.family, ca.port > 0)
+    client.write("ping")
+  })
+  client.on('data', (c: Uint8Array) => {
+    console.log("got", dec.decode(c))
+    client.end()
+    server.close()
+  })
+})
+`, "listening\nlocal 127.0.0.1 IPv4 true\ngot pong")
+}
+
+// TDD-00131 (net completion): net.isIP / isIPv4 / isIPv6 address-family checks.
+func TestE2ENetIsIP(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+console.log(net.isIP("1.2.3.4"), net.isIP("::1"), net.isIP("nope"));
+console.log(net.isIPv4("10.0.0.1"), net.isIPv4("::1"));
+console.log(net.isIPv6("::1"), net.isIPv6("1.2.3.4"));
+`, "4 6 0\ntrue false\ntrue false")
+}
+
+// net.connect options-object form { port, host } + socket setNoDelay/destroy.
+func TestE2ENetConnectOptionsObject(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+const dec = new TextDecoder()
+const server = net.createServer((sock) => {
+  sock.setNoDelay(true)
+  sock.on('data', (c: Uint8Array) => { sock.write("ok") })
+})
+server.listen(0, () => {
+  const client = net.connect({ port: server.address().port, host: "127.0.0.1" }, () => {
+    client.setKeepAlive()
+    client.write("go")
+  })
+  client.on('data', (c: Uint8Array) => {
+    console.log(dec.decode(c))
+    client.destroy()
+    server.close()
+  })
+})
+`, "ok")
+}
+
+func TestE2ENetConnectPortOnly(t *testing.T) {
+	// `net.connect(port)` — host defaults to localhost; the shape Node code
+	// uses with server.address().port. Full echo round trip against an
+	// in-process net server, closing cleanly from the data handler.
+	assertOutputImports(t, `
+import net from 'net'
+const server = net.createServer((socket) => {
+  socket.on('data', (c: string) => { socket.write("e:" + c); socket.end() })
+})
+server.listen(0, () => {
+  const sock = net.connect(server.address().port)
+  sock.on('data', (c: string) => { console.log("got", c); server.close() })
+  sock.write("hi")
+})
+`, "got e:hi")
+}
+
+func TestE2EDgramSocketAddress(t *testing.T) {
+	// dgram socket.address() — getsockname on the bound fd, the bind(0)
+	// ephemeral-port idiom.
+	assertOutputImports(t, `
+import dgram from 'dgram'
+const sock = dgram.createSocket('udp4')
+sock.bind(0, () => {
+  const port: number = sock.address().port
+  if (port > 0) { console.log("dgram port ok") }
+  sock.close()
+})
+`, "dgram port ok")
+}

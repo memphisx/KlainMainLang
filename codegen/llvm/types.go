@@ -186,6 +186,17 @@ type Type struct {
 	// dispatched method it has; every other property is a plain field read
 	// via the existing object machinery, same as Response/URL.
 	IsRequest bool
+	// IsServerResponse marks Node's `http.createServer((req, res) => …)` `res`
+	// object (TDD-00131): an ordinary heap object whose fields are exactly the
+	// {status, body, headers} the existing http dispatcher reads, plus this flag
+	// so method-call dispatch recognizes `res.writeHead`/`setHeader`/`write`/
+	// `end` and the `res.statusCode =` assignment, translating them to mutations
+	// of those fields. The dispatcher then reads the accumulated response off it
+	// exactly as it reads a bespoke handler's returned object.
+	IsServerResponse bool
+
+	// IsIncomingMessage marks Node's http client response object (TDD-00138).
+	IsIncomingMessage bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -262,6 +273,15 @@ type Type struct {
 	// way HasVTable propagates across an inheritance tree. See
 	// ClassEventEmitterField and registerClasses.
 	HasEventEmitter bool
+
+	// HasNodeStream marks a class that `extends Readable/Writable/Duplex/
+	// Transform` (TDD-00132) — its instances carry a hidden Node-stream
+	// handle field (ClassNodeStreamField), positioned right after the tag
+	// (and vtable pointer, if present). The readable-vs-writable split and
+	// the chunk/out element types live on the class's ClassInfo, not here —
+	// this flag only governs the hidden field's presence and VisibleFields'
+	// skip count.
+	HasNodeStream bool
 	// IsArrayBuffer marks `new ArrayBuffer(byteLength)`: a fixed-length,
 	// zero-initialized raw byte buffer. Deliberately not IsObject — the
 	// runtime value is a ptr to a hidden 2-word heap struct ({i64
@@ -431,6 +451,23 @@ type Type struct {
 	// connection socket (both ptr to runtime_net.go structs), for .listen/
 	// .on/.write/.end/.close dispatch.
 	IsNetServer bool
+	// IsHTTPServer marks a variable-bound http.createServer() handle
+	// (.listen/.close/.closeAllConnections/.address).
+	IsHTTPServer bool
+	// IsH2ServerStream marks the http2 server-side stream object
+	// (.respond/.end/.write/.on('data'|'end'), TDD-00139 Stage 2).
+	IsH2ServerStream bool
+	// IsH2ClientSession / IsH2ClientStream mark the http2 client surface
+	// (http2.connect / session.request, TDD-00139 Stage 3).
+	IsH2ClientSession bool
+	IsH2ClientStream  bool
+	// IsH2Constants marks a binding of the compile-time http2.constants
+	// namespace (TDD-00139 Stage 4).
+	IsH2Constants bool
+	// IsTestContext marks the node:test runner's `t` (TDD-00140).
+	IsTestContext bool
+	// IsDCChannel marks a diagnostics_channel Channel handle.
+	IsDCChannel bool
 	IsNetSocket bool
 	// IsDgramSocket marks a dgram.createSocket() handle (a ptr to
 	// runtime_dgram.go's dgramSocketIR), for .bind/.on('message')/.send/.close.
@@ -1256,6 +1293,17 @@ func StdinType() Type {
 	return ty
 }
 
+// HTTPServerType is an http.createServer() handle bound to a variable (the
+// standard Node idiom, as opposed to the chained
+// `http.createServer(cb).listen(port)` expression): a pointer to a single i64
+// slot holding the listen fd (-1 before .listen()), flag-tagged for
+// .listen/.close/.closeAllConnections/.address.
+func HTTPServerType() Type {
+	ty := ObjectType([]Field{{Name: "__httpsrv", Ty: TypePtr}})
+	ty.IsHTTPServer = true
+	return ty
+}
+
 // NetServerType is a net.createServer() handle: a bare pointer to
 // runtime_net.go's netServerIR, flag-tagged for .listen/.on/.close.
 func NetServerType() Type {
@@ -1388,6 +1436,14 @@ const ClassVTableField = "__kml_vtable"
 // field with this name is a compile-time error.
 const ClassEventEmitterField = "__kml_ee_listeners"
 
+// ClassNodeStreamField is the name of the hidden ptr field a class carries
+// (TDD-00132) when HasNodeStream is set — positioned right after the tag
+// (and vtable pointer, if present; a stream class never also sets
+// HasEventEmitter, since the Node-stream runtime carries its own listener
+// surface). Holds the `nodestream` handle the options-form `new Readable(...)`
+// builds. Reserved the same way ClassTagField/ClassVTableField are.
+const ClassNodeStreamField = "__kml_ns_handle"
+
 // ClassType returns a user-defined class's instance type: an ordinary
 // object type (see IsObject's doc comment on why this is enough for field
 // access, JSON, Object.* etc. to work unmodified) plus IsClass/ClassName so
@@ -1406,14 +1462,17 @@ const ClassEventEmitterField = "__kml_ee_listeners"
 // Callers that enumerate *all* fields for reflection (Object.keys/values/
 // entries, JSON, for...in, spread) must use VisibleFields() instead of
 // Fields directly, or the hidden fields leak out as fake user-visible ones.
-func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter bool) Type {
-	tagged := make([]Field, 0, 3+len(inherited)+len(own))
+func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventEmitter, hasNodeStream bool) Type {
+	tagged := make([]Field, 0, 4+len(inherited)+len(own))
 	tagged = append(tagged, Field{Name: ClassTagField, Ty: TypeI64})
 	if hasVTable {
 		tagged = append(tagged, Field{Name: ClassVTableField, Ty: TypePtr})
 	}
 	if hasEventEmitter {
 		tagged = append(tagged, Field{Name: ClassEventEmitterField, Ty: TypePtr})
+	}
+	if hasNodeStream {
+		tagged = append(tagged, Field{Name: ClassNodeStreamField, Ty: TypePtr})
 	}
 	tagged = append(tagged, inherited...)
 	tagged = append(tagged, own...)
@@ -1422,6 +1481,7 @@ func ClassType(name string, inherited []Field, own []Field, hasVTable, hasEventE
 	ty.ClassName = name
 	ty.HasVTable = hasVTable
 	ty.HasEventEmitter = hasEventEmitter
+	ty.HasNodeStream = hasNodeStream
 	return ty
 }
 
@@ -1447,6 +1507,9 @@ func (t Type) VisibleFields() []Field {
 			skip++
 		}
 		if t.HasEventEmitter {
+			skip++
+		}
+		if t.HasNodeStream {
 			skip++
 		}
 		fields = fields[skip:]
@@ -1505,6 +1568,91 @@ func (t Type) VisibleFields() []Field {
 // embedded null byte) — an implementation-only field feeding .bodyBytes(),
 // the same "hidden field backing a binary accessor" shape ResponseType's own
 // bodyLength already uses for Response.arrayBuffer(). See emit_http.go.
+// ServerResponseType is Node's `http.createServer` `res` object (TDD-00131).
+// Its fields are exactly what the existing http dispatcher reads off a bespoke
+// handler's returned object — status/body/headers — so once `res.writeHead`/
+// `end`/etc. have mutated them, the same response-writing path applies. status
+// is an integer (the HTTP status code); body accumulates written chunks.
+func ServerResponseType() Type {
+	ty := ObjectType([]Field{
+		{Name: "status", Ty: TypeI64},
+		{Name: "body", Ty: TypePtr},
+		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
+	})
+	ty.IsServerResponse = true
+	return ty
+}
+
+// Http2ServerStreamType is the server-side Http2Stream (TDD-00139 Stage 2)
+// handed to `server.on('stream', (stream, headers) => …)`. Its first three
+// fields deliberately mirror ServerResponseType — status/body/headers are what
+// the shared response-writing tail reads after the handler returns — with the
+// request body appended so `stream.on('data')` can deliver it.
+func Http2ServerStreamType() Type {
+	ty := ObjectType([]Field{
+		{Name: "status", Ty: TypeI64},
+		{Name: "body", Ty: TypePtr},
+		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
+		{Name: "reqBody", Ty: TypePtr},
+		{Name: "reqBodyLen", Ty: TypeI64},
+	})
+	ty.IsH2ServerStream = true
+	return ty
+}
+
+// DiagChannelType is a diagnostics_channel Channel handle: a pointer to the
+// runtime channel record (runtime_diagch.go's layout).
+func DiagChannelType() Type {
+	ty := ObjectType([]Field{{Name: "__dcchan", Ty: TypePtr}})
+	ty.IsDCChannel = true
+	return ty
+}
+
+// TestContextType is the node:test runner's `t` (TDD-00140): a pointer to
+// the per-test record {aftersRoot, aftersN, aftersCap, skipped, todo}.
+func TestContextType() Type {
+	ty := ObjectType([]Field{{Name: "__testctx", Ty: TypePtr}})
+	ty.IsTestContext = true
+	return ty
+}
+
+// Http2ClientSessionType is a ClientHttp2Session handle from http2.connect
+// (TDD-00139 Stage 3): one pointer slot holding the C driver session.
+func Http2ClientSessionType() Type {
+	ty := ObjectType([]Field{{Name: "__h2sess", Ty: TypePtr}})
+	ty.IsH2ClientSession = true
+	return ty
+}
+
+// Http2ClientStreamType is a ClientHttp2Stream from session.request: the
+// 32-byte callback context the driver's response frames fire into
+// (cbResponse/cbData/cbEnd/headersMap — see ensureH2ClientRuntime).
+func Http2ClientStreamType() Type {
+	ty := ObjectType([]Field{{Name: "__h2creq", Ty: TypePtr}})
+	ty.IsH2ClientStream = true
+	return ty
+}
+
+// IncomingMessageType is Node's `http.get`/`http.request` response object
+// (TDD-00138) handed to the callback: `res.statusCode`, `res.on('data'|'end')`,
+// with the buffered body + listener slots hidden behind the event surface.
+func IncomingMessageType() Type {
+	ty := ObjectType([]Field{
+		{Name: "statusCode", Ty: TypeF64},
+		{Name: incomingBodyField, Ty: TypePtr},
+		{Name: incomingDataListenerField, Ty: TypePtr},
+		{Name: incomingEndListenerField, Ty: TypePtr},
+	})
+	ty.IsIncomingMessage = true
+	return ty
+}
+
+const (
+	incomingBodyField         = "__kml_im_body"
+	incomingDataListenerField = "__kml_im_data"
+	incomingEndListenerField  = "__kml_im_end"
+)
+
 func RequestType() Type {
 	ty := ObjectType([]Field{
 		{Name: "method", Ty: TypePtr},
@@ -1893,8 +2041,26 @@ func ResolveTypeName(name string) Type {
 		return TypeDate
 	case "Response":
 		return ResponseType()
-	case "HttpRequest":
+	case "HttpRequest", "IncomingMessage":
 		return RequestType()
+	case "__kml_test_ctx":
+		// Internal-only: the node:test runner's TestContext parameter.
+		return TestContextType()
+	case "__kml_h2_stream":
+		// Internal-only: synthesized for the http2 stream handler's first param.
+		return Http2ServerStreamType()
+	case "__kml_h2_headers":
+		// Internal-only: the http2 stream handler's headers map.
+		return MapType(TypePtr, TypePtr)
+	case "__kml_client_response":
+		// Internal-only name synthesized by contextTypeArrowParams for the
+		// http client's response callback — Node calls both the server request
+		// and the client response `IncomingMessage`, but this compiler models
+		// them as distinct types and the public annotation name is taken by
+		// the server side above. Never written by user code.
+		return IncomingMessageType()
+	case "ServerResponse":
+		return ServerResponseType()
 	case "Request":
 		return FetchRequestType()
 	case "Headers":

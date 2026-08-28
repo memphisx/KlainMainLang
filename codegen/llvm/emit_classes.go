@@ -118,6 +118,18 @@ type ClassInfo struct {
 	HasEventEmitter     bool
 	EventEmitterPayload Type
 
+	// HasNodeReadable/HasNodeWritable (TDD-00132) are set for a class that
+	// `extends Readable/Writable/Duplex/Transform` — Duplex/Transform set
+	// both. The class's instances carry a hidden Node-stream handle
+	// (ClassNodeStreamField, HasNodeStream on Ty). StreamOutTy is the
+	// readable-side element type (Readable<T>), StreamInTy the writable-side
+	// chunk type (Writable<T>); both default to i64. These flags propagate
+	// to every descendant, mirroring HasEventEmitter.
+	HasNodeReadable bool
+	HasNodeWritable bool
+	StreamOutTy     Type
+	StreamInTy      Type
+
 	// --- TDD-00009 Stage 4 ---
 
 	// IsAbstract marks an `abstract class` — cannot be directly
@@ -545,8 +557,23 @@ func (e *Emitter) registerClassNamePlaceholders(prog *ast.Program) {
 		if !ok || len(cd.TypeParams) > 0 {
 			continue
 		}
-		e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
+		e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false, false)
 	}
+}
+
+// nodeStreamRootKind reports whether base is one of Node's synthetic stream
+// root classes (TDD-00132) and, if so, which side(s) a subclass gets:
+// Readable → readable, Writable → writable, Duplex/Transform → both.
+func nodeStreamRootKind(base string) (readable, writable, ok bool) {
+	switch base {
+	case "Readable":
+		return true, false, true
+	case "Writable":
+		return false, true, true
+	case "Duplex", "Transform":
+		return true, true, true
+	}
+	return false, false, false
 }
 
 func (e *Emitter) registerClasses(prog *ast.Program) error {
@@ -590,7 +617,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// Placeholder: correct IR/IsObject/IsClass/ClassName, no fields
 			// yet — see canonicalizeClassTy's doc comment for why this must
 			// exist before any field/param/return type is resolved.
-			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false)
+			e.interfaces[cd.Name] = ClassType(cd.Name, nil, nil, false, false, false)
 		}
 	}
 
@@ -608,7 +635,16 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			return nil
 		}
 		visitState[name] = 1
-		if cd.BaseClass == "EventEmitter" {
+		if _, _, isStreamRoot := nodeStreamRootKind(cd.BaseClass); isStreamRoot {
+			// A synthetic stream root (TDD-00132): Readable/Writable/Duplex/
+			// Transform are never registered classes (mirroring EventEmitter
+			// in Pass 0), so there is nothing in classDeclByName to recurse
+			// into. An optional single type argument (Readable<T>) is allowed;
+			// more than one is rejected in Pass 1.
+			if len(cd.BaseTypeArgs) > 1 {
+				return fmt.Errorf("%d:%d: class '%s' extends %s with %d type arguments, expected at most 1", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass, len(cd.BaseTypeArgs))
+			}
+		} else if cd.BaseClass == "EventEmitter" {
 			// A synthetic root (TDD-00023): EventEmitter is never itself a
 			// registered class (no vtable slot, no TagID, not
 			// instanceof-checkable — same as Error/Date/Map), so there is
@@ -651,11 +687,40 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// exactly the same "root class" rules below as one with no base at
 		// all.
 		isEEDirect := cd.BaseClass == "EventEmitter"
-		haveBase := cd.BaseClass != "" && !isEEDirect
+		rootReadable, rootWritable, isStreamRoot := nodeStreamRootKind(cd.BaseClass)
+		if isStreamRoot && (cd.BaseClass == "Duplex" || cd.BaseClass == "Transform") {
+			return fmt.Errorf("%d:%d: class '%s' extends %s — Duplex/Transform subclassing is not yet supported (Readable and Writable are)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, cd.BaseClass)
+		}
+		haveBase := cd.BaseClass != "" && !isEEDirect && !isStreamRoot
 		if haveBase {
 			baseInfo = e.classes[cd.BaseClass]
 		}
 		hasEventEmitter := isEEDirect || (haveBase && baseInfo.HasEventEmitter)
+
+		// Node-stream synthetic roots (TDD-00132): a class `extends Readable/
+		// Writable/Duplex/Transform` (or a descendant of one) carries the
+		// readable/writable flags and the readable-out / writable-in element
+		// types. An optional `<T>` type argument names the readable-out type
+		// for Readable/Transform, else the writable-in type for Writable.
+		hasNodeReadable := (isStreamRoot && rootReadable) || (haveBase && baseInfo.HasNodeReadable)
+		hasNodeWritable := (isStreamRoot && rootWritable) || (haveBase && baseInfo.HasNodeWritable)
+		streamOutTy := TypeI64
+		streamInTy := TypeI64
+		switch {
+		case isStreamRoot:
+			if len(cd.BaseTypeArgs) == 1 {
+				argTy := e.resolveType(cd.BaseTypeArgs[0])
+				if rootReadable {
+					streamOutTy = argTy
+				} else {
+					streamInTy = argTy
+				}
+			}
+		case haveBase && (baseInfo.HasNodeReadable || baseInfo.HasNodeWritable):
+			streamOutTy = baseInfo.StreamOutTy
+			streamInTy = baseInfo.StreamInTy
+		}
+		hasNodeStream := hasNodeReadable || hasNodeWritable
 		var eePayload Type
 		switch {
 		case isEEDirect:
@@ -699,6 +764,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			}
 			if f.Name == ClassEventEmitterField {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal EventEmitter listener map", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassEventEmitterField)
+			}
+			if f.Name == ClassNodeStreamField {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal Node-stream handle", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassNodeStreamField)
 			}
 			if f.Static {
 				// A static field's initializer (`static x = expr`) runs in the
@@ -748,7 +816,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// hasEventEmitter, unlike HasVTable, is already fully known by this
 		// point (computed above, not deferred to a later pass), so it's
 		// threaded through here too.
-		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false, hasEventEmitter)
+		provisionalTy := ClassType(cd.Name, inheritedFields, ownFields, false, hasEventEmitter, hasNodeStream)
 		e.interfaces[cd.Name] = provisionalTy
 
 		ancestorChain := append([]string{}, baseInfo.AncestorChain...)
@@ -785,6 +853,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			OwnStaticMethodVisibility: make(map[string]string),
 			HasEventEmitter:           hasEventEmitter,
 			EventEmitterPayload:       eePayload,
+			HasNodeReadable:           hasNodeReadable,
+			HasNodeWritable:           hasNodeWritable,
+			StreamOutTy:               streamOutTy,
+			StreamInTy:                streamInTy,
 		}
 		nextTagID++
 
@@ -820,6 +892,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// "override an EventEmitter method" interaction to support.
 			if !m.IsStatic && hasEventEmitter && isEventEmitterMethodName(m.Name) {
 				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by EventEmitter<T>", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+			}
+			// Node-stream classes (TDD-00132) hand-dispatch on/push/pipe/…
+			// by name (emit_call.go) against the hidden stream handle, never
+			// a real vtable slot — but the `_read`/`_write`/`_transform`
+			// override hooks are ordinary user methods, so they are allowed.
+			if !m.IsStatic && hasNodeStream && isNodeStreamMethodName(m.Name) {
+				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by the Node stream base class", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
 			}
 			sig := e.buildParamSig(m.Params)
 			sig.IsAsync = m.IsAsync
@@ -1070,7 +1149,12 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if baseCtor != nil && !callsSuper {
 				return fmt.Errorf("%d:%d: constructor of class '%s' must call super(...) (base class '%s' has a constructor)", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
 			}
-			if baseCtor == nil && callsSuper {
+			if baseCtor == nil && callsSuper && !isStreamRoot {
+				// A stream-root subclass (TDD-00132) is allowed to call
+				// `super({ highWaterMark, objectMode })`: the options are read
+				// statically and threaded into the hidden stream handle at
+				// construction (streamSuperHWM), and the super() call itself
+				// lowers to a no-op (emitSuperCall).
 				if haveBase {
 					return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but base class '%s' has no constructor", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
 				}
@@ -1236,7 +1320,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 	// site (unchanged since before Stage 3) sees the final shape.
 	for _, name := range topoOrder {
 		info := e.classes[name]
-		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable, info.HasEventEmitter)
+		info.Ty = ClassType(name, info.InheritedFields, info.OwnFields, info.HasVTable, info.HasEventEmitter, info.HasNodeReadable || info.HasNodeWritable)
 		e.classes[name] = info
 		e.interfaces[name] = info.Ty
 	}
@@ -1687,6 +1771,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		eeGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", eeGep, info.Ty.StructIR(), dataReg, classEventEmitterFieldIndex(info.Ty)))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", listenersPtr, eeGep))
+	}
+
+	// Node-stream class (TDD-00132): build the runtime handle and wire the
+	// pull/sink to the `_read`/`_write` override before the user constructor
+	// runs, so a `this.push(...)` in the constructor already has a handle.
+	if info.HasNodeReadable || info.HasNodeWritable {
+		if err := e.emitConstructNodeStreamHandle(info, className, dataReg, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
 
 	if info.Constructor != nil {
@@ -2284,6 +2377,16 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	info, ok := e.classes[thisSym.Ty.ClassName]
 	if !ok || info.BaseClass == "" {
 		return Value{}, fmt.Errorf("%d:%d: super(...) is only valid inside the constructor of a class with a base class", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	// A stream-root subclass's `super({ highWaterMark, objectMode })`
+	// (TDD-00132) is a no-op here: the options were already read statically and
+	// threaded into the hidden stream handle at construction (streamSuperHWM),
+	// and the synthetic root has no constructor to call.
+	if _, _, isStreamRoot := nodeStreamRootKind(info.BaseClass); isStreamRoot {
+		if len(ex.Args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: super(...) on a stream base takes at most one options object", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		return Value{Ty: TypeVoid}, nil
 	}
 	baseInfo := e.classes[info.BaseClass]
 	if baseInfo.Constructor == nil {

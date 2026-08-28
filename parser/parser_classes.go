@@ -104,6 +104,19 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			return nil, err
 		}
 		baseClass = baseTok.Literal
+		// Qualified base: `extends events.EventEmitter` / `extends
+		// stream.Readable` — the namespace-import shape. Like qualified `new`
+		// (parseNew), the qualifier segments are consumed and the final name
+		// is the base; a name registerClasses doesn't know still gets its
+		// usual "extends unknown class" rejection there.
+		for p.check(lexer.DOT) {
+			p.advance() // '.'
+			segTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			baseClass = segTok.Literal
+		}
 		// Generic extends (TDD-00023): `extends EventEmitter<T>` is
 		// currently the only base that accepts a type argument — but the
 		// parse itself is generic (any `extends <Ident><T>` shape), with

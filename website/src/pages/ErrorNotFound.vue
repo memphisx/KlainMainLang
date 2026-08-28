@@ -1,7 +1,7 @@
 <template>
   <div class="km-404 km-on-black">
     <div class="km-wrap km-404__inner">
-      <VerginaSun :size="120" class="km-404__sun" />
+      <MedallionKM :size="120" class="km-404__sun" />
       <h1 class="km-display km-404__code">404</h1>
       <p class="km-404__msg km-mono">This route was never emitted. // Κλάιν Μάιν — I don't care, let's go home.</p>
       <router-link to="/" class="km-btn km-btn--gold">Back to start</router-link>
@@ -10,7 +10,7 @@
 </template>
 
 <script setup>
-import VerginaSun from 'components/brand/VerginaSun.vue'
+import MedallionKM from 'components/brand/MedallionKM.vue'
 </script>
 
 <style scoped>

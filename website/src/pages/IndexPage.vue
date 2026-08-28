@@ -26,7 +26,7 @@
         </div>
 
         <div class="km-hero__art">
-          <VerginaSun :size="340" class="km-hero__sun" />
+          <MedallionKM :size="320" class="km-hero__sun" />
           <div class="km-hero__terminal">
             <CodeBlock :code="terminal" lang="bash" terminal label="shell" />
           </div>
@@ -201,7 +201,7 @@
           <router-link to="/docs" class="km-btn km-btn--ghost">Read the docs</router-link>
         </div>
         <div class="km-origin__flag">
-          <FlagVergina :width="300" />
+          <FoilSun :size="300" />
         </div>
       </div>
     </section>
@@ -224,8 +224,8 @@
 import { ref } from 'vue'
 import CodeBlock from 'components/CodeBlock.vue'
 import Wordmark from 'components/brand/Wordmark.vue'
-import VerginaSun from 'components/brand/VerginaSun.vue'
-import FlagVergina from 'components/brand/FlagVergina.vue'
+import MedallionKM from 'components/brand/MedallionKM.vue'
+import FoilSun from 'components/brand/FoilSun.vue'
 import { samples, terminal, coverage, headline, conformance, GITHUB_URL } from 'src/lib/content.js'
 
 const gh = GITHUB_URL

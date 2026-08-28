@@ -392,8 +392,13 @@ func (e *Emitter) emitProcessLifecycleRuntime() {
 	// handler's own assertions still surface, and a failed mustCall expectation
 	// exits the process non-zero from here.
 	testVerify := ""
+	if e.usedNodeTestRuntime {
+		// The node:test summary runs first (module after() hooks + totals +
+		// nonzero exit on failures, TDD-00140), then the mustCall verifier.
+		testVerify += "  call void @__kml_ntest_summary()\n"
+	}
 	if e.usedTestRuntime {
-		testVerify = "  call void @__kml_test_verify()\n"
+		testVerify += "  call void @__kml_test_verify()\n"
 	}
 	e.emitGlobal(`
 define void @__kml_run_exit_handlers(i64 %code) {
@@ -527,6 +532,58 @@ ok:
 // ensureGetpid declares __kml_getpid: the current process ID via POSIX
 // getpid(), sign-extended from the C int it actually returns to this
 // compiler's i64 number representation.
+// ensureExecPath emits `ptr @__kml_execpath()` returning the absolute,
+// symlink-resolved path of the running executable — what Node's
+// process.execPath guarantees (always absolute), which a raw argv[0] (possibly
+// `./bin` or a bare PATH name) is not. Platform-specific, host-only (this
+// compiler doesn't cross-compile): macOS uses `_NSGetExecutablePath` +
+// `realpath`, Linux reads `/proc/self/exe`.
+func (e *Emitter) ensureExecPath() {
+	if e.usedExecPath {
+		return
+	}
+	e.usedExecPath = true
+	e.ensureMalloc()
+	if runtime.GOOS == "darwin" {
+		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr, ptr)")
+		e.emitGlobal("declare ptr @realpath(ptr, ptr)")
+		e.emitGlobal(`
+define ptr @__kml_execpath() {
+entry:
+  %sizep = alloca i32
+  store i32 4096, ptr %sizep
+  %buf = call ptr @malloc(i64 4096)
+  %rc = call i32 @_NSGetExecutablePath(ptr %buf, ptr %sizep)
+  %res = call ptr @realpath(ptr %buf, ptr null)
+  %isnull = icmp eq ptr %res, null
+  br i1 %isnull, label %fallback, label %ok
+fallback:
+  ret ptr %buf
+ok:
+  ret ptr %res
+}`)
+		return
+	}
+	// Linux and other /proc-bearing systems.
+	e.emitGlobal(`@__kml_procself_exe = private unnamed_addr constant [15 x i8] c"/proc/self/exe\00"`)
+	e.emitGlobal("declare i64 @readlink(ptr, ptr, i64)")
+	e.emitGlobal(`
+define ptr @__kml_execpath() {
+entry:
+  %buf = call ptr @malloc(i64 4097)
+  %n = call i64 @readlink(ptr @__kml_procself_exe, ptr %buf, i64 4096)
+  %neg = icmp slt i64 %n, 0
+  br i1 %neg, label %fail, label %ok
+ok:
+  %endp = getelementptr i8, ptr %buf, i64 %n
+  store i8 0, ptr %endp
+  ret ptr %buf
+fail:
+  store i8 0, ptr %buf
+  ret ptr %buf
+}`)
+}
+
 func (e *Emitter) ensureGetpid() {
 	if e.usedGetpid {
 		return

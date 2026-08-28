@@ -24,6 +24,34 @@ func parseTrailingArrayBrackets(p *Parser, source string, ta *ast.TypeAnnotation
 // an outer conditional-type level (`T extends U ? X : Y`, TDD-00079 Stage 3):
 // the check and extends operands are union-level, while the two branches are
 // full annotations (so conditionals nest right-associatively).
+// parseIndexSignature parses a string index signature `[ name : string ] : V`
+// (TDD-00130), positioned at the opening `[`, and returns the value type V. Only
+// a `string` key is supported in V1; a numeric or other key is a clean
+// rejection. The key name is documentation-only.
+func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error) {
+	p.advance() // consume '['
+	if _, err := p.expect(lexer.IDENT); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+	keyTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	if keyTok.Literal != "string" {
+		return nil, fmt.Errorf("%d:%d: only a string index signature `[k: string]: T` is supported (a `%s` key is not yet supported)", keyTok.Line, keyTok.Col, keyTok.Literal)
+	}
+	if _, err := p.expect(lexer.RBRACKET); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+	return p.parseTypeAnnotation(source)
+}
+
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
 	left, err := p.parseUnionType(source)
 	if err != nil {
@@ -209,7 +237,20 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		p.advance() // consume '('
 		var funcParams []ast.TypeAnnotation
 		singleUnnamed := true
+		hasRest := false
 		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			// Optional leading `...` rest marker: `(...xs: T[]) => R` or
+			// `(a: T, ...xs: U[]) => R`. Only the final parameter may be rest.
+			if p.check(lexer.ELLIPSIS) {
+				if hasRest {
+					return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a function type", p.peek().Line, p.peek().Col)
+				}
+				p.advance() // consume '...'
+				hasRest = true
+				singleUnnamed = false
+			} else if hasRest {
+				return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a function type", p.peek().Line, p.peek().Col)
+			}
 			// Optional param name (for documentation only)
 			if p.check(lexer.IDENT) && p.peekNth(1).Type == lexer.COLON {
 				p.advance() // name
@@ -242,7 +283,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			p.advance() // consume '=>' tentatively
 			retType, err := p.parseTypeAnnotation(source)
 			if err == nil {
-				ta := &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType}
+				ta := &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType, FuncHasRest: hasRest}
 				return parseTrailingArrayBrackets(p, source, ta)
 			}
 			if len(funcParams) == 1 && singleUnnamed {
@@ -309,7 +350,20 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		}
 
 		var fields []ast.AnnotField
+		var indexSig *ast.TypeAnnotation
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+			if p.check(lexer.LBRACKET) {
+				valTy, err := p.parseIndexSignature(source)
+				if err != nil {
+					return nil, err
+				}
+				if indexSig != nil {
+					return nil, fmt.Errorf("%d:%d: at most one index signature is supported per object type", tok.Line, tok.Col)
+				}
+				indexSig = valTy
+				p.match(lexer.SEMICOLON, lexer.COMMA)
+				continue
+			}
 			nameTok, err := p.expect(lexer.IDENT)
 			if err != nil {
 				return nil, err
@@ -327,7 +381,10 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		if _, err := p.expect(lexer.RBRACE); err != nil {
 			return nil, err
 		}
-		ta := &ast.TypeAnnotation{Source: source, Fields: fields}
+		if indexSig != nil && len(fields) > 0 {
+			return nil, fmt.Errorf("%d:%d: combining named properties with an index signature is not yet supported — use an index signature alone", tok.Line, tok.Col)
+		}
+		ta := &ast.TypeAnnotation{Source: source, Fields: fields, IndexSig: indexSig}
 		return parseTrailingArrayBrackets(p, source, ta)
 	}
 
@@ -354,6 +411,25 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			return nil, fmt.Errorf("%d:%d: an empty tuple type '[]' is not supported", tok.Line, tok.Col)
 		}
 		ta := &ast.TypeAnnotation{Source: source, TupleElems: elems}
+		return parseTrailingArrayBrackets(p, source, ta)
+	}
+
+	// `typeof value` type query — resolves to the referenced value's type.
+	if tok.Type == lexer.TYPEOF {
+		p.advance() // consume 'typeof'
+		baseTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		ta := &ast.TypeAnnotation{Source: source, IsTypeof: true, TypeofName: baseTok.Literal}
+		for p.check(lexer.DOT) {
+			p.advance() // consume '.'
+			seg, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			ta.TypeofPath = append(ta.TypeofPath, seg.Literal)
+		}
 		return parseTrailingArrayBrackets(p, source, ta)
 	}
 
@@ -494,8 +570,21 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	}
 	var fields []ast.AnnotField
 	var methods []ast.InterfaceMethodSig
+	var indexSig *ast.TypeAnnotation
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
+		if p.check(lexer.LBRACKET) {
+			valTy, err := p.parseIndexSignature("ts")
+			if err != nil {
+				return nil, err
+			}
+			if indexSig != nil {
+				return nil, fmt.Errorf("%d:%d: at most one index signature is supported per interface", nameTok.Line, nameTok.Col)
+			}
+			indexSig = valTy
+			p.match(lexer.SEMICOLON, lexer.COMMA)
+			continue
+		}
 		fieldTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
@@ -549,9 +638,13 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
+	if indexSig != nil && len(fields) > 0 {
+		return nil, fmt.Errorf("%d:%d: combining named properties with an index signature is not yet supported — use an index signature alone", nameTok.Line, nameTok.Col)
+	}
 	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
+	decl.IndexSig = indexSig
 	return decl, nil
 }
 

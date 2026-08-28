@@ -1,6 +1,10 @@
 package resolver
 
-import "KlainMainLang/ast"
+import (
+	"strings"
+
+	"KlainMainLang/ast"
+)
 
 // TDD-00049 Stage 1: a fixed table of "virtual" built-in module specifiers —
 // never a real file on disk, unlike every other import source this
@@ -41,6 +45,22 @@ var virtualBuiltinMarkers = map[string]string{
 	"dgram":         "dgram__kml_builtin",
 	"assert":        "assert__kml_builtin",
 	"http":          "http__kml_builtin",
+	// https shares the libcurl-backed client (get/request speak TLS for free);
+	// https.createServer is a clean codegen rejection until the http accept
+	// loop is TLS-wrapped.
+	"https":      "https__kml_builtin",
+	"stream/web": "streamweb__kml_builtin",
+	// TDD-00139 Stage 1: the explicit http2 module. createServer shares the
+	// http server core (which already speaks h2c on the same port); the
+	// client/session surface arrives in later stages.
+	"http2": "http2__kml_builtin",
+	"diagnostics_channel": "diagch__kml_builtin",
+	// TDD-00131: the `klain:` namespace holds this project's own bespoke
+	// re-imaginings, distinct from the Node-faithful module names. `klain:http`
+	// is the current `http.listen(handler ⇒ response)` server model, which is
+	// NOT Node's `http.createServer` shape — kept intentionally, on the same
+	// runtime, under an explicitly-non-Node specifier.
+	"klain:http":    "http__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -105,9 +125,9 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"deflateRaw": true, "inflateRaw": true,
 		"unzip": true,
 	},
-	"child_process": {"spawn": true, "exec": true, "execFile": true},
+	"child_process": {"spawn": true, "exec": true, "execFile": true, "spawnSync": true, "execSync": true, "execFileSync": true},
 	"readline":      {"createInterface": true},
-	"net":           {"createServer": true, "connect": true, "createConnection": true},
+	"net":           {"createServer": true, "connect": true, "createConnection": true, "isIP": true, "isIPv4": true, "isIPv6": true},
 	"tls":           {"connect": true, "createServer": true},
 	"util":          {"inspect": true, "format": true},
 	"dns":           {"lookup": true, "resolve4": true, "resolve": true},
@@ -116,15 +136,32 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"ok": true, "equal": true, "strictEqual": true, "notEqual": true,
 		"notStrictEqual": true, "fail": true, "throws": true,
 	},
-	"http":    {"listen": true, "close": true},
-	"cluster": {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
+	"http":       {"listen": true, "close": true, "get": true, "request": true, "createServer": true, "closeAllConnections": true},
+	"klain:http": {"listen": true, "close": true, "closeAllConnections": true},
+	"cluster":    {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {
 		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
 	},
+	"https": {"get": true, "request": true},
+	"diagnostics_channel": {"channel": true, "subscribe": true, "unsubscribe": true, "hasSubscribers": true, "tracingChannel": true},
+	"http2": {
+		"createServer": true, "createSecureServer": true, "connect": true,
+		"constants": true, "getDefaultSettings": true,
+		"getPackedSettings": true, "getUnpackedSettings": true,
+	},
+	// stream/web re-exports the WHATWG stream classes that already exist as
+	// parse-time constructors — the names bind as identity, like stream's.
+	"stream/web": {
+		"ReadableStream": true, "WritableStream": true, "TransformStream": true,
+		"CompressionStream": true, "DecompressionStream": true,
+	},
 	"stream/promises": {"pipeline": true, "finished": true},
 	"worker_threads":  {"Worker": true, "parentPort": true, "workerData": true},
 	"test": {
+		// node:test runner surface (TDD-00140)
+		"test": true, "it": true, "describe": true, "suite": true,
+		"before": true, "after": true, "beforeEach": true, "afterEach": true,
 		// call helpers
 		"mustCall": true, "mustCallAtLeast": true, "mustNotCall": true,
 		"mustSucceed": true, "skip": true, "expectsError": true, "expectWarning": true,
@@ -149,4 +186,24 @@ func virtualImportLocal(imp *ast.ImportDeclaration) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// Node supports the `node:`-prefixed form of every core-module specifier
+// (`import test from 'node:test'`); alias each Node-named virtual module
+// under that prefix so both spellings resolve. The project-specific
+// specifiers (`klain:*`, `memory`, `test`'s bare-name alias stays too) are
+// deliberately not double-registered beyond this mechanical prefixing.
+func init() {
+	for name, marker := range virtualBuiltinMarkers {
+		if strings.HasPrefix(name, "klain:") || strings.HasPrefix(name, "node:") {
+			continue
+		}
+		virtualBuiltinMarkers["node:"+name] = marker
+	}
+	for name, members := range virtualModuleMembers {
+		if strings.HasPrefix(name, "klain:") || strings.HasPrefix(name, "node:") {
+			continue
+		}
+		virtualModuleMembers["node:"+name] = members
+	}
 }

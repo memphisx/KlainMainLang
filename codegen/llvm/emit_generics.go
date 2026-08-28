@@ -428,7 +428,7 @@ func (e *Emitter) genericClassInstanceType(decl *ast.ClassDeclaration, subs map[
 	if err != nil {
 		return Type{}, err
 	}
-	return ClassType(mangled, nil, ownFields, false, false), nil
+	return ClassType(mangled, nil, ownFields, false, false, false), nil
 }
 
 // instantiateGenericClass builds and emits (on first use) a full,
@@ -447,7 +447,7 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	if _, ok := e.classes[mangled]; ok {
 		return mangled, nil
 	}
-	ty := ClassType(mangled, nil, ownFields, false, false)
+	ty := ClassType(mangled, nil, ownFields, false, false, false)
 	e.interfaces[mangled] = ty
 
 	info := ClassInfo{

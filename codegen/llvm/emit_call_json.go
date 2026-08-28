@@ -214,6 +214,15 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		return e.emitJSONStringifyArray(args[0], pos, ind)
 	}
 
+	// A map-backed dynamic object (a computed-key literal or a string
+	// index-signature dict, TDD-00012/TDD-00130) has no fixed field table to
+	// walk; serializing it needs a map-iteration path not yet built. Reject
+	// cleanly rather than emit an empty string — iterate `Object.keys(d)` and
+	// build the JSON by hand for now.
+	if argTy.IsDynamicObject || argTy.IsMap {
+		return Value{}, fmt.Errorf("%d:%d: JSON.stringify of an index-signature / dynamic-key object is not yet supported — build it from Object.keys(...) for now", pos.Line, pos.Col)
+	}
+
 	val, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err

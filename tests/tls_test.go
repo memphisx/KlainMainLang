@@ -148,3 +148,38 @@ try {
 `
 	assertOutputImports(t, src, "refused")
 }
+
+// TestE2ETLSCreateServerOptionsVariable: the options bound to a const first
+// (`const opts = { cert, key }; tls.createServer(opts)`) — the shape Node
+// tests use — reads cert/key off the object value instead of requiring a
+// literal at the call site.
+func TestE2ETLSCreateServerOptionsVariable(t *testing.T) {
+	certLit, keyLit := genSelfSignedPEM(t)
+	src := fmt.Sprintf(`
+import tls from 'tls'
+const opts = { cert: "%s", key: "%s" }
+const server = tls.createServer(opts, (socket) => {
+  socket.on('data', (chunk: string) => { socket.write("v:" + chunk) })
+})
+server.listen(8982, () => {})
+`, certLit, keyLit)
+	startHTTPServer(t, src, 8982)
+
+	conn, err := tls.Dial("tcp", "127.0.0.1:8982", &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("tls dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ok")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got, want := string(buf[:n]), "v:ok"; got != want {
+		t.Errorf("echo: got %q, want %q", got, want)
+	}
+}

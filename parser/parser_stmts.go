@@ -7,6 +7,60 @@ import (
 	"fmt"
 )
 
+// parseAmbientDeclaration parses a `declare ...` ambient declaration and erases
+// it to an empty statement. TypeScript ambient declarations describe types the
+// surrounding environment provides — they carry no implementation — so this
+// compiler emits no storage or code for them; a runtime *use* of a declared
+// binding this compiler doesn't itself provide then surfaces as an ordinary
+// undefined-variable error. The value is unblocking whole `.d.ts`-style files
+// (ambient `const`/`function` signatures, `declare global`/`module`/`namespace`
+// blocks) that previously failed to parse. The tokens are consumed by balance:
+// a brace-bodied form is its `{ … }` block; a valueless `const`/`let`/`var` or
+// a bodiless `function`/`type` ends at a `;` or a line break (ASI).
+func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
+	pos := posOf(p.peek())
+	p.advance() // consume 'declare'
+	startLine := p.peek().Line
+	depth := 0
+	sawBrace := false
+	for !p.check(lexer.EOF) {
+		t := p.peek()
+		switch t.Type {
+		case lexer.LBRACE:
+			depth++
+			sawBrace = true
+			p.advance()
+			continue
+		case lexer.RBRACE:
+			if depth > 0 {
+				depth--
+				p.advance()
+				if depth == 0 && sawBrace {
+					return ast.NewBlockStatement(nil, pos), nil
+				}
+				continue
+			}
+			// A depth-0 '}' belongs to an enclosing block — stop before it.
+			return ast.NewBlockStatement(nil, pos), nil
+		case lexer.SEMICOLON:
+			if depth == 0 {
+				p.advance()
+				return ast.NewBlockStatement(nil, pos), nil
+			}
+			p.advance()
+			continue
+		}
+		// ASI: a non-brace ambient declaration ends at the next line break, once
+		// we're outside any brace body (guard against a body brace opening on its
+		// own line by not stopping on a leading '{').
+		if depth == 0 && !sawBrace && t.Line > startLine && t.Type != lexer.LBRACE {
+			return ast.NewBlockStatement(nil, pos), nil
+		}
+		p.advance()
+	}
+	return ast.NewBlockStatement(nil, pos), nil
+}
+
 func (p *Parser) parseStatement() (ast.Statement, error) {
 	switch p.peek().Type {
 	case lexer.LET, lexer.CONST, lexer.VAR:
@@ -93,6 +147,8 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 			if p.peekNth(1).Type == lexer.IDENT {
 				return p.parseNamespaceDecl()
 			}
+		case "declare":
+			return p.parseAmbientDeclaration()
 		case "debugger":
 			// `debugger;` — a no-op in AOT-compiled native output (there is no
 			// attached inspector to break into), so parse and erase it to an

@@ -47,7 +47,7 @@ func (e *Emitter) ensureDgramRuntime() {
 	e.emitGlobal("declare i64 @recvfrom(i32 noundef, ptr noundef, i64 noundef, i32 noundef, ptr noundef, ptr noundef)")
 	// @inet_pton is declared by the WebSocket-client runtime, which
 	// ensureHTTPRuntime (called above) always pulls in — don't redeclare it.
-	e.emitGlobal("declare i16 @ntohs(i16 noundef)")
+	e.ensureNtohs()
 
 	e.emitGlobal("@__kml_dgram_data = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_dgram_len = internal global i64 0, align 8")

@@ -638,6 +638,7 @@ func (e *Emitter) ensureHTTPRuntime() {
 	e.usedHTTP = true
 	e.ensureTimerRuntime()
 	e.ensureFiberRuntime()
+	e.ensureHTTPClientReactions() // defines __kml_httpc_fire_ready, called by the loop below
 	// __kml_event_loop_run below unconditionally references
 	// @__kml_curl_multi/curl_multi_fdset/curl_multi_perform/
 	// __kml_curl_drain_messages (its own "does curl have work to do"
@@ -1656,6 +1657,7 @@ afterselectok:
 docurlperform:
   call i32 @curl_multi_perform(ptr %curlmulti, ptr %runningp2)
   call void @__kml_curl_drain_messages()
+  call void @__kml_httpc_fire_ready()
   br label %checkes
 
 checkes:

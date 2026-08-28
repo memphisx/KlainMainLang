@@ -961,3 +961,117 @@ await finished(r);
 console.log("pulled", n, "times");
 `, "v 10\nv 20\nv 30\npulled 4 times")
 }
+
+// TDD-00132 Stage A/B: Node streams as real classes — `class X extends
+// Readable` with a `this`-based `_read()` override, and `class Y extends
+// Writable` with an `_write(chunk, enc, cb)` override.
+func TestE2ENodeStreamQualifiedNewReadable(t *testing.T) {
+	// `new stream.Readable(...)` — the qualified (namespace-import) constructor
+	// form Node code uses everywhere; parses and behaves exactly like the bare
+	// `new Readable(...)`.
+	assertOutputImports(t, `
+import stream from 'stream';
+let n: number = 0;
+const r = new stream.Readable<number>({
+  read: (self) => {
+    n = n + 1;
+    if (n > 2) { self.push(null); } else { self.push(n); }
+  }
+});
+r.on("data", (v) => { console.log("q", v); });
+r.on("end", () => { console.log("qdone"); });
+`, "q 1\nq 2\nqdone")
+}
+
+func TestE2ENodeStreamClassExtendsReadable(t *testing.T) {
+	assertOutputImports(t, `
+import { Readable } from 'stream';
+import { finished } from 'stream/promises';
+class Counter extends Readable<number> {
+  n: number = 0;
+  _read() {
+    this.n = this.n + 1;
+    if (this.n > 3) { this.push(null); } else { this.push(this.n * 10); }
+  }
+}
+const c = new Counter();
+c.on("data", (v) => { console.log("v", v); });
+await finished(c);
+console.log("done", c.n);
+`, "v 10\nv 20\nv 30\ndone 4")
+}
+
+func TestE2ENodeStreamClassExtendsWritable(t *testing.T) {
+	assertOutputImports(t, `
+import { Writable } from 'stream';
+class Collector extends Writable<string> {
+  items: string[] = [];
+  _write(chunk: string, enc: string, cb: () => void) {
+    this.items.push(chunk);
+    cb();
+  }
+}
+const sink = new Collector();
+sink.on("finish", () => { console.log("collected:", sink.items.join(",")); });
+sink.write("alpha");
+sink.write("beta");
+sink.end();
+`, "collected: alpha,beta")
+}
+
+// TDD-00132: `super({ highWaterMark, objectMode })` threading into a stream
+// subclass's hidden handle, plus options-form highWaterMark.
+func TestE2ENodeStreamClassSuperOptions(t *testing.T) {
+	assertOutputImports(t, `
+import { Readable } from 'stream';
+import { finished } from 'stream/promises';
+class Counter extends Readable<string> {
+  n: number = 0;
+  constructor() {
+    super({ highWaterMark: 2, objectMode: true });
+  }
+  _read() {
+    this.n = this.n + 1;
+    if (this.n > 3) { this.push(null); } else { this.push("chunk" + this.n); }
+  }
+}
+const c = new Counter();
+const seen: string[] = [];
+c.on("data", (v) => { seen.push(v); });
+await finished(c);
+console.log("read:", seen.join(","));
+`, "read: chunk1,chunk2,chunk3")
+}
+
+func TestE2ENodeStreamOptionsHighWaterMark(t *testing.T) {
+	assertOutputImports(t, `
+import { Readable } from 'stream';
+import { finished } from 'stream/promises';
+let m = 0;
+const r = new Readable<number>({
+  highWaterMark: 8,
+  read: (self) => { m = m + 1; if (m > 2) { self.push(null); } else { self.push(m); } }
+});
+const seen: number[] = [];
+r.on("data", (v) => { seen.push(v); });
+await finished(r);
+console.log("hwm ok", seen.join(","));
+`, "hwm ok 1,2")
+}
+
+func TestE2ENodeStreamQualifiedExtends(t *testing.T) {
+	// `class X extends stream.Readable<T>` — qualified base through a
+	// namespace import, same treatment as qualified `new` (ADR-00408).
+	assertOutputImports(t, `
+import stream from 'stream';
+class Counter extends stream.Readable<number> {
+  n: number = 0;
+  _read() {
+    this.n = this.n + 1;
+    if (this.n > 2) { this.push(null); } else { this.push(this.n * 5); }
+  }
+}
+const c = new Counter();
+c.on("data", (v) => { console.log("qe", v); });
+`, "qe 5\nqe 10")
+}

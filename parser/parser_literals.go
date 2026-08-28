@@ -168,6 +168,18 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	if nameTok.Type != lexer.IDENT {
 		return nil, fmt.Errorf("%d:%d: expected constructor name after 'new'", nameTok.Line, nameTok.Col)
 	}
+	// Qualified constructor: `new mod.Class(...)` (`new stream.Readable(...)`,
+	// `new http.ClientRequest(...)` — the standard Node namespace-import shape).
+	// Consume the qualifier segments and dispatch on the final class name
+	// through the same switch below, so `new stream.Readable(opts)` behaves
+	// exactly like `new Readable(opts)`. The qualifier is validated only
+	// syntactically; a final name no case matches falls to parseNewGenericBody
+	// and gets codegen's per-class rejection rather than a parse error.
+	for p.peekNth(1).Type == lexer.DOT && p.peekNth(2).Type == lexer.IDENT {
+		p.advance() // qualifier ident
+		p.advance() // '.'
+		nameTok = p.peek()
+	}
 	switch nameTok.Literal {
 	case "Array":
 		return p.parseNewArrayBody(pos)

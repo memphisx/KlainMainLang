@@ -4,7 +4,26 @@
 
 **Coverage**: JSDoc tags 20/22 (~91%) · JSDoc type expressions 14/15 (~93%).
 
-**Strict Coverage**: JSDoc tags 3/22 (~14%) · JSDoc type expressions 3/15 (20%). A row counts toward Strict only when its **Caveats** column is empty.
+**Strict Coverage**: JSDoc tags 3/22 (~14%) · JSDoc type expressions 5/15 (~33%). A row counts toward Strict only when its **Caveats** column is empty.
+
+> **On the low Strict figure — expected, not a backlog.** Most tags that stay
+> out of Strict do so because their Caveats read "accepted and erased, not
+> enforced" (`@readonly`, `@private`/`@protected`/`@public`, `@override`,
+> `@implements`, `@satisfies`, `@enum`). That is deliberate parity: this
+> compiler erases the *inline* TS equivalents (`readonly`, `private`, the
+> `satisfies` operator) without enforcement too, so enforcing only their JSDoc
+> spelling would make the doc-comment form stricter than the real keyword —
+> backwards. These rows are correct as loose ✅; the caveat is an accurate
+> disclosure of a stance, not pending work. The type-carrying tags
+> (`@param`/`@returns`/`@typedef`/`@template`) already do the useful job: they
+> supply a type only where nothing else does, and never override an inline
+> annotation, so stale docs can't corrupt a typed implementation.
+>
+> **Revisited in future.** A pure-JavaScript author may legitimately want JSDoc
+> to *be* the whole type system, enforcement included. The plan is to offer that
+> behind an opt-in compiler flag rather than by default — clearing these caveats
+> only when the user asks, without changing the experience for everyone else.
+> Scoped in [TDD-00126](../tdd/TDD-00126.md).
 
 Format: [Status page format](README.md#status-page-format).
 

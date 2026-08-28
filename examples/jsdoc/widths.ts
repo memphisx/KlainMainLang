@@ -18,6 +18,12 @@ console.log(ratio)                // 0.3333333432674408  (float32 rounding)
 let big = 9007199254740993        // 2**53 + 1
 console.log(big)                  // 9007199254740992  (precision loss, as in JS)
 
+// ...but a JSDoc width fixes it: an int64 literal is parsed straight to a 64-bit
+// integer, so 2**53 + 1 survives exactly — precision plain JS/TS can't express.
+/** @type {int64} */
+let bigExact = 9007199254740993
+console.log(bigExact)             // 9007199254740993  (exact, via int64)
+
 // Sized integers interconvert cleanly with the default float `number`.
 /** @type {int64} */
 let count = 1000000

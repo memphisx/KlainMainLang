@@ -88,34 +88,61 @@ func (e *Emitter) emitTLSCreateServer(args []ast.Expression, pos ast.Pos) (Value
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: tls.createServer takes (options, connectionListener?)", pos.Line, pos.Col)
 	}
-	obj, ok := args[0].(*ast.ObjectLiteral)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: tls.createServer's options must be an object literal with { cert, key }", pos.Line, pos.Col)
-	}
-	var certExpr, keyExpr ast.Expression
-	for _, prop := range obj.Properties {
-		switch prop.Key {
-		case "cert":
-			certExpr = prop.Value
-		case "key":
-			keyExpr = prop.Value
-		default:
-			return Value{}, fmt.Errorf("%d:%d: tls.createServer supports only { cert, key } (not '%s')", pos.Line, pos.Col, prop.Key)
+	var certVal, keyVal Value
+	if obj, ok := args[0].(*ast.ObjectLiteral); ok {
+		var certExpr, keyExpr ast.Expression
+		for _, prop := range obj.Properties {
+			switch prop.Key {
+			case "cert":
+				certExpr = prop.Value
+			case "key":
+				keyExpr = prop.Value
+			default:
+				return Value{}, fmt.Errorf("%d:%d: tls.createServer supports only { cert, key } (not '%s')", pos.Line, pos.Col, prop.Key)
+			}
+		}
+		if certExpr == nil || keyExpr == nil {
+			return Value{}, fmt.Errorf("%d:%d: tls.createServer requires { cert, key } (PEM strings)", pos.Line, pos.Col)
+		}
+		cv, err := e.emitExpr(certExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		certVal = e.coerce(cv, TypePtr)
+		kv, err := e.emitExpr(keyExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		keyVal = e.coerce(kv, TypePtr)
+	} else {
+		// Options bound to a variable (`const opts = { cert, key };
+		// tls.createServer(opts)`) — the binding's static object type carries
+		// the fields; read them off the value.
+		optVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		if !optVal.Ty.IsObject {
+			return Value{}, fmt.Errorf("%d:%d: tls.createServer's options must be an object with { cert, key } (PEM strings)", pos.Line, pos.Col)
+		}
+		load := func(name string) (Value, error) {
+			idx, fty, ok := optVal.Ty.FieldIndex(name)
+			if !ok || fty.IR != "ptr" {
+				return Value{}, fmt.Errorf("%d:%d: tls.createServer's options object must have a '%s: string' field (PEM)", pos.Line, pos.Col, name)
+			}
+			g := e.freshReg()
+			v := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, optVal.Ty.StructIR(), optVal.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, g))
+			return Value{Ref: v, Ty: TypePtr}, nil
+		}
+		if certVal, err = load("cert"); err != nil {
+			return Value{}, err
+		}
+		if keyVal, err = load("key"); err != nil {
+			return Value{}, err
 		}
 	}
-	if certExpr == nil || keyExpr == nil {
-		return Value{}, fmt.Errorf("%d:%d: tls.createServer requires { cert, key } (PEM strings)", pos.Line, pos.Col)
-	}
-	certVal, err := e.emitExpr(certExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	certVal = e.coerce(certVal, TypePtr)
-	keyVal, err := e.emitExpr(keyExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	keyVal = e.coerce(keyVal, TypePtr)
 
 	e.ensureTLSRuntime()
 	ctx := e.freshReg()
@@ -131,7 +158,7 @@ func (e *Emitter) emitTLSCreateServer(args []ast.Expression, pos ast.Pos) (Value
 
 	e.emitLabel(okL)
 	srv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 32)", srv))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", srv, netServerStructSize))
 	// field 0 listenfd = -1 (not yet listening)
 	lfd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", lfd, netServerIR, srv))

@@ -23,6 +23,11 @@ func testHostBool(b bool) string {
 // emitTestModuleCall dispatches test.<method>(...).
 func (e *Emitter) emitTestModuleCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	switch property {
+	case "test", "it", "describe", "suite", "before", "after", "beforeEach", "afterEach":
+		// The node:test runner surface (TDD-00140) shares this module.
+		return e.emitNodeTestRunnerCall(property, args, pos)
+	}
+	switch property {
 	case "skip":
 		return e.emitTestSkip(args, pos)
 	case "mustCall":

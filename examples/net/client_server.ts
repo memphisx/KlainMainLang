@@ -11,8 +11,16 @@ const server = net.createServer((conn) => {
   });
 });
 
-server.listen(9109, () => {
-  const client = net.connect(9109, "127.0.0.1", () => {
+// Address-family helpers (net.isIP → 0/4/6).
+console.log("isIP:", net.isIP("127.0.0.1"), net.isIP("::1"), net.isIP("host"));
+
+// listen(0) lets the OS pick a free port; server.address() reads it back —
+// the idiomatic Node pattern, and collision-free versus a hardcoded port.
+server.listen(0, () => {
+  const port = server.address().port;
+  // net.connect also takes an options object { port, host }.
+  const client = net.connect({ port: port, host: "127.0.0.1" }, () => {
+    client.setNoDelay(true);
     client.write("hello");
   });
   client.on('data', (chunk: Uint8Array) => {

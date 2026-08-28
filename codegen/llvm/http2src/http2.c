@@ -19,6 +19,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
 
 // --- IR-side symbols (emitted by the compiler when UsesHTTP2) ---------------
 // A string-keyed Map<string,string> built with the same runtime the 1.1 path
@@ -33,6 +35,9 @@ extern void *__kml_h2_dispatch(const char *method, const char *path,
 extern int64_t __kml_h2_resp_status(void *resp);
 extern const char *__kml_h2_resp_body(void *resp);
 extern int64_t __kml_h2_resp_bodylen(void *resp);
+extern int64_t __kml_h2_resp_hdr_count(void *resp);
+extern const char *__kml_h2_resp_hdr_name(void *resp, int64_t i);
+extern const char *__kml_h2_resp_hdr_val(void *resp, int64_t i);
 
 // --- per-stream request accumulation ----------------------------------------
 typedef struct {
@@ -58,6 +63,18 @@ static char *dupn(const char *s, size_t n) {
 	memcpy(p, s, n);
 	p[n] = '\0';
 	return p;
+}
+
+/* A length-prefixed string in the IR runtime's layout ([i64 len][bytes][NUL],
+   value pointer = base+8) — required for anything handed to string-typed IR
+   code, whose binary-safe ops read the header at ptr-8. */
+static char *kml_strn(const char *s, size_t n) {
+	char *b = malloc(n + 9);
+	if (!b) return NULL;
+	*(int64_t *)b = (int64_t)n;
+	memcpy(b + 8, s, n);
+	b[8 + n] = '\0';
+	return b + 8;
 }
 
 // --- nghttp2 callbacks ------------------------------------------------------
@@ -93,10 +110,13 @@ static int on_header(nghttp2_session *session, const nghttp2_frame *frame,
 	} else if (namelen > 0 && name[0] == ':') {
 		// other pseudo-headers (:scheme/:authority) — not surfaced to the handler
 	} else {
-		char *k = dupn((const char *)name, namelen);
-		char *v = dupn((const char *)value, valuelen);
+		/* Length-prefixed (IR string layout) and stored as-is — the map does
+		   NOT copy, so both must stay alive for the request (they leak in
+		   manual mode, the standing convention). An earlier free(k) here
+		   left a dangling key that shadowed every real header. */
+		char *k = kml_strn((const char *)name, namelen);
+		char *v = kml_strn((const char *)value, valuelen);
 		if (k && v) __kml_map_str_set(r->headers, k, (int64_t)(intptr_t)v);
-		free(k); // the map interns/copies the key; value is referenced by pointer
 	}
 	return 0;
 }
@@ -172,8 +192,22 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
 
 	char statusbuf[16];
 	snprintf(statusbuf, sizeof(statusbuf), "%lld", (long long)status);
-	nghttp2_nv nva[1];
+	/* :status plus any response headers the handler set (TDD-00139 Stage 2). */
+	int64_t hn = __kml_h2_resp_hdr_count(resp);
+	size_t nvn = (size_t)(1 + (hn > 0 ? hn : 0));
+	nghttp2_nv *nva = calloc(nvn, sizeof(nghttp2_nv));
+	if (!nva) return 0;
 	submit_number_header(&nva[0], ":status", statusbuf);
+	for (int64_t i = 0; i < hn; i++) {
+		const char *hname = __kml_h2_resp_hdr_name(resp, i);
+		const char *hval = __kml_h2_resp_hdr_val(resp, i);
+		if (!hname || !hval) { hname = ""; hval = ""; }
+		nva[1 + i].name = (uint8_t *)hname;
+		nva[1 + i].namelen = strlen(hname);
+		nva[1 + i].value = (uint8_t *)hval;
+		nva[1 + i].valuelen = strlen(hval);
+		nva[1 + i].flags = NGHTTP2_NV_FLAG_NONE;
+	}
 
 	h2_body_src *bsrc = calloc(1, sizeof(h2_body_src));
 	nghttp2_data_provider prov;
@@ -183,11 +217,12 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
 		bsrc->len = (size_t)blen;
 		prov.source.ptr = bsrc;
 		prov.read_callback = body_read_cb;
-		nghttp2_submit_response(session, sid, nva, 1, &prov);
+		nghttp2_submit_response(session, sid, nva, nvn, &prov);
 	} else {
 		free(bsrc);
-		nghttp2_submit_response(session, sid, nva, 1, NULL);
+		nghttp2_submit_response(session, sid, nva, nvn, NULL);
 	}
+	free(nva);
 	return 0;
 }
 
@@ -256,8 +291,33 @@ void __kml_h2_session_feed(void *sess, const void *buf, int64_t len) {
 
 // __kml_h2_session_recv drains readable socket bytes into the session. Returns
 // 0 on success, <0 to close the connection (EOF or protocol error).
+int64_t __kml_h2c_pump_all(void);
+
 int __kml_h2_session_recv(void *sess) {
 	h2_conn *c = (h2_conn *)sess;
+	/* The server drive waits for frames between requests. While in-process
+	   client sessions have open streams (TDD-00139 Stage 3), alternate
+	   pumping them with a short poll instead of blocking outright — loopback
+	   delivery is asynchronous, so a single pump-then-block races the
+	   response bytes and deadlocks a same-process server+client pair. */
+	if (!c->rd) {
+		for (;;) {
+			int64_t act = __kml_h2c_pump_all();
+			struct pollfd pfd;
+			pfd.fd = c->fd;
+			pfd.events = POLLIN;
+			pfd.revents = 0;
+			int pr = poll(&pfd, 1, act > 0 ? 2 : -1);
+			if (pr < 0) {
+				if (errno == EINTR) continue;
+				return -1;
+			}
+			if (pr > 0) break; /* server bytes readable */
+			/* timeout — client work may have produced/consumed frames; loop */
+		}
+	} else {
+		__kml_h2c_pump_all();
+	}
 	uint8_t buf[16384];
 	long n = conn_read(c, buf, sizeof(buf));
 	if (n == 0) return -1; // peer closed
@@ -307,4 +367,247 @@ void __kml_h2_session_del(void *sess) {
 	if (!c) return;
 	nghttp2_session_del(c->session);
 	free(c);
+}
+
+// ===========================================================================
+// HTTP/2 client sessions (TDD-00139 Stage 3) — h2c prior-knowledge only.
+// The IR side registers per-stream callback contexts; frames arriving during
+// a pump fire the __kml_h2c_on_* IR bridge. Request bodies are V1-out (GET-
+// shaped requests: HEADERS with END_STREAM at submit).
+// ===========================================================================
+#include <netdb.h>
+#include <sys/socket.h>
+#include <errno.h>
+
+extern void __kml_h2c_on_header(void *ctx, const char *name, const char *value);
+extern void __kml_h2c_on_response(void *ctx);
+extern void __kml_h2c_on_data(void *ctx, const char *buf, int64_t len);
+extern void __kml_h2c_on_end(void *ctx);
+
+typedef struct h2c_sess {
+	nghttp2_session *session;
+	int fd;
+	int active;     /* open client streams */
+	int want_close; /* close() called: terminate once active==0 */
+	int dead;
+	char authority[256];
+	struct h2c_sess *next;
+} h2c_sess;
+
+static h2c_sess *h2c_list = NULL;
+
+static int h2c_on_header(nghttp2_session *session, const nghttp2_frame *frame,
+                         const uint8_t *name, size_t namelen,
+                         const uint8_t *value, size_t valuelen,
+                         uint8_t flags, void *user_data) {
+	(void)flags; (void)user_data;
+	if (frame->hd.type != NGHTTP2_HEADERS ||
+	    frame->headers.cat != NGHTTP2_HCAT_RESPONSE) {
+		return 0;
+	}
+	void *ctx = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
+	if (!ctx) return 0;
+	char *n = dupn((const char *)name, namelen);
+	char *v = dupn((const char *)value, valuelen);
+	if (n && v) __kml_h2c_on_header(ctx, n, v);
+	free(n);
+	free(v);
+	return 0;
+}
+
+static int h2c_on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame,
+                             void *user_data) {
+	(void)user_data;
+	if (frame->hd.type != NGHTTP2_HEADERS ||
+	    frame->headers.cat != NGHTTP2_HCAT_RESPONSE) {
+		return 0;
+	}
+	void *ctx = nghttp2_session_get_stream_user_data(session, frame->hd.stream_id);
+	if (ctx) __kml_h2c_on_response(ctx);
+	return 0;
+}
+
+static int h2c_on_data_chunk(nghttp2_session *session, uint8_t flags,
+                             int32_t stream_id, const uint8_t *data, size_t len,
+                             void *user_data) {
+	(void)flags; (void)user_data;
+	void *ctx = nghttp2_session_get_stream_user_data(session, stream_id);
+	if (ctx) __kml_h2c_on_data(ctx, (const char *)data, (int64_t)len);
+	return 0;
+}
+
+static int h2c_on_stream_close(nghttp2_session *session, int32_t stream_id,
+                               uint32_t error_code, void *user_data) {
+	(void)error_code;
+	h2c_sess *s = (h2c_sess *)user_data;
+	void *ctx = nghttp2_session_get_stream_user_data(session, stream_id);
+	if (ctx) __kml_h2c_on_end(ctx);
+	if (s && s->active > 0) s->active--;
+	return 0;
+}
+
+// __kml_h2c_connect_url: parse an h2c authority ("http://host:port[/…]"),
+// TCP-connect (blocking), start a client-mode session (preface + SETTINGS
+// sent), register it for pumping. NULL on any failure — including an
+// https:// authority (TLS client sessions are not supported).
+void *__kml_h2c_connect_url(const char *url) {
+	if (!url || strncmp(url, "http://", 7) != 0) return NULL;
+	const char *hostp = url + 7;
+	char host[224];
+	char port[16] = "80";
+	size_t hi = 0;
+	while (*hostp && *hostp != ':' && *hostp != '/' && hi < sizeof(host) - 1) {
+		host[hi++] = *hostp++;
+	}
+	host[hi] = '\0';
+	if (*hostp == ':') {
+		hostp++;
+		size_t pi = 0;
+		while (*hostp && *hostp != '/' && pi < sizeof(port) - 1) {
+			port[pi++] = *hostp++;
+		}
+		port[pi] = '\0';
+	}
+	if (hi == 0) return NULL;
+
+	struct addrinfo hints, *res = NULL;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return NULL;
+	int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (fd < 0) { freeaddrinfo(res); return NULL; }
+	if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
+		freeaddrinfo(res);
+		close(fd);
+		return NULL;
+	}
+	freeaddrinfo(res);
+	int fl = fcntl(fd, F_GETFL, 0);
+	if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+	h2c_sess *s = calloc(1, sizeof(h2c_sess));
+	if (!s) { close(fd); return NULL; }
+	s->fd = fd;
+	snprintf(s->authority, sizeof(s->authority), "%s:%s", host, port);
+
+	nghttp2_session_callbacks *cbs;
+	nghttp2_session_callbacks_new(&cbs);
+	nghttp2_session_callbacks_set_on_header_callback(cbs, h2c_on_header);
+	nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, h2c_on_frame_recv);
+	nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, h2c_on_data_chunk);
+	nghttp2_session_callbacks_set_on_stream_close_callback(cbs, h2c_on_stream_close);
+	nghttp2_session_client_new(&s->session, cbs, s);
+	nghttp2_session_callbacks_del(cbs);
+
+	nghttp2_settings_entry iv[1] = {
+	    {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}};
+	nghttp2_submit_settings(s->session, NGHTTP2_FLAG_NONE, iv, 1);
+
+	s->next = h2c_list;
+	h2c_list = s;
+	return s;
+}
+
+static void h2c_nv(nghttp2_nv *nv, const char *name, const char *value) {
+	nv->name = (uint8_t *)name;
+	nv->namelen = strlen(name);
+	nv->value = (uint8_t *)value;
+	nv->valuelen = strlen(value);
+	nv->flags = NGHTTP2_NV_FLAG_NONE;
+}
+
+// __kml_h2c_request: submit a body-less request (END_STREAM at submit) with
+// optional extra literal headers. ctx is the IR-side stream object the frame
+// callbacks fire into. Returns the stream id, or -1.
+int32_t __kml_h2c_request(void *sp, void *ctx, const char *method,
+                          const char *path, const char **hnames,
+                          const char **hvals, int64_t nh) {
+	h2c_sess *s = (h2c_sess *)sp;
+	if (!s || s->dead) return -1;
+	size_t nvn = 4 + (size_t)(nh > 0 ? nh : 0);
+	nghttp2_nv *nva = calloc(nvn, sizeof(nghttp2_nv));
+	if (!nva) return -1;
+	h2c_nv(&nva[0], ":method", method && *method ? method : "GET");
+	h2c_nv(&nva[1], ":path", path && *path ? path : "/");
+	h2c_nv(&nva[2], ":scheme", "http");
+	h2c_nv(&nva[3], ":authority", s->authority);
+	for (int64_t i = 0; i < nh; i++) {
+		h2c_nv(&nva[4 + i], hnames[i], hvals[i]);
+	}
+	int32_t sid = nghttp2_submit_request(s->session, NULL, nva, nvn, NULL, ctx);
+	free(nva);
+	if (sid < 0) return -1;
+	s->active++;
+	return sid;
+}
+
+// One nonblocking send+recv round for one session.
+static void h2c_pump_one(h2c_sess *s) {
+	if (s->dead) return;
+	for (;;) {
+		const uint8_t *data = NULL;
+		ssize_t len = nghttp2_session_mem_send(s->session, &data);
+		if (len < 0) { s->dead = 1; return; }
+		if (len == 0) break;
+		long w = (long)write(s->fd, data, (size_t)len);
+		if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { s->dead = 1; return; }
+		if (w < 0) break;
+	}
+	for (;;) {
+		uint8_t buf[16384];
+		long n = (long)read(s->fd, buf, sizeof(buf));
+		if (n == 0) { s->dead = 1; return; } /* peer closed */
+		if (n < 0) break;                    /* EAGAIN — nothing more now */
+		if (nghttp2_session_mem_recv(s->session, buf, (size_t)n) < 0) {
+			s->dead = 1;
+			return;
+		}
+	}
+	if (s->want_close && s->active == 0) {
+		nghttp2_session_terminate_session(s->session, NGHTTP2_NO_ERROR);
+		const uint8_t *data = NULL;
+		ssize_t len;
+		while ((len = nghttp2_session_mem_send(s->session, &data)) > 0) {
+			if (write(s->fd, data, (size_t)len) < 0) break;
+		}
+		close(s->fd);
+		s->dead = 1;
+	}
+}
+
+// __kml_h2c_pump_all: one round over every live session; returns the number
+// of still-open client streams (the loop's keepalive signal).
+int64_t __kml_h2c_pump_all(void) {
+	int64_t total = 0;
+	for (h2c_sess *s = h2c_list; s; s = s->next) {
+		h2c_pump_one(s);
+		if (!s->dead) total += s->active;
+	}
+	return total;
+}
+
+// void-typed tick for the event loop's per-iteration hook.
+void __kml_h2c_pump_tick(void) { (void)__kml_h2c_pump_all(); }
+
+// __kml_h2c_flush: drive every session until no client streams remain (or
+// everything is dead). Called after the event loop exits, mirroring the http/1
+// client's post-loop reaction flush. Bounded so a wedged peer can't hang exit.
+void __kml_h2c_flush(void) {
+	for (int i = 0; i < 20000; i++) {
+		if (__kml_h2c_pump_all() <= 0) return;
+		usleep(500);
+	}
+}
+
+void __kml_h2c_close(void *sp) {
+	h2c_sess *s = (h2c_sess *)sp;
+	if (s) s->want_close = 1;
+}
+
+void __kml_h2c_destroy(void *sp) {
+	h2c_sess *s = (h2c_sess *)sp;
+	if (!s || s->dead) return;
+	close(s->fd);
+	s->dead = 1;
 }

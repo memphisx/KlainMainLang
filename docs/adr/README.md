@@ -422,3 +422,39 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00382](ADR-00382.md) | `@template` JSDoc generics (Stage 3) | Extends [ADR-00380](ADR-00380.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
 | [00383](ADR-00383.md) | JSDoc type-expression sub-parser (Stage 4) | Extends [ADR-00380](ADR-00380.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
 | [00384](ADR-00384.md) | JSDoc class/documentation tags + `import()` types (Stages 5–6) | Extends [ADR-00380](ADR-00380.md), [ADR-00383](ADR-00383.md); Implements [TDD-00125](../tdd/TDD-00125.md) |
+| [00385](ADR-00385.md) | Rest parameters in function type annotations | Extends [ADR-00166](ADR-00166.md) |
+| [00386](ADR-00386.md) | Closure capture for nested function declarations (Stage 1) | Implements [TDD-00129](../tdd/TDD-00129.md); Extends [ADR-00149](ADR-00149.md), [ADR-00178](ADR-00178.md) |
+| [00387](ADR-00387.md) | The `arguments` object, synthesized from parameters | |
+| [00388](ADR-00388.md) | Ambient declarations (`declare`), parsed and erased | |
+| [00389](ADR-00389.md) | `typeof` type queries | |
+| [00390](ADR-00390.md) | Index signatures (`{ [k: string]: T }`), map-backed | Implements [TDD-00130](../tdd/TDD-00130.md) |
+| [00391](ADR-00391.md) | Node's `http.createServer` / `(req, res)` (TDD-00131 Stage 1) | Implements [TDD-00131](../tdd/TDD-00131.md) |
+| [00392](ADR-00392.md) | Multi-argument EventEmitter events (TDD-00131 Stage 2) | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00089](ADR-00089.md) |
+| [00393](ADR-00393.md) | Node streams as real classes (`class X extends Readable/Writable`) | Implements [TDD-00132](../tdd/TDD-00132.md); Extends [ADR-00089](ADR-00089.md), [ADR-00304](ADR-00304.md) |
+| [00394](ADR-00394.md) | Scrub absolute paths from conformance report failure reasons | Extends TDD-00121 |
+| [00395](ADR-00395.md) | `process.execPath` and `process.emitWarning` | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00026](ADR-00026.md) |
+| [00396](ADR-00396.md) | `process.version` / `process.versions` reporting | Implements [TDD-00136](../tdd/TDD-00136.md); Extends [ADR-00395](ADR-00395.md) |
+| [00397](ADR-00397.md) | `net.Server.address()` and the `listen(0)` ephemeral-port idiom | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00324](ADR-00324.md), [ADR-00358](ADR-00358.md) |
+| [00398](ADR-00398.md) | `Function.prototype.call` / `.apply` / `.bind` | Implements [TDD-00137](../tdd/TDD-00137.md) |
+| [00399](ADR-00399.md) | `net` completion — `isIP` family, options-object connect, socket options | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00397](ADR-00397.md) |
+| [00400](ADR-00400.md) | Accept any function-typed expression as a callback | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00398](ADR-00398.md) |
+| [00401](ADR-00401.md) | `assert.deepStrictEqual` and `process.on('warning')` | Implements [TDD-00131](../tdd/TDD-00131.md); Extends [ADR-00395](ADR-00395.md) |
+| [00402](ADR-00402.md) | Node conformance — resolve `require('../common/fixtures')` via a generated typed shim | Extends [TDD-00121](../tdd/TDD-00121.md) |
+| [00403](ADR-00403.md) | Specific "no method" diagnostic instead of the "only simple function calls" catch-all | Extends [TDD-00072](../tdd/TDD-00072.md), [TDD-00121](../tdd/TDD-00121.md) |
+| [00404](ADR-00404.md) | Node `http` client `http.get`/`http.request` (Stage 1) | Implements [TDD-00138](../tdd/TDD-00138.md); Extends [ADR-00050](ADR-00050.md) |
+| [00405](ADR-00405.md) | Async event-loop delivery for the `http` client (Stage 2) | Implements [TDD-00138](../tdd/TDD-00138.md); Extends [ADR-00404](ADR-00404.md) |
+| [00406](ADR-00406.md) | Variable-bound `http.createServer` handle (`listen`/`close`/`address`/`on('request')`, contextual handler typing, named import) | Extends [ADR-00391](ADR-00391.md); Extends [TDD-00131](../tdd/TDD-00131.md) |
+| [00407](ADR-00407.md) | Node oracle — reclassify shimmable harness helpers as in scope; raw-reason fail lists; gap-analysis companion | Extends [ADR-00402](ADR-00402.md), [TDD-00121](../tdd/TDD-00121.md) |
+| [00408](ADR-00408.md) | Qualified constructor parsing — `new mod.Class(...)` | Extends [ADR-00406](ADR-00406.md) |
+| [00409](ADR-00409.md) | Node oracle — unimplemented core modules count as FAIL, not SKIP | Extends [ADR-00407](ADR-00407.md), [TDD-00121](../tdd/TDD-00121.md) |
+| [00410](ADR-00410.md) | `https` module (client) and `stream/web` re-exports | Extends [TDD-00138](../tdd/TDD-00138.md), [TDD-00097](../tdd/TDD-00097.md); Extends [ADR-00409](ADR-00409.md) |
+| [00411](ADR-00411.md) | child_process `spawnSync`/`execSync`/`execFileSync` (embedded C core) | Extends [ADR-00322](ADR-00322.md), [ADR-00409](ADR-00409.md) |
+| [00412](ADR-00412.md) | Node test idiom end-to-end — wrapper contextual typing, options-object http client, post-loop reaction flush | Extends [ADR-00406](ADR-00406.md), [TDD-00138](../tdd/TDD-00138.md), [TDD-00122](../tdd/TDD-00122.md) |
+| [00413](ADR-00413.md) | tls.createServer options as a value; `net.connect(port)` arity | Extends [TDD-00110](../tdd/TDD-00110.md), [ADR-00358](ADR-00358.md), [ADR-00412](ADR-00412.md) |
+| [00414](ADR-00414.md) | http2 module Stage 1 — resolution, server handle, compat API | Implements [TDD-00139](../tdd/TDD-00139.md); Extends [ADR-00406](ADR-00406.md), [ADR-00357](ADR-00357.md) |
+| [00415](ADR-00415.md) | http2 Stage 2 — core streams API (`on('stream')`, `Http2Stream`) + Map bracket access | Implements [TDD-00139](../tdd/TDD-00139.md); Extends [ADR-00414](ADR-00414.md) |
+| [00416](ADR-00416.md) | http2 Stage 3 — client sessions (`http2.connect`/`session.request`, client-mode nghttp2) | Implements [TDD-00139](../tdd/TDD-00139.md); Extends [ADR-00415](ADR-00415.md) |
+| [00417](ADR-00417.md) | http2 Stage 4 — `constants` namespace + settings helpers | Implements [TDD-00139](../tdd/TDD-00139.md); Extends [ADR-00416](ADR-00416.md) |
+| [00418](ADR-00418.md) | Node oracle — "dynamic require" mislabel decomposed; static member/bare forms handled; named skip reasons | Extends [ADR-00409](ADR-00409.md), [ADR-00369](ADR-00369.md) |
+| [00419](ADR-00419.md) | node:test runner — test/describe/TestContext/hooks + `node:` specifier aliases | Implements [TDD-00140](../tdd/TDD-00140.md); Extends [TDD-00122](../tdd/TDD-00122.md) |
+| [00420](ADR-00420.md) | diagnostics_channel V1 — named pub/sub, string messages | Extends [ADR-00412](ADR-00412.md) |

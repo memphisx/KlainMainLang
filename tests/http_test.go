@@ -169,6 +169,114 @@ func startHTTPClusterServerGC(t *testing.T, src string, port int) {
 	t.Fatalf("server never started listening on %s", addr)
 }
 
+func TestE2EHTTPCreateServerNodeShape(t *testing.T) {
+	// TDD-00131: real Node http.createServer((req, res) => …).listen(port), with
+	// res.writeHead(status, headers) / res.setHeader / res.write / res.end and
+	// req.method access.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.setHeader("X-Method", req.method)
+  res.writeHead(201, { "Content-Type": "text/plain" })
+  res.write("part1;")
+  res.end("part2")
+}).listen(8955)
+`
+	startHTTPServer(t, src, 8955)
+	resp, err := http.Get("http://127.0.0.1:8955/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Errorf("status: got %d, want 201", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain" {
+		t.Errorf("Content-Type: got %q, want text/plain", ct)
+	}
+	if xm := resp.Header.Get("X-Method"); xm != "GET" {
+		t.Errorf("X-Method: got %q, want GET", xm)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "part1;part2" {
+		t.Errorf("body: got %q, want %q", string(body), "part1;part2")
+	}
+}
+
+func TestE2EHTTPCreateServerBoundHandle(t *testing.T) {
+	// Variable-bound http.createServer handle (the standard Node idiom, as
+	// opposed to the chained createServer(cb).listen(port) expression): the
+	// server is bound to a const and .listen() is a later statement.
+	src := `
+import http from 'http'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  res.end("pong:" + req.path)
+})
+server.listen(8973)
+`
+	startHTTPServer(t, src, 8973)
+	resp, err := http.Get("http://127.0.0.1:8973/x")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "pong:/x" {
+		t.Errorf("body: got %q, want %q", string(body), "pong:/x")
+	}
+}
+
+func TestE2EHTTPCreateServerOnRequestUntyped(t *testing.T) {
+	// Zero-arg createServer + server.on('request', …) registration, with the
+	// handler params left untyped (contextually typed IncomingMessage /
+	// ServerResponse, as real Node infers them), via the named-import form.
+	src := `
+import { createServer } from 'http'
+const server = createServer()
+server.on('request', (req, res) => {
+  res.writeHead(200)
+  res.end("on:" + req.path)
+})
+server.listen(8972)
+`
+	startHTTPServer(t, src, 8972)
+	resp, err := http.Get("http://127.0.0.1:8972/y")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "on:/y" {
+		t.Errorf("body: got %q, want %q", string(body), "on:/y")
+	}
+}
+
+func TestE2EHTTPCreateServerEphemeralPortAndClose(t *testing.T) {
+	// listen(0) binds an ephemeral port, server.address().port reports the real
+	// one, and server.close() from inside the loop lets control continue past
+	// the blocking listen call.
+	src := `
+import http from 'http'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.end("unused")
+})
+server.listen(0, () => {
+  const port: number = server.address().port
+  if (port > 0) { console.log("got ephemeral port") }
+  setTimeout(() => { server.close() }, 20)
+})
+console.log("after loop")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "got ephemeral port") {
+		t.Errorf("address().port was not positive: %q", out)
+	}
+	if !strings.Contains(out, "after loop") {
+		t.Errorf("control never continued past server.close(): %q", out)
+	}
+}
+
 func TestE2EHTTPListenBasicGet(t *testing.T) {
 	src := `
 import http from 'http'
@@ -305,6 +413,19 @@ try {
 	got := compileAndRunImports(t, src)
 	if got == "" {
 		t.Fatal("expected the second instance's catch block to print something")
+	}
+}
+
+func TestE2EKlainHTTPNamespaceResolves(t *testing.T) {
+	// TDD-00131: the bespoke `http.listen(handler ⇒ response)` model is reachable
+	// under the explicitly-non-Node `klain:http` specifier.
+	_, err := parseAndCompileImports(t, `
+import http from 'klain:http'
+interface Res { status: number; body: string }
+http.listen(8951, (req: HttpRequest): Res => { return { status: 200, body: "ok" } })
+`)
+	if err != nil {
+		t.Fatalf("klain:http import should compile the bespoke server: %v", err)
 	}
 }
 
@@ -1380,4 +1501,218 @@ http.listen(8961, (req: HttpRequest): Res => {
 	if got := string(out); got != "h2:GET:/one:|1.1" {
 		t.Errorf("1.1: got %q, want %q", got, "h2:GET:/one:|1.1")
 	}
+}
+
+func TestE2EHTTPCreateServerNodeTestIdiom(t *testing.T) {
+	// The full shape Node's own tests use: mustCall-wrapped untyped handler and
+	// callbacks, listen(0), options-object http.get with the ephemeral port,
+	// server.close() from inside the response flow — with the mustCall counts
+	// verified at exit and the client response still delivered after the loop
+	// winds down (post-loop reaction flush).
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end("resp:" + req.path)
+  server.close()
+}))
+server.listen(0, mustCall(() => {
+  http.get({ port: server.address().port, path: "/req7" }, mustCall((res) => {
+    let data = ""
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', () => { console.log("got", data) })
+  }))
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "got resp:/req7") {
+		t.Errorf("response never delivered: %q", out)
+	}
+}
+
+func TestE2EHTTP2ModuleCreateServer(t *testing.T) {
+	// TDD-00139 Stage 1: the explicit http2 module's createServer — shares the
+	// http server core, which speaks h2c (prior-knowledge cleartext HTTP/2) on
+	// the same port. Verified with curl forcing HTTP/2.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	src := `
+import http2 from 'http2'
+const server = http2.createServer((req, res) => {
+  res.writeHead(200)
+  res.end("h2mod:" + req.path)
+})
+server.listen(8983)
+`
+	startHTTPServer(t, src, 8983)
+	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+		"http://127.0.0.1:8983/y", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2c: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2mod:/y|2" {
+		t.Errorf("h2 response: got %q, want %q", got, "h2mod:/y|2")
+	}
+}
+
+func TestE2EHTTP2SecureServerRejected(t *testing.T) {
+	// createSecureServer must reject cleanly (no TLS server mode), never
+	// silently serve cleartext under a secure-sounding name.
+	_, err := parseAndCompileImports(t, `
+import http2 from 'http2'
+http2.createSecureServer((req, res) => { res.end("x") })
+`)
+	if err == nil || !strings.Contains(err.Error(), "createSecureServer is not implemented") {
+		t.Fatalf("want clean createSecureServer rejection, got %v", err)
+	}
+}
+
+func TestE2EHTTP2StreamsAPI(t *testing.T) {
+	// TDD-00139 Stage 2: the core streams API — server.on('stream', (stream,
+	// headers)), pseudo-header reads via Map bracket access, stream.respond
+	// with :status + a response header, stream.end body — verified over real
+	// HTTP/2 (h2c) with curl.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	src := `
+import http2 from 'http2'
+const server = http2.createServer()
+server.on('stream', (stream, headers) => {
+  stream.respond({ ':status': 201, 'x-served-by': 'kml' })
+  stream.end("p=" + headers[':path'] + " m=" + headers[':method'])
+})
+server.listen(8984)
+`
+	startHTTPServer(t, src, 8984)
+	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+		"http://127.0.0.1:8984/abc", "-w", "|%{http_code}|%{http_version}|%header{x-served-by}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2c: %v\n%s", err, out)
+	}
+	if got := string(out); got != "p=/abc m=GET|201|2|kml" {
+		t.Errorf("streams response: got %q, want %q", got, "p=/abc m=GET|201|2|kml")
+	}
+}
+
+func TestE2EHTTP2StreamsRequestBody(t *testing.T) {
+	// stream.on('data'/'end'): the request body delivered as one chunk.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	src := `
+import http2 from 'http2'
+const server = http2.createServer()
+server.on('stream', (stream, headers) => {
+  let seen = ""
+  stream.on('data', (chunk: string) => { seen = seen + chunk })
+  stream.on('end', () => {
+    stream.respond({ ':status': 200 })
+    stream.end("body:" + seen)
+  })
+})
+server.listen(8985)
+`
+	startHTTPServer(t, src, 8985)
+	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+		"-d", "payload7", "http://127.0.0.1:8985/up", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2c POST: %v\n%s", err, out)
+	}
+	if got := string(out); got != "body:payload7|2" {
+		t.Errorf("h2 POST: got %q, want %q", got, "body:payload7|2")
+	}
+}
+
+func TestE2EHTTPServerNoHandlerListen(t *testing.T) {
+	// A handler-less server (createServer() with no 'request'/'stream'
+	// listener) is legitimate Node — client-behavior tests listen without
+	// responding. A synthesized empty handler answers 200/empty.
+	assertOutputImports(t, `
+import http from 'http'
+const server = http.createServer()
+server.listen(0, () => {
+  console.log("up", server.address().port > 0)
+  setTimeout(() => { server.close() }, 10)
+})
+console.log("done")
+`, "up true\ndone")
+}
+
+func TestE2EHTTP2ClientSession(t *testing.T) {
+	// TDD-00139 Stage 3: http2.connect + session.request against the same
+	// process's http2 server — the dominant corpus shape. Response headers
+	// (:status + custom), body via 'data'/'end', clean close of both ends,
+	// with every callback count verified at exit by mustCall.
+	src := `
+import http2 from 'http2'
+import { mustCall } from 'test'
+const server = http2.createServer()
+server.on('stream', mustCall((stream, headers) => {
+  stream.respond({ ':status': 200, 'x-mode': 'h2' })
+  stream.end("srv:" + headers[':path'])
+}))
+server.listen(0, mustCall(() => {
+  const client = http2.connect("http://127.0.0.1:" + server.address().port)
+  const req = client.request({ ':path': '/from-client' })
+  let data = ""
+  req.on('response', mustCall((headers) => {
+    console.log("status", headers[':status'], "xmode", headers['x-mode'])
+  }))
+  req.on('data', (chunk: string) => { data = data + chunk })
+  req.on('end', mustCall(() => {
+    console.log("got", data)
+    client.close()
+    server.close()
+  }))
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "status 200 xmode h2") {
+		t.Errorf("response headers missing: %q", out)
+	}
+	if !strings.Contains(out, "got srv:/from-client") {
+		t.Errorf("response body missing: %q", out)
+	}
+}
+
+func TestE2EHTTP2ClientRequestHeaders(t *testing.T) {
+	// Extra literal request headers reach the server's headers map.
+	src := `
+import http2 from 'http2'
+const server = http2.createServer()
+server.on('stream', (stream, headers) => {
+  stream.respond({ ':status': 200 })
+  stream.end("tok=" + headers['x-token'])
+})
+server.listen(0, () => {
+  const client = http2.connect("http://127.0.0.1:" + server.address().port)
+  const req = client.request({ ':path': '/t', 'x-token': 'abc123' })
+  req.on('data', (c: string) => { console.log("body", c) })
+  req.on('end', () => { client.close(); server.close() })
+})
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "body tok=abc123") {
+		t.Errorf("request header did not reach the server: %q", out)
+	}
+}
+
+func TestE2EHTTP2ConstantsAndSettings(t *testing.T) {
+	// TDD-00139 Stage 4: constants (direct and via a bound alias), default
+	// settings, wire packing (6-byte big-endian entries in identifier order),
+	// and a pack→unpack round trip.
+	assertOutputImports(t, `
+import http2 from 'http2'
+console.log("hdr", http2.constants.HTTP2_HEADER_PATH)
+const constants = http2.constants
+console.log("code", constants.NGHTTP2_CANCEL)
+const d = http2.getDefaultSettings()
+console.log("defaults", d.headerTableSize, d.enablePush, d.maxFrameSize)
+const packed = http2.getPackedSettings({ headerTableSize: 100, enablePush: true })
+console.log("packed", packed.length, packed[1], packed[5], packed[7], packed[11])
+const round = http2.getUnpackedSettings(http2.getPackedSettings(http2.getDefaultSettings()))
+console.log("round", round.headerTableSize, round.maxConcurrentStreams, round.enableConnectProtocol)
+`, "hdr :path\ncode 8\ndefaults 4096 true 16384\npacked 12 1 100 2 1\nround 4096 4294967295 false")
 }

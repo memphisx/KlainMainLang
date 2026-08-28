@@ -48,6 +48,40 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitSuperMethodCall(mem.Property, ex.Args, ex.GetPos())
 		}
 	}
+	// Node's chained `http.createServer((req, res) => …).listen(port[, cb])`
+	// (TDD-00131) — the callee is `<createServer call>.listen`.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "listen" {
+		if inner, ok := mem.Object.(*ast.CallExpression); ok {
+			if im, ok := inner.Callee.(*ast.MemberExpression); ok && im.Property == "createServer" {
+				if id, ok := im.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" {
+					if len(inner.Args) != 1 {
+						return Value{}, fmt.Errorf("%d:%d: http.createServer takes one listener (req, res) => void", inner.GetPos().Line, inner.GetPos().Col)
+					}
+					if len(ex.Args) < 1 {
+						return Value{}, fmt.Errorf("%d:%d: server.listen requires a port", ex.GetPos().Line, ex.GetPos().Col)
+					}
+					var listeningCb ast.Expression
+					if len(ex.Args) >= 2 {
+						listeningCb = ex.Args[1]
+					}
+					return e.emitHTTPCreateServerListen(inner.Args[0], ex.Args[0], listeningCb, ex.GetPos())
+				}
+			}
+		}
+	}
+	// A `res.writeHead/setHeader/write/end(...)` call on Node's http.createServer
+	// `res` object (TDD-00131).
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if e.inferExprType(mem.Object).IsServerResponse {
+			return e.emitServerResponseMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+	}
+	// http.get/request response (TDD-00138): res.on('data'|'end'), setEncoding, …
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if e.inferExprType(mem.Object).IsIncomingMessage {
+			return e.emitIncomingMessageCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+	}
 	// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
 	// 4). Checked before every mem.Property-name-based/inferExprType-based
 	// dispatch below, for the same reason super's own checks above are: a
@@ -242,6 +276,24 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsNetServer {
 			return e.emitNetServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsHTTPServer {
+			return e.emitHTTPServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsH2ServerStream {
+			return e.emitH2StreamMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsH2ClientSession {
+			return e.emitH2ClientSessionMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsH2ClientStream {
+			return e.emitH2ClientStreamMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsTestContext {
+			return e.emitTestContextMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsDCChannel {
+			return e.emitDiagChannelMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.inferExprType(mem.Object).IsNetSocket {
 			return e.emitNetSocketMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -288,6 +340,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// prototype-chain method resolution would.
 		if objTy := e.inferExprType(mem.Object); objTy.IsClass {
 			if info, ok := e.classes[objTy.ClassName]; ok {
+				// Node-stream class (TDD-00132): on/push/pipe/write/end/… are
+				// hand-dispatched against the hidden stream handle, mirroring
+				// the options-form `new Readable(...)` surface. Checked before
+				// MethodSigs — these names are reserved (never real methods on
+				// a stream class), while `_read`/`_write` fall through to the
+				// ordinary MethodSigs dispatch below.
+				if (info.HasNodeReadable || info.HasNodeWritable) && isNodeStreamMethodName(mem.Property) {
+					return e.emitClassNodeStreamCall(objTy, info, mem.Object, mem.Property, ex.Args, ex.GetPos())
+				}
 				if _, ok := info.MethodSigs[mem.Property]; ok {
 					return e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos())
 				}
@@ -318,6 +379,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "toString" && isNumberTy(e.inferExprType(mem.Object)) {
 			return e.emitNumberToStringRadix(mem, ex.Args, ex.GetPos())
+		}
+		// str.toString() is the identity — Node code calls it habitually on
+		// values that are Buffers there but strings here (spawnSync results,
+		// stream chunks), so this keeps that idiom compiling.
+		if mem.Property == "toString" && len(ex.Args) == 0 && isPlainStringType(e.inferExprType(mem.Object)) {
+			return e.emitExpr(mem.Object)
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Array" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
@@ -418,6 +485,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessUptime(ex.Args, ex.GetPos())
 			case "hrtime":
 				return e.emitProcessHrtime(ex.Args, ex.GetPos())
+			case "emitWarning":
+				return e.emitProcessEmitWarning(ex.Args, ex.GetPos())
 			}
 		}
 		// process.hrtime.bigint(): a nested two-level member call.
@@ -604,7 +673,49 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitHTTPClose(ex.Args, ex.GetPos())
 			case "closeAllConnections":
 				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
+			case "get", "request":
+				return e.emitHTTPClientGet(ex.Args, ex.GetPos())
+			case "createServer":
+				// The chained createServer(cb).listen(...) expression is
+				// intercepted earlier; reaching here means the variable-bound
+				// handle form (TDD-00131 follow-on).
+				return e.emitHTTPCreateServer(ex.Args, ex.GetPos())
 			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "diagch__kml_builtin" {
+			return e.emitDiagChModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "https__kml_builtin" {
+			switch mem.Property {
+			case "get", "request":
+				// TLS is the libcurl client's native ground — same emitter as
+				// http.get/request; the options-object form composes https URLs.
+				return e.emitHTTPClientGetScheme(ex.Args, ex.GetPos(), "https")
+			case "createServer":
+				return Value{}, fmt.Errorf("%d:%d: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped; serve plain http.createServer behind TLS termination, or use tls.createServer for a raw TLS socket server", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			return Value{}, fmt.Errorf("%d:%d: https has no method '%s' (supported: get, request)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http2__kml_builtin" {
+			switch mem.Property {
+			case "createServer":
+				// TDD-00139 Stage 1: shares the http server core — which
+				// already serves h2c (prior-knowledge cleartext HTTP/2) on the
+				// same port — so the handle, listen/close/address, and the
+				// compat (req, res) API are all inherited.
+				return e.emitHTTPCreateServer(ex.Args, ex.GetPos())
+			case "createSecureServer":
+				return Value{}, fmt.Errorf("%d:%d: http2.createSecureServer is not implemented yet — the server has no TLS mode; http2.createServer serves h2c (cleartext prior-knowledge HTTP/2)", ex.GetPos().Line, ex.GetPos().Col)
+			case "connect":
+				return e.emitH2Connect(ex.Args, ex.GetPos())
+			case "getDefaultSettings":
+				return e.emitH2GetDefaultSettings(ex.Args, ex.GetPos())
+			case "getPackedSettings":
+				return e.emitH2GetPackedSettings(ex.Args, ex.GetPos())
+			case "getUnpackedSettings":
+				return e.emitH2GetUnpackedSettings(ex.Args, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: http2 has no method '%s'", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
@@ -987,6 +1098,19 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "entries" && e.inferExprType(mem.Object).IsArray {
 			return e.emitArrayEntries(mem, ex.Args, ex.GetPos())
 		}
+		// Function.prototype.call / .apply on a first-class function value
+		// (TDD-00137 Stage A): fn.call(thisArg, a, b) and fn.apply(thisArg,
+		// [a, b]) lower to a direct fn(a, b). Checked before the generic
+		// field-call below so `fn.call`/`fn.apply` aren't misread as calling a
+		// field literally named "call"/"apply".
+		if (mem.Property == "call" || mem.Property == "apply") && e.inferExprType(mem.Object).IsFunc {
+			return e.emitFunctionCallApply(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		// Function.prototype.bind (TDD-00137 Stage C): fn.bind(thisArg, …bound)
+		// returns a new partially-applied function value.
+		if mem.Property == "bind" && e.inferExprType(mem.Object).IsFunc {
+			return e.emitFunctionBind(mem.Object, ex.Args, ex.GetPos())
+		}
 		// Calling a function-typed object field: obj.callback(...), none of
 		// the hardcoded built-in method names above matched, so treat mem as
 		// a plain value expression and call it as a closure if its static
@@ -1170,7 +1294,94 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		return e.emitClosureCallByPtr(val.Ref, val.Ty, ex.Args, ex.GetPos())
 	}
 
-	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported", ex.GetPos().Line, ex.GetPos().Col)
+	// A method call whose receiver type doesn't have that method reaches here
+	// too (the callee `obj.prop` isn't function-typed). Report it as the real
+	// missing-method gap it is — a far more useful diagnostic than the generic
+	// "only simple function calls" fallback, and (for the conformance leverage
+	// map) it splits that catch-all bucket by the receiver's type instead of
+	// lumping every unrecognized method call together.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		recv := describeReceiverType(e.inferExprType(mem.Object))
+		// A bare namespace/global identifier receiver (Object.setPrototypeOf,
+		// process.send, cluster.fork, Math.foo, …) infers as the i64 default;
+		// name it explicitly so the diagnostic — and the conformance histogram —
+		// attributes the missing member to the right namespace.
+		if id, ok := mem.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
+			if n := strings.TrimSuffix(id.Name, "__kml_builtin"); n != id.Name {
+				recv = n
+			} else if knownGlobalNamespace[id.Name] {
+				recv = id.Name
+			}
+		}
+		return Value{}, fmt.Errorf("%d:%d: %s has no method '%s'", ex.GetPos().Line, ex.GetPos().Col, recv, mem.Property)
+	}
+
+	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported (the callee is not a named function, a function value, or a supported method)", ex.GetPos().Line, ex.GetPos().Col)
+}
+
+// knownGlobalNamespace lists the bare-identifier globals/namespaces whose
+// members are static (so a receiver of this name infers as the numeric default,
+// not a real value) — named explicitly in the "no method" diagnostic.
+var knownGlobalNamespace = map[string]bool{
+	"Object": true, "Math": true, "JSON": true, "Reflect": true, "Number": true,
+	"Array": true, "String": true, "Boolean": true, "Symbol": true, "Promise": true,
+	"process": true, "console": true, "Date": true, "RegExp": true, "Proxy": true,
+}
+
+// describeReceiverType names a value's type for a "<type> has no method 'x'"
+// diagnostic — short human phrases for the common builtin/receiver types, so
+// the error (and the conformance histogram it feeds) attributes a missing
+// method to the right type rather than a generic catch-all.
+func describeReceiverType(ty Type) string {
+	switch {
+	case ty.IsBuffer:
+		return "Buffer"
+	case ty.IsTypedArray:
+		return "a TypedArray"
+	case ty.IsArrayBuffer:
+		return "an ArrayBuffer"
+	case ty.IsDataView:
+		return "a DataView"
+	case ty.IsArray:
+		return "an array"
+	case ty.IsMap:
+		return "a Map"
+	case ty.IsSet:
+		return "a Set"
+	case ty.IsPromise:
+		return "a Promise"
+	case ty.IsDate:
+		return "a Date"
+	case ty.IsRegExp:
+		return "a RegExp"
+	case ty.IsBigInt:
+		return "a bigint"
+	case ty.IsNodeReadable || ty.IsNodeWritable:
+		return "a Node stream"
+	case ty.IsNetServer:
+		return "a net.Server"
+	case ty.IsNetSocket:
+		return "a net socket"
+	case ty.IsChildProcess:
+		return "a ChildProcess"
+	case ty.IsWorker:
+		return "a Worker"
+	case ty.HasEventEmitter:
+		return "an EventEmitter"
+	case ty.IsResponse:
+		return "a Response"
+	case ty.IsRequest:
+		return "a Request"
+	case ty.IsClass:
+		return "class '" + ty.ClassName + "'"
+	case isStringTy(ty):
+		return "a string"
+	case ty.IsObject:
+		return "an object"
+	case ty.IR != "ptr":
+		return "a number"
+	}
+	return "a value of this type"
 }
 
 // builtinModuleSpecifiers maps the conventional bare identifier name a

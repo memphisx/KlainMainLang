@@ -1641,7 +1641,10 @@ type InterfaceDeclaration struct {
 	TypeParamConstraints []*TypeAnnotation
 	Fields               []AnnotField
 	Methods              []InterfaceMethodSig // TDD-00009 Stage 4 — method signatures, for `implements` conformance checking
-	pos                  Pos
+	// IndexSig is the value type of a string index signature `[k: string]: V`
+	// (TDD-00130) — a map-backed dynamic object; V1 disallows named Fields with it.
+	IndexSig *TypeAnnotation
+	pos      Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()   {}
@@ -1875,6 +1878,11 @@ type TypeAnnotation struct {
 	IsFuncType  bool
 	FuncParams  []TypeAnnotation // param types for function type annotations
 	FuncRetType *TypeAnnotation  // return type for function type annotations
+	// FuncHasRest marks the last entry of FuncParams as a rest slot, e.g.
+	// `(...xs: number[]) => T` or `(a: number, ...xs: number[]) => T`. The
+	// stored type is the collected array type (number[]), matching the codegen
+	// Type.FuncHasRest convention.
+	FuncHasRest bool
 	Nullable    bool             // true for T | null or T | undefined
 	// UnionMembers holds every non-null/undefined member of a T | U | ...
 	// union with more than one such member (TDD-00043). nil for the common
@@ -1937,4 +1945,14 @@ type TypeAnnotation struct {
 	// structurally-matched sub-type.
 	IsInfer   bool
 	InferName string
+	// IsTypeof marks a `typeof value` type query. TypeofName is the referenced
+	// value's leading identifier; TypeofPath holds any trailing member segments
+	// (`typeof a.b.c` → TypeofName "a", TypeofPath ["b","c"]).
+	IsTypeof   bool
+	TypeofName string
+	TypeofPath []string
+	// IndexSig is the value type V of a string index signature
+	// `{ [k: string]: V }` (TDD-00130). Non-nil marks the object type as a
+	// map-backed dynamic object; V1 disallows it combining with named Fields.
+	IndexSig *TypeAnnotation
 }

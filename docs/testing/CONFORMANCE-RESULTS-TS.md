@@ -6,19 +6,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**4967 / 9256 agree with TypeScript (53.7%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
+**4979 / 9256 agree with TypeScript (53.8%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
 
-- **1041** match-accept (both compile clean)
-- **3926** match-reject (both reject)
-- **3836** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **453** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **1130** match-accept (both compile clean)
+- **3849** match-reject (both reject)
+- **3747** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **530** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 2404 | 4833 | 49.7% | 300 | 1430 |
-| conformance | 2563 | 4423 | 57.9% | 153 | 1148 |
+| compiler | 2442 | 4833 | 50.5% | 337 | 1430 |
+| conformance | 2537 | 4423 | 57.4% | 193 | 1148 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -30,15 +30,25 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `ES5For-of17` | conformance |
 | `ES5For-ofTypeCheck13` | conformance |
 | `InterfaceDeclaration8` | compiler |
+| `ParameterList8` | compiler |
 | `Protected4` | conformance |
 | `Protected6` | conformance |
 | `Protected7` | conformance |
 | `abstractPropertyInitializer` | conformance |
 | `accessorDeclarationEmitVisibilityErrors` | compiler |
+| `accessorsInAmbientContext` | compiler |
 | `addMoreOverloadsToBaseSignature` | compiler |
 | `additionOperatorWithOnlyNullValueOrUndefinedValue` | conformance |
 | `alwaysStrict` | compiler |
 | `alwaysStrictES6` | compiler |
+| `ambientDeclarationsPatterns_tooManyAsterisks` | conformance |
+| `ambientEnum1` | compiler |
+| `ambientErrors1` | compiler |
+| `ambientExternalModuleWithRelativeExternalImportDeclaration` | compiler |
+| `ambientExternalModuleWithRelativeModuleName` | compiler |
+| `ambientGetters` | compiler |
+| `ambientStatement1` | compiler |
+| `ambientWithStatements` | compiler |
 | `anonymousClassExpression2` | compiler |
 | `argumentsBindsToFunctionScopeArgumentList` | compiler |
 | `arithmeticOnInvalidTypes2` | compiler |
@@ -54,10 +64,12 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `assignmentCompatWithEnumIndexer` | conformance |
 | `assignmentCompatability_checking-apply-member-off-of-function-interface` | compiler |
 | `assignmentCompatability_checking-call-member-off-of-function-interface` | compiler |
-| `assignmentStricterConstraints` | compiler |
-| `assignmentToObject` | compiler |
+| `assignmentToAnyArrayRestParameters` | compiler |
 | `asyncAliasReturnType_es5` | conformance |
+| `asyncDeclare_es5` | conformance |
+| `asyncDeclare_es6` | conformance |
 | `asyncFunctionReturnExpressionErrorSpans` | compiler |
+| `augmentedClassWithPrototypePropertyOnModule` | compiler |
 | `awaitAndYield` | conformance |
 | `awaitCallExpressionInSyncFunction` | compiler |
 | `awaitInNonAsyncFunction` | compiler |
@@ -69,6 +81,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `binaryArithmatic4` | compiler |
 | `binaryIntegerLiteralError` | conformance |
 | `bitwiseCompoundAssignmentOperators` | compiler |
+| `cannotIndexGenericWritingError` | compiler |
 | `capturedLetConstInLoop14` | compiler |
 | `capturedLetConstInLoop8` | compiler |
 | `capturedLetConstInLoop8_ES6` | compiler |
@@ -79,6 +92,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `classAbstractConstructor` | conformance |
 | `classAbstractMethodWithImplementation` | conformance |
 | `classAbstractProperties` | conformance |
+| `classAndInterfaceMergeConflictingMembers` | conformance |
 | `classExtendsInterfaceThatExtendsClassWithPrivates1` | compiler |
 | `classOrder2` | compiler |
 | `classSideInheritance2` | compiler |
@@ -89,18 +103,16 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `comparisonOperatorWithTypeParameter` | conformance |
 | `computedPropertyNames46_ES5` | conformance |
 | `computedPropertyNames46_ES6` | conformance |
-| `conditionalDoesntLeakUninstantiatedTypeParameter` | compiler |
 | `conditionalEqualityOnLiteralObjects` | compiler |
 | `conditionalExpression1` | compiler |
 | `conflictingTypeAnnotatedVar` | compiler |
 | `consistentAliasVsNonAliasRecordBehavior` | compiler |
+| `constDeclarations-ambient-errors` | compiler |
 | `constEnum2` | conformance |
 | `constEnum4` | conformance |
 | `constantEnumAssert` | compiler |
 | `constraintErrors1` | compiler |
 | `constructorReturnsInvalidType` | compiler |
-| `contextualTyping21` | compiler |
-| `contextualTyping30` | compiler |
 | `contextualTyping5` | compiler |
 | `contextualTypingOfConditionalExpression2` | compiler |
 | `contextuallyTypeCommaOperator02` | conformance |
@@ -108,25 +120,13 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `contextuallyTypeLogicalAnd02` | conformance |
 | `contextuallyTypeLogicalAnd03` | conformance |
 | `contextuallyTypedParametersWithQuestionToken` | compiler |
+| `contextuallyTypingRestParameters` | compiler |
 | `controlFlowLoopAnalysis` | compiler |
-| `controlFlowNullTypeAndLiteral` | compiler |
 | `declarationEmitDestructuringObjectLiteralPattern1` | compiler |
 | `declarationEmitInvalidReference2` | compiler |
 | `declarationEmitInvalidReferenceAllowJs` | compiler |
-| `declarationEmitTypeAliasTypeParameterExtendingUnknownSymbol` | compiler |
-| `deeplyNestedAssignabilityIssue` | compiler |
-| `derivedClassOverridesPrivateFunction1` | compiler |
-| `derivedTypeAccessesHiddenBaseCallViaSuperPropertyAccess` | conformance |
-| `destructuringSameNames` | conformance |
-| `directReferenceToNull` | conformance |
-| `directReferenceToUndefined` | conformance |
-| `doubleUnderStringLiteralAssignability` | compiler |
-| `downlevelLetConst12` | compiler |
-| `duplicateInterfaceMembers1` | compiler |
-| `duplicateLabel1` | compiler |
-| `duplicateLabel2` | compiler |
-| `duplicateLocalVariable3` | compiler |
-| … | +353 more |
+| `declarationEmitRelativeModuleError` | compiler |
+| … | +430 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -134,67 +134,67 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 215 | REJECTED: undefined variable '%s' |
-| 210 | REJECTED: variable '%s' is used before being assigned |
-| 42 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:1: '%s' can only precede a function, variable, inter… |
-| 40 | REJECTED: '%s' is only valid inside a method or constructor body |
-| 35 | REJECTED: only simple function calls are supported |
-| 33 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:5: expected IDENT, got [ |
-| 30 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 4:8: expected :, got ( |
-| 27 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:5: expected IDENT, got ( |
-| 23 | REJECTED: undefined function or closure '%s' |
-| 21 | REJECTED: '%s' is declared more than once in /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts |
-| 21 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
-| 19 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 13:1: unexpected character '%s' |
-| 18 | REJECTED: '%s' is not an array |
-| 17 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 5:5: class field '%s' requires a type annotation or an… |
-| 17 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 5:71: expected {, got ; |
-| 16 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 6:5: unexpected character '%s' |
-| 15 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:1: '%s' can only precede a function, variable, inter… |
-| 15 | REJECTED: an array element type is not yet supported on a generator function |
-| 15 | REJECTED: computed property key must be a string |
-| 15 | REJECTED: unknown class '%s' |
-| 14 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 11:1: unexpected character '%s' |
-| 14 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 4:5: class field '%s' requires a type annotation or an… |
-| 13 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 10:5: unexpected character '%s' |
-| 13 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:15: '%s' declaration '%s' must be initialized |
-| 13 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 5:1: unexpected character '%s' |
-| 13 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 8:5: unexpected character '%s' |
+| 260 | REJECTED: undefined variable '%s' |
+| 220 | REJECTED: variable '%s' is used before being assigned |
+| 181 | REJECTED: unexpected character '%s' |
+| 146 | REJECTED: class field '%s' requires a type annotation or an initializer |
+| 144 | REJECTED: expected IDENT, got ( |
+| 138 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
+| 117 | REJECTED: expected {, got ; |
+| 113 | REJECTED: undefined function or closure '%s' |
+| 101 | REJECTED: unexpected token < in expression |
+| 75 | REJECTED: expected IDENT, got public |
+| 73 | REJECTED: expected :, got ( |
+| 70 | REJECTED: unexpected token , in expression |
+| 61 | REJECTED: expected :, got < |
+| 57 | REJECTED: expected IDENT, got new |
+| 54 | REJECTED: expected :, got ? |
+| 53 | REJECTED: unexpected token ) in expression |
+| 45 | REJECTED: expected {, got < |
+| 43 | REJECTED: '%s' is only valid inside a method or constructor body |
+| 41 | REJECTED: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… |
+| 41 | REJECTED: expected ], got : |
+| 40 | REJECTED: expected type name, got NUMBER |
+| 38 | REJECTED: expected IDENT, got STRING |
+| 35 | REJECTED: expected type name, got < |
+| 33 | REJECTED: expected '%s' after import specifier list, got = |
+| 32 | REJECTED: only a string index signature `[k: string]: T` is supported (a `number` key is not yet supported) |
+| 31 | REJECTED: expected {, got IDENT |
+| 31 | REJECTED: unexpected token > in expression |
+| 29 | REJECTED: a number has no method '%s' |
+| 29 | REJECTED: expected }, got IDENT |
+| 25 | REJECTED: expected '%s' after export specifier list, got ; |
+| 25 | REJECTED: expected :, got IDENT |
+| 24 | REJECTED: a destructured parameter requires an explicit type annotation |
+| 24 | REJECTED: expected type name, got this |
+| 23 | REJECTED: '%s' is declared more than once in <path> |
+| 23 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
+| 23 | REJECTED: expected ), got => |
+| 23 | REJECTED: expected ;, got IDENT |
+| 22 | REJECTED: unexpected token + in expression |
+| 22 | REJECTED: unexpected token . in expression |
+| 22 | REJECTED: unknown class '%s' |
+| 21 | REJECTED: expected IDENT, got NUMBER |
+| 20 | REJECTED: expected :, got . |
+| 20 | REJECTED: expected type name, got new |
+| 18 | REJECTED: expected IDENT, got < |
+| 17 | REJECTED: '%s' is not an array |
+| 17 | REJECTED: expected type name, got \| |
+| 16 | REJECTED: an array element type is not yet supported on a generator function |
+| 16 | REJECTED: computed property key must be a string |
+| 15 | REJECTED: expected IDENT, got await |
+| 15 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
+| 14 | REJECTED: expected type name, got ... |
+| 14 | REJECTED: expected {, got . |
+| 14 | REJECTED: initializer'%s's type — this compiler is a typed subset |
+| 13 | REJECTED: <path>: expected ] in array type annotation |
+| 13 | REJECTED: any/unknown is not yet supported as an array element or object field type |
 | 13 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from (expl… |
-| 13 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
-| 12 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:3: expected IDENT, got STRING |
-| 12 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:5: expected IDENT, got ( |
-| 12 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 4:5: expected IDENT, got [ |
-| 12 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 6:5: class field '%s' requires a type annotation or an… |
-| 12 | REJECTED: any/unknown is not yet supported as an array element or object field type |
-| 12 | REJECTED: field assignment on non-object |
-| 12 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
-| 11 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:13: class field '%s' requires a type annotation or a… |
-| 11 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 5:32: expected {, got ; |
-| 11 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 7:1: unexpected character '%s' |
-| 11 | REJECTED: for...in requires an object with known fields |
-| 11 | REJECTED: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/fo… |
-| 10 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:17: expected IDENT, got public |
-| 10 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:5: '%s' can only precede a function, variable, inter… |
-| 10 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:5: expected IDENT, got new |
-| 10 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:5: a computed class member name must be a constant s… |
-| 10 | REJECTED: a class expression is only supported as a top-level `const/let/var X = class {...}` binding (V1) — using it as a value… |
-| 10 | REJECTED: field access on non-object (no field '%s') |
-| 9 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:3: expected IDENT, got NUMBER |
-| 9 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 2:5: class field '%s' requires a type annotation or an… |
-| 9 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 4:5: expected IDENT, got ( |
-| 9 | REJECTED: object has no field '%s' |
-| 9 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object/interface/class, and ReadableStr… |
-| 8 | REJECTED: '%s' is a reserved built-in name — pass -compat=js to allow shadowing it (matches real JS/browser behavior) |
-| 8 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:29: expected {, got ; |
-| 8 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 3:5: '%s' can only precede a function, variable, inter… |
-| 8 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 4:15: '%s' declaration '%s' must be initialized |
-| 8 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 6:71: expected {, got ; |
-| 8 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 7:5: unexpected character '%s' |
-| 8 | REJECTED: object destructuring requires an object variable, function call, or object literal |
-| 7 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 14:5: expected IDENT, got new |
-| 7 | REJECTED: /Users/kyriakosbompotis/Git/KlainMainLang/.conformance-out/ts.ts: 1:10: unexpected token , in expression |
-| … | +1839 more distinct reasons |
+| 13 | REJECTED: expected IDENT, got . |
+| 13 | REJECTED: expected IDENT, got private |
+| 13 | REJECTED: expected property name, got [ |
+| 13 | REJECTED: field assignment on non-object |
+| … | +247 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -203,63 +203,63 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | Count | Blocker |
 |---|---|
 | 170 | `@` |
-| 137 | `export` |
-| 99 | `module` |
-| 70 | `from` |
-| 67 | `x` |
-| 60 | `const` |
-| 40 | `declare` |
-| 40 | `this` |
-| 36 | `a` |
-| 29 | `>` |
-| 25 | `foo` |
-| 16 | `c` |
-| 16 | `x__kml_mod0` |
+| 138 | `export` |
+| 124 | `module` |
+| 88 | `x` |
+| 65 | `from` |
+| 47 | `a` |
+| 43 | `this` |
+| 41 | `foo` |
+| 27 | `>` |
+| 20 | `f` |
+| 17 | `c` |
+| 15 | `b` |
+| 14 | `s type is incompatible with the variable` |
 | 13 | `T` |
 | 13 | `accessor` |
-| 13 | `b` |
-| 11 | `arguments` |
-| 11 | `readonly` |
-| 10 | `C__kml_mod0` |
-| 10 | `f__kml_mod0` |
-| 10 | `m` |
-| 10 | `new` |
-| 8 | `callback` |
-| 7 | `C` |
-| 7 | `a__kml_mod0` |
+| 12 | `before` |
+| 12 | `readonly` |
+| 11 | `C__kml_mod0` |
+| 11 | `array` |
+| 11 | `new` |
+| 10 | `callback` |
+| 9 | `C` |
+| 9 | `Foo` |
+| 9 | `const` |
+| 9 | `f__kml_mod0` |
+| 9 | `m` |
+| 9 | `y` |
+| 8 | `bar` |
+| 8 | `p` |
+| 7 | `Symbol` |
+| 7 | `arguments` |
 | 7 | `get x` |
-| 7 | `method` |
+| 7 | `of` |
 | 7 | `union` |
-| 7 | `y` |
+| 7 | `use` |
+| 6 | `B` |
 | 6 | `B__kml_mod0` |
-| 6 | `Foo` |
 | 6 | `Object` |
-| 6 | `Symbol` |
-| 6 | `bar` |
 | 6 | `foo__kml_mod0` |
+| 6 | `method` |
+| 6 | `v` |
 | 5 | `#x` |
-| 5 | `B` |
+| 5 | `A` |
+| 5 | `D__kml_mod0` |
 | 5 | `Derived__kml_mod0` |
-| 5 | `in` |
+| 5 | `Foo__kml_mod0` |
+| 5 | `I` |
+| 5 | `get` |
 | 5 | `override` |
-| 5 | `p` |
+| 5 | `run` |
+| 5 | `value` |
 | 5 | `var1` |
+| 5 | `x__kml_mod0` |
 | 5 | `�` |
-| 4 | `A` |
-| 4 | `Foo__kml_mod0` |
-| 4 | `f` |
-| 4 | `i` |
-| 4 | `of` |
-| 4 | `s` |
-| 4 | `set` |
-| 4 | `strOrNum` |
-| 4 | `target1` |
-| 3 | `#test` |
-| 3 | `A__kml_mod0` |
-| 3 | `Array` |
-| 3 | `Bar__kml_mod0` |
-| 3 | `C1__kml_mod0` |
-| 3 | `E__kml_mod0` |
-| 3 | `I` |
-| 3 | `\\` |
-| … | +220 more distinct blockers |
+| 4 | `Bar__kml_mod0` |
+| 4 | `a__kml_mod0` |
+| 4 | `baz` |
+| 4 | `cond` |
+| 4 | `f1` |
+| 4 | `for await` |
+| … | +307 more distinct blockers |

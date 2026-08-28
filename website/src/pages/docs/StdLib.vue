@@ -48,12 +48,14 @@
     <table>
       <thead><tr><th>Area</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>Streams</td><td>Web + Node streams (options-form), 100%</td></tr>
+        <tr><td>Streams</td><td>Web + Node streams (options form and <code>class X extends Readable/Writable</code>), 100%</td></tr>
         <tr><td><code>URL</code> / <code>URLSearchParams</code></td><td>100% (one value per key)</td></tr>
         <tr><td><code>WebSocket</code> / SSE</td><td>Client &amp; server; client speaks <code>wss://</code></td></tr>
         <tr><td><code>events</code> (EventEmitter)</td><td>100%, single payload type per emitter</td></tr>
         <tr><td><code>path</code> / <code>os</code></td><td>100% (POSIX; Linux + Apple Silicon verified)</td></tr>
-        <tr><td><code>net</code> / <code>dns</code> / <code>dgram</code> / <code>tls</code> / <code>http2</code> / <code>zlib</code></td><td>Done (<code>tls</code> = client + server); <code>vm</code> not started</td></tr>
+        <tr><td><code>net</code> / <code>dns</code> / <code>dgram</code> / <code>tls</code> / <code>http2</code> / <code>https</code> / <code>zlib</code></td><td>Done (<code>tls</code> = client + server; <code>http2</code> = h2c server + client sessions; <code>https</code> = client); <code>vm</code> not started</td></tr>
+        <tr><td><code>node:test</code></td><td>The test runner — <code>test</code>/<code>describe</code>, subtests, hooks, TAP output, non-zero exit on failure</td></tr>
+        <tr><td><code>diagnostics_channel</code></td><td>Named pub/sub (string messages)</td></tr>
       </tbody>
     </table>
 

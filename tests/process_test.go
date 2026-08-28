@@ -452,3 +452,57 @@ throw new Error("boom")
 		t.Errorf("exit code: got %d, want 1", code)
 	}
 }
+
+// TDD-00131 (process fidelity): process.execPath is the running binary's own
+// absolute, symlink-resolved path — always absolute like Node's, and a
+// length-prefixed string so `.length` works (ADR-00395).
+func TestE2EProcessExecPath(t *testing.T) {
+	assertOutput(t, `console.log(process.execPath.length > 0 && process.execPath.startsWith("/"))`, "true")
+}
+
+// Regression: process.cwd() must be a length-prefixed string (previously
+// returned a raw getcwd() pointer with no header, so `.length` read garbage).
+func TestE2EProcessCwdHasLength(t *testing.T) {
+	assertOutput(t, `console.log(process.cwd().length > 0)`, "true")
+}
+
+// process.emitWarning(message, type?) writes Node's `(node:<pid>) <type>:
+// <message>` format to stderr, defaulting the type to "Warning".
+func TestE2EProcessEmitWarning(t *testing.T) {
+	_, stderr := compileAndRunCaptureStderr(t, `
+process.emitWarning("careful now");
+process.emitWarning("old api", "DeprecationWarning");
+`)
+	if !strings.Contains(stderr, "Warning: careful now\n") {
+		t.Errorf("stderr missing default warning: %q", stderr)
+	}
+	if !strings.Contains(stderr, "DeprecationWarning: old api\n") {
+		t.Errorf("stderr missing typed warning: %q", stderr)
+	}
+}
+
+// TDD-00136: process.version / process.versions report the pinned Node
+// compatibility baseline (v22.11.0) plus this compiler's own klain version;
+// versions.node/v8 match that Node release verbatim, no fabricated bundled-lib
+// versions.
+func TestE2EProcessVersion(t *testing.T) {
+	assertOutput(t, `console.log(process.version)`, "v22.11.0")
+}
+
+func TestE2EProcessVersionsObject(t *testing.T) {
+	assertOutput(t, `
+console.log(process.versions.node);
+console.log(process.versions.v8);
+console.log(process.versions.klain);
+console.log(JSON.stringify(process.versions));
+`, "22.11.0\n12.4.254.21-node.21\n0.52.0\n{\"node\":\"22.11.0\",\"v8\":\"12.4.254.21-node.21\",\"klain\":\"0.52.0\"}")
+}
+
+// TDD-00131: process.on('warning', h) fires h with the warning as an Error
+// when process.emitWarning is called (the stderr print still happens too).
+func TestE2EProcessOnWarning(t *testing.T) {
+	assertOutput(t, `
+process.on('warning', (w: Error) => { console.log("warn:", w.name, w.message); });
+process.emitWarning("careful", "CustomWarning");
+`, "warn: CustomWarning careful")
+}

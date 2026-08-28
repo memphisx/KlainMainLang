@@ -964,7 +964,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.emitLabel(bodyStartL)
 	}
 
-	if err := e.pushNestedFuncScope(decl.Body.Body); err != nil {
+	if err := e.pushNestedFuncScope(decl.Params, decl.Body.Body); err != nil {
 		return err
 	}
 	for _, stmt := range decl.Body.Body {

@@ -23,7 +23,7 @@
             <a :href="gh + '/blob/main/LICENSE'" target="_blank" rel="noopener" class="km-footer__link">License (AGPL-3.0)</a>
           </div>
           <div class="km-footer__col km-footer__flag">
-            <FlagVergina :width="128" />
+            <MonogramKM :size="96" />
           </div>
         </div>
       </div>
@@ -40,7 +40,7 @@
 
 <script setup>
 import Wordmark from 'components/brand/Wordmark.vue'
-import FlagVergina from 'components/brand/FlagVergina.vue'
+import MonogramKM from 'components/brand/MonogramKM.vue'
 import { GITHUB_URL } from 'src/lib/content.js'
 
 const gh = GITHUB_URL

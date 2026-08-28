@@ -10,6 +10,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 50 # kill a genuine hang instead of burning the default 6h
     steps:
       - uses: actions/checkout@v5
 
@@ -23,7 +24,7 @@ jobs:
 
       - run: go build .
       - run: go vet ./...
-      - run: go test -timeout 20m ./...
+      - run: go test -timeout 40m ./... # serial E2E suite on a 2-core runner; 20m started timing out as it grew
       - run: make examples
 
   release:

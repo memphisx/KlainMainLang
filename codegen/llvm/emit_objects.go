@@ -107,6 +107,12 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	if lit.HasComputedKey() {
 		return e.emitDynamicObjectLiteral(lit)
 	}
+	// A plain object literal assigned to a string index-signature target
+	// (TDD-00130) is built as a map, not a fixed struct, so `d[key]` access
+	// works — the same map-backed representation a computed-key literal uses.
+	if hint != nil && hint.IsDynamicObject {
+		return e.emitDynamicObjectLiteral(lit)
+	}
 	ty := e.inferObjectType(lit)
 	if hint != nil && hint.IsObject {
 		ty = *hint

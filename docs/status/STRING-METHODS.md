@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 27/29 (~93%) · **Strict Coverage**: 20/29 (~69%).
+**Coverage**: 28/30 (~93%) · **Strict Coverage**: 21/30 (~70%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -20,6 +20,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.split(sep)` | ✅ | | • Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
+| `.toString()` | ✅ | | • Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks) |
 | `.toUpperCase()` | ✅ | | |
 | `.toLowerCase()` | ✅ | | |
 | `.repeat(n)` | ✅ | | |

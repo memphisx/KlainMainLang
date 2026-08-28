@@ -376,3 +376,41 @@ const ts = new TransformStream<number, number>();
 console.log(rs instanceof ReadableStream, ws instanceof WritableStream, ts instanceof TransformStream, rs instanceof WritableStream);
 `, "true true true false")
 }
+
+func TestE2EEventEmitterMultiArgTuple(t *testing.T) {
+	// TDD-00131: Node's multi-argument events — a tuple-payload event emits and
+	// listens with one argument per element.
+	assertOutput(t, `
+class Bus extends EventEmitter<{ data: [string, number]; done: void }> {}
+const b = new Bus()
+b.on("data", (chunk: string, size: number) => {
+  console.log(chunk + " " + size)
+})
+b.on("done", () => { console.log("done") })
+b.emit("data", "hello", 5)
+b.emit("data", "world", 10)
+b.emit("done")
+`, "hello 5\nworld 10\ndone")
+}
+
+func TestE2EEventEmitterMultiArgSingleTupleOnce(t *testing.T) {
+	assertOutput(t, `
+const bus = new EventEmitter<[string, number, boolean]>()
+bus.once("evt", (name: string, code: number, ok: boolean) => {
+  console.log(name + " " + code + " " + ok)
+})
+bus.emit("evt", "req", 200, true)
+bus.emit("evt", "req2", 500, false)
+`, "req 200 true")
+}
+
+func TestE2EEventEmitterMultiArgWrongArity(t *testing.T) {
+	_, err := parseAndCompile(`
+class Bus extends EventEmitter<{ data: [string, number] }> {}
+const b = new Bus()
+b.on("data", (chunk: string) => { console.log(chunk) })
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a listener arity not matching the tuple payload, got none")
+	}
+}

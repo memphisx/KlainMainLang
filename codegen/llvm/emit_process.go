@@ -209,9 +209,16 @@ func (e *Emitter) emitProcessCwd(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, fmt.Errorf("%d:%d: process.cwd takes no arguments", pos.Line, pos.Col)
 	}
 	e.ensureProcessCwd()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", r))
-	return Value{Ref: r, Ty: TypePtr}, nil
+	// getcwd returns a raw malloc'd libc string with no length header — copy
+	// it into a length-prefixed string so `.length` and other header-based
+	// string ops work (TDD-00120), same as env/execPath. A pre-existing bug:
+	// `.length`/slice on process.cwd() previously read a bogus -8 header.
+	boxed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", boxed, r))
+	return Value{Ref: boxed, Ty: TypePtr}, nil
 }
 
 // emitProcessChdir implements process.chdir(path): changes the current
@@ -237,6 +244,133 @@ func (e *Emitter) emitProcessPid() (Value, error) {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_getpid()", r))
 	return Value{Ref: r, Ty: TypeI64}, nil
+}
+
+// emitProcessExecPath implements the process.execPath property read: the
+// absolute path of the running executable. This compiler has no separate
+// runtime binary — the compiled program *is* the executable — so execPath is
+// its own argv[0] (the same value real Node fills for a bundled/SEA binary),
+// loaded from the @__argv_ptr backing the argv array.
+func (e *Emitter) emitProcessExecPath() (Value, error) {
+	e.ensureExecPath()
+	e.ensureStrHeaderRuntime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_execpath()", r))
+	// __kml_execpath returns a raw libc string (realpath/readlink buffer) with
+	// no length header — copy it into a length-prefixed string so `.length`
+	// and other header-based string ops work (TDD-00120), same as env/cwd.
+	boxed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", boxed, r))
+	return Value{Ref: boxed, Ty: TypePtr}, nil
+}
+
+// emitProcessEmitWarning implements process.emitWarning(message, type?): writes
+// `(node:<pid>) <type>: <message>` to stderr, matching Node's default warning
+// format (the `type` defaults to "Warning", as Node's does). The richer
+// options-object form (`{ code, detail }`) and the `'unhandledRejection'`-style
+// process 'warning' event are out of V1 scope — this is the plain textual
+// emission the vast majority of callers use.
+func (e *Emitter) emitProcessEmitWarning(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: process.emitWarning takes (message, type?)", pos.Line, pos.Col)
+	}
+	msg, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if msg.Ty.IR != "ptr" {
+		return Value{}, fmt.Errorf("%d:%d: process.emitWarning's message must be a string", pos.Line, pos.Col)
+	}
+	typeRef := e.internString("Warning")
+	if len(args) == 2 {
+		t, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		if t.Ty.IR != "ptr" {
+			return Value{}, fmt.Errorf("%d:%d: process.emitWarning's type must be a string", pos.Line, pos.Col)
+		}
+		typeRef = t.Ref
+	}
+	pid, err := e.emitProcessPid()
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureDprintf()
+	fmtStr := e.internString("(node:%lld) %s: %s\n")
+	e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i64 %s, ptr %s, ptr %s)", fmtStr, pid.Ref, typeRef, msg.Ref))
+
+	// If a process.on('warning', handler) is registered, invoke it with the
+	// warning as an Error object (name = type, message). The stderr print above
+	// still happens (Node's always-on default warning printer).
+	e.ensureProcessWarningHandler()
+	e.ensureExceptionHelpers()
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_process_warning_handler, align 8", h))
+	isnull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, h))
+	fireL := e.freshLabel("warn.fire")
+	doneL := e.freshLabel("warn.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isnull, doneL, fireL))
+	e.emitLabel(fireL)
+	errObj := e.buildErrorObj(0, msg.Ref, typeRef)
+	fp := e.freshReg()
+	fpp := e.freshReg()
+	ep := e.freshReg()
+	epp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, h))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, h))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+	e.emitInstr(fmt.Sprintf("call void (ptr, ptr) %s(ptr %s, ptr %s)", fp, ep, errObj))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	return Value{Ty: TypeVoid}, nil
+}
+
+// ensureProcessWarningHandler emits the process 'warning'-listener slot once.
+func (e *Emitter) ensureProcessWarningHandler() {
+	if e.usedProcessWarning {
+		return
+	}
+	e.usedProcessWarning = true
+	e.emitGlobal("@__kml_process_warning_handler = internal global ptr null, align 8")
+}
+
+// emitProcessVersion implements the process.version property read: `"v" +`
+// the Node compatibility baseline (TDD-00136) — the pinned Node release this
+// compiler's API is measured against.
+func (e *Emitter) emitProcessVersion() (Value, error) {
+	return Value{Ref: e.internString("v" + nodeCompatVersion), Ty: TypePtr}, nil
+}
+
+// processVersionsType is the fixed shape of the process.versions object —
+// declared once so member-type inference and the emitted object agree on field
+// order (node, v8, klain).
+func processVersionsType() Type {
+	return ObjectType([]Field{
+		{Name: "node", Ty: TypePtr},
+		{Name: "v8", Ty: TypePtr},
+		{Name: "klain", Ty: TypePtr},
+	})
+}
+
+// emitProcessVersions implements the process.versions property read (TDD-00136).
+// V1 reports only values that are either the agreed compatibility baseline
+// (`node`/`v8`, the pinned Node release) or genuinely ours (`klain`, this
+// compiler's version) — deliberately *not* fabricated versions for bundled
+// libraries this compiler doesn't ship (Node's `uv`/`undici`/`icu`/… would be
+// made up). The real linked-library versions we *can* report honestly
+// (`openssl` when the crypto/tls backend is OpenSSL, `zlib` when linked, …) are
+// a follow-on, since they require querying the linked lib at runtime and
+// backend-aware conditional linking.
+func (e *Emitter) emitProcessVersions(pos ast.Pos) (Value, error) {
+	props := []ast.ObjectProperty{
+		{Key: "node", Value: ast.NewStringLiteral(nodeCompatVersion, pos)},
+		{Key: "v8", Value: ast.NewStringLiteral(nodeCompatV8, pos)},
+		{Key: "klain", Value: ast.NewStringLiteral(klainVersion, pos)},
+	}
+	return e.emitObjectLiteral(ast.NewObjectLiteral(props, pos))
 }
 
 // emitProcessOn implements process.on('SIGINT' | 'SIGTERM', handler): TDD-00019.
@@ -301,8 +435,21 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.usedProcessLifecycle = true
 		e.ensureExceptionHelpers() // the hook lives in __kml_throw's uncaught path
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_uncaught_handler, align 8", cb.hdrPtr))
+	case "warning":
+		// The listener receives the warning as an Error: (warning) => void.
+		// process.emitWarning still prints to stderr (matching Node's always-on
+		// default printer) and additionally invokes this handler.
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{errorObjType})
+		if err != nil {
+			return Value{}, err
+		}
+		if cb.kind != cbClosure {
+			return Value{}, fmt.Errorf("%d:%d: a process 'warning' listener must be an arrow function literal", pos.Line, pos.Col)
+		}
+		e.ensureProcessWarningHandler()
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_process_warning_handler, align 8", cb.hdrPtr))
 	default:
-		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'exit'/'uncaughtException' (got %q)", pos.Line, pos.Col, eventLit.Value)
+		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'exit'/'uncaughtException'/'warning' (got %q)", pos.Line, pos.Col, eventLit.Value)
 	}
 	return Value{Ty: TypeVoid}, nil
 }

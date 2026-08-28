@@ -164,3 +164,17 @@ try {
 }
 `, "expected a throw")
 }
+
+// TDD-00131: assert.deepStrictEqual — recursive structural equality over
+// arrays, objects (incl. nested), strings, and scalars.
+func TestE2EAssertDeepStrictEqual(t *testing.T) {
+	assertOutputImports(t, `
+import assert from 'assert'
+assert.deepStrictEqual([1, 2, 3], [1, 2, 3]);
+assert.deepStrictEqual({ a: "hi", b: [1, 2] }, { a: "hi", b: [1, 2] });
+try { assert.deepStrictEqual([1, 2], [1, 9]); console.log("no throw"); }
+catch (e) { console.log("caught"); }
+assert.notDeepStrictEqual({ x: 1 }, { x: 2 });
+console.log("done");
+`, "caught\ndone")
+}

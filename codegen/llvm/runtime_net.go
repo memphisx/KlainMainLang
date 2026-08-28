@@ -18,11 +18,17 @@
 // inspection the loop does not do for non-curl fds).
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+)
 
 // netServerIR: 0 i64 listenfd (-1 before listen / after close) · 1 ptr
-// connection listener (closure header, or null) · 2 i64 closed (0 open · 1).
-const netServerIR = "{ i64, ptr, i64, ptr }" // field 3 = server SSL_CTX* (null for plaintext; set by tls.createServer, TDD-00110)
+// connection listener (closure header, or null) · 2 i64 closed (0 open · 1) ·
+// 3 ptr server SSL_CTX* (null for plaintext; set by tls.createServer,
+// TDD-00110) · 4 ptr 'listening' listener (closure header, or null).
+const netServerIR = "{ i64, ptr, i64, ptr, ptr }"
+const netServerStructSize = 40
 
 // netSocketIR: 0 i64 fd (-1 after close/EOF) · 1 i64 state (0 open · 1 closed)
 // · 2 ptr 'data' listener · 3 ptr 'end' listener · 4 ptr pending 'connect'
@@ -30,6 +36,16 @@ const netServerIR = "{ i64, ptr, i64, ptr }" // field 3 = server SSL_CTX* (null 
 // runs after net.connect returns and the socket variable is bound, then
 // cleared — server-accepted sockets leave it null).
 const netSocketIR = "{ i64, i64, ptr, ptr, ptr, ptr }" // field 5 = SSL* (null for plaintext; set for a tls.connect socket, TDD-00109)
+
+// ensureNtohs declares ntohs exactly once — both the net and dgram runtimes
+// need it, and duplicate declarations are an LLVM redefinition error.
+func (e *Emitter) ensureNtohs() {
+	if e.usedNtohs {
+		return
+	}
+	e.usedNtohs = true
+	e.emitGlobal("declare i16 @ntohs(i16 noundef)")
+}
 
 func (e *Emitter) ensureNetRuntime() {
 	if e.usedNetRuntime {
@@ -554,4 +570,98 @@ cnext:
 done:
   ret void
 }`, srv, nonblock, sock, srv, sock, sock, sock, sock))
+
+	// __kml_net_sockname_port: getsockname(fd) → the host-order local port, or
+	// -1 on error. Backs server.address()/socket.address() and, crucially, the
+	// `listen(0)` ephemeral-port idiom (bind picks the port; this reads it back).
+	e.ensureNtohs()
+	e.emitGlobal(`
+declare i32 @getsockname(i32, ptr, ptr)
+define i32 @__kml_net_sockname_port(i32 %fd) {
+entry:
+  %addr = alloca [16 x i8], align 4
+  %lenp = alloca i32, align 4
+  store i32 16, ptr %lenp, align 4
+  %rc = call i32 @getsockname(i32 %fd, ptr %addr, ptr %lenp)
+  %ok = icmp eq i32 %rc, 0
+  br i1 %ok, label %read, label %fail
+read:
+  %portp = getelementptr i8, ptr %addr, i64 2
+  %portn = load i16, ptr %portp, align 1
+  %porth = call i16 @ntohs(i16 %portn)
+  %port32 = zext i16 %porth to i32
+  ret i32 %port32
+fail:
+  ret i32 -1
+}`)
+
+	// __kml_net_sockname_addr: getsockname(fd) → the local IPv4 address as a
+	// length-prefixed string ("0.0.0.0" for a wildcard-bound server, the real
+	// peer-local IP like "127.0.0.1" for a connected socket), or "" on error.
+	// sockaddr_in's sin_addr is at byte offset 4 on both Linux and BSD/macOS.
+	e.ensureStrHeaderRuntime()
+	e.emitGlobal(`
+declare ptr @inet_ntop(i32, ptr, ptr, i32)
+define ptr @__kml_net_sockname_addr(i32 %fd) {
+entry:
+  %addr = alloca [16 x i8], align 4
+  %tmp = alloca [46 x i8], align 1
+  %lenp = alloca i32, align 4
+  store i32 16, ptr %lenp, align 4
+  %rc = call i32 @getsockname(i32 %fd, ptr %addr, ptr %lenp)
+  %ok = icmp eq i32 %rc, 0
+  br i1 %ok, label %conv, label %fail
+conv:
+  %sinaddr = getelementptr i8, ptr %addr, i64 4
+  %res = call ptr @inet_ntop(i32 2, ptr %sinaddr, ptr %tmp, i32 46)
+  %resok = icmp ne ptr %res, null
+  br i1 %resok, label %box, label %fail
+box:
+  %boxed = call ptr @__kml_str_from_cstr(ptr %tmp)
+  ret ptr %boxed
+fail:
+  %empty = call ptr @__kml_str_from_cstr(ptr @.kml_net_emptystr)
+  ret ptr %empty
+}
+@.kml_net_emptystr = private unnamed_addr constant [1 x i8] c"\00"`)
+
+	// __kml_net_is_ip: 4 if s parses as an IPv4 literal, 6 if IPv6, else 0 —
+	// backs net.isIP/isIPv4/isIPv6.
+	e.emitGlobal(fmt.Sprintf(`
+define i32 @__kml_net_is_ip(ptr %%s) {
+entry:
+  %%buf = alloca [16 x i8], align 4
+  %%r4 = call i32 @inet_pton(i32 2, ptr %%s, ptr %%buf)
+  %%is4 = icmp eq i32 %%r4, 1
+  br i1 %%is4, label %%ret4, label %%try6
+try6:
+  %%r6 = call i32 @inet_pton(i32 %d, ptr %%s, ptr %%buf)
+  %%is6 = icmp eq i32 %%r6, 1
+  br i1 %%is6, label %%ret6, label %%ret0
+ret4:
+  ret i32 4
+ret6:
+  ret i32 6
+ret0:
+  ret i32 0
+}`, netAFInet6()))
+}
+
+// netAFInet6 is the platform's AF_INET6 value (macOS 30, Linux 10) — host-only,
+// since this compiler doesn't cross-compile.
+func netAFInet6() int {
+	if runtime.GOOS == "darwin" {
+		return 30
+	}
+	return 10
+}
+
+// netKeepAliveConst returns the platform's (SOL_SOCKET, SO_KEEPALIVE) pair for
+// setsockopt (macOS 0xffff/0x0008, Linux 1/9).
+func netKeepAliveConst() (solSocket, soKeepAlive int) {
+	sol, _ := httpSockConstants()
+	if runtime.GOOS == "darwin" {
+		return sol, 0x0008
+	}
+	return sol, 9
 }

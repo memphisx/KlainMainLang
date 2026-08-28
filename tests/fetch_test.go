@@ -1006,3 +1006,93 @@ main2()
 `, srv.URL)
 	assertOutput(t, src, "200\n200")
 }
+
+// TDD-00138 Stage 1: the Node http client — http.get(url, cb) hands the callback
+// an IncomingMessage (statusCode + 'data'/'end' events), built on the same
+// libcurl primitive as fetch.
+func TestE2EHTTPSClientGet(t *testing.T) {
+	// The https module's get/request ride the same libcurl client as http's —
+	// TLS comes from the URL scheme at curl's layer (verified manually against
+	// a live https host; this test pins the module wiring itself against a
+	// local upstream).
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+import https from 'https'
+https.get("%s/flat", (res) => {
+  console.log("status", res.statusCode)
+})
+`, srv.URL)
+	assertOutputImports(t, src, `status 200`)
+}
+
+func TestE2EHTTPSCreateServerRejected(t *testing.T) {
+	// https.createServer must be a clean rejection, never a silently non-TLS
+	// server.
+	_, err := parseAndCompileImports(t, `
+import https from 'https'
+https.createServer((req, res) => { res.end("x") })
+`)
+	if err == nil || !strings.Contains(err.Error(), "https.createServer is not implemented") {
+		t.Fatalf("want clean https.createServer rejection, got %v", err)
+	}
+}
+
+func TestE2EStreamWebReExports(t *testing.T) {
+	// stream/web re-exports the ambient WHATWG stream constructors.
+	assertOutputImports(t, `
+import { ReadableStream } from 'stream/web'
+const rs = new ReadableStream<number>({ start: (c) => { c.enqueue(41); c.close(); } })
+const rd = rs.getReader()
+const first = await rd.read()
+console.log("v", first.value)
+`, "v 41")
+}
+
+func TestE2EHTTPClientGet(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+import http from 'http'
+http.get("%s/flat", (res) => {
+  console.log("status", res.statusCode)
+  let data = ""
+  res.on('data', (chunk: string) => { data = data + chunk })
+  res.on('end', () => { console.log("body", data) })
+})
+`, srv.URL)
+	assertOutputImports(t, src, `status 200`+"\n"+`body {"title":"hello","count":42,"active":true}`)
+}
+
+func TestE2EHTTPClientGetStatusCode(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+import http from 'http'
+http.get("%s/notfound", (res) => {
+  console.log(res.statusCode)
+  res.on('data', (chunk: string) => {})
+  res.on('end', () => { console.log("done") })
+})
+`, srv.URL)
+	assertOutputImports(t, src, "404\ndone")
+}
+
+// TDD-00138 Stage 2: async client delivery — http.get can call this program's
+// OWN in-process http.listen server without deadlocking the single event loop
+// (registers a completion reaction the loop fires; previously busy-blocked).
+func TestE2EHTTPClientInProcessRoundTrip(t *testing.T) {
+	assertOutputImports(t, `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  res.end("pong")
+}).listen(18499, () => {
+  http.get("http://127.0.0.1:18499/", (res) => {
+    let data = ""
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', () => {
+      console.log("got", data, res.statusCode)
+      process.exit(0)
+    })
+  })
+})
+`, "got pong 200")
+}

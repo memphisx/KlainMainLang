@@ -522,6 +522,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "workerthreads__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// stream/web re-exports the ambient WHATWG stream constructors —
+				// identity, same as stream's class names.
+				if ref.Marker == "streamweb__kml_builtin" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}

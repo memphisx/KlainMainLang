@@ -1,6 +1,12 @@
 // process introspection, scheduling, env, and lifecycle.
 console.log("platform:", process.platform, "arch:", process.arch);
 console.log("pid:", process.pid > 0);
+console.log("execPath is absolute:", process.execPath.startsWith("/"));
+console.log("node compat:", process.version, "klain:", process.versions.klain);
+
+// emitWarning writes Node's `(node:<pid>) <type>: <message>` line to stderr.
+process.emitWarning("this is a demo warning");
+process.emitWarning("legacy call site", "DeprecationWarning");
 
 process.env.GREETING = "hi";
 console.log("env:", process.env.GREETING);

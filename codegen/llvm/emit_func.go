@@ -107,7 +107,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	e.coroRetLabel = ""
 	e.pushScope()
 	if decl.Body != nil {
-		if err := e.pushNestedFuncScope(decl.Body.Body); err != nil {
+		if err := e.pushNestedFuncScope(decl.Params, decl.Body.Body); err != nil {
 			return err
 		}
 		defer e.popNestedFuncScope()
@@ -249,6 +249,15 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		}
 	}
 
+	// A body referencing `arguments` gets a synthesized array of the declared
+	// parameters bound under that name (ADR-00387). Skipped for a may-suspend
+	// task body, whose params live in %__taskargs rather than plain allocas.
+	if !taskBody {
+		if err := e.synthesizeArgumentsObject(decl, sig); err != nil {
+			return err
+		}
+	}
+
 	// Emit body statements.
 	for _, stmt := range decl.Body.Body {
 		if err := e.emitStmt(stmt); err != nil {
@@ -302,6 +311,77 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 }
 
 // =============================================================================
+// synthesizeArgumentsObject binds a local `arguments` array, built from the
+// declared parameters, when the function body references `arguments` (ADR-00387).
+//
+// V1 scope: a regular (non-task) named function body whose parameters are all
+// the same simple (scalar/string) type, with no rest or destructured parameter.
+// Since this compiler has static arity, the synthesized `arguments` reflects
+// exactly the declared parameters — matching real JS for a call that passes
+// every declared argument. It does not grow with extra untyped arguments (there
+// is no variadic beyond an explicit `...rest`, which callers use directly), and
+// it is unavailable in an arrow function (real JS arrows have no own
+// `arguments`; here the reference simply stays an undefined-variable error).
+func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig FuncSig) error {
+	if decl.Body == nil {
+		return nil
+	}
+	// A parameter named `arguments` shadows the object — the user binding wins.
+	for _, p := range decl.Params {
+		if p.Name == "arguments" {
+			return nil
+		}
+	}
+	// Only synthesize when the body actually references `arguments`, so an
+	// ordinary function pays nothing.
+	bound := map[string]bool{}
+	addParamBoundNames(bound, decl.Params)
+	refs := map[string]bool{}
+	scanStmtsFV(decl.Body.Body, bound, refs)
+	if !refs["arguments"] {
+		return nil
+	}
+	elemTy := TypeI64 // a zero-parameter `arguments` is an empty number[]
+	if len(decl.Params) > 0 {
+		for _, p := range decl.Params {
+			if p.Rest {
+				return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a rest parameter — iterate the `...%s` parameter directly", decl.GetPos().Line, decl.GetPos().Col, p.Name)
+			}
+			if p.ArrayPattern != nil || p.ObjectPattern != nil {
+				return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a destructured parameter", decl.GetPos().Line, decl.GetPos().Col)
+			}
+		}
+		elemTy = sig.ParamTypes[0]
+		for i := 1; i < len(sig.ParamTypes); i++ {
+			if sig.ParamTypes[i].IR != elemTy.IR || sig.ParamTypes[i].IsArray != elemTy.IsArray {
+				return fmt.Errorf("%d:%d: `arguments` is only supported when every parameter shares one type (this compiler's arrays are homogeneous) — use a `...rest` parameter for mixed argument types", decl.GetPos().Line, decl.GetPos().Col)
+			}
+		}
+		if elemTy.IsArray || isNullableScalar(elemTy) || elemTy.IsDynamic {
+			return fmt.Errorf("%d:%d: `arguments` is not yet supported for array, nullable, or any/unknown parameter types", decl.GetPos().Line, decl.GetPos().Col)
+		}
+	}
+	// Build the array from the parameter values, reusing the array-literal data
+	// path (each element loads its parameter, already in scope), then bind the
+	// two-alloca array Symbol under `arguments`.
+	elems := make([]ast.Expression, len(decl.Params))
+	for i, p := range decl.Params {
+		elems[i] = ast.NewIdentifier(p.Name, decl.GetPos())
+	}
+	dataReg, n, err := e.emitArrayLiteralData(ast.NewArrayLiteral(elems, decl.GetPos()), elemTy)
+	if err != nil {
+		return err
+	}
+	ptrAlloca := e.freshReg()
+	lenAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", n, lenAlloca))
+	e.define("arguments", Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: ArrayOf(elemTy)})
+	return nil
+}
+
 // Nested function declarations (TDD-00057)
 // =============================================================================
 
@@ -328,6 +408,15 @@ type nestedFuncEntry struct {
 type nestedFuncScope struct {
 	byName map[string]nestedFuncEntry
 	byDecl map[*ast.FunctionDeclaration]nestedFuncEntry
+	// capturing (TDD-00129 Stage 1) holds the nested declarations in this body
+	// that reference an enclosing function's local/parameter and so must be
+	// emitted as a closure *value* bound to their own name, not a mangled
+	// direct-call symbol. They are deliberately absent from byName/byDecl, so
+	// resolveFuncRef misses them and a call falls through to the closure-value
+	// lookup — and a call *before* the declaration cleanly errors as an
+	// undefined function/closure (Stage 1 supports use at or after the
+	// declaration point only).
+	capturing map[*ast.FunctionDeclaration]bool
 }
 
 // pushNestedFuncScope pre-scans body (direct statements only) for nested
@@ -337,7 +426,18 @@ type nestedFuncScope struct {
 // emitted (skipped on an error return, same as every other per-function
 // emitter-state restore in this file — an error aborts the whole
 // compilation, so nothing downstream ever observes the unpopped frame).
-func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
+func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) error {
+	// TDD-00129 Stage 1: build this body's capturable-binding frame (params +
+	// var/let/const/destructured locals, never function/class names) and push
+	// it before classifying, so a nested declaration referencing one of this
+	// body's own locals — not only an outer body's — is seen as capturing.
+	frame := map[string]bool{}
+	for _, p := range params {
+		frame[p.Name] = true
+	}
+	collectCapturableNames(body, frame)
+	e.enclosingCapturables = append(e.enclosingCapturables, frame)
+
 	// Pushed before the scan below runs (and popped on an early-error
 	// return, to leave e.nestedFuncScopes exactly as this function found it
 	// — every caller relies on that on error) rather than only once fully
@@ -347,8 +447,19 @@ func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
 	// registerFunctions (emitter.go) uses for the identical reason. scope's
 	// maps are reference types, so mutating the local variable below and
 	// reading back through e.nestedFuncScopes see the same underlying data.
-	scope := nestedFuncScope{byName: map[string]nestedFuncEntry{}, byDecl: map[*ast.FunctionDeclaration]nestedFuncEntry{}}
+	scope := nestedFuncScope{
+		byName:    map[string]nestedFuncEntry{},
+		byDecl:    map[*ast.FunctionDeclaration]nestedFuncEntry{},
+		capturing: map[*ast.FunctionDeclaration]bool{},
+	}
 	e.nestedFuncScopes = append(e.nestedFuncScopes, scope)
+
+	// popFrames undoes both parallel pushes on an early-error return, keeping
+	// enclosingCapturables and nestedFuncScopes balanced.
+	popFrames := func() {
+		e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+		e.enclosingCapturables = e.enclosingCapturables[:len(e.enclosingCapturables)-1]
+	}
 
 	var unannotated []*ast.FunctionDeclaration
 	for _, stmt := range body {
@@ -357,23 +468,23 @@ func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
 			continue
 		}
 		if len(fd.TypeParams) > 0 {
-			e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+			popFrames()
 			return fmt.Errorf("%d:%d: a generic nested function declaration is not supported", fd.GetPos().Line, fd.GetPos().Col)
 		}
 		if _, dup := scope.byName[fd.Name]; dup {
-			e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+			popFrames()
 			return fmt.Errorf("%d:%d: '%s' is already declared in this scope", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
 		}
 		// A nested generator (TDD-00094) registers its GeneratorInfo instead of an
 		// ordinary Sig; the `g()` call site (lookupGenerator) then constructs an
-		// instance. Sub-step 1: a capturing nested generator needs the __env work
-		// (sub-step 2), so it's a clean rejection for now rather than a body that
-		// can't see the capture.
+		// instance. A capturing nested generator still needs its own __env work
+		// (out of TDD-00129 Stage 1's scope — see its Stage 3 note), so generators
+		// stay on the existing direct-registration path here regardless of capture.
 		if fd.IsGenerator {
 			e.nestedFuncCtr++
 			info, err := e.buildGeneratorSig(fd)
 			if err != nil {
-				e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+				popFrames()
 				return err
 			}
 			entry := nestedFuncEntry{
@@ -382,6 +493,17 @@ func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
 			}
 			scope.byName[fd.Name] = entry
 			scope.byDecl[fd] = entry
+			continue
+		}
+		// TDD-00129 Stage 1: a nested declaration that closes over an enclosing
+		// function's local/parameter is emitted as a closure value (at its
+		// declaration point, by emitStmt) rather than a mangled direct-call
+		// symbol — so it is recorded in `capturing` and deliberately left out of
+		// byName/byDecl. Keeping it out of resolveFuncRef is what makes a call
+		// fall through to the closure-value lookup, and makes a call before the
+		// declaration a clean "undefined function or closure" error.
+		if e.nestedDeclCaptures(fd) {
+			scope.capturing[fd] = true
 			continue
 		}
 		e.nestedFuncCtr++
@@ -412,9 +534,86 @@ func (e *Emitter) pushNestedFuncScope(body []ast.Statement) error {
 	return nil
 }
 
-// popNestedFuncScope removes the most recently pushed nestedFuncScope frame.
+// emitCapturingNestedFunc emits a capturing nested function declaration
+// (TDD-00129 Stage 1) as a closure *value* bound to its own name in the current
+// scope, by treating it as the equivalent named function expression. The
+// function-expression path already provides everything the capture needs:
+// gatherCaptures/env-struct (with by-reference mutation via boxed cells), the
+// ADR-00178 self-capture for recursion, and the closure-value representation so
+// the function can be returned, stored, or passed as a callback. The name is
+// defined *after* emission (use at or after the declaration point — Stage 1);
+// recursion inside the body resolves through the self-capture, not this slot.
+func (e *Emitter) emitCapturingNestedFunc(fd *ast.FunctionDeclaration) error {
+	fe := ast.NewFunctionExpression(fd.Name, fd.Params, fd.ReturnType, fd.Body, fd.IsAsync, fd.GetPos())
+	val, err := e.emitFunctionExpression(fe, nil)
+	if err != nil {
+		return err
+	}
+	ptrName := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+	e.define(fd.Name, Symbol{Ptr: ptrName, Ty: val.Ty})
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, ptrName))
+	return nil
+}
+
+// popNestedFuncScope removes the most recently pushed nestedFuncScope frame,
+// and the parallel enclosingCapturables frame (TDD-00129 Stage 1).
 func (e *Emitter) popNestedFuncScope() {
 	e.nestedFuncScopes = e.nestedFuncScopes[:len(e.nestedFuncScopes)-1]
+	e.enclosingCapturables = e.enclosingCapturables[:len(e.enclosingCapturables)-1]
+}
+
+// collectCapturableNames adds every capturable binding a body directly declares
+// — var/let/const and their destructured leaf names — to out. Function and
+// class declarations are intentionally excluded: they are resolved by name
+// (nested-func scopes / e.funcs / class table), never closed over as variables,
+// so treating them as captures would wrongly route a helper that merely calls a
+// sibling function through the closure path. Only the immediate statement list
+// is walked; a binding inside a further block isn't in scope for a nested
+// function declared directly in this body anyway (TDD-00129 Stage 1).
+func collectCapturableNames(body []ast.Statement, out map[string]bool) {
+	for _, stmt := range body {
+		switch s := stmt.(type) {
+		case *ast.VarDeclaration:
+			out[s.Name] = true
+		case *ast.VarDeclarationList:
+			for _, d := range s.Decls {
+				out[d.Name] = true
+			}
+		case *ast.ArrayDestructuring:
+			collectArrayPatternNames(s.Elems, out)
+		case *ast.ObjectDestructuring:
+			collectObjectPatternNames(s.Props, out)
+		}
+	}
+}
+
+// nestedDeclCaptures reports whether nested function declaration fd references a
+// binding of some enclosing function scope — i.e. a name present in any
+// enclosingCapturables frame — after excluding fd's own parameters and its own
+// name (self-recursion is not a capture). Purely syntactic, run at pre-scan
+// before the enclosing scope's params/locals are define()d. Over-approximation
+// is safe: a declaration wrongly flagged capturing is emitted as a closure whose
+// precise capture scan (emitFunctionExpression, via e.lookup) simply finds no
+// enclosing-scope symbol and produces a zero-capture closure — correct, only
+// slightly less efficient than a direct call. Under-approximation cannot happen
+// for an in-scope local, since every such binding is recorded in a frame.
+func (e *Emitter) nestedDeclCaptures(fd *ast.FunctionDeclaration) bool {
+	if fd.Body == nil {
+		return false
+	}
+	bound := map[string]bool{fd.Name: true}
+	addParamBoundNames(bound, fd.Params)
+	refs := map[string]bool{}
+	scanStmtsFV(fd.Body.Body, bound, refs)
+	for name := range refs {
+		for _, frame := range e.enclosingCapturables {
+			if frame[name] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resolveFuncRef resolves a bare identifier used as a callee/callback name:
@@ -1007,7 +1206,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.coroRetLabel = ""
 	e.pushScope()
 	if af.Block != nil {
-		if err := e.pushNestedFuncScope(af.Block.Body); err != nil {
+		if err := e.pushNestedFuncScope(af.Params, af.Block.Body); err != nil {
 			return err
 		}
 		defer e.popNestedFuncScope()
@@ -1774,7 +1973,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.currentPromiseTy = TypeVoid
 	e.coroRetLabel = ""
 	e.pushScope()
-	if err := e.pushNestedFuncScope(fe.Body.Body); err != nil {
+	if err := e.pushNestedFuncScope(fe.Params, fe.Body.Body); err != nil {
 		return Value{}, err
 	}
 	defer e.popNestedFuncScope()
@@ -1947,6 +2146,179 @@ func (e *Emitter) emitClosureCall(sym Symbol, args []ast.Expression, pos ast.Pos
 	closureReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", closureReg, sym.Ptr))
 	return e.emitClosureCallByPtr(closureReg, sym.Ty, args, pos)
+}
+
+// emitFunctionCallApply implements Function.prototype.call / .apply on a
+// first-class function value (TDD-00137 Stage A). `fnExpr` is the function-typed
+// receiver; `method` is "call" or "apply". The trailing arguments are forwarded
+// to a direct closure call — `thisArg` (the first argument) is evaluated for its
+// side effects then discarded, since this compiler's closures have no rebindable
+// `this`. For `apply`, the second argument must be a literal array whose
+// elements become the call arguments; a runtime args array is a clean error
+// (Stage B).
+func (e *Emitter) emitFunctionCallApply(fnExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	fnVal, err := e.emitExpr(fnExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	if !fnVal.Ty.IsFunc {
+		return Value{}, fmt.Errorf("%d:%d: .%s requires a function value", pos.Line, pos.Col, method)
+	}
+	// thisArg: evaluate (for side effects) then ignore — no rebindable `this`.
+	if len(args) >= 1 {
+		if _, err := e.emitExpr(args[0]); err != nil {
+			return Value{}, err
+		}
+	}
+
+	var callArgs []ast.Expression
+	if method == "call" {
+		callArgs = args[1:]
+	} else { // apply
+		if len(args) < 2 {
+			// apply() / apply(thisArg) with no args array — an empty argument list.
+			callArgs = nil
+		} else if lit, ok := args[1].(*ast.ArrayLiteral); ok {
+			callArgs = lit.Elements
+		} else {
+			// Stage B: fn.apply(thisArg, runtimeArray) — spread the runtime
+			// array into fn's rest parameter, exactly like fn(...arr). The
+			// closure-call path validates that fn actually has a rest slot and
+			// the element types match (a non-rest fn is a clean error there).
+			callArgs = []ast.Expression{ast.NewSpreadElement(args[1], args[1].GetPos())}
+		}
+	}
+	return e.emitClosureCallByPtr(fnVal.Ref, fnVal.Ty, callArgs, pos)
+}
+
+// emitFunctionBind implements Function.prototype.bind (TDD-00137 Stage C):
+// `fn.bind(thisArg, ...bound)` returns a new function value that, when called
+// with the remaining arguments, invokes `fn(bound…, remaining…)`. `thisArg` is
+// evaluated then discarded (no rebindable `this`). V1 is bounded to functions
+// with plain scalar/string/pointer parameters and no rest slot — an array,
+// nullable-scalar, dynamic, or rest parameter is a clean compile error.
+func (e *Emitter) emitFunctionBind(fnExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	fnVal, err := e.emitExpr(fnExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	if !fnVal.Ty.IsFunc {
+		return Value{}, fmt.Errorf("%d:%d: .bind requires a function value", pos.Line, pos.Col)
+	}
+	if fnVal.Ty.FuncHasRest {
+		return Value{}, fmt.Errorf("%d:%d: .bind on a rest-parameter function is not yet supported", pos.Line, pos.Col)
+	}
+	for _, p := range fnVal.Ty.FuncParams {
+		if p.IsArray || isNullableScalar(p) || p.IsDynamic {
+			return Value{}, fmt.Errorf("%d:%d: .bind is supported only on functions whose parameters are plain scalar/string/pointer types (V1)", pos.Line, pos.Col)
+		}
+	}
+	boundCount := len(args) - 1
+	if boundCount < 0 {
+		boundCount = 0
+	}
+	if boundCount > len(fnVal.Ty.FuncParams) {
+		return Value{}, fmt.Errorf("%d:%d: .bind supplies %d bound argument(s) but the function takes only %d", pos.Line, pos.Col, boundCount, len(fnVal.Ty.FuncParams))
+	}
+	// thisArg (args[0]) — evaluate for side effects, then ignore.
+	if len(args) >= 1 {
+		if _, err := e.emitExpr(args[0]); err != nil {
+			return Value{}, err
+		}
+	}
+
+	// env layout: slot 0 = the original fn closure header; slots 1..K = the
+	// bound argument values (one 8-byte slot each; every allowed param type
+	// fits in 8 bytes).
+	e.ensureMalloc()
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, 8*(1+boundCount)))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fnVal.Ref, env))
+	for i := 0; i < boundCount; i++ {
+		paramTy := fnVal.Ty.FuncParams[i]
+		bv, err := e.emitExprWithObjectHint(args[i+1], paramTy)
+		if err != nil {
+			return Value{}, err
+		}
+		bv = e.coerce(bv, paramTy)
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", slot, env, 8*(1+i)))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(paramTy), bv.Ref, slot))
+	}
+
+	tramp := e.emitBindTrampoline(fnVal.Ty, boundCount)
+	hdr := e.buildBuiltinClosure(tramp, env)
+	retTy := TypeVoid
+	if fnVal.Ty.FuncRetType != nil {
+		retTy = *fnVal.Ty.FuncRetType
+	}
+	return Value{Ref: hdr, Ty: FuncType(fnVal.Ty.FuncParams[boundCount:], retTy)}, nil
+}
+
+// emitBindTrampoline emits the forwarding function for a .bind result: it loads
+// the original closure header + the bound args from its env and tail-calls the
+// original with `(bound…, remaining…)`. Signature is
+// `<ret> (ptr %env, <remaining param IRs>)` — matching how the reduced closure
+// value is later invoked (emitClosureCallByPtr).
+func (e *Emitter) emitBindTrampoline(fnTy Type, boundCount int) string {
+	e.streamSiteCtr++
+	fn := fmt.Sprintf("@__kml_bind_%d", e.streamSiteCtr)
+	remaining := fnTy.FuncParams[boundCount:]
+	retTy := TypeVoid
+	if fnTy.FuncRetType != nil {
+		retTy = *fnTy.FuncRetType
+	}
+
+	// Trampoline parameter declaration.
+	paramDecls := []string{"ptr %env"}
+	for i, p := range remaining {
+		paramDecls = append(paramDecls, fmt.Sprintf("%s %%r%d", storageIR(p), i))
+	}
+	// The original closure's function-pointer type: (ptr env, all params…).
+	allIRs := []string{"ptr"}
+	for _, p := range fnTy.FuncParams {
+		allIRs = append(allIRs, storageIR(p))
+	}
+	fpTypePart := "(" + strings.Join(allIRs, ", ") + ")"
+
+	restore := e.beginThunkEmit()
+	fnhdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", fnhdr))
+	fp := e.freshReg()
+	fpp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, fnhdr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	ep := e.freshReg()
+	epp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, fnhdr))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+
+	callArgs := []string{"ptr " + ep}
+	for i := 0; i < boundCount; i++ {
+		p := fnTy.FuncParams[i]
+		slot := e.freshReg()
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%env, i64 %d", slot, 8*(1+i)))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", v, storageIR(p), slot))
+		callArgs = append(callArgs, fmt.Sprintf("%s %s", storageIR(p), v))
+	}
+	for i, p := range remaining {
+		callArgs = append(callArgs, fmt.Sprintf("%s %%r%d", storageIR(p), i))
+	}
+
+	if retTy.IR == "void" {
+		e.emitInstr(fmt.Sprintf("call void %s %s(%s)", fpTypePart, fp, strings.Join(callArgs, ", ")))
+		e.emitInstr("ret void")
+	} else {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, retTy.LLVMRetType(), fpTypePart, fp, strings.Join(callArgs, ", ")))
+		e.emitInstr(fmt.Sprintf("ret %s %s", retTy.LLVMRetType(), r))
+	}
+	body := e.allocas.String() + e.body.String()
+	restore()
+
+	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n", retTy.LLVMRetType(), fn, strings.Join(paramDecls, ", "), body))
+	return fn
 }
 
 // emitClosureCallByPtr calls a closure given the direct header pointer and its type.
@@ -2196,6 +2568,19 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 			return Callback{kind: cbClosure, hdrPtr: hdr, ty: sym.Ty}, nil
 		}
 		return Callback{}, fmt.Errorf("'%s' is not a callable", cb.Name)
+	}
+	// Any other expression whose static type is a function value — a bound
+	// function (`fn.bind(null, x)`), a wrapper-returning call (`mustCall(fn)`),
+	// a function-typed object field or array element (`obj.handler`,
+	// `handlers[i]`), a ternary (`cond ? f : g`), etc. Evaluate it once to its
+	// closure header and dispatch as a closure. Checked after the specific
+	// arrow/expression/identifier cases above so their tailored handling wins.
+	if ty := e.inferExprType(arg); ty.IsFunc {
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Callback{}, err
+		}
+		return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
 	}
 	return Callback{}, fmt.Errorf("callback must be an arrow function or function identifier")
 }

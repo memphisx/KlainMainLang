@@ -523,6 +523,38 @@ console.log(f(1))
 `, "10\n1")
 }
 
+func TestE2ERestParamInFunctionTypeAnnotation(t *testing.T) {
+	// A function *type* annotation with a rest parameter — both the
+	// rest-only form and a leading-positional-then-rest form — used as a
+	// parameter type, so the callback value is called variadically and via
+	// spread through the typed slot.
+	assertOutput(t, `
+function apply(f: (...xs: number[]) => number, args: number[]): number {
+    return f(...args);
+}
+function reduceTail(f: (head: number, ...tail: number[]) => number): number {
+    return f(1, 2, 3, 4);
+}
+console.log(apply((...xs: number[]): number => xs.length, [10, 20, 30]))
+console.log(reduceTail((head: number, ...tail: number[]): number => head + tail.length))
+`, "3\n4")
+}
+
+func TestE2ERestParamInFunctionTypeAlias(t *testing.T) {
+	assertOutput(t, `
+type Variadic = (...xs: number[]) => number;
+const count: Variadic = (...xs: number[]): number => xs.length;
+console.log(count(1, 2, 3, 4, 5))
+`, "5")
+}
+
+func TestE2ERestParamNotLastInFunctionTypeRejected(t *testing.T) {
+	_, err := parseAndCompile(`let f: (...xs: number[], y: number) => number;`)
+	if err == nil {
+		t.Fatal("expected a compile error for a rest parameter that isn't last in a function type, got none")
+	}
+}
+
 func TestE2EArrayParamOnArrowFunctionAsHOFCallback(t *testing.T) {
 	// The "no nested-array element as the callback's own parameter"
 	// fidelity gap ARRAY-METHODS.md documented — a HOF callback taking an
@@ -647,11 +679,69 @@ console.log(b());
 `, "1\n2")
 }
 
-func TestE2ENestedFunctionCapturingOuterLocalRejected(t *testing.T) {
-	// V1 scope (TDD-00057): a nested function declaration gets its own
-	// clean scope, same as a top-level function — it does not close over
-	// the enclosing function's locals the way an arrow function would.
-	_, err := parseAndCompile(`
+func TestE2EArgumentsObjectNumeric(t *testing.T) {
+	// ADR-00387: `arguments` synthesized from same-typed parameters — indexed
+	// access and `.length`.
+	assertOutput(t, `
+function sum(a: number, b: number, c: number): number {
+    let total = 0;
+    for (let i = 0; i < arguments.length; i++) { total += arguments[i]; }
+    return total;
+}
+console.log(sum(1, 2, 3))
+`, "6")
+}
+
+func TestE2EArgumentsObjectForOf(t *testing.T) {
+	assertOutput(t, `
+function total(a: number, b: number): number {
+    let s = 0;
+    for (const x of arguments) { s += x; }
+    return s;
+}
+console.log(total(10, 32))
+`, "42")
+}
+
+func TestE2EArgumentsObjectStrings(t *testing.T) {
+	assertOutput(t, `
+function joinAll(a: string, b: string, c: string): string {
+    let out = "";
+    for (let i = 0; i < arguments.length; i++) { out += arguments[i]; }
+    return out;
+}
+console.log(joinAll("a", "b", "c"))
+`, "abc")
+}
+
+func TestE2EArgumentsObjectMixedTypesRejected(t *testing.T) {
+	_, err := parseAndCompile(`function f(a: number, b: string): number { return arguments.length }`)
+	if err == nil {
+		t.Fatal("expected a compile error for `arguments` with mixed-type parameters, got none")
+	}
+}
+
+func TestE2EArgumentsObjectWithRestRejected(t *testing.T) {
+	_, err := parseAndCompile(`function f(...xs: number[]): number { return arguments.length }`)
+	if err == nil {
+		t.Fatal("expected a compile error for `arguments` alongside a rest parameter, got none")
+	}
+}
+
+func TestE2EArgumentsObjectInArrowRejected(t *testing.T) {
+	// Real JS arrow functions have no own `arguments`; here the reference stays
+	// an undefined-variable error rather than synthesizing from arrow params.
+	_, err := parseAndCompile(`const f = (a: number, b: number): number => arguments.length;`)
+	if err == nil {
+		t.Fatal("expected a compile error for `arguments` in an arrow function, got none")
+	}
+}
+
+func TestE2ENestedFunctionCapturesOuterLocal(t *testing.T) {
+	// TDD-00129 Stage 1: a nested function declaration that references an
+	// enclosing local/parameter is emitted as a closure value, capturing it —
+	// previously a clean rejection under TDD-00057's V1 scope.
+	assertOutput(t, `
 function outer(): number {
     const x: number = 10;
     function inner(): number {
@@ -660,9 +750,86 @@ function outer(): number {
     return inner();
 }
 console.log(outer());
+`, "10")
+}
+
+func TestE2ENestedFunctionCaptureByReferenceMutation(t *testing.T) {
+	// The captured local is shared by reference: a mutation the outer body
+	// makes after the nested function is defined is visible when it runs, and a
+	// mutation the nested function makes is visible to the outer body.
+	assertOutput(t, `
+function outer(base: number): number {
+    let acc = base;
+    function bump(): void { acc = acc + 1; }
+    bump();
+    acc = acc + 10;
+    bump();
+    return acc;
+}
+console.log(outer(0));
+`, "12")
+}
+
+func TestE2ENestedFunctionCaptureEscapesAsValue(t *testing.T) {
+	// A capturing nested function returned from its enclosing function keeps
+	// its captured environment after that function's frame is gone.
+	assertOutput(t, `
+function makeAdder(x: number): (n: number) => number {
+    function add(n: number): number { return x + n; }
+    return add;
+}
+const a = makeAdder(10);
+const b = makeAdder(100);
+console.log(a(5));
+console.log(b(5));
+`, "15\n105")
+}
+
+func TestE2ENestedFunctionCapturingRecursion(t *testing.T) {
+	// A capturing nested function may still recurse on itself (self-reference
+	// via the named-function-expression self-capture, ADR-00178).
+	assertOutput(t, `
+function outer(base: number): number {
+    function countdown(n: number): number {
+        if (n <= 0) return base;
+        return countdown(n - 1);
+    }
+    return countdown(3);
+}
+console.log(outer(7));
+`, "7")
+}
+
+func TestE2ENestedFunctionCaptureUsedBeforeDeclarationRejected(t *testing.T) {
+	// TDD-00129 Stage 1 supports use at or after the declaration point only; a
+	// capturing nested function called before its declaration is a clean error
+	// (full pre-declaration hoisting is Stage 2).
+	_, err := parseAndCompile(`
+function outer(x: number): number {
+    const r = inner();
+    function inner(): number { return x + 1; }
+    return r;
+}
+console.log(outer(1));
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a nested function referencing an enclosing local, got none")
+		t.Fatal("expected a compile error for a capturing nested function used before its declaration, got none")
+	}
+}
+
+func TestE2ENestedFunctionCapturingArrayRejected(t *testing.T) {
+	// Inherited closure limitation: capturing an array-typed variable in a
+	// closure is not yet supported, so a nested function closing over one is a
+	// clean rejection.
+	_, err := parseAndCompile(`
+function outer(arr: number[]): number {
+    function first(): number { return arr[0]; }
+    return first();
+}
+console.log(outer([9, 8, 7]));
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a nested function capturing an array variable, got none")
 	}
 }
 
@@ -2046,4 +2213,109 @@ async function outer(): Promise<void> {
 }
 outer()
 `, "0\n10\n20")
+}
+
+// TDD-00137 Stage A: Function.prototype.call / .apply on a function value lower
+// to a direct call, with thisArg evaluated-then-discarded (no rebindable this).
+func TestE2EFunctionCall(t *testing.T) {
+	assertOutput(t, `
+const add = (a: number, b: number): number => a + b;
+console.log(add.call(null, 3, 4));
+`, "7")
+}
+
+func TestE2EFunctionApplyLiteral(t *testing.T) {
+	assertOutput(t, `
+const add = (a: number, b: number): number => a + b;
+console.log(add.apply(null, [5, 6]));
+`, "11")
+}
+
+func TestE2EFunctionCallThisArgDiscardedSideEffectKept(t *testing.T) {
+	assertOutput(t, `
+let n = 0;
+const bump = (): number => { n = n + 1; return n; };
+const ctx = { tag: "x" };
+console.log(bump.call(ctx));
+console.log(n);
+`, "1\n1")
+}
+
+func TestE2EFunctionApplyRuntimeArrayRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const f = (a: number, b: number): number => a + b;
+const xs = [1, 2];
+f.apply(null, xs);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for .apply with a runtime args array, got none")
+	}
+}
+
+// TDD-00137 Stage B: fn.apply(thisArg, runtimeArray) spreads the array into a
+// rest parameter (equivalent to fn(...arr)).
+func TestE2EFunctionApplyRuntimeArrayIntoRest(t *testing.T) {
+	assertOutput(t, `
+const sum = (...ns: number[]): number => {
+  let t = 0;
+  for (const n of ns) t = t + n;
+  return t;
+};
+const xs = [1, 2, 3, 4];
+console.log(sum.apply(null, xs));
+`, "10")
+}
+
+// TDD-00137 Stage C: fn.bind(thisArg, ...bound) returns a partially-applied
+// function; thisArg is ignored, bound args prefix the call.
+func TestE2EFunctionBindPartialApplication(t *testing.T) {
+	assertOutput(t, `
+const add = (a: number, b: number): number => a + b;
+const add10 = add.bind(null, 10);
+console.log(add10(5));
+console.log(add10(100));
+`, "15\n110")
+}
+
+func TestE2EFunctionBindFullyBound(t *testing.T) {
+	assertOutput(t, `
+const add = (a: number, b: number): number => a + b;
+const seven = add.bind(null, 3, 4);
+console.log(seven());
+`, "7")
+}
+
+func TestE2EFunctionBindAsCallback(t *testing.T) {
+	assertOutput(t, `
+function apply2(fn: (n: number) => number, x: number): number { return fn(x); }
+const mul = (a: number, b: number): number => a * b;
+console.log(apply2(mul.bind(null, 3), 7));
+`, "21")
+}
+
+// TDD-00131 (front-end): a callback argument may be any statically
+// function-typed expression — a bound function, a function-typed object field,
+// an array element, or a ternary — not only an arrow/expression/identifier
+// literal (resolveCallback generalization).
+func TestE2ECallbackBoundFunction(t *testing.T) {
+	assertOutput(t, `
+const log = (tag: string, n: number): void => { console.log(tag, n); };
+setTimeout(log.bind(null, "bound", 42), 5);
+`, "bound 42")
+}
+
+func TestE2ECallbackFunctionField(t *testing.T) {
+	assertOutput(t, `
+const handlers = { done: (): void => { console.log("field ok"); } };
+setTimeout(handlers.done, 5);
+`, "field ok")
+}
+
+func TestE2ECallbackTernary(t *testing.T) {
+	assertOutput(t, `
+const a = (): void => { console.log("a"); };
+const b = (): void => { console.log("b"); };
+const pick = true;
+setTimeout(pick ? a : b, 5);
+`, "a")
 }

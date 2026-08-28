@@ -76,7 +76,14 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		// further if/for/while/switch block), rejected cleanly rather than
 		// silently mishandled.
 		if len(e.nestedFuncScopes) > 0 {
-			if entry, ok := e.nestedFuncScopes[len(e.nestedFuncScopes)-1].byDecl[s]; ok {
+			cur := e.nestedFuncScopes[len(e.nestedFuncScopes)-1]
+			// TDD-00129 Stage 1: a nested declaration that closes over an
+			// enclosing local/parameter was classified capturing at pre-scan and
+			// left out of byDecl — emit it as a closure value bound to its name.
+			if cur.capturing[s] {
+				return e.emitCapturingNestedFunc(s)
+			}
+			if entry, ok := cur.byDecl[s]; ok {
 				// A nested generator (TDD-00094) emits its fiber body here, where
 				// the enclosing scope is fully populated — so its captures are
 				// resolved now (not at pre-scan time) and recorded on the shared

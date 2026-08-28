@@ -295,6 +295,43 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 			return e.emitGroupMapIndex(sym, ex.Index, ex.GetPos())
 		}
 	}
+	// String-keyed Map bracket access: map[key] reads like Node's plain-object
+	// header records (`headers[':path']`, `req.headers['host']`) — sugar for
+	// .get(key), yielding the value string or null when absent (TDD-00139
+	// Stage 2 surfaced it; generally useful wherever a Map models an object).
+	if objTy := e.inferExprType(ex.Object); objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		keyVal, err := e.emitExpr(ex.Index)
+		if err != nil {
+			return Value{}, err
+		}
+		if keyVal.Ty.IR != "ptr" {
+			return Value{}, fmt.Errorf("%d:%d: a Map<string, …> bracket index must be a string", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, objVal.Ref, keyVal.Ref))
+		valTy := TypePtr
+		if objTy.MapVal != nil {
+			valTy = *objTy.MapVal
+		}
+		if valTy.IR == "ptr" {
+			p := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, raw))
+			return Value{Ref: p, Ty: valTy}, nil
+		}
+		if valTy.IR == "double" {
+			// Number values are stored as the double's BIT PATTERN in the
+			// i64 slot — reinterpret, never numerically convert.
+			d := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", d, raw))
+			return Value{Ref: d, Ty: valTy}, nil
+		}
+		out := e.coerce(Value{Ref: raw, Ty: TypeI64}, valTy)
+		return out, nil
+	}
 	// Dynamic object bracket access: obj[key] — a computed-key object literal
 	// is a real Map<string,V> under the hood, see docs/tdd/TDD-00012.md. Must
 	// run before the generic string-indexing check below, since a dynamic
@@ -346,6 +383,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
 	}
+	// http2.constants members are compile-time literals (TDD-00139 Stage 4);
+	// `http2.constants` itself binds as a flagged namespace value.
+	if e.isH2ConstantsExpr(ex.Object) {
+		return e.emitH2Constant(ex.Property, ex.GetPos())
+	}
+	if ex.Property == "constants" {
+		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "http2__kml_builtin" {
+			ty := TypeI64
+			ty.IsH2Constants = true
+			return Value{Ref: "0", Ty: ty}, nil
+		}
+	}
 	// DataView properties (byteLength/byteOffset/buffer) — dedicated reads
 	// over the hidden header struct, same pattern ArrayBuffer's .byteLength
 	// uses below.
@@ -365,6 +414,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitDataViewProp(objVal, ex.Property, ex.GetPos())
+		}
+	}
+	// diagnostics_channel Channel properties (hasSubscribers/name).
+	if ex.Property == "hasSubscribers" || ex.Property == "name" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsDCChannel {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDiagChannelMember(objVal, ex.Property, ex.GetPos())
 		}
 	}
 	// Blob properties (size/type, TDD-00102) — same dedicated-read pattern.
@@ -455,6 +514,12 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(nodePlatformName()), Ty: TypePtr}, nil
 		case "arch":
 			return Value{Ref: e.internString(nodeArchName()), Ty: TypePtr}, nil
+		case "execPath":
+			return e.emitProcessExecPath()
+		case "version":
+			return e.emitProcessVersion()
+		case "versions":
+			return e.emitProcessVersions(ex.GetPos())
 		case "exitCode":
 			e.usedProcessLifecycle = true
 			r := e.freshReg()
@@ -520,6 +585,19 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		}
 	}
 	// HttpRequest.body under streaming dispatch (TDD-00097 Stage 5b):
+	// Node's `req.url` (IncomingMessage, TDD-00131) is this request's path —
+	// aliased onto the existing `path` field so the same request object serves
+	// both the Node property name and the bespoke one.
+	if ex.Property == "url" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsRequest {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			idx, fieldTy, _ := objVal.Ty.FieldIndex("path")
+			return e.loadFieldValue(objVal, idx, fieldTy), nil
+		}
+	}
 	// complete the buffer in place before the plain field read below.
 	if ex.Property == "body" {
 		if objTy := e.inferExprType(ex.Object); objTy.IsRequest {

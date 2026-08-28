@@ -122,3 +122,48 @@ const c = spawn("echo", ["hi"])
 		t.Fatal("expected a compile error for using spawn without importing 'child_process', got none")
 	}
 }
+
+func TestE2EChildProcessSpawnSync(t *testing.T) {
+	// spawnSync blocks and returns { status, stdout, stderr, pid }.
+	assertOutputImports(t, `
+import { spawnSync } from 'child_process'
+const r = spawnSync("echo", ["hello", "world"])
+console.log("status", r.status)
+console.log("stdout", r.stdout.trim())
+const bad = spawnSync("false")
+console.log("badstatus", bad.status)
+`, "status 0\nstdout hello world\nbadstatus 1")
+}
+
+func TestE2EChildProcessExecSyncAndExecFileSync(t *testing.T) {
+	// execSync runs through /bin/sh -c; execFileSync execvp's with no shell.
+	// Both return captured stdout as a string.
+	assertOutputImports(t, `
+import { execSync, execFileSync } from 'child_process'
+console.log("exec", execSync("echo shell-$((2+3))").trim())
+console.log("execfile", execFileSync("printf", ["%s-%s", "a", "b"]))
+`, "exec shell-5\nexecfile a-b")
+}
+
+func TestE2EChildProcessSpawnSyncLargeInterleavedOutput(t *testing.T) {
+	// Both pipes are poll-multiplexed: a child writing well past the pipe
+	// buffer on stdout AND stderr must not deadlock, and both captures must be
+	// complete.
+	assertOutputImports(t, `
+import { spawnSync } from 'child_process'
+const r = spawnSync("/bin/sh", ["-c", "for i in $(seq 1 3000); do echo out$i; echo err$i 1>&2; done"])
+console.log("outlines:", r.stdout.split("\n").length - 1)
+console.log("errlines:", r.stderr.split("\n").length - 1)
+`, "outlines: 3000\nerrlines: 3000")
+}
+
+func TestE2EChildProcessSyncOptionsCwdEncoding(t *testing.T) {
+	// { cwd } chdir's the child before exec; encoding: 'utf8' is accepted
+	// (results are already strings); other options are clean rejections.
+	assertOutputImports(t, `
+import { spawnSync, execSync } from 'child_process'
+console.log("a", spawnSync("pwd", [], { cwd: "/" }).stdout.trim())
+console.log("b", execSync("pwd", { cwd: "/", encoding: "utf8" }).trim())
+console.log("c", spawnSync("pwd", { cwd: "/" }).stdout.trim())
+`, "a /\nb /\nc /")
+}

@@ -52,6 +52,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		cflags, libs := LocateHTTP2()
 		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs})
 	}
+	if e.UsesSpawnSync() {
+		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil})
+	}
 	if e.UsesBufferCodecs() {
 		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil})
 	}

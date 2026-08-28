@@ -110,6 +110,14 @@ func (e *Emitter) emitDgramMethod(objExpr ast.Expression, method string, args []
 	case "close":
 		e.emitInstr(fmt.Sprintf("call void @__kml_dgram_close(ptr %s)", objVal.Ref))
 		return Value{Ty: TypeVoid}, nil
+	case "address":
+		// getsockname on the socket fd — the `bind(0)` ephemeral-port idiom,
+		// same shared AddressInfo builder the net server/socket use.
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("%d:%d: socket.address takes no arguments", pos.Line, pos.Col)
+		}
+		e.ensureNetRuntime()
+		return e.emitNetAddressObject(e.netFieldFd32(objVal.Ref, dgramSocketIR)), nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: a dgram socket has no method '%s'", pos.Line, pos.Col, method)
 }

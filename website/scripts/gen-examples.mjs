@@ -33,6 +33,7 @@ const LABELS = {
   function_expressions: 'Function expressions', generators: 'Generators',
   generics: 'Generics', globals: 'Globals', http: 'HTTP server', http2: 'HTTP/2',
   imports: 'Modules', inspect: 'util.inspect', interfaces: 'Interfaces', json: 'JSON',
+  jsdoc: 'JSDoc',
   language: 'Language', literal_expressions: 'Literal expressions', map: 'Map',
   math: 'Math', memory: 'Memory management', nested_functions: 'Nested functions',
   net: 'net', nullable_scalars: 'Nullable scalars', nullish: 'Nullish', objects: 'Objects',

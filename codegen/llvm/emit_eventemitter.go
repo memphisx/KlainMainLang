@@ -59,6 +59,18 @@ func classEventEmitterFieldIndex(classTy Type) int {
 	return 1
 }
 
+// classNodeStreamFieldIndex returns the hidden Node-stream-handle field's
+// struct index for a HasNodeStream class (TDD-00132) — right after the tag
+// and the optional vtable pointer. A stream class never also sets
+// HasEventEmitter (its listener surface is the Node-stream runtime's own),
+// so only the vtable pointer can shift it.
+func classNodeStreamFieldIndex(classTy Type) int {
+	if classTy.HasVTable {
+		return 2
+	}
+	return 1
+}
+
 // emitEventEmitterVarDecl handles `const e = new EventEmitter<T>()`.
 func (e *Emitter) emitEventEmitterVarDecl(v *ast.VarDeclaration, init *ast.NewEventEmitterExpression) error {
 	val, err := e.emitNewEventEmitterValue(init)
@@ -146,10 +158,45 @@ func (e *Emitter) resolveEventPayload(payloadTy Type, eventArg ast.Expression, p
 // already has): .emit() must be able to invoke the listener later, from a
 // different call site entirely, which requires a real runtime closure
 // pointer to store — a named function has no such pointer representation.
+// tupleElemTypes returns a tuple type's element types in order.
+func tupleElemTypes(t Type) []Type {
+	elems := make([]Type, len(t.Fields))
+	for i, f := range t.Fields {
+		elems[i] = f.Ty
+	}
+	return elems
+}
+
+// emitBuildTuple packs N argument expressions into a fresh tuple value of type
+// tupleTy (TDD-00131 multi-argument events) — one heap struct with each arg
+// coerced to and stored at its positional field.
+func (e *Emitter) emitBuildTuple(argExprs []ast.Expression, tupleTy Type) (Value, error) {
+	e.ensureMalloc()
+	structIR := tupleTy.StructIR()
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reg, tupleTy.StructSize()))
+	for i, ae := range argExprs {
+		idx, fieldTy, _ := tupleTy.FieldIndex(fmt.Sprintf("%d", i))
+		v, err := e.emitExprWithObjectHint(ae, fieldTy)
+		if err != nil {
+			return Value{}, err
+		}
+		v = e.coerce(v, fieldTy)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, reg, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, v.Ref, gep, fieldTy.Align()))
+	}
+	return Value{Ref: reg, Ty: tupleTy}, nil
+}
+
 func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy Type, isVoid bool, fnName string, pos ast.Pos) (string, error) {
+	// A tuple payload `[A, B, …]` (TDD-00131) is Node's multi-argument event:
+	// the listener takes one parameter per tuple element, hinted per-position.
 	hints := []Type{payloadTy}
 	if isVoid {
 		hints = nil
+	} else if payloadTy.IsTuple {
+		hints = tupleElemTypes(payloadTy)
 	}
 	var val Value
 	var err error
@@ -169,6 +216,16 @@ func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy T
 	if isVoid {
 		if len(val.Ty.FuncParams) != 0 {
 			return "", fmt.Errorf("%d:%d: %s's listener for a payload-less event must take no arguments", pos.Line, pos.Col, fnName)
+		}
+	} else if payloadTy.IsTuple {
+		elems := tupleElemTypes(payloadTy)
+		if len(val.Ty.FuncParams) != len(elems) {
+			return "", fmt.Errorf("%d:%d: %s's listener must take %d arguments (one per tuple-payload element)", pos.Line, pos.Col, fnName, len(elems))
+		}
+		for i, p := range val.Ty.FuncParams {
+			if p.IR != elems[i].IR {
+				return "", fmt.Errorf("%d:%d: %s's listener argument %d does not match the event's tuple-payload element type", pos.Line, pos.Col, fnName, i+1)
+			}
 		}
 	} else if len(val.Ty.FuncParams) != 1 || val.Ty.FuncParams[0].IR != payloadTy.IR {
 		return "", fmt.Errorf("%d:%d: %s's listener must take exactly 1 argument matching this event's payload type", pos.Line, pos.Col, fnName)
@@ -369,8 +426,8 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 // matching real Node's one specially-treated event name. Returns whether
 // any listener was invoked.
 func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: emit() takes (event) or (event, data)", pos.Line, pos.Col)
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: emit() takes (event, ...args)", pos.Line, pos.Col)
 	}
 	eventVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -385,6 +442,16 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	if evVoid {
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: emit() for a payload-less event takes only the event name", pos.Line, pos.Col)
+		}
+	} else if evTy.IsTuple {
+		// Node's multi-argument event: emit(event, a, b, …) packs the tuple.
+		elems := tupleElemTypes(evTy)
+		if len(args) != 1+len(elems) {
+			return Value{}, fmt.Errorf("%d:%d: emit() for this event requires %d data arguments (one per tuple-payload element)", pos.Line, pos.Col, len(elems))
+		}
+		dataVal, err = e.emitBuildTuple(args[1:], evTy)
+		if err != nil {
+			return Value{}, err
 		}
 	} else {
 		if len(args) != 2 {
@@ -459,6 +526,17 @@ func (e *Emitter) emitEventEmitterEmit(payloadTy Type, listenersMapPtr string, a
 	if evVoid {
 		cbParams = nil
 		cbArgs = nil
+	} else if evTy.IsTuple {
+		// Unpack the tuple payload into one listener argument per element
+		// (TDD-00131 multi-argument events).
+		elems := tupleElemTypes(evTy)
+		cbParams = elems
+		cbArgs = nil
+		for i, et := range elems {
+			idx, ft, _ := evTy.FieldIndex(fmt.Sprintf("%d", i))
+			cbArgs = append(cbArgs, e.loadFieldValue(dataVal, idx, ft))
+			_ = et
+		}
 	}
 	cb := Callback{kind: cbClosure, hdrPtr: listenerPtr, ty: FuncType(cbParams, TypeVoid)}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {

@@ -431,3 +431,13 @@ func TestE2EStringFromCharCodeNonNumberRejected(t *testing.T) {
 		t.Fatal("expected a compile error for String.fromCharCode with a string argument, got none")
 	}
 }
+
+func TestE2EStringToStringIdentity(t *testing.T) {
+	// str.toString() is the identity, matching JS — Node code calls it on
+	// values that are Buffers there but strings here.
+	assertOutput(t, `
+const s: string = "kalimera";
+console.log(s.toString());
+console.log(s.toString().length);
+`, "kalimera\n8")
+}

@@ -26,8 +26,210 @@ func (e *Emitter) emitChildProcessModuleCall(method string, args []ast.Expressio
 		return e.emitCPExec(args, pos)
 	case "execFile":
 		return e.emitCPExecFile(args, pos)
+	case "spawnSync":
+		return e.emitCPSpawnSync(args, pos)
+	case "execSync":
+		return e.emitCPExecSync(args, pos)
+	case "execFileSync":
+		return e.emitCPExecFileSync(args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: child_process.%s is not supported", pos.Line, pos.Col, method)
+}
+
+// cpSpawnSyncResultType is spawnSync's result record — Node's
+// `{ status, stdout, stderr, pid }` with stdout/stderr as strings (the
+// `encoding: 'utf8'` shape; there is no Buffer default here). Field order
+// must match cpSpawnSyncResultObject's stores.
+func cpSpawnSyncResultType() Type {
+	return ObjectType([]Field{
+		{Name: "status", Ty: TypeF64},
+		{Name: "stdout", Ty: TypePtr},
+		{Name: "stderr", Ty: TypePtr},
+		{Name: "pid", Ty: TypeF64},
+	})
+}
+
+// cpSpawnSyncCall evaluates (file, argv) and emits the blocking
+// @__kml_cp_spawn_sync call, returning the raw C result-struct pointer
+// (layout: i64 status @0, ptr stdout @8, ptr stderr @16, i64 pid @24).
+func (e *Emitter) cpSpawnSyncCall(fileRef, argsPtr, argsLen, cwdRef string) string {
+	e.ensureSpawnSyncRuntime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn_sync(ptr %s, ptr %s, i64 %s, ptr %s)", r, fileRef, argsPtr, argsLen, cwdRef))
+	return r
+}
+
+// cpSyncOptions evaluates the optional trailing options object of the *Sync
+// forms. Supported: `cwd` (child chdir before exec) and `encoding` (must be
+// the literal 'utf8' — results are already utf8 strings). Anything else is a
+// clean rejection rather than a silent ignore.
+func (e *Emitter) cpSyncOptions(arg ast.Expression, name string, pos ast.Pos) (cwdRef string, err error) {
+	cwdRef = "null"
+	lit, ok := arg.(*ast.ObjectLiteral)
+	if !ok {
+		return "", fmt.Errorf("%d:%d: child_process.%s's options must be an object literal", pos.Line, pos.Col, name)
+	}
+	for _, prop := range lit.Properties {
+		switch prop.Key {
+		case "cwd":
+			v, verr := e.emitExpr(prop.Value)
+			if verr != nil {
+				return "", verr
+			}
+			cwdRef = e.coerce(v, TypePtr).Ref
+		case "encoding":
+			s, ok := prop.Value.(*ast.StringLiteral)
+			if !ok || (s.Value != "utf8" && s.Value != "utf-8") {
+				return "", fmt.Errorf("%d:%d: child_process.%s supports encoding: 'utf8' only (results are strings)", pos.Line, pos.Col, name)
+			}
+		default:
+			return "", fmt.Errorf("%d:%d: child_process.%s options support { cwd, encoding } only (got '%s')", pos.Line, pos.Col, name, prop.Key)
+		}
+	}
+	return cwdRef, nil
+}
+
+// cpSpawnSyncField loads field idx (8-byte slots) from the C result struct.
+func (e *Emitter) cpSpawnSyncField(raw string, idx int, ir string) string {
+	gep := e.freshReg()
+	v := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, raw, idx*8))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", v, ir, gep))
+	return v
+}
+
+// emitCPSpawnSync implements spawnSync(command, args?) — blocks until the
+// child exits and returns { status, stdout, stderr, pid }.
+func (e *Emitter) emitCPSpawnSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.spawnSync takes (command, args?, { cwd, encoding }?)", pos.Line, pos.Col)
+	}
+	fileVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fileVal = e.coerce(fileVal, TypePtr)
+	argsPtr, argsLen, cwdRef := "null", "0", "null"
+	rest := args[1:]
+	if len(rest) >= 1 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj && len(rest) == 1 {
+			// spawnSync(cmd, { cwd }) — options with no args array.
+			c, err := e.cpSyncOptions(rest[0], "spawnSync", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			cwdRef = c
+		} else {
+			p, l, err := e.cpResolveArgv(rest[0], pos, "spawnSync")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			if len(rest) == 2 {
+				c, err := e.cpSyncOptions(rest[1], "spawnSync", pos)
+				if err != nil {
+					return Value{}, err
+				}
+				cwdRef = c
+			}
+		}
+	}
+	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef)
+
+	ty := cpSpawnSyncResultType()
+	e.ensureCalloc()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", obj, ty.StructSize()))
+	structIR := ty.StructIR()
+	store := func(idx int, ir, val string) {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, obj, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, g))
+	}
+	statI := e.cpSpawnSyncField(raw, 0, "i64")
+	statD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", statD, statI))
+	store(0, "double", statD)
+	store(1, "ptr", e.cpSpawnSyncField(raw, 1, "ptr"))
+	store(2, "ptr", e.cpSpawnSyncField(raw, 2, "ptr"))
+	pidI := e.cpSpawnSyncField(raw, 3, "i64")
+	pidD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", pidD, pidI))
+	store(3, "double", pidD)
+	return Value{Ref: obj, Ty: ty}, nil
+}
+
+// emitCPExecSync implements execSync(command): runs via `/bin/sh -c` and
+// returns the captured stdout string. Unlike Node it does not throw on a
+// nonzero exit status (documented caveat) — use spawnSync for the status.
+func (e *Emitter) emitCPExecSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.execSync takes (command, { cwd, encoding }?)", pos.Line, pos.Col)
+	}
+	cwdRef := "null"
+	if len(args) == 2 {
+		c, err := e.cpSyncOptions(args[1], "execSync", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		cwdRef = c
+	}
+	cmdVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	cmdVal = e.coerce(cmdVal, TypePtr)
+	e.ensureMalloc()
+	argvPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", argvPtr))
+	s0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", s0, argvPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("-c"), s0))
+	s1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", s1, argvPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cmdVal.Ref, s1))
+	raw := e.cpSpawnSyncCall(e.internString("/bin/sh"), argvPtr, "2", cwdRef)
+	return Value{Ref: e.cpSpawnSyncField(raw, 1, "ptr"), Ty: TypePtr}, nil
+}
+
+// emitCPExecFileSync implements execFileSync(file, args?, options?): execvp
+// with no shell, returning the captured stdout string. Same no-throw caveat
+// as execSync.
+func (e *Emitter) emitCPExecFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.execFileSync takes (file, args?, { cwd, encoding }?)", pos.Line, pos.Col)
+	}
+	fileVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fileVal = e.coerce(fileVal, TypePtr)
+	argsPtr, argsLen, cwdRef := "null", "0", "null"
+	rest := args[1:]
+	if len(rest) >= 1 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj && len(rest) == 1 {
+			c, err := e.cpSyncOptions(rest[0], "execFileSync", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			cwdRef = c
+		} else {
+			p, l, err := e.cpResolveArgv(rest[0], pos, "execFileSync")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			if len(rest) == 2 {
+				c, err := e.cpSyncOptions(rest[1], "execFileSync", pos)
+				if err != nil {
+					return Value{}, err
+				}
+				cwdRef = c
+			}
+		}
+	}
+	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef)
+	return Value{Ref: e.cpSpawnSyncField(raw, 1, "ptr"), Ty: TypePtr}, nil
 }
 
 // cpSpawnCall emits the @__kml_cp_spawn call and returns the handle register.

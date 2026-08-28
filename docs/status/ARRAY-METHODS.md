@@ -2,7 +2,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 35/35 (100%) · **Strict Coverage**: 25/35 (~71%).
+**Coverage**: 35/35 (100%) · **Strict Coverage**: 22/35 (~63%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -11,11 +11,11 @@ Format: [Status page format](README.md#status-page-format).
 | Literal `[a, b, c]` | ✅ | | |
 | `new Array<T>(n)` | ✅ | | |
 | `.length` | ✅ | • `a.length = 2` (real JS's array-truncation idiom) hard compile-errors with "field assignment on non-object" — length is read-only in practice ([ADR-00166](../adr/ADR-00166.md)) | |
-| `.push(...items)` | ✅ | | • Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md) |
-| `.pop()` | ✅ | • On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type ([ADR-00157](../adr/ADR-00157.md) convention) | • Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
-| `.shift()` | ✅ | • Same empty-array zero-value-instead-of-`undefined` convention as `.pop()` ([ADR-00157](../adr/ADR-00157.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
-| `.unshift(...items)` | ✅ | | • Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md)) |
-| `.splice(start, delete?, ...items)` | ✅ | | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• [ADR-00056](../adr/ADR-00056.md) |
+| `.push(...items)` | ✅ | • A length change to an array that is a **function parameter** is not visible to the caller — arrays cross a call boundary as a flat `(ptr, len)` copy, so the callee's grown length (and reallocated buffer) stays local; element writes (`arr[i] = v`) still propagate ([TDD-00127](../tdd/TDD-00127.md)) | • Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md) |
+| `.pop()` | ✅ | • On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type ([ADR-00157](../adr/ADR-00157.md) convention)<br>• A length change to an array that is a **function parameter** is not visible to the caller ([TDD-00127](../tdd/TDD-00127.md)) | • Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
+| `.shift()` | ✅ | • Same empty-array zero-value-instead-of-`undefined` convention as `.pop()` ([ADR-00157](../adr/ADR-00157.md))<br>• A length change to an array that is a **function parameter** is not visible to the caller ([TDD-00127](../tdd/TDD-00127.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
+| `.unshift(...items)` | ✅ | • A length change to an array that is a **function parameter** is not visible to the caller ([TDD-00127](../tdd/TDD-00127.md)) | • Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md)) |
+| `.splice(start, delete?, ...items)` | ✅ | • A length change to an array that is a **function parameter** is not visible to the caller ([TDD-00127](../tdd/TDD-00127.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• [ADR-00056](../adr/ADR-00056.md) |
 | `.slice(start, end?)` | ✅ | | |
 | `.at(i)` | ✅ | | |
 | `.indexOf(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |

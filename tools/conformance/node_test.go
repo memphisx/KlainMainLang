@@ -10,7 +10,7 @@ import "testing"
 func TestTransformNodeSource(t *testing.T) {
 	t.Run("basic require rewrite", func(t *testing.T) {
 		src := "'use strict';\nrequire('../common');\nconst assert = require('assert');\nconst path = require('node:path');\nassert.ok(path.basename('/a/b') === 'b');\n"
-		out, _, skip := transformNodeSource(src, "/tmp/test-x.js")
+		out, _, skip, _ := transformNodeSource(src, "/tmp/test-x.js")
 		if skip != "" {
 			t.Fatalf("unexpected skip: %s", skip)
 		}
@@ -27,7 +27,7 @@ func TestTransformNodeSource(t *testing.T) {
 
 	t.Run("destructured require", func(t *testing.T) {
 		src := "const { basename } = require('path');\n"
-		out, _, skip := transformNodeSource(src, "/tmp/t.js")
+		out, _, skip, _ := transformNodeSource(src, "/tmp/t.js")
 		if skip != "" || !strings.Contains(out, "import {") || !strings.Contains(out, "basename") || !strings.Contains(out, "from 'path'") {
 			t.Errorf("destructure rewrite failed: skip=%q out=%s", skip, out)
 		}
@@ -35,12 +35,12 @@ func TestTransformNodeSource(t *testing.T) {
 
 	t.Run("global injection only when used", func(t *testing.T) {
 		with := "const path = require('path');\nconsole.log(path.basename(__filename));\n"
-		out, _, _ := transformNodeSource(with, "/tmp/test-name.js")
+		out, _, _, _ := transformNodeSource(with, "/tmp/test-name.js")
 		if !strings.Contains(out, `const __filename = "/tmp/test-name.js"`) {
 			t.Errorf("__filename not injected when used:\n%s", out)
 		}
 		without := "const path = require('path');\nconsole.log('hi');\n"
-		out2, _, _ := transformNodeSource(without, "/tmp/t.js")
+		out2, _, _, _ := transformNodeSource(without, "/tmp/t.js")
 		if strings.Contains(out2, "__filename") {
 			t.Errorf("__filename injected when unused:\n%s", out2)
 		}
@@ -53,7 +53,7 @@ func TestTransformNodeSource(t *testing.T) {
 			"unsupported module": "const insp = require('inspector');\n",
 		}
 		for name, src := range cases {
-			if _, _, skip := transformNodeSource(src, "/tmp/t.js"); skip == "" {
+			if _, _, skip, fail := transformNodeSource(src, "/tmp/t.js"); skip == "" && fail == "" {
 				t.Errorf("%s: expected out-of-scope skip, got none", name)
 			}
 		}
