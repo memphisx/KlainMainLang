@@ -180,10 +180,10 @@
             ]
           },
           {
-            "feature": "`https` (client: `https.get`/`https.request`)",
+            "feature": "`https` (`https.get`/`https.request` client + `https.createServer`)",
             "status": "implemented",
             "caveats": [
-              "**Client only** — `https.createServer` is a clean rejection (the HTTP accept loop is not TLS-wrapped; use `tls.createServer` for a raw TLS socket server, or terminate TLS in front of `http.createServer`)",
+              "**`https.createServer({ cert, key }[, handler])`** serves **HTTPS/1.1** ([TDD-00111](../tdd/TDD-00111.md) / [ADR-00505](../adr/ADR-00505.md)): the same `(req, res)` core as `http.createServer`, with the connection fiber's socket I/O routed through per-fd `SSL_read`/`SSL_write` shims; an http/1.1-only ALPN means even an h2-capable client negotiates 1.1. Inherits the V1 `res` subset and the one-request-per-connection (`Connection: close`) posture of `http.createServer`; streaming response bodies over TLS are supported",
               "Same V1 client surface and caveats as `http.get`/`request` ([TDD-00138](../tdd/TDD-00138.md))"
             ],
             "notes": [
@@ -212,18 +212,18 @@
             ]
           },
           {
-            "feature": "`http2` **module** (`http2.createServer`/`connect`, `Http2Session`/`Http2Stream`)",
+            "feature": "`http2` **module** (`http2.createServer`/`createSecureServer`/`connect`, `Http2Session`/`Http2Stream`)",
             "status": "implemented",
             "caveats": [
               "**Server-side Stages 1–2** ([TDD-00139](../tdd/TDD-00139.md)/[ADR-00414](../adr/ADR-00414.md)/[ADR-00415](../adr/ADR-00415.md)): `http2.createServer` on the http server handle, serving **h2c** (it also still answers 1.1, a superset of Node); compat `.on('request', (req, res))` **and** the core streams API — `.on('stream', (stream, headers))` with pseudo-headers on the map, `stream.respond({ ':status', … })` incl. response headers, `.end`/`.write`, request body via `.on('data'\\|'end')` (one synchronous chunk)",
               "`stream.close()`/`setEncoding`/`resume`/`pause` are accepted no-ops; responses are written when the handler returns (no mid-stream RST/flow control)",
               "**Client (Stage 3)**: `http2.connect(\"http://…\")` (h2c only — a TLS authority throws) → session `.request({ ':path', ':method', headers… })` → stream `.on('response'\\|'data'\\|'end')`; requests are **body-less** (END_STREAM at submit — `req.write`/`end(body)` are clean rejections); response `':status'` arrives as a *string* in the headers map (Node types it as a number); session/stream `'error'`/`'close'` listeners are accepted no-ops",
               "**Stage 4**: `http2.constants` (compile-time namespace — header/method names, RFC 7540 error codes; unknown members reject cleanly) and `getDefaultSettings`/`getPackedSettings`/`getUnpackedSettings` (nghttp2 wire format; the invalid-value RangeError taxonomy is not modeled)",
-              "`createSecureServer` (needs a TLS server mode) and request bodies remain **clean rejections**",
-              "Sessions, streams, server/client push, settings frames, and the whole explicit-API surface are unimplemented — scoped in [TDD-00139](../tdd/TDD-00139.md) (staged over the existing nghttp2 h2c driver; client-mode nghttp2 is the main new work)"
+              "**`createSecureServer({ cert, key }[, handler])`** serves **h2 over TLS** ([TDD-00111](../tdd/TDD-00111.md) Stage 3b / [ADR-00504](../adr/ADR-00504.md)): each accepted fd is TLS-handshaken, ALPN selects `h2`, and the connection drives the same nghttp2 session as h2c over the `SSL_read`/`SSL_write` shims — the compat and `.on('stream')` APIs are inherited unchanged. h2 connections are served one-at-a-time (the TLS drive is blocking in the accept path); a client that doesn't negotiate `h2` is dropped after the handshake (Node's `allowHTTP1:false` default) unless **`allowHTTP1: true`** is set, which serves an ALPN-negotiated http/1.1 client over the HTTPS/1.1 fiber path instead ([ADR-00505](../adr/ADR-00505.md))",
+              "Request bodies on both `createServer` and `createSecureServer`, and server/client **push streams**, remain **clean rejections** — scoped in [TDD-00139](../tdd/TDD-00139.md)"
             ],
             "notes": [
-              "Transparent h2, no `http2` import needed: `fetch` negotiates h2 over TLS (ALPN); `http.listen` serves **h2c** (cleartext prior-knowledge) alongside 1.1, riding nghttp2 (`http2src/http2.c`, linked when `http.listen` is used), the h2 preface detected per-connection and dispatched through the shared 1.1 handler. h2-over-TLS server + async handlers under h2 remain unsupported ([TDD-00111](../tdd/TDD-00111.md) Stage 3b, [ADR-00357](../adr/ADR-00357.md))"
+              "Transparent h2, no `http2` import needed: `fetch` negotiates h2 over TLS (ALPN); `http.listen` serves **h2c** (cleartext prior-knowledge) alongside 1.1, riding nghttp2 (`http2src/http2.c`, linked when `http.listen` is used), the h2 preface detected per-connection and dispatched through the shared 1.1 handler. h2-over-TLS is served explicitly via `http2.createSecureServer`; async handlers under h2 remain unsupported ([TDD-00111](../tdd/TDD-00111.md) Stage 3b, [ADR-00357](../adr/ADR-00357.md))"
             ]
           }
         ]

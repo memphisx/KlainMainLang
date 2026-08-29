@@ -38,6 +38,34 @@ func (e *Emitter) emitHTTP2ServerDecls() {
 	e.emitGlobal("declare void @__kml_h2_set_blocking(i32)")
 }
 
+// ensureH2TLSServer wires the h2-over-TLS secure-server path (TDD-00111 Stage
+// 3b / http2.createSecureServer). It sets the flag the event-loop emitter reads
+// to splice its TLS accept branch, links libssl (usedTLS) + nghttp2 (usedHTTP2),
+// and declares the extern C symbols that branch calls: the tls.c server
+// handshake/ALPN/read/write/free helpers, plus the nghttp2 driver ABI. Also
+// emits the two module-level globals the branch references — the server's
+// SSL_CTX* slot (populated at the createSecureServer call site) and the wire-
+// format ALPN token it matches the negotiated protocol against.
+//
+// Must run before ensureHTTPRuntime emits the event loop, so the flag is set in
+// time; the createSecureServer emitter calls it first for that reason.
+func (e *Emitter) ensureH2TLSServer() {
+	if e.usedH2TLSServer {
+		return
+	}
+	e.usedH2TLSServer = true
+	e.usedTLS = true    // link libssl + compile tlssrc/tls.c (main.go UsesTLS gate)
+	e.usedHTTP2 = true  // link nghttp2 + compile http2src/http2.c
+	e.ensureMemcmp()
+	// The __kml_tls_* server ABI (server_ctx/server_accept/alpn_selected/read/
+	// write/free) is declared once by emitTLSNetSymbols, gated on usedH2TLSServer.
+	e.emitGlobal(`@__kml_http_tls_ctx = global ptr null`)
+	e.emitGlobal(`@__kml_h2_alpn = private unnamed_addr constant [3 x i8] c"h2\00"`)
+	// The __kml_h2_session_* ABI the TLS drive loop calls is declared by the
+	// shared http server core (emitHTTPCreateServer always wires the h2c path),
+	// which the createSecureServer emitter delegates to — no decl needed here.
+}
+
 // LocateHTTP2 returns the clang cflags/libs to compile and link http2src/http2.c:
 // libnghttp2's include path via pkg-config, plus -lnghttp2 (added via
 // requireLink so it also flows through LinkLibs). Falls back to a bare -lnghttp2

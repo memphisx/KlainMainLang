@@ -959,6 +959,18 @@ entry:
 }`, swCases.String(), swBlocks.String(), e.internString("OK")))
 
 	respFmt := e.internString("HTTP/1.1 %lld %s\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n")
+	// When the HTTPS/1.1 path is used, the fd may be a TLS connection: route the
+	// header + body write and the close through the SSL-aware shims (a plain
+	// connection has no registry entry and falls through to raw write/close).
+	writeHdr := "call i64 @write(i32 %connfd, ptr %respbuf, i64 %n64)"
+	writeBody := "call i64 @write(i32 %connfd, ptr %body, i64 %bodylen)"
+	closeConn := "call i32 @close(i32 %connfd)"
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		writeHdr = "call i64 @__kml_http_conn_send(i32 %connfd, ptr %respbuf, i64 %n64)"
+		writeBody = "call i64 @__kml_http_conn_send(i32 %connfd, ptr %body, i64 %bodylen)"
+		closeConn = "call void @__kml_http_conn_close(i32 %connfd)"
+	}
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, i64 %%bodylen, ptr %%extraHeaders) {
 entry:
@@ -968,12 +980,12 @@ entry:
   %%respbuf = call ptr @malloc(i64 %%bufsize1)
   %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, ptr %%reason, i64 %%bodylen, ptr %%extraHeaders)
   %%n64 = sext i32 %%n to i64
-  call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
+  %s
   call void @free(ptr %%respbuf)
-  call i64 @write(i32 %%connfd, ptr %%body, i64 %%bodylen)
-  call i32 @close(i32 %%connfd)
+  %s
+  %s
   ret void
-}`, respFmt))
+}`, respFmt, writeHdr, writeBody, closeConn))
 
 	// gc mode: same GC_stackbottom repointing as __kml_http_append_conn's
 	// initial fiber launch, needed here too since this is the *other* place
@@ -998,6 +1010,125 @@ entry:
 		gcRestoreRStackbottom = fmt.Sprintf(`
   %%rorigbottom = load ptr, ptr @__kml_gc_orig_stackbottom, align 8
   %s`, e.gcSBStore("%rorigbottom"))
+	}
+
+	// h2-over-TLS secure server (TDD-00111 Stage 3b / TDD-00139
+	// createSecureServer). When the program uses http2.createSecureServer, the
+	// accepted fd is TLS-wrapped before it enters the 1.1/h2c path: a blocking
+	// server handshake, then an ALPN check — an `h2` client is driven as an
+	// nghttp2 session over the SSL read/write shims (createSecureServer is
+	// h2-only, matching Node's allowHTTP1:false default), anything else is
+	// closed. Gated so a plain http server never links libssl/nghttp2 nor pays
+	// the runtime branch. h2tlsAcceptTarget redirects the accept-ok edge into
+	// the TLS check; h2tlsBranch is the check + drive blocks (they end in
+	// `br label %scanconn`, so the connection never joins the fiber conn table).
+	//
+	// The HTTPS/1.1 server (https.createServer, or http2.createSecureServer's
+	// allowHTTP1 fallback) shares the same TLS accept head: an ALPN-negotiated
+	// (or no-ALPN) http/1.1 connection is registered in the fd→SSL table
+	// (__kml_http_conn_ssl_set) and then falls through to the normal
+	// setnonblock/append_conn path, so it is served by the ordinary connection
+	// fiber whose I/O the conn_recv/conn_send shims route through SSL. An h2
+	// client is still driven inline by the nghttp2 loop below.
+	h2tlsAcceptTarget := "setnonblock"
+	h2tlsBranch := ""
+	if e.usedH2TLSServer || e.usedHTTPS1Server {
+		if e.usedHTTPS1Server {
+			e.emitHTTPSConnShims()
+		}
+		h2tlsAcceptTarget = "tlscheck"
+		// notH2Target: where a non-h2 (or no-ALPN) connection goes after the
+		// handshake — served as 1.1 over TLS when the HTTPS/1.1 path is enabled,
+		// else closed (an h2-only secure server, Node's allowHTTP1:false).
+		notH2Target := "tlsclossl"
+		if e.usedHTTPS1Server {
+			notH2Target = "tls1serve"
+		}
+		var b strings.Builder
+		b.WriteString(`
+tlscheck:
+  %tlsctx = load ptr, ptr @__kml_http_tls_ctx, align 8
+  %istls = icmp ne ptr %tlsctx, null
+  br i1 %istls, label %tlsaccept, label %setnonblock
+
+tlsaccept:
+  %tlsssl = call ptr @__kml_tls_server_accept(ptr %tlsctx, i32 %newfd)
+  %tlssslok = icmp ne ptr %tlsssl, null
+  br i1 %tlssslok, label %tlsalpn, label %tlsclosefd
+`)
+		if e.usedH2TLSServer {
+			// h2 is on the menu: inspect ALPN, drive nghttp2 on "h2", else fall
+			// through to the non-h2 target.
+			b.WriteString(`
+tlsalpn:
+  %tlsproto = call ptr @__kml_tls_alpn_selected(ptr %tlsssl)
+  %tlsprotook = icmp ne ptr %tlsproto, null
+  br i1 %tlsprotook, label %tlsalpncmp, label %` + notH2Target + `
+
+tlsalpncmp:
+  %tlscmp = call i32 @memcmp(ptr %tlsproto, ptr @__kml_h2_alpn, i64 3)
+  call void @free(ptr %tlsproto)
+  %tlsish2 = icmp eq i32 %tlscmp, 0
+  br i1 %tlsish2, label %tlsdrive, label %` + notH2Target + `
+
+tlsdrive:
+  %tlssess = call ptr @__kml_h2_session_server_new(i32 %newfd, ptr %tlsssl, ptr @__kml_tls_read, ptr @__kml_tls_write)
+  br label %tlsh2loop
+
+tlsh2loop:
+  %tlssr = call i32 @__kml_h2_session_send(ptr %tlssess)
+  %tlssbad = icmp slt i32 %tlssr, 0
+  br i1 %tlssbad, label %tlsh2done, label %tlsh2cont
+
+tlsh2cont:
+  %tlswr = call i32 @__kml_h2_session_want_read(ptr %tlssess)
+  %tlsww = call i32 @__kml_h2_session_want_write(ptr %tlssess)
+  %tlswsum = or i32 %tlswr, %tlsww
+  %tlsmore = icmp ne i32 %tlswsum, 0
+  br i1 %tlsmore, label %tlsh2recv, label %tlsh2done
+
+tlsh2recv:
+  %tlsrr = call i32 @__kml_h2_session_recv(ptr %tlssess)
+  %tlsrbad = icmp slt i32 %tlsrr, 0
+  br i1 %tlsrbad, label %tlsh2done, label %tlsh2loop
+
+tlsh2done:
+  call void @__kml_h2_session_del(ptr %tlssess)
+  call void @__kml_tls_free(ptr %tlsssl)
+  %tlsc1 = call i32 @close(i32 %newfd)
+  br label %scanconn
+`)
+		} else {
+			// HTTPS/1.1-only (https.createServer): the h1-only ALPN ctx never
+			// selects h2, so serve 1.1 unconditionally.
+			b.WriteString(`
+tlsalpn:
+  br label %tls1serve
+`)
+		}
+		if e.usedHTTPS1Server {
+			// Register the SSL* for this fd and rejoin the plain accept path —
+			// the connection fiber's conn_recv/conn_send shims find the entry and
+			// route its I/O through SSL.
+			b.WriteString(`
+tls1serve:
+  call void @__kml_http_conn_ssl_set(i32 %newfd, ptr %tlsssl)
+  br label %setnonblock
+`)
+		} else {
+			// h2-only: a non-h2 client (allowHTTP1:false) is dropped.
+			b.WriteString(`
+tlsclossl:
+  call void @__kml_tls_free(ptr %tlsssl)
+  br label %tlsclosefd
+`)
+		}
+		b.WriteString(`
+tlsclosefd:
+  %tlsc2 = call i32 @close(i32 %newfd)
+  br label %scanconn
+`)
+		h2tlsBranch = b.String()
 	}
 
 	e.emitGlobal(`
@@ -1734,8 +1865,8 @@ checkisset:
 doaccept:
   %newfd = call i32 @accept(i32 %listenfd, ptr null, ptr null)
   %acceptok = icmp sge i32 %newfd, 0
-  br i1 %acceptok, label %setnonblock, label %scanconn
-
+  br i1 %acceptok, label %` + h2tlsAcceptTarget + `, label %scanconn
+` + h2tlsBranch + `
 setnonblock:
   %curflags = call i32 (i32, i32, ...) @fcntl(i32 %newfd, i32 3)
   %newflags = or i32 %curflags, ` + fmt.Sprintf("%d", httpNonblockFlag()) + `
@@ -2022,6 +2153,160 @@ setflag:
 
 local:
   call void @__kml_http_shutdown_local_conns()
+  ret void
+}`)
+}
+
+// emitHTTPSConnShims emits the HTTPS/1.1 server's fd→SSL* registry and the three
+// I/O shims (__kml_http_conn_recv/_send/_close) every connection-fiber I/O site
+// routes through when the program uses the 1.1-over-TLS path (usedHTTPS1Server).
+// A plain (non-TLS) connection has no registry entry, so the shims fall through
+// to raw read()/write()/close() — byte-identical to the pre-TLS path. A TLS
+// connection's SSL* (registered by the event loop's accept branch after the
+// handshake) routes reads through the non-blocking __kml_tls_read_nb (EAGAIN on
+// WANT, so the fiber's existing yield path applies) and writes through
+// __kml_tls_write_all (drains fully, polling on WANT). Entries are { i64 fd,
+// ptr ssl } pairs (the wss fd→SSL registry shape, ADR-00346); on close the SSL
+// is freed and the slot cleared, so a reused fd number never routes to a stale
+// SSL. Emitted once, idempotently.
+func (e *Emitter) emitHTTPSConnShims() {
+	if e.emittedHTTPSConnShims {
+		return
+	}
+	e.emittedHTTPSConnShims = true
+	e.ensureReadDecl()
+	e.ensureWriteDecl()
+	e.ensureCloseDecl()
+	e.ensureRealloc()
+
+	e.emitGlobal("@__kml_http_conn_ssl_data = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_http_conn_ssl_len = internal thread_local global i64 0, align 8")
+	e.emitGlobal("@__kml_http_conn_ssl_cap = internal thread_local global i64 0, align 8")
+
+	// set(fd, ssl): reuse an existing slot for this fd, else append.
+	e.emitGlobal(`
+define void @__kml_http_conn_ssl_set(i32 %fd, ptr %ssl) {
+entry:
+  %fd64 = sext i32 %fd to i64
+  %len = load i64, ptr @__kml_http_conn_ssl_len, align 8
+  %data = load ptr, ptr @__kml_http_conn_ssl_data, align 8
+  %i = alloca i64, align 8
+  store i64 0, ptr %i, align 8
+  br label %scan
+scan:
+  %iv = load i64, ptr %i, align 8
+  %inb = icmp slt i64 %iv, %len
+  br i1 %inb, label %chk, label %append
+chk:
+  %ep = getelementptr { i64, ptr }, ptr %data, i64 %iv
+  %efd = load i64, ptr %ep, align 8
+  %match = icmp eq i64 %efd, %fd64
+  br i1 %match, label %reuse, label %advance
+advance:
+  %inx = add i64 %iv, 1
+  store i64 %inx, ptr %i, align 8
+  br label %scan
+reuse:
+  %rsp = getelementptr { i64, ptr }, ptr %data, i64 %iv, i32 1
+  store ptr %ssl, ptr %rsp, align 8
+  ret void
+append:
+  %cap = load i64, ptr @__kml_http_conn_ssl_cap, align 8
+  %needgrow = icmp sge i64 %len, %cap
+  br i1 %needgrow, label %grow, label %store
+grow:
+  %ncap0 = mul i64 %cap, 2
+  %atleast4 = icmp sgt i64 %ncap0, 4
+  %ncap = select i1 %atleast4, i64 %ncap0, i64 4
+  %bytes = mul i64 %ncap, 16
+  %nd = call ptr @realloc(ptr %data, i64 %bytes)
+  store ptr %nd, ptr @__kml_http_conn_ssl_data, align 8
+  store i64 %ncap, ptr @__kml_http_conn_ssl_cap, align 8
+  br label %store
+store:
+  %d2 = load ptr, ptr @__kml_http_conn_ssl_data, align 8
+  %sfd = getelementptr { i64, ptr }, ptr %d2, i64 %len
+  store i64 %fd64, ptr %sfd, align 8
+  %ssp = getelementptr { i64, ptr }, ptr %d2, i64 %len, i32 1
+  store ptr %ssl, ptr %ssp, align 8
+  %nlen = add i64 %len, 1
+  store i64 %nlen, ptr @__kml_http_conn_ssl_len, align 8
+  ret void
+}`)
+
+	// get(fd) -> ssl* (null if no entry / cleared).
+	e.emitGlobal(`
+define ptr @__kml_http_conn_ssl_get(i32 %fd) {
+entry:
+  %fd64 = sext i32 %fd to i64
+  %len = load i64, ptr @__kml_http_conn_ssl_len, align 8
+  %data = load ptr, ptr @__kml_http_conn_ssl_data, align 8
+  %i = alloca i64, align 8
+  store i64 0, ptr %i, align 8
+  br label %scan
+scan:
+  %iv = load i64, ptr %i, align 8
+  %inb = icmp slt i64 %iv, %len
+  br i1 %inb, label %chk, label %none
+chk:
+  %ep = getelementptr { i64, ptr }, ptr %data, i64 %iv
+  %efd = load i64, ptr %ep, align 8
+  %match = icmp eq i64 %efd, %fd64
+  br i1 %match, label %hit, label %advance
+advance:
+  %inx = add i64 %iv, 1
+  store i64 %inx, ptr %i, align 8
+  br label %scan
+hit:
+  %sp = getelementptr { i64, ptr }, ptr %data, i64 %iv, i32 1
+  %ssl = load ptr, ptr %sp, align 8
+  ret ptr %ssl
+none:
+  ret ptr null
+}`)
+
+	// recv/send: route through SSL when the fd has a live entry, else raw.
+	e.emitGlobal(`
+define i64 @__kml_http_conn_recv(i32 %fd, ptr %buf, i64 %n) {
+entry:
+  %ssl = call ptr @__kml_http_conn_ssl_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  %rt = call i64 @__kml_tls_read_nb(ptr %ssl, ptr %buf, i64 %n)
+  ret i64 %rt
+raw:
+  %rr = call i64 @read(i32 %fd, ptr %buf, i64 %n)
+  ret i64 %rr
+}`)
+
+	e.emitGlobal(`
+define i64 @__kml_http_conn_send(i32 %fd, ptr %buf, i64 %n) {
+entry:
+  %ssl = call ptr @__kml_http_conn_ssl_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  %wt = call i64 @__kml_tls_write_all(ptr %ssl, ptr %buf, i64 %n)
+  ret i64 %wt
+raw:
+  %wr = call i64 @write(i32 %fd, ptr %buf, i64 %n)
+  ret i64 %wr
+}`)
+
+	// close: free + clear the SSL (if any), then close the fd.
+	e.emitGlobal(`
+define void @__kml_http_conn_close(i32 %fd) {
+entry:
+  %ssl = call ptr @__kml_http_conn_ssl_get(i32 %fd)
+  %istls = icmp ne ptr %ssl, null
+  br i1 %istls, label %tls, label %raw
+tls:
+  call void @__kml_tls_free(ptr %ssl)
+  call void @__kml_http_conn_ssl_set(i32 %fd, ptr null)
+  br label %raw
+raw:
+  %c = call i32 @close(i32 %fd)
   ret void
 }`)
 }

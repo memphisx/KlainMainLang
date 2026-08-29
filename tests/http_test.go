@@ -1556,15 +1556,132 @@ server.listen(8983)
 	}
 }
 
-func TestE2EHTTP2SecureServerRejected(t *testing.T) {
-	// createSecureServer must reject cleanly (no TLS server mode), never
-	// silently serve cleartext under a secure-sounding name.
-	_, err := parseAndCompileImports(t, `
+func TestE2EHTTP2SecureServer(t *testing.T) {
+	// TDD-00111 Stage 3b: http2.createSecureServer — h2 over TLS. The accepted
+	// fd is TLS-handshaken, ALPN selects h2, and the connection drives the same
+	// nghttp2 session as h2c but over the SSL read/write shims. curl --http2
+	// negotiates h2 via ALPN; -k accepts the self-signed fixture cert.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	src := fmt.Sprintf(`
 import http2 from 'http2'
-http2.createSecureServer((req, res) => { res.end("x") })
-`)
-	if err == nil || !strings.Contains(err.Error(), "createSecureServer is not implemented") {
-		t.Fatalf("want clean createSecureServer rejection, got %v", err)
+const cert = "%s"
+const key = "%s"
+const server = http2.createSecureServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200)
+  res.end("h2tls:" + req.method + ":" + req.path)
+})
+server.listen(8985)
+`, certLit, keyLit)
+	startHTTPServer(t, src, 8985)
+
+	out, err := exec.Command("curl", "-sk", "--http2",
+		"https://127.0.0.1:8985/hello", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2-tls GET: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2tls:GET:/hello|2" {
+		t.Errorf("h2-tls GET: got %q, want %q", got, "h2tls:GET:/hello|2")
+	}
+
+	// A 1.1-only TLS client offers no h2 ALPN — createSecureServer is h2-only
+	// (Node's allowHTTP1:false default), so the connection is dropped without a
+	// response. curl exits non-zero; the server must survive to serve h2 again.
+	_, err = exec.Command("curl", "-sk", "--http1.1", "--max-time", "3",
+		"https://127.0.0.1:8985/one").CombinedOutput()
+	if err == nil {
+		t.Errorf("1.1-only TLS client: want rejection, got success")
+	}
+	out, err = exec.Command("curl", "-sk", "--http2",
+		"https://127.0.0.1:8985/after", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2-tls after reject: %v\n%s", err, out)
+	}
+	if got := string(out); got != "h2tls:GET:/after|2" {
+		t.Errorf("h2-tls after reject: got %q, want %q", got, "h2tls:GET:/after|2")
+	}
+}
+
+func TestE2EHTTPSServer(t *testing.T) {
+	// TDD-00111: https.createServer — HTTPS/1.1 over TLS. The accepted fd is
+	// TLS-handshaken; the h1-only ALPN forces even an h2-capable client to 1.1,
+	// and the connection is served by the ordinary fiber dispatcher whose socket
+	// I/O is routed through the SSL shims. curl -k accepts the self-signed cert.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	src := fmt.Sprintf(`
+import https from 'https'
+const cert = "%s"
+const key = "%s"
+const server = https.createServer({ cert: cert, key: key }, (req, res) => {
+  res.writeHead(200)
+  res.end("https:" + req.method + ":" + req.path + ":" + req.body)
+})
+server.listen(8987)
+`, certLit, keyLit)
+	startHTTPServer(t, src, 8987)
+
+	// A GET — even an h2-capable client negotiates 1.1 (h1-only ALPN).
+	out, err := exec.Command("curl", "-sk", "--http2",
+		"https://127.0.0.1:8987/hello", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl https GET: %v\n%s", err, out)
+	}
+	if got := string(out); got != "https:GET:/hello:|1.1" {
+		t.Errorf("https GET: got %q, want %q", got, "https:GET:/hello:|1.1")
+	}
+
+	// A POST body — exercises the Content-Length read loop over the SSL shims.
+	out, err = exec.Command("curl", "-sk", "https://127.0.0.1:8987/echo",
+		"-d", "payload", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl https POST: %v\n%s", err, out)
+	}
+	if got := string(out); got != "https:POST:/echo:payload|1.1" {
+		t.Errorf("https POST: got %q, want %q", got, "https:POST:/echo:payload|1.1")
+	}
+}
+
+func TestE2EHTTP2SecureServerAllowHTTP1(t *testing.T) {
+	// TDD-00111: http2.createSecureServer({ allowHTTP1: true }) serves both an
+	// ALPN-negotiated h2 client (nghttp2 inline drive) and a 1.1 client (routed
+	// into the fiber conn table over the SSL shims) on the same TLS port.
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not found in PATH")
+	}
+	certLit, keyLit := genSelfSignedPEM(t)
+	src := fmt.Sprintf(`
+import http2 from 'http2'
+const cert = "%s"
+const key = "%s"
+const server = http2.createSecureServer({ cert: cert, key: key, allowHTTP1: true }, (req, res) => {
+  res.writeHead(200)
+  res.end("both:" + req.method + ":" + req.path)
+})
+server.listen(8988)
+`, certLit, keyLit)
+	startHTTPServer(t, src, 8988)
+
+	out, err := exec.Command("curl", "-sk", "--http2",
+		"https://127.0.0.1:8988/h2", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl h2: %v\n%s", err, out)
+	}
+	if got := string(out); got != "both:GET:/h2|2" {
+		t.Errorf("allowHTTP1 h2: got %q, want %q", got, "both:GET:/h2|2")
+	}
+
+	out, err = exec.Command("curl", "-sk", "--http1.1",
+		"https://127.0.0.1:8988/one", "-w", "|%{http_version}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("curl 1.1 fallback: %v\n%s", err, out)
+	}
+	if got := string(out); got != "both:GET:/one|1.1" {
+		t.Errorf("allowHTTP1 1.1: got %q, want %q", got, "both:GET:/one|1.1")
 	}
 }
 

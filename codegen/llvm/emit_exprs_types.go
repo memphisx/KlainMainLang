@@ -1511,13 +1511,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeVoid
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "https__kml_builtin" {
-				// https.get/request mirror the http client (ADR-00430).
+				// https.createServer shares the http server handle (TDD-00111);
+				// get/request mirror the http client (ADR-00430).
+				if mem.Property == "createServer" {
+					return HTTPServerType()
+				}
 				return ClientRequestType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "http2__kml_builtin" {
 				// http2.createServer shares the http server handle (TDD-00139 Stage 1);
 				// connect returns a client session (Stage 3).
-				if mem.Property == "createServer" {
+				if mem.Property == "createServer" || mem.Property == "createSecureServer" {
 					return HTTPServerType()
 				}
 				if mem.Property == "connect" {

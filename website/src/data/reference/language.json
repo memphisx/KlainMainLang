@@ -575,11 +575,11 @@
       "id": "lang.overloads",
       "name": "Function overload signatures",
       "statusRow": "Function overload signatures (function f(x: number): number; + impl)",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Standalone overload signatures are not supported. Write a single implementation signature and union the parameter/return types instead.",
+      "signature": "function f(x: number): number;\nfunction f(x: string): string;\nfunction f(x) { return x; }",
+      "badge": "caveats",
+      "description": "Overload signature heads (a `function` head terminated by `;` with no body) are parsed and then erased — call sites type-check against the implementation's parameter list, matching this compiler's TS-modifier stance.",
       "differences": [
-        "A standalone overload signature (a `function` head terminated by `;` with no body, followed by the implementation) is a parse error (`expected {, got ;`). Write a single implementation signature — union the parameter/return types instead."
+        "Overload heads are **erased**, not used for per-signature overload resolution: a call is checked against the implementation signature only, so give it parameter/return types (often a union) wide enough to cover every overload."
       ],
       "seeAlso": ["lang.functiondecl"],
       "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#function-overloads" }
@@ -843,11 +843,26 @@
         "A computed/dynamic member name is a clean rejection; the recognized well-known-symbol keys are `[Symbol.asyncIterator]` and `[Symbol.iterator]`.",
         "A class expression used as a runtime value or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope.",
         "Class early-error gaps (deferred): a field initializer containing `arguments` or a `super()` call, a `super()` in a method parameter default, field-definition ASI on the same line, and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`.",
-        "**Parameter properties are not supported** — a modifier on a constructor parameter (`constructor(public x: number)` / `private` / `readonly` / `protected`) is a parse error; declare the field explicitly and assign it in the constructor body.",
-        "The **`readonly` field modifier** is not parsed (`readonly x: number` reads `readonly` as the field name); drop it — there's no mutation checking anyway."
+        "The **`readonly` field modifier** parses and declares the field but is not enforced as immutability — a later write is not rejected."
       ],
-      "seeAlso": ["lang.classstatic", "lang.classinherit", "lang.getset"],
+      "seeAlso": ["lang.classstatic", "lang.classinherit", "lang.getset", "lang.paramprops"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes" }
+    },
+    {
+      "id": "lang.paramprops",
+      "name": "Constructor parameter properties",
+      "statusRow": "Constructor parameter properties (constructor(public x: number, readonly y: T))",
+      "signature": "class C { constructor(public x: number, private readonly y: string) {} }",
+      "badge": "caveats",
+      "description": "A visibility/readonly modifier on a constructor parameter (public/private/protected/readonly) both declares the field and assigns it from the parameter — the TypeScript shorthand for the declare-plus-assign boilerplate.",
+      "snippet": "class Point {\n  constructor(public x: number, public y: number) {}\n}\nconst p = new Point(3, 4);\nconsole.log(p.x, p.y);",
+      "differences": [
+        "Desugars at parse time to a declared field plus a `this.x = x` constructor prologue; `private`/`protected` get the same enforcement as ordinary declared fields.",
+        "`readonly` is parsed and declares the field but is not enforced as immutability — a later write is not rejected.",
+        "The modifiers are valid only on a constructor parameter — elsewhere they are a clean parse error."
+      ],
+      "seeAlso": ["lang.class"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/classes.html#parameter-properties" }
     },
     {
       "id": "lang.classstatic",

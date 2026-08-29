@@ -1403,7 +1403,16 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	readCap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", readCap, readCapMinus1))
 	nReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @read(i32 %s, ptr %s, i64 %s)", nReg, fd32, readPtr, readCap))
+	// When the HTTPS/1.1 path is in use this fd may be a TLS connection —
+	// __kml_http_conn_recv routes it through SSL_read (EAGAIN on WANT, so the
+	// yield path below is unchanged); a plain connection falls through to raw
+	// read(). A program with no HTTPS server keeps the bare read() unchanged.
+	readFn := fmt.Sprintf("@read(i32 %s, ptr %s, i64 %s)", fd32, readPtr, readCap)
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		readFn = fmt.Sprintf("@__kml_http_conn_recv(i32 %s, ptr %s, i64 %s)", fd32, readPtr, readCap)
+	}
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s", nReg, readFn))
 	gotData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gotData, accumulateL, checkErrL))
@@ -1895,7 +1904,11 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	}
 
 	e.emitLabel(noReqL)
-	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+	if e.usedHTTPS1Server {
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_conn_close(i32 %s)", fd32))
+	} else {
+		e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+	}
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	emitConnActiveDecrement()
 	e.emitTerminator("ret void")

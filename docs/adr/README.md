@@ -542,3 +542,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00501](ADR-00501.md) | net socket close + connect/ready listeners | |
 | [00502](ADR-00502.md) | http.Server listening event | |
 | [00503](ADR-00503.md) | createServer({requireHostHeader: false}) | |
+| [00504](ADR-00504.md) | HTTP/2 over TLS server — `http2.createSecureServer` | Implements [TDD-00111](../tdd/TDD-00111.md) Stage 3b, [TDD-00139](../tdd/TDD-00139.md); Extends [ADR-00357](ADR-00357.md) |
+| [00505](ADR-00505.md) | HTTPS/1.1 server — `https.createServer` + `allowHTTP1` | Implements [TDD-00111](../tdd/TDD-00111.md); Extends [ADR-00504](ADR-00504.md), [ADR-00346](ADR-00346.md) |
+| [00506](ADR-00506.md) | fetch header-buffer segfault on Linux (out-of-bounds slot-3 read) | Fixes a `fetch` runtime crash; relates to [ADR-00490](ADR-00490.md), [ADR-00050](ADR-00050.md) |

@@ -11,7 +11,10 @@
 // ptr · 4 isText i64 (1 ⇒ chunk length via strlen, 0 ⇒ the {ptr,len} word).
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func (e *Emitter) ensureHTTPStreamRuntime() {
 	if e.usedHTTPStreamRuntime {
@@ -30,7 +33,7 @@ func (e *Emitter) ensureHTTPStreamRuntime() {
 	terminator := e.internString("0\r\n\r\n")
 	hws := "{ i64, ptr, ptr, ptr, i64 }"
 
-	e.emitGlobal(fmt.Sprintf(`
+	streamBlock := fmt.Sprintf(`
 define void @__kml_http_send_stream_head(i32 %%connfd, i64 %%status, ptr %%extraHeaders) {
 entry:
   %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
@@ -140,5 +143,17 @@ finish:
   %%active2 = sub i64 %%active, 1
   store i64 %%active2, ptr @__kml_conn_active, align 8
   ret void
-}`, headFmt, fmt.Sprintf("%d", ^httpNonblockFlag()), hws, hws, hws, hws, hws, hws, hws, hws, hws, promiseStructIR, promiseStructIR, hws, terminator, hws, chunkFmt, crlf))
+}`, headFmt, fmt.Sprintf("%d", ^httpNonblockFlag()), hws, hws, hws, hws, hws, hws, hws, hws, hws, promiseStructIR, promiseStructIR, hws, terminator, hws, chunkFmt, crlf)
+
+	// Over an HTTPS/1.1 connection the fd is TLS-wrapped: route the chunk writes
+	// and the final close through the SSL-aware shims (a plain fd falls through
+	// to raw write/close inside them). Without this a streaming body would emit
+	// plaintext frames onto the TLS socket.
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		streamBlock = strings.ReplaceAll(streamBlock, "call i64 @write(i32 %connfd,", "call i64 @__kml_http_conn_send(i32 %connfd,")
+		streamBlock = strings.ReplaceAll(streamBlock, "call i64 @write(i32 %fd,", "call i64 @__kml_http_conn_send(i32 %fd,")
+		streamBlock = strings.ReplaceAll(streamBlock, "%ign4 = call i32 @close(i32 %fd)", "call void @__kml_http_conn_close(i32 %fd)")
+	}
+	e.emitGlobal(streamBlock)
 }

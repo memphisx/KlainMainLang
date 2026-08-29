@@ -100,8 +100,8 @@
     },
     {
       "id": "streams.nodestreams",
-      "name": "stream.Readable / .Writable / .Transform / .PassThrough",
-      "statusRow": "stream.Readable / .Writable / .Transform / .PassThrough (new Duplex ❌)",
+      "name": "stream.Readable / .Writable / .Duplex / .Transform / .PassThrough",
+      "statusRow": "stream.Readable / .Writable / .Duplex / .Transform / .PassThrough",
       "signature": "class X extends Readable<T> { _read() {} }; new Writable<T>({ write }); new PassThrough()",
       "badge": "caveats",
       "description": "Node's stream classes over the WHATWG internals, with 'data'/'end'/'error'/'close'/'finish'/'drain' events, .pipe(), and the flowing-mode read→emit loop started by the first 'data' listener. Both the options form (new Readable({ read })) and the class form (class X extends Readable with a this-based _read/_write) work; Readable.from/.fromWeb/.toWeb bridge to and from the web streams.",

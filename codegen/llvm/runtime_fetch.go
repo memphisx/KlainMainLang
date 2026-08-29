@@ -257,13 +257,21 @@ havemulti:
   ; fed by the same write callback via HEADERFUNCTION/HEADERDATA
   ; (CURLOPT 20079/10029 — frozen curl ABI values), reachable from the
   ; body buffer's slot 4 so the Response can parse it lazily.
-  %hbuf = call ptr @malloc(i64 24)
+  ; 32 bytes, not 24: the shared write callback reads slot 3 (the pending-fetch
+  ; backpointer) on every call, header data included — a 24-byte {data,len,cap}
+  ; buffer would have that read land past the allocation, and a non-null garbage
+  ; value there sends the header path into the streaming branch and dereferences
+  ; it (a Linux-heap-dependent segfault; macOS's adjacent heap read as null).
+  ; Store null into slot 3 so the header write always takes the buffer branch.
+  %hbuf = call ptr @malloc(i64 32)
   %hb_d = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 0
   %hb_l = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 1
   %hb_c = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 2
   store ptr null, ptr %hb_d, align 8
   store i64 0, ptr %hb_l, align 8
   store i64 0, ptr %hb_c, align 8
+  %hb_pend_p = getelementptr ptr, ptr %hbuf, i64 3
+  store ptr null, ptr %hb_pend_p, align 8
   %buf_hb_p = getelementptr ptr, ptr %buf, i64 4
   store ptr %hbuf, ptr %buf_hb_p, align 8
 

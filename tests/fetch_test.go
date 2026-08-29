@@ -1025,15 +1025,16 @@ https.get("%s/flat", (res) => {
 	assertOutputImports(t, src, `status 200`)
 }
 
-func TestE2EHTTPSCreateServerRejected(t *testing.T) {
-	// https.createServer must be a clean rejection, never a silently non-TLS
-	// server.
+func TestE2EHTTPSCreateServerNeedsCertKey(t *testing.T) {
+	// https.createServer is a TLS server (TDD-00111): the { cert, key } options
+	// object is required — the bare-listener form is a clean rejection, never a
+	// silently non-TLS server.
 	_, err := parseAndCompileImports(t, `
 import https from 'https'
 https.createServer((req, res) => { res.end("x") })
 `)
-	if err == nil || !strings.Contains(err.Error(), "https.createServer is not implemented") {
-		t.Fatalf("want clean https.createServer rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cert, key") {
+		t.Fatalf("want clean https.createServer { cert, key } rejection, got %v", err)
 	}
 }
 

@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
-  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "7/14", "strictPct": 50 },
+  "coverage": { "loose": "16/17", "loosePct": 94, "strict": "7/17", "strictPct": 41 },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
   "entries": [
     {
@@ -197,6 +197,56 @@
       ],
       "seeAlso": ["fs.async", "fs.readFileSync"],
       "spec": { "mdn": "https://nodejs.org/api/fs.html#fscreatereadstreampath-options" }
+    },
+    {
+      "id": "fs.statsync",
+      "name": "fs.statSync(path) / fs.lstatSync(path)",
+      "statusRow": "fs.statSync(path) / fs.lstatSync(path)",
+      "signature": "statSync(path: string): Stats",
+      "badge": "caveats",
+      "description": "Reads file metadata into a Stats object. lstatSync does not follow a final symlink. The Stats value carries size and modified-time plus the type predicates.",
+      "params": [{ "name": "path", "type": "string", "desc": "Path to stat." }],
+      "returns": { "type": "Stats", "desc": "A Stats with size, mtimeMs, and isFile()/isDirectory()/isSymbolicLink()." },
+      "differences": [
+        "Only `size`, `mtimeMs`, and `isFile()`/`isDirectory()`/`isSymbolicLink()` are exposed — `mode`/`uid`/`atimeMs` and the rest of the Node Stats surface are not.",
+        "The Linux struct-stat field offsets are encoded but verified on macOS only so far."
+      ],
+      "seeAlso": ["fs.existsSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsstatsyncpath-options" }
+    },
+    {
+      "id": "fs.rmsync",
+      "name": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / readlinkSync / chmodSync / truncateSync / accessSync",
+      "statusRow": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / readlinkSync / chmodSync / truncateSync / accessSync",
+      "signature": "rmSync(path: string, options?: { recursive: boolean, force: boolean }): void",
+      "badge": "caveats",
+      "description": "The rest of the sync path-management set: recursive removal, canonicalization, temp-directory creation, symlink create/read, permission bits, truncation, and existence/permission checks.",
+      "params": [{ "name": "path", "type": "string", "desc": "The path to operate on." }],
+      "differences": [
+        "`rmSync` options must be a `{ recursive, force }` boolean-literal object — no `maxRetries`/`retryDelay`.",
+        "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (`F_OK`) with no `fs.constants` to name the others."
+      ],
+      "seeAlso": ["fs.unlinkSync", "fs.mkdirSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsrmsyncpath-options" }
+    },
+    {
+      "id": "fs.opensync",
+      "name": "fs.openSync / closeSync / readSync / writeSync / fstatSync",
+      "statusRow": "fs.openSync / closeSync / readSync / writeSync / fstatSync",
+      "signature": "openSync(path: string, flags: string): number",
+      "badge": "caveats",
+      "description": "The low-level file-descriptor API: open a path to an fd, read/write at the descriptor, stat it, and close it — for random-access or streaming patterns the whole-file helpers don't cover.",
+      "params": [
+        { "name": "path", "type": "string", "desc": "Path to open." },
+        { "name": "flags", "type": "string", "desc": "A string-literal mode: r r+ w w+ a a+ wx ax (or a raw numeric mask)." }
+      ],
+      "returns": { "type": "number", "desc": "The open file descriptor." },
+      "differences": [
+        "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names.",
+        "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer`."
+      ],
+      "seeAlso": ["fs.readFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsopensyncpath-flags-mode" }
     },
     {
       "id": "fs.fileapi",

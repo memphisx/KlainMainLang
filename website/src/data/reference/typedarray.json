@@ -4,7 +4,7 @@
   "kind": "web",
   "statusPage": "BINARY-DATA-TYPED-ARRAYS.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "0/9", "strictPct": 0 },
   "lede": "Raw byte buffers and the typed views over them, the layer every networking, crypto, and file-I/O path is built on. The recurring divergence is construction: a TypedArray can only be built in a variable declaration's initializer, never as a general expression, and none carry a `.buffer` back-reference (ArrayBuffer, Blob, and Node Buffer are the exceptions — they're general expressions). ArrayBuffer, DataView, SharedArrayBuffer, Atomics, and a real bigint-backed BigInt64Array/DataView 64-bit path are all here, so binary layouts round-trip byte-exactly; the text-shaped readers (Blob.text, Buffer.toString) still truncate at an embedded null byte.",
   "entries": [
     {

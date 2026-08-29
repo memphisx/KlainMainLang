@@ -305,6 +305,18 @@ type Emitter struct {
 	// usedH2Client marks the http2 client-session runtime (TDD-00139 Stage 3).
 	usedH2Client       bool
 	usedH2ClientBridge bool
+	// usedH2TLSServer marks http2.createSecureServer (TDD-00111 Stage 3b): the
+	// event loop gains a TLS-wrap + ALPN + h2-drive branch in its accept path.
+	usedH2TLSServer bool
+	// usedHTTPS1Server marks the HTTPS/1.1 server path (https.createServer, or
+	// http2.createSecureServer's allowHTTP1 fallback): an ALPN-negotiated
+	// http/1.1 (or no-ALPN) TLS connection is registered in the fd→SSL table and
+	// served by the normal connection fiber, whose I/O is routed through the
+	// SSL-aware conn_recv/conn_send/conn_close shims.
+	usedHTTPS1Server bool
+	// emittedHTTPSConnShims guards the one-time emission of the fd→SSL registry
+	// and the conn_recv/conn_send/conn_close I/O shims (emitHTTPSConnShims).
+	emittedHTTPSConnShims bool
 	// usedNodeTestRuntime: the node:test runner bookkeeping (TDD-00140).
 	usedNodeTestRuntime bool
 	// usedDiagChRuntime: diagnostics_channel pub/sub core.

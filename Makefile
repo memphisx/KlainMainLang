@@ -11,7 +11,7 @@ EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip help
+.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check help
 
 ## all: build the compiler
 all: build
@@ -177,6 +177,10 @@ status-check:
 ## status-roundtrip: re-derivation tool — verify every docs/status page survives the Markdown→JSON→Markdown round-trip byte-identically (useful after a deliberate hand-edit, before re-exporting)
 status-roundtrip:
 	$(GO) run ./cmd/statusgen roundtrip $(wildcard docs/status/*.md)
+
+## reference-check: fail if the website API reference (website/src/data/reference/*.json) has drifted from the status data — every ✅ status row needs a reference entry, badges must agree. The website is a SECOND projection of docs/status/data; run this same-commit as any change that flips/adds a ✅ status row. Node built-ins only, no npm install.
+reference-check:
+	node website/scripts/check-reference.mjs
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

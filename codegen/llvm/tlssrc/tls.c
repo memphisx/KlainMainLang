@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <poll.h>
 
 static SSL_CTX *g_ctx = NULL;
 
@@ -97,6 +99,54 @@ long __kml_tls_write(void *ssl, const void *buf, long n) {
 	return r > 0 ? r : -1;
 }
 
+// __kml_tls_read_nb: the non-blocking-socket variant used by the HTTPS/1.1
+// server dispatcher (TDD-00111). Behaves like read() on a non-blocking fd —
+// >0 = bytes; 0 = clean close (close_notify); -1 with errno==EAGAIN when the
+// TLS layer has no data yet (SSL_ERROR_WANT_READ/WRITE), so the connection
+// fiber's existing EAGAIN-yield path applies unchanged; -1 with errno==0 on a
+// fatal error (treated by the dispatcher like a peer close).
+long __kml_tls_read_nb(void *ssl, void *buf, long n) {
+	int r = SSL_read((SSL *)ssl, buf, (int)n);
+	if (r > 0) return r;
+	int e = SSL_get_error((SSL *)ssl, r);
+	if (e == SSL_ERROR_ZERO_RETURN) { errno = 0; return 0; }
+	if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+		errno = EAGAIN;
+		return -1;
+	}
+	errno = 0;
+	return -1;
+}
+
+// __kml_tls_write_all: writes the whole buffer, blocking on the (non-blocking)
+// socket via poll() whenever SSL_write reports WANT_READ/WANT_WRITE. The 1.1
+// response writer (__kml_http_send_response) assumes a single blocking write
+// succeeds in full — this preserves that contract over TLS, where a partial /
+// WANT_WRITE result on a non-blocking fd would otherwise silently truncate the
+// response. Returns the number of bytes written, or -1 on a fatal error.
+long __kml_tls_write_all(void *ssl, const void *buf, long n) {
+	const unsigned char *p = (const unsigned char *)buf;
+	long off = 0;
+	int fd = SSL_get_fd((SSL *)ssl);
+	while (off < n) {
+		int r = SSL_write((SSL *)ssl, p + off, (int)(n - off));
+		if (r > 0) { off += r; continue; }
+		int e = SSL_get_error((SSL *)ssl, r);
+		if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+			if (fd >= 0) {
+				struct pollfd pfd;
+				pfd.fd = fd;
+				pfd.events = (e == SSL_ERROR_WANT_READ) ? POLLIN : POLLOUT;
+				pfd.revents = 0;
+				poll(&pfd, 1, -1);
+			}
+			continue;
+		}
+		return -1;
+	}
+	return off;
+}
+
 void __kml_tls_free(void *ssl) {
 	if (ssl) SSL_free((SSL *)ssl);
 }
@@ -135,6 +185,27 @@ static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *ou
 	return SSL_TLSEXT_ERR_NOACK;
 }
 
+// alpn_select_h1_cb is the h1-only variant used by https.createServer, which has
+// no nghttp2 driver linked: it never selects "h2" (so a `curl --http2` client
+// falls back to HTTP/1.1 rather than negotiating a protocol the server can't
+// speak), only "http/1.1", else NOACK.
+static int alpn_select_h1_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                             const unsigned char *in, unsigned int inlen, void *arg) {
+	(void)ssl;
+	(void)arg;
+	for (unsigned int i = 0; i + 1 <= inlen;) {
+		unsigned int l = in[i];
+		if (i + 1 + l > inlen) break;
+		if (l == 8 && memcmp(&in[i + 1], "http/1.1", 8) == 0) {
+			*out = &in[i + 1];
+			*outlen = 8;
+			return SSL_TLSEXT_ERR_OK;
+		}
+		i += 1 + l;
+	}
+	return SSL_TLSEXT_ERR_NOACK;
+}
+
 // __kml_tls_alpn_selected returns the negotiated ALPN protocol (e.g. "h2" or
 // "http/1.1") as a malloc'd NUL-terminated string, or NULL if none was
 // negotiated. The caller frees it. Lets the accept path branch h2 vs 1.1 after
@@ -154,14 +225,18 @@ char *__kml_tls_alpn_selected(void *ssl) {
 // __kml_tls_server_ctx builds a server SSL_CTX from a PEM certificate and
 // private key (as strings, the way Node's { cert, key } are). Returns the ctx,
 // or NULL + a message in *errout on failure.
-void *__kml_tls_server_ctx(const char *cert_pem, const char *key_pem, char **errout) {
+// offer_h2 chooses the ALPN callback: non-zero offers "h2" then "http/1.1"
+// (http2.createSecureServer), zero offers "http/1.1" only (https.createServer,
+// which has no h2 driver linked). tls.createServer passes non-zero — its raw
+// TLS-line clients offer no ALPN, so the choice is moot for them.
+void *__kml_tls_server_ctx(const char *cert_pem, const char *key_pem, char **errout, int offer_h2) {
 	SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
 	if (!ctx) {
 		if (errout) *errout = dup_err("TLS: SSL_CTX_new (server) failed");
 		return NULL;
 	}
 	SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-	SSL_CTX_set_alpn_select_cb(ctx, alpn_select_cb, NULL);
+	SSL_CTX_set_alpn_select_cb(ctx, offer_h2 ? alpn_select_cb : alpn_select_h1_cb, NULL);
 	BIO *cbio = BIO_new_mem_buf(cert_pem, -1);
 	X509 *cert = cbio ? PEM_read_bio_X509(cbio, NULL, NULL, NULL) : NULL;
 	if (cbio) BIO_free(cbio);

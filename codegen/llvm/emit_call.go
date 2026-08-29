@@ -761,7 +761,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// http.get/request; the options-object form composes https URLs.
 				return e.emitHTTPClientGetScheme(ex.Args, ex.GetPos(), "https", mem.Property == "request")
 			case "createServer":
-				return Value{}, fmt.Errorf("%d:%d: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped; serve plain http.createServer behind TLS termination, or use tls.createServer for a raw TLS socket server", ex.GetPos().Line, ex.GetPos().Col)
+				// HTTPS/1.1 server (TDD-00111): a TLS-wrapped accept path serving
+				// the same (req,res) core as http.createServer over the SSL shims.
+				return e.emitHTTPSCreateServer(ex.Args, ex.GetPos())
 			}
 			return Value{}, fmt.Errorf("%d:%d: https has no method '%s' (supported: get, request)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
 		}
@@ -774,7 +776,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// compat (req, res) API are all inherited.
 				return e.emitHTTPCreateServer(ex.Args, ex.GetPos())
 			case "createSecureServer":
-				return Value{}, fmt.Errorf("%d:%d: http2.createSecureServer is not implemented yet — the server has no TLS mode; http2.createServer serves h2c (cleartext prior-knowledge HTTP/2)", ex.GetPos().Line, ex.GetPos().Col)
+				// TDD-00111 Stage 3b: h2-over-TLS. Serves h2 only (ALPN),
+				// matching Node's allowHTTP1:false default; a non-h2 client is
+				// closed after the handshake.
+				return e.emitHTTP2CreateSecureServer(ex.Args, ex.GetPos())
 			case "connect":
 				return e.emitH2Connect(ex.Args, ex.GetPos())
 			case "getDefaultSettings":
