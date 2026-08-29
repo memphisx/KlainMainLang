@@ -1,0 +1,216 @@
+{
+  "id": "string-methods",
+  "file": "STRING-METHODS.md",
+  "title": "String Methods",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`+` (concatenation)",
+            "status": "implemented",
+            "caveats": [
+              "A `number \\| null` operand still silently prints `\"x0\"` instead of `\"xnull\"` — the numeric branch of value-to-string has no nullability check ([ADR-00166](../adr/ADR-00166.md))"
+            ],
+            "notes": [
+              "A null *string* operand stringifies as `\"null\"` (`\"x\" + null === \"xnull\"`), matching real JS ([ADR-00165](../adr/ADR-00165.md))"
+            ]
+          },
+          {
+            "feature": "`.length`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.slice(start, end?)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.substring(start, end?)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.indexOf(substr)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.includes(substr)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.startsWith(prefix)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.endsWith(suffix)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.replace(from, to)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.split(sep)`",
+            "status": "implemented",
+            "notes": [
+              "Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md))"
+            ]
+          },
+          {
+            "feature": "`.trim()`",
+            "status": "implemented",
+            "notes": [
+              "Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md))"
+            ]
+          },
+          {
+            "feature": "`.trimStart()` / `.trimEnd()`",
+            "status": "implemented",
+            "notes": [
+              "Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md))"
+            ]
+          },
+          {
+            "feature": "`.toString()`",
+            "status": "implemented",
+            "notes": [
+              "Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks)"
+            ]
+          },
+          {
+            "feature": "`.toUpperCase()`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.toLowerCase()`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.repeat(n)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.padStart(len, pad?)`",
+            "status": "implemented",
+            "notes": [
+              "Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md))"
+            ]
+          },
+          {
+            "feature": "`.padEnd(len, pad?)`",
+            "status": "implemented",
+            "notes": [
+              "Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md))"
+            ]
+          },
+          {
+            "feature": "`.charCodeAt(i)`",
+            "status": "implemented",
+            "notes": [
+              "Bounds-checked: an out-of-range index (negative or `>= length`) returns `NaN`, as real JS — the result is a double for exactly that reason ([ADR-00287](../adr/ADR-00287.md)); byte-space code units per this compiler's byte-sequence strings"
+            ]
+          },
+          {
+            "feature": "`.at(i)`",
+            "status": "implemented",
+            "caveats": [
+              "An out-of-range `i` returns `\"\"` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data ([ADR-00166](../adr/ADR-00166.md))"
+            ]
+          },
+          {
+            "feature": "`.charAt(i)`",
+            "status": "implemented",
+            "notes": [
+              "Never wraps a negative index from the end — always `\"\"` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/ADR-00028.md))"
+            ]
+          },
+          {
+            "feature": "`.codePointAt(i)`",
+            "status": "implemented",
+            "caveats": [
+              "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text ([ADR-00028](../adr/ADR-00028.md))",
+              "An out-of-range index returns `NaN` (bounds-checked, [ADR-00287](../adr/ADR-00287.md)), where real JS returns `undefined` — no undefined sentinel for a numeric result"
+            ]
+          },
+          {
+            "feature": "`.normalize()`",
+            "status": "missing",
+            "notes": [
+              "Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text"
+            ]
+          },
+          {
+            "feature": "`.match()` / `.matchAll()`",
+            "status": "implemented",
+            "caveats": [
+              "`.matchAll()` returns an eager `string[][]` rather than a lazy iterator ([REGEXP.md](REGEXP.md))"
+            ],
+            "notes": [
+              "PCRE2-backed; `.match()` is real JS-shaped ([REGEXP.md](REGEXP.md))"
+            ]
+          },
+          {
+            "feature": "`.search(pattern)`",
+            "status": "implemented",
+            "caveats": [
+              "A plain-string `pattern` isn't coerced to a `RegExp` as in real JS — it falls back to the pre-`RegExp` `.indexOf()`-shaped behavior ([ADR-00028](../adr/ADR-00028.md)/[REGEXP.md](REGEXP.md))"
+            ],
+            "notes": [
+              "A `RegExp` `pattern` runs a real PCRE2 search"
+            ]
+          },
+          {
+            "feature": "`.replaceAll()`",
+            "status": "implemented",
+            "caveats": [
+              "An empty search is a no-op, not JS's insert-between-chars behavior ([ADR-00003](../adr/ADR-00003.md))"
+            ]
+          },
+          {
+            "feature": "`.localeCompare(other)`",
+            "status": "implemented",
+            "caveats": [
+              "Length-aware byte-order comparison (normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL — [TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md))"
+            ]
+          },
+          {
+            "feature": "`String.fromCharCode(n)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`String.fromCodePoint(n)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`String.raw` tag",
+            "status": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Known limitations"
+    },
+    {
+      "kind": "block",
+      "text": "- The regex-accepting methods (`.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`) carry additional caveats in [REGEXP.md](REGEXP.md) (backreference/callback scope, no implicit string-to-RegExp coercion, etc.), not repeated per row.\n- Comparison (`===`/`<`/`switch`/`.localeCompare`) and substring search (`.indexOf`/`.includes`/`.split`/`.replace`/`.replaceAll`) are binary-safe: they read a length header and search with `memmem`, so an embedded null byte no longer cuts the operation short ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)). The one string consumer still bounded by the NUL is `console.log`'s display — see [CONSOLE.md](CONSOLE.md)."
+    }
+  ]
+}

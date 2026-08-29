@@ -169,8 +169,8 @@ type Emitter struct {
 	// visible throughout its own enclosing body (hoisted, self-recursive,
 	// visible to its own further-nested descendants) without ever being
 	// entered into the flat, whole-program e.funcs map.
-	nestedFuncScopes     []nestedFuncScope
-	nestedFuncCtr        int
+	nestedFuncScopes []nestedFuncScope
+	nestedFuncCtr    int
 	// prog is the whole program AST, retained for `typeof value` resolution
 	// (finding a referenced value's top-level declaration before value scope is
 	// populated).
@@ -192,6 +192,7 @@ type Emitter struct {
 	// enclosing scope's params/locals are define()d.
 	enclosingCapturables []map[string]bool
 	usedStrlen           bool
+	usedIsatty           bool
 	usedMemcpy           bool
 	usedMemset           bool
 	usedStrcmp           bool
@@ -256,21 +257,47 @@ type Emitter struct {
 	currentWorkerMod       string
 	workerAdaptCtr         int
 	// TDD-00099: shared memory + channels.
-	usedGCUncollectable      bool
-	usedWeakHelpers          bool
-	usedGCGcollect           bool
-	usedHTTP2                bool
+	usedGCUncollectable bool
+	usedWeakHelpers     bool
+	usedGCGcollect      bool
+	usedHTTP2           bool
 	// usedSpawnSync links the embedded C behind child_process's *Sync forms.
 	usedSpawnSync bool
+	// usedIPC links the fork IPC framing C (TDD-00141); usedIPCChildRuntime
+	// marks the child-side channel surface (process.send/.on('message')),
+	// which hooks the event loop.
+	usedIPC             bool
+	usedIPCChildRuntime bool
+	usedCPForkRuntime   bool
+	// usedWebview links the C++ system-webview binding (TDD-00142);
+	// webviewConstructed enforces one-window-per-process; webviewThunkCtr
+	// numbers the per-bind trampolines.
+	usedWebview                bool
+	webviewConstructed         bool
+	webviewThunkCtr            int
+	webviewPumpEmitted         bool
+	webviewReturnRunnerEmitted bool
+	// webviewTypedRunners caches per-inner-type async-typed-bind settlement
+	// runners (TDD-00142 Stage 6), keyed by the inner type's shape.
+	webviewTypedRunners map[string]string
+	// webviewBindings records the typed window.* bindings for --emit-window-dts.
+	webviewBindings []webviewBindingSig
+	// embeddedDirs maps a compile-time-literal directory path to the IR symbol
+	// its packed blob is linked under (TDD-00142 Stage 7); usedEmbeddedAssets
+	// gates the embed_assets.c static-server runtime.
+	embeddedDirs       map[string]string
+	usedEmbeddedAssets bool
+	usedEmbedRuntime   bool
+	embedSymbols       map[string]bool
 	// usedH2Client marks the http2 client-session runtime (TDD-00139 Stage 3).
-	usedH2Client bool
+	usedH2Client       bool
 	usedH2ClientBridge bool
 	// usedNodeTestRuntime: the node:test runner bookkeeping (TDD-00140).
 	usedNodeTestRuntime bool
 	// usedDiagChRuntime: diagnostics_channel pub/sub core.
 	usedDiagChRuntime bool
 	// nodeTestPrefix is the compile-time describe/suite name stack.
-	nodeTestPrefix []string // the generic __kml_h2c_on_* IR callbacks http2.c references
+	nodeTestPrefix           []string // the generic __kml_h2c_on_* IR callbacks http2.c references
 	usedAtomicsRuntime       bool
 	usedChanRuntime          bool
 	usedPipeDecl             bool
@@ -314,6 +341,15 @@ type Emitter struct {
 	usedCryptoRandomUUID     bool
 	usedReadLineSync         bool
 	usedExecFileSync         bool
+	usedProcessGetID         bool
+	usedChdirDecl            bool
+	usedPemFromDer           bool
+	cryptoSubtleAliases      map[string]bool
+	usedHTTPCThunk           bool
+	usedHTTPCBegin           bool
+	usedExecvDecl            bool
+	usedExecvpDecl           bool
+	usedExitRawDecl          bool
 	usedForkDecl             bool
 	usedCloseDecl            bool
 	usedWaitpidDecl          bool
@@ -419,7 +455,7 @@ type Emitter struct {
 	// TDD-00027) is rejected at compile time instead of producing a
 	// duplicate @__kml_http_dispatch definition the LLVM backend would
 	// reject with a confusing symbol-collision error.
-	httpListenCallSeen       bool
+	httpListenCallSeen bool
 	// httpServerHandlerPending marks a zero-arg http.createServer() handle
 	// still waiting for its request handler via server.on('request', cb);
 	// server.listen rejects until one is registered.
@@ -1416,6 +1452,12 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// before Pass 2 emits any function body.
 	e.registerModuleGlobals(prog)
 
+	// Pass 1.8: pre-register `const { subtle } = globalThis.crypto` aliases
+	// (ADR-00434) so function bodies emitted in Pass 2 — before the top-level
+	// destructuring statement itself is reached in Pass 3 — dispatch
+	// `subtle.digest(...)` correctly.
+	e.registerCryptoSubtleAliases(prog)
+
 	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
 	// function is never emitted here — it has no single concrete signature
 	// to emit; each concrete instantiation is emitted on demand from its own
@@ -1589,7 +1631,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
@@ -1603,6 +1645,7 @@ entry:
 	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
 	// runtimes were not, define no-op stubs for the symbols it references.
 	e.emitLoopTaskStubs()
+	e.emitCPRuntimeStubs()
 	// TDD-00109: the net runtime's read/write/close branch on a socket's SSL*
 	// and call the __kml_tls_* ABI. Declare it (libssl provides it via tlssrc/
 	// tls.c) when `tls` is used, else define no-op stubs so a plain-net program

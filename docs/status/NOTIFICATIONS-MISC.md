@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/notifications-misc.json; edit the JSON, then run `make status`. -->
+
 # Notifications & Misc (Low priority / browser-specific)
 
 > Part of the [Implementation Status](README.md) index. Most of this is genuinely browser-specific and N/A in a native CLI context. A few entries, though, are browser API *shapes* with a real native reinterpretation — the same idea as the IndexedDB-shaped native storage API in [TDD-00011](../tdd/TDD-00011.md): keep the familiar browser surface, back it with an OS-native implementation. Those are marked **Differentiator (deferred)** below — deliberately not a V1 target and not yet scoped in a TDD, but not ignored either.

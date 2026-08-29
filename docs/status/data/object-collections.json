@@ -1,0 +1,244 @@
+{
+  "id": "object-collections",
+  "file": "OBJECT-COLLECTIONS.md",
+  "title": "Object / Collections",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "Object literals `{ a: 1 }`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Field access `obj.field`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Object destructuring",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Object.keys(obj)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Object.values(obj)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Object.entries(obj)`",
+            "status": "implemented",
+            "caveats": [
+              "Values are stringified — a heterogeneous object's value type is a union not yet representable ([TDD-00066](../tdd/TDD-00066.md))"
+            ],
+            "notes": [
+              "Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))`"
+            ]
+          },
+          {
+            "feature": "`Object.groupBy(arr, fn)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Object.assign(target, ...src)`",
+            "status": "implemented",
+            "caveats": [
+              "Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md))"
+            ],
+            "notes": [
+              "Mutates and returns `target`"
+            ]
+          },
+          {
+            "feature": "`Object.create()`",
+            "status": "missing",
+            "notes": [
+              "Out of scope: its core is prototype-chain creation, which this compiler's fixed-shape struct object model can't represent — the deferred dynamic/prototype object model ([TDD-00068](../tdd/TDD-00068.md))"
+            ]
+          },
+          {
+            "feature": "`Object.freeze(obj)`",
+            "status": "implemented",
+            "notes": [
+              "Real runtime enforcement, not a no-op: tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter ([ADR-00055](../adr/ADR-00055.md))"
+            ]
+          },
+          {
+            "feature": "`Object.seal(obj)`",
+            "status": "implemented",
+            "notes": [
+              "A genuine no-op, not a scope-narrowed approximation: seal's guarantee (\"no new/deleted fields\") is already structurally impossible for this compiler's fixed-shape objects, so there's nothing further to enforce ([ADR-00055](../adr/ADR-00055.md))"
+            ]
+          },
+          {
+            "feature": "`Object.hasOwn()` / `.hasOwnProperty()`",
+            "status": "implemented",
+            "caveats": [
+              "The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against) ([ADR-00065](../adr/ADR-00065.md))"
+            ],
+            "notes": [
+              "Object shapes are fully structural/static, so this is a compile-time `FieldIndex` lookup, not a runtime scan"
+            ]
+          },
+          {
+            "feature": "`Object.fromEntries()`",
+            "status": "implemented",
+            "caveats": [
+              "Keys must be strings (a `[string, V][]` array) — real JS stringifies any key and accepts symbol keys ([ADR-00348](../adr/ADR-00348.md))"
+            ],
+            "notes": [
+              "Returns a *dynamic object* (a `Map<string,V>`-backed value, [TDD-00012](../tdd/TDD-00012.md)); read via `obj.field`/`obj[key]`. Seeds via the same `[K,V][]` walker `new Map(entries)` uses ([ADR-00347](../adr/ADR-00347.md))"
+            ]
+          },
+          {
+            "feature": "Object spread `{ ...obj, key: val }`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Computed property keys `{ [expr]: value }`",
+            "status": "implemented",
+            "caveats": [
+              "`V` is inferred from the first property only",
+              "`...spread` combined with a computed key isn't supported yet",
+              "The declared-type form (`{ [key: string]: T }`) isn't supported yet"
+            ],
+            "notes": [
+              "A *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s runtime, with `.field`/`[expr]` sugar layered on top ([TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md))",
+              "Exception: a well-known-symbol key (`[Symbol.asyncIterator]`/`[Symbol.iterator]`, colon or method-shorthand form) desugars to a reserved *static* key, so the literal stays a static struct and the member drives `for...of`/`for await...of` iteration ([ADR-00279](../adr/ADR-00279.md))"
+            ]
+          },
+          {
+            "feature": "Shorthand property `{ x }`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Method shorthand `{ foo() {...} }`",
+            "status": "implemented",
+            "caveats": [
+              "No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong",
+              "No `async`/generator method shorthand either, matching this compiler's class methods ([ADR-00169](../adr/ADR-00169.md))"
+            ],
+            "notes": [
+              "Desugars to `{ foo: function() {...} }` — a plain anonymous function value, reusing the same closure machinery ([TDD-00060](../tdd/TDD-00060.md))"
+            ]
+          },
+          {
+            "feature": "`Map.set/get/has/delete/keys/values`",
+            "status": "implemented",
+            "caveats": [
+              "A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `\"null\"` stand-in on a miss ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md))"
+            ],
+            "notes": [
+              "`.get()` on a scalar-valued map returns `V \\| null` — a missing key is distinguishable from a stored `0`/`false` via the presence-flagged nullable-scalar representation"
+            ]
+          },
+          {
+            "feature": "`Map.size`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Map.entries()`",
+            "status": "implemented",
+            "notes": [
+              "Returns a real `[K, V][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)); iterate with `for (const [k, v] of m.entries())`; replaced the earlier object-shaped stand-in ([ADR-00053](../adr/ADR-00053.md))"
+            ]
+          },
+          {
+            "feature": "`Map.forEach()`",
+            "status": "implemented",
+            "caveats": [
+              "The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes) ([ADR-00053](../adr/ADR-00053.md))"
+            ],
+            "notes": [
+              "Calls `fn(value, key)`, matching real JS's argument order"
+            ]
+          },
+          {
+            "feature": "`Map.clear()`",
+            "status": "implemented",
+            "notes": [
+              "Resets size to 0 in place — doesn't free/reallocate the backing arrays (\"leak by design\" memory model); immediately reusable afterward ([ADR-00053](../adr/ADR-00053.md))"
+            ]
+          },
+          {
+            "feature": "`new Map(entries)`",
+            "status": "implemented",
+            "caveats": [
+              "Accepts only a `[K, V][]` array of 2-tuples, narrowed from the spec's `Iterable<[K, V]>` — the only iterable/pair concept a general expression has here ([ADR-00347](../adr/ADR-00347.md))"
+            ],
+            "notes": [
+              "K/V are inferred from the entries when no `<K, V>` is given; duplicate keys resolve last-wins; the entries source may be a bare literal or an already-declared `[K, V][]` variable ([TDD-00066](../tdd/TDD-00066.md))"
+            ]
+          },
+          {
+            "feature": "`new Set(iterable)`",
+            "status": "implemented",
+            "caveats": [
+              "Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here ([ADR-00159](../adr/ADR-00159.md))"
+            ]
+          },
+          {
+            "feature": "`Set.add/has/delete/values`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Set.size`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Set.forEach()`",
+            "status": "implemented",
+            "notes": [
+              "Calls `fn(element[, element])` — real JS's `Set.prototype.forEach` passes the value twice (`(value, value, set)`) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter ([ADR-00053](../adr/ADR-00053.md))"
+            ]
+          },
+          {
+            "feature": "`Set.clear()`",
+            "status": "implemented",
+            "notes": [
+              "Same in-place reset as `Map.clear()` ([ADR-00053](../adr/ADR-00053.md))"
+            ]
+          },
+          {
+            "feature": "`WeakMap` / `WeakSet` / `WeakRef`",
+            "status": "implemented",
+            "caveats": [
+              "Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)",
+              "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md)/[ADR-00349](../adr/ADR-00349.md))"
+            ],
+            "notes": [
+              "`-mm=gc`: genuinely weak via Boehm disappearing links (the referent word is `GC_malloc_atomic`/unscanned so it isn't traced); a collected referent's `.deref()`/`WeakMap.has` observably drops. `gc()` (Node `--expose-gc` idiom) forces a full collection under gc, a no-op under manual",
+              "A `new WeakMap()` initial-entries argument is out of V1 scope"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Known limitations"
+    },
+    {
+      "kind": "block",
+      "text": "- Objects are fixed-shape heap structs — no dynamic property add/delete (`Object.freeze`/`.seal` don't need to enforce this; it's already structurally impossible)."
+    }
+  ]
+}

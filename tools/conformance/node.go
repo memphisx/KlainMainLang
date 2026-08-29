@@ -124,6 +124,9 @@ var nodeSupportedModule = map[string]bool{
 	"fs/promises": true, "stream/promises": true,
 	// https (client via the libcurl backend) and the stream/web re-exports.
 	"https": true, "stream/web": true, "http2": true,
+	// The Node crypto module (generateKeyPair etc., ADR-00434). The ambient
+	// WebCrypto global (crypto.subtle) still works without any import.
+	"crypto": true,
 	// node:test — the runner surface (TDD-00140) + the mustCall helpers.
 	"test": true, "diagnostics_channel": true,
 }
@@ -150,7 +153,7 @@ var nodeAmbientMemberGlobal = map[string]map[string]string{
 var nodeAmbientModule = map[string]bool{
 	"buffer": true, "process": true, "console": true, "timers": true,
 	"url": true, "string_decoder": true, "punycode": true,
-	"events": true, "crypto": true, // EventEmitter / crypto are global, not importable
+	"events": true, // EventEmitter is global, not importable
 	"timers/promises": true,
 }
 

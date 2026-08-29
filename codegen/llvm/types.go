@@ -454,6 +454,18 @@ type Type struct {
 	// IsHTTPServer marks a variable-bound http.createServer() handle
 	// (.listen/.close/.closeAllConnections/.address).
 	IsHTTPServer bool
+	// IsClientRequest marks the http.get/request return handle (ADR-00430):
+	// a { ptr url, ptr cb, i64 state } struct for .end()/.abort()/.on().
+	IsClientRequest bool
+	// IsHTTPAgent marks the inert `new http.Agent(...)` token (ADR-00432).
+	IsHTTPAgent bool
+	// IsEmbeddedAssets marks an `embedDir(...)` handle (TDD-00142 Stage 7).
+	IsEmbeddedAssets bool
+	// IsWebview marks a `new Webview(...)` handle (TDD-00142): a calloc'd
+	// `{ ptr webview_t, ptr boundListHead }` struct dispatching the window
+	// methods (navigate/html/setTitle/setSize/init/eval/run/terminate/
+	// destroy/bind/unbind).
+	IsWebview bool
 	// IsH2ServerStream marks the http2 server-side stream object
 	// (.respond/.end/.write/.on('data'|'end'), TDD-00139 Stage 2).
 	IsH2ServerStream bool
@@ -1301,6 +1313,41 @@ func StdinType() Type {
 func HTTPServerType() Type {
 	ty := ObjectType([]Field{{Name: "__httpsrv", Ty: TypePtr}})
 	ty.IsHTTPServer = true
+	return ty
+}
+
+// ClientRequestType is the http.get/request return handle (ADR-00430): a
+// pointer to { ptr url, ptr userCb, i64 state } (state 0 pending · 1 fired ·
+// 2 aborted). `request` fires on .end(); `get` is returned already fired.
+func ClientRequestType() Type {
+	ty := ObjectType([]Field{{Name: "__clientreq", Ty: TypePtr}})
+	ty.IsClientRequest = true
+	return ty
+}
+
+// HTTPAgentType is the inert `new http.Agent(...)` token (ADR-00432): a
+// single heap byte — the client opens one connection per request, so an
+// Agent carries configuration with no behavior; .destroy() is a no-op.
+func HTTPAgentType() Type {
+	ty := ObjectType([]Field{{Name: "__httpagent", Ty: TypePtr}})
+	ty.IsHTTPAgent = true
+	return ty
+}
+
+// EmbeddedAssetsType is an `embedDir(...)` handle (TDD-00142 Stage 7): a ptr to
+// the packed blob linked into the binary, dispatching `.get(path)`.
+func EmbeddedAssetsType() Type {
+	ty := ObjectType([]Field{{Name: "__embedassets", Ty: TypePtr}})
+	ty.IsEmbeddedAssets = true
+	return ty
+}
+
+// WebviewType is a `new Webview(...)` handle (TDD-00142): a calloc'd
+// `{ ptr webview_t, ptr boundListHead }` struct, flag-tagged for the window
+// method dispatch in emit_webview.go.
+func WebviewType() Type {
+	ty := ObjectType([]Field{{Name: "__webview", Ty: TypePtr}})
+	ty.IsWebview = true
 	return ty
 }
 

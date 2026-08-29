@@ -506,3 +506,26 @@ process.on('warning', (w: Error) => { console.log("warn:", w.name, w.message); }
 process.emitWarning("careful", "CustomWarning");
 `, "warn: CustomWarning careful")
 }
+
+func TestE2EProcessStdioIsTTY(t *testing.T) {
+	// process.stdout/.stderr/.stdin .isTTY — a real isatty(fd) probe
+	// (ADR-00424). Under the test harness all three are pipes, so false;
+	// the binding form checks bool-typed inference.
+	assertOutput(t, `
+const t = process.stdout.isTTY
+console.log(t)
+console.log(process.stderr.isTTY)
+console.log(!process.stdin.isTTY)
+`, "false\nfalse\ntrue")
+}
+
+func TestE2EProcessGetUIDFamily(t *testing.T) {
+	// POSIX credential reads (ADR-00428) — non-negative numbers, and the
+	// effective ids match the real ones under a normal (non-setuid) run.
+	assertOutput(t, `
+console.log(process.getuid() >= 0)
+console.log(process.getgid() >= 0)
+console.log(process.geteuid() === process.getuid())
+console.log(process.getegid() === process.getgid())
+`, "true\ntrue\ntrue\ntrue")
+}

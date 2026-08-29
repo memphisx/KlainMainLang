@@ -1,0 +1,130 @@
+{
+  "id": "performance-timing",
+  "file": "PERFORMANCE-TIMING.md",
+  "title": "Performance & Timing",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`performance.now()`",
+            "status": "implemented",
+            "caveats": [
+              "No fixed \"time origin\" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time"
+            ],
+            "notes": [
+              "`CLOCK_MONOTONIC`-based milliseconds, as a `double` (sub-millisecond precision) — unlike `Date.now()`, not tied to wall-clock time",
+              "See [ADR-00024](../adr/ADR-00024.md)"
+            ]
+          },
+          {
+            "feature": "`performance.mark(name)` / `performance.measure(name, start, end?)`",
+            "status": "implemented",
+            "caveats": [
+              "Re-marking a name overwrites its timestamp — last-write-wins, not a full ordered entries list",
+              "`measure()` returns the elapsed milliseconds directly as a plain number rather than a `PerformanceMeasure` object, and its own `name` argument is evaluated but not stored anywhere"
+            ],
+            "notes": [
+              "Named timing marks backed by a `Map<string, number>`; no `getEntriesByName`/`PerformanceObserver` machinery exists for a `PerformanceMeasure` to belong to",
+              "`endMark` defaults to the current `performance.now()` reading when omitted",
+              "Measuring against a name that was never marked throws, matching real `performance.measure()`'s own behavior",
+              "See [ADR-00111](../adr/ADR-00111.md)"
+            ]
+          },
+          {
+            "feature": "`Date`",
+            "status": "implemented",
+            "caveats": [
+              "UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone; the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC"
+            ],
+            "notes": [
+              "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
+              "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds`, `getTime`/`valueOf`, `toISOString`",
+              "See [ADR-00014](../adr/ADR-00014.md)"
+            ]
+          },
+          {
+            "feature": "`Date.now()`",
+            "status": "implemented",
+            "notes": [
+              "Milliseconds since epoch, via `clock_gettime(CLOCK_REALTIME, ...)`"
+            ]
+          },
+          {
+            "feature": "`Date.parse(string)`",
+            "status": "implemented",
+            "caveats": [
+              "Unparseable input returns `-1` (a documented sentinel — this compiler's Date has no NaN representation)"
+            ],
+            "notes": [
+              "ISO 8601 strings, with or without milliseconds: `Z` (UTC), a `+HH:MM`/`-HH:MM` timezone offset (converted to UTC), or a bare `YYYY-MM-DD` date",
+              "See [ADR-00015](../adr/ADR-00015.md) and [ADR-00017](../adr/ADR-00017.md)"
+            ]
+          },
+          {
+            "feature": "`Date` setters (`setFullYear`, `setMonth`, `setDate`, `setHours`, `setMinutes`, `setSeconds`, `setMilliseconds`, `setTime`)",
+            "status": "implemented",
+            "caveats": [
+              "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)",
+              "Only the single-argument form of each setter (no `setFullYear(y, m, d)`-style overloads)"
+            ],
+            "notes": [
+              "Mutate a named Date variable in place and return the new timestamp, matching real JS",
+              "See [ADR-00016](../adr/ADR-00016.md)"
+            ]
+          },
+          {
+            "feature": "`Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`)",
+            "status": "implemented",
+            "caveats": [
+              "`Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation)",
+              "`Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time"
+            ],
+            "notes": [
+              "`Date - Date` gives the difference in milliseconds (a number), matching real JS",
+              "See [ADR-00018](../adr/ADR-00018.md)"
+            ]
+          },
+          {
+            "feature": "`Date.prototype.toDateString()`",
+            "status": "implemented",
+            "caveats": [
+              "Always UTC, not local time"
+            ],
+            "notes": [
+              "Fixed `\"Www Mon DD YYYY\"` shape (e.g. `\"Thu Jan 01 1970\"`), matching real JS exactly except for the UTC deviation",
+              "See [ADR-00019](../adr/ADR-00019.md)"
+            ]
+          },
+          {
+            "feature": "`Date.prototype.toLocaleDateString()`",
+            "status": "implemented",
+            "caveats": [
+              "One fixed `\"M/D/YYYY\"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support"
+            ],
+            "notes": [
+              "See [ADR-00019](../adr/ADR-00019.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

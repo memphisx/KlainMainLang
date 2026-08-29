@@ -7,11 +7,11 @@ CLANG        := clang
 TEST_TIMEOUT ?= 20m
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
-EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' | sort)
+EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts help
+.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip help
 
 ## all: build the compiler
 all: build
@@ -165,6 +165,18 @@ conformance-node: conformance-fetch
 ## conformance-ts: regenerate docs/testing/CONFORMANCE-RESULTS-TS.md — TypeScript accept/reject oracle (TDD-00121 Track C)
 conformance-ts: conformance-fetch
 	$(GO) run ./tools/conformance -suite=ts
+
+## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables
+status:
+	$(GO) run ./cmd/statusgen generate
+
+## status-check: fail if any docs/status page is out of sync with its data/ source (CI forward guard)
+status-check:
+	$(GO) run ./cmd/statusgen check
+
+## status-roundtrip: re-derivation tool — verify every docs/status page survives the Markdown→JSON→Markdown round-trip byte-identically (useful after a deliberate hand-edit, before re-exporting)
+status-roundtrip:
+	$(GO) run ./cmd/statusgen roundtrip $(wildcard docs/status/*.md)
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

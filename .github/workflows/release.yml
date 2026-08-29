@@ -19,11 +19,12 @@ jobs:
           go-version-file: go.mod
           cache: false # stdlib-only project, no go.sum to key the module cache on
 
-      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2)
-        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev
+      - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
+        run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - run: go build .
       - run: go vet ./...
+      - run: make status-check # docs/status pages must match their data/ JSON source
       - run: go test -timeout 40m ./... # serial E2E suite on a 2-core runner; 20m started timing out as it grew
       - run: make examples
 

@@ -171,11 +171,22 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
 
-	// Register: if the source is already settled, enqueue now; else attach a
-	// reaction node onto the source's reaction list.
+	e.emitAttachPromiseReaction(pVal.Ref, clo)
+
+	qt := PromiseOf(retTy)
+	qt.PromiseTask = true
+	return Value{Ref: q, Ty: qt}, nil
+}
+
+// emitAttachPromiseReaction registers reaction closure clo on promise prom:
+// if the source is already settled, enqueue the closure as a microtask now;
+// else push a { closure, next } node onto the promise's reaction list, which
+// __kml_promise_drain_reactions fires at settle time. Shared by .then/.catch/
+// .finally and the stream finished()/pipeline() callback forms.
+func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	res := e.freshReg()
 	resP := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, pVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, prom))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resP))
 	settled := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, res))
@@ -194,7 +205,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	nodeClo := e.freshReg()
 	nodeNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, pVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, prom))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nodeClo, node))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", clo, nodeClo))
@@ -203,10 +214,6 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, rxP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
-
-	qt := PromiseOf(retTy)
-	qt.PromiseTask = true
-	return Value{Ref: q, Ty: qt}, nil
 }
 
 // ensureFetchDriveRunner emits @__kml_fetch_drive_run(ptr %env) exactly once —

@@ -10,9 +10,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **35 passed**, 2416 failed, 1027 skipped (out of scope).
+3478 files total: **37 passed**, 2414 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **35 passed (1.4%)**.
+Of the 2451 files that compiled far enough to run, **37 passed (1.5%)**.
 
 ## By module (top 40 by file count)
 
@@ -65,46 +65,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 263 | COMPILE_ERROR: a number has no method '%s' |
-| 159 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
-| 154 | COMPILE_ERROR: undefined variable '%s' |
+| 249 | COMPILE_ERROR: a number has no method '%s' |
+| 118 | COMPILE_ERROR: undefined variable '%s' |
+| 94 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 86 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
-| 69 | COMPILE_ERROR: unknown class '%s' |
-| 65 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 62 | COMPILE_ERROR: undefined function or closure '%s' |
-| 53 | COMPILE_ERROR: no field '%s' |
+| 73 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 59 | COMPILE_ERROR: no field '%s' |
+| 56 | COMPILE_ERROR: unknown class '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 52 | COMPILE_ERROR: fs has no method '%s' |
+| 49 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
+| 43 | COMPILE_ERROR: undefined function or closure '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 35 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
-| 31 | COMPILE_ERROR: process has no method '%s' |
-| 27 | COMPILE_ERROR: initializer'%s's type — this compiler is a typed subset |
-| 26 | COMPILE_ERROR: child_process.spawn takes (command, args?) |
-| 25 | COMPILE_ERROR: a net socket supports '%s' and '%s' (got '%s') |
+| 33 | COMPILE_ERROR: an http.Server supports .on('%s', (req, res)) and .on('%s', (stream, headers)) (got '… |
+| 29 | COMPILE_ERROR: a net socket supports '%s' and '%s' (got '%s') |
+| 28 | COMPILE_ERROR: initializer'%s's type — this compiler is a typed subset |
+| 28 | COMPILE_ERROR: process has no method '%s' |
+| 27 | COMPILE_ERROR: http.get options support { port, path, host, agent } only (got '%s') |
+| 26 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 25 | COMPILE_ERROR: expected ), got => |
-| 23 | COMPILE_ERROR: an object has no method '%s' |
-| 23 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
-| 20 | COMPILE_ERROR: callback must be an arrow function or function identifier |
-| 19 | COMPILE_ERROR: a Request has no method '%s' |
-| 19 | COMPILE_ERROR: an http.Server supports .on('%s', (req, res)) and .on('%s', (stream, headers)) (got '… |
-| 19 | COMPILE_ERROR: http.get options support { port, path, host } only (got '%s') |
+| 23 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
+| 21 | COMPILE_ERROR: a Request has no method '%s' |
+| 21 | COMPILE_ERROR: field assignment on non-object |
+| 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 19 | COMPILE_ERROR: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped… |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
-| 18 | COMPILE_ERROR: field assignment on non-object |
+| 19 | RUN_TIMEOUT |
+| 18 | COMPILE_ERROR: '%s' is not an array |
+| 18 | COMPILE_ERROR: createServer's options object is not supported (only the bare listener form, or an em… |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
-| 17 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
-| 16 | COMPILE_ERROR: '%s' is not an array |
-| 16 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
-| 16 | COMPILE_ERROR: createServer's options object is not supported (only the bare listener form, or an em… |
+| 16 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
+| 16 | COMPILE_ERROR: unknown stream method '%s' |
 | 15 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
+| 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
 | 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 15 | COMPILE_ERROR: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped… |
-| 15 | RUN_TIMEOUT |
-| 14 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 14 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
-| 14 | MODULE_NOT_IMPLEMENTED: module |
+| 14 | COMPILE_ERROR: cannot convert type ptr to string in template literal |
+| 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 
 ## Top skip reasons
 
@@ -138,12 +138,13 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (35)
+## Passing files (37)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
 | File | Module | Default-only |
 |---|---|---|
+| `test-assert-checktag.js` | assert |  |
 | `test-buffer-badhex.js` | buffer |  |
 | `test-buffer-nopendingdep-map.js` | buffer |  |
 | `test-dgram-abort-closed.js` | dgram |  |
@@ -177,5 +178,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-url-format-whatwg.js` | url |  |
 | `test-url-format.js` | url |  |
 | `test-url-parse-format.js` | url |  |
+| `test-utf8-scripts.js` | utf8 |  |
 | `test-websocket.js` | websocket |  |
 | `test-zlib-no-stream.js` | zlib |  |

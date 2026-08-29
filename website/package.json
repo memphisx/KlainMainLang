@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "gen:examples": "node scripts/gen-examples.mjs",
+    "check:reference": "node scripts/check-reference.mjs",
     "dev": "npm run gen:examples && quasar dev",
     "dev:ssg": "npm run gen:examples && quasar dev -m ssg",
-    "build": "npm run gen:examples && quasar build -m ssg",
+    "build": "npm run check:reference && npm run gen:examples && quasar build -m ssg",
     "build:spa": "npm run gen:examples && quasar build"
   },
   "dependencies": {

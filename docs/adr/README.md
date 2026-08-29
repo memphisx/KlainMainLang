@@ -140,6 +140,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00099](ADR-00099.md) | `GC_set_handle_fork(1)` for `-mm=gc` + `http.listen` clustering — fixed one real crash, one residual hang left unresolved | Extends [ADR-00097](ADR-00097.md), [ADR-00098](ADR-00098.md). Extended by [ADR-00101](ADR-00101.md) |
 | [00100](ADR-00100.md) | Fix `-mm=gc` startup crash under AddressSanitizer, and add ASan/UBSan test-build helpers | Extends [ADR-00071](ADR-00071.md), [ADR-00080](ADR-00080.md) |
 | [00101](ADR-00101.md) | Root cause of the `-mm=gc` clustering hang — `GC_stackbottom` never restored when a fiber runs to completion | Implements [TDD-00025](../tdd/TDD-00025.md). Extends [ADR-00071](ADR-00071.md), [ADR-00093](ADR-00093.md), [ADR-00099](ADR-00099.md) |
+| [00102](ADR-00102.md) | `http.close()` — listener teardown | Implements [TDD-00027](../tdd/TDD-00027.md); references [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](ADR-00079.md) |
 | [00103](ADR-00103.md) | User-defined generics V1 — monomorphization for functions, interfaces, classes | Implements [TDD-00010](../tdd/TDD-00010.md) |
 | [00104](ADR-00104.md) | Array/Map/Set/EventEmitter literals as general expressions | Implements [TDD-00028](../tdd/TDD-00028.md) |
 | [00105](ADR-00105.md) | Array-of-arrays (nested array) storage representation | Implements [TDD-00029](../tdd/TDD-00029.md) |
@@ -459,3 +460,27 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00419](ADR-00419.md) | node:test runner — test/describe/TestContext/hooks + `node:` specifier aliases | Implements [TDD-00140](../tdd/TDD-00140.md); Extends [TDD-00122](../tdd/TDD-00122.md) |
 | [00420](ADR-00420.md) | diagnostics_channel V1 — named pub/sub, string messages | Extends [ADR-00412](ADR-00412.md) |
 | [00421](ADR-00421.md) | Linux CI fixes — empty-header-block NUL, libm for frem, float fuzz oracle | Extends [ADR-00072](ADR-00072.md), [TDD-00123](../tdd/TDD-00123.md), [TDD-00014](../tdd/TDD-00014.md) |
+| [00422](ADR-00422.md) | stream named exports — PassThrough, callback pipeline/finished, duplexPair | Extends [ADR-00304](ADR-00304.md), [ADR-00412](ADR-00412.md); Implements [TDD-00131](../tdd/TDD-00131.md) |
+| [00423](ADR-00423.md) | chained `createServer().listen()` binding + function-less `mustCall()` | Extends [ADR-00406](ADR-00406.md), [ADR-00370](ADR-00370.md); Implements [TDD-00131](../tdd/TDD-00131.md) |
+| [00424](ADR-00424.md) | `process.<stdio>.isTTY` + zero-param `createServer` listener | Extends [ADR-00423](ADR-00423.md), [ADR-00406](ADR-00406.md) |
+| [00425](ADR-00425.md) | child_process.fork — self-fork with a NODE_CHANNEL_FD IPC channel | Implements [TDD-00141](../tdd/TDD-00141.md); Extends [ADR-00423](ADR-00423.md), [ADR-00412](ADR-00412.md) |
+| [00426](ADR-00426.md) | promote http server-handle bindings to module globals | Extends [ADR-00342](ADR-00342.md), [ADR-00423](ADR-00423.md) |
+| [00427](ADR-00427.md) | cluster workers ride the fork IPC channel | Extends [ADR-00425](ADR-00425.md), [ADR-00331](ADR-00331.md) |
+| [00428](ADR-00428.md) | assert.match/doesNotMatch, process.getuid family, honest marker diagnostics | Extends [ADR-00195](ADR-00195.md), [ADR-00026](ADR-00026.md) |
+| [00429](ADR-00429.md) | http client — variable-bound options objects + the `agent` key | Extends [ADR-00412](ADR-00412.md) |
+| [00430](ADR-00430.md) | the ClientRequest handle — request().end(), abort, response/error events | Extends [ADR-00429](ADR-00429.md), [ADR-00412](ADR-00412.md); Implements [TDD-00138](../tdd/TDD-00138.md) |
+| [00431](ADR-00431.md) | worker_threads re-exports MessageChannel/MessagePort/BroadcastChannel | Extends [ADR-00369](ADR-00369.md) |
+| [00432](ADR-00432.md) | `new http.Agent(...)` as an inert pool-config token | Extends [ADR-00429](ADR-00429.md), [ADR-00430](ADR-00430.md) |
+| [00433](ADR-00433.md) | spawn options — cwd wired through, shell/stdio pipe tolerated | Extends [ADR-00322](ADR-00322.md), [ADR-00411](ADR-00411.md) |
+| [00434](ADR-00434.md) | the Node crypto module — generateKeyPair(Sync), randomBytes | Extends [ADR-00317](ADR-00317.md), [ADR-00370](ADR-00370.md) |
+| [00435](ADR-00435.md) | `const { subtle } = globalThis.crypto` binding | Extends [ADR-00434](ADR-00434.md) |
+| [00436](ADR-00436.md) | klain:webview Stage 0 — C++ embedded-source plumbing + LocateWebview | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00411](ADR-00411.md), [ADR-00020](ADR-00020.md) |
+| [00437](ADR-00437.md) | klain:webview Stage 1 — the Webview handle and window methods | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00436](ADR-00436.md), [ADR-00432](ADR-00432.md) |
+| [00438](ADR-00438.md) | klain:webview Stage 2 — bind/unbind, page↔native IPC, served SPA | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00437](ADR-00437.md), [ADR-00425](ADR-00425.md) |
+| [00439](ADR-00439.md) | klain:webview Stage 3 — loop fusion (page-tick pump) + async bind | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00438](ADR-00438.md), [ADR-00437](ADR-00437.md) |
+| [00440](ADR-00440.md) | klain:webview Stage 4 — packaging (`.app` bundle / `.desktop` launcher) | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00437](ADR-00437.md) |
+| [00441](ADR-00441.md) | klain:webview Stage 5 — typed bind + the `bindings` object | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00438](ADR-00438.md), [ADR-00439](ADR-00439.md), [ADR-00224](ADR-00224.md) |
+| [00442](ADR-00442.md) | klain:webview Stage 6 — window `.d.ts`, async typed bind, nested-tuple params | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00441](ADR-00441.md), [ADR-00439](ADR-00439.md) |
+| [00443](ADR-00443.md) | klain:webview Stage 7 — embed a SPA bundle into the executable (`klain:assets` + `Webview({ serve })`) | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00437](ADR-00437.md), [ADR-00411](ADR-00411.md) |
+| [00444](ADR-00444.md) | docs/status flipped to a JSON source of truth with generated Markdown | Implements [TDD-00145](../tdd/TDD-00145.md) |
+| [00445](ADR-00445.md) | statusgen importer retained as on-demand tooling (TDD-00145 Phase 5) | Implements [TDD-00145](../tdd/TDD-00145.md); Extends [ADR-00444](ADR-00444.md) |

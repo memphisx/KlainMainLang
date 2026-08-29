@@ -1,0 +1,90 @@
+{
+  "id": "path",
+  "file": "PATH.md",
+  "title": "path",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. Node's `path` module — portable filesystem path manipulation. Import-gated (`import path from 'path'` or `import { join } from 'path'`) — see [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "API",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`path.join(...segments)`",
+            "status": "implemented",
+            "notes": [
+              "Joins with `/`, then normalizes (collapses repeated slashes, drops `.` segments, resolves `..` against segments already seen in the same call)"
+            ]
+          },
+          {
+            "feature": "`path.resolve(...segments)`",
+            "status": "implemented",
+            "notes": [
+              "Absolute-always: starts from `process.cwd()`, walks segments left to right, any segment starting with `/` resets the accumulator (discarding everything before it, including cwd) — equivalent to real Node's right-to-left \"stop at the last absolute segment\" algorithm"
+            ]
+          },
+          {
+            "feature": "`path.dirname(p)`",
+            "status": "implemented",
+            "notes": [
+              "Directory portion; trailing slashes trimmed first"
+            ]
+          },
+          {
+            "feature": "`path.basename(p, ext?)`",
+            "status": "implemented",
+            "notes": [
+              "Final path segment, optionally with a trailing `ext` stripped — not stripped when doing so would consume the whole segment, unless the *entire* `path` argument equals `ext` (then returns `\"\"`), matching real Node's own asymmetric rule here",
+              "See [ADR-00368](../adr/ADR-00368.md)"
+            ]
+          },
+          {
+            "feature": "`path.extname(p)`",
+            "status": "implemented",
+            "notes": [
+              "Extension of the basename, including the leading `.`; `\"\"` for a dotfile whose only `.` is its first character"
+            ]
+          },
+          {
+            "feature": "`path.parse(p)` / `path.format(obj)`",
+            "status": "implemented",
+            "notes": [
+              "`parse` returns `{root, dir, base, ext, name}`; `format` is the inverse (`base` wins over `name`+`ext`, `dir` falls back to `root`)"
+            ]
+          },
+          {
+            "feature": "`path.isAbsolute(p)`",
+            "status": "implemented",
+            "notes": [
+              "`p[0] === '/'`"
+            ]
+          },
+          {
+            "feature": "`path.sep` / `path.delimiter`",
+            "status": "implemented",
+            "caveats": [
+              "POSIX-only (this compiler doesn't cross-compile) — the compile-time constants `/` and `:`, never the Windows `\\`/`;` forms"
+            ],
+            "notes": [
+              "No cross-compilation, so no Windows form is ever needed — see [process.platform](PROCESS-CLI.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1075,3 +1075,96 @@ const c = new Counter();
 c.on("data", (v) => { console.log("qe", v); });
 `, "qe 5\nqe 10")
 }
+
+// stream named exports batch: PassThrough, callback finished()/pipeline(),
+// duplexPair().
+
+func TestE2ENodeStreamPassThrough(t *testing.T) {
+	// Identity Transform; string chunks by default (no <T> needed).
+	assertOutputImports(t, `
+import { PassThrough } from 'stream';
+const p = new PassThrough();
+p.on("data", (chunk) => { console.log("got: " + chunk); });
+p.on("end", () => { console.log("ended"); });
+p.write("hello");
+p.end("world");
+`, "got: hello\ngot: world\nended")
+}
+
+func TestE2ENodeStreamPassThroughQualifiedTyped(t *testing.T) {
+	// Qualified `new stream.PassThrough()`, a typed `<number>` variant with
+	// options, and piping into a Writable.
+	assertOutputImports(t, `
+import stream from 'stream';
+const s2 = new stream.PassThrough();
+const sink = new stream.Writable<string>({
+  write: (chunk: string) => { console.log("sink: " + chunk); }
+});
+s2.pipe(sink);
+s2.write("a");
+s2.end("b");
+const nums = new stream.PassThrough<number>({ highWaterMark: 4 });
+nums.on("data", (n) => { console.log(n * 2); });
+nums.write(21);
+nums.end();
+`, "sink: a\n42\nsink: b")
+}
+
+func TestE2ENodeStreamFinishedCallback(t *testing.T) {
+	// The callback form from 'stream' (the Promise form lives in
+	// 'stream/promises'): fires with a null error on clean completion.
+	assertOutputImports(t, `
+import { PassThrough, finished } from 'stream';
+const p = new PassThrough();
+finished(p, (err) => { console.log("finished, err null: " + (err === null)); });
+p.on("data", (c) => { console.log("data: " + c); });
+p.write("x");
+p.end();
+`, "data: x\nfinished, err null: true")
+}
+
+func TestE2ENodeStreamFinishedMustCall(t *testing.T) {
+	// The corpus idiom: qualified stream.finished with a mustCall-wrapped
+	// callback (counted at exit) on a resumed, ended stream.
+	assertOutputImports(t, `
+import stream from 'stream';
+import { mustCall } from 'test';
+const p = new stream.PassThrough();
+stream.finished(p, mustCall((err) => { console.log("done"); }));
+p.resume();
+p.end();
+`, "done")
+}
+
+func TestE2ENodeStreamPipelineCallback(t *testing.T) {
+	// Callback pipeline() from 'stream' across three stages.
+	assertOutputImports(t, `
+import { PassThrough, Writable, pipeline } from 'stream';
+const src = new PassThrough();
+const mid = new PassThrough();
+const sink = new Writable<string>({
+  write: (chunk: string) => { console.log("sink: " + chunk); }
+});
+pipeline(src, mid, sink, () => { console.log("pipeline done"); });
+src.write("a");
+src.end("b");
+`, "sink: a\nsink: b\npipeline done")
+}
+
+func TestE2ENodeStreamDuplexPair(t *testing.T) {
+	// duplexPair(): cross-wired sides (a write on one surfaces as 'data' on
+	// the other), array destructuring and indexing, end propagation, and
+	// mustCall/mustNotCall-wrapped listeners (exit-verified).
+	assertOutputImports(t, `
+import { duplexPair } from 'stream';
+import { mustCall, mustNotCall } from 'test';
+const [clientSide, serverSide] = duplexPair();
+clientSide.on("data", mustCall((d) => { console.log("client got: " + d); }));
+clientSide.on("end", mustNotCall());
+serverSide.write("foo");
+const pair2 = duplexPair();
+pair2[1].on("data", (d) => { console.log("side2 got: " + d); });
+pair2[1].on("end", () => { console.log("side2 ended"); });
+pair2[0].end("bar");
+`, "client got: foo\nside2 got: bar\nside2 ended")
+}

@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/global-functions.json; edit the JSON, then run `make status`. -->
+
 # Global Functions & Constants
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.

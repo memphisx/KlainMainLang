@@ -8,6 +8,7 @@
  * Allocation goes through plain malloc, so under -mm=gc it is transparently
  * routed to the collector by the shim's global malloc override.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -158,4 +159,30 @@ long long __kml_buf_latin1_bytes(const char *s, unsigned char **out) {
 	}
 	*out = buf;
 	return n;
+}
+
+/* ---- PEM assembly (crypto.generateKeyPair, ADR-00434) ----
+ * base64 the DER in 64-char lines between -----BEGIN <label>-----/
+ * -----END <label>----- with a trailing newline — Node's own PEM shape.
+ * Returns a length-prefixed kml string. */
+char *__kml_pem_from_der(const unsigned char *der, long long n, const char *label) {
+	char *b64 = __kml_buf_b64_enc(der, n, 0);
+	long long bl = *(long *)(b64 - 8);
+	long long lines = (bl + 63) / 64;
+	long long ll = (long long)strlen(label);
+	/* "-----BEGIN -----\n" = 17 + label; "-----END -----\n" = 15 + label */
+	long long total = 17 + ll + bl + lines + 15 + ll;
+	char *out = kml_str_hdr_alloc(total);
+	long long o = 0;
+	o += sprintf(out + o, "-----BEGIN %s-----\n", label);
+	for (long long i = 0; i < bl; i += 64) {
+		long long chunk = bl - i < 64 ? bl - i : 64;
+		memcpy(out + o, b64 + i, (size_t)chunk);
+		o += chunk;
+		out[o++] = '\n';
+	}
+	o += sprintf(out + o, "-----END %s-----\n", label);
+	*(long *)(out - 8) = o;
+	out[o] = 0;
+	return out;
 }

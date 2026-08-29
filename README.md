@@ -8,16 +8,16 @@ Why does this exist? Not because TypeScript-to-native compilation needed solving
 
 ## What actually works right now
 
-The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/README.md)**: a feature-by-feature matrix, one page per feature area, with coverage percentages kept current as things ship — trust it over any claim here if the two ever disagree. It also has a "Fidelity Gaps" section for features marked done that still have real, non-cosmetic differences from actual JS/TS behavior worth knowing before you rely on them.
+The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/README.md)**: a feature-by-feature matrix, one page per feature area, with coverage percentages kept current as things ship — trust it over any claim here if the two ever disagree. It also has a "Fidelity Gaps" section for features marked done that still have real, non-cosmetic differences from actual JS/TS behavior worth knowing before you rely on them. Those pages are generated: the source of truth is `docs/status/data/*.json`, every coverage number derives from the row tables, and `make status` re-renders the Markdown (CI fails on any drift) — to change a status page, edit the JSON, never the `.md`.
 
 Broad strokes:
 
-- **The language itself is basically all there (~97%).** Classes, generics, closures, `async`/`await`, the whole type-system circus (unions, generics with constraints, mapped and conditional types) — if it's core TypeScript, it probably compiles. The handful of holdouts are the genuinely hard ones: `Proxy`, decorators, `eval`.
-- **You can write a real server (~94% of the Node surface targeted).** `http.listen` speaks HTTP/1.1 and HTTP/2 out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
+- **The language itself is basically all there.** Classes, generics, closures, `async`/`await`, the whole type-system circus (unions, generics with constraints, mapped and conditional types) — if it's core TypeScript, it probably compiles. The handful of holdouts are the genuinely hard ones: `Proxy`, decorators, `eval`.
+- **You can write a real server.** Both the bespoke `http.listen` and a real `http.createServer` speak HTTP/1.1 and HTTP/2 (h2c) out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
 - **The browser-shaped APIs that make sense off the browser all work.** `fetch`, `URL`, `WebSocket`, Web Crypto, Streams, `AbortController`, timers. The actually-browser-only stuff (DOM, Canvas, WebGL) is out, on purpose.
-- **What'll bite you.** A bare `: number` is a 64-bit integer, not a double — reach for `float64` when you mean fractions. Concurrency is cooperative (one fiber at a time per thread, no preemption). And nothing here is dynamic: no `Proxy`, no adding properties to an object at runtime. All deliberate. `docs/status/` has the honest corner-cases for everything above.
-
-Oh, and it fuzzes itself — lexer, parser, and the whole parse-to-binary pipeline (`make fuzz` / `fuzz-codegen` / `fuzz-all`).
+- **You can ship a desktop app, too.** `import { Webview } from 'klain:webview'` opens a real window over the system browser engine and calls straight into typed native code; `new Webview({ serve: './dist' })` embeds a built SPA/SSG (React/Vue/Svelte/Quasar) into the binary and serves it from an in-binary server — a single-file desktop app, packaged to a `.app`/`.desktop` with `-package`. macOS-verified; Linux is compile-tier.
+- **It fuzzes itself.** The lexer, the parser, and the whole parse-to-binary pipeline all have fuzz targets (`make fuzz` / `fuzz-codegen` / `fuzz-all`) — the codegen one drives real source all the way through `clang` and runs the result.
+- **What'll bite you.** A bare `: number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, just like JS) — reach for a JSDoc `int8…uint64` width when you mean exact machine integers. Concurrency is cooperative (one fiber at a time per thread, no preemption). And nothing here is dynamic: no `Proxy`, no adding properties to an object at runtime. All deliberate. `docs/status/` has the honest corner-cases for everything above.
 
 Every feature and bug fix comes with a matching entry in **[`docs/adr/`](docs/adr/README.md)**: a paper trail of what was tried, what broke, and why a given weird decision was made on purpose rather than by accident. Bigger features get scoped out in **[`docs/tdd/`](docs/tdd/README.md)** first: a design doc written before any code exists. Both indexes are cross-linked from `docs/status/` wherever relevant, rather than repeated here.
 
@@ -36,6 +36,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - a crypto backend library, needed only if the compiled program uses `crypto.subtle` — OpenSSL 3's libcrypto by default (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`), or Apple CommonCrypto + Security.framework with `-crypto=commoncrypto` (macOS only, ships with the OS — no install at all). Same conditional-linking convention: a program without `crypto.subtle` stays plain-libc (`crypto.getRandomValues`/`randomUUID` use the OS CSPRNG directly, no library). See [docs/tdd/TDD-00104.md](docs/tdd/TDD-00104.md)
 - OpenSSL 3's **libssl**, needed only if the compiled program uses the `tls` module (`tls.connect`/`tls.createServer`) or a `WebSocket` (its URL scheme — `ws://` vs `wss://` — is a runtime value, so any WebSocket program links libssl) — ships alongside libcrypto (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`). `tls` is OpenSSL-only (`-crypto=commoncrypto` is rejected for it). Same conditional-linking convention: a program that doesn't use `tls` never links libssl. See [docs/tdd/TDD-00109.md](docs/tdd/TDD-00109.md)
 - **libnghttp2**, needed if the compiled program calls `http.listen` — the server transparently accepts cleartext HTTP/2 (h2c) via nghttp2's session API, so every `http.listen` program links `-lnghttp2` (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). Same conditional-linking convention: a program without `http.listen` never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
+- a **system webview**, needed only if the compiled program constructs a `Webview` (`import { Webview } from 'klain:webview'`) — the desktop-window module compiles a vendored C++ binding over the OS browser engine. **macOS needs nothing** (WebKit.framework ships with the OS). Linux needs the WebKitGTK dev packages at build time (`apt-get install libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`) and the matching shared libs at run time. Windows is out of scope. Same conditional-linking convention: a program without a `Webview` never links it. `new Webview({ serve: './dist' })` (or `import { embedDir } from 'klain:assets'`) embeds a built SPA/SSG directory into the binary and serves it from an in-binary static server — a single-file desktop app with no external `dist/`. See [docs/status/DESKTOP-WEBVIEW.md](docs/status/DESKTOP-WEBVIEW.md)
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
@@ -134,6 +135,20 @@ klainmain [flags] <file.ts>
   
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
+
+  --emit-window-dts
+                For a klain:webview program, also write a
+                <output>.window.d.ts declaring the window.* functions its
+                typed bindings expose, so the page-side SPA gets autocomplete
+                and typechecking on them (and a machine-checkable record of
+                the frontend<->backend contract).
+
+  --package     After compiling, also build a double-clickable desktop app
+                around the binary: a .app bundle on macOS, a .desktop launcher
+                on Linux. For klain:webview GUI programs. The standalone binary
+                is still produced too. Metadata via --app-name / --app-id /
+                --app-version / --app-icon (a .icns or .png on macOS; .png/.svg
+                on Linux). Targets the host platform (no cross-packaging).
 ```
 
 Run `klainmain` with no file (or `klainmain --help`) to print this list with
@@ -181,7 +196,7 @@ codegen/
 docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
-  status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail
+  status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail. All .md pages are generated from status/data/*.json (make status) — edit the JSON, not the pages
   testing/          Test262 conformance results — generated, not hand-written; see "Test262 conformance" above
 docker/             Dockerfiles verifying --static (+ fetch, + RegExp) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
@@ -237,11 +252,11 @@ This project is deliberately a different, narrower animal. The honest head-to-he
 |---|---|---|
 | Written in | Go, emitting LLVM IR text | Rust (SWC + LLVM) |
 | Value model | **static** — typed subset; no dynamic value model (`any`/`unknown` are boxed, everything else is statically typed) | **NaN-boxed dynamic** — emulates full JS; optional embedded V8 (`--enable-js-runtime`) for the untyped tail |
-| Numeric types | **sized machine types** — `number` is `i64`, with JSDoc `/** @type {int8…int64, uint8…uint64, float32, float64} */` for exact width/signedness control | every number is a 64-bit double (NaN-boxed) |
+| Numeric types | `number` is a **JS-faithful IEEE-754 double** by default, with opt-in **sized machine types** via JSDoc `/** @type {int8…int64, uint8…uint64, float32} */` for exact width/signedness when you want them | every number is a 64-bit double (NaN-boxed) |
 | Semantics | **opinionated, safer-than-JS by default** (`-compat=strict`), JS-faithful mode opt-in (`-compat=js`) | run all JS/TS faithfully |
 | Memory | **no GC by default** (`-mm=manual`), Boehm GC opt-in (`-mm=gc`) | generational GC by default |
 | Tunable knobs | memory mode, compat mode, crypto/bigint/regex backends, link-only-when-used deps | few knobs, opinionated defaults |
-| Targets | POSIX, host arch (CLI tools + Docker microservices) | ~11 incl. mobile + native GUI |
+| Targets | POSIX, host arch (CLI tools + Docker microservices + `klain:webview` desktop apps) | ~11 incl. mobile + native GUI |
 | npm packages | none yet | 30–50 reimplemented natively |
 | Maturity | one-person experiment | mature, many contributors, production apps |
 

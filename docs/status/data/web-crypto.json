@@ -1,0 +1,144 @@
+{
+  "id": "web-crypto",
+  "file": "WEB-CRYPTO.md",
+  "title": "Cryptography (Web Crypto API)",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. `crypto.subtle.*` delegates to a native crypto library selected with `-crypto`: OpenSSL 3 libcrypto (default, all platforms) or Apple CommonCrypto + Security.framework (`-crypto=commoncrypto`, macOS only) — a per-backend C file implementing one shared `__kml_crypto_*` ABI, compiled+linked only when a program uses `crypto.subtle` ([TDD-00104](../tdd/TDD-00104.md)). `crypto.getRandomValues`/`randomUUID` need only a real CSPRNG (`arc4random_buf`/`getrandom()`), no external library."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "block",
+      "text": "Shared `crypto.subtle` caveats (apply to every ✅ subtle row):"
+    },
+    {
+      "kind": "block",
+      "text": "- The algorithm argument must be a string literal or an object literal with a literal `name:` (a variable holding the name is a compile error — compile-time dispatch)\n- Results return as settled task promises: `await`/`.then`/`.catch`/`.finally` all work, but operational failures throw synchronously at the call site instead of rejecting the promise\n- Bare `crypto.subtle` as a value (e.g. `const s = crypto.subtle`) is not supported — methods must be called directly"
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`crypto.getRandomValues(view)`",
+            "status": "implemented",
+            "caveats": [
+              "The spec's 65536-byte quota and integer-TypedArray-only restriction aren't enforced (float TypedArrays and whole `ArrayBuffer`s are accepted, oversize fills succeed)"
+            ],
+            "notes": [
+              "Fills any TypedArray/`ArrayBuffer` in place and returns it ([ADR-00317](../adr/ADR-00317.md)); the legacy plain-`number[]` form (one random byte value per element) still works",
+              "See [ADR-00024](../adr/ADR-00024.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.randomUUID()`",
+            "status": "implemented",
+            "notes": [
+              "RFC 4122 version-4 UUID string",
+              "See [ADR-00024](../adr/ADR-00024.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.digest(algo, data)`",
+            "status": "implemented",
+            "caveats": [
+              "Shared subtle caveats above only"
+            ],
+            "notes": [
+              "SHA-1, SHA-256, SHA-384, SHA-512 over a TypedArray/`ArrayBuffer`, → `Promise<ArrayBuffer>`; known-answer-tested on both backends",
+              "See [ADR-00316](../adr/ADR-00316.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.encrypt` / `.decrypt`",
+            "status": "implemented",
+            "caveats": [
+              "On `-crypto=commoncrypto` only: a non-empty RSA-OAEP `label` throws `NotSupportedError` (SecKey has no label parameter)",
+              "Shared subtle caveats above"
+            ],
+            "notes": [
+              "AES-GCM (`iv`, optional `additionalData`, optional `tagLength` default 128; auth failure → `OperationError`), AES-CBC (`iv`, PKCS#7), and RSA-OAEP (public encrypts / private decrypts, optional `label`), → `Promise<ArrayBuffer>`",
+              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.sign` / `.verify`",
+            "status": "implemented",
+            "caveats": [
+              "On `-crypto=commoncrypto` only: RSA-PSS `saltLength` must equal the hash length or `NotSupportedError` is thrown (SecKey fixes salt = digest size)",
+              "Shared subtle caveats above"
+            ],
+            "notes": [
+              "HMAC (constant-time verify), RSA-PSS (runtime `saltLength`), ECDSA P-256/P-384/P-521 (per-call literal `hash`, raw `r‖s` signatures), → `Promise<ArrayBuffer>`/`Promise<boolean>`",
+              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.generateKey`",
+            "status": "implemented",
+            "caveats": [
+              "`publicExponent` restricted to 65537 (the literal `new Uint8Array([1, 0, 1])`, or omit it)",
+              "Shared subtle caveats above"
+            ],
+            "notes": [
+              "AES-GCM/AES-CBC (`length:`), HMAC (`hash:`, spec-default length), RSA-OAEP/RSA-PSS (`modulusLength`, `hash`) and ECDSA (`namedCurve`) → `Promise<CryptoKey>` / `Promise<CryptoKeyPair>` (`.publicKey`/`.privateKey`); usages enforced and spec-split across the pair",
+              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.importKey` / `.exportKey`",
+            "status": "implemented",
+            "caveats": [
+              "`jwk` is surfaced as a `Map<string,string>` (this compiler has no dynamic object model), key-material members only (`kty`/`k`/`crv`/`n`/`e`/`d`/…) — no `key_ops`/`ext`/`alg` members; import never validates `kty`",
+              "`CryptoKey.algorithm`/`.usages` property reads not implemented (`.type`/`.extractable` work)",
+              "`raw` export of a non-EC asymmetric key isn't rejected (yields the stored DER)",
+              "Shared subtle caveats above"
+            ],
+            "notes": [
+              "`raw` (AES/HMAC bytes; EC public uncompressed points both ways), `pkcs8` (private), `spki` (public), `jwk` (oct/RSA/EC; object literal or Map in, Map out); kind/format mismatches and non-extractable export throw `InvalidAccessError`",
+              "See [ADR-00318](../adr/ADR-00318.md), [ADR-00319](../adr/ADR-00319.md)"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `generateKeyPair`/`generateKeyPairSync`, `randomBytes` (+ `randomUUID`/`getRandomValues` re-exports)",
+            "status": "implemented",
+            "caveats": [
+              "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
+              "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
+              "`randomBytes`'s callback form is a clean rejection (use the returned Buffer)",
+              "A namespace import's binding covers these five members only — `crypto.subtle` is reached via the ambient global, not the module"
+            ],
+            "notes": [
+              "`import { generateKeyPair } from 'crypto'` ([ADR-00434](../adr/ADR-00434.md)): PEM assembly (`__kml_pem_from_der`, Node's 64-column shape) over the same per-backend keygen ABI as `subtle.generateKey`; callback shapes `(err, publicKey, privateKey)` and mustSucceed's `(publicKey, privateKey)` both contextually typed",
+              "`const { subtle } = globalThis.crypto` binds a compile-time subtle alias ([ADR-00435](../adr/ADR-00435.md)); `globalThis.crypto.subtle` chains dispatch directly"
+            ]
+          },
+          {
+            "feature": "`crypto.subtle.deriveKey` / `.deriveBits`",
+            "status": "implemented",
+            "caveats": [
+              "The spec's extractable=false requirement on PBKDF2/HKDF base keys is not enforced",
+              "Shared subtle caveats above"
+            ],
+            "notes": [
+              "PBKDF2 (`salt`, `iterations`, literal `hash`) and HKDF (`salt`, optional `info`, literal `hash`); deriveBits → `Promise<ArrayBuffer>`, deriveKey → AES-GCM/AES-CBC/HMAC `Promise<CryptoKey>`; RFC 6070/5869 known-answer-tested on both backends",
+              "See [ADR-00320](../adr/ADR-00320.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

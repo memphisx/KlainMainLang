@@ -1,0 +1,166 @@
+{
+  "surface": "console",
+  "title": "console",
+  "kind": "node",
+  "statusPage": "CONSOLE.md",
+  "coversRows": "all",
+  "coverage": { "loose": "11/12", "loosePct": 92, "strict": "7/12", "strictPct": 58 },
+  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works, but two divergences stand out: console.trace prints only its message with no stack walk, and console.time is a single global timer slot rather than a per-label map (unlike console.count, which is a real per-label Map). console.table is the one unimplemented method — it needs genuinely new column-layout machinery, not an extension of the existing print path.",
+  "entries": [
+    {
+      "id": "console.log",
+      "name": "console.log(...)",
+      "statusRow": "console.log(...)",
+      "signature": "log(...args: any[]): void",
+      "badge": "caveats",
+      "description": "Writes its arguments to stdout on one line, joined by single spaces, followed by a newline. A no-argument call prints a bare newline, and -0 displays as -0 (matching Node's util.inspect display, even though String(-0) stays \"0\").",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "differences": [
+        "A printed string is written via `printf`'s `\"%s\"`, so a value with an embedded null byte truncates *on display* at the first `\\0` — the stored string is intact (`.length` and every operation see the full bytes); a binary-safe `fwrite` print is deferred as display-only, low-value. Use `process.stdout.write` for binary output"
+      ],
+      "seeAlso": ["console.error", "console.dir", "console.group"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consolelogdata-args" }
+    },
+    {
+      "id": "console.error",
+      "name": "console.error(...)",
+      "statusRow": "console.error(...)",
+      "signature": "error(...args: any[]): void",
+      "badge": "exact",
+      "description": "Like console.log, but writes to stderr instead of stdout.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["console.warn", "console.log"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoleerrordata-args" }
+    },
+    {
+      "id": "console.warn",
+      "name": "console.warn(...)",
+      "statusRow": "console.warn(...)",
+      "signature": "warn(...args: any[]): void",
+      "badge": "exact",
+      "description": "Writes to stderr, unprefixed — identical to console.error, exactly as real Node treats it.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["console.error"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consolewarndata-args" }
+    },
+    {
+      "id": "console.info",
+      "name": "console.info(...)",
+      "statusRow": "console.info(...)",
+      "signature": "info(...args: any[]): void",
+      "badge": "exact",
+      "description": "Alias for console.log — writes to stdout on one line.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["console.log", "console.debug"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoleinfodata-args" }
+    },
+    {
+      "id": "console.debug",
+      "name": "console.debug(...)",
+      "statusRow": "console.debug(...)",
+      "signature": "debug(...args: any[]): void",
+      "badge": "exact",
+      "description": "Alias for console.log — writes to stdout on one line.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["console.log", "console.info"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoledebugdata-args" }
+    },
+    {
+      "id": "console.trace",
+      "name": "console.trace(...)",
+      "statusRow": "console.trace(...)",
+      "signature": "trace(...args: any[]): void",
+      "badge": "caveats",
+      "description": "Prints \"Trace: <message>\" to stderr through the same generic print path as console.debug/info — with no stack-walking logic.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "differences": [
+        "Prints `\"Trace: <message>\"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all"
+      ],
+      "seeAlso": ["console.debug", "console.error"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoletracemessage-args" }
+    },
+    {
+      "id": "console.assert",
+      "name": "console.assert(cond, msg)",
+      "statusRow": "console.assert(cond, msg)",
+      "signature": "assert(cond: boolean, msg?: string): void",
+      "badge": "exact",
+      "description": "Writes an assertion failure message when cond is falsy; does nothing when cond is truthy.",
+      "params": [
+        { "name": "cond", "type": "boolean", "desc": "The condition to test." },
+        { "name": "msg", "type": "string", "desc": "Message printed on failure." }
+      ],
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["console.error"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoleassertvalue-message" }
+    },
+    {
+      "id": "console.table",
+      "name": "console.table()",
+      "statusRow": "console.table()",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Not implemented. It needs a genuinely new algorithm — dynamic per-column width computation and box-drawing header/index rows over arbitrarily-shaped input — rather than a quick extension of the existing print machinery, so it is deliberately deferred rather than attempted.",
+      "seeAlso": ["console.log", "console.dir"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoletabletabulardata-properties" }
+    },
+    {
+      "id": "console.time",
+      "name": "console.time() / .timeEnd()",
+      "statusRow": "console.time() / .timeEnd()",
+      "signature": "time(label?: string): void; timeEnd(label?: string): void",
+      "badge": "caveats",
+      "description": "Starts a monotonic timer with time() and prints the elapsed \"label: <N>ms\" with timeEnd(). An omitted label is exactly \"default\", matching real Node.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "console/console",
+      "snippet": "console.time('work')\n// ... work ...\nconsole.timeEnd('work')   // work: <N>ms",
+      "differences": [
+        "V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label"
+      ],
+      "seeAlso": ["console.count"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoletimelabel" }
+    },
+    {
+      "id": "console.count",
+      "name": "console.count() / .countReset()",
+      "statusRow": "console.count() / .countReset()",
+      "signature": "count(label?: string): void; countReset(label?: string): void",
+      "badge": "exact",
+      "description": "count() prints \"label: <n>\" with a per-label counter that increments each call; countReset() zeroes one label. Backed by a real Map<string, number>, so it matches real Node's per-label semantics exactly — unlike time's single-slot narrowing.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "console/console",
+      "snippet": "console.count()            // default: 1\nconsole.count('apples')    // apples: 1\nconsole.countReset('apples')\nconsole.count('apples')    // apples: 1",
+      "seeAlso": ["console.time"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consolecountlabel" }
+    },
+    {
+      "id": "console.group",
+      "name": "console.group() / .groupEnd()",
+      "statusRow": "console.group() / .groupEnd()",
+      "signature": "group(label?: string): void; groupEnd(): void",
+      "badge": "exact",
+      "description": "Indents every subsequent console.* line by two spaces per nesting level. An unbalanced extra groupEnd() floors at depth 0 rather than going negative.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "console/console",
+      "snippet": "console.group('Section A')\nconsole.log('inside A')\nconsole.groupEnd()",
+      "seeAlso": ["console.log"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consolegrouplabel" }
+    },
+    {
+      "id": "console.dir",
+      "name": "console.dir()",
+      "statusRow": "console.dir()",
+      "signature": "dir(value: any, options?: object): void",
+      "badge": "caveats",
+      "description": "Prints a single value exactly like a single-argument console.log.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "console/console",
+      "snippet": "console.dir('hello')   // hello\nconsole.dir(42)        // 42",
+      "differences": [
+        "The real API's second `options` argument — depth/color controls — is accepted syntactically but ignored"
+      ],
+      "seeAlso": ["console.log"],
+      "spec": { "mdn": "https://nodejs.org/api/console.html#consoledirobj-options" }
+    }
+  ]
+}

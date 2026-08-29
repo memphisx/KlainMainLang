@@ -178,3 +178,19 @@ assert.notDeepStrictEqual({ x: 1 }, { x: 2 });
 console.log("done");
 `, "caught\ndone")
 }
+
+func TestE2EAssertMatch(t *testing.T) {
+	// assert.match/doesNotMatch (ADR-00428): regexp.test under the hood,
+	// AssertionError on mismatch.
+	assertOutputImports(t, `
+import assert from 'assert'
+assert.match("thessaloniki", /salon/)
+assert.doesNotMatch("abc", /xyz/)
+try {
+  assert.match("abc", /nope/)
+} catch (e) {
+  console.log("caught: " + e.message)
+}
+console.log("ok")
+`, "caught: the input did not match the regular expression\nok")
+}

@@ -85,16 +85,28 @@ func (e *Emitter) emitTestSkip(args []ast.Expression, pos ast.Pos) (Value, error
 // registers an at-exit expectation. atLeast=false ⇒ exactly `exact` (default 1
 // or the 2nd argument); atLeast=true ⇒ `>= min`.
 func (e *Emitter) emitTestMustCall(property string, args []ast.Expression, pos ast.Pos, atLeast bool) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: test.%s takes 1-2 arguments", pos.Line, pos.Col, property)
+	if len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: test.%s takes 0-2 arguments", pos.Line, pos.Col, property)
+	}
+	// Node's forms without a function — `mustCall()` and `mustCall(n)` —
+	// count invocations of a noop: synthesize an empty zero-param arrow so
+	// the counting wrapper below applies unchanged.
+	if len(args) == 0 || !e.inferExprType(args[0]).IsFunc {
+		noop := ast.NewArrowFunction(nil, nil, nil, ast.NewBlockStatement(nil, pos), pos)
+		args = append([]ast.Expression{noop}, args...)
+		if len(args) > 2 {
+			return Value{}, fmt.Errorf("%d:%d: test.%s without a function takes at most a count", pos.Line, pos.Col, property)
+		}
 	}
 	fnTy := e.inferExprType(args[0])
 	if !fnTy.IsFunc {
 		return Value{}, fmt.Errorf("%d:%d: test.%s's first argument must be a function", pos.Line, pos.Col, property)
 	}
-	// V1 ABI bound: 0-2 scalar/pointer params, no rest, no array/nullable params.
-	if fnTy.FuncHasRest || len(fnTy.FuncParams) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: test.%s supports callbacks of 0-2 simple parameters (no rest / >2 args) in this version", pos.Line, pos.Col, property)
+	// ABI bound: 0-3 scalar/pointer params (the counting trampoline is
+	// signature-parametric; 3 covers Node's (err, a, b) callbacks), no rest,
+	// no array/nullable params.
+	if fnTy.FuncHasRest || len(fnTy.FuncParams) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: test.%s supports callbacks of 0-3 simple parameters (no rest / >3 args) in this version", pos.Line, pos.Col, property)
 	}
 	for _, p := range fnTy.FuncParams {
 		if p.IsArray || isNullableScalar(p) {

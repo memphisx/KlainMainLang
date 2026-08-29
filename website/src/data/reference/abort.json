@@ -1,0 +1,78 @@
+{
+  "surface": "abort",
+  "title": "Events & cancellation",
+  "kind": "web",
+  "statusPage": "EVENTS-CANCELLATION.md",
+  "coversRows": "all",
+  "coverage": { "loose": "3/3", "loosePct": 100, "strict": "0/3", "strictPct": 0 },
+  "lede": "The WHATWG event and cancellation trio — EventTarget, Event/CustomEvent, and AbortController/AbortSignal — kept distinct from Node's EventEmitter. The overriding divergence is that dispatch is single-target: there is no DOM tree, so nothing bubbles or captures and stopPropagation is a no-op. The V1 Event surface is intentionally thin (type, defaultPrevented, CustomEvent.detail), and while an AbortSignal actually cancels a fetch — including via AbortSignal.timeout(ms) — it is not yet wired into setTimeout.",
+  "entries": [
+    {
+      "id": "abort.eventtarget",
+      "name": "EventTarget / addEventListener / dispatchEvent",
+      "statusRow": "EventTarget / addEventListener / dispatchEvent",
+      "signature": "new EventTarget(); addEventListener(type, listener, opts?); removeEventListener(type, listener); dispatchEvent(event): boolean",
+      "badge": "caveats",
+      "description": "A WHATWG event bus, separate from Node's EventEmitter. addEventListener registers a listener keyed by event type; dispatchEvent reads event.type, invokes each registered listener with the event object over a snapshot of the list, and returns !defaultPrevented. Backed by a bare Map<string, listener-list> reusing the EventEmitter registry.",
+      "params": [
+        { "name": "type", "type": "string", "desc": "Event type name to register or fire." },
+        { "name": "listener", "type": "(e: Event) => void", "desc": "A named binding (matched by closure identity on remove); must take the event parameter." },
+        { "name": "opts", "type": "{ once?, capture?, passive?, signal? }", "desc": "Only once is honored; the rest are accepted but ignored." }
+      ],
+      "returns": { "type": "boolean", "desc": "dispatchEvent returns false when a listener called preventDefault()." },
+      "exampleKey": "events/eventtarget",
+      "snippet": "const bus = new EventTarget()\nbus.addEventListener(\"ping\", (e: Event) => console.log(\"ping\"))\nbus.dispatchEvent(new Event(\"ping\"))",
+      "differences": [
+        "Single-target dispatch — no DOM tree, so no capture/bubble/propagation (`stopPropagation` is a no-op; `stopImmediatePropagation` halts the remaining listeners)",
+        "`removeEventListener` matches by closure identity, so the listener must be a named binding (an inline arrow re-emitted at the remove site won't match); a 0-argument listener is rejected (the event parameter is required)",
+        "`{ once }` honored; `capture`/`passive`/`signal` options accepted but ignored (`signal` cancellation arrives with `AbortController`)",
+        "No `class X extends EventTarget` (built-in `extends` targets are rejected)"
+      ],
+      "seeAlso": ["abort.event", "abort.abortcontroller"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/EventTarget" }
+    },
+    {
+      "id": "abort.event",
+      "name": "Event / CustomEvent",
+      "statusRow": "Event / CustomEvent",
+      "signature": "new Event(type, init?); new CustomEvent(type, { detail }); e.type; e.defaultPrevented; e.preventDefault()",
+      "badge": "caveats",
+      "description": "The base event objects, distinct from Node's EventEmitter. A plain Event carries its type and a defaultPrevented cancellation flag; CustomEvent adds a detail payload of any type (inferred from the value). Construction, field reads, and preventDefault/stop* work standalone; dispatching them is EventTarget's job. Modeled as plain fixed-shape objects tagged IsEvent.",
+      "params": [
+        { "name": "type", "type": "string", "desc": "The event type name." },
+        { "name": "init", "type": "{ detail?, cancelable?, bubbles? }", "desc": "CustomEvent.detail is read; cancelable/bubbles are accepted but ignored." }
+      ],
+      "returns": { "type": "Event | CustomEvent", "desc": "The constructed event object." },
+      "exampleKey": "events/event-customevent",
+      "snippet": "const clicked = new Event(\"click\")\nclicked.preventDefault()\nconsole.log(clicked.defaultPrevented)     // true\nconst greeting = new CustomEvent(\"greet\", { detail: \"hello\" })\nconsole.log(greeting.detail)              // hello",
+      "differences": [
+        "V1 surface is `type`, `defaultPrevented`, and `CustomEvent.detail` (type inferred from the value); the fuller WHATWG properties (`target`/`currentTarget`/`bubbles`/`cancelable`/`composed`/`timeStamp`/`eventPhase`/`isTrusted`) are absent",
+        "`new Event(type, { cancelable, bubbles })` init options are accepted but ignored; `preventDefault()` sets `defaultPrevented` unconditionally (no `cancelable` gate)",
+        "`stopPropagation()` is a no-op (single-target dispatch, no capture/bubble tree)"
+      ],
+      "seeAlso": ["abort.eventtarget", "abort.abortcontroller"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Event" }
+    },
+    {
+      "id": "abort.abortcontroller",
+      "name": "AbortController / AbortSignal",
+      "statusRow": "AbortController / AbortSignal",
+      "signature": "new AbortController(); controller.signal; controller.abort(reason?); AbortSignal.timeout(ms); signal.aborted; signal.reason",
+      "badge": "caveats",
+      "description": "The WHATWG cancellation token. An AbortSignal is an EventTarget that fires an \"abort\" event, plus an aborted flag and a reason. fetch(url, { signal }) cancellation works — pre-flight, mid-flight, and via AbortSignal.timeout(ms) — on both the top-level await path and the fiber path inside an http.listen handler: the transfer is torn down and a DOMException is thrown, named AbortError for a manual abort and TimeoutError for a timeout. DOMException inherits Error, so both instanceof DOMException and instanceof Error hold; new DOMException(message?, name?) is constructible directly.",
+      "params": [
+        { "name": "reason", "type": "any", "desc": "Optional abort reason stored on signal.reason." },
+        { "name": "ms", "type": "number", "desc": "AbortSignal.timeout(ms) deadline in milliseconds." }
+      ],
+      "returns": { "type": "AbortController | AbortSignal", "desc": "The controller, or a signal from AbortSignal.timeout." },
+      "exampleKey": "events/fetch-abort",
+      "snippet": "const controller = new AbortController()\ncontroller.abort()\ntry {\n\tawait fetch(\"http://example.com\", { signal: controller.signal })\n} catch (e) {\n\tconsole.log(e.name)   // AbortError\n}",
+      "differences": [
+        "A bare `signal.aborted` read reflects a `timeout` only after some await loop has checked it (no background latching); `signal` is wired into `fetch` but not `setTimeout`",
+        "A manual `controller.abort(reason)` with a custom reason still makes the awaited fetch throw an `AbortError` DOMException rather than that reason value; DOMException carries no legacy numeric `.code`"
+      ],
+      "seeAlso": ["abort.eventtarget", "abort.event"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/AbortController" }
+    }
+  ]
+}

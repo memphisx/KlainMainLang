@@ -1,8 +1,10 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/file-system.json; edit the JSON, then run `make status`. -->
+
 # File System (fs)
 
 > Part of the [Implementation Status](README.md) index. Node-`fs`-shaped synchronous file I/O for reading/writing config, data, and logs — not `File`/`FileReader`/`FileSystemFileHandle` (those model browser sandbox/permission concepts that don't exist for a native CLI/microservice program with direct filesystem access).
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 7/14 (~50%).
+**Coverage**: 13/14 (~93%) · **Strict Coverage**: 7/14 (50%).
 
 Format: [Status page format](README.md#status-page-format).
 

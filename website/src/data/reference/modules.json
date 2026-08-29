@@ -1,0 +1,221 @@
+{
+  "surface": "modules",
+  "title": "Modules",
+  "kind": "language",
+  "statusPage": "MODULES.md",
+  "coversRows": "all",
+  "coverage": { "loose": "15/16", "loosePct": 94, "strict": "8/16", "strictPct": 50 },
+  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, an import cycle is restricted to declarations, and dynamic import() is the one unimplemented row.",
+  "entries": [
+    {
+      "id": "modules.exportDeclarations",
+      "name": "export function / const/let/var / interface / type / enum",
+      "statusRow": "export function / const/let/var / interface / type / enum",
+      "signature": "export function f() { ... }; export const x = ...; export interface I { ... }",
+      "badge": "exact",
+      "description": "The export modifier on any top-level declaration — function, const/let/var, interface, type alias, or enum. It is a declaration-level modifier and nothing more: the resolver consumes it entirely while building each file's export table, so codegen never sees an export node.",
+      "exampleKey": "imports/math",
+      "snippet": "export function add(a: number, b: number): number {\n    return a + b\n}",
+      "seeAlso": ["modules.namedImport", "modules.exportDefault"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export" }
+    },
+    {
+      "id": "modules.namedImport",
+      "name": "import { a, b } from './relative/path'",
+      "statusRow": "import { a, b } from './relative/path'",
+      "signature": "import { a, b } from './relative/path'",
+      "badge": "exact",
+      "description": "Named imports from a relative-path module — named imports only, relative paths only (`./`, `../`) with `.ts` auto-appended if omitted. Resolved at compile time against the importing file's own directory (not `cwd`), then merged into the single whole-program AST.",
+      "exampleKey": "imports/imports",
+      "snippet": "import { add, mul, Point, Direction, squareOf } from './math'",
+      "seeAlso": ["modules.defaultImport", "modules.namespaceImport", "modules.aliasing"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
+    },
+    {
+      "id": "modules.circularImports",
+      "name": "Circular imports",
+      "statusRow": "Circular imports",
+      "signature": "// a.ts imports b.ts; b.ts imports a.ts",
+      "badge": "caveats",
+      "description": "Two files may import from each other and call each other's exported functions. The cycle is resolved once into the merged program.",
+      "differences": [
+        "Supported only for the declarations-only case — a file in an import cycle can't run arbitrary top-level side-effecting code"
+      ],
+      "seeAlso": ["modules.sideEffects", "modules.diamondImports"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    },
+    {
+      "id": "modules.diamondImports",
+      "name": "Diamond-shaped import graphs",
+      "statusRow": "Diamond-shaped import graphs",
+      "signature": "// a → b, a → c, b → d, c → d",
+      "badge": "exact",
+      "description": "A file imported from multiple places is parsed once and merged once, memoized by absolute path, so a shared dependency in a diamond graph contributes its declarations and runs its top-level code exactly once.",
+      "seeAlso": ["modules.circularImports", "modules.sideEffects"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    },
+    {
+      "id": "modules.sideEffects",
+      "name": "Imported (non-entry) files may run top-level side-effecting code",
+      "statusRow": "Imported (non-entry) files may run top-level side-effecting code",
+      "signature": "// setup.ts top-level console.log runs before its importer's",
+      "badge": "caveats",
+      "description": "An acyclic imported file's top-level statements run exactly once, in real dependency order, strictly before whatever imports it — no restriction to declarations-only. Diamond-shared dependencies still run exactly once via per-path memoization.",
+      "exampleKey": "imports/side_effects",
+      "snippet": "import { ready } from './side_effects_setup'\n\nconsole.log(\"main: ready = \" + ready())",
+      "differences": [
+        "A file that genuinely participates in an import cycle keeps the declarations-only restriction (no bare executable top-level statements), and additionally requires a top-level `var`/`let`/`const` initializer to be a compile-time literal — no TDZ/live-binding modeling"
+      ],
+      "seeAlso": ["modules.circularImports", "modules.diamondImports"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    },
+    {
+      "id": "modules.moduleScope",
+      "name": "True per-file module scope (mangled internal names)",
+      "statusRow": "True per-file module scope (mangled internal names)",
+      "signature": "// two files may both declare a top-level `helper`",
+      "badge": "exact",
+      "description": "Every top-level declaration gets a file-private mangled name, and every reference to it is rewritten via a real scope-aware walk, so two unrelated files may freely declare the same top-level name. Binding two different files' exports to the same local name in one importing file with no `as` is still rejected — a real conflict, same as real ES modules.",
+      "exampleKey": "imports/scoping",
+      "snippet": "import { run as runA } from './scoping_a'\nimport { run as runB } from './scoping_b'",
+      "seeAlso": ["modules.aliasing"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    },
+    {
+      "id": "modules.aliasing",
+      "name": "Import aliasing (import { a as b })",
+      "statusRow": "Import aliasing (import { a as b })",
+      "signature": "import { a as b } from './path'",
+      "badge": "exact",
+      "description": "A direct consequence of the per-file rename mechanism: `b` is simply bound to the target's mangled name for `a`, with no separate rename step.",
+      "exampleKey": "imports/scoping",
+      "snippet": "import { run as runA } from './scoping_a'\nimport { run as runB } from './scoping_b'",
+      "seeAlso": ["modules.moduleScope", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
+    },
+    {
+      "id": "modules.exportDefault",
+      "name": "export default",
+      "statusRow": "export default",
+      "signature": "export default function foo() { ... }; export default 42",
+      "badge": "exact",
+      "description": "Named (function/class/interface/type/enum) and anonymous function/class forms, plus an arbitrary expression (`export default 42`, wrapped as a synthetic const). Exposed only under the export key \"default\" — a named default export's own name stays usable for intra-file self-reference (recursion, etc.) but is not itself importable via `import { foo }`, matching real ES modules.",
+      "exampleKey": "imports/greet",
+      "snippet": "export default function greet(name: string): string {\n    return \"hello \" + name\n}",
+      "seeAlso": ["modules.defaultImport", "modules.exportDeclarations"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export" }
+    },
+    {
+      "id": "modules.defaultImport",
+      "name": "import x from './path' (default import)",
+      "statusRow": "import x from './path' (default import)",
+      "signature": "import x from './path'; import x, { a, b } from './path'",
+      "badge": "exact",
+      "description": "Also combinable with a named list in one statement (`import x, { a, b } from './path'`). Sugar over the same specifier machinery as a named import — no separate resolver mechanism.",
+      "exampleKey": "imports/default_export",
+      "snippet": "import greet, { shout } from './greet'",
+      "seeAlso": ["modules.exportDefault", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
+    },
+    {
+      "id": "modules.namespaceImport",
+      "name": "import * as ns from '...' (namespace import)",
+      "statusRow": "import * as ns from '...' (namespace import)",
+      "signature": "import * as ns from './path'",
+      "badge": "caveats",
+      "description": "`ns.member` is rewritten directly to that member's mangled name during resolution. Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does.",
+      "exampleKey": "imports/namespace_import",
+      "snippet": "import * as greetLib from './greet'\nconsole.log(greetLib.shout(\"hey\"))\nconsole.log(greetLib.default(\"there\"))",
+      "differences": [
+        "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message",
+        "Type-position access (`let x: ns.SomeInterface`) and `new ns.SomeClass(...)` are not supported — the latter a pre-existing, namespace-independent restriction (`new` already only accepts a single bare identifier)"
+      ],
+      "seeAlso": ["modules.namedImport", "modules.defaultImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
+    },
+    {
+      "id": "modules.require",
+      "name": "Static CommonJS require('<literal>')",
+      "statusRow": "Static CommonJS require('<literal>')",
+      "signature": "const x = require('m'); const { a, b } = require('m')",
+      "badge": "caveats",
+      "description": "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import` and interoperates with `import` in the same file. `const x = require('m')` binds the namespace (whole module object); `const { a, b } = require('m')` is a named import; bare `require('m')` is side-effect-only.",
+      "exampleKey": "imports/require_commonjs",
+      "snippet": "const path = require('path')\nconst { basename, extname } = require('path')",
+      "differences": [
+        "Top-level, string-literal specifier only. `const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
+      ],
+      "seeAlso": ["modules.namedImport", "modules.dynamicImport"],
+      "spec": { "mdn": "https://nodejs.org/api/modules.html#requireid" }
+    },
+    {
+      "id": "modules.reExports",
+      "name": "Re-exports (export { x } from './other', export * from './other')",
+      "statusRow": "Re-exports (export { x } from './other', export * from './other')",
+      "signature": "export { x } from './other'; export * from './other'",
+      "badge": "caveats",
+      "description": "Named re-export list (with `as` aliasing) and star re-export both work, including default re-export in either direction. `export *` never forwards a default, matching real ES modules. Chains of arbitrary depth resolve transitively. A re-export forwards a name to this file's importers only — it does not become a usable bare identifier inside the re-exporting file itself.",
+      "exampleKey": "imports/re_export_lib",
+      "snippet": "export { add } from './re_export_core'\nexport { mul as multiply } from './re_export_core'\nexport { default as greet } from './re_export_core'",
+      "differences": [
+        "No namespace re-exports (`export * as ns from`) — parsed and explicitly rejected with a clear error rather than silently mis-parsed, no concrete use case yet",
+        "Re-exporting from a built-in module (`export { readFileSync } from 'fs'`) is an explicit, rejected scope cut, not an oversight"
+      ],
+      "seeAlso": ["modules.exportDeclarations", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export" }
+    },
+    {
+      "id": "modules.bareImports",
+      "name": "Bare/package-style imports (import x from 'somepackage')",
+      "statusRow": "Bare/package-style imports (import x from 'somepackage')",
+      "signature": "import x from 'somepackage'",
+      "badge": "caveats",
+      "description": "A bare specifier resolves against `klain_modules/<name>/klain.json`'s \"main\" field, found by walking upward once from the entry file's own directory (not re-walked per importing file, unlike Node). A real built-in module name (`'fs'`/`'path'`/etc.) is always checked, and always wins, before any `klain_modules` lookup is attempted.",
+      "exampleKey": "imports/klain_modules_package",
+      "snippet": "import { greet } from 'greeter'",
+      "differences": [
+        "klmpm is Stage 1 only — deliberately just the resolution half; no klmpm tool exists yet to fetch/version/lock a dependency, so a `klain_modules/<name>/` directory has to be hand-constructed today",
+        "npm/`node_modules` interop is a separate, unstarted, differently-scoped mechanism"
+      ],
+      "seeAlso": ["modules.builtinBindings", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    },
+    {
+      "id": "modules.dynamicImport",
+      "name": "Dynamic import(...)",
+      "statusRow": "Dynamic import(...)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Parses cleanly (recognized in expression position) and is explicitly rejected with a \"not yet supported\" error, rather than a generic parse failure. Real support is staged separately as a later capability — the whole-program AOT model means a target's top-level code would still run at startup regardless of whether the call site executes.",
+      "seeAlso": ["modules.require", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/import" }
+    },
+    {
+      "id": "modules.importMetaUrl",
+      "name": "import.meta.url",
+      "statusRow": "import.meta.url",
+      "signature": "import.meta.url",
+      "badge": "caveats",
+      "description": "Resolved entirely at compile time, per file, into a plain string literal (`\"file://\" + that file's own absolute path`, matching real Node/browser convention) — codegen never sees a real module metadata object.",
+      "exampleKey": "imports/import_meta_url",
+      "snippet": "console.log(import.meta.url.startsWith(\"file://\"))\nconsole.log(import.meta.url.endsWith(\"import_meta_url.ts\"))",
+      "differences": [
+        "`import.meta.url` is the only supported member — bare `import.meta` or any other member (`import.meta.resolve`, etc.) is a clean parse-time error"
+      ],
+      "seeAlso": ["modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/import.meta" }
+    },
+    {
+      "id": "modules.builtinBindings",
+      "name": "Import-gated built-in bindings (fs/path/os/querystring/assert/http/cluster/Memory)",
+      "statusRow": "Import-gated built-in bindings (fs/path/os/querystring/assert/http/cluster/Memory)",
+      "signature": "import fs from 'fs'; import { readFileSync } from 'fs'; import test from 'node:test'",
+      "badge": "exact",
+      "description": "`import fs from 'fs'`, `import * as fs from 'fs'`, and `import { readFileSync } from 'fs'` (including aliasing and combining a default with named specifiers in one statement) all bind through the same scope-aware machinery as a real file import; every Node-named builtin also resolves under the node: prefix. A local variable of the same name correctly shadows it; importing an unknown member is a clean, explicit rejection. Node-style built-ins require a default, namespace, or named import; process/console stay ambient by design.",
+      "exampleKey": "imports/named_builtin_import",
+      "snippet": "import { readFileSync, writeFileSync as wfs, existsSync, unlinkSync } from 'fs'",
+      "seeAlso": ["modules.bareImports", "modules.namedImport"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules" }
+    }
+  ]
+}

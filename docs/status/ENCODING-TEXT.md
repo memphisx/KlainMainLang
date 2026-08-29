@@ -1,8 +1,10 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/encoding-text.json; edit the JSON, then run `make status`. -->
+
 # Encoding / Text
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 2/2 (100%) · **Strict Coverage**: 1/2 (~50%).
+**Coverage**: 2/2 (100%) · **Strict Coverage**: 1/2 (50%).
 
 Format: [Status page format](README.md#status-page-format).
 

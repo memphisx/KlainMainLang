@@ -61,6 +61,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// NOT Node's `http.createServer` shape — kept intentionally, on the same
 	// runtime, under an explicitly-non-Node specifier.
 	"klain:http":    "http__kml_builtin",
+	// TDD-00142: the system-webview desktop-window module. `Webview` binds as
+	// identity (a parse-time constructor, like stream's class names).
+	"klain:webview": "webview__kml_builtin",
+	// TDD-00142 Stage 7: compile-time asset embedding (`embedDir`). Function
+	// member → marker-dispatch (not identity).
+	"klain:assets": "assets__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -77,6 +83,9 @@ var virtualBuiltinMarkers = map[string]string{
 	"worker_threads": "workerthreads__kml_builtin",
 	// TDD-00122: native testing helpers (`import { mustCall } from 'test'`).
 	"test": "test__kml_builtin",
+	// ADR-00434: the Node crypto *module* (generateKeyPair etc.), distinct
+	// from (and re-exporting parts of) the ambient WebCrypto global.
+	"crypto": "nodecrypto__kml_builtin",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -125,7 +134,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"deflateRaw": true, "inflateRaw": true,
 		"unzip": true,
 	},
-	"child_process": {"spawn": true, "exec": true, "execFile": true, "spawnSync": true, "execSync": true, "execFileSync": true},
+	"child_process": {"spawn": true, "exec": true, "execFile": true, "fork": true, "spawnSync": true, "execSync": true, "execFileSync": true},
 	"readline":      {"createInterface": true},
 	"net":           {"createServer": true, "connect": true, "createConnection": true, "isIP": true, "isIPv4": true, "isIPv6": true},
 	"tls":           {"connect": true, "createServer": true},
@@ -136,14 +145,24 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"ok": true, "equal": true, "strictEqual": true, "notEqual": true,
 		"notStrictEqual": true, "fail": true, "throws": true,
 	},
-	"http":       {"listen": true, "close": true, "get": true, "request": true, "createServer": true, "closeAllConnections": true},
-	"klain:http": {"listen": true, "close": true, "closeAllConnections": true},
+	"http":       {"listen": true, "close": true, "get": true, "request": true, "createServer": true, "closeAllConnections": true, "Agent": true},
+	"klain:http":    {"listen": true, "close": true, "closeAllConnections": true},
+	"klain:webview": {"Webview": true},
+	"klain:assets":  {"embedDir": true},
 	"cluster":    {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {
 		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
+		"PassThrough": true,
+		// Function members (callback forms; the Promise forms live under
+		// 'stream/promises'). Dispatched via the marker, not identity.
+		"pipeline": true, "finished": true, "duplexPair": true,
 	},
-	"https": {"get": true, "request": true},
+	"https": {"get": true, "request": true, "Agent": true},
+	"crypto": {
+		"generateKeyPair": true, "generateKeyPairSync": true,
+		"randomBytes": true, "randomUUID": true, "getRandomValues": true,
+	},
 	"diagnostics_channel": {"channel": true, "subscribe": true, "unsubscribe": true, "hasSubscribers": true, "tracingChannel": true},
 	"http2": {
 		"createServer": true, "createSecureServer": true, "connect": true,
@@ -157,7 +176,13 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"CompressionStream": true, "DecompressionStream": true,
 	},
 	"stream/promises": {"pipeline": true, "finished": true},
-	"worker_threads":  {"Worker": true, "parentPort": true, "workerData": true},
+	// MessageChannel/MessagePort/BroadcastChannel are the ambient TDD-00099
+	// constructors re-exported under their Node module name — identity, like
+	// Worker.
+	"worker_threads": {
+		"Worker": true, "parentPort": true, "workerData": true,
+		"MessageChannel": true, "MessagePort": true, "BroadcastChannel": true,
+	},
 	"test": {
 		// node:test runner surface (TDD-00140)
 		"test": true, "it": true, "describe": true, "suite": true,

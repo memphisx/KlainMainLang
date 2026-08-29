@@ -243,14 +243,48 @@ func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 // mirroring main.go so the test build and the real build can't drift.
 func appendSpawnSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
-	if !em.UsesSpawnSync() {
-		return clangArgs
+	if em.UsesSpawnSync() {
+		ssFile := filepath.Join(dir, "spawnsync.c")
+		if err := os.WriteFile(ssFile, []byte(llvm.SpawnSyncSource()), 0644); err != nil {
+			t.Fatalf("write spawnsync source: %v", err)
+		}
+		clangArgs = append(clangArgs, ssFile)
 	}
-	ssFile := filepath.Join(dir, "spawnsync.c")
-	if err := os.WriteFile(ssFile, []byte(llvm.SpawnSyncSource()), 0644); err != nil {
-		t.Fatalf("write spawnsync source: %v", err)
+	// The fork IPC framing C (TDD-00141) rides the same helper.
+	if em.UsesIPC() {
+		ipcFile := filepath.Join(dir, "ipc.c")
+		if err := os.WriteFile(ipcFile, []byte(llvm.IPCSource()), 0644); err != nil {
+			t.Fatalf("write ipc source: %v", err)
+		}
+		clangArgs = append(clangArgs, ipcFile)
 	}
-	return append(clangArgs, ssFile)
+	return clangArgs
+}
+
+// appendWebview compiles+links the vendored C++ webview binding (TDD-00142)
+// into the clang invocation when the program constructed a Webview, mirroring
+// EmbeddedCSources so the test build path can't drift from the CLI's. The
+// source is written with its real .cc extension so clang's driver compiles it
+// as C++; the framework/pkg-config flags come from LocateWebview. Returns
+// whether webview was used and any LocateWebview error, so a caller on a
+// machine without WebKitGTK (headless Linux CI) can Skip rather than Fail.
+func appendWebview(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) ([]string, bool, error) {
+	t.Helper()
+	if !em.UsesWebview() {
+		return clangArgs, false, nil
+	}
+	cflags, libs, err := llvm.LocateWebview()
+	if err != nil {
+		return clangArgs, true, err
+	}
+	wvFile := filepath.Join(dir, "webview.cc")
+	if err := os.WriteFile(wvFile, []byte(llvm.WebviewSource()), 0644); err != nil {
+		t.Fatalf("write webview source: %v", err)
+	}
+	clangArgs = append(clangArgs, wvFile)
+	clangArgs = append(clangArgs, cflags...)
+	clangArgs = append(clangArgs, libs...)
+	return clangArgs, true, nil
 }
 
 func buildBinaryGC(t *testing.T, src string) string {
@@ -365,6 +399,11 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
+	if wverr != nil {
+		t.Skipf("webview: %v", wverr)
+	}
+	clangArgs = appendEmbedBlobs(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -373,9 +412,45 @@ func buildBinaryImports(t *testing.T, src string) string {
 		if cryptoUsed {
 			t.Skipf("crypto backend %q may not be installed: clang: %v\n%s", em.CryptoBackend(), err, out)
 		}
+		if webviewUsed {
+			t.Skipf("webview dev packages may not be installed: clang: %v\n%s", err, out)
+		}
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	return binFile
+}
+
+// appendEmbedBlobs writes each embedded-asset blob (.bin) + its .incbin .s stub
+// and links them, mirroring main.go so the test build path can't drift
+// (TDD-00142 Stage 7).
+func appendEmbedBlobs(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesEmbeddedAssets() {
+		return clangArgs
+	}
+	// The embedded static-server C runtime (main.go links this via EmbeddedCSources;
+	// the test build path appends sources individually, so add it here).
+	eaFile := filepath.Join(dir, "embedassets.c")
+	if err := os.WriteFile(eaFile, []byte(llvm.EmbedAssetsSource()), 0644); err != nil {
+		t.Fatalf("write embed_assets.c: %v", err)
+	}
+	clangArgs = append(clangArgs, eaFile, "-pthread")
+	blobs, err := em.EmbeddedBlobs()
+	if err != nil {
+		t.Fatalf("embedded blobs: %v", err)
+	}
+	for _, b := range blobs {
+		binPath := filepath.Join(dir, b.Symbol+".bin")
+		asmPath := filepath.Join(dir, b.Symbol+".s")
+		if err := os.WriteFile(binPath, b.Blob, 0644); err != nil {
+			t.Fatalf("write embed blob: %v", err)
+		}
+		if err := os.WriteFile(asmPath, []byte(llvm.EmbedBlobAsm(b.Symbol, binPath, runtime.GOOS)), 0644); err != nil {
+			t.Fatalf("write embed asm: %v", err)
+		}
+		clangArgs = append(clangArgs, asmPath)
+	}
+	return clangArgs
 }
 
 // buildBinaryGCImports is buildBinaryGC's counterpart for source using a

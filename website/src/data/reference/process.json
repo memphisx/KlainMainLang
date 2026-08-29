@@ -1,0 +1,427 @@
+{
+  "surface": "process",
+  "title": "Process & CLI",
+  "kind": "node",
+  "statusPage": "PROCESS-CLI.md",
+  "coversRows": "all",
+  "coverage": { "loose": "28/29", "loosePct": 97, "strict": "13/29", "strictPct": 45 },
+  "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
+  "entries": [
+    {
+      "id": "process.argv",
+      "name": "process.argv",
+      "statusRow": "Command-line arguments (process.argv)",
+      "signature": "process.argv: string[]",
+      "badge": "caveats",
+      "description": "The command-line arguments.",
+      "returns": { "type": "string[]", "desc": "The argument vector." },
+      "exampleKey": "process/process",
+      "snippet": "const args: string[] = process.argv\nfor (const a of args) console.log(a)",
+      "differences": [
+        "Mirrors C's `argv` directly (`argv[0]` is the binary's own path), not Node's two-prefix convention.",
+        "An out-of-range `process.argv[i]` read yields `\"\"` (falsy), not Node's `undefined` and not the general array bounds throw."
+      ],
+      "seeAlso": ["process.env", "process.execPath"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processargv" }
+    },
+    {
+      "id": "process.env",
+      "name": "process.env",
+      "statusRow": "Environment variables (process.env.KEY / process.env[\"KEY\"])",
+      "signature": "process.env.KEY: string | null; process.env[\"KEY\"]",
+      "badge": "exact",
+      "description": "Environment variables, via both dot and bracket notation. Returns a possibly-null string (same convention as .find()), so process.env.X ?? \"default\" works.",
+      "returns": { "type": "string | null", "desc": "The value, or null if unset." },
+      "exampleKey": "process/process",
+      "snippet": "const path: string = process.env.PATH ?? \"no PATH set\"",
+      "seeAlso": ["process.env.write", "process.argv"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processenv" }
+    },
+    {
+      "id": "process.exit",
+      "name": "process.exit(code)",
+      "statusRow": "Exit codes (process.exit(code))",
+      "signature": "process.exit(code?: number): never",
+      "badge": "exact",
+      "description": "Exits the process. Calls C exit(); never returns, and code after it is correctly unreachable. With no argument, uses process.exitCode.",
+      "returns": { "type": "never", "desc": "Does not return." },
+      "seeAlso": ["process.exit-events", "process.kill"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processexitcode" }
+    },
+    {
+      "id": "process.readLineSync",
+      "name": "process.readLineSync()",
+      "statusRow": "Reading stdin (sync line read)",
+      "signature": "process.readLineSync(): string | null",
+      "badge": "exact",
+      "description": "Reads one line from stdin via POSIX getline() (handles arbitrarily long lines), stripped of its trailing newline. Returns null at EOF (same possibly-null convention as process.env). The blocking counterpart to the streamed process.stdin and the readline module.",
+      "returns": { "type": "string | null", "desc": "The line, or null at EOF." },
+      "exampleKey": "process/process",
+      "snippet": "const line = process.readLineSync()\nif (line === null) console.log(\"no input\")",
+      "seeAlso": ["process.stdin", "process.readline"],
+      "spec": { "mdn": "https://nodejs.org/api/readline.html" }
+    },
+    {
+      "id": "process.fsio",
+      "name": "Synchronous file read/write",
+      "statusRow": "Simple synchronous file read/write (fs.readFileSync/writeFileSync-style)",
+      "signature": "fs.readFileSync(path); fs.writeFileSync(path, data)",
+      "badge": "exact",
+      "description": "Config, data, and log I/O for a CLI program — the full sync/async/stream fs surface has its own reference page.",
+      "seeAlso": ["process.argv"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html" }
+    },
+    {
+      "id": "process.execFileSync",
+      "name": "process.execFileSync(file, args?)",
+      "statusRow": "process.execFileSync(file, args?)",
+      "signature": "process.execFileSync(file: string, args?: string[]): string",
+      "badge": "caveats",
+      "description": "Node's child_process.execFileSync (not execSync): fork()+execvp()s file directly with no shell, so shell metacharacters in args are never interpreted. Returns captured stdout as a string; throws a catchable Error on a non-zero exit status or a signal death.",
+      "returns": { "type": "string", "desc": "Captured stdout." },
+      "differences": [
+        "No options object (no `cwd`/`env`/`timeout`/`stdio` overrides yet).",
+        "stderr is inherited (visible on the terminal live), not captured."
+      ],
+      "seeAlso": ["process.spawnSync", "process.spawn"],
+      "spec": { "mdn": "https://nodejs.org/api/child_process.html#child_processexecfilesyncfile-args-options" }
+    },
+    {
+      "id": "process.cwd",
+      "name": "process.cwd()",
+      "statusRow": "process.cwd()",
+      "signature": "process.cwd(): string",
+      "badge": "exact",
+      "description": "The current working directory, via POSIX getcwd(NULL, 0) (auto-sizing).",
+      "returns": { "type": "string", "desc": "The current directory." },
+      "exampleKey": "process/process",
+      "snippet": "const startDir: string = process.cwd()",
+      "seeAlso": ["process.chdir"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processcwd" }
+    },
+    {
+      "id": "process.chdir",
+      "name": "process.chdir(path)",
+      "statusRow": "process.chdir(path)",
+      "signature": "process.chdir(path: string): void",
+      "badge": "exact",
+      "description": "Changes the current working directory via POSIX chdir(). Throws a catchable Error (the same shape fs.*'s failures use) if the path doesn't exist or isn't a directory.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "process/process",
+      "snippet": "process.chdir(\"/tmp\")",
+      "seeAlso": ["process.cwd"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processchdirdirectory" }
+    },
+    {
+      "id": "process.pid",
+      "name": "process.pid",
+      "statusRow": "process.pid",
+      "signature": "process.pid: number",
+      "badge": "exact",
+      "description": "The current process ID, via POSIX getpid(). A property read, not a call.",
+      "returns": { "type": "number", "desc": "The process ID." },
+      "seeAlso": ["process.kill", "process.getuid"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processpid" }
+    },
+    {
+      "id": "process.platform",
+      "name": "process.platform",
+      "statusRow": "process.platform",
+      "signature": "process.platform: string",
+      "badge": "exact",
+      "description": "A pure compile-time constant (\"darwin\"/\"linux\"/\"win32\"/…) baked in from the Go compiler's runtime.GOOS — no runtime code, since this compiler doesn't cross-compile.",
+      "returns": { "type": "string", "desc": "The OS platform." },
+      "exampleKey": "process/process_info",
+      "snippet": "console.log(process.platform, process.arch)",
+      "seeAlso": ["process.arch", "process.version"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processplatform" }
+    },
+    {
+      "id": "process.arch",
+      "name": "process.arch",
+      "statusRow": "process.arch",
+      "signature": "process.arch: string",
+      "badge": "exact",
+      "description": "A compile-time constant (\"arm64\"/\"x64\"/…) from the Go compiler's runtime.GOARCH, exactly like process.platform.",
+      "returns": { "type": "string", "desc": "The CPU architecture." },
+      "seeAlso": ["process.platform"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processarch" }
+    },
+    {
+      "id": "process.execPath",
+      "name": "process.execPath",
+      "statusRow": "process.execPath",
+      "signature": "process.execPath: string",
+      "badge": "exact",
+      "description": "The absolute, symlink-resolved path of the running executable — the compiled program is itself the binary (no separate runtime). Always absolute like Node's, not a raw argv[0].",
+      "returns": { "type": "string", "desc": "The executable's absolute path." },
+      "seeAlso": ["process.argv"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processexecpath" }
+    },
+    {
+      "id": "process.emitWarning",
+      "name": "process.emitWarning(message, type?)",
+      "statusRow": "process.emitWarning(message, type?)",
+      "signature": "process.emitWarning(message: string, type?: string): void",
+      "badge": "caveats",
+      "description": "Writes (node:<pid>) <type>: <message> to stderr, type defaulting to \"Warning\", and (like Node's always-on default printer) additionally invokes any process.on('warning', …) listener with the warning as an Error.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "process/process_info",
+      "snippet": "process.emitWarning(\"legacy call site\", \"DeprecationWarning\")",
+      "differences": [
+        "No options-object form (`{ code, detail }`) and no first-warning `--trace-warnings` hint line."
+      ],
+      "seeAlso": ["process.exit-events"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processemitwarningwarning-options" }
+    },
+    {
+      "id": "process.kill",
+      "name": "process.kill(pid, signal?)",
+      "statusRow": "process.kill(pid, signal?)",
+      "signature": "process.kill(pid: number, signal?: number): void",
+      "badge": "exact",
+      "description": "Sends signal (defaults to 15/SIGTERM, matching real Node) to pid via POSIX kill(). Throws a catchable Error if the target doesn't exist or the signal can't be sent; signal 0 is the standard POSIX existence check and delivers nothing.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "seeAlso": ["process.pid", "process.signals"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processkillpid-signal" }
+    },
+    {
+      "id": "process.stdout",
+      "name": "process.stdout.write / stderr.write",
+      "statusRow": "process.stdout.write(s) / process.stderr.write(s) (raw write, no auto-newline)",
+      "signature": "process.stdout.write(s: string): void; process.stderr.write(s: string): void",
+      "badge": "caveats",
+      "description": "A raw write of exactly s with nothing appended — unlike console.log/.error's always-trailing newline. Useful for a progress indicator or assembling one line from pieces. stdout is buffered (fd 1, ordering-correct against console.log); stderr is unbuffered (fd 2).",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "process_stdin/stream",
+      "snippet": "process.stdout.write(chunk.toUpperCase())",
+      "differences": [
+        "Text-only (byte-string, not binary-safe past an embedded null — the same scope narrowing `console.log` has).",
+        "Beyond `.write` and `.isTTY` (a real `isatty(fd)` probe), `process.stdout`/`stderr` expose no other stream surface (no `.columns`/`.rows`, no `'drain'`)."
+      ],
+      "seeAlso": ["process.stdin"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processstdout" }
+    },
+    {
+      "id": "process.env.write",
+      "name": "Writing process.env",
+      "statusRow": "Writing process.env (process.env.KEY = val / process.env[\"KEY\"] = val)",
+      "signature": "process.env.KEY = val; process.env[\"KEY\"] = val",
+      "badge": "caveats",
+      "description": "Sets an environment variable via setenv(key, String(val), overwrite); a written variable is inherited by child processes.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "process/process_info",
+      "snippet": "process.env.GREETING = \"hi\"",
+      "differences": [
+        "Write only — no `delete process.env.KEY` (`delete` is not a parser keyword; the fixed-shape object model has no dynamic delete).",
+        "Compound assignment (`process.env.X += …`) is a clean rejection."
+      ],
+      "seeAlso": ["process.env"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processenv" }
+    },
+    {
+      "id": "process.signals",
+      "name": "process.on('SIGINT'/'SIGTERM', handler)",
+      "statusRow": "process.on('SIGINT'/'SIGTERM', handler) (signal handlers)",
+      "signature": "process.on('SIGINT' | 'SIGTERM', handler: () => void)",
+      "badge": "caveats",
+      "description": "Lets a running program (e.g. an http.listen server) intercept a signal and shut down gracefully instead of dying immediately.",
+      "returns": { "type": "void", "desc": "Registers the handler." },
+      "differences": [
+        "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context.",
+        "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`.",
+        "Handler must be a zero-argument `() => void` closure; one handler slot per signal (re-registering overwrites).",
+        "Only fires while a `http.listen`- or timer-driven event loop is actively iterating; a plain synchronous script has no loop to check from."
+      ],
+      "seeAlso": ["process.exit-events", "process.kill"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#signal-events" }
+    },
+    {
+      "id": "process.exit-events",
+      "name": "process.on('exit'/'uncaughtException'/'warning') + exitCode",
+      "statusRow": "process.on('exit'/'uncaughtException'/'warning', ...) + process.exitCode",
+      "signature": "process.on('exit', (code) => …); process.exitCode = N",
+      "badge": "caveats",
+      "description": "'exit' fires at normal end and from process.exit(), receiving the exit code; process.exitCode = N sets the deferred code a bare program returns; process.exit() with no argument uses it.",
+      "returns": { "type": "void", "desc": "Registers a lifecycle listener." },
+      "exampleKey": "process/process_info",
+      "snippet": "process.on('exit', (code: number) => console.log(\"exiting with code\", code))\nprocess.exitCode = 0",
+      "differences": [
+        "`'uncaughtException'` runs the listener (suppressing the default print) but the process still exits (code 1) — the setjmp/longjmp model has already unwound to the top-level catch, so it can't resume like Node.",
+        "No `'unhandledRejection'` yet (needs rejected-promise tracking).",
+        "One listener slot per event, arrow-literal only."
+      ],
+      "seeAlso": ["process.exit", "process.emitWarning"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#event-exit" }
+    },
+    {
+      "id": "process.hrtime",
+      "name": "process.hrtime() / .bigint()",
+      "statusRow": "process.hrtime() / process.hrtime.bigint()",
+      "signature": "process.hrtime(): [number, number]; process.hrtime.bigint(): bigint",
+      "badge": "caveats",
+      "description": "CLOCK_MONOTONIC high-resolution timing. hrtime() returns a [seconds, nanoseconds] tuple, .bigint() total-nanoseconds as a bigint.",
+      "returns": { "type": "[number, number] | bigint", "desc": "The timestamp." },
+      "exampleKey": "process/process_info",
+      "snippet": "const start = process.hrtime.bigint()\nconst elapsed = process.hrtime.bigint() - start",
+      "differences": [
+        "`hrtime()` takes no argument — the legacy diff-from-a-previous-reading form isn't supported (use `.bigint()` and subtract)."
+      ],
+      "seeAlso": ["process.uptime"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processhrtimetime" }
+    },
+    {
+      "id": "process.getuid",
+      "name": "process.getuid() / geteuid() / getgid() / getegid()",
+      "statusRow": "process.getuid() / geteuid() / getgid() / getegid()",
+      "signature": "process.getuid(): number; geteuid(); getgid(); getegid()",
+      "badge": "exact",
+      "description": "Direct POSIX credential reads returning a number — present unconditionally (this compiler is POSIX-only), matching Node-on-POSIX.",
+      "returns": { "type": "number", "desc": "The uid/gid." },
+      "seeAlso": ["process.pid"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processgetuid" }
+    },
+    {
+      "id": "process.memoryUsage",
+      "name": "process.memoryUsage()",
+      "statusRow": "process.memoryUsage()",
+      "signature": "process.memoryUsage(): MemoryUsage",
+      "badge": "missing",
+      "description": "RSS/heap-size reporting — not implemented. It isn't meaningful in the default manual memory-management mode the way it is under a real GC; more relevant once -mm=gc is the default.",
+      "seeAlso": ["process.uptime"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processmemoryusage" }
+    },
+    {
+      "id": "process.nextTick",
+      "name": "process.nextTick(fn)",
+      "statusRow": "process.nextTick(fn)",
+      "signature": "process.nextTick(fn: () => void): void",
+      "badge": "caveats",
+      "description": "Enqueues fn on the existing microtask queue.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "process/process_info",
+      "snippet": "process.nextTick(() => console.log(\"ran after synchronous code\"))",
+      "differences": [
+        "Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises); zero-argument `() => void` callback only."
+      ],
+      "seeAlso": ["process.exit-events"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processnexttickcallback-args" }
+    },
+    {
+      "id": "process.version",
+      "name": "process.version / process.versions",
+      "statusRow": "process.version / process.versions",
+      "signature": "process.version: string; process.versions: object",
+      "badge": "caveats",
+      "description": "process.version = \"v22.11.0\"; process.versions is a real object (JSON.stringify/field access/Object.keys all work), matching Node v22.11.0's node/v8 verbatim, plus a klain key for this compiler's version.",
+      "returns": { "type": "string | object", "desc": "Version string / versions object." },
+      "exampleKey": "process/process_info",
+      "snippet": "console.log(process.version, process.versions.klain)",
+      "differences": [
+        "`versions` reports only honest values — `node`/`v8`/`klain` — deliberately omitting bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them.",
+        "The real linked-library versions (`openssl`/`zlib`) are a follow-on — they need a runtime lib query.",
+        "`node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred."
+      ],
+      "seeAlso": ["process.platform"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processversions" }
+    },
+    {
+      "id": "process.uptime",
+      "name": "process.uptime()",
+      "statusRow": "process.uptime()",
+      "signature": "process.uptime(): number",
+      "badge": "exact",
+      "description": "Seconds (a double) since process start, captured once at main entry via CLOCK_MONOTONIC.",
+      "returns": { "type": "number", "desc": "Seconds since start." },
+      "seeAlso": ["process.hrtime"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processuptime" }
+    },
+    {
+      "id": "process.stdin",
+      "name": "process.stdin (streamed)",
+      "statusRow": "process.stdin (streamed reads, not just readLineSync())",
+      "signature": "process.stdin.on('data' | 'end', cb)",
+      "badge": "caveats",
+      "description": "Streamed stdin over a non-blocking fd 0 folded into the same select() loop as readline/child_process: 'data' per read chunk, 'end' once on EOF. Distinct from the blocking readLineSync() and the line-oriented readline module.",
+      "returns": { "type": "void", "desc": "Registers a stream listener." },
+      "exampleKey": "process_stdin/stream",
+      "snippet": "process.stdin.on(\"data\", (chunk: string) => process.stdout.write(chunk.toUpperCase()))\nprocess.stdin.on(\"end\", () => console.error(\"done\"))",
+      "differences": [
+        "`'data'` delivers each chunk as a UTF-8 string, not a `Buffer` — no `setEncoding`, no binary mode.",
+        "Flowing mode only (attaching `'data'` starts it) — no `.pause()`/`.resume()`/`.read()`/`'readable'`.",
+        "One listener per event, arrow/function-expression literal only; callbacks fire synchronously from the dispatch, not via a microtask."
+      ],
+      "seeAlso": ["process.readLineSync", "process.readline"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processstdin" }
+    },
+    {
+      "id": "process.readline",
+      "name": "readline module",
+      "statusRow": "readline module (createInterface, 'line'/'close' events, question(), close())",
+      "signature": "readline.createInterface({ input }); rl.on('line' | 'close'); rl.question(q, cb); rl.close()",
+      "badge": "caveats",
+      "description": "Line-oriented stdin over the same non-blocking select() loop as child_process: one 'line' per newline (CR stripped), an unterminated final line flushed on EOF, then 'close'. Distinct from the blocking readLineSync().",
+      "returns": { "type": "Interface", "desc": "The readline interface." },
+      "differences": [
+        "Listener callbacks fire synchronously from the event loop's dispatch, not deferred through a microtask queue.",
+        "One listener per event, an arrow/function-expression literal only; no line history/editing, no `SIGINT`/`'pause'`/`'resume'`, no completer.",
+        "The `createInterface` options object is accepted but ignored — input is always stdin, output always stdout; one active interface at a time."
+      ],
+      "seeAlso": ["process.stdin", "process.readLineSync"],
+      "spec": { "mdn": "https://nodejs.org/api/readline.html#readlinecreateinterfaceoptions" }
+    },
+    {
+      "id": "process.spawn",
+      "name": "child_process.spawn / exec / execFile (async)",
+      "statusRow": "child_process.spawn() / .exec() / .execFile() (async, event-driven)",
+      "signature": "spawn(cmd, args?, opts?); exec(cmd, cb); execFile(file, args?, cb)",
+      "badge": "caveats",
+      "description": "fork()+execvp() with three pipes; the read ends are non-blocking and fold into the same select() event loop as Worker/channel pipes. spawn streams (child.stdout/stderr 'data'/'end', child.on('close'/'exit'), child.stdin.write/.end, child.pid, child.kill); exec runs via /bin/sh -c and execFile execvp's directly, both buffering into one (err, stdout, stderr) callback.",
+      "returns": { "type": "ChildProcess", "desc": "The child handle." },
+      "differences": [
+        "Listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue.",
+        "One listener per event, an arrow/function-expression literal only; no `removeListener`.",
+        "spawn's options support `{ cwd, shell, stdio: 'pipe' }` — `cwd` is real, `shell` is accepted but **ignored** (commands always exec directly), and `env`/`detached`/stdio arrays are clean rejections; exec/execFile take no options.",
+        "`'close'`/`'exit'` receive the exit `code` only (a signal death folds to `128+signal`).",
+        "Handles and their buffered output are never freed (`-mm=manual`)."
+      ],
+      "seeAlso": ["process.spawnSync", "process.fork"],
+      "spec": { "mdn": "https://nodejs.org/api/child_process.html#child_processspawncommand-args-options" }
+    },
+    {
+      "id": "process.fork",
+      "name": "child_process.fork (self-fork + IPC)",
+      "statusRow": "child_process.fork() (self-fork + IPC channel)",
+      "signature": "fork(modulePath, args?): ChildProcess",
+      "badge": "caveats",
+      "description": "Node's own mechanism: socketpair + re-exec of the current binary with NODE_CHANNEL_FD set; NDJSON string frames. Parent: child.send(str)→bool, child.on('message'/'exit'/'close'), child.disconnect(); child: process.send(str)→bool, process.on('message'), process.disconnect().",
+      "returns": { "type": "ChildProcess", "desc": "The forked child with an IPC channel." },
+      "differences": [
+        "Self-fork only: the path must be `__filename` or `process.argv[1]` (forking a *different* module is a clean rejection); the options object must be an empty `{}`.",
+        "Messages are strings (`send(obj)` is a clean rejection); one `'message'` listener per side.",
+        "Bare `process.send` reads as a *boolean* forked-ness probe, not Node's function-or-undefined.",
+        "`process.argv[i]` out-of-range reads yield `\"\"` (falsy) rather than Node's `undefined`."
+      ],
+      "seeAlso": ["process.spawn"],
+      "spec": { "mdn": "https://nodejs.org/api/child_process.html#child_processforkmodulepath-args-options" }
+    },
+    {
+      "id": "process.spawnSync",
+      "name": "child_process.spawnSync / execSync / execFileSync",
+      "statusRow": "child_process.spawnSync() / .execSync() / .execFileSync() (blocking)",
+      "signature": "spawnSync(cmd, args?, opts?); execSync(cmd); execFileSync(file, args?)",
+      "badge": "caveats",
+      "description": "One embedded C core: fork + execvp with both stdio pipes poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), then a blocking waitpid; execSync runs via /bin/sh -c. Distinct from the bespoke process.execFileSync above.",
+      "returns": { "type": "SpawnSyncResult | string", "desc": "The result object / captured stdout." },
+      "exampleKey": "process/spawn_sync",
+      "snippet": "const r = spawnSync(\"echo\", [\"kalimera\", \"kosme\"])\nconsole.log(r.status, r.stdout.trim())",
+      "differences": [
+        "Options object supports `{ cwd, encoding: 'utf8' }` only (no `env`/`timeout`/`input`/`shell`/`stdio`); results are strings, not Buffers.",
+        "`spawnSync`'s result carries `status`/`stdout`/`stderr`/`pid` only — no `signal`/`error`/`output` fields (a signal death folds into `status` as `128+signal`).",
+        "`execSync`/`execFileSync` return stdout but do **not** throw on a non-zero exit status (Node throws) — use `spawnSync().status` where the exit code matters."
+      ],
+      "seeAlso": ["process.spawn", "process.execFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/child_process.html#child_processspawnsynccommand-args-options" }
+    }
+  ]
+}

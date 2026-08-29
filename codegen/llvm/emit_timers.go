@@ -536,4 +536,96 @@ markdone:
 alldone:
   ret void
 }`)
+
+	// __kml_timer_tick(): the non-blocking counterpart to __kml_timer_drain,
+	// for the webview page-tick pump (TDD-00142 Stage 3). Fires every timer
+	// whose deadline has already passed *now* (earliest-first), reschedules
+	// repeating ones, marks one-shots done, and returns immediately — it never
+	// sleeps and never waits for a future deadline, so it is safe to call from
+	// a foreign GUI main loop on a fast interval. A timer callback that enqueues
+	// microtasks is handled by the caller draining microtasks after the tick.
+	e.emitGlobal(`
+define void @__kml_timer_tick() {
+entry:
+  %besti = alloca i64, align 8
+  %bestfire = alloca i64, align 8
+  %scani = alloca i64, align 8
+  br label %scanstart
+scanstart:
+  %len = load i64, ptr @__kml_timer_len, align 8
+  %data = load ptr, ptr @__kml_timer_data, align 8
+  store i64 -1, ptr %besti, align 8
+  store i64 0, ptr %bestfire, align 8
+  store i64 0, ptr %scani, align 8
+  br label %scanloop
+scanloop:
+  %si = load i64, ptr %scani, align 8
+  %sinbounds = icmp slt i64 %si, %len
+  br i1 %sinbounds, label %scanbody, label %scandone
+scanbody:
+  %sslot = getelementptr { i64, i64, i64, ptr }, ptr %data, i64 %si
+  %sinterval_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 2
+  %sinterval = load i64, ptr %sinterval_p, align 8
+  %sdone = icmp eq i64 %sinterval, -1
+  br i1 %sdone, label %scannext, label %scanconsider
+scanconsider:
+  %sfire_p = getelementptr { i64, i64, i64, ptr }, ptr %sslot, i32 0, i32 1
+  %sfire = load i64, ptr %sfire_p, align 8
+  %curbesti = load i64, ptr %besti, align 8
+  %noneyet = icmp eq i64 %curbesti, -1
+  br i1 %noneyet, label %scantakebest, label %scancompare
+scancompare:
+  %curbestfire = load i64, ptr %bestfire, align 8
+  %better = icmp slt i64 %sfire, %curbestfire
+  br i1 %better, label %scantakebest, label %scannext
+scantakebest:
+  store i64 %si, ptr %besti, align 8
+  store i64 %sfire, ptr %bestfire, align 8
+  br label %scannext
+scannext:
+  %sinext = add i64 %si, 1
+  store i64 %sinext, ptr %scani, align 8
+  br label %scanloop
+scandone:
+  %foundbest = load i64, ptr %besti, align 8
+  %nomore = icmp eq i64 %foundbest, -1
+  br i1 %nomore, label %tickret, label %checkdue
+checkdue:
+  %targetfire = load i64, ptr %bestfire, align 8
+  %now1 = call i64 @__kml_monotonic_ns()
+  %notdue = icmp sgt i64 %targetfire, %now1
+  br i1 %notdue, label %tickret, label %dofire
+dofire:
+  %data2 = load ptr, ptr @__kml_timer_data, align 8
+  %fireidx = load i64, ptr %besti, align 8
+  %fslot = getelementptr { i64, i64, i64, ptr }, ptr %data2, i64 %fireidx
+  %fclosure_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot, i32 0, i32 3
+  %fclosure = load ptr, ptr %fclosure_p, align 8
+  %fp_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 0
+  %fp = load ptr, ptr %fp_p, align 8
+  %ep_p = getelementptr { ptr, ptr }, ptr %fclosure, i32 0, i32 1
+  %ep = load ptr, ptr %ep_p, align 8
+  call void (ptr) %fp(ptr %ep)
+  %data3 = load ptr, ptr @__kml_timer_data, align 8
+  %fslot2 = getelementptr { i64, i64, i64, ptr }, ptr %data3, i64 %fireidx
+  %finterval_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 2
+  %finterval = load i64, ptr %finterval_p, align 8
+  %stillrepeating = icmp sgt i64 %finterval, 0
+  br i1 %stillrepeating, label %reschedule, label %maybemarkdone
+reschedule:
+  %now2 = call i64 @__kml_monotonic_ns()
+  %intervalns = mul i64 %finterval, 1000000
+  %newfire = add i64 %now2, %intervalns
+  %ffire_p = getelementptr { i64, i64, i64, ptr }, ptr %fslot2, i32 0, i32 1
+  store i64 %newfire, ptr %ffire_p, align 8
+  br label %scanstart
+maybemarkdone:
+  %alreadycancelled = icmp eq i64 %finterval, -1
+  br i1 %alreadycancelled, label %scanstart, label %markdone2
+markdone2:
+  store i64 -1, ptr %finterval_p, align 8
+  br label %scanstart
+tickret:
+  ret void
+}`)
 }

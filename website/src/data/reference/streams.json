@@ -1,0 +1,174 @@
+{
+  "surface": "streams",
+  "title": "Streams",
+  "kind": "node",
+  "statusPage": "STREAMS.md",
+  "coversRows": "all",
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
+  "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) are the backbone, and Node's older stream module (Readable/Writable/Transform/PassThrough, pipeline/finished, duplexPair) wraps the same internals. In-memory pipelines run on the promise/microtask runtime alone — no fibers or libcurl. The recurring divergences are edge-semantic rather than shape: a synchronously-throwing pull/start/write propagates to the caller instead of erroring the stream, closed-stream reads yield the chunk type's zero value rather than undefined, desiredSize settles to 0 instead of null, and fs/http don't yet hand out Node streams. new Duplex remains rejected — duplexPair() is the one Duplex producer.",
+  "entries": [
+    {
+      "id": "streams.readablestream",
+      "name": "ReadableStream",
+      "statusRow": "ReadableStream",
+      "signature": "new ReadableStream<T>(source?, strategy?): ReadableStream<T>",
+      "badge": "caveats",
+      "description": "A pull/push source with backpressure: enqueue via a controller in start/pull, consume with for await, .getReader().read(), or by piping. ReadableStream.from() builds one from an array. Runs on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines.",
+      "returns": { "type": "ReadableStream<T>", "desc": "A readable stream." },
+      "exampleKey": "streams/readable",
+      "snippet": "let n = 0\nconst numbers = new ReadableStream<number>({\n  pull: (controller) => {\n    n = n + 1\n    if (n > 5) { controller.close() } else { controller.enqueue(n * n) }\n  }\n}, { highWaterMark: 1 })\nfor await (const square of numbers) { console.log(\"square:\", square) }",
+      "differences": [
+        "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
+        "`ReadableStream.from()` accepts arrays only, not async iterables",
+        "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
+        "`read()` on a closed stream yields the chunk type's zero value, not `undefined`; `controller.desiredSize` is `0` (not `null`) once closed/errored",
+        "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
+        "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
+        "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
+        "A synchronously-throwing pull/start propagates to the caller instead of erroring the stream",
+        "`tee()` forwards the last cancelling branch's reason instead of composing both; a signal abort of `pipeTo` takes effect at the next chunk boundary"
+      ],
+      "seeAlso": ["streams.writablestream", "streams.transformstream", "streams.blobstream"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream" }
+    },
+    {
+      "id": "streams.writablestream",
+      "name": "WritableStream",
+      "statusRow": "WritableStream",
+      "signature": "new WritableStream<T>(sink?, strategy?): WritableStream<T>",
+      "badge": "caveats",
+      "description": "A backpressured sink: .write() queues a chunk (each write carries its own promise), .close()/.abort() finish it, and ready re-arms on backpressure flips. The sink's write/close/abort callbacks drive delivery.",
+      "returns": { "type": "WritableStream<T>", "desc": "A writable stream." },
+      "exampleKey": "streams/pipeline",
+      "snippet": "const printed: string[] = []\nconst sink = new WritableStream<string>({\n  write: (chunk) => { printed.push(chunk) }\n})\nawait source.pipeThrough(upper).pipeTo(sink)",
+      "differences": [
+        "`desiredSize` is `0` (not `null`) once errored; `releaseLock()` doesn't reject a pending-write view",
+        "A synchronously-throwing sink write propagates instead of erroring the stream (an async rejection is handled per spec)",
+        "A sink abort callback can't take a reason parameter; no transformer/sink `start` promise-vs-write interlock beyond the started flag"
+      ],
+      "seeAlso": ["streams.readablestream", "streams.transformstream"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/WritableStream" }
+    },
+    {
+      "id": "streams.transformstream",
+      "name": "TransformStream",
+      "statusRow": "TransformStream",
+      "signature": "new TransformStream<I, O>(transformer?): TransformStream<I, O>",
+      "badge": "caveats",
+      "description": "A writable-in / readable-out pair whose transform callback maps chunks from one side to the other, running when the readable side has capacity (else parking one chunk). Compose it with pipeThrough. Writable HWM defaults to 1, readable HWM to 0.",
+      "returns": { "type": "TransformStream<I, O>", "desc": "A transform stream." },
+      "exampleKey": "streams/pipeline",
+      "snippet": "const upper = new TransformStream<string, string>({\n  transform: (chunk, controller) => { controller.enqueue(chunk.toUpperCase()) }\n})\nawait source.pipeThrough(upper).pipeTo(sink)",
+      "differences": [
+        "No transformer `start` callback",
+        "Cancelling the readable side doesn't error the writable side",
+        "An identity transform (no callback) requires matching I/O chunk representations"
+      ],
+      "seeAlso": ["streams.readablestream", "streams.writablestream", "streams.compressionstream"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/TransformStream" }
+    },
+    {
+      "id": "streams.compressionstream",
+      "name": "CompressionStream / DecompressionStream",
+      "statusRow": "CompressionStream / DecompressionStream",
+      "signature": "new CompressionStream(format): TransformStream; new DecompressionStream(format): TransformStream",
+      "badge": "caveats",
+      "description": "TransformStreams backed by native zlib: gzip/deflate/deflate-raw compress and decompress a Uint8Array chunk stream. Inflate auto-detects gzip/zlib wrappers, and -lz is linked only when one of these is actually constructed.",
+      "returns": { "type": "TransformStream", "desc": "A zlib-backed transform stream." },
+      "exampleKey": "streams/gzip",
+      "snippet": "const [rawBranch, decodeBranch] = source.pipeThrough(new CompressionStream(\"gzip\")).tee()\nfor await (const chunk of decodeBranch.pipeThrough(new DecompressionStream(\"gzip\"))) {\n  out = out + dec.decode(chunk)\n}",
+      "differences": [
+        "The format argument must be a string literal (\"gzip\", \"deflate\", \"deflate-raw\") — a runtime-computed format string is a compile error",
+        "Chunks are `Uint8Array` only (no ArrayBuffer/DataView BufferSource variants)"
+      ],
+      "seeAlso": ["streams.transformstream"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/CompressionStream" }
+    },
+    {
+      "id": "streams.blobstream",
+      "name": "Blob.stream()",
+      "statusRow": "Blob.stream()",
+      "signature": "blob.stream(): ReadableStream<Uint8Array>",
+      "badge": "caveats",
+      "description": "Returns a ReadableStream<Uint8Array> over the blob's bytes — one owned-copy chunk then closed (an empty blob yields no chunk). Consumable via for await or .getReader().",
+      "returns": { "type": "ReadableStream<Uint8Array>", "desc": "A readable stream of the blob's bytes." },
+      "differences": [
+        "Delivers the blob's bytes as a **single** `Uint8Array` chunk (the whole blob), not incrementally chunked as a real byte source would be"
+      ],
+      "seeAlso": ["streams.readablestream"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Blob/stream" }
+    },
+    {
+      "id": "streams.nodestreams",
+      "name": "stream.Readable / .Writable / .Transform / .PassThrough",
+      "statusRow": "stream.Readable / .Writable / .Transform / .PassThrough (new Duplex ❌)",
+      "signature": "class X extends Readable<T> { _read() {} }; new Writable<T>({ write }); new PassThrough()",
+      "badge": "caveats",
+      "description": "Node's stream classes over the WHATWG internals, with 'data'/'end'/'error'/'close'/'finish'/'drain' events, .pipe(), and the flowing-mode read→emit loop started by the first 'data' listener. Both the options form (new Readable({ read })) and the class form (class X extends Readable with a this-based _read/_write) work; Readable.from/.fromWeb/.toWeb bridge to and from the web streams.",
+      "returns": { "type": "Readable | Writable | Transform | PassThrough", "desc": "A Node stream." },
+      "exampleKey": "streams/class_extends",
+      "snippet": "class Greeter extends Readable<string> {\n  words: string[] = [\"kalimera\", \"kosme\", \"apo\", \"thessaloniki\"]\n  i: number = 0\n  _read() {\n    if (this.i >= this.words.length) { this.push(null) }\n    else { this.push(this.words[this.i]); this.i = this.i + 1 }\n  }\n}",
+      "differences": [
+        "`new PassThrough()` is the identity Transform — string chunks by default (`<T>` overrides), `highWaterMark`/`objectMode` options only; `new Duplex(...)` itself is still rejected (`duplexPair()` is the one Duplex producer)",
+        "`class X extends Readable/Writable` with a `this`-based `_read()` / `_write(chunk, enc, cb)` override is supported; `extends Duplex`/`Transform` is not yet (rejected at compile time). Options form (`new Readable({ read })`) also stays",
+        "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
+        "`highWaterMark` (options form and class-form `super({ highWaterMark })`) sets the queue watermark; `objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode). A `super(options)` `highWaterMark` must be a literal/construction-scope constant — it can't reference a constructor parameter",
+        "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
+        "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
+        "No `.read()`/`.unshift()`/`.destroy()`/`.setEncoding()`",
+        "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
+        "`fs`/`http` still don't hand out Node streams (their surfaces are WHATWG-based or buffered)"
+      ],
+      "seeAlso": ["streams.streampipeline", "streams.duplexpair", "streams.readablestream"],
+      "spec": { "mdn": "https://nodejs.org/api/stream.html#class-streamreadable" }
+    },
+    {
+      "id": "streams.streampipeline",
+      "name": "stream.pipeline() / .finished()",
+      "statusRow": "stream.pipeline() / .finished()",
+      "signature": "pipeline(src, ...stages, cb); finished(stream, cb)",
+      "badge": "caveats",
+      "description": "The callback-style named exports: pipeline(a, b, cb) wires streams and calls the callback with null or the error (returning the destination stream), and finished(s, cb) fires when a stream closes. Their Promise twins live in stream/promises.",
+      "returns": { "type": "Writable | void", "desc": "pipeline returns the destination stream; finished returns nothing." },
+      "exampleKey": "streams/named_exports",
+      "snippet": "finished(echo, (err) => { console.log(\"echo finished, clean:\", err === null) })\npipeline(src, new PassThrough(), sink, () => { console.log(\"pipeline done\") })",
+      "differences": [
+        "The callback forms' callback takes zero parameters or one (the error) — no `(err, value)` extras",
+        "`finished(s, cb)` returns nothing, not Node's cleanup function",
+        "Function-stage pipelines (`pipeline(src, async function* …)`) are not supported — stages must be streams"
+      ],
+      "seeAlso": ["streams.streampromises", "streams.nodestreams"],
+      "spec": { "mdn": "https://nodejs.org/api/stream.html#streampipelinesource-transforms-destination-callback" }
+    },
+    {
+      "id": "streams.streampromises",
+      "name": "stream/promises",
+      "statusRow": "stream/promises",
+      "signature": "import { pipeline, finished } from 'stream/promises'",
+      "badge": "exact",
+      "description": "The promise-returning pipeline and finished, awaitable directly. pipeline resolves when the pipe drains; finished resolves when the stream closes.",
+      "returns": { "type": "Promise<void>", "desc": "Resolves on completion, rejects on error." },
+      "exampleKey": "streams/node_stream",
+      "snippet": "import { pipeline, finished } from 'stream/promises'\nawait pipeline(numbers, square, sink)\nawait finished(words)",
+      "seeAlso": ["streams.streampipeline", "streams.nodestreams"],
+      "spec": { "mdn": "https://nodejs.org/api/stream.html#streampromisespipelinesource-transforms-destination-options" }
+    },
+    {
+      "id": "streams.duplexpair",
+      "name": "stream.duplexPair()",
+      "statusRow": "stream.duplexPair()",
+      "signature": "duplexPair(): [Duplex, Duplex]",
+      "badge": "caveats",
+      "description": "Two cross-wired identity-transform sides: what one side writes, the other reads (backpressure parks on the peer's capacity), and ending one side ends the other's readable. Returned as a 2-element array, so both destructuring and index access work.",
+      "returns": { "type": "[Duplex, Duplex]", "desc": "A pair of cross-wired duplex handles." },
+      "exampleKey": "streams/named_exports",
+      "snippet": "const [clientSide, serverSide] = duplexPair()\nserverSide.on(\"data\", (d) => { console.log(\"server saw:\", d) })\nclientSide.end(\"hello over the pair\")",
+      "differences": [
+        "String chunks only (no `<T>` form)",
+        "The sides are Duplex *handles* (`write`/`end`/`on`/`pipe`/…), not `Duplex` class instances — no `instanceof Duplex`, `cork`/`uncork`, `.read()`, or `'readable'` events"
+      ],
+      "seeAlso": ["streams.nodestreams"],
+      "spec": { "mdn": "https://nodejs.org/api/stream.html#streamduplexpairoptions" }
+    }
+  ]
+}

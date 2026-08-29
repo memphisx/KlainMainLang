@@ -1,0 +1,212 @@
+{
+  "surface": "fs",
+  "title": "File system (fs)",
+  "kind": "node",
+  "statusPage": "FILE-SYSTEM.md",
+  "coversRows": "all",
+  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "7/14", "strictPct": 50 },
+  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
+  "entries": [
+    {
+      "id": "fs.readFileSync",
+      "name": "fs.readFileSync(path)",
+      "statusRow": "fs.readFileSync(path)",
+      "signature": "readFileSync(path: string): string",
+      "badge": "caveats",
+      "description": "Reads the whole file into a string. Throws a catchable Error (built from strerror(errno)) if the file can't be opened.",
+      "params": [{ "name": "path", "type": "string", "desc": "Path to read." }],
+      "returns": { "type": "string", "desc": "The file contents as text." },
+      "exampleKey": "fs/fs",
+      "snippet": "const content: string = fs.readFileSync('/tmp/kml_fs_example.txt')\nconsole.log(content.length)",
+      "differences": [
+        "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file."
+      ],
+      "seeAlso": ["fs.readFileSyncBytes", "fs.writeFileSync", "fs.async"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsreadfilesyncpath-options" }
+    },
+    {
+      "id": "fs.readFileSyncBytes",
+      "name": "fs.readFileSyncBytes(path)",
+      "statusRow": "fs.readFileSyncBytes(path)",
+      "signature": "readFileSyncBytes(path: string): Uint8Array",
+      "badge": "exact",
+      "description": "Binary-safe sibling of readFileSync: returns a Uint8Array with the file's exact byte count (no strlen involved), so a file with an embedded null byte reads back whole. There is no Buffer class — this compiler uses plain ArrayBuffer/TypedArrays.",
+      "params": [{ "name": "path", "type": "string", "desc": "Path to read." }],
+      "returns": { "type": "Uint8Array", "desc": "The exact file bytes." },
+      "seeAlso": ["fs.readFileSync", "fs.writeFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsreadfilesyncpath-options" }
+    },
+    {
+      "id": "fs.writeFileSync",
+      "name": "fs.writeFileSync(path, data)",
+      "statusRow": "fs.writeFileSync(path, data)",
+      "signature": "writeFileSync(path: string, data: string | ArrayBuffer | TypedArray): void",
+      "badge": "exact",
+      "description": "Creates or truncates the file with data, throwing on failure. data may be a string (the strlen-based path) or an ArrayBuffer/TypedArray (binary-safe, writes the real byte count via fwrite) — dispatched on data's inferred type.",
+      "params": [
+        { "name": "path", "type": "string", "desc": "Path to write." },
+        { "name": "data", "type": "string | ArrayBuffer | TypedArray", "desc": "Content; binary for the typed-array forms." }
+      ],
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "fs/fs",
+      "snippet": "fs.writeFileSync('/tmp/out.txt', 'first line')",
+      "seeAlso": ["fs.appendFileSync", "fs.readFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fswritefilesyncfile-data-options" }
+    },
+    {
+      "id": "fs.appendFileSync",
+      "name": "fs.appendFileSync(path, data)",
+      "statusRow": "fs.appendFileSync(path, data)",
+      "signature": "appendFileSync(path: string, data: string | ArrayBuffer | TypedArray): void",
+      "badge": "exact",
+      "description": "Like writeFileSync, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure. Same string/ArrayBuffer/TypedArray dispatch as writeFileSync.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "fs/fs",
+      "snippet": "fs.appendFileSync('/tmp/out.txt', '\\nsecond line')",
+      "seeAlso": ["fs.writeFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsappendfilesyncpath-data-options" }
+    },
+    {
+      "id": "fs.existsSync",
+      "name": "fs.existsSync(path)",
+      "statusRow": "fs.existsSync(path)",
+      "signature": "existsSync(path: string): boolean",
+      "badge": "exact",
+      "description": "Plain existence check via POSIX access(). Deliberately does not throw for a missing path — matching real Node's own existsSync, one of the few fs functions that reports \"doesn't exist\" as false rather than an error.",
+      "returns": { "type": "boolean", "desc": "true if the path exists." },
+      "exampleKey": "fs/fs",
+      "snippet": "console.log(fs.existsSync('/tmp/out.txt'))   // true",
+      "seeAlso": ["fs.unlinkSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsexistssyncpath" }
+    },
+    {
+      "id": "fs.unlinkSync",
+      "name": "fs.unlinkSync(path)",
+      "statusRow": "fs.unlinkSync(path)",
+      "signature": "unlinkSync(path: string): void",
+      "badge": "exact",
+      "description": "Deletes a file. Throws on failure.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "fs/fs",
+      "snippet": "fs.unlinkSync('/tmp/out.txt')",
+      "seeAlso": ["fs.rmdirSync", "fs.existsSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsunlinksyncpath" }
+    },
+    {
+      "id": "fs.mkdirSync",
+      "name": "fs.mkdirSync(path)",
+      "statusRow": "fs.mkdirSync(path)",
+      "signature": "mkdirSync(path: string): void",
+      "badge": "caveats",
+      "description": "Creates a directory via POSIX mkdir(), mode 0777 reduced by the process umask as usual.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "fs/fs",
+      "snippet": "fs.mkdirSync('/tmp/kml_fs_example_dir')",
+      "differences": [
+        "No `{recursive: true}` option — throws (e.g. `EEXIST`) if the path already exists or a parent directory is missing."
+      ],
+      "seeAlso": ["fs.rmdirSync", "fs.readdirSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsmkdirsyncpath-options" }
+    },
+    {
+      "id": "fs.rmdirSync",
+      "name": "fs.rmdirSync(path)",
+      "statusRow": "fs.rmdirSync(path)",
+      "signature": "rmdirSync(path: string): void",
+      "badge": "caveats",
+      "description": "Removes an empty directory via POSIX rmdir() — deliberately directory-only (fails on a plain file, unlike unlinkSync).",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "differences": [
+        "No recursive-delete option, matching `mkdirSync`'s lack of one."
+      ],
+      "seeAlso": ["fs.mkdirSync", "fs.unlinkSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsrmdirsyncpath-options" }
+    },
+    {
+      "id": "fs.readdirSync",
+      "name": "fs.readdirSync(path)",
+      "statusRow": "fs.readdirSync(path)",
+      "signature": "readdirSync(path: string): string[]",
+      "badge": "exact",
+      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe.",
+      "returns": { "type": "string[]", "desc": "Directory entry names." },
+      "exampleKey": "fs/fs",
+      "snippet": "const entries: string[] = fs.readdirSync('/tmp/kml_fs_example_dir')\nentries.sort()",
+      "seeAlso": ["fs.mkdirSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsreaddirsyncpath-options" }
+    },
+    {
+      "id": "fs.renameSync",
+      "name": "fs.renameSync(oldPath, newPath)",
+      "statusRow": "fs.renameSync(oldPath, newPath)",
+      "signature": "renameSync(oldPath: string, newPath: string): void",
+      "badge": "exact",
+      "description": "Renames/moves a file via POSIX rename(). Throws on failure.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "fs/fs",
+      "snippet": "fs.renameSync(dir + '/a.txt', dir + '/a_renamed.txt')",
+      "seeAlso": ["fs.copyFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fsrenamesyncoldpath-newpath" }
+    },
+    {
+      "id": "fs.copyFileSync",
+      "name": "fs.copyFileSync(src, dest)",
+      "statusRow": "fs.copyFileSync(src, dest)",
+      "signature": "copyFileSync(src: string, dest: string): void",
+      "badge": "caveats",
+      "description": "Copies a file by composing the existing string-based readFileSync/writeFileSync helpers — no new C-level I/O code.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "differences": [
+        "Still inherits `readFileSync`'s text-only limitation — a source file with embedded null bytes copies back shorter than its real size; not rewritten to use the binary-safe path."
+      ],
+      "seeAlso": ["fs.renameSync", "fs.readFileSyncBytes"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fscopyfilesyncsrc-dest-mode" }
+    },
+    {
+      "id": "fs.async",
+      "name": "Async variants (callback + fs.promises)",
+      "statusRow": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
+      "signature": "fs.readFile(path, cb); await fs.promises.readFile(path)",
+      "badge": "caveats",
+      "description": "Async forms of the sync set: readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir. The callback gets (err[, data]); the Promise rejects with the same Error the sync form throws. Each reuses its *Sync runtime helper verbatim, catching the throw via the compiler's setjmp catch primitive — no parallel non-throwing I/O code.",
+      "returns": { "type": "void | Promise<T>", "desc": "Callback delivery, or a Promise." },
+      "exampleKey": "fs_async/fs_async",
+      "snippet": "await fs.promises.writeFile('demo.txt', 'hi')\nconst text: string = await fs.promises.readFile('demo.txt')",
+      "differences": [
+        "Blocking I/O under the hood — no thread pool, so the syscall runs inline; only *delivery* is async (the callback fires right after the op, the Promise is returned already settled). An API-shape gain, not a concurrency/performance one.",
+        "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form.",
+        "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)."
+      ],
+      "seeAlso": ["fs.readFileSync", "fs.streams"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fspromisesreadfilepath-options" }
+    },
+    {
+      "id": "fs.streams",
+      "name": "fs.createReadStream / createWriteStream",
+      "statusRow": "fs.createReadStream / fs.createWriteStream",
+      "signature": "fs.createReadStream(path, opts?): Readable; fs.createWriteStream(path, opts?): Writable",
+      "badge": "caveats",
+      "description": "createReadStream returns a Node Readable (consume via for await, .on('data')/.on('end'), or .pipe()); createWriteStream a Node Writable (.write/.end, 'finish'/'close'/'drain'). A read→write .pipe() round-trips; a failed open throws a catchable Error.",
+      "returns": { "type": "Readable | Writable", "desc": "A Node stream." },
+      "exampleKey": "fs_streams/fs_streams",
+      "snippet": "for await (const chunk of fs.createReadStream('demo.txt')) { /* ... */ }\nfs.createReadStream('a.txt').pipe(fs.createWriteStream('b.txt'))",
+      "differences": [
+        "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on.",
+        "`createReadStream` reads eagerly to EOF at construction (chunked, not a lazy pull) — a huge file is fully read into per-chunk buffers.",
+        "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors."
+      ],
+      "seeAlso": ["fs.async", "fs.readFileSync"],
+      "spec": { "mdn": "https://nodejs.org/api/fs.html#fscreatereadstreampath-options" }
+    },
+    {
+      "id": "fs.fileapi",
+      "name": "File / FileReader / FileSystemFileHandle",
+      "statusRow": "File / FileReader / FileSystemFileHandle (browser-flavored File API)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "The browser-flavored File API is not planned — these model browser sandbox/permission concepts this compiler has no equivalent for. A native CLI/microservice program has direct filesystem access via the fs functions above instead.",
+      "seeAlso": ["fs.readFileSync"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/File" }
+    }
+  ]
+}

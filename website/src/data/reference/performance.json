@@ -1,0 +1,155 @@
+{
+  "surface": "performance",
+  "title": "Performance timing",
+  "kind": "web",
+  "statusPage": "PERFORMANCE-TIMING.md",
+  "coversRows": "all",
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
+  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. The recurring divergence is UTC-everywhere Date: construction, getters, and formatting all ignore local time for deterministic output regardless of machine/CI timezone, and the plain-number Date representation means `-1` stands in for an unparseable date (no NaN) and arithmetic does numeric durations rather than string coercion. performance.now() is a raw CLOCK_MONOTONIC reading with no fixed time origin, and performance.mark/measure are a Map-backed last-write-wins pair with no PerformanceObserver/getEntriesByName machinery behind them.",
+  "entries": [
+    {
+      "id": "performance.now",
+      "name": "performance.now()",
+      "statusRow": "performance.now()",
+      "signature": "performance.now(): number",
+      "badge": "caveats",
+      "description": "A CLOCK_MONOTONIC-based timestamp in milliseconds, as a double (sub-millisecond precision). Unlike Date.now(), it is not tied to wall-clock time, so it is the right choice for measuring elapsed time by subtracting two readings.",
+      "returns": { "type": "number", "desc": "Monotonic milliseconds as a double." },
+      "exampleKey": "globals/globals",
+      "snippet": "const t1: number = performance.now()\nfor (let i = 0; i < 200000; i++) { arr.push(i) }\nconst t2: number = performance.now()\nconsole.log(t2 >= t1)      // true",
+      "differences": [
+        "No fixed \"time origin\" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time"
+      ],
+      "seeAlso": ["performance.mark", "Date.now"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Performance/now" }
+    },
+    {
+      "id": "performance.mark",
+      "name": "performance.mark(name) / performance.measure(name, start, end?)",
+      "statusRow": "performance.mark(name) / performance.measure(name, start, end?)",
+      "signature": "performance.mark(name: string): void; performance.measure(name: string, startMark: string, endMark?: string): number",
+      "badge": "caveats",
+      "description": "Named timing marks on top of performance.now(), backed by a Map<string, number>. mark(name) records \"now\" under a name; measure(label, startMark, endMark?) returns the elapsed milliseconds between two marks as a plain number. endMark defaults to the current performance.now() reading when omitted, and measuring against a name that was never marked throws — matching real performance.measure().",
+      "returns": { "type": "number", "desc": "Elapsed milliseconds from measure(); mark() returns nothing." },
+      "exampleKey": "globals/globals",
+      "snippet": "performance.mark(\"loop-start\")\nfor (let i = 0; i < 200000; i++) { arr2.push(i) }\nperformance.mark(\"loop-end\")\nconst loopMs: number = performance.measure(\"loop\", \"loop-start\", \"loop-end\")",
+      "differences": [
+        "Re-marking a name overwrites its timestamp — last-write-wins, not a full ordered entries list",
+        "`measure()` returns the elapsed milliseconds directly as a plain number rather than a `PerformanceMeasure` object, and its own `name` argument is evaluated but not stored anywhere"
+      ],
+      "seeAlso": ["performance.now"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Performance/mark" }
+    },
+    {
+      "id": "Date",
+      "name": "Date",
+      "statusRow": "Date",
+      "signature": "new Date(); new Date(ms); new Date(isoString); new Date(year, month, day?, hours?, minutes?, seconds?, ms?)",
+      "badge": "caveats",
+      "description": "A thin wrapper over milliseconds-since-epoch. Constructs from no argument (now), a millisecond number, an ISO string, or year/month/day/... fields (month 0-indexed, omitted trailing fields defaulting like real JS). Provides getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds, getTime/valueOf, and toISOString.",
+      "returns": { "type": "Date", "desc": "A Date value (a plain number under the hood)." },
+      "exampleKey": "date/date",
+      "snippet": "const epoch: Date = new Date(0)\nconsole.log(epoch.getFullYear())       // 1970\nconst later: Date = new Date(1700000000000)\nconsole.log(later.toISOString())",
+      "differences": [
+        "UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone; the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC"
+      ],
+      "seeAlso": ["Date.now", "Date.parse", "Date.setters", "Date.arithmetic"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Date" }
+    },
+    {
+      "id": "Date.now",
+      "name": "Date.now()",
+      "statusRow": "Date.now()",
+      "signature": "Date.now(): number",
+      "badge": "exact",
+      "description": "Milliseconds since the epoch, via clock_gettime(CLOCK_REALTIME, ...). Wall-clock time, unlike performance.now().",
+      "returns": { "type": "number", "desc": "Milliseconds since the Unix epoch." },
+      "exampleKey": "date/date",
+      "snippet": "const nowMs: number = Date.now()\nconst now: Date = new Date()",
+      "seeAlso": ["Date", "performance.now"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now" }
+    },
+    {
+      "id": "Date.parse",
+      "name": "Date.parse(string)",
+      "statusRow": "Date.parse(string)",
+      "signature": "Date.parse(string: string): number",
+      "badge": "caveats",
+      "description": "Parses ISO 8601 strings, with or without milliseconds: Z (UTC), a +HH:MM/-HH:MM timezone offset (converted to UTC), or a bare YYYY-MM-DD date.",
+      "returns": { "type": "number", "desc": "Milliseconds since epoch, or -1 if unparseable." },
+      "exampleKey": "date/date",
+      "snippet": "console.log(Date.parse('2023-11-14T22:13:20.000Z'))   // 1700000000000\nconsole.log(Date.parse('2023-11-14'))                 // 1699920000000\nconsole.log(Date.parse('not a date'))                 // -1",
+      "differences": [
+        "Unparseable input returns `-1` (a documented sentinel — this compiler's Date has no NaN representation)"
+      ],
+      "seeAlso": ["Date"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/parse" }
+    },
+    {
+      "id": "Date.setters",
+      "name": "Date setters (setFullYear, setMonth, setDate, setHours, setMinutes, setSeconds, setMilliseconds, setTime)",
+      "statusRow": "Date setters (setFullYear, setMonth, setDate, setHours, setMinutes, setSeconds, setMilliseconds, setTime)",
+      "signature": "date.setFullYear(y: number): number  // and setMonth/setDate/setHours/setMinutes/setSeconds/setMilliseconds/setTime",
+      "badge": "caveats",
+      "description": "Mutate a named Date variable in place and return the new timestamp, matching real JS.",
+      "returns": { "type": "number", "desc": "The new timestamp after mutation." },
+      "exampleKey": "date/date",
+      "snippet": "const editable: Date = new Date(0)\nconst newTimestamp: number = editable.setFullYear(2020)\neditable.setMonth(5)\neditable.setDate(15)",
+      "differences": [
+        "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)",
+        "Only the single-argument form of each setter (no `setFullYear(y, m, d)`-style overloads)"
+      ],
+      "seeAlso": ["Date", "Date.arithmetic"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/setFullYear" }
+    },
+    {
+      "id": "Date.arithmetic",
+      "name": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
+      "statusRow": "Date arithmetic (date ± durationMs, date - date, date += durationMs)",
+      "signature": "date + durationMs; date - durationMs; date - date; date += durationMs",
+      "badge": "caveats",
+      "description": "Date - Date gives the difference in milliseconds (a number), matching real JS. Adding or subtracting a numeric duration produces a new Date you can keep chaining methods on.",
+      "returns": { "type": "Date | number", "desc": "A new Date for ± duration; a number for Date - Date." },
+      "exampleKey": "date/date",
+      "snippet": "const start: Date = new Date(0)\nconst tomorrow: Date = start + oneDayMs\nconst elapsedMs: number = tomorrow - start\nconsole.log(elapsedMs)                      // 86400000",
+      "differences": [
+        "`Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation)",
+        "`Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time"
+      ],
+      "seeAlso": ["Date", "Date.setters"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Date" }
+    },
+    {
+      "id": "Date.toDateString",
+      "name": "Date.prototype.toDateString()",
+      "statusRow": "Date.prototype.toDateString()",
+      "signature": "date.toDateString(): string",
+      "badge": "caveats",
+      "description": "A fixed \"Www Mon DD YYYY\" shape (e.g. \"Thu Jan 01 1970\"), matching real JS exactly except for the UTC deviation.",
+      "returns": { "type": "string", "desc": "The date as a \"Www Mon DD YYYY\" string." },
+      "exampleKey": "date/date",
+      "snippet": "const launch: Date = new Date(1700000000000)\nconsole.log(launch.toDateString())          // Tue Nov 14 2023",
+      "differences": [
+        "Always UTC, not local time"
+      ],
+      "seeAlso": ["Date", "Date.toLocaleDateString"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toDateString" }
+    },
+    {
+      "id": "Date.toLocaleDateString",
+      "name": "Date.prototype.toLocaleDateString()",
+      "statusRow": "Date.prototype.toLocaleDateString()",
+      "signature": "date.toLocaleDateString(): string",
+      "badge": "caveats",
+      "description": "Mimics real JS's default (en-US, no explicit locale) \"M/D/YYYY\" output.",
+      "returns": { "type": "string", "desc": "The date as a \"M/D/YYYY\" string." },
+      "exampleKey": "date/date",
+      "snippet": "const launch: Date = new Date(1700000000000)\nconsole.log(launch.toLocaleDateString())    // 11/14/2023",
+      "differences": [
+        "One fixed `\"M/D/YYYY\"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support"
+      ],
+      "seeAlso": ["Date", "Date.toDateString"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleDateString" }
+    }
+  ]
+}

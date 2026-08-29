@@ -130,6 +130,22 @@ none:
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
+	// TDD-00142 Stage 3: the webview page-tick pump (@__kml_wv_pump) calls
+	// @__kml_timer_tick / @__kml_task_sched_step / @__kml_drain_microtasks
+	// unconditionally. When the corresponding runtime is absent, a no-op stub
+	// stands in — but only for symbols the HTTP path below does not already
+	// stub (guarded on !usedHTTP), so no symbol is defined twice.
+	if e.usedWebview {
+		if !e.usedTimers {
+			e.emitGlobal("define void @__kml_timer_tick() {\nentry:\n  ret void\n}")
+		}
+		if !e.usedTaskRuntime && !e.usedHTTP {
+			e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
+		}
+		if !e.usedMicrotasks && !e.usedHTTP {
+			e.emitGlobal("define void @__kml_drain_microtasks() {\nentry:\n  ret void\n}")
+		}
+	}
 	// Streaming-request-body pump stubs — referenced by both the event loop
 	// and the task scheduler's step, so emitted whenever either exists.
 	if (e.usedHTTP || e.usedTaskRuntime) && !e.usedReqBodyRuntime {

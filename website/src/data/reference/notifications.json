@@ -1,0 +1,82 @@
+{
+  "surface": "notifications",
+  "title": "Deferred browser APIs",
+  "kind": "web",
+  "statusPage": "NOTIFICATIONS-MISC.md",
+  "coversRows": "all",
+  "coverageScope": "subset",
+  "coverage": { "loose": "0/7", "strict": "0/7" },
+  "lede": "These are browser platform APIs that are deliberately out of scope for a compiler that targets native CLI tools and microservices — there is no DOM, no browser permission model, and no service-worker lifecycle to hang them on. A few of them are interesting only as shapes: the same familiar surface could one day be re-backed by an OS-native implementation, and those rows note where that would genuinely earn its keep. Nothing on this page is implemented.",
+  "entries": [
+    {
+      "id": "notifications.notification",
+      "name": "Notifications API",
+      "statusRow": "Notifications API",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "The Web Notifications API shows desktop notifications from a page. The Notification shape maps cleanly onto real OS notification systems — macOS Notification Center, Linux libnotify/notify-send — so a native reinterpretation would be a genuinely useful CLI capability. What stays out of scope is the browser side: permission prompts and service-worker-driven delivery. It is noted as a possible future native reinterpretation, not a committed target.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API" }
+    },
+    {
+      "id": "notifications.storage",
+      "name": "Storage API (localStorage / sessionStorage)",
+      "statusRow": "Storage API (localStorage / sessionStorage)",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "The Web Storage API is the browser's synchronous key/value store. Its getItem/setItem/removeItem shape backs naturally onto a file-persisted native key/value store, with sessionStorage as an in-process sibling — a lighter-weight companion to a native storage layer and handy for CLI config and state persistence. It is noted as a possible future native reinterpretation, not a committed target.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API" }
+    },
+    {
+      "id": "notifications.clipboard",
+      "name": "Clipboard API",
+      "statusRow": "Clipboard API",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "The Clipboard API reads from and writes to the system clipboard through navigator.clipboard. That read/write maps onto the OS clipboard tools (macOS pbcopy/pbpaste, Linux xclip/wl-copy), which would be useful for CLI tooling; the async, permission-gated access model is the browser-specific part left behind. It is noted as a possible future native reinterpretation, not a committed target.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API" }
+    },
+    {
+      "id": "notifications.push",
+      "name": "Push API",
+      "statusRow": "Push API",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "The Push API delivers server-sent messages to a page even when it is not open. It requires a Service Worker plus browser push infrastructure, and there is no meaningful native reinterpretation of that model, so it is out of scope.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Push_API" }
+    },
+    {
+      "id": "notifications.serviceworker",
+      "name": "Service Worker API",
+      "statusRow": "Service Worker API",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "Service Workers are browser-only background scripts with their own install/activate/fetch lifecycle sitting between a page and the network. That model has no counterpart in a native binary, so it is out of scope.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API" }
+    },
+    {
+      "id": "notifications.geolocation",
+      "name": "Geolocation API",
+      "statusRow": "Geolocation API",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "The Geolocation API exposes the device's location through a browser permission prompt. It is a hardware sensor tied to that browser permission model, with nothing to reinterpret in a native CLI context, so it is out of scope.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API" }
+    },
+    {
+      "id": "notifications.canvas",
+      "name": "Canvas / WebGL / WebGPU",
+      "statusRow": "Canvas / WebGL / WebGPU",
+      "signature": "// not implemented",
+      "badge": "missing",
+      "description": "Canvas, WebGL, and WebGPU are the browser's 2D and GPU drawing surfaces. Graphics rendering is not part of a CLI or microservice target, so these are out of scope; direct framebuffer or hardware output is a separate track altogether rather than a reinterpretation of these APIs.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API" }
+    }
+  ]
+}

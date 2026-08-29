@@ -1956,3 +1956,35 @@ type TypeAnnotation struct {
 	// map-backed dynamic object; V1 disallows it combining with named Fields.
 	IndexSig *TypeAnnotation
 }
+
+// NewHTTPAgentExpression is `new http.Agent(options?)` / `new Agent(options?)`
+// (ADR-00432): an inert connection-pool config token — this compiler's client
+// opens one connection per request, so the options carry no behavior.
+type NewHTTPAgentExpression struct {
+	Options Expression // nil, or the options object literal
+	pos     Pos
+}
+
+func (*NewHTTPAgentExpression) nodeMarker()   {}
+func (*NewHTTPAgentExpression) exprMarker()   {}
+func (n *NewHTTPAgentExpression) GetPos() Pos { return n.pos }
+
+func NewNewHTTPAgentExpression(options Expression, pos Pos) *NewHTTPAgentExpression {
+	return &NewHTTPAgentExpression{Options: options, pos: pos}
+}
+
+// NewWebviewExpression is `new Webview(options?)` (TDD-00142): the system
+// webview window handle. Options is the `{ title, width, height, debug }`
+// object literal (all fields optional).
+type NewWebviewExpression struct {
+	Options Expression // nil, or the options object literal
+	pos     Pos
+}
+
+func (*NewWebviewExpression) nodeMarker()   {}
+func (*NewWebviewExpression) exprMarker()   {}
+func (n *NewWebviewExpression) GetPos() Pos { return n.pos }
+
+func NewNewWebviewExpression(options Expression, pos Pos) *NewWebviewExpression {
+	return &NewWebviewExpression{Options: options, pos: pos}
+}

@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/os.json; edit the JSON, then run `make status`. -->
+
 # os
 
 > Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information. See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md).

@@ -1716,3 +1716,167 @@ const round = http2.getUnpackedSettings(http2.getPackedSettings(http2.getDefault
 console.log("round", round.headerTableSize, round.maxConcurrentStreams, round.enableConnectProtocol)
 `, "hdr :path\ncode 8\ndefaults 4096 true 16384\npacked 12 1 100 2 1\nround 4096 4294967295 false")
 }
+
+func TestE2EHTTPChainedListenBinding(t *testing.T) {
+	// The chained-binding idiom Node tests use constantly:
+	// `const server = http.createServer(cb).listen(0, readyCb)` — listen()
+	// returns the server, and the handle is stored into the binding *before*
+	// the ready callback runs, so `server.address().port` works inside it
+	// (the var-decl split, ADR-00423).
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end("hi:" + req.path)
+})).listen(0, mustCall(() => {
+  http.get({ port: server.address().port, path: "/c" }, mustCall((res) => {
+    let data = ""
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', () => { console.log("chained", data) })
+    server.close()
+  }))
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "chained hi:/c") {
+		t.Errorf("chained-binding response never delivered: %q", out)
+	}
+}
+
+func TestE2EHTTPCreateServerMustNotCall(t *testing.T) {
+	// `createServer(mustNotCall())` — a server that must never see a request
+	// (ADR-00424): a zero-param listener wraps into a synthesized (req, res)
+	// handler that invokes it, so a hit registers the exit-verified failure.
+	src := `
+import http from 'http'
+import { mustCall, mustNotCall } from 'test'
+const server = http.createServer(mustNotCall())
+server.listen(0, mustCall(() => {
+  console.log("bound: " + (server.address().port > 0))
+  server.close()
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "bound: true") {
+		t.Errorf("server never bound: %q", out)
+	}
+}
+
+func TestE2EHTTPServerHandleInTopLevelFunction(t *testing.T) {
+	// A top-level helper function referencing the sibling server-handle
+	// binding — the corpus's `function nextRequest() { … server.address()
+	// … }` idiom. Works because an http.createServer binding (plain or
+	// chained) promotes to a module global (ADR-00426).
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end("r" + req.path)
+}, 2))
+function nextRequest(i: number) {
+  http.get({ port: server.address().port, path: "/q" + i }, mustCall((res) => {
+    res.resume()
+    if (i === 1) { nextRequest(2) } else { server.close() }
+  }))
+}
+server.listen(0, mustCall(() => { nextRequest(1) }))
+console.log("done")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "done") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestE2EHTTPClientVariableOptionsObject(t *testing.T) {
+	// A variable-bound options object (`const options = {...};
+	// http.get(options, cb)`) — previously the object pointer silently fell
+	// through as the URL and the program hung (ADR-00429). The 'agent' key
+	// is accepted (one connection per request ≙ a non-keepAlive Agent).
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => { res.end("v:" + req.path) }))
+server.listen(0, mustCall(() => {
+  const options = { agent: null, port: server.address().port, path: "/varopt" }
+  http.get(options, mustCall((res) => {
+    let d = ""
+    res.on('data', (c: string) => { d = d + c })
+    res.on('end', () => { console.log("got " + d) })
+    server.close()
+  }))
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "got v:/varopt") {
+		t.Errorf("variable-options request failed: %q", out)
+	}
+}
+
+func TestE2EHTTPClientRequestHandle(t *testing.T) {
+	// The ClientRequest handle (ADR-00430): http.request(...) sends nothing
+	// until .end() (the chained corpus idiom), and an aborted pre-end request
+	// never fires — the server handler is mustNotCall-verified.
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end('ok')
+  server.close()
+})).listen(0, mustCall(() => {
+  http.request({ port: server.address().port }, mustCall((res) => {
+    let data = ''
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', mustCall(() => { console.log("data: " + data) }))
+  })).end()
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "data: ok") {
+		t.Errorf("request().end() roundtrip failed: %q", out)
+	}
+}
+
+func TestE2EHTTPClientRequestAbort(t *testing.T) {
+	src := `
+import http from 'http'
+import { mustCall, mustNotCall } from 'test'
+const server = http.createServer(mustNotCall())
+server.listen(0, mustCall(() => {
+  const req = http.request({ port: server.address().port })
+  req.on('error', mustNotCall())
+  req.abort()
+  server.close()
+}))
+console.log("aborted cleanly")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "aborted cleanly") {
+		t.Errorf("abort path failed: %q", out)
+	}
+}
+
+func TestE2EHTTPAgentInert(t *testing.T) {
+	// `new http.Agent(options)` (ADR-00432): an inert pool-config token —
+	// constructible (qualified or named import), passable as the client's
+	// `agent` option, `.destroy()`-able; pooling itself never happens (one
+	// connection per request, Node's non-keepAlive behavior).
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+const server = http.createServer(mustCall((req, res) => { res.end('a') }))
+server.listen(0, mustCall(() => {
+  http.get({ port: server.address().port, agent: agent }, mustCall((res) => {
+    res.resume()
+    agent.destroy()
+    server.close()
+  }))
+}))
+console.log("agent ok")
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "agent ok") {
+		t.Errorf("agent flow failed: %q", out)
+	}
+}

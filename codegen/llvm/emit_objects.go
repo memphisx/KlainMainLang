@@ -442,11 +442,38 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 }
 
 func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
+	// `const { subtle } = globalThis.crypto` / `= crypto` (the corpus's
+	// standard WebCrypto binding, ADR-00434): `subtle` is a compile-time
+	// pseudo-namespace, not a bindable value — register the local name as a
+	// subtle alias (isCryptoSubtle consults it) and emit nothing.
+	if src, ok := cryptoGlobalExpr(s.Init); ok && src {
+		if len(s.Props) == 1 && s.Props[0].Key == "subtle" && s.Props[0].Default == nil {
+			if e.cryptoSubtleAliases == nil {
+				e.cryptoSubtleAliases = map[string]bool{}
+			}
+			e.cryptoSubtleAliases[s.Props[0].Local] = true
+			return nil
+		}
+	}
 	objPtr, objTy, err := e.resolveObjectPtr(s.Init, s.GetPos())
 	if err != nil {
 		return err
 	}
 	return e.unpackObjectPatternInto(objPtr, objTy, s.Props, s.GetPos())
+}
+
+// cryptoGlobalExpr reports whether expr is the ambient WebCrypto global —
+// the identifier `crypto` (unshadowed) or `globalThis.crypto`.
+func cryptoGlobalExpr(expr ast.Expression) (bool, bool) {
+	if id, ok := expr.(*ast.Identifier); ok && id.Name == "crypto" {
+		return true, true
+	}
+	if mem, ok := expr.(*ast.MemberExpression); ok && mem.Property == "crypto" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "globalThis" {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 // unpackObjectPatternInto is emitObjectDestructuring's core, factored out
@@ -1239,4 +1266,25 @@ func (e *Emitter) emitGroupMapIndex(sym Symbol, indexExpr ast.Expression, pos as
 		elemTy = *sym.Ty.ElemType
 	}
 	return Value{Ref: retReg, Ty: ArrayOf(elemTy)}, nil
+}
+
+// registerCryptoSubtleAliases pre-scans top-level statements for the
+// `const { subtle } = globalThis.crypto` binding (ADR-00434) so Pass 2
+// function bodies see the alias before the statement itself emits.
+func (e *Emitter) registerCryptoSubtleAliases(prog *ast.Program) {
+	for _, stmt := range prog.Body {
+		d, ok := stmt.(*ast.ObjectDestructuring)
+		if !ok {
+			continue
+		}
+		if g, _ := cryptoGlobalExpr(d.Init); !g {
+			continue
+		}
+		if len(d.Props) == 1 && d.Props[0].Key == "subtle" && d.Props[0].Default == nil {
+			if e.cryptoSubtleAliases == nil {
+				e.cryptoSubtleAliases = map[string]bool{}
+			}
+			e.cryptoSubtleAliases[d.Props[0].Local] = true
+		}
+	}
 }

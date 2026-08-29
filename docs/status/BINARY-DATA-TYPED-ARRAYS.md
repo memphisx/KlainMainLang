@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/binary-data-typed-arrays.json; edit the JSON, then run `make status`. -->
+
 # Binary Data & Typed Arrays
 
 > Part of the [Implementation Status](README.md) index. Binary views over a raw `ArrayBuffer` — essential for networking, crypto, and file I/O.

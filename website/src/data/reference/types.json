@@ -1,0 +1,411 @@
+{
+  "surface": "types",
+  "title": "Type system",
+  "kind": "language",
+  "statusPage": "TYPE-SYSTEM.md",
+  "coversRows": "all",
+  "coverageScope": "subset",
+  "coverage": { "loose": "30/31", "strict": "14/31" },
+  "lede": "TypeScript's type surface reinterpreted for whole-program AOT compilation, so the divergences are about what a static native target can and can't model. Advanced type-level machinery — mapped/utility/conditional types, generics, intersections, typeof queries — is evaluated at compile time via monomorphization, then erased, and assertions (`as T`, `as const`, `satisfies`) and modifiers (`readonly`) are likewise erased rather than enforcing. The primitives are JS-faithful (`number` is an IEEE-754 double; `bigint` is arbitrary-precision), with the extended integer/float JSDoc types as the escape hatch for real fixed-width integer semantics.",
+  "entries": [
+    {
+      "id": "types.number",
+      "name": "number → double",
+      "statusRow": "number → double",
+      "signature": "let n: number",
+      "badge": "caveats",
+      "description": "A JS-faithful IEEE-754 double: 0.1 + 0.2 is 0.30000000000000004, 10 / 3 is 3.3333333333333335, 1 / 0 is Infinity. The explicit JSDoc integer types are the opt-in escape hatch when real integer semantics matter.",
+      "snippet": "console.log(0.1 + 0.2)   // 0.30000000000000004\nconsole.log(10 / 3)      // 3.3333333333333335\nconsole.log(2 ** -1)     // 0.5",
+      "differences": [
+        "A plain `number` past 2^53 loses precision exactly as JS does (`9007199254740993` is `…992`) — inherent to the double model, not a defect (use `int64`/`uint64` for exact 64-bit integers)",
+        "Mixing an explicit integer type with a bare literal promotes to double (`int32 / 2` is `3.5`); use two integer-typed operands for integer division"
+      ],
+      "seeAlso": ["types.jsdocint", "types.jsdocfloat"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number" }
+    },
+    {
+      "id": "types.string",
+      "name": "string → ptr",
+      "statusRow": "string → ptr",
+      "signature": "let s: string",
+      "badge": "exact",
+      "description": "The string type, lowered to a pointer at the IR level.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html" }
+    },
+    {
+      "id": "types.boolean",
+      "name": "boolean → i1",
+      "statusRow": "boolean → i1",
+      "signature": "let b: boolean",
+      "badge": "exact",
+      "description": "The boolean type, lowered to a single-bit i1.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html" }
+    },
+    {
+      "id": "types.void",
+      "name": "void",
+      "statusRow": "void",
+      "signature": "function f(): void",
+      "badge": "exact",
+      "description": "The absence of a return value on a function.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#void" }
+    },
+    {
+      "id": "types.nullundefined",
+      "name": "null / undefined",
+      "statusRow": "null / undefined",
+      "signature": "let x: T | null",
+      "badge": "exact",
+      "description": "The null and undefined values, represented as a sentinel null pointer.",
+      "seeAlso": ["types.nullable"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#null-and-undefined" }
+    },
+    {
+      "id": "types.jsdocint",
+      "name": "JSDoc extended integers",
+      "statusRow": "JSDoc extended integers",
+      "signature": "/** @type {int32} */ let n = 0",
+      "badge": "exact",
+      "description": "A JSDoc @type override that gives a binding real fixed-width integer semantics: int8..int64 and uint8..uint64, with integer division, exact values past 2^53, and bit-width storage.",
+      "seeAlso": ["types.number", "types.jsdocfloat"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html" }
+    },
+    {
+      "id": "types.jsdocfloat",
+      "name": "JSDoc extended floats",
+      "statusRow": "JSDoc extended floats",
+      "signature": "/** @type {float32} */ let x = 0",
+      "badge": "exact",
+      "description": "A JSDoc @type override selecting float32 or float64. Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript Number::toString, so 1.1 + 2.2 prints 3.3000000000000003 and integer-valued floats drop the point. A float32 prints against its widened double.",
+      "seeAlso": ["types.number", "types.jsdocint"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html" }
+    },
+    {
+      "id": "types.any",
+      "name": "any",
+      "statusRow": "any",
+      "signature": "let x: any",
+      "badge": "caveats",
+      "description": "A runtime-tagged value supporting declare/assign/reassign/print/typeof/=== plus bare any params and returns on every function shape. Objects and arrays box by reference — === is reference identity, typeof is \"object\".",
+      "snippet": "let x: any = 5\nx = \"hello\"\nx = true\nconsole.log(typeof x)   // boolean",
+      "differences": [
+        "Arithmetic on an `any` is a clean compile error",
+        "Nested positions `any[]`/`{ x: any }` are clean compile errors",
+        "A boxed array keeps only its data pointer — length/elements aren't recoverable, so it stringifies to the `[object Array]` tag, not its contents"
+      ],
+      "seeAlso": ["types.unknown", "types.union"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#any" }
+    },
+    {
+      "id": "types.unknown",
+      "name": "unknown",
+      "statusRow": "unknown",
+      "signature": "let x: unknown",
+      "badge": "caveats",
+      "description": "The type-safe counterpart to any, with the same Staged V1 scope: declare/assign/reassign/print/typeof/=== plus bare params and returns.",
+      "differences": [
+        "Same as `any` (see above)"
+      ],
+      "seeAlso": ["types.any"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#unknown" }
+    },
+    {
+      "id": "types.never",
+      "name": "never",
+      "statusRow": "never",
+      "signature": "function f(): never",
+      "badge": "exact",
+      "description": "The bottom type. A (): never function that always throws works correctly.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#never" }
+    },
+    {
+      "id": "types.symbol",
+      "name": "symbol",
+      "statusRow": "symbol",
+      "signature": "const s = Symbol(\"desc\")",
+      "badge": "caveats",
+      "description": "V1 opaque unique values — Symbol()/Symbol(\"desc\") (no new, Symbol is not a constructor), ===/!==, typeof, .description, .toString(). Uniqueness comes from the value's own heap-pointer identity, so two Symbol() calls with the same description are never equal.",
+      "snippet": "const a = Symbol(\"id\")\nconst b = Symbol(\"id\")\nconsole.log(a === b)   // 0",
+      "differences": [
+        "No dynamic property keys",
+        "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys, not evaluable `Symbol` values",
+        "No `Symbol.for`/`Symbol.keyFor` registry"
+      ],
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol" }
+    },
+    {
+      "id": "types.bigint",
+      "name": "bigint",
+      "statusRow": "bigint",
+      "signature": "const n = 10n",
+      "badge": "caveats",
+      "description": "Arbitrary-precision integers over a backend-agnostic ABI, selectable via -bigint=libtommath|gmp (default libtommath, public domain). Literals, the full arithmetic/bitwise operator set, same-type and cross-type-with-integer comparisons, typeof, ++/--, .toString([radix]), params/returns/fields/arrays, and BigInt(int|string) all work. Division/modulo by zero throws a catchable Error.",
+      "snippet": "const a = 10n\nconst b = 20n\nconsole.log(a + b)      // 30n\nconsole.log(typeof a)   // \"bigint\"",
+      "differences": [
+        "No `.toLocaleString()`, `BigInt.asIntN`/`asUintN`; bare `Number(bigint)` conversion unsupported (part of a general `Number()`/`String()` gap)"
+      ],
+      "seeAlso": ["types.number"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt" }
+    },
+    {
+      "id": "types.nullable",
+      "name": "T | null (nullable)",
+      "statusRow": "T | null (nullable)",
+      "signature": "let x: number | null",
+      "badge": "exact",
+      "description": "A single-branch T | null uses a presence-flagged nullable-scalar slot ({ i1, T }), so a genuine null is distinguishable from a legitimately-present 0 everywhere — ??, === null, printing, JSON — across locals, params, returns, fields, and Maps. A multi-branch A | B | null is handled by the union box instead.",
+      "snippet": "let present: number | null = 0\nlet absent: number | null = null\nconsole.log(present ?? 42)      // 0\nconsole.log(absent ?? 42)      // 42",
+      "seeAlso": ["types.nullundefined", "types.union"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#null-and-undefined" }
+    },
+    {
+      "id": "types.object",
+      "name": "Object types (interfaces / inline {})",
+      "statusRow": "Object types (interfaces / inline {})",
+      "signature": "interface Point { x: number; y: number }",
+      "badge": "exact",
+      "description": "Interfaces, inline {} shapes, and type aliases. A literal's fields are coerced against the declared type wherever one is known — variable annotation, function parameter/return/default, array element type, or nested field — not just the literal's own self-inferred type.",
+      "snippet": "interface Point {\n  x: number;\n  y: number;\n}\ntype Rect = { width: number; height: number }",
+      "seeAlso": ["types.intersection", "types.mapped"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html" }
+    },
+    {
+      "id": "types.array",
+      "name": "Array types T[]",
+      "statusRow": "Array types T[]",
+      "signature": "let xs: number[]",
+      "badge": "exact",
+      "description": "Homogeneous arrays, stored as a { ptr, i64 } aggregate.",
+      "seeAlso": ["types.tuple"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#arrays" }
+    },
+    {
+      "id": "types.promise",
+      "name": "Promise<T>",
+      "statusRow": "Promise<T>",
+      "signature": "async function f(): Promise<number>",
+      "badge": "exact",
+      "description": "The Promise<T> type for async values.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise" }
+    },
+    {
+      "id": "types.function",
+      "name": "Function types (a: T) => R",
+      "statusRow": "Function types (a: T) => R",
+      "signature": "let f: (a: number) => number",
+      "badge": "exact",
+      "description": "Function types, represented as a closure struct { funcPtr, envPtr }.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/functions.html#function-type-expressions" }
+    },
+    {
+      "id": "types.map",
+      "name": "Map<K,V>",
+      "statusRow": "Map<K,V>",
+      "signature": "let m: Map<string, number>",
+      "badge": "exact",
+      "description": "The Map<K,V> collection, with separate helpers per key/value combination (<string,number>, <string,string>, etc.).",
+      "seeAlso": ["types.set"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map" }
+    },
+    {
+      "id": "types.set",
+      "name": "Set<T>",
+      "statusRow": "Set<T>",
+      "signature": "let s: Set<number>",
+      "badge": "exact",
+      "description": "The Set<T> collection.",
+      "seeAlso": ["types.map"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set" }
+    },
+    {
+      "id": "types.union",
+      "name": "Union types beyond T | null",
+      "statusRow": "Union types beyond T | null",
+      "signature": "let x: string | number",
+      "badge": "caveats",
+      "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer.",
+      "snippet": "let x: string | number = \"hello\"\nconsole.log(typeof x)    // string\nx = 42\nconsole.log(typeof x)    // number",
+      "differences": [
+        "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member, or ≥2 as a **discriminated union** sharing a first-position string-literal tag), and a `ReadableStream` member; array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported",
+        "Usable at the top level of a var declaration/function param/return and as an **object field** (checked + boxed at construction); as an **array element** it's still rejected (element-level checking not wired)",
+        "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access"
+      ],
+      "seeAlso": ["types.nullable", "types.any"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#union-types" }
+    },
+    {
+      "id": "types.intersection",
+      "name": "Intersection types",
+      "statusRow": "Intersection types",
+      "signature": "let x: HasName & HasAge",
+      "badge": "caveats",
+      "description": "An object-type intersection collapses at resolveType into one merged ObjectType — member fields concatenated, compatible duplicates deduped — with no runtime tag, unlike a union. & binds tighter than |. Works as a named interface, inline {}, or type alias member, and in variable/param/return/field/array-element positions.",
+      "snippet": "interface HasName { name: string }\ninterface HasAge { age: number }\nconst p: HasName & HasAge = { name: \"Kyriakos\", age: 34 }",
+      "differences": [
+        "Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error",
+        "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)",
+        "Inherits object types' missing-field leniency: a partial object literal for an `A & B`-typed target is not rejected (a pre-existing object-literal behavior, not intersection-specific)"
+      ],
+      "seeAlso": ["types.object", "types.union"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html#intersection-types" }
+    },
+    {
+      "id": "types.tuple",
+      "name": "Tuple types",
+      "statusRow": "Tuple types",
+      "signature": "const point: [number, number]",
+      "badge": "caveats",
+      "description": "A fixed-arity, heterogeneous, positional value stored as a fixed-shape struct. Supports the tuple literal, constant-index read and assignment, .length (compile-time constant), destructuring (including nested and for-of), and array-shaped rendering. Map/Array/Object.entries() return real [K, V] tuples.",
+      "snippet": "const point: [number, number] = [3, 4]\nconsole.log(point[0])              // 3\nconst [name, value] = point",
+      "differences": [
+        "No rest/optional/named elements",
+        "Constant index only — no non-constant index; compound assignment to an element (`t[0] += x`) is a clean rejection",
+        "No array methods (`.map`/`.filter`/…) on a tuple (`.length` works)",
+        "Not supported nested in `any` or a union"
+      ],
+      "seeAlso": ["types.array"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html#tuple-types" }
+    },
+    {
+      "id": "types.mapped",
+      "name": "Mapped & utility types",
+      "statusRow": "Mapped & utility types",
+      "signature": "type Clone = { [K in keyof T]: T[K] }",
+      "badge": "caveats",
+      "description": "Partial/Required/Readonly/NonNullable/Pick/Omit/Record, the general mapped form { [K in keyof T]: V }, keyof, indexed access T[K], and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation.",
+      "snippet": "type Clone = { [K in keyof User]: User[K] }",
+      "differences": [
+        "`Partial`/`Required`/`Readonly` are structural no-ops — the object model already zero-fills omitted fields and does no mutation checking; the visibly-effective utilities are `Pick`/`Omit`/`Record`",
+        "Mapped value body handles `T[K]` (homomorphic), a bare `K`, a concrete type (uniform), or `T[K]` wrapped one level in `Array`/`Promise`/`Set`; a `T[K]` nested deeper isn't substituted",
+        "No key remapping (`as`) or modifier-removal (`-?`/`-readonly`); `?`/`readonly` are accepted but near-no-ops",
+        "String-literal types resolve to `string` — the literal value is not narrowed/enforced",
+        "An unrecognized `Name<Args>` (or a malformed `Pick`/`Omit`) is not yet a clean rejection"
+      ],
+      "seeAlso": ["types.object", "types.conditional"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/mapped-types.html" }
+    },
+    {
+      "id": "types.conditional",
+      "name": "Conditional types (T extends U ? X : Y)",
+      "statusRow": "Conditional types (T extends U ? X : Y)",
+      "signature": "type ElementOf<T> = T extends Array<infer E> ? E : T",
+      "badge": "caveats",
+      "description": "Evaluated at compile time off the monomorphized (concrete) check type — generic type aliases, infer capture, and a structural assignability predicate. Nested conditionals are right-associative.",
+      "snippet": "type ElementOf<T> = T extends Array<infer E> ? E : T\nconst one: ElementOf<number[]> = 7\nconst raw: ElementOf<string> = \"hi\"",
+      "differences": [
+        "`infer` supported for `Array<infer E>`/`Promise<infer V>` and a bare `infer R`; function-signature inference (`(...) => infer R`) and deeper `infer` nesting are deferred",
+        "`assignable` is structural width subtyping (objects), element-wise (arrays), IR-equality with numeric leniency (scalars) — not full variance"
+      ],
+      "seeAlso": ["types.mapped", "types.generics"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/conditional-types.html" }
+    },
+    {
+      "id": "types.generics",
+      "name": "Generics on user functions/interfaces/classes",
+      "statusRow": "Generics on user functions/interfaces/classes",
+      "signature": "function identity<T>(x: T): T",
+      "badge": "caveats",
+      "description": "V1 (default) is monomorphization — one specialized implementation per distinct combination of concrete types actually used. Covers function identity<T>, interface Box<T>, class Box<T>, and multiple type parameters <K, V>. <T extends X> constraints are parsed and enforced (structural width subtyping). V2 /** @erased */ compiles a generic function's body once, with no name mangling.",
+      "snippet": "function identity<T>(x: T): T {\n  return x;\n}\nconsole.log(identity(42));       // 42\nconsole.log(identity(\"hello\"));  // hello",
+      "differences": [
+        "No explicit call-site type arguments for a *function* (`identity<number>(5)`) — inference-only, blocked by the `a<b>(c)` grammar ambiguity (a generic class still takes an explicit `new Box<T>(...)` list)",
+        "A generic function needs an inferable `T`/`T[]`-typed parameter for each of its type parameters",
+        "Map/Set/Promise/closure/dynamic type arguments are a clean rejection (scalars, arrays, and object/interface/class types are supported)",
+        "V2 `@erased` covers functions only (not interfaces/classes) and bare `T` positions only — `T[]` or `T` nested in an object field is a clean compile error",
+        "Arithmetic on an erased `T` hits the same \"operator on any/unknown\" rejection as plain `any`"
+      ],
+      "seeAlso": ["types.conditional", "types.mapped"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/generics.html" }
+    },
+    {
+      "id": "types.indexsig",
+      "name": "Index signatures ({ [k: string]: T })",
+      "statusRow": "Index signatures ({ [k: string]: T })",
+      "signature": "interface Scores { [player: string]: number }",
+      "badge": "caveats",
+      "description": "A string index signature types a dictionary of arbitrary string keys, backed by a map.",
+      "snippet": "interface Scores {\n  [player: string]: number;\n}\nconst scores: Scores = { alice: 10, bob: 7 };\nscores[\"carol\"] = 12;",
+      "differences": [
+        "String key only, map-backed — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work",
+        "A numeric index (`[i: number]: T`) and a mixed named+index shape (`{ id: number; [k: string]: T }`) are clean rejections",
+        "`JSON.stringify` of an index-signature dict is a clean rejection (no field table to walk) — build it from `Object.keys(...)`; a map-iterating stringify path is deferred"
+      ],
+      "seeAlso": ["types.object", "types.map"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html#index-signatures" }
+    },
+    {
+      "id": "types.typeofquery",
+      "name": "typeof type queries (type T = typeof x)",
+      "statusRow": "typeof type queries (type T = typeof x)",
+      "signature": "type Config = typeof config",
+      "badge": "caveats",
+      "description": "Derives a type from an existing value without restating its shape, usable as a type alias, an inline annotation, or a parameter/return type.",
+      "snippet": "const config = { host: \"localhost\", port: 8080 };\ntype Config = typeof config;\nconst staging: Config = { host: \"staging\", port: 9090 };",
+      "differences": [
+        "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type. A function-local binding shadowing a top-level one of the same name isn't distinguished (the top-level wins), and an unresolvable query degrades to the `number` default rather than erroring"
+      ],
+      "seeAlso": ["types.object"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/typeof-types.html" }
+    },
+    {
+      "id": "types.assertion",
+      "name": "Type assertions (x as T, as const, satisfies T)",
+      "statusRow": "Type assertions (x as T, as const, satisfies T)",
+      "signature": "const x = value as T",
+      "badge": "caveats",
+      "description": "Parsed as a left-associative postfix on any expression; as const and satisfies T are likewise identity.",
+      "differences": [
+        "**Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect"
+      ],
+      "seeAlso": ["types.readonly"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-assertions" }
+    },
+    {
+      "id": "types.templateliteral",
+      "name": "Template literal types ( a-${T} )",
+      "statusRow": "Template literal types ( a-${T} )",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Template literal types in a type position are not parsed. This is distinct from template literal values, which work.",
+      "differences": [
+        "Not parsed in a type position (`expected type name, got TEMPLATE_HEAD`). Distinct from template literal *values*, which work"
+      ],
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html" }
+    },
+    {
+      "id": "types.readonly",
+      "name": "readonly T[] array-type modifier",
+      "statusRow": "readonly T[] array-type modifier",
+      "signature": "let xs: readonly number[]",
+      "badge": "caveats",
+      "description": "The readonly array-type modifier parses in variable/parameter/return/field positions.",
+      "differences": [
+        "**Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered"
+      ],
+      "seeAlso": ["types.assertion", "types.array"],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/objects.html#the-readonlyarray-type" }
+    },
+    {
+      "id": "types.ambient",
+      "name": "Ambient declarations (declare const/function/class/module/namespace)",
+      "statusRow": "Ambient declarations (declare const/function/class/module/namespace)",
+      "signature": "declare const BUILD_ID: string",
+      "badge": "caveats",
+      "description": "declare ambient declarations describe types the environment provides; carrying no implementation, they are parsed and erased.",
+      "snippet": "declare const BUILD_ID: string;\ndeclare function nativeHook(x: number): number;\ndeclare module \"vendor-lib\" {\n  export function doThing(): void;\n}",
+      "differences": [
+        "Parsed and erased — the no-body/no-init forms and the brace-bodied `global`/`module`/`namespace`/`class` blocks all compile away. Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so a runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error"
+      ],
+      "seeAlso": [],
+      "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/declaration-files/by-example.html" }
+    }
+  ]
+}

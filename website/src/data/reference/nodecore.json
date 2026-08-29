@@ -1,0 +1,291 @@
+{
+  "surface": "nodecore",
+  "title": "Other Node core modules",
+  "kind": "node",
+  "statusPage": "NODE-CORE-MODULES.md",
+  "coversRows": "all",
+  "coverage": { "loose": "15/16", "loosePct": 94, "strict": "2/16", "strictPct": 13 },
+  "lede": "The smaller Node built-ins, grouped here rather than each given a full page. The recurring divergence is that anything nominally async is blocking under the hood — net/tls/dns/dgram fold their file descriptors into one select() loop, so a slow peer stalls it and connect/handshake failures throw a catchable Error rather than emitting an async 'error' event. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, the http/https clients are GET-only over libcurl, and vm stays out of scope behind the same blocker as bare eval().",
+  "entries": [
+    {
+      "id": "nodecore.querystring",
+      "name": "querystring (.parse, .stringify)",
+      "statusRow": "querystring (.parse, .stringify)",
+      "signature": "querystring.parse(str: string): Map<string,string>; querystring.stringify(m: Map<string,string>): string",
+      "badge": "exact",
+      "description": "The legacy \"a=b&c=d\" parse/stringify pair, largely superseded by URLSearchParams but a natural companion when a request handler already holds a Map<string,string>. A Map goes in and comes out — the same shape req.query and URLSearchParams already use. .parse does not strip a leading '?' (matching real Node, and distinct from new URLSearchParams(str), which does).",
+      "params": [{ "name": "str / m", "type": "string | Map<string,string>", "desc": "A raw query tail to parse, or a Map to serialize." }],
+      "returns": { "type": "Map<string,string> | string", "desc": "The parsed map, or the serialized query string." },
+      "exampleKey": "querystring/querystring",
+      "snippet": "const parsed = querystring.parse(\"name=Ada&topic=compilers%20and%20types\")\nconsole.log(parsed.get(\"topic\"))  // compilers and types",
+      "seeAlso": ["nodecore.httpclient"],
+      "spec": { "mdn": "https://nodejs.org/api/querystring.html" }
+    },
+    {
+      "id": "nodecore.assert",
+      "name": "assert (.ok, bare assert(cond, msg?), .equal/.strictEqual, .notEqual/.notStrictEqual, .deepEqual/.deepStrictEqual (+not*), .fail, .throws, .match/.doesNotMatch)",
+      "statusRow": "assert (.ok, bare assert(cond, msg?), .equal/.strictEqual, .notEqual/.notStrictEqual, .deepEqual/.deepStrictEqual (+not*), .fail, .throws, .match/.doesNotMatch)",
+      "signature": "assert(cond: boolean, msg?: string): void; assert.strictEqual(a, b); assert.deepStrictEqual(a, b); assert.throws(fn)",
+      "badge": "caveats",
+      "description": "Node's real assertion library — distinct from console.assert, which logs and continues. A failure throws a catchable AssertionError (kind-tagged as a base Error, since this compiler's fixed error-kind enum has no dedicated slot), the shape scripts and tests actually use.",
+      "returns": { "type": "void", "desc": "Nothing, or throws AssertionError." },
+      "exampleKey": "assert/assert",
+      "snippet": "assert.strictEqual(\"a\" + \"b\", \"ab\")\nassert.throws(() => { throw new Error(\"boom\") })",
+      "differences": [
+        "`equal`/`strictEqual` and `deepEqual`/`deepStrictEqual` (and their `not*` counterparts) are aliases of each other — this compiler's `==` has no implicit coercion to distinguish them",
+        "`deepStrictEqual` covers scalars, strings, arrays, and objects (recursively, incl. nested); Map/Set/class instances, nullable-scalar members, and TypedArrays are a clean compile error (V1)",
+        "`.match`/`.doesNotMatch`'s regexp argument must be statically a RegExp",
+        "`.throws` only checks that *something* was thrown, not the thrown value's type/message"
+      ],
+      "seeAlso": ["nodecore.test"],
+      "spec": { "mdn": "https://nodejs.org/api/assert.html" }
+    },
+    {
+      "id": "nodecore.test",
+      "name": "test / node:test (the **runner**: test/it, describe/suite, TestContext t.test/t.after/t.skip/t.todo/t.diagnostic, hooks before/after/beforeEach/afterEach — plus the native helpers mustCall/mustCallAtLeast/mustNotCall/skip/expectsError + env probes)",
+      "statusRow": "test / node:test (the **runner**: test/it, describe/suite, TestContext t.test/t.after/t.skip/t.todo/t.diagnostic, hooks before/after/beforeEach/afterEach — plus the native helpers mustCall/mustCallAtLeast/mustNotCall/skip/expectsError + env probes)",
+      "signature": "import { test, describe, mustCall } from 'test'; test(name, fn); mustCall(fn, n=1)",
+      "badge": "caveats",
+      "description": "The node:test runner plus the native helpers. mustCall is a first-class builtin (not Node's internal ../common): it wraps fn so its invocation count is verified at process exit via the existing exit sink — an unmet or exceeded count prints a diagnostic and exits non-zero, giving examples and tests real async assertions instead of console.log.",
+      "returns": { "type": "void | (...args) => void", "desc": "Registration, or a counting-trampoline wrapper." },
+      "differences": [
+        "Runner: **run-at-registration** (top-level code after a `test()` runs after it here, before it in Node); `beforeEach`/`afterEach` are single slots (last wins) and also fire for subtests; no `mock.*`, `t.plan`, `run()`, concurrency, or snapshots",
+        "`mustCall` supports callbacks of **0–3 simple (scalar/pointer) parameters** — a rest param, >3 args, or an array/nullable-scalar param is a clean compile error (the counting trampoline is signature-parametric)",
+        "`mustNotCall()` returns a `() => void`; using it where a non-zero-arity callback is expected is a type mismatch",
+        "`mustSucceed` is count-only (the \"err is falsy\" check is deferred); `expectWarning` runs the thunk but doesn't capture warnings"
+      ],
+      "seeAlso": ["nodecore.assert"],
+      "spec": { "mdn": "https://nodejs.org/api/test.html" }
+    },
+    {
+      "id": "nodecore.util",
+      "name": "util (.inspect, .format)",
+      "statusRow": "util (.inspect, .format)",
+      "signature": "util.format(fmt: string, ...args): string; util.inspect(value): string",
+      "badge": "caveats",
+      "description": ".inspect reuses the same value formatter as console.log (strings single-quoted, ClassName { … }, arrays, 10n). .format handles %s/%d/%i/%f/%j/%o/%O/%%, appends excess args space-separated, and leaves unrecognized specifiers literal — matching Node.",
+      "params": [
+        { "name": "fmt", "type": "string", "desc": "A string-literal format for .format." },
+        { "name": "value", "type": "any", "desc": "The value to render for .inspect." }
+      ],
+      "returns": { "type": "string", "desc": "The formatted/inspected string." },
+      "exampleKey": "util/format_inspect",
+      "snippet": "console.log(util.format(\"%s = %d\", \"count\", 42))\nconsole.log(util.inspect({ name: \"kml\", tags: [\"ts\", \"native\"] }))",
+      "differences": [
+        "No `.promisify` — the callback builtins (`zlib.gzip`, `child_process.exec`) are name-dispatched calls, not first-class function values to wrap; importing `promisify` fails cleanly",
+        "`.format` requires a string-**literal** format (compile-time walk); a runtime format string is a compile error",
+        "`.inspect`'s options object is accepted but ignored (no `depth`/`colors`)"
+      ],
+      "seeAlso": [],
+      "spec": { "mdn": "https://nodejs.org/api/util.html" }
+    },
+    {
+      "id": "nodecore.net",
+      "name": "net (TCP server: net.createServer, server.listen/address()/on('connection'|'listening')/close; TCP client: net.connect/createConnection (positional or { port, host }); connection socket .on('data'|'end')/.write/.end/.address()/.destroy()/.setNoDelay()/.setKeepAlive(); net.isIP/isIPv4/isIPv6)",
+      "statusRow": "net (TCP server: net.createServer, server.listen/address()/on('connection'|'listening')/close; TCP client: net.connect/createConnection (positional or { port, host }); connection socket .on('data'|'end')/.write/.end/.address()/.destroy()/.setNoDelay()/.setKeepAlive(); net.isIP/isIPv4/isIPv6)",
+      "signature": "net.createServer(cb).listen(port, cb?); net.connect(port, host?, cb?)",
+      "badge": "caveats",
+      "description": "TCP server and client. The accept loop and per-connection read pipes fold into the same select() event loop as child_process; a client socket reuses the same machinery once connected. 'data' delivers a Buffer; .write/.end take a string/Buffer/ArrayBuffer/DataView. address() reads the real bound address+port via getsockname+inet_ntop, making the listen(0) ephemeral-port idiom usable; net.isIP parses via inet_pton (0/4/6).",
+      "returns": { "type": "net.Server | net.Socket", "desc": "A server or connection handle." },
+      "exampleKey": "net/echo_server",
+      "snippet": "const server = net.createServer((socket) => {\n  socket.on('data', (chunk: Uint8Array) => { socket.write(chunk); });\n});\nserver.listen(9099);",
+      "differences": [
+        "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout; a connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event",
+        "Server binds IPv4 `0.0.0.0` only (no `host`/`path`/options object on `listen`); `.address()` reports the **real** bound address/port via `getsockname` (`{ family: \"IPv4\", address, port }`) — for a server that's `0.0.0.0`, for a connected socket its real local IP (e.g. `127.0.0.1`). Because the bind is IPv4-native, an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
+        "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); the IPC `{ path }` form is TCP-only-unsupported",
+        "`on('listening')` fires when the server binds (registered before or after `listen()`); no `'error'`/`'close'`/`'connect'` events on server or socket yet",
+        "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls; `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are **accepted but no-ops** (the blocking read model has no separately-schedulable flow or idle timer, and a socket's chunk type already follows the listener's declared parameter type)",
+        "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
+        "Listeners must be arrow/function-expression literals",
+        "`net.Server`/`net.Socket` are not exposed as constructible classes"
+      ],
+      "seeAlso": ["nodecore.tls", "nodecore.dgram"],
+      "spec": { "mdn": "https://nodejs.org/api/net.html" }
+    },
+    {
+      "id": "nodecore.dgram",
+      "name": "dgram (UDP sockets: createSocket('udp4'), bind, address(), on('message'), send, close)",
+      "statusRow": "dgram (UDP sockets: createSocket('udp4'), bind, address(), on('message'), send, close)",
+      "signature": "dgram.createSocket('udp4'); socket.bind(port); socket.send(msg, port, host)",
+      "badge": "caveats",
+      "description": "UDP sockets. Each socket's fd folds into the same select() event loop as net/child_process. 'message' fires with a Buffer and an rinfo { address, port }; send(msg, port, host) resolves host (name or IP) via the dns helper. msg/send payloads take a string/Buffer/ArrayBuffer/DataView.",
+      "returns": { "type": "dgram.Socket", "desc": "A UDP socket handle." },
+      "exampleKey": "dgram/echo",
+      "snippet": "const server = dgram.createSocket('udp4');\nserver.on('message', (msg: Uint8Array, rinfo) => {\n  server.send('reply:' + dec.decode(msg), rinfo.port, rinfo.address);\n});\nserver.bind(9199);",
+      "differences": [
+        "`udp4` only — no `udp6`",
+        "No `'listening'`/`'error'` events, options object, or multicast",
+        "Message listeners must be arrow/function-expression literals",
+        "`socket.send(msg, port, host)` positional form only — no `(msg, offset, length, port, address, cb)` form; no `.address()`/`.setBroadcast()`/`.setTTL()`/membership methods"
+      ],
+      "seeAlso": ["nodecore.net", "nodecore.dns"],
+      "spec": { "mdn": "https://nodejs.org/api/dgram.html" }
+    },
+    {
+      "id": "nodecore.tls",
+      "name": "tls (TLS-wrapped sockets)",
+      "statusRow": "tls (TLS-wrapped sockets)",
+      "signature": "tls.connect(port, host[, {rejectUnauthorized}][, onSecureConnect]); tls.createServer({ cert, key }, connectionListener)",
+      "badge": "caveats",
+      "description": "Client tls.connect (cert verification + SNI on by default) and server tls.createServer({ cert, key }) both return net-shaped handles (an SSL* in the socket), so .on('data')/.write()/.end()/.on('connection') reuse the net machinery, routing through SSL_read/SSL_write. A handshake or verify failure throws a catchable Error.",
+      "returns": { "type": "tls.TLSSocket | tls.Server", "desc": "A net-shaped TLS handle." },
+      "exampleKey": "tls/tls_client",
+      "snippet": "const sock = tls.connect(443, \"example.com\", () => {\n  sock.write(\"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n\");\n});\nsock.on(\"data\", (chunk: string) => { response += chunk; });",
+      "differences": [
+        "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop), the same simplification `net.connect` makes",
+        "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
+        "Client options `{ rejectUnauthorized }` only (SNI = the host; no client-cert / ALPN / `servername` override); server `{ cert, key }` are PEM **strings** only (one cert per server, no chain/passphrase, no `requestCert`); the options may be an object literal or a bound object value"
+      ],
+      "seeAlso": ["nodecore.net", "nodecore.https"],
+      "spec": { "mdn": "https://nodejs.org/api/tls.html" }
+    },
+    {
+      "id": "nodecore.dns",
+      "name": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
+      "statusRow": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
+      "signature": "dns.lookup(host, cb); dns.resolve4(host, cb); await dns.promises.lookup(host)",
+      "badge": "caveats",
+      "description": "getaddrinfo(3)-backed name resolution. lookup returns one dotted-quad, resolve4 all A records as a string[], promises.lookup a Promise<{address, family}>.",
+      "params": [{ "name": "host", "type": "string", "desc": "The hostname to resolve." }],
+      "returns": { "type": "void | Promise<{address, family}>", "desc": "Callback delivery, or a Promise." },
+      "exampleKey": "dns/lookup",
+      "snippet": "dns.lookup(\"localhost\", (err, address, family) => {\n  console.log(\"localhost ->\", address, \"family\", family);\n});",
+      "differences": [
+        "`dns.resolve4`/`resolve` use `getaddrinfo` (the OS resolver), not real DNS `A` queries — no `resolve6`/`resolveMx`/`resolveTxt`/`reverse`",
+        "IPv4 (`AF_INET`) only; `family` is always 4",
+        "The callback forms fire synchronously, not on a later event-loop tick",
+        "Failure passes a generic `Error` (`getaddrinfo ENOTFOUND`), not a `code`-tagged Node error"
+      ],
+      "seeAlso": ["nodecore.net"],
+      "spec": { "mdn": "https://nodejs.org/api/dns.html" }
+    },
+    {
+      "id": "nodecore.zlib",
+      "name": "zlib (gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw, unzip, each *Sync + (err, result) callback)",
+      "statusRow": "zlib (gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw, unzip, each *Sync + (err, result) callback)",
+      "signature": "zlib.gzipSync(input): Buffer; zlib.gunzipSync(buf): Buffer; zlib.gzip(input, (err, out) => …)",
+      "badge": "caveats",
+      "description": "One-shot compression over the same libz backend as CompressionStream, driven by a shared @__kml_zlib_oneshot helper. Input may be a Buffer/TypedArray, ArrayBuffer, DataView, or string (UTF-8); output is always a Buffer.",
+      "params": [{ "name": "input", "type": "string | Buffer | ArrayBuffer | DataView", "desc": "The data to compress or decompress." }],
+      "returns": { "type": "Buffer", "desc": "The compressed/decompressed bytes." },
+      "exampleKey": "zlib/zlib",
+      "snippet": "const gz = zlib.gzipSync(text)\nconsole.log(\"gunzip:\", dec.decode(zlib.gunzipSync(gz)) === text)\nconst best = zlib.deflateSync(text, { level: 9 })",
+      "differences": [
+        "The callback form fires synchronously, not deferred to the next event-loop tick",
+        "No Brotli (`brotliCompress*`) — it would pull in `-lbrotli`, a new system dependency this binding deliberately avoids",
+        "No class/stream forms (`createGzip()`, `zlib.Gzip`, …) — the WHATWG `CompressionStream`/`DecompressionStream` cover the streaming case",
+        "`{ level }` is the only supported option and must be a compile-time constant"
+      ],
+      "seeAlso": ["nodecore.streamweb"],
+      "spec": { "mdn": "https://nodejs.org/api/zlib.html" }
+    },
+    {
+      "id": "nodecore.vm",
+      "name": "vm (vm.Script, sandboxed eval-like execution)",
+      "statusRow": "vm (vm.Script, sandboxed eval-like execution)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Not implemented. vm hits the same fundamental blocker as bare eval() — there is no embedded engine to run source assembled at runtime. An opt-in embedded-engine path is scoped but not started.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://nodejs.org/api/vm.html" }
+    },
+    {
+      "id": "nodecore.diagnostics_channel",
+      "name": "diagnostics_channel (channel/subscribe/unsubscribe/hasSubscribers, Channel .publish/.hasSubscribers/.name)",
+      "statusRow": "diagnostics_channel (channel/subscribe/unsubscribe/hasSubscribers, Channel .publish/.hasSubscribers/.name)",
+      "signature": "const ch = diagnostics_channel.channel(name); ch.subscribe(fn); ch.publish(msg)",
+      "badge": "caveats",
+      "description": "Name-keyed pub/sub: channel/subscribe/unsubscribe/hasSubscribers, with a Channel handle exposing .publish/.hasSubscribers/.name. Subscribers may be 0/1/2-arity, and unsubscribe is by pointer identity.",
+      "returns": { "type": "Channel | boolean | void", "desc": "A channel handle, subscription result, or nothing." },
+      "differences": [
+        "Messages are **strings** (serialize with `JSON.stringify`) — a typed subset can't hand arbitrary object shapes to unknown subscribers",
+        "Subscriber params must be string-typed (an untyped pre-wrapped subscriber is a clean rejection, never silent reinterpretation)",
+        "`tracingChannel` and the store bindings (`bindStore`/`runStores`) are clean rejections; a Channel handle isn't module-global-promotable (capture it in a closure, not a named top-level function)"
+      ],
+      "seeAlso": [],
+      "spec": { "mdn": "https://nodejs.org/api/diagnostics_channel.html" }
+    },
+    {
+      "id": "nodecore.httpclient",
+      "name": "http client (http.get/http.request)",
+      "statusRow": "http client (http.get/http.request)",
+      "signature": "http.get(url, res => …); const req = http.request(opts); req.end()",
+      "badge": "caveats",
+      "description": "A libcurl-backed HTTP client with async event-loop delivery and contextually-typed callbacks (including test wrappers). Both http.get and http.request return a ClientRequest handle.",
+      "returns": { "type": "ClientRequest", "desc": "A request handle; the response arrives via callback." },
+      "differences": [
+        "GET only (no request bodies/method override — `req.end(body)` is a clean rejection); response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding`",
+        "Both calls return a ClientRequest handle: `request()` sends nothing until `.end()`; `.abort()`/`.destroy()` cancel only a not-yet-fired request (an in-flight transfer isn't torn down); `.on('error')` is accepted but never fired — transport failures throw instead",
+        "`new http.Agent(options)`/`new https.Agent(options)` construct an inert token: recognized pool options are validated but configure nothing (one connection per request), `.destroy()` is a no-op, and `.sockets`/`.requests` reject cleanly",
+        "Options objects (literal **or variable-bound**) support `{ port, path, host/hostname, agent }`; `headers`/`method` are clean rejections",
+        "`agent` is accepted and ignored — this client opens one connection per request (Node's own `agent: false` behavior); `new http.Agent(...)` itself is not implemented, and no pooling ever happens"
+      ],
+      "seeAlso": ["nodecore.https"],
+      "spec": { "mdn": "https://nodejs.org/api/http.html" }
+    },
+    {
+      "id": "nodecore.https",
+      "name": "https (client: https.get/https.request)",
+      "statusRow": "https (client: https.get/https.request)",
+      "signature": "https.get(url, res => …); const req = https.request(opts); req.end()",
+      "badge": "caveats",
+      "description": "get/request ride the same libcurl backend as the http client, so the TLS handshake and certificate verification come from the URL scheme — no https-specific machinery. Verified against a live TLS host on Mac.",
+      "returns": { "type": "ClientRequest", "desc": "A request handle; the response arrives via callback." },
+      "differences": [
+        "**Client only** — `https.createServer` is a clean rejection (the HTTP accept loop is not TLS-wrapped; use `tls.createServer` for a raw TLS socket server, or terminate TLS in front of `http.createServer`)",
+        "Same V1 client surface and caveats as `http.get`/`request`"
+      ],
+      "seeAlso": ["nodecore.httpclient", "nodecore.tls"],
+      "spec": { "mdn": "https://nodejs.org/api/https.html" }
+    },
+    {
+      "id": "nodecore.streamweb",
+      "name": "stream/web (re-exports: ReadableStream/WritableStream/TransformStream/CompressionStream/DecompressionStream)",
+      "statusRow": "stream/web (re-exports: ReadableStream/WritableStream/TransformStream/CompressionStream/DecompressionStream)",
+      "signature": "import { ReadableStream, TransformStream } from 'stream/web'",
+      "badge": "exact",
+      "description": "The names bind as identity to the ambient WHATWG constructors that already exist — importing them from stream/web is interchangeable with using the globals. The queuing-strategy classes are not exported.",
+      "returns": { "type": "typeof ReadableStream", "desc": "The same ambient constructors as the globals." },
+      "seeAlso": ["nodecore.zlib"],
+      "spec": { "mdn": "https://nodejs.org/api/webstreams.html" }
+    },
+    {
+      "id": "nodecore.cluster",
+      "name": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
+      "statusRow": "cluster (fork, worker messaging, isPrimary/isWorker/workerId, Worker.id/.process)",
+      "signature": "cluster.fork(); worker.send(msg); worker.on('message', fn); cluster.isPrimary",
+      "badge": "caveats",
+      "description": "Unifies with http.listen({ workers: N })'s worker-id global — the primary stays in the event loop while workers live (via their IPC handles), then blocks in waitpid as the backstop. Workers carry the fork IPC channel: worker.send/.on('message'/'online'/'exit'/'close'/'error')/.disconnect()/.kill()/.destroy()/.process.pid; in-worker process.send/process.on('message').",
+      "returns": { "type": "cluster.Worker", "desc": "A worker handle." },
+      "differences": [
+        "Messages are strings; one listener per event; `'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake",
+        "No `cluster.on(...)` (cluster-level events), `cluster.workers` map, `cluster.disconnect()`, `setupPrimary()`(`setupMaster`)/`settings`",
+        "Workers each bind the port via `SO_REUSEPORT`; on Linux the kernel load-balances accepts across them, on Darwin the distribution is uneven (often one worker) — correctness holds, balancing differs",
+        "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
+      ],
+      "seeAlso": ["nodecore.net"],
+      "spec": { "mdn": "https://nodejs.org/api/cluster.html" }
+    },
+    {
+      "id": "nodecore.http2",
+      "name": "http2 **module** (http2.createServer/connect, Http2Session/Http2Stream)",
+      "statusRow": "http2 **module** (http2.createServer/connect, Http2Session/Http2Stream)",
+      "signature": "http2.createServer().on('stream', (stream, headers) => …); http2.connect(url).request({ ':path' })",
+      "badge": "caveats",
+      "description": "The explicit http2 module, over the same nghttp2 h2c driver that http.listen already rides transparently. Server-side serves h2c (and still answers 1.1, a superset of Node); the client opens an h2c session and submits body-less requests.",
+      "returns": { "type": "Http2Session | Http2Stream", "desc": "A session or stream handle." },
+      "exampleKey": "http2/client_session",
+      "snippet": "const server = http2.createServer();\nserver.on('stream', (stream, headers) => {\n  stream.respond({ ':status': 200, 'content-type': 'text/plain' });\n  stream.end(\"hello \" + headers[':path'].slice(1));\n});",
+      "differences": [
+        "**Server-side Stages 1–2**: `http2.createServer` on the http server handle, serving **h2c** (it also still answers 1.1, a superset of Node); compat `.on('request', (req, res))` **and** the core streams API — `.on('stream', (stream, headers))` with pseudo-headers on the map, `stream.respond({ ':status', … })` incl. response headers, `.end`/`.write`, request body via `.on('data'|'end')` (one synchronous chunk)",
+        "`stream.close()`/`setEncoding`/`resume`/`pause` are accepted no-ops; responses are written when the handler returns (no mid-stream RST/flow control)",
+        "**Client (Stage 3)**: `http2.connect(\"http://…\")` (h2c only — a TLS authority throws) → session `.request({ ':path', ':method', headers… })` → stream `.on('response'|'data'|'end')`; requests are **body-less** (END_STREAM at submit — `req.write`/`end(body)` are clean rejections); response `':status'` arrives as a *string* in the headers map (Node types it as a number); session/stream `'error'`/`'close'` listeners are accepted no-ops",
+        "**Stage 4**: `http2.constants` (compile-time namespace — header/method names, RFC 7540 error codes; unknown members reject cleanly) and `getDefaultSettings`/`getPackedSettings`/`getUnpackedSettings` (nghttp2 wire format; the invalid-value RangeError taxonomy is not modeled)",
+        "`createSecureServer` (needs a TLS server mode) and request bodies remain **clean rejections**",
+        "Sessions, streams, server/client push, settings frames, and the whole explicit-API surface are unimplemented — staged over the existing nghttp2 h2c driver; client-mode nghttp2 is the main new work"
+      ],
+      "seeAlso": ["nodecore.httpclient", "nodecore.tls"],
+      "spec": { "mdn": "https://nodejs.org/api/http2.html" }
+    }
+  ]
+}

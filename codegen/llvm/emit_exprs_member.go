@@ -289,6 +289,43 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	if e.isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetDynamic(ex.Index)
 	}
+	// process.argv[i]: an out-of-range read yields "" instead of the general
+	// array bounds throw — Node yields undefined there, and the ubiquitous
+	// `process.argv[2] === 'child'` / `if (!process.argv[2])` branching
+	// (child_process.fork self-fork files, TDD-00141) relies on a falsy,
+	// non-matching value rather than a crash.
+	if mem, ok := ex.Object.(*ast.MemberExpression); ok && mem.Property == "argv" {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+			idxVal, err := e.emitExpr(ex.Index)
+			if err != nil {
+				return Value{}, err
+			}
+			idxVal = e.coerce(idxVal, TypeI64)
+			dataReg := e.freshReg()
+			lenReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__argv_ptr, align 8", dataReg))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__argv_len, align 8", lenReg))
+			inb := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", inb, idxVal.Ref, lenReg))
+			inL := e.freshLabel("argv.in")
+			outL := e.freshLabel("argv.out")
+			doneL := e.freshLabel("argv.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inb, inL, outL))
+			e.emitLabel(inL)
+			gep := e.freshReg()
+			elem := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gep, dataReg, idxVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elem, gep))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(outL)
+			empty := e.internString("")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, elem, inL, empty, outL))
+			return Value{Ref: r, Ty: TypePtr}, nil
+		}
+	}
 	// Group map access: grouped["key"] → sub-array.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsGroupMap {
@@ -504,6 +541,23 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: "4.342944819032518e-01", Ty: TypeF64}, nil
 		}
 	}
+	// process.stdout/.stderr/.stdin `.isTTY` — a nested two-level member chain
+	// (process.<stdio> is a pseudo-namespace, not a bindable value), same
+	// shape check as process.stdout.write in emit_call.go.
+	if ex.Property == "isTTY" {
+		if inner, ok := ex.Object.(*ast.MemberExpression); ok {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+				switch inner.Property {
+				case "stdin":
+					return e.emitProcessStreamIsTTY(0), nil
+				case "stdout":
+					return e.emitProcessStreamIsTTY(1), nil
+				case "stderr":
+					return e.emitProcessStreamIsTTY(2), nil
+				}
+			}
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "argv":
@@ -532,6 +586,17 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_stdin_create()", r))
 			return Value{Ref: r, Ty: StdinType()}, nil
+		case "send":
+			// Bare `process.send` (not a call) is the corpus's forked-child
+			// probe (`if (process.send) …`): a boolean "was this process
+			// forked with an IPC channel" (TDD-00141). Node's value is the
+			// function-or-undefined; the truthiness use is what matters here.
+			e.ensureIPCChildRuntime()
+			fd := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_ipcc_fd()", fd))
+			b := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp sgt i32 %s, 0", b, fd))
+			return Value{Ref: b, Ty: TypeBool}, nil
 		}
 	}
 	if e.isProcessEnvExpr(ex.Object) {

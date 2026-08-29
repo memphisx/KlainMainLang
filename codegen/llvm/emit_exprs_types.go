@@ -516,6 +516,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeF64
 		}
 	case *ast.MemberExpression:
+		// process.stdout/.stderr/.stdin `.isTTY` — a boolean isatty probe.
+		if ex.Property == "isTTY" {
+			if inner, ok := ex.Object.(*ast.MemberExpression); ok {
+				if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+					switch inner.Property {
+					case "stdin", "stdout", "stderr":
+						return TypeBool
+					}
+				}
+			}
+		}
 		if objTy := e.inferExprType(ex.Object); objTy.IsDCChannel {
 			if ex.Property == "hasSubscribers" {
 				return TypeBool
@@ -558,6 +569,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 		// cluster.fork() Worker's `.id`.
+		if ex.Property == "process" && e.inferExprType(ex.Object).IsClusterWorker {
+			return ChildProcessType()
+		}
 		if ex.Property == "id" && e.inferExprType(ex.Object).IsClusterWorker {
 			return TypeI64
 		}
@@ -771,6 +785,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// template's type is exactly its tag function's return type.
 		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
+		// klain:assets (TDD-00142 Stage 7): embedDir(...) → EmbeddedAssets,
+		// assets.get(...) → ArrayBuffer.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assets__kml_builtin" && mem.Property == "embedDir" {
+				return EmbeddedAssetsType()
+			}
+			if mem.Property == "get" && e.inferExprType(mem.Object).IsEmbeddedAssets {
+				return ArrayBufferType()
+			}
+		}
 		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 			if id, ok := mem.Object.(*ast.Identifier); ok {
@@ -936,6 +960,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				pt := PromiseOf(TypeVoid)
 				pt.PromiseTask = true
 				return pt
+			}
+			// Chained `http.createServer(cb).listen(...)` yields the server
+			// handle (Node's listen() returns the server).
+			if _, _, isChain := chainedCreateServerListen(ex); isChain {
+				return HTTPServerType()
+			}
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "stream__kml_builtin" {
+				// Callback forms: finished() yields nothing; pipeline()
+				// yields its destination (last-stream) argument;
+				// duplexPair() yields a 2-element array of string Duplexes.
+				if mem.Property == "pipeline" && len(ex.Args) >= 2 {
+					return e.inferExprType(ex.Args[len(ex.Args)-2])
+				}
+				if mem.Property == "duplexPair" {
+					return ArrayOf(NodeTransformType(TypePtr, TypePtr))
+				}
+				return TypeVoid
 			}
 		}
 		// Stream/reader/controller method results (TDD-00097 Stage 1) —
@@ -1272,6 +1313,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TupleType([]Type{TypeI64, TypeI64})
 				case "nextTick":
 					return TypeVoid
+				case "send":
+					return TypeBool
+				}
+			}
+			// ClientRequest methods chain (end/abort/on return the handle).
+			if objTy := e.inferExprType(mem.Object); objTy.IsClientRequest {
+				return ClientRequestType()
+			}
+			// child.send(msg) / worker.send(msg) → boolean (the fork IPC
+			// channel, TDD-00141).
+			if mem.Property == "send" {
+				if objTy := e.inferExprType(mem.Object); objTy.IsChildProcess || objTy.IsClusterWorker {
+					return TypeBool
 				}
 			}
 			// process.hrtime.bigint()
@@ -1318,9 +1372,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				switch mem.Property {
 				case "mustCall", "mustCallAtLeast", "mustSucceed":
 					if len(ex.Args) >= 1 {
-						return e.inferExprType(ex.Args[0])
+						if t := e.inferExprType(ex.Args[0]); t.IsFunc {
+							return t
+						}
 					}
-					return TypeVoid
+					// `mustCall()` / `mustCall(n)`: a counted noop wrapper.
+					return FuncType(nil, TypeVoid)
 				case "mustNotCall":
 					return FuncType(nil, TypeVoid) // a zero-arg () => void wrapper
 				default:
@@ -1361,10 +1418,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return NetServerType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "http__kml_builtin" {
-				// http.get/request deliver the response to a callback and return
-				// void in V1 (the ClientRequest return is a follow-on, TDD-00138).
+				// http.get/request return the ClientRequest handle (ADR-00430).
 				if mem.Property == "get" || mem.Property == "request" {
-					return TypeVoid
+					return ClientRequestType()
 				}
 				// Variable-bound http.createServer(cb) returns a Server handle.
 				if mem.Property == "createServer" {
@@ -1380,9 +1436,20 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				}
 				return TypeVoid
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "https__kml_builtin" {
-				// https.get/request mirror the http client: callback-based, void.
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "nodecrypto__kml_builtin" {
+				switch mem.Property {
+				case "generateKeyPairSync":
+					return nodeCryptoKeyPairResultType()
+				case "randomBytes":
+					return TypedArrayType("uint8")
+				case "randomUUID":
+					return TypePtr
+				}
 				return TypeVoid
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "https__kml_builtin" {
+				// https.get/request mirror the http client (ADR-00430).
+				return ClientRequestType()
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "http2__kml_builtin" {
 				// http2.createServer shares the http server handle (TDD-00139 Stage 1);
@@ -2019,6 +2086,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return TypeI64
 	case *ast.NewNodeStreamExpression:
 		inTy, outTy := TypeI64, TypeI64
+		if ex.Kind == "passthrough" {
+			// Mirrors emitNewNodeStream: PassThrough defaults to string chunks.
+			inTy, outTy = TypePtr, TypePtr
+		}
 		if ex.InType != nil {
 			inTy = e.resolveType(ex.InType)
 		}
@@ -2140,6 +2211,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return AbortControllerType()
 	case *ast.NewEventTargetExpression:
 		return EventTargetType()
+	case *ast.NewHTTPAgentExpression:
+		return HTTPAgentType()
+	case *ast.NewWebviewExpression:
+		return WebviewType()
 	case *ast.NewEventExpression:
 		return EventType()
 	case *ast.NewCustomEventExpression:

@@ -372,3 +372,53 @@ console.log(buf.byteLength);
 	got := compileAndRun(t, src)
 	compareLines(t, got, "32 32 filled\n8 filled\n16")
 }
+
+func TestE2ENodeCryptoGenerateKeyPair(t *testing.T) {
+	// The Node crypto *module* (ADR-00434): generateKeyPair(Sync) with PEM
+	// encodings over the existing keygen ABI, the async (err, pub, priv)
+	// and mustSucceed (pub, priv) callback shapes, and randomBytes.
+	assertOutputImports(t, `
+import { generateKeyPair, generateKeyPairSync, randomBytes } from 'crypto'
+import { mustCall, mustSucceed } from 'test'
+const pair = generateKeyPairSync('ec', {
+  namedCurve: 'P-256',
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+})
+console.log("sync pub:", pair.publicKey.startsWith("-----BEGIN PUBLIC KEY-----"))
+console.log("sync priv:", pair.privateKey.startsWith("-----BEGIN PRIVATE KEY-----"))
+generateKeyPair('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+}, mustCall((err, publicKey, privateKey) => {
+  console.log("async:", err === null, publicKey.includes("PUBLIC KEY"), privateKey.trim().endsWith("-----END PRIVATE KEY-----"))
+}))
+generateKeyPair('ec', {
+  namedCurve: 'P-384',
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+}, mustSucceed((publicKey, privateKey) => {
+  console.log("mustSucceed:", publicKey.includes("PUBLIC KEY"))
+}))
+console.log("randomBytes:", randomBytes(16).length)
+`, "sync pub: true\nsync priv: true\nasync: true true true\nmustSucceed: true\nrandomBytes: 16")
+}
+
+func TestE2ECryptoSubtleDestructuredAlias(t *testing.T) {
+	// `const { subtle } = globalThis.crypto` — the corpus's standard binding
+	// (ADR-00435): the local is a compile-time subtle alias usable inside
+	// function bodies too; the chained globalThis.crypto.subtle form works
+	// directly.
+	assertOutput(t, `
+const { subtle } = globalThis.crypto
+async function main() {
+  const data = new TextEncoder().encode("thessaloniki")
+  const h = await subtle.digest("SHA-256", data)
+  console.log("digest bytes:", h.byteLength)
+  const h2 = await globalThis.crypto.subtle.digest("SHA-256", data)
+  console.log("same:", h2.byteLength === h.byteLength)
+}
+main()
+`, "digest bytes: 32\nsame: true")
+}

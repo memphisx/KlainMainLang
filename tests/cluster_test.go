@@ -51,3 +51,28 @@ if (cluster.isPrimary) {
 		t.Errorf("body: got %q, want prefix %q", string(body), "served by worker ")
 	}
 }
+
+func TestE2EClusterWorkerIPCMessaging(t *testing.T) {
+	// cluster.fork() workers now carry the TDD-00141 IPC channel
+	// (ADR-00427): primary sees 'online' (microtask-deferred), receives the
+	// worker's message, replies, and observes the worker's exit — all
+	// mustCall-verified at exit on both sides.
+	assertOutputImports(t, `
+import cluster from 'cluster'
+import { mustCall } from 'test'
+if (cluster.isPrimary) {
+  const worker = cluster.fork()
+  worker.on('online', mustCall(() => { console.log("online") }))
+  worker.on('message', mustCall((msg) => {
+    console.log("primary got: " + msg)
+    worker.send("shutdown")
+  }))
+  worker.on('exit', mustCall((code) => { console.log("worker exit: " + code) }))
+} else {
+  process.send("hi from worker " + cluster.workerId)
+  process.on('message', (msg) => {
+    if (msg === "shutdown") { process.exit(0) }
+  })
+}
+`, "online\nprimary got: hi from worker 1\nworker exit: 0")
+}

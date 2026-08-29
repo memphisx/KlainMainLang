@@ -167,3 +167,73 @@ console.log("b", execSync("pwd", { cwd: "/", encoding: "utf8" }).trim())
 console.log("c", spawnSync("pwd", { cwd: "/" }).stdout.trim())
 `, "a /\nb /\nc /")
 }
+
+func TestE2EChildProcessForkIPCRoundtrip(t *testing.T) {
+	// TDD-00141 self-fork: the child (a re-exec of this same binary with
+	// NODE_CHANNEL_FD set) detects itself via `if (process.send)`, echoes a
+	// message back over the channel, disconnects; the parent sees 'message'
+	// (mustCall-wrapped, exit-verified) and then the child's 'exit'.
+	assertOutputImports(t, `
+import { fork } from 'child_process'
+import { mustCall } from 'test'
+if (process.send) {
+  process.on('message', (msg) => {
+    process.send("echo:" + msg)
+    process.disconnect()
+  })
+} else {
+  const child = fork(__filename)
+  child.on('message', mustCall((msg) => { console.log("parent got: " + msg) }))
+  child.on('exit', (code) => { console.log("child exited: " + code) })
+  child.send("kalimera")
+}
+`, "parent got: echo:kalimera\nchild exited: 0")
+}
+
+func TestE2EChildProcessForkArgvBranch(t *testing.T) {
+	// The other self-fork idiom: extra args land at process.argv[2] (Node's
+	// child argv layout), and an out-of-range process.argv read is "" (falsy)
+	// instead of a bounds throw, so the parent branch works.
+	assertOutputImports(t, `
+import cp from 'child_process'
+import { mustCall } from 'test'
+if (process.argv[2] === 'child') {
+  process.send("hello from child")
+  process.disconnect()
+} else {
+  const child = cp.fork(process.argv[1], ['child'])
+  child.on('message', mustCall((msg) => { console.log("got: " + msg) }))
+}
+`, "got: hello from child")
+}
+
+func TestE2EChildProcessSendUnforked(t *testing.T) {
+	// process.send in a non-forked process: falsy probe, false return.
+	assertOutput(t, `
+if (process.send) { console.log("forked") } else { console.log("not forked") }
+console.log(process.send("x"))
+`, "not forked\nfalse")
+}
+
+func TestE2EChildProcessSpawnOptions(t *testing.T) {
+	// spawn's options argument (ADR-00433): `cwd` is wired through (the
+	// child chdirs before exec — /tmp resolves to /private/tmp on darwin);
+	// a variable-bound `{ shell: isWindows }` object (the corpus idiom) is
+	// accepted, shell always ignored (commands exec directly).
+	assertOutputImports(t, `
+import cp from 'child_process'
+import { isWindows } from 'test'
+const dec = new TextDecoder()
+const p = cp.spawn('pwd', [], { cwd: "/tmp" })
+let out = ""
+p.stdout.on('data', (chunk: Uint8Array) => { out = out + dec.decode(chunk) })
+p.on('close', (code: number) => {
+  console.log("cwd ok:", out.trim() === "/tmp" || out.trim() === "/private/tmp", code)
+  const opts = { shell: isWindows }
+  const p2 = cp.spawn('echo', ['hi'], opts)
+  let out2 = ""
+  p2.stdout.on('data', (chunk: Uint8Array) => { out2 = out2 + dec.decode(chunk) })
+  p2.on('close', (code2: number) => { console.log("echo:", out2.trim(), code2) })
+})
+`, "cwd ok: true 0\necho: hi 0")
+}

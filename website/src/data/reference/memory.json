@@ -1,0 +1,59 @@
+{
+  "surface": "memory",
+  "title": "Memory management",
+  "kind": "node",
+  "statusPage": "MEMORY-MANAGEMENT.md",
+  "coversRows": "all",
+  "coverage": { "loose": "2/3", "loosePct": 67, "strict": "0/3", "strictPct": 0 },
+  "lede": "Memory mode is chosen once per compiled binary via the -mm=manual|gc|auto flag, defaulting to manual. The big divergence from a managed runtime: manual mode never frees anything on its own, so a program's footprint grows for its whole run unless it calls Memory.free(x) by hand — fine for short-lived CLI tools, a real concern for long-running servers. gc swaps in the Boehm collector for a one-flag fix; auto (compiler-inserted frees) is design-only and not built yet.",
+  "entries": [
+    {
+      "id": "memory.manual",
+      "name": "manual mode (-mm=manual, default)",
+      "statusRow": "manual (default)",
+      "signature": "klainmain -mm=manual program.ts   // default; Memory.free(x): void",
+      "badge": "caveats",
+      "description": "The default mode: every heap allocation the compiler emits (arrays, object literals, closure environments, string concatenation/slicing/templates, Map/Set backing tables, JSON/Date scratch buffers, boxed any payloads) goes through a plain malloc/realloc and is only released by an explicit Memory.free(x). That call resolves the value's underlying heap pointer — array data pointer, object struct, closure header plus environment, Map/Set backing buffers — and frees it shallowly, never anything reachable through it.",
+      "returns": { "type": "void", "desc": "Memory.free(x) releases x's own top-level allocation(s)." },
+      "exampleKey": "memory/memory_free",
+      "snippet": "let big: string = \"hello \" + \"world\"   // concatenation result -> malloc'd\nconsole.log(big.length)   // 11\nMemory.free(big)\nconsole.log(big === null)  // true — the variable's own storage was nulled",
+      "differences": [
+        "Never frees on its own — a program's footprint grows monotonically with runtime unless the programmer calls `Memory.free(x)` by hand",
+        "Same footguns as C, including that a string *literal* is a compile-time global constant, not `malloc`'d, so freeing one crashes exactly like C's `free(\"literal\")`"
+      ],
+      "seeAlso": ["memory.gc", "memory.auto"],
+      "spec": { "mdn": "" }
+    },
+    {
+      "id": "memory.gc",
+      "name": "gc mode (-mm=gc)",
+      "statusRow": "gc",
+      "signature": "klainmain -mm=gc program.ts   // Boehm collector; Memory.free lowers to GC_free",
+      "badge": "caveats",
+      "description": "Opt-in Boehm-Demers-Weiser collector (libgc): it swaps the declared @malloc/@realloc for @GC_malloc/@GC_realloc and links -lgc, with no per-feature codegen change beyond the allocation call sites, since the collector conservatively scans the native stack, registers, and managed heap for live pointers. Program output is identical to manual mode — gc only changes when memory is reclaimed. Memory.free(x) stays legal and lowers to GC_free, an always-safe early-release hint.",
+      "returns": { "type": "void", "desc": "Same Memory.free(x) surface; here it hints the collector rather than calling libc free()." },
+      "exampleKey": "memory/memory_gc",
+      "snippet": "let s: string = \"abcdefghijklmnopqrstuvwxyz0123456789\" + \"abcdefghijklmnopqrstuvwxyz0123456789\";\ntotal = total + s.length;",
+      "differences": [
+        "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
+        "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it"
+      ],
+      "seeAlso": ["memory.manual", "memory.auto"],
+      "spec": { "mdn": "" }
+    },
+    {
+      "id": "memory.auto",
+      "name": "auto mode (-mm=auto)",
+      "statusRow": "auto",
+      "signature": "// not implemented — design-only",
+      "badge": "missing",
+      "description": "Design-only: compiler-inserted frees at compile-time-proven-safe points, with no runtime collector. It is sequenced last because a wrong escape analysis is a use-after-free, not just a delayed free. The staged plan is a /** @free */ annotation with a conservative local escape check, then an @owned linear-value annotation with real last-use liveness analysis. Memory.free(x) would be a compile error in this mode, since the compiler's own inserted frees can't account for a manual free it didn't plan for.",
+      "differences": [
+        "Not started",
+        "`Memory.free(x)` would be a compile error in this mode (the compiler's own inserted frees can't account for a manual free it didn't plan for)"
+      ],
+      "seeAlso": ["memory.manual", "memory.gc"],
+      "spec": { "mdn": "" }
+    }
+  ]
+}

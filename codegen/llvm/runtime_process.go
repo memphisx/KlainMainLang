@@ -125,8 +125,8 @@ func (e *Emitter) ensureExecFileSync() {
 	e.ensureForkDecl()
 	e.emitGlobal("declare i32 @dup2(i32 noundef, i32 noundef)")
 	e.ensureCloseDecl()
-	e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
+	e.ensureExecvpDecl()
+	e.ensureExitRawDecl()
 	e.ensureReadDecl()
 	e.ensureWaitpidDecl()
 
@@ -511,7 +511,7 @@ func (e *Emitter) ensureProcessChdir() {
 	}
 	e.usedProcessChdir = true
 	e.ensureFsThrow()
-	e.emitGlobal("declare i32 @chdir(ptr noundef)")
+	e.ensureChdirDecl()
 	opDescPtr := e.internString("cannot change directory to")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_process_chdir(ptr %%path) {

@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/performance-timing.json; edit the JSON, then run `make status`. -->
+
 # Performance & Timing
 
 > Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too.

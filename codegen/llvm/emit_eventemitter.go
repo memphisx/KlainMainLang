@@ -189,6 +189,26 @@ func (e *Emitter) emitBuildTuple(argExprs []ast.Expression, tupleTy Type) (Value
 	return Value{Ref: reg, Ty: tupleTy}, nil
 }
 
+// listenerTypeName maps an event payload Type to a source-level type name a
+// contextually-typed parameter annotation can carry, or "" when the payload
+// has no plain name (an object/tuple type). Used to see through `test`
+// counting wrappers: `p.on('data', mustCall((d) => …))` types the inner
+// arrow's `d` the way real Node infers it — the same ADR-00412 treatment
+// createServer handlers get.
+func listenerTypeName(ty Type) string {
+	switch {
+	case isStringTy(ty):
+		return "string"
+	case ty.IsError:
+		return "Error"
+	case ty.IR == "i64" || ty.IR == "double":
+		return "number"
+	case ty.IR == "i1":
+		return "boolean"
+	}
+	return ""
+}
+
 func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy Type, isVoid bool, fnName string, pos ast.Pos) (string, error) {
 	// A tuple payload `[A, B, …]` (TDD-00131) is Node's multi-argument event:
 	// the listener takes one parameter per tuple element, hinted per-position.
@@ -197,6 +217,28 @@ func (e *Emitter) resolveEventEmitterListenerArg(arg ast.Expression, payloadTy T
 		hints = nil
 	} else if payloadTy.IsTuple {
 		hints = tupleElemTypes(payloadTy)
+	}
+	// A listener inside a `test` counting wrapper can't receive the hints
+	// below (the wrapper call is emitted as an opaque expression), so
+	// contextually annotate the inner arrow's bare parameters first.
+	if unwrapTestWrapper(arg) != arg && !isVoid {
+		if payloadTy.IsTuple {
+			names := make([]string, 0, len(hints))
+			ok := true
+			for _, h := range hints {
+				n := listenerTypeName(h)
+				if n == "" {
+					ok = false
+					break
+				}
+				names = append(names, n)
+			}
+			if ok {
+				contextTypeArrowParams(arg, names...)
+			}
+		} else if n := listenerTypeName(payloadTy); n != "" {
+			contextTypeArrowParams(arg, n)
+		}
 	}
 	var val Value
 	var err error

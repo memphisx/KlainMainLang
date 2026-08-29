@@ -1,0 +1,42 @@
+{
+  "surface": "encoding",
+  "title": "Encoding & text",
+  "kind": "web",
+  "statusPage": "ENCODING-TEXT.md",
+  "coversRows": "all",
+  "coverage": { "loose": "2/2", "strict": "1/2" },
+  "lede": "Web-standard TextEncoder/TextDecoder for converting between strings and raw bytes. The single divergence from the browser API is scope: this is UTF-8 only. Because this compiler's strings are already raw UTF-8 byte sequences, encode/decode are direct byte copies with no real transcoding, and TextDecoder's optional label argument is accepted but ignored rather than validated. (atob/btoa and encodeURI(Component) live under global functions, not here.)",
+  "entries": [
+    {
+      "id": "encoding.textencoder",
+      "name": "TextEncoder",
+      "statusRow": "TextEncoder",
+      "signature": "new TextEncoder().encode(str: string): Uint8Array",
+      "badge": "exact",
+      "description": "Encodes a string to its UTF-8 bytes as a Uint8Array. UTF-8-only matches the spec exactly — TextEncoder is UTF-8-only by definition, so this is not a narrowing. Since strings are already stored as raw UTF-8, encode is a direct byte copy.",
+      "returns": { "type": "Uint8Array", "desc": "The string's UTF-8 bytes." },
+      "exampleKey": "encoding_text/encoding_text",
+      "snippet": "const encoder = new TextEncoder()\nconst bytes = encoder.encode(\"Hello, KlainMainLang!\")\nconsole.log(bytes.length)\nconsole.log(bytes[0]) // 72 ('H')",
+      "differences": [],
+      "seeAlso": ["encoding.textdecoder"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/TextEncoder" }
+    },
+    {
+      "id": "encoding.textdecoder",
+      "name": "TextDecoder",
+      "statusRow": "TextDecoder",
+      "signature": "new TextDecoder(label?: string).decode(bytes: Uint8Array | ArrayBuffer): string",
+      "badge": "caveats",
+      "description": "Decodes UTF-8 bytes back to a string, accepting either a Uint8Array or an ArrayBuffer directly (e.g. from a binary file read or a fetch response's .arrayBuffer()). As with encode, decoding is a direct byte copy since strings are already raw UTF-8.",
+      "returns": { "type": "string", "desc": "The decoded UTF-8 text." },
+      "exampleKey": "encoding_text/encoding_text",
+      "snippet": "const decoder = new TextDecoder()\nconsole.log(decoder.decode(bytes))\n\nconst buf = new ArrayBuffer(5)\nconst view: Uint8Array = new Uint8Array(buf)\nview[0] = 72  // H\nconsole.log(decoder.decode(buf))",
+      "differences": [
+        "UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on, not started.",
+        "The optional `label` argument is evaluated (for side effects) and then ignored, not validated — always decodes as UTF-8, permissive rather than throwing a `RangeError` for an unrecognized label."
+      ],
+      "seeAlso": ["encoding.textencoder"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder" }
+    }
+  ]
+}

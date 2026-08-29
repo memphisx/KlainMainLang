@@ -100,3 +100,24 @@ import { mustCall } from 'test'
 setTimeout(mustCall((): void => { console.log('fired') }), 0)
 `, 0)
 }
+
+func TestE2ETestMustCallZeroArg(t *testing.T) {
+	// Node's function-less forms: mustCall() and mustCall(n) count a noop
+	// (ADR-00423) — met expectations exit 0.
+	expectExit(t, `
+import { mustCall } from 'test'
+const done = mustCall()
+done()
+const twice = mustCall(2)
+twice()
+twice()
+`, 0)
+}
+
+func TestE2ETestMustCallZeroArgUnmet(t *testing.T) {
+	// An uncalled mustCall() still fails at exit.
+	expectExit(t, `
+import { mustCall } from 'test'
+const never = mustCall()
+`, 1)
+}

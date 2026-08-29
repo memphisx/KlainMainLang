@@ -1,0 +1,181 @@
+{
+  "id": "http-server",
+  "file": "HTTP-SERVER.md",
+  "title": "HTTP Server",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. The piece that unlocks this project's microservice direction. Full design: [TDD-00004](../tdd/TDD-00004.md)."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "block",
+      "text": "The `http` module now exposes the **real Node.js API** — `http.createServer` (first row). The bespoke `http.listen(handler ⇒ response)` model (the rest of this page) is this project's own re-imagining; it stays importable, and is also reachable under the explicitly-non-Node `klain:http` specifier ([TDD-00131](../tdd/TDD-00131.md))."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`http.createServer((req, res) => …).listen(port[, cb])` — real Node shape",
+            "status": "implemented",
+            "caveats": [
+              "V1 subset ([TDD-00131](../tdd/TDD-00131.md) Stage 1): `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end` and `req.method`/`url`/`headers`; no `res.statusCode =` setter or streaming backpressure",
+              "The status reason phrase is hardcoded `OK` (`writeHead(201)` → `201 OK`, not `201 Created`)",
+              "One server per program, shared with the bespoke `http.listen`"
+            ],
+            "notes": [
+              "Node's `(req, res)` model, portable to Node.js — reuses the same fiber-per-connection accept loop and response writer as the bespoke path; `res` is a `ServerResponse` object whose `{status, body, headers}` the dispatcher reads after the handler ([ADR-00391](../adr/ADR-00391.md))"
+            ]
+          },
+          {
+            "feature": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request', cb)`",
+            "status": "implemented",
+            "caveats": [
+              "`server.listen` **blocks** until the loop stops (`server.close()` + drain) — Node's non-blocking listen-then-continue top-level flow is not modeled",
+              "`.on` supports only the `'request'` event (one listener); no `'close'`/`'error'`/`'connection'`/`'listening'` events",
+              "A handler wrapped in a `test` counting wrapper (`createServer(mustCall(fn))`) *is* contextually typed ([ADR-00412](../adr/ADR-00412.md)); other wrapper calls are not"
+            ],
+            "notes": [
+              "The standard Node idiom: bind to a variable, `.listen(0)` for an ephemeral port, read `.address().port`, `.close()` from inside the loop; named import `import { createServer } from 'http'` works; untyped `(req, res)` handler params are contextually typed ([ADR-00406](../adr/ADR-00406.md))",
+              "The chained-binding idiom too: `const server = http.createServer(cb).listen(0, readyCb)` — `listen()` returns the server and the handle is stored before the ready callback runs, so `server.address().port` works inside it ([ADR-00423](../adr/ADR-00423.md))"
+            ]
+          },
+          {
+            "feature": "`http.listen(port, handler)` — bind, accept, dispatch (bespoke; also `klain:http`)",
+            "status": "implemented",
+            "notes": [
+              "One fiber per accepted connection (`ucontext.h`), so a slow connection never blocks the others",
+              "Runs on the shared `select()` event loop with timers, fetch, and the other socket APIs",
+              "[TDD-00006](../tdd/TDD-00006.md), [ADR-00048](../adr/ADR-00048.md), [ADR-00049](../adr/ADR-00049.md), [ADR-00052](../adr/ADR-00052.md)"
+            ]
+          },
+          {
+            "feature": "`http.listen(port, handler, { workers: N })` — multi-process clustering",
+            "status": "implemented",
+            "notes": [
+              "`fork()`s `N-1` workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency",
+              "`cluster.isPrimary`/`cluster.workerId` (0 = original, 1..N-1 per fork) branch on the current process",
+              "Works under both memory modes",
+              "[TDD-00025](../tdd/TDD-00025.md), [ADR-00097](../adr/ADR-00097.md)–[ADR-00101](../adr/ADR-00101.md)"
+            ]
+          },
+          {
+            "feature": "Request-line parsing (`req.method`, `req.path`)",
+            "status": "implemented",
+            "notes": [
+              "Any method token (`GET`/`POST`/`PUT`/`DELETE`/...), not GET-only",
+              "`req.path` excludes the query string (that's `req.query`)",
+              "[ADR-00072](../adr/ADR-00072.md)"
+            ]
+          },
+          {
+            "feature": "Request headers (`req.headers: Map<string, string>`)",
+            "status": "implemented",
+            "notes": [
+              "Lowercased keys (case-insensitive lookup, matching real HTTP semantics) — [ADR-00072](../adr/ADR-00072.md)"
+            ]
+          },
+          {
+            "feature": "Query string (`req.query: Map<string, string>`)",
+            "status": "implemented",
+            "notes": [
+              "Split from `req.path` and parsed (`a=b&c=d`), both keys and values percent-decoded via the same `decodeURIComponent` primitive this compiler already had — [ADR-00072](../adr/ADR-00072.md)"
+            ]
+          },
+          {
+            "feature": "Request body (`req.body: string`)",
+            "status": "implemented",
+            "notes": [
+              "`Content-Length`-aware, accumulated across reads, capped at 10MiB — [ADR-00072](../adr/ADR-00072.md)",
+              "Binary-safe: the buffer, the `string` value, and every string operation carry/read a length header, so an embedded null byte survives — an `\"ab\\0cd\"` body reports length 5 and echoes 5 bytes ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md))"
+            ]
+          },
+          {
+            "feature": "Binary-safe request body (`req.bodyBytes(): ArrayBuffer`)",
+            "status": "implemented",
+            "notes": [
+              "Wraps the same already-buffered, `Content-Length`-accurate bytes into an `ArrayBuffer` (no copy) — an explicit `ArrayBuffer` view for callers that want one; `req.body: string` is itself binary-safe now ([TDD-00120](../tdd/TDD-00120.md))",
+              "See [TDD-00026](../tdd/TDD-00026.md)/[ADR-00106](../adr/ADR-00106.md)"
+            ]
+          },
+          {
+            "feature": "Response headers (optional `headers: Map<string, string>` field)",
+            "status": "implemented",
+            "notes": [
+              "Fully user-controlled, including `Content-Type` if set — omitting the field behaves byte-identically to before this existed — [ADR-00072](../adr/ADR-00072.md)"
+            ]
+          },
+          {
+            "feature": "Binary-safe response body (optional `bodyBytes: ArrayBuffer` field)",
+            "status": "implemented",
+            "notes": [
+              "Wins outright over `body`'s own content whenever present and non-null — the response writer (`__kml_http_send_response`) writes the body via an explicit-length `write()` (not a NUL-terminated `sprintf %s`), so a binary payload with embedded null bytes reaches the socket whole",
+              "The plain string `body` field is itself binary-safe now — it too writes via the header length, so `bodyBytes` is an explicit-`ArrayBuffer` convenience rather than the only NUL-safe path ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md))",
+              "See [TDD-00026](../tdd/TDD-00026.md)/[ADR-00106](../adr/ADR-00106.md)"
+            ]
+          },
+          {
+            "feature": "Streaming response body (`body: ReadableStream<string \\| Uint8Array>` field)",
+            "status": "implemented",
+            "notes": [
+              "A handler whose returned object's `body` field is statically a `ReadableStream` produces a `Transfer-Encoding: chunked` response, written chunk-at-a-time by a promise-reaction-driven writer — the handler returns immediately and a slow producer holds only its own connection open; `http.close()` still waits for in-flight streams",
+              "A stream error mid-response closes the connection without the chunked terminator (nothing else is signallable mid-stream)",
+              "See [ADR-00300](../adr/ADR-00300.md)"
+            ]
+          },
+          {
+            "feature": "Streaming request body (`req.stream(): ReadableStream<Uint8Array>`)",
+            "status": "implemented",
+            "notes": [
+              "`req.body`/`req.bodyBytes()` after consuming `req.stream()` throw a catchable `TypeError` (WHATWG \"body already disturbed\", [ADR-00362](../adr/ADR-00362.md))",
+              "A handler may mix response `body` shapes across branches by declaring a union `body: string \\| ReadableStream<Uint8Array>` — the writer branches on the runtime tag ([TDD-00119](../tdd/TDD-00119.md)/[ADR-00363](../adr/ADR-00363.md))",
+              "Using `req.stream()` anywhere switches the program to headers-complete dispatch: the handler runs once headers are parsed and the body flows as `Uint8Array` chunks read off the socket (fiber-yield on EAGAIN, event-loop pump for non-fiber consumers); the 10MiB request cap then applies to the header block only",
+              "`req.body`/`req.bodyBytes()` stay correct — they drain the remaining body into the pre-allocated buffer in place",
+              "`req.stream()` piped into a streaming response body echoes without ever buffering the payload",
+              "See [ADR-00301](../adr/ADR-00301.md), [ADR-00307](../adr/ADR-00307.md)"
+            ]
+          },
+          {
+            "feature": "Graceful shutdown via `process.on('SIGINT'/'SIGTERM', handler)`",
+            "status": "implemented",
+            "notes": [
+              "The handler runs from ordinary control flow at the top of a loop iteration (never real signal context) and may clean up and `process.exit()` — [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md), [PROCESS-CLI.md](PROCESS-CLI.md)"
+            ]
+          },
+          {
+            "feature": "`http.close()` (formal listener teardown, distinct from the graceful-shutdown row above)",
+            "status": "implemented",
+            "notes": [
+              "A bare global function (like `http.listen` itself), reachable only from inside a running request handler, `setTimeout`/`setInterval` callback, or `process.on(...)` handler — the only places code ever runs \"alongside\" the event loop",
+              "Graceful by design: stops accepting immediately and lets already-open connections finish before `http.listen()`'s own call returns control to the rest of the program (matching Node's default `server.close()`) — `http.closeAllConnections()` (next row) is the forceful counterpart",
+              "In a `{ workers: N }` cluster, one worker's `.close()` shuts down every worker — it sets a shared `mmap`'d flag each worker's event loop polls, so the whole cluster drains and exits with no external signal ([TDD-00117](../tdd/TDD-00117.md)/[ADR-00359](../adr/ADR-00359.md))",
+              "See [TDD-00027](../tdd/TDD-00027.md)/[ADR-00102](../adr/ADR-00102.md)"
+            ]
+          },
+          {
+            "feature": "`http.closeAllConnections()` (forceful in-flight teardown)",
+            "status": "implemented",
+            "notes": [
+              "The forceful counterpart to `http.close()` (Node's `server.closeAllConnections()`): `shutdown(2)`s every in-flight connection so each fiber unwinds through its own EOF finish path — no suspended-fiber teardown from outside",
+              "Shuts down the calling handler's own connection too (Node parity), so send the response before calling it if the response must be delivered",
+              "In a `{ workers: N }` cluster, one worker's call force-closes every worker's connections via the same shared `mmap` flag `http.close()` uses (word[1])",
+              "See [TDD-00118](../tdd/TDD-00118.md)/[ADR-00360](../adr/ADR-00360.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

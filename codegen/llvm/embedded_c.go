@@ -12,6 +12,22 @@ type CSource struct {
 	Content string
 	CFlags  []string
 	Libs    []string
+	// Ext is the source-file extension clang compiles this member as, without
+	// the leading dot. Empty means "c" (the overwhelming default); the one
+	// C++14 member — the webview binding — sets "cc" so clang's driver picks
+	// the C++ frontend. SrcExt() resolves the default.
+	Ext string
+}
+
+// SrcExt returns the source-file extension for this member (without the dot),
+// defaulting to "c" when unset — the single point every writer (main.go, the
+// conformance runner, the test build path) consults so a .cc member can never
+// be written as .c by accident.
+func (c CSource) SrcExt() string {
+	if c.Ext == "" {
+		return "c"
+	}
+	return c.Ext
 }
 
 // EmbeddedCSources returns every embedded C runtime file this program's emitted
@@ -30,7 +46,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			return nil, fmt.Errorf("bigint: unknown backend %q", backend)
 		}
 		cflags, libs := LocateBigInt(backend)
-		out = append(out, CSource{"bigint", src, cflags, libs})
+		out = append(out, CSource{"bigint", src, cflags, libs, ""})
 	}
 	if e.UsesCrypto() {
 		backend := e.CryptoBackend()
@@ -39,33 +55,48 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			return nil, fmt.Errorf("crypto: unknown backend %q", backend)
 		}
 		cflags, libs := LocateCrypto(backend)
-		out = append(out, CSource{"crypto", src, cflags, libs})
+		out = append(out, CSource{"crypto", src, cflags, libs, ""})
 	}
 	if e.UsesTLS() {
 		if e.CryptoBackend() == "commoncrypto" {
 			return nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
 		}
 		cflags, libs := LocateTLS()
-		out = append(out, CSource{"tls", TLSClientSource(), cflags, libs})
+		out = append(out, CSource{"tls", TLSClientSource(), cflags, libs, ""})
 	}
 	if e.UsesHTTP2() {
 		cflags, libs := LocateHTTP2()
-		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs})
+		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs, ""})
 	}
 	if e.UsesSpawnSync() {
-		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil})
+		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil, ""})
+	}
+	if e.UsesIPC() {
+		out = append(out, CSource{"ipc", IPCSource(), nil, nil, ""})
 	}
 	if e.UsesBufferCodecs() {
-		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil})
+		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
 	}
 	if e.UsesJSONParse() {
-		out = append(out, CSource{"jsontree", JSONParseTreeSource(), nil, nil})
+		out = append(out, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})
 	}
 	if e.UsesURLPattern() {
-		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil})
+		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
 	}
 	if e.UsesFloatFmt() {
-		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil})
+		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})
+	}
+	if e.UsesWebview() {
+		cflags, libs, err := LocateWebview()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
+	}
+	if e.UsesEmbeddedAssets() {
+		// The embedded static server needs pthread; -pthread is already added
+		// by the CLI when workers are used, but a serve-only program needs it too.
+		out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
 	}
 	return out, nil
 }

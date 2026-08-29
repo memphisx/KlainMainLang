@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/regexp.json; edit the JSON, then run `make status`. -->
+
 # RegExp
 
 > Part of the [Implementation Status](README.md) index.

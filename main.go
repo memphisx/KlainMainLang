@@ -21,6 +21,12 @@ func main() {
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
 	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms) or commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency). Both give identical Web Crypto semantics")
+	pkg := flag.Bool("package", false, "after compiling, also build a double-clickable desktop app around the binary: a .app bundle on macOS, a .desktop launcher on Linux. Intended for webview GUI programs — the bundle is what gives a window proper foreground activation. The standalone binary is still produced too")
+	appName := flag.String("app-name", "", "display `name` for -package (default: the output binary's name). Sets the .app folder name and the app's shown name")
+	appID := flag.String("app-id", "", "bundle `identifier` for -package, e.g. com.example.myapp (default: com.klain.<name>). Becomes the macOS Info.plist CFBundleIdentifier")
+	appVersion := flag.String("app-version", "1.0.0", "app `version` string for -package (macOS CFBundleShortVersionString/CFBundleVersion)")
+	appIcon := flag.String("app-icon", "", "`path` to an app icon for -package: a .icns (used as-is) or .png (converted to .icns on macOS) on macOS; a .png or .svg on Linux. If omitted, the platform's generic app icon is used")
+	emitWindowDTS := flag.Bool("emit-window-dts", false, "for a klain:webview program, also write a <output>.window.d.ts declaring the window.* functions its typed bindings expose, so the page-side code gets autocomplete/typechecking on them")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "usage: klainmain [flags] <file.ts>")
@@ -168,13 +174,33 @@ func main() {
 		fatal("%v", cerr)
 	}
 	for _, cs := range cSources {
-		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + ".c"
+		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + "." + cs.SrcExt()
 		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
 			fatal("cannot write %s source: %v", cs.Name, err)
 		}
 		clangArgs = append(clangArgs, cPath)
 		clangArgs = append(clangArgs, cs.CFlags...)
 		clangArgs = append(clangArgs, cs.Libs...)
+	}
+	// Embedded asset blobs (TDD-00142 Stage 7): each packed directory is written
+	// as a sidecar `.bin` and linked via a generated `.s` that `.incbin`s it
+	// under the per-GOOS symbol the IR references.
+	blobs, berr := em.EmbeddedBlobs()
+	if berr != nil {
+		fatal("%v", berr)
+	}
+	for _, b := range blobs {
+		base := strings.TrimSuffix(inFile, filepath.Ext(inFile))
+		binPath := base + "." + b.Symbol + ".bin"
+		asmPath := base + "." + b.Symbol + ".s"
+		if err := os.WriteFile(binPath, b.Blob, 0644); err != nil {
+			fatal("cannot write embed blob: %v", err)
+		}
+		absBin, _ := filepath.Abs(binPath)
+		if err := os.WriteFile(asmPath, []byte(llvm.EmbedBlobAsm(b.Symbol, absBin, runtime.GOOS)), 0644); err != nil {
+			fatal("cannot write embed asm: %v", err)
+		}
+		clangArgs = append(clangArgs, asmPath)
 	}
 	cmd := exec.Command("clang", clangArgs...)
 	cmd.Stdout = os.Stdout
@@ -184,6 +210,42 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "compiled: %s\n", outBin)
+
+	// --emit-window-dts (TDD-00142 Stage 6): write the page-side Window typing
+	// for this program's typed bindings next to the output.
+	if *emitWindowDTS {
+		if !em.HasWindowBindings() {
+			fmt.Fprintf(os.Stderr, "klainmain: warning: --emit-window-dts: this program has no typed Webview bindings; nothing to declare\n")
+		} else {
+			dtsPath := outBin + ".window.d.ts"
+			if err := os.WriteFile(dtsPath, []byte(em.WindowDTS()), 0644); err != nil {
+				fatal("cannot write %s: %v", dtsPath, err)
+			}
+			fmt.Fprintf(os.Stderr, "window types: %s\n", dtsPath)
+		}
+	}
+
+	// -package (TDD-00142 Stage 4): wrap the freshly-built binary into a
+	// double-clickable desktop app for this host. Gated on GOOS the same way
+	// -static is; a non-webview program is only a warning (a .app can wrap any
+	// GUI binary).
+	if *pkg {
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			fatal("-package is only supported on macOS and Linux (this run is on %s)", runtime.GOOS)
+		}
+		if !em.UsesWebview() {
+			fmt.Fprintf(os.Stderr, "klainmain: warning: -package on a program that doesn't open a webview window; bundling anyway\n")
+		}
+		opts, oerr := resolvePackageOpts(outBin, *appName, *appID, *appVersion, *appIcon)
+		if oerr != nil {
+			fatal("%v", oerr)
+		}
+		artifact, perr := packageApp(outBin, opts)
+		if perr != nil {
+			fatal("package: %v", perr)
+		}
+		fmt.Fprintf(os.Stderr, "packaged: %s\n", artifact)
+	}
 }
 
 func fatal(format string, args ...any) {

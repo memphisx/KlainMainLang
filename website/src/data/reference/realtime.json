@@ -1,0 +1,112 @@
+{
+  "surface": "realtime",
+  "title": "WebSocket, SSE & XHR",
+  "kind": "web",
+  "statusPage": "NETWORKING.md",
+  "coverageScope": "subset",
+  "coverage": {
+    "loose": "3/3",
+    "loosePct": 100,
+    "strict": "0/3",
+    "strictPct": 0
+  },
+  "lede": "The realtime and legacy corners of the Networking surface — WebSocket, EventSource (SSE), and XMLHttpRequest. Each diverges from its browser counterpart in a documented way: WebSocket's handshake is blocking and text-only, EventSource replays the whole stored Last-Event-ID on reconnect, and XMLHttpRequest is modeled as the spec's legacy synchronous mode. The fetch/Response/Request/Headers rows of this same status page are documented separately under the fetch surface.",
+  "entries": [
+    {
+      "id": "realtime.websocket",
+      "name": "new WebSocket(url)",
+      "statusRow": "WebSocket",
+      "signature": "new WebSocket(url: string): WebSocket",
+      "badge": "caveats",
+      "description": "Both a client and a server-side WebSocket. The client's connect and HTTP upgrade handshake run synchronously before the constructor returns; .onmessage/.send(data)/.close() then drive the connection under the event loop. Server-side, http.listen(port, handler, { ws }) hands each upgraded connection a WSConnection that coexists with ordinary HTTP requests on the same listener. A client ping gets an automatic pong reply, and both peer close frames and .close() send a proper Close frame.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "desc": "The ws:// or wss:// endpoint to connect to."
+        }
+      ],
+      "returns": {
+        "type": "WebSocket",
+        "desc": "The client socket, with onopen/onmessage/onclose/onerror handlers."
+      },
+      "exampleKey": "websocket/websocket_client",
+      "snippet": "const ws = new WebSocket('ws://127.0.0.1:8083/')\nws.onopen = () => { ws.send('ping') }\nws.onmessage = (ev) => { console.log(ev.data); ws.close() }",
+      "differences": [
+        "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side `wss` (a TLS listener) is not offered — front it with `tls`/a reverse proxy.",
+        "Neither side supports binary `.send()` (`ArrayBuffer` payloads).",
+        "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification).",
+        "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline."
+      ],
+      "seeAlso": [
+        "realtime.eventsource",
+        "realtime.xmlhttprequest"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/WebSocket"
+      }
+    },
+    {
+      "id": "realtime.eventsource",
+      "name": "new EventSource(url)",
+      "statusRow": "EventSource",
+      "signature": "new EventSource(url: string): EventSource",
+      "badge": "caveats",
+      "description": "Server-sent events (SSE) over HTTP as a non-blocking libcurl transfer sharing the same event loop fetch() uses. Covers connection plumbing (readyState/close()), onmessage/onopen/onerror, and addEventListener/removeEventListener for named (event: name) records — including data/event/id/retry field parsing, multi-line data: concatenation, the several record-boundary forms, and auto-reconnect honoring a server-sent retry: delay while replaying Last-Event-ID. A response that arrives with the wrong shape (non-2xx, or a 2xx without text/event-stream) fails permanently instead of retrying.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "desc": "The SSE endpoint to connect to."
+        }
+      ],
+      "returns": {
+        "type": "EventSource",
+        "desc": "The event source, with readyState, onmessage/onopen/onerror and addEventListener."
+      },
+      "exampleKey": "eventsource/eventsource",
+      "snippet": "const messages = new EventSource('http://127.0.0.1:8765/stream')\nmessages.onopen = (ev) => { console.log(ev.type) }   // open\nmessages.onmessage = (ev) => { console.log(ev.data); messages.close() }",
+      "differences": [
+        "The `Content-Type` check on connect is a case-sensitive `\"text/event-stream\"` prefix match.",
+        "A `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value."
+      ],
+      "seeAlso": [
+        "realtime.websocket",
+        "realtime.xmlhttprequest"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/EventSource"
+      }
+    },
+    {
+      "id": "realtime.xmlhttprequest",
+      "name": "new XMLHttpRequest()",
+      "statusRow": "XMLHttpRequest",
+      "signature": "new XMLHttpRequest(): XMLHttpRequest",
+      "badge": "caveats",
+      "description": "A legacy client modeled as the spec's synchronous mode: .send() runs the request to completion before returning, then fires every registered callback once. It's not actually blocking — .send() is built on the same non-blocking primitive fetch() uses, so it still yields the current fiber when called from inside an http.listen connection handler. Supports .open(), .setRequestHeader(), .send()/.send(body), .abort(), .readyState, .status, .responseText/.response, and the zero-argument callbacks. A network-level failure fires .onerror rather than throwing.",
+      "returns": {
+        "type": "XMLHttpRequest",
+        "desc": "The request object, with onreadystatechange/onload/onerror callbacks."
+      },
+      "exampleKey": "fetch/xhr",
+      "snippet": "const xhr = new XMLHttpRequest()\nxhr.onload = () => { console.log('loaded') }\nxhr.open('GET', 'http://127.0.0.1:8765/get')\nxhr.send()\nconsole.log(xhr.status)  // 200",
+      "differences": [
+        "Modeled as the real spec's legacy *synchronous* mode: `.send()`/`.send(body)` runs the request to completion before returning, then fires every registered callback once, synchronously — there's no default-async, callback-interleaved mode (this compiler has no re-entrant-into-already-returned-caller callback machinery to support one).",
+        "`.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing.",
+        "`.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call.",
+        "`.responseText`/`.response` are identical values — only a text `responseType` is supported; no `responseType` other than the default.",
+        "`.onreadystatechange`/`.onload`/`.onerror` callbacks are zero-argument (deliberately — a payload-carrying callback isn't representable for this particular type).",
+        "`.abort()` is a best-effort `readyState` reset — there's nothing to actually interrupt once a synchronous `.send()` has returned.",
+        "No `.getResponseHeader()`/`.getAllResponseHeaders()` (same missing-response-header-capture gap `Response` has)."
+      ],
+      "seeAlso": [
+        "realtime.websocket",
+        "realtime.eventsource"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest"
+      }
+    }
+  ]
+}

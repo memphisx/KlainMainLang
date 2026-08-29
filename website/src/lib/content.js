@@ -66,6 +66,26 @@ let big = 9007199254740993 // 2**53 + 1
 console.log(big)           // 9007199254740992  (precision loss, as in JS)`
   },
 
+  desktop: {
+    filename: 'embedded.ts',
+    code: `import { Webview } from 'klain:webview'
+
+// A single-file desktop app. \`serve\` embeds your built SPA directory
+// (quasar/vite/react/svelte — any static dist/) straight into the
+// compiled binary and serves it from an in-binary server. The result
+// is ONE executable with no dist/ folder beside it at runtime.
+
+const w = new Webview({
+  title: "My App",
+  width: 900,
+  height: 640,
+  serve: "./dist",
+})
+
+w.run()
+// klainmain app.ts && ./app   →   package it: klainmain -package app.ts`
+  },
+
   fetch: {
     filename: 'fetch.ts',
     code: `const r = await fetch('http://127.0.0.1:8765/get')
@@ -117,7 +137,9 @@ export const coverage = [
   { area: 'os', pct: 100, strict: 86, group: 'Node.js' },
   { area: 'Process / CLI I/O', pct: 96, strict: 44, group: 'Node.js' },
   { area: 'File System (fs)', pct: 93, strict: 50, group: 'Node.js' },
-  { area: 'Other core modules', pct: 93, strict: 7, group: 'Node.js' }
+  { area: 'Other core modules', pct: 93, strict: 7, group: 'Node.js' },
+
+  { area: 'Desktop (klain:webview)', pct: 100, strict: 0, group: 'Desktop' }
 ]
 
 // Headline area figures (docs/status/README.md section totals). These are
@@ -125,8 +147,8 @@ export const coverage = [
 // conformance. See `conformance` below for the honest, unflattering numbers.
 export const headline = [
   { label: 'TypeScript core language', value: '~96%', sub: '336 / 351 targeted features' },
-  { label: 'Web Platform APIs', value: '100%', sub: '55 / 55 targeted features' },
-  { label: 'Node.js APIs', value: '~97%', sub: '90 / 93 targeted features' }
+  { label: 'Web Platform APIs', value: '100%', sub: '57 / 57 targeted features' },
+  { label: 'Node.js APIs', value: '~97%', sub: '93 / 96 targeted features' }
 ]
 
 // External conformance — full public test suites, run unfiltered.

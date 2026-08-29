@@ -17,16 +17,14 @@
           </p>
           <div class="km-hero__cta">
             <router-link to="/docs/getting-started" class="km-btn km-btn--gold">Get started</router-link>
-            <router-link to="/docs/install" class="km-btn km-btn--ghost">Install</router-link>
-            <a :href="gh" target="_blank" rel="noopener" class="km-btn km-btn--ghost">GitHub</a>
           </div>
           <p class="km-hero__note km-mono">
-            Single-developer, experimental, AGPL-3.0. Built for CLI tools &amp; Docker microservices.
+            One self-contained binary — for CLI tools, Docker microservices, and desktop apps.
           </p>
         </div>
 
         <div class="km-hero__art">
-          <MedallionKM :size="320" class="km-hero__sun" />
+          <MedallionKM :size="320" class="km-hero__sun" title="Because native is Gold" />
           <div class="km-hero__terminal">
             <CodeBlock :code="terminal" lang="bash" terminal label="shell" />
           </div>
@@ -124,13 +122,7 @@
           <span class="km-kicker-num km-display">03</span>
           <h2 class="km-display km-secthead__title">The pipeline,<br>in one breath</h2>
         </header>
-        <ol class="km-pipe">
-          <li v-for="(s, i) in pipeline" :key="s.name" class="km-pipe__step">
-            <span class="km-pipe__num km-mono">{{ String(i + 1).padStart(2, '0') }}</span>
-            <h3 class="km-pipe__name">{{ s.name }}</h3>
-            <p class="km-pipe__desc">{{ s.desc }}</p>
-          </li>
-        </ol>
+        <PipelineFlow />
         <p class="km-pipe__tail km-mono">
           → one <code>.ll</code>, one <code>clang</code> call, one generated
           <code>main()</code>, one binary that runs unsupervised.
@@ -167,12 +159,6 @@
         </div>
         <div class="km-cov__foot">
           <router-link to="/docs/coverage" class="km-btn">Full status matrix</router-link>
-          <p class="km-mono">
-            A bare <code>: number</code> is a JS-faithful 64-bit float. Reach for a JSDoc
-            <code>int8…uint64</code> width when you mean real integers. Memory is manual by
-            default (<code>-mm=gc</code> for a collector). Concurrency is cooperative. Nothing
-            is dynamic. All deliberate.
-          </p>
         </div>
       </div>
     </section>
@@ -201,7 +187,7 @@
           <router-link to="/docs" class="km-btn km-btn--ghost">Read the docs</router-link>
         </div>
         <div class="km-origin__flag">
-          <FoilSun :size="300" />
+          <FoilSun :size="300" title="Macedonia is Greek" />
         </div>
       </div>
     </section>
@@ -226,6 +212,7 @@ import CodeBlock from 'components/CodeBlock.vue'
 import Wordmark from 'components/brand/Wordmark.vue'
 import MedallionKM from 'components/brand/MedallionKM.vue'
 import FoilSun from 'components/brand/FoilSun.vue'
+import PipelineFlow from 'components/PipelineFlow.vue'
 import { samples, terminal, coverage, headline, conformance, GITHUB_URL } from 'src/lib/content.js'
 
 const gh = GITHUB_URL
@@ -233,6 +220,7 @@ const tab = ref('server')
 
 const tabs = [
   { key: 'server', file: 'http_server.ts', blurb: 'An HTTP/1.1 + HTTP/2 server' },
+  { key: 'desktop', file: 'embedded.ts', blurb: 'A single-file desktop app' },
   { key: 'fetch', file: 'fetch.ts', blurb: 'async / await + typed JSON' },
   { key: 'generics', file: 'generics.ts', blurb: 'Generics & interfaces' },
   { key: 'numbers', file: 'jsdoc-widths.ts', blurb: 'JSDoc numeric widths' }
@@ -242,16 +230,11 @@ const props = [
   { icon: 'bolt', title: 'No runtime, no VM', body: 'The output is a native executable from clang -O2, not a bundled interpreter. Zero startup warmup, small binaries, plain libc by default.' },
   { icon: 'dns', title: 'Real servers', body: 'http.listen speaks HTTP/1.1 and HTTP/2 (h2c) on one port. fs, worker_threads and cluster give you real OS threads and processes. TLS on both ends.' },
   { icon: 'public', title: 'Browser-shaped APIs, off-browser', body: 'fetch, URL, WebSocket, Web Crypto, Streams, AbortController, timers, the web APIs that make sense without a DOM, and none of the ones that don\'t.' },
-  { icon: 'tune', title: 'You pick the trade-offs', body: 'number is a JS-faithful 64-bit float by default, opt into sized machine ints (int8…uint64) with a JSDoc width when you want them. Memory is manual by default (never frees, perfect for short-lived CLIs); pass -mm=gc for a real Boehm collector. Crypto / bigint / regex backends chosen per compile.' }
+  { icon: 'desktop_windows', title: 'Desktop apps, one file', body: 'klain:webview opens a real window over the system browser engine and calls straight into typed native code. Any SPA (React/Vue/Svelte/Quasar) embeds into the binary with new Webview({ serve }) — a single-file app, packaged to a .app or .desktop.' },
+  { icon: 'tune', title: 'You pick the trade-offs', body: 'number is a JS-faithful 64-bit float by default, opt into sized machine ints (int8…uint64) with a JSDoc width when you want them. Memory is manual by default (never frees, perfect for short-lived CLIs); pass -mm=gc for a real Boehm collector. Crypto / bigint / regex backends chosen per compile.' },
+  { icon: 'inventory_2', title: 'Ships in a scratch image', body: 'One statically-linkable binary, no interpreter and no node_modules to copy in. A Docker microservice fits in a FROM scratch image measured in megabytes, boots instantly, and has nothing extra to patch or CVE-scan.' }
 ]
 
-const pipeline = [
-  { name: 'Lexer', desc: 'Source text becomes a flat token stream.' },
-  { name: 'Parser', desc: 'Recursive descent with Pratt precedence climbing builds the AST.' },
-  { name: 'Resolver', desc: 'Transitive imports are parsed and merged into one AST.' },
-  { name: 'LLVM emitter', desc: '~60 small domain files write LLVM IR text.' },
-  { name: 'clang -O2', desc: 'The real backend turns IR into a host-arch binary.' }
-]
 </script>
 
 <style scoped>
@@ -336,6 +319,10 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-showtab span { font-size: 0.88rem; font-weight: 600; color: #1a1a1a; }
 .km-showtab small { color: #6a6a64; font-size: 0.76rem; }
 .km-showtab:hover { background: #e7e3d8; }
+/* On hover the tab background goes light, so force the labels dark — otherwise
+   the active tab's white filename stays white and becomes unreadable. */
+.km-showtab:hover span { color: #1a1a1a; }
+.km-showtab:hover small { color: #6a6a64; }
 .km-showtab--active { background: var(--km-black); border-left-color: var(--km-gold); }
 .km-showtab--active span { color: #fff; }
 .km-showtab--active small { color: var(--km-gold); }
@@ -349,28 +336,8 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 }
 
 /* ---- PIPELINE ---- */
-.km-pipe { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; align-items: stretch; column-gap: 34px; row-gap: 20px; }
-.km-pipe__step {
-  flex: 1 1 150px; min-width: 150px; position: relative;
-  background: var(--km-black); border: 1px solid var(--km-line); padding: 22px 20px;
-}
-/* Flow connector: a gold arrow sitting in the column-gap between steps. */
-.km-pipe__step:not(:last-child)::after {
-  content: '→'; color: var(--km-gold); font-size: 1.4rem; font-weight: 700; line-height: 1;
-  position: absolute; right: -26px; top: 50%; transform: translateY(-50%); z-index: 2;
-}
-.km-pipe__num { color: var(--km-gold); font-size: 0.86rem; }
-.km-pipe__name { font-size: 1.12rem; font-weight: 800; margin: 12px 0 8px; }
-.km-pipe__desc { color: #a8a8a8; font-size: 0.88rem; }
 .km-pipe__tail { margin-top: 26px; color: var(--km-gold); font-size: 0.9rem; }
 .km-pipe__tail code { color: #fff; }
-@media (max-width: 860px) {
-  .km-pipe { flex-direction: column; row-gap: 30px; }
-  .km-pipe__step { flex-basis: auto; }
-  .km-pipe__step:not(:last-child)::after {
-    content: '↓'; right: auto; left: 50%; top: auto; bottom: -26px; transform: translateX(-50%);
-  }
-}
 
 /* ---- COVERAGE ---- */
 .km-cov { border-top: 1px solid rgba(0,0,0,0.14); }

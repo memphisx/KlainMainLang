@@ -1,0 +1,165 @@
+{
+  "id": "file-system",
+  "file": "FILE-SYSTEM.md",
+  "title": "File System (fs)",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. Node-`fs`-shaped synchronous file I/O for reading/writing config, data, and logs — not `File`/`FileReader`/`FileSystemFileHandle` (those model browser sandbox/permission concepts that don't exist for a native CLI/microservice program with direct filesystem access)."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`fs.readFileSync(path)`",
+            "status": "implemented",
+            "caveats": [
+              "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file"
+            ],
+            "notes": [
+              "Reads the whole file into a string",
+              "Throws a catchable `Error` (built from `strerror(errno)`) if the file can't be opened",
+              "See [ADR-00023](../adr/ADR-00023.md)"
+            ]
+          },
+          {
+            "feature": "`fs.readFileSyncBytes(path)`",
+            "status": "implemented",
+            "notes": [
+              "Binary-safe sibling of `readFileSync`: returns a `Uint8Array` with the file's exact byte count (no `strlen` involved), so a file with an embedded null byte reads back whole",
+              "No `Buffer` class — this compiler has none; plain `ArrayBuffer`/TypedArrays instead",
+              "See [ADR-00094](../adr/ADR-00094.md)"
+            ]
+          },
+          {
+            "feature": "`fs.writeFileSync(path, data)`",
+            "status": "implemented",
+            "notes": [
+              "Creates or truncates the file with `data`. Throws on failure",
+              "`data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type"
+            ]
+          },
+          {
+            "feature": "`fs.appendFileSync(path, data)`",
+            "status": "implemented",
+            "notes": [
+              "Like `writeFileSync`, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure",
+              "Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync`"
+            ]
+          },
+          {
+            "feature": "`fs.existsSync(path)`",
+            "status": "implemented",
+            "notes": [
+              "Plain existence check via POSIX `access()`",
+              "Deliberately does **not** throw for a missing path — matches real Node's own `existsSync`, one of the few `fs` functions that reports \"doesn't exist\" as `false` rather than an error"
+            ]
+          },
+          {
+            "feature": "`fs.unlinkSync(path)`",
+            "status": "implemented",
+            "notes": [
+              "Deletes a file. Throws on failure"
+            ]
+          },
+          {
+            "feature": "`fs.mkdirSync(path)`",
+            "status": "implemented",
+            "caveats": [
+              "No `{recursive: true}` option — throws (e.g. `EEXIST`) if the path already exists or a parent directory is missing"
+            ],
+            "notes": [
+              "Creates a directory via POSIX `mkdir()`, mode `0777` reduced by the process umask as usual",
+              "See [ADR-00027](../adr/ADR-00027.md)"
+            ]
+          },
+          {
+            "feature": "`fs.rmdirSync(path)`",
+            "status": "implemented",
+            "caveats": [
+              "No recursive-delete option, matching `mkdirSync`'s lack of one"
+            ],
+            "notes": [
+              "Removes an *empty* directory via POSIX `rmdir()` — deliberately directory-only (fails on a plain file, unlike `remove()`/`unlinkSync`)",
+              "See [ADR-00027](../adr/ADR-00027.md)"
+            ]
+          },
+          {
+            "feature": "`fs.readdirSync(path)`",
+            "status": "implemented",
+            "notes": [
+              "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, in whatever order the OS's own `readdir()` returns them — no ordering guarantee, matching real Node",
+              "Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux",
+              "See [ADR-00027](../adr/ADR-00027.md)"
+            ]
+          },
+          {
+            "feature": "`fs.renameSync(oldPath, newPath)`",
+            "status": "implemented",
+            "notes": [
+              "Renames/moves a file via POSIX `rename()`. Throws on failure",
+              "See [ADR-00027](../adr/ADR-00027.md)"
+            ]
+          },
+          {
+            "feature": "`fs.copyFileSync(src, dest)`",
+            "status": "implemented",
+            "caveats": [
+              "Still inherits `readFileSync`'s text-only limitation — a source file with embedded null bytes copies back shorter than its real size; not rewritten to use the binary-safe `readFileSyncBytes`/`writeFileSync(path, ArrayBuffer)` path ([ADR-00094](../adr/ADR-00094.md)), a real, separate follow-up if a binary-safe copy is ever needed"
+            ],
+            "notes": [
+              "Composes the existing string-based `readFileSync`/`writeFileSync` helpers — no new C-level I/O code",
+              "See [ADR-00027](../adr/ADR-00027.md)"
+            ]
+          },
+          {
+            "feature": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
+            "status": "implemented",
+            "caveats": [
+              "Blocking I/O under the hood — this compiler has no thread pool, so the syscall runs inline; only *delivery* is async (the callback fires right after the op, the Promise is returned already settled). Not a concurrency/performance gain, an API-shape one ([TDD-00107](../tdd/TDD-00107.md)/[ADR-00340](../adr/ADR-00340.md))",
+              "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form",
+              "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)"
+            ],
+            "notes": [
+              "Covers the sync set: `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir`. Callback gets `(err[, data])`; the Promise rejects with the same `Error` the sync form throws",
+              "Reuses each `*Sync` runtime helper verbatim, catching its throw via the compiler's own `setjmp` catch primitive — no parallel non-throwing I/O code"
+            ]
+          },
+          {
+            "feature": "`fs.createReadStream` / `fs.createWriteStream`",
+            "status": "implemented",
+            "caveats": [
+              "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on",
+              "`createReadStream` reads eagerly to EOF at construction (chunked, not a lazy pull) — a huge file is fully read into per-chunk buffers",
+              "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"\\|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors"
+            ],
+            "notes": [
+              "`createReadStream` returns a Node `Readable` (consumable via `for await` or `.on('data')`/`.on('end')`/`.pipe()`); `createWriteStream` a Node `Writable` (`.write`/`.end`, `'finish'`/`'close'`/`'drain'`). A read→write `.pipe()` round-trips. A failed open throws a catchable `Error` (like `readFileSync`) ([TDD-00108](../tdd/TDD-00108.md)/[ADR-00343](../adr/ADR-00343.md))",
+              "Also wired `for await` over any Node `Readable` (was WHATWG-only)"
+            ]
+          },
+          {
+            "feature": "`File` / `FileReader` / `FileSystemFileHandle` (browser-flavored File API)",
+            "status": "missing",
+            "notes": [
+              "Not planned — these model browser concepts this compiler has no equivalent for"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -246,3 +246,19 @@ const read = () => {
 console.log(read());
 `, "5")
 }
+
+func TestE2EMessageChannelWorkerThreadsImport(t *testing.T) {
+	// `import { MessageChannel } from 'worker_threads'` — Node's module-named
+	// export of the ambient constructor (ADR-00431), identity-bound like
+	// Worker.
+	assertOutputImports(t, `
+import { MessageChannel } from 'worker_threads'
+const ch = new MessageChannel<string>()
+ch.port1.onmessage = (e: { data: string }) => {
+  console.log("got: " + e.data)
+  ch.port1.close()
+  ch.port2.close()
+}
+ch.port2.postMessage("ping")
+`, "got: ping")
+}

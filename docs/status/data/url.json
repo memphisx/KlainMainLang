@@ -1,0 +1,70 @@
+{
+  "id": "url",
+  "file": "URL.md",
+  "title": "URL",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`URL`",
+            "status": "implemented",
+            "caveats": [
+              "`new URL(url)` — single-argument form only, no base-URL resolution"
+            ],
+            "notes": [
+              "Parses via libcurl's URL API (`curl_url`/`curl_url_set`/`curl_url_get`) rather than a hand-rolled parser — the same \"reuse the already-linked C library\" approach `fetch` established",
+              "Fields: `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams` — all plain reads via the ordinary object field-access path, no dispatched methods",
+              "A part absent from the URL (no port/query/fragment) reads as `\"\"`, matching real `URL`'s own default",
+              "Throws a catchable Error (\"Invalid URL\") on a malformed URL",
+              "See [ADR-00076](../adr/ADR-00076.md)"
+            ]
+          },
+          {
+            "feature": "`URLSearchParams`",
+            "status": "implemented",
+            "caveats": [
+              "**Single value per key**: a repeated query-string key (`?a=1&a=2`) silently keeps only its last value — `.get()`/`.getAll()` never see the first one, so `.getAll()` never returns more than one element",
+              "There is no true multi-value `.append()`, since it can't be represented faithfully on top of the `Map<string,string>` backing structure"
+            ],
+            "notes": [
+              "`new URLSearchParams()` / `new URLSearchParams(init)` (tolerates a leading `?`)",
+              "Backed by a plain `Map<string,string>` (the same simplification `http.listen`'s own `req.query` already makes) — `get`/`set`/`has`/`delete`/`size`/`keys()`/`values()`/`entries()`/`forEach()` all come for free from the existing Map machinery, plus `toString()` (percent-encodes back into a query string) and `getAll()` (0 or 1 elements) added specifically for this type",
+              "See [ADR-00076](../adr/ADR-00076.md)"
+            ]
+          },
+          {
+            "feature": "`URLPattern`",
+            "status": "implemented",
+            "caveats": [
+              "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash` — no constructor-string form, no `baseURL`, no `username`/`password` components",
+              "Pattern grammar is literals, `\\` escapes, `*`, `:name`, and `:name?` — `{}` groups, `+` modifiers, and inline `(regex)` groups throw a `TypeError` at construction",
+              "`.exec()` returns a merged `Map<string, string> \\| null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model ([TDD-00068](../tdd/TDD-00068.md))",
+              "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"
+            ],
+            "notes": [
+              "Each component pattern compiles once at construction to an anchored PCRE2 regex (embedded C runtime); input URLs parse via libcurl's URL API, so `.test`/`.exec` link `-lpcre2-8` + `-lcurl` — both already conditional. An unparseable input is `false`/`null`, never a throw; an omitted init component defaults to `*` and reads back as such from the component fields ([TDD-00100](../tdd/TDD-00100.md)/[ADR-00311](../adr/ADR-00311.md))"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

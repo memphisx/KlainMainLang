@@ -1,0 +1,416 @@
+{
+  "surface": "number",
+  "title": "Number, Math & BigInt",
+  "kind": "language",
+  "statusPage": "NUMBER-MATH.md",
+  "coversRows": "all",
+  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "26/35", "strictPct": 74 },
+  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The divergences cluster in two spots: the string-rendering methods (toString/toPrecision/toExponential) pad exponents to two digits (`e+05` vs `e+5`) and truncate a fractional receiver before radix rendering, and the parse helpers inherit their C runtime's quirks — no hex auto-detect for parseInt, and strtod extras like `\"inf\"` for parseFloat. Everything else — the constants, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
+  "entries": [
+    {
+      "id": "number.isInteger",
+      "name": "Number.isInteger(x)",
+      "statusRow": "Number.isInteger(x)",
+      "signature": "Number.isInteger(x: number): boolean",
+      "badge": "caveats",
+      "description": "Reports whether x is a finite integer value. Checks floor(x) == x on the double.",
+      "differences": [
+        "`Number.isInteger(Infinity)`/`(-Infinity)` return `true` — should be `false`; `emitNumberIsInteger` checks `floor(x) == x` only, never finiteness, and `floor(Infinity) == Infinity` is trivially true."
+      ],
+      "seeAlso": ["number.isFinite", "number.isSafeInteger"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isInteger" }
+    },
+    {
+      "id": "number.isFinite",
+      "name": "Number.isFinite(x)",
+      "statusRow": "Number.isFinite(x)",
+      "signature": "Number.isFinite(x: number): boolean",
+      "badge": "exact",
+      "description": "True when x is a finite number (not NaN, not ±Infinity). Unlike the global isFinite, does not coerce non-number arguments.",
+      "seeAlso": ["number.isNaN", "number.isInteger", "global.isFinite"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isFinite" }
+    },
+    {
+      "id": "number.isNaN",
+      "name": "Number.isNaN(x)",
+      "statusRow": "Number.isNaN(x)",
+      "signature": "Number.isNaN(x: number): boolean",
+      "badge": "exact",
+      "description": "True only when x is the NaN value itself — the non-coercing sibling of the global isNaN.",
+      "seeAlso": ["number.isFinite", "global.isNaN"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isNaN" }
+    },
+    {
+      "id": "number.isSafeInteger",
+      "name": "Number.isSafeInteger(x)",
+      "statusRow": "Number.isSafeInteger(x)",
+      "signature": "Number.isSafeInteger(x: number): boolean",
+      "badge": "exact",
+      "description": "True when x is an integer that round-trips exactly through a double — i.e. within ±(2^53 − 1).",
+      "seeAlso": ["number.isInteger", "number.MAX_SAFE_INTEGER"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isSafeInteger" }
+    },
+    {
+      "id": "number.parseInt",
+      "name": "Number.parseInt(s)",
+      "statusRow": "Number.parseInt(s)",
+      "signature": "Number.parseInt(s: string, radix?: number): number",
+      "badge": "caveats",
+      "description": "Parses a leading integer out of s. Returns a double (as real JS), so a no-digits input is a real NaN via an endptr-checked strtoll.",
+      "differences": [
+        "No hex auto-detect when radix is omitted — `\"0x1F\"` parses as `0`, not `31`."
+      ],
+      "seeAlso": ["number.parseFloat", "global.parseInt"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/parseInt" }
+    },
+    {
+      "id": "number.parseFloat",
+      "name": "Number.parseFloat(s)",
+      "statusRow": "Number.parseFloat(s)",
+      "signature": "Number.parseFloat(s: string): number",
+      "badge": "caveats",
+      "description": "Parses a leading floating-point number out of s. A no-conversion input returns a real NaN via the endptr check.",
+      "differences": [
+        "Inherits `strtod` extras — `\"inf\"` parses to `Infinity` (JS only accepts the full word `Infinity`) and C hex-float syntax parses."
+      ],
+      "seeAlso": ["number.parseInt", "global.parseFloat"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/parseFloat" }
+    },
+    {
+      "id": "number.MAX_SAFE_INTEGER",
+      "name": "Number.MAX_SAFE_INTEGER",
+      "statusRow": "Number.MAX_SAFE_INTEGER",
+      "signature": "Number.MAX_SAFE_INTEGER: number",
+      "badge": "exact",
+      "description": "The largest integer that round-trips through a double, 2^53 − 1 (9007199254740991).",
+      "seeAlso": ["number.MIN_SAFE_INTEGER", "number.isSafeInteger"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER" }
+    },
+    {
+      "id": "number.MIN_SAFE_INTEGER",
+      "name": "Number.MIN_SAFE_INTEGER",
+      "statusRow": "Number.MIN_SAFE_INTEGER",
+      "signature": "Number.MIN_SAFE_INTEGER: number",
+      "badge": "exact",
+      "description": "The most-negative safe integer, −(2^53 − 1).",
+      "seeAlso": ["number.MAX_SAFE_INTEGER", "number.isSafeInteger"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MIN_SAFE_INTEGER" }
+    },
+    {
+      "id": "number.EPSILON",
+      "name": "Number.EPSILON",
+      "statusRow": "Number.EPSILON",
+      "signature": "Number.EPSILON: number",
+      "badge": "exact",
+      "description": "The difference between 1 and the smallest double greater than 1, 2^-52.",
+      "seeAlso": ["number.MAX_VALUE", "number.MIN_VALUE"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/EPSILON" }
+    },
+    {
+      "id": "number.MAX_VALUE",
+      "name": "Number.MAX_VALUE",
+      "statusRow": "Number.MAX_VALUE",
+      "signature": "Number.MAX_VALUE: number",
+      "badge": "exact",
+      "description": "The largest representable positive double, roughly 1.7976931348623157e+308.",
+      "seeAlso": ["number.MIN_VALUE", "number.POSITIVE_INFINITY"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_VALUE" }
+    },
+    {
+      "id": "number.MIN_VALUE",
+      "name": "Number.MIN_VALUE",
+      "statusRow": "Number.MIN_VALUE",
+      "signature": "Number.MIN_VALUE: number",
+      "badge": "exact",
+      "description": "The smallest representable positive (subnormal) double, roughly 5e-324.",
+      "seeAlso": ["number.MAX_VALUE", "number.EPSILON"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MIN_VALUE" }
+    },
+    {
+      "id": "number.POSITIVE_INFINITY",
+      "name": "Number.POSITIVE_INFINITY",
+      "statusRow": "Number.POSITIVE_INFINITY",
+      "signature": "Number.POSITIVE_INFINITY: number",
+      "badge": "exact",
+      "description": "The +Infinity value.",
+      "seeAlso": ["number.NEGATIVE_INFINITY", "number.NaN"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/POSITIVE_INFINITY" }
+    },
+    {
+      "id": "number.NEGATIVE_INFINITY",
+      "name": "Number.NEGATIVE_INFINITY",
+      "statusRow": "Number.NEGATIVE_INFINITY",
+      "signature": "Number.NEGATIVE_INFINITY: number",
+      "badge": "exact",
+      "description": "The −Infinity value.",
+      "seeAlso": ["number.POSITIVE_INFINITY", "number.NaN"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/NEGATIVE_INFINITY" }
+    },
+    {
+      "id": "number.NaN",
+      "name": "Number.NaN",
+      "statusRow": "Number.NaN",
+      "signature": "Number.NaN: number",
+      "badge": "exact",
+      "description": "The NaN value, as a Number static property.",
+      "seeAlso": ["number.isNaN", "number.POSITIVE_INFINITY"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/NaN" }
+    },
+    {
+      "id": "number.toFixed",
+      "name": "Number.prototype.toFixed(n)",
+      "statusRow": "Number.prototype.toFixed(n)",
+      "signature": "(x: number).toFixed(digits: number): string",
+      "badge": "caveats",
+      "description": "Formats x with a fixed number of digits after the decimal point.",
+      "differences": [
+        "The `digits` argument is required here, not optional — `(3.14159).toFixed()` hard compile-errors with \"toFixed takes exactly 1 argument\"; real JS defaults `digits` to `0`."
+      ],
+      "seeAlso": ["number.toPrecision", "number.toExponential"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toFixed" }
+    },
+    {
+      "id": "number.toString",
+      "name": "Number.prototype.toString(radix?)",
+      "statusRow": "Number.prototype.toString(radix?)",
+      "signature": "(x: number).toString(radix?: number): string",
+      "badge": "caveats",
+      "description": "Renders x as a string, optionally in a given radix via a hand-rolled digit loop.",
+      "differences": [
+        "Truncates a non-integer receiver to its integer part first (real JS renders fractional digits).",
+        "Radix trusted, not validated (real JS throws a `RangeError` for an out-of-range radix).",
+        "Minor cosmetic deviations from real JS, the same `sprintf`-based exponent padding as the two rows below."
+      ],
+      "seeAlso": ["number.toPrecision", "number.toExponential"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toString" }
+    },
+    {
+      "id": "number.toPrecision",
+      "name": "Number.prototype.toPrecision(n)",
+      "statusRow": "Number.prototype.toPrecision(n)",
+      "signature": "(x: number).toPrecision(precision: number): string",
+      "badge": "caveats",
+      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...).",
+      "differences": [
+        "Exponent pads to 2 digits — `e+05` vs real JS's `e+5`."
+      ],
+      "seeAlso": ["number.toExponential", "number.toFixed"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toPrecision" }
+    },
+    {
+      "id": "number.toExponential",
+      "name": "Number.prototype.toExponential(n)",
+      "statusRow": "Number.prototype.toExponential(n)",
+      "signature": "(x: number).toExponential(fractionDigits: number): string",
+      "badge": "caveats",
+      "description": "Formats x in exponential notation with the given fraction digits via sprintf(\"%.*e\", ...).",
+      "differences": [
+        "Same exponent-padding deviation — `e+05` vs `e+5`."
+      ],
+      "seeAlso": ["number.toPrecision", "number.toFixed"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toExponential" }
+    },
+    {
+      "id": "global.parseInt",
+      "name": "parseInt(s, radix?) (global)",
+      "statusRow": "parseInt(s, radix?) (global)",
+      "signature": "parseInt(s: string, radix?: number): number",
+      "badge": "caveats",
+      "description": "The global parseInt — same runtime as Number.parseInt. A no-digits input yields a real NaN.",
+      "differences": [
+        "Same residual as `Number.parseInt(s)` above — no hex auto-detect when radix is omitted."
+      ],
+      "seeAlso": ["number.parseInt", "global.parseFloat"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt" }
+    },
+    {
+      "id": "global.parseFloat",
+      "name": "parseFloat(s) (global)",
+      "statusRow": "parseFloat(s) (global)",
+      "signature": "parseFloat(s: string): number",
+      "badge": "caveats",
+      "description": "The global parseFloat — same runtime as Number.parseFloat. A no-conversion input yields a real NaN.",
+      "differences": [
+        "Same `strtod` extras as `Number.parseFloat(s)` above."
+      ],
+      "seeAlso": ["number.parseFloat", "global.parseInt"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }
+    },
+    {
+      "id": "global.isNaN",
+      "name": "isNaN(x) (global)",
+      "statusRow": "isNaN(x) (global)",
+      "signature": "isNaN(x: number): boolean",
+      "badge": "exact",
+      "description": "The global isNaN — true when x is NaN.",
+      "seeAlso": ["number.isNaN", "global.isFinite"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isNaN" }
+    },
+    {
+      "id": "global.isFinite",
+      "name": "isFinite(x) (global)",
+      "statusRow": "isFinite(x) (global)",
+      "signature": "isFinite(x: number): boolean",
+      "badge": "exact",
+      "description": "The global isFinite — true when x is finite.",
+      "seeAlso": ["number.isFinite", "global.isNaN"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isFinite" }
+    },
+    {
+      "id": "math.rounding",
+      "name": "Math.floor/ceil/round/trunc",
+      "statusRow": "Math.floor/ceil/round/trunc",
+      "signature": "Math.floor(x); Math.ceil(x); Math.round(x); Math.trunc(x)",
+      "badge": "exact",
+      "description": "The four rounding modes. A float input stays a double end-to-end, so NaN/±Infinity pass through unchanged; Math.round uses JS's tie-toward-+Infinity (Math.round(-4.5) === -4), including the -0 result for Math.round(-0.5). An integer input keeps the exact-i64 path.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.floor(-3.2))  // -4\nconsole.log(Math.ceil(3.2))    // 4\nconsole.log(Math.round(3.5))   // 4\nconsole.log(Math.trunc(-3.9))  // -3",
+      "seeAlso": ["math.abs", "math.sign"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/floor" }
+    },
+    {
+      "id": "math.abs",
+      "name": "Math.abs",
+      "statusRow": "Math.abs",
+      "signature": "Math.abs(x: number): number",
+      "badge": "exact",
+      "description": "Absolute value, preserving the integer fast path for integer inputs.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.abs(-10))   // 10",
+      "seeAlso": ["math.sign", "math.rounding"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/abs" }
+    },
+    {
+      "id": "math.powFamily",
+      "name": "Math.sqrt/pow/hypot",
+      "statusRow": "Math.sqrt/pow/hypot",
+      "signature": "Math.sqrt(x); Math.pow(x, y); Math.hypot(...xs)",
+      "badge": "exact",
+      "description": "Square root, exponentiation, and the Euclidean-norm helper.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.pow(2.0, 10.0))   // 1024\nconsole.log(Math.sqrt(9.0))         // 3\nconsole.log(Math.hypot(3.0, 4.0))  // 5",
+      "seeAlso": ["math.logFamily", "math.cbrtFamily"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sqrt" }
+    },
+    {
+      "id": "math.logFamily",
+      "name": "Math.log/log2/log10",
+      "statusRow": "Math.log/log2/log10",
+      "signature": "Math.log(x); Math.log2(x); Math.log10(x)",
+      "badge": "exact",
+      "description": "Natural, base-2, and base-10 logarithms.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.floor(Math.log2(8.0)))     // 3\nconsole.log(Math.floor(Math.log10(1000.0))) // 3",
+      "seeAlso": ["math.powFamily", "math.cbrtFamily"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/log" }
+    },
+    {
+      "id": "math.trig",
+      "name": "Math.sin/cos/tan",
+      "statusRow": "Math.sin/cos/tan",
+      "signature": "Math.sin(x); Math.cos(x); Math.tan(x)",
+      "badge": "exact",
+      "description": "The primary trigonometric functions (radians).",
+      "exampleKey": "math/math_methods",
+      "snippet": "const sinHalf = Math.sin(Math.PI / 2.0)\nconsole.log(Math.round(sinHalf))   // 1",
+      "seeAlso": ["math.inverseTrig", "math.hyperbolic"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sin" }
+    },
+    {
+      "id": "math.minMax",
+      "name": "Math.min/max",
+      "statusRow": "Math.min/max",
+      "signature": "Math.min(...xs: number[]): number; Math.max(...xs: number[]): number",
+      "badge": "exact",
+      "description": "Any float argument promotes the fold to llvm.minimum/llvm.maximum — NaN propagates and -0.0 orders below +0.0, as the JS spec; all-integer calls stay exact i64.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.min(1, 5, 3))  // 1\nconsole.log(Math.max(1, 5, 3))  // 5",
+      "seeAlso": ["math.sign", "math.abs"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/min" }
+    },
+    {
+      "id": "math.sign",
+      "name": "Math.sign",
+      "statusRow": "Math.sign",
+      "signature": "Math.sign(x: number): number",
+      "badge": "exact",
+      "description": "The float path returns ±1.0 or the input itself (NaN stays NaN, a signed zero keeps its sign); the integer path stays exact i64.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.sign(42))   // 1\nconsole.log(Math.sign(-7))   // -1\nconsole.log(Math.sign(0))    // 0",
+      "seeAlso": ["math.abs", "math.minMax"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sign" }
+    },
+    {
+      "id": "math.random",
+      "name": "Math.random()",
+      "statusRow": "Math.random()",
+      "signature": "Math.random(): number",
+      "badge": "exact",
+      "description": "Returns a float in [0, 1).",
+      "exampleKey": "math/math_methods",
+      "snippet": "const roll = Math.floor(Math.random() * 6.0)\nconst rollOk = roll >= 0 && roll < 6\nconsole.log(rollOk)  // 1",
+      "seeAlso": ["math.rounding"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/random" }
+    },
+    {
+      "id": "math.constants",
+      "name": "Math.PI/E/LN2/LN10/SQRT2/LOG2E/LOG10E",
+      "statusRow": "Math.PI/E/LN2/LN10/SQRT2/LOG2E/LOG10E",
+      "signature": "Math.PI; Math.E; Math.LN2; Math.LN10; Math.SQRT2; Math.LOG2E; Math.LOG10E",
+      "badge": "exact",
+      "description": "The standard Math constants.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.PI)     // 3.141592653589793\nconsole.log(Math.E)      // 2.718281828459045\nconsole.log(Math.SQRT2)  // 1.4142135623730951",
+      "seeAlso": ["math.powFamily", "math.logFamily"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/PI" }
+    },
+    {
+      "id": "math.cbrtFamily",
+      "name": "Math.cbrt/expm1/log1p",
+      "statusRow": "Math.cbrt/expm1/log1p",
+      "signature": "Math.cbrt(x); Math.expm1(x); Math.log1p(x)",
+      "badge": "exact",
+      "description": "cbrt uses a deterministic, correctly-rounded fdlibm implementation (@__kml_cbrt) rather than platform libm, whose runtime cbrt is not reliably correctly-rounded and diverged by OS (glibc cbrt(27) gave 3.0000000000000004); expm1/log1p delegate to libm.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.cbrt(27.0))   // 3\nconsole.log(Math.expm1(0.0))   // 0\nconsole.log(Math.log1p(0.0))   // 0",
+      "seeAlso": ["math.powFamily", "math.logFamily"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/cbrt" }
+    },
+    {
+      "id": "math.inverseTrig",
+      "name": "Math.asin/acos/atan/atan2",
+      "statusRow": "Math.asin/acos/atan/atan2",
+      "signature": "Math.asin(x); Math.acos(x); Math.atan(x); Math.atan2(y, x)",
+      "badge": "exact",
+      "description": "The inverse trigonometric functions.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.acos(1.0))                     // 0\nconsole.log(Math.round(Math.atan2(1.0, 1.0) * 4.0))  // 3",
+      "seeAlso": ["math.trig", "math.hyperbolic"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/atan2" }
+    },
+    {
+      "id": "math.hyperbolic",
+      "name": "Math.sinh/cosh/tanh",
+      "statusRow": "Math.sinh/cosh/tanh",
+      "signature": "Math.sinh(x); Math.cosh(x); Math.tanh(x)",
+      "badge": "exact",
+      "description": "The hyperbolic functions.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.sinh(0.0))   // 0\nconsole.log(Math.cosh(0.0))   // 1\nconsole.log(Math.tanh(0.0))   // 0",
+      "seeAlso": ["math.trig", "math.inverseTrig"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sinh" }
+    },
+    {
+      "id": "math.bitOps",
+      "name": "Math.clz32/fround/imul",
+      "statusRow": "Math.clz32/fround/imul",
+      "signature": "Math.clz32(x); Math.fround(x); Math.imul(a, b)",
+      "badge": "exact",
+      "description": "clz32 via LLVM's own llvm.ctlz.i32 intrinsic; fround via an fptrunc/fpext float32 round-trip; imul via 32-bit mul + sign-extend, giving real 32-bit-wraparound integer multiplication distinct from plain *'s double-precision result.",
+      "exampleKey": "math/math_methods",
+      "snippet": "console.log(Math.clz32(1))     // 31\nconsole.log(Math.imul(3, 4))   // 12\nconsole.log(Math.fround(5.5))  // 5.5",
+      "seeAlso": ["math.powFamily", "math.rounding"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/imul" }
+    }
+  ]
+}

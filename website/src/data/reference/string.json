@@ -1,0 +1,385 @@
+{
+  "surface": "string",
+  "title": "String methods",
+  "kind": "language",
+  "statusPage": "STRING-METHODS.md",
+  "coversRows": "all",
+  "coverage": { "loose": "28/30", "loosePct": 93, "strict": "21/30", "strictPct": 70 },
+  "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
+  "entries": [
+    {
+      "id": "string.concat",
+      "name": "+ (concatenation)",
+      "signature": "string + string → string",
+      "badge": "caveats",
+      "description": "Joins two strings. A null string operand stringifies as \"null\", matching JavaScript.",
+      "snippet": "console.log('x' + null)   // xnull   (matches JS)",
+      "differences": [
+        "A `number | null` operand still silently prints `\"x0\"` instead of `\"xnull\"` — the numeric branch of value-to-string has no nullability check."
+      ],
+      "seeAlso": ["string.length"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Addition" }
+    },
+    {
+      "id": "string.length",
+      "name": ".length",
+      "signature": "length: number",
+      "badge": "exact",
+      "description": "The number of bytes in the string. This compiler's strings are byte sequences, so for ASCII/Latin-1 text this equals the character count.",
+      "snippet": "console.log('Hello'.length)   // 5",
+      "seeAlso": ["string.at", "string.charCodeAt"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/length" }
+    },
+    {
+      "id": "string.slice",
+      "name": ".slice(start, end?)",
+      "signature": "slice(start: number, end?: number): string",
+      "badge": "exact",
+      "description": "Returns a section of the string without mutating the original. Negative indices count from the end.",
+      "params": [
+        { "name": "start", "type": "number", "desc": "Zero-based start index; negative counts from the end." },
+        { "name": "end?", "type": "number", "desc": "Exclusive end index; defaults to the string length." }
+      ],
+      "returns": { "type": "string", "desc": "A new string spanning [start, end)." },
+      "exampleKey": "strings/substring_slice",
+      "snippet": "console.log('Hello, World!'.slice(7, 12))   // World\nconsole.log('Hello, World!'.slice(-6))      // orld!",
+      "seeAlso": ["string.substring", "string.at"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/slice" }
+    },
+    {
+      "id": "string.substring",
+      "name": ".substring(start, end?)",
+      "signature": "substring(start: number, end?: number): string",
+      "badge": "exact",
+      "description": "Like slice, but negative arguments clamp to 0 and a start greater than end is swapped, matching JavaScript.",
+      "params": [
+        { "name": "start", "type": "number", "desc": "Start index; clamped to 0 if negative." },
+        { "name": "end?", "type": "number", "desc": "Exclusive end index; defaults to the string length." }
+      ],
+      "returns": { "type": "string", "desc": "A new string between the two indices." },
+      "exampleKey": "strings/substring_slice",
+      "snippet": "console.log('Hello, World!'.substring(0, 5))   // Hello\nconsole.log('Hello, World!'.substring(5, 0))   // Hello   (swapped)",
+      "seeAlso": ["string.slice"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/substring" }
+    },
+    {
+      "id": "string.indexOf",
+      "name": ".indexOf(substr)",
+      "signature": "indexOf(substr: string): number",
+      "badge": "exact",
+      "description": "Returns the byte index of the first occurrence of the substring, or -1 if absent. Binary-safe past an embedded NUL.",
+      "returns": { "type": "number", "desc": "First match index, or -1." },
+      "snippet": "console.log('the quick brown fox'.indexOf('brown'))   // 10",
+      "seeAlso": ["string.includes", "string.search"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/indexOf" }
+    },
+    {
+      "id": "string.includes",
+      "name": ".includes(substr)",
+      "signature": "includes(substr: string): boolean",
+      "badge": "exact",
+      "description": "Whether the string contains the substring. Binary-safe (searches with memmem over a length header).",
+      "returns": { "type": "boolean", "desc": "true if the substring is present." },
+      "snippet": "console.log('report.pdf'.includes('.pdf'))   // true",
+      "seeAlso": ["string.indexOf", "string.startsWith", "string.endsWith"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/includes" }
+    },
+    {
+      "id": "string.startsWith",
+      "name": ".startsWith(prefix)",
+      "signature": "startsWith(prefix: string): boolean",
+      "badge": "exact",
+      "description": "Whether the string begins with the prefix. Returns false when the string is shorter than the prefix.",
+      "returns": { "type": "boolean", "desc": "true if the string starts with the prefix." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('https://example.com'.startsWith('https'))   // true",
+      "seeAlso": ["string.endsWith", "string.includes"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/startsWith" }
+    },
+    {
+      "id": "string.endsWith",
+      "name": ".endsWith(suffix)",
+      "signature": "endsWith(suffix: string): boolean",
+      "badge": "exact",
+      "description": "Whether the string ends with the suffix. Returns false when the string is shorter than the suffix.",
+      "returns": { "type": "boolean", "desc": "true if the string ends with the suffix." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('report.pdf'.endsWith('.pdf'))   // true",
+      "seeAlso": ["string.startsWith", "string.includes"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/endsWith" }
+    },
+    {
+      "id": "string.replace",
+      "name": ".replace(from, to)",
+      "signature": "replace(from: string, to: string): string",
+      "badge": "exact",
+      "description": "Replaces the first occurrence of `from` with `to`, returning the original string when there is no match. See RegExp for regex-pattern edges.",
+      "returns": { "type": "string", "desc": "A new string with the first match replaced." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('Hello World'.replace('World', 'TypeGo'))   // Hello TypeGo",
+      "seeAlso": ["string.replaceAll", "string.split"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replace" }
+    },
+    {
+      "id": "string.split",
+      "name": ".split(sep)",
+      "signature": "split(sep: string): string[]",
+      "badge": "exact",
+      "description": "Splits the string on a separator into an array. An empty separator splits into individual characters, matching JavaScript.",
+      "returns": { "type": "string[]", "desc": "The array of substrings." },
+      "snippet": "console.log('one,two,three'.split(','))   // ['one','two','three']",
+      "seeAlso": ["string.replace"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/split" }
+    },
+    {
+      "id": "string.trim",
+      "name": ".trim()",
+      "signature": "trim(): string",
+      "badge": "exact",
+      "description": "Strips leading and trailing whitespace. Uses the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware), not just ASCII.",
+      "returns": { "type": "string", "desc": "The trimmed string." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('  hello world  '.trim())   // hello world",
+      "seeAlso": ["string.trimStart"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/trim" }
+    },
+    {
+      "id": "string.trimStart",
+      "name": ".trimStart() / .trimEnd()",
+      "signature": "trimStart(): string; trimEnd(): string",
+      "badge": "exact",
+      "description": "Strips whitespace from one side only, using the same full whitespace set as trim().",
+      "returns": { "type": "string", "desc": "The one-sided-trimmed string." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('[' + '  hi  '.trimStart() + ']')   // [hi  ]",
+      "seeAlso": ["string.trim"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/trimStart" }
+    },
+    {
+      "id": "string.toString",
+      "name": ".toString()",
+      "signature": "toString(): string",
+      "badge": "exact",
+      "description": "Identity on a string, matching JavaScript. Kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks).",
+      "returns": { "type": "string", "desc": "The same string." },
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toString" }
+    },
+    {
+      "id": "string.toUpperCase",
+      "name": ".toUpperCase()",
+      "signature": "toUpperCase(): string",
+      "badge": "exact",
+      "description": "Returns the string with ASCII letters uppercased.",
+      "returns": { "type": "string", "desc": "The uppercased string." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('Hello World'.toUpperCase())   // HELLO WORLD",
+      "seeAlso": ["string.toLowerCase"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toUpperCase" }
+    },
+    {
+      "id": "string.toLowerCase",
+      "name": ".toLowerCase()",
+      "signature": "toLowerCase(): string",
+      "badge": "exact",
+      "description": "Returns the string with ASCII letters lowercased.",
+      "returns": { "type": "string", "desc": "The lowercased string." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('Hello World'.toLowerCase())   // hello world",
+      "seeAlso": ["string.toUpperCase"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toLowerCase" }
+    },
+    {
+      "id": "string.repeat",
+      "name": ".repeat(n)",
+      "signature": "repeat(n: number): string",
+      "badge": "exact",
+      "description": "Returns the string repeated n times.",
+      "returns": { "type": "string", "desc": "The repeated string." },
+      "snippet": "console.log('ab'.repeat(3))   // ababab",
+      "seeAlso": ["string.padStart"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/repeat" }
+    },
+    {
+      "id": "string.padStart",
+      "name": ".padStart(len, pad?)",
+      "signature": "padStart(len: number, pad?: string): string",
+      "badge": "exact",
+      "description": "Pads the start of the string to a target length. An empty pad string is a no-op, matching JavaScript.",
+      "params": [
+        { "name": "len", "type": "number", "desc": "Target total length." },
+        { "name": "pad?", "type": "string", "desc": "Pad string; defaults to a space." }
+      ],
+      "returns": { "type": "string", "desc": "The padded string." },
+      "snippet": "console.log('7'.padStart(3, '0'))   // 007",
+      "seeAlso": ["string.padEnd", "string.repeat"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padStart" }
+    },
+    {
+      "id": "string.padEnd",
+      "name": ".padEnd(len, pad?)",
+      "signature": "padEnd(len: number, pad?: string): string",
+      "badge": "exact",
+      "description": "Pads the end of the string to a target length. Same empty-pad rule as padStart.",
+      "params": [
+        { "name": "len", "type": "number", "desc": "Target total length." },
+        { "name": "pad?", "type": "string", "desc": "Pad string; defaults to a space." }
+      ],
+      "returns": { "type": "string", "desc": "The padded string." },
+      "snippet": "console.log('7'.padEnd(3, '.'))   // 7..",
+      "seeAlso": ["string.padStart"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/padEnd" }
+    },
+    {
+      "id": "string.charCodeAt",
+      "name": ".charCodeAt(i)",
+      "signature": "charCodeAt(i: number): number",
+      "badge": "exact",
+      "description": "Returns the byte-space code unit at index i. Bounds-checked: an out-of-range index (negative or >= length) returns NaN, as real JS — the result is a double for exactly that reason.",
+      "returns": { "type": "number", "desc": "The code unit, or NaN if out of range." },
+      "exampleKey": "strings/char_code",
+      "snippet": "console.log('Hello'.charCodeAt(0))   // 72",
+      "seeAlso": ["string.codePointAt", "string.fromCharCode"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/charCodeAt" }
+    },
+    {
+      "id": "string.at",
+      "name": ".at(i)",
+      "signature": "at(i: number): string",
+      "badge": "caveats",
+      "description": "Returns the character at index i, with negative indices counting from the end.",
+      "returns": { "type": "string", "desc": "The character at i." },
+      "differences": [
+        "An out-of-range `i` returns `\"\"` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data."
+      ],
+      "seeAlso": ["string.charAt", "string.length"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/at" }
+    },
+    {
+      "id": "string.charAt",
+      "name": ".charAt(i)",
+      "signature": "charAt(i: number): string",
+      "badge": "exact",
+      "description": "Returns the character at index i. Never wraps a negative index from the end — always \"\" for any out-of-range i, matching real JS's distinction from .at().",
+      "returns": { "type": "string", "desc": "The character at i, or \"\" if out of range." },
+      "seeAlso": ["string.at"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/charAt" }
+    },
+    {
+      "id": "string.codePointAt",
+      "name": ".codePointAt(i)",
+      "signature": "codePointAt(i: number): number",
+      "badge": "caveats",
+      "description": "Returns the code point at index i.",
+      "returns": { "type": "number", "desc": "The code point, or NaN if out of range." },
+      "exampleKey": "strings/char_code",
+      "snippet": "console.log('Hello'.codePointAt(0))   // 72\nconsole.log('Hello'.codePointAt(0) === 'Hello'.charCodeAt(0))   // true",
+      "differences": [
+        "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text.",
+        "An out-of-range index returns `NaN` (bounds-checked), where real JS returns `undefined` — no undefined sentinel for a numeric result."
+      ],
+      "seeAlso": ["string.charCodeAt"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/codePointAt" }
+    },
+    {
+      "id": "string.normalize",
+      "name": ".normalize()",
+      "signature": "normalize(form?: string): string",
+      "badge": "missing",
+      "description": "Unicode normalization (NFC/NFD/NFKC/NFKD). Deliberately deferred, not attempted — it needs real Unicode normalization tables this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize" }
+    },
+    {
+      "id": "string.match",
+      "name": ".match() / .matchAll()",
+      "signature": "match(re: RegExp): string[] | null; matchAll(re: RegExp): string[][]",
+      "badge": "caveats",
+      "description": "PCRE2-backed regex matching. .match() is real-JS-shaped. See RegExp for the full pattern-language caveats.",
+      "returns": { "type": "string[] | string[][]", "desc": "The match(es)." },
+      "differences": [
+        "`.matchAll()` returns an eager `string[][]` rather than a lazy iterator."
+      ],
+      "seeAlso": ["string.replace", "string.search"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/match" }
+    },
+    {
+      "id": "string.search",
+      "name": ".search(pattern)",
+      "signature": "search(pattern: string | RegExp): number",
+      "badge": "caveats",
+      "description": "Searches for a pattern and returns its index, or -1. A RegExp pattern runs a real PCRE2 search.",
+      "returns": { "type": "number", "desc": "First match index, or -1." },
+      "exampleKey": "strings/search_compare",
+      "snippet": "console.log('the quick brown fox'.search('brown'))   // 10",
+      "differences": [
+        "A plain-string `pattern` isn't coerced to a `RegExp` as in real JS — it falls back to the pre-`RegExp` `.indexOf()`-shaped behavior."
+      ],
+      "seeAlso": ["string.indexOf", "string.match"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/search" }
+    },
+    {
+      "id": "string.replaceAll",
+      "name": ".replaceAll(from, to)",
+      "signature": "replaceAll(from: string, to: string): string",
+      "badge": "caveats",
+      "description": "Replaces every non-overlapping occurrence of `from` with `to`.",
+      "returns": { "type": "string", "desc": "A new string with all matches replaced." },
+      "exampleKey": "strings/string_methods",
+      "snippet": "console.log('a-b-a-b'.replaceAll('-', ' '))   // a b a b",
+      "differences": [
+        "An empty search is a no-op, not JS's insert-between-chars behavior."
+      ],
+      "seeAlso": ["string.replace"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replaceAll" }
+    },
+    {
+      "id": "string.localeCompare",
+      "name": ".localeCompare(other)",
+      "signature": "localeCompare(other: string): number",
+      "badge": "caveats",
+      "description": "Compares two strings, returning exactly -1, 0, or 1. Binary-safe past an embedded NUL.",
+      "returns": { "type": "number", "desc": "-1, 0, or 1." },
+      "exampleKey": "strings/search_compare",
+      "snippet": "console.log('apple'.localeCompare('banana'))   // -1",
+      "differences": [
+        "Length-aware byte-order comparison, not real Unicode collation — no locale/`Intl` infrastructure."
+      ],
+      "seeAlso": ["string.search"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/localeCompare" }
+    },
+    {
+      "id": "string.fromCharCode",
+      "name": "String.fromCharCode(n)",
+      "signature": "String.fromCharCode(...codes: number[]): string",
+      "badge": "exact",
+      "description": "Builds a string from one or more byte-space code units. Static method on String.",
+      "returns": { "type": "string", "desc": "The constructed string." },
+      "exampleKey": "strings/string_static",
+      "snippet": "console.log(String.fromCharCode(72, 105))   // Hi",
+      "seeAlso": ["string.charCodeAt", "string.fromCodePoint"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode" }
+    },
+    {
+      "id": "string.fromCodePoint",
+      "name": "String.fromCodePoint(n)",
+      "signature": "String.fromCodePoint(...codes: number[]): string",
+      "badge": "exact",
+      "description": "Builds a string from code points. In this compiler's byte-space strings this is a BMP alias of fromCharCode.",
+      "returns": { "type": "string", "desc": "The constructed string." },
+      "exampleKey": "strings/string_static",
+      "snippet": "console.log(String.fromCodePoint(84, 121, 112, 101, 71, 111))   // TypeGo",
+      "seeAlso": ["string.fromCharCode"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCodePoint" }
+    },
+    {
+      "id": "string.raw",
+      "name": "String.raw tag",
+      "signature": "String.raw`template`",
+      "badge": "missing",
+      "description": "The String.raw tagged-template helper is not implemented.",
+      "seeAlso": [],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/raw" }
+    }
+  ]
+}

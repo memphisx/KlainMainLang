@@ -168,6 +168,10 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewEventSourceExpression(ex)
 	case *ast.NewEventTargetExpression:
 		return e.emitNewEventTargetExpression()
+	case *ast.NewHTTPAgentExpression:
+		return e.emitNewHTTPAgent(ex)
+	case *ast.NewWebviewExpression:
+		return e.emitNewWebview(ex)
 	case *ast.NewAbortControllerExpression:
 		return e.emitNewAbortControllerExpression()
 	case *ast.NewEventExpression:
@@ -304,6 +308,12 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagFuncRef))
 			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pay))
 			return Value{Ref: r1, Ty: TypeAny}, nil
+		}
+		// A builtin-module marker reaching the generic identifier path means
+		// an unhandled member/usage of that module leaked past its dispatch —
+		// name the module instead of the internal marker.
+		if mod, ok := strings.CutSuffix(id.Name, "__kml_builtin"); ok {
+			return Value{}, fmt.Errorf("%d:%d: this usage of the built-in '%s' module is not supported", id.GetPos().Line, id.GetPos().Col, mod)
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}

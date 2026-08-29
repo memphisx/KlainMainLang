@@ -207,6 +207,12 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewNodeStreamBody(pos, "writable")
 	case "Transform":
 		return p.parseNewNodeStreamBody(pos, "transform")
+	case "PassThrough":
+		return p.parseNewNodeStreamBody(pos, "passthrough")
+	case "Agent":
+		return p.parseNewAgentBody(pos)
+	case "Webview":
+		return p.parseNewWebviewBody(pos)
 	case "CompressionStream":
 		return p.parseNewCompressionStreamBody(pos, false)
 	case "DecompressionStream":
@@ -498,6 +504,48 @@ func (p *Parser) parseNewEventTargetBody(pos ast.Pos) (*ast.NewEventTargetExpres
 		return nil, err
 	}
 	return ast.NewNewEventTargetExpression(pos), nil
+}
+
+// parseNewAgentBody parses `new Agent(options?)` / `new http.Agent(options?)`.
+func (p *Parser) parseNewAgentBody(pos ast.Pos) (*ast.NewHTTPAgentExpression, error) {
+	p.advance() // consume 'Agent'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var options ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		options, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewHTTPAgentExpression(options, pos), nil
+}
+
+// parseNewWebviewBody parses `new Webview(options?)` (TDD-00142) — the system
+// webview window. Options is an optional `{ title, width, height, debug }`
+// object literal, validated in codegen.
+func (p *Parser) parseNewWebviewBody(pos ast.Pos) (*ast.NewWebviewExpression, error) {
+	p.advance() // consume 'Webview'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var options ast.Expression
+	if !p.check(lexer.RPAREN) {
+		var err error
+		options, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewWebviewExpression(options, pos), nil
 }
 
 // parseNewEventBody parses `new Event(type)` (TDD-00081). A second init argument
@@ -1248,7 +1296,7 @@ func (p *Parser) parseNewNodeStreamBody(pos ast.Pos, kind string) (*ast.NewNodeS
 			outTy = first
 		} else {
 			inTy = first
-			if kind == "transform" {
+			if kind == "transform" || kind == "passthrough" {
 				outTy = first
 			}
 		}

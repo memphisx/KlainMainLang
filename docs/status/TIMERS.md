@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/timers.json; edit the JSON, then run `make status`. -->
+
 # Timers
 
 > Part of the [Implementation Status](README.md) index. WHATWG/browser-standard timer APIs.

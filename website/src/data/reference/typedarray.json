@@ -1,0 +1,174 @@
+{
+  "surface": "typedarray",
+  "title": "Binary data & typed arrays",
+  "kind": "web",
+  "statusPage": "BINARY-DATA-TYPED-ARRAYS.md",
+  "coversRows": "all",
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
+  "lede": "Raw byte buffers and the typed views over them, the layer every networking, crypto, and file-I/O path is built on. The recurring divergence is construction: a TypedArray can only be built in a variable declaration's initializer, never as a general expression, and none carry a `.buffer` back-reference (ArrayBuffer, Blob, and Node Buffer are the exceptions — they're general expressions). ArrayBuffer, DataView, SharedArrayBuffer, Atomics, and a real bigint-backed BigInt64Array/DataView 64-bit path are all here, so binary layouts round-trip byte-exactly; the text-shaped readers (Blob.text, Buffer.toString) still truncate at an embedded null byte.",
+  "entries": [
+    {
+      "id": "typedarray.arraybuffer",
+      "name": "ArrayBuffer",
+      "statusRow": "ArrayBuffer",
+      "signature": "new ArrayBuffer(byteLength: number): ArrayBuffer",
+      "badge": "exact",
+      "description": "A fixed-length, zero-initialized (calloc'd) raw byte buffer, with .byteLength and .slice(start?, end?) (a copy, with array-slice negative-index/clamping rules). Unlike the TypedArrays below, it's a general expression — it works anywhere, not just in a variable declaration's initializer.",
+      "params": [{ "name": "byteLength", "type": "number", "desc": "Size of the buffer in bytes." }],
+      "returns": { "type": "ArrayBuffer", "desc": "A zero-filled buffer." },
+      "exampleKey": "typedarrays/typedarrays",
+      "snippet": "const buf = new ArrayBuffer(8)\nconsole.log(buf.byteLength)    // 8\nconst tail = buf.slice(-4)\nconsole.log(tail.byteLength)   // 4",
+      "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.dataview", "typedarray.sharedarraybuffer"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer" }
+    },
+    {
+      "id": "typedarray.uint8arrayint8arrayuint1",
+      "name": "Uint8Array / Int8Array / Uint16Array / Int16Array / Uint32Array / Int32Array / Float32Array / Float64Array",
+      "statusRow": "Uint8Array / Int8Array / Uint16Array / Int16Array / Uint32Array / Int32Array / Float32Array / Float64Array",
+      "signature": "new Uint8Array(size | ArrayBuffer | number[] | TypedArray)",
+      "badge": "caveats",
+      "description": "Typed views over bytes, in three construction forms: a size (own new zero-filled buffer), an existing ArrayBuffer (a view sharing the same memory — writes through one view are visible through any other view over the same buffer, including a differently-typed one), the sub-range form new XArray(buf, byteOffset, length?), or a number[]/array literal/another TypedArray (a copy). Indexing, .length, the whole number[] HOF/iterator surface, plus the TypedArray-specific .set(source, offset?), .subarray(start?, end?) (a view, not a copy), and .byteLength. Non-clamped writes wrap mod 2^width, matching real JS.",
+      "returns": { "type": "TypedArray", "desc": "A typed view or an own buffer." },
+      "exampleKey": "typedarrays/typedarrays",
+      "snippet": "const buf = new ArrayBuffer(8)\nconst bytes: Uint8Array = new Uint8Array(buf)\nconst ints: Int32Array = new Int32Array(buf)\nbytes[0] = 1\nconsole.log(ints[0])           // 1 — same 4 bytes as an i32",
+      "differences": [
+        "Construction is restricted to a variable declaration's initializer — `new Uint8Array(...)` can't appear as a general expression (TypedArrays weren't in scope for the change that lifted the identical restriction on plain array literals and `new Array<T>(...)`/`new Map<K,V>()`/`new Set<T>()`/`new EventEmitter<T>()`, but not for TypedArrays)",
+        "No `.buffer` property (would require every TypedArray, including the \"own buffer\" form, to carry a back-reference to a real `ArrayBuffer` object — a shape change from the plain `{ptr,i64}` array representation)"
+      ],
+      "seeAlso": ["typedarray.arraybuffer", "typedarray.uint8clampedarray", "typedarray.bigint64arraybiguint64ar", "typedarray.dataview"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray" }
+    },
+    {
+      "id": "typedarray.bigint64arraybiguint64ar",
+      "name": "BigInt64Array / BigUint64Array",
+      "statusRow": "BigInt64Array / BigUint64Array",
+      "signature": "new BigInt64Array(size | bigint[] | TypedArray)",
+      "badge": "caveats",
+      "description": "64-bit typed arrays whose elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision bigint handles — writes require a bigint (a plain number is the spec's TypeError), reads wrap losslessly, so values above 2^53 round-trip exactly. Atomics load/store/RMW/compareExchange work on them, lowered to the same seq_cst i64 atomics.",
+      "returns": { "type": "BigInt64Array | BigUint64Array", "desc": "A 64-bit typed array." },
+      "exampleKey": "typedarrays/typedarrays",
+      "snippet": "const bigs = new BigInt64Array(2)\nbigs[0] = 9007199254740993n\nconsole.log(bigs[0])            // 9007199254740993n\nconst ubigs = new BigUint64Array([18446744073709551615n])\nconsole.log(ubigs[0])          // 18446744073709551615n",
+      "differences": [
+        "The vardecl-only construction restriction and missing `.buffer` above apply here too",
+        "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
+        "Compound element assignment (`a[0] += 1n`) is rejected — load, compute, assign",
+        "`console.log` of a *whole* array prints raw element values without the `n` suffix (single-element reads print correctly)",
+        "`Atomics.wait`/`notify` stay `Int32Array`-only"
+      ],
+      "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.atomics", "typedarray.dataview"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt64Array" }
+    },
+    {
+      "id": "typedarray.uint8clampedarray",
+      "name": "Uint8ClampedArray",
+      "statusRow": "Uint8ClampedArray",
+      "signature": "new Uint8ClampedArray(size | number[] | TypedArray)",
+      "badge": "caveats",
+      "description": "A Uint8Array whose write path uses the spec's ToUint8Clamp instead of wrapping — values clamp to [0,255], floats round half to even (254.5 → 254, 255.5 → 255), and NaN → 0, on every write (element assignment including compound, construction, .set, .fill, and .map's result store). Reads are plain u8, so the entire read-side method surface works unchanged.",
+      "returns": { "type": "Uint8ClampedArray", "desc": "A clamping byte array." },
+      "exampleKey": "typedarrays/typedarrays",
+      "snippet": "const clamped = new Uint8ClampedArray([-1, 300, 254.5, 255.5])\nconsole.log(clamped[0], clamped[1], clamped[2], clamped[3]) // 0 255 254 255",
+      "differences": [
+        "The vardecl-only construction restriction and missing `.buffer` above apply here too"
+      ],
+      "seeAlso": ["typedarray.uint8arrayint8arrayuint1"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8ClampedArray" }
+    },
+    {
+      "id": "typedarray.dataview",
+      "name": "DataView",
+      "statusRow": "DataView",
+      "signature": "new DataView(buffer: ArrayBuffer, byteOffset?, byteLength?)",
+      "badge": "caveats",
+      "description": "Endian-controlled binary access over an ArrayBuffer: full get/set × Int8..Uint32/Float32/Float64 and BigInt64/BigUint64 (real bigint values, unsigned above 2^63 correct) with the spec's per-call littleEndian flag (default big-endian, via llvm.bswap), plus .byteLength/.byteOffset/.buffer (an aliasing-identical ArrayBuffer). RangeError on out-of-bounds access and construction.",
+      "params": [
+        { "name": "buffer", "type": "ArrayBuffer", "desc": "The backing buffer." },
+        { "name": "byteOffset", "type": "number", "desc": "Optional start offset." },
+        { "name": "byteLength", "type": "number", "desc": "Optional view length." }
+      ],
+      "returns": { "type": "DataView", "desc": "A view for scalar reads/writes." },
+      "exampleKey": "basics/dataview",
+      "snippet": "const buf = new ArrayBuffer(12);\nconst view = new DataView(buf);\nview.setUint16(0, 0xCAFE);         // big-endian by default\nview.setUint32(2, 123456789, true); // explicit little-endian\nconsole.log(view.getUint32(2, true));",
+      "differences": [
+        "No `getFloat16`"
+      ],
+      "seeAlso": ["typedarray.arraybuffer", "typedarray.bigint64arraybiguint64ar"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView" }
+    },
+    {
+      "id": "typedarray.blob",
+      "name": "Blob",
+      "statusRow": "Blob",
+      "signature": "new Blob(parts?, { type }?)",
+      "badge": "caveats",
+      "description": "An immutable binary value with a MIME type, built from mixed string/TypedArray/ArrayBuffer/Blob parts — a general expression. Exposes .size/.type, .slice(start?, end?, contentType?) (a copy; type never inherited, per spec), awaitable .text()/.arrayBuffer()/.bytes() returning copies, and .stream() → ReadableStream<Uint8Array>.",
+      "returns": { "type": "Blob", "desc": "An immutable binary blob." },
+      "exampleKey": "blob/blob",
+      "snippet": "const greeting = new Blob([\"Hello, \", \"world\", \"!\"], { type: \"text/plain\" })\nconsole.log(greeting.size, greeting.type) // 13 text/plain\nconsole.log(await greeting.text())        // Hello, world!",
+      "differences": [
+        "`.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally",
+        "The parts argument must be an inline array literal; no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
+        "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)"
+      ],
+      "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.arraybuffer"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Blob" }
+    },
+    {
+      "id": "typedarray.sharedarraybuffer",
+      "name": "SharedArrayBuffer",
+      "statusRow": "SharedArrayBuffer",
+      "signature": "new SharedArrayBuffer(byteLength: number): SharedArrayBuffer",
+      "badge": "caveats",
+      "description": "Identical representation to ArrayBuffer (all view constructions, .byteLength, .slice() — which returns a new SharedArrayBuffer, per spec — and DataView work unchanged), but postMessage/workerData/structuredClone share it by reference instead of deep-copying, the spec's semantics. The backing memory for cross-thread Atomics.",
+      "params": [{ "name": "byteLength", "type": "number", "desc": "Size in bytes." }],
+      "returns": { "type": "SharedArrayBuffer", "desc": "A reference-shared buffer." },
+      "exampleKey": "workers/shared_counter",
+      "snippet": "const sab = new SharedArrayBuffer(8); // [0] counter, [1] done flag\nconst cells = new Int32Array(sab);\nfor (let i = 0; i < 1000; i++) {\n  Atomics.add(cells, 0, 1);\n}",
+      "differences": [
+        "No `growable`/`grow()`",
+        "Crosses a worker boundary whole or as an object field; a TypedArray **view** doesn't cross — send the buffer, re-view on the other side",
+        "Views over it can't be captured by closures (the general array-capture limitation), so cross-thread handlers re-view inside the handler"
+      ],
+      "seeAlso": ["typedarray.arraybuffer", "typedarray.atomics"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer" }
+    },
+    {
+      "id": "typedarray.atomics",
+      "name": "Atomics",
+      "statusRow": "Atomics",
+      "signature": "Atomics.add/load/store/wait/notify/compareExchange(ta, i, ...)",
+      "badge": "caveats",
+      "description": "load/store/add/sub/and/or/xor/exchange/compareExchange on any integer TypedArray including BigInt64Array/BigUint64Array (bigint operands/results), lowered directly to seq_cst LLVM atomics; float TypedArrays are a compile-time rejection. wait(ta, i, expected, timeoutMs?) returns \"ok\"/\"not-equal\"/\"timed-out\"; notify(ta, i, count?) returns the wake count — a portable futex substitute. Atomics.isLockFree(n) is true for 1/2/4/8.",
+      "returns": { "type": "number | bigint | string", "desc": "The atomic result." },
+      "exampleKey": "workers/shared_counter",
+      "snippet": "for (let i = 0; i < 1000; i++) {\n  Atomics.add(cells, 0, 1);\n}\nconst r: string = Atomics.wait(cells, 1, 0, 2000);\nconsole.log(\"4-byte ops lock-free: \" + Atomics.isLockFree(4));",
+      "differences": [
+        "`wait` blocks the whole calling thread (event loop and fibers included) — allowed on the main thread (Node posture); no `waitAsync`",
+        "`wait`/`notify` are `Int32Array`-only (spec minus the BigInt64 half)",
+        "Index is bounds-unchecked, matching ordinary TypedArray indexing"
+      ],
+      "seeAlso": ["typedarray.sharedarraybuffer", "typedarray.bigint64arraybiguint64ar"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics" }
+    },
+    {
+      "id": "typedarray.nodebufferbufferfromallo",
+      "name": "Node Buffer (Buffer.from/.alloc/.toString(encoding)/.write/etc.)",
+      "statusRow": "Node Buffer (Buffer.from/.alloc/.toString(encoding)/.write/etc.)",
+      "signature": "Buffer.from(...) / Buffer.alloc(n) / buf.toString(enc)",
+      "badge": "caveats",
+      "description": "A Buffer IS a Uint8Array — indexing, .length, .slice/.subarray, numeric .fill/.indexOf/.includes, HOFs, for-of, .set, .byteLength, and fs.writeFileSync(buffer) all share the TypedArray machinery; Buffer.from(...)/.alloc(...) are general expressions (call syntax, no vardecl restriction). Codecs both directions — utf8, hex, base64, base64url, latin1/binary/ascii — plus full read/write{U}Int{8,16,32}{LE,BE} + Float/Double + BigInt64/BigUInt64 accessors with catchable RangeError bounds checks.",
+      "returns": { "type": "Buffer", "desc": "A Uint8Array-backed buffer." },
+      "exampleKey": "buffer/buffer",
+      "snippet": "const hello = Buffer.from(\"Hello\");            // utf8 bytes\nconsole.log(Buffer.from(\"4869\", \"hex\").toString())      // Hi\nconsole.log(hello.toString(\"base64\"))          // SGVsbG8=\nconst pkt = Buffer.alloc(12)\npkt.writeBigInt64BE(9007199254740993n, 4)",
+      "differences": [
+        "No `utf16le`/`ucs2` encodings (the compiler's strings are UTF-8-native)",
+        "Encoding arguments must be compile-time string literals",
+        "`Buffer.from(arrayBuffer)` **copies** (Node views); `Buffer.concat`'s list must be an inline array literal",
+        "String-valued `.fill`/`.indexOf`/`.includes`/`.lastIndexOf` unsupported (number forms work); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
+        "`.toString()` (utf8/latin1) truncates at an embedded null byte"
+      ],
+      "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.blob"],
+      "spec": { "mdn": "https://nodejs.org/api/buffer.html" }
+    }
+  ]
+}

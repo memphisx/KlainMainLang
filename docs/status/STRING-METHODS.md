@@ -1,8 +1,10 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/string-methods.json; edit the JSON, then run `make status`. -->
+
 # String Methods
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 28/30 (~93%) · **Strict Coverage**: 21/30 (~70%).
+**Coverage**: 28/30 (~93%) · **Strict Coverage**: 21/30 (70%).
 
 Format: [Status page format](README.md#status-page-format).
 

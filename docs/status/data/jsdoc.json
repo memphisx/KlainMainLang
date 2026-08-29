@@ -1,0 +1,434 @@
+{
+  "id": "jsdoc",
+  "file": "JSDOC.md",
+  "title": "JSDoc",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "multiCategory"
+    },
+    {
+      "kind": "block",
+      "text": "> **On the low Strict figure — expected, not a backlog.** Most tags that stay\n> out of Strict do so because their Caveats read \"accepted and erased, not\n> enforced\" (`@readonly`, `@private`/`@protected`/`@public`, `@override`,\n> `@implements`, `@satisfies`, `@enum`). That is deliberate parity: this\n> compiler erases the *inline* TS equivalents (`readonly`, `private`, the\n> `satisfies` operator) without enforcement too, so enforcing only their JSDoc\n> spelling would make the doc-comment form stricter than the real keyword —\n> backwards. These rows are correct as loose ✅; the caveat is an accurate\n> disclosure of a stance, not pending work. The type-carrying tags\n> (`@param`/`@returns`/`@typedef`/`@template`) already do the useful job: they\n> supply a type only where nothing else does, and never override an inline\n> annotation, so stale docs can't corrupt a typed implementation.\n>\n> **Revisited in future.** A pure-JavaScript author may legitimately want JSDoc\n> to *be* the whole type system, enforcement included. The plan is to offer that\n> behind an opt-in compiler flag rather than by default — clearing these caveats\n> only when the user asks, without changing the experience for everyone else.\n> Scoped in [TDD-00126](../tdd/TDD-00126.md)."
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "block",
+      "text": "This page tracks the JSDoc tags and type-expression syntaxes TypeScript itself\nsupports, per [the TypeScript JSDoc reference](https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html) — the parity target. This compiler's own JSDoc **extensions** (which TypeScript has no equivalent for) are listed separately at the bottom and are **not** counted in the parity figures above."
+    },
+    {
+      "kind": "block",
+      "text": "Staged roadmap: [TDD-00125](../tdd/TDD-00125.md)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "JSDoc tags",
+        "featureColumn": "Tag",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`@type`",
+            "status": "implemented",
+            "caveats": [
+              "Applies to variable, class-field, and type-alias positions"
+            ],
+            "notes": [
+              "The value string is parsed by the real type parser (Stage 4), so the full type-expression grammar in the table below is available ([TDD-00123](../tdd/TDD-00123.md) uses it for the `intN` override)"
+            ]
+          },
+          {
+            "feature": "`@param` (aliases `@arg`, `@argument`)",
+            "status": "implemented",
+            "caveats": [
+              "Fills only a parameter with no inline `: T` annotation and no destructuring pattern (an inline type wins)",
+              "A `{...T}` varargs type is stripped to its base `T`; binding it to a body that reads `arguments` still needs the unsupported `arguments` object — use a declared `...rest: T[]` parameter"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 1; the type body uses the full grammar in the type-expression table; a `{number=}`/`[name]` optional decoration is recognized and stripped"
+            ]
+          },
+          {
+            "feature": "`@returns` (alias `@return`)",
+            "status": "implemented",
+            "caveats": [
+              "Fills only when the function has no inline `: RetType`"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
+            ]
+          },
+          {
+            "feature": "`@typedef`",
+            "status": "implemented",
+            "caveats": [
+              "Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal (since Stage 4)",
+              "A `@typedef {T} Name` alias to a **width keyword** (`int32`) does not propagate the integer semantics — the same pre-existing limit a TS `type X = int32` alias has"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a `type Name = …` declaration, so it resolves anywhere a type name does (`@type`/`@param`/inline)"
+            ]
+          },
+          {
+            "feature": "`@callback`",
+            "status": "implemented",
+            "caveats": [
+              "Param/return types use the full type-expression grammar (Stage 4)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 2; synthesized into a function-type alias"
+            ]
+          },
+          {
+            "feature": "`@template`",
+            "status": "implemented",
+            "caveats": [
+              "Inherits the TS generics scope: V1 monomorphization needs an inferable `T`/`T[]`-typed parameter, no explicit call-site type arguments ([TDD-00010](../tdd/TDD-00010.md)); a `{Base}` constraint on a multi-name tag applies to the first name (matching TS)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 3; sets the function's `<T>` list, so it drives the exact same monomorphization a TS `<T>` does. `@erased` (below) is the compile-once variant"
+            ]
+          },
+          {
+            "feature": "`@satisfies`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased — the value keeps its own type, no `satisfies`-style excess-property/conformance check (parity with the erased TS `satisfies` operator — [ADR-00371](../adr/ADR-00371.md))"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@enum`",
+            "status": "implemented",
+            "caveats": [
+              "The tagged `const` object works for value access (`Dir.Up`); it is a plain object, not a nominal enum type — no reverse mapping, no enum-member type narrowing"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@this`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased; a `this` parameter type is not separately modeled (`this` is bound by the class method it lives in)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@extends` (alias `@augments`)",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased — the class's own `extends` clause does the work; the tag does not add type arguments to a generic base"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@implements`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased — like a TS `implements` clause here, it does not strictly enforce structural conformance"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@public`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased, not enforced — the same stance as the TS `public` field modifier here"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@private`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased, not enforced — no access checking (the TS `private` modifier is likewise erased, not enforced, here)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@protected`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased, not enforced"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@readonly`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased, not enforced — no mutation checking (parity with the erased TS `readonly` modifier — [ADR-00373](../adr/ADR-00373.md))"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@override`",
+            "status": "implemented",
+            "caveats": [
+              "Accepted and erased — no override-consistency check"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
+            ]
+          },
+          {
+            "feature": "`@deprecated`",
+            "status": "implemented",
+            "caveats": [
+              "Documentation-only; accepted with no compile effect, but there is no tooling layer to surface a deprecation warning"
+            ],
+            "notes": [
+              "Parity with TS's runtime behavior"
+            ]
+          },
+          {
+            "feature": "`@see`",
+            "status": "implemented",
+            "notes": [
+              "Documentation-only, no type effect — accepted, parity with TS"
+            ]
+          },
+          {
+            "feature": "`@link`",
+            "status": "implemented",
+            "notes": [
+              "Documentation-only, no type effect — accepted, parity with TS"
+            ]
+          },
+          {
+            "feature": "`@author`",
+            "status": "implemented",
+            "notes": [
+              "Documentation-only, no type effect — accepted, parity with TS"
+            ]
+          },
+          {
+            "feature": "`@import`",
+            "status": "missing",
+            "caveats": [
+              "The comment-form import statement is not synthesized; use a normal `import` plus an `import(\"./m\").T` type reference (which resolves — see the type-expression table)"
+            ]
+          },
+          {
+            "feature": "`@constructor` (alias `@class`)",
+            "status": "missing",
+            "caveats": [
+              "Marks a plain function as a constructor (legacy pre-`class` JS) — unsupported; this compiler uses real `class` declarations, not function-as-constructor"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "JSDoc type expressions",
+        "featureColumn": "Syntax",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "Bare primitive (`string`, `number`, `boolean`, …)",
+            "status": "implemented",
+            "notes": [
+              "Resolved by the same type resolver a TS annotation uses"
+            ]
+          },
+          {
+            "feature": "`T[]` array",
+            "status": "implemented",
+            "notes": [
+              "The `[]` suffix is handled by the resolver"
+            ]
+          },
+          {
+            "feature": "Optional param (`T=`, `[name]`)",
+            "status": "implemented",
+            "caveats": [
+              "Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?`"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
+            ]
+          },
+          {
+            "feature": "Varargs/rest (`...T`)",
+            "status": "implemented",
+            "caveats": [
+              "Stripped to the base `T`; the varargs body needs a declared `...rest` parameter (no `arguments`)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
+            ]
+          },
+          {
+            "feature": "Union (`A \\| B`)",
+            "status": "implemented",
+            "caveats": [
+              "Inherits the union V1 scope (scalar/object/`ReadableStream` members, narrowing rules — see the Type system page)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4; the JSDoc string is parsed by the real type parser"
+            ]
+          },
+          {
+            "feature": "Nullable (`?T`)",
+            "status": "implemented",
+            "caveats": [
+              "The leading marker (`?number` → `number \\| null`); a `?` buried mid-expression is left to the parser"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
+            ]
+          },
+          {
+            "feature": "Non-null (`!T`)",
+            "status": "implemented",
+            "caveats": [
+              "The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
+            ]
+          },
+          {
+            "feature": "Object shape (`{ a: string, b: number }`)",
+            "status": "implemented",
+            "caveats": [
+              "Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
+            ]
+          },
+          {
+            "feature": "`Array.<T>` / `Array<T>` (generic array form)",
+            "status": "implemented",
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4; the Closure dot (`Array.<T>`) is normalized to `Array<T>`"
+            ]
+          },
+          {
+            "feature": "`Object.<K, V>` (index map)",
+            "status": "missing",
+            "caveats": [
+              "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would — [TYPE-SYSTEM.md](TYPE-SYSTEM.md)"
+            ]
+          },
+          {
+            "feature": "Function type (`function(A): B`)",
+            "status": "implemented",
+            "caveats": [
+              "Rewritten to the arrow form `(arg0: A) => B`; a nested `function(...)` inside another type is not rewritten (rare)"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
+            ]
+          },
+          {
+            "feature": "`*` / `?` (Closure any/unknown)",
+            "status": "implemented",
+            "notes": [
+              "Both normalized to `any` ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
+            ]
+          },
+          {
+            "feature": "`import(\"./m\").T` type",
+            "status": "implemented",
+            "caveats": [
+              "The `import(\"./m\").Name` qualifier is dropped to the bare `Name`, which resolves under whole-program compilation when that module is part of the build (typically because the file also imports from it) — a `Name` not otherwise pulled in won't resolve; the `typeof import(...)` value form is out of scope"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 6"
+            ]
+          },
+          {
+            "feature": "`@typedef`/`@callback`-defined names",
+            "status": "implemented",
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 2; inline `{{…}}` typedefs work since Stage 4"
+            ]
+          },
+          {
+            "feature": "Legacy synonyms (`String`→`string`, …)",
+            "status": "implemented",
+            "caveats": [
+              "`String`/`Number`/`Boolean`/`Void`/`Undefined`/`Null` remap to the lowercase primitive; bare `Object`/`object` are left as-is"
+            ],
+            "notes": [
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 4"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Compiler extensions (no TypeScript equivalent)"
+    },
+    {
+      "kind": "block",
+      "text": "Not counted in the parity figures above — these are this project's own additions\nto `@type`/`@param`, for native-compilation needs TypeScript's `number`-only\nmodel can't express."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Extension",
+        "hasCaveats": false,
+        "hasNotes": true,
+        "countsTowardParity": false,
+        "rows": [
+          {
+            "feature": "Integer width keywords (`@type {int8..int64, uint8..uint64}`)",
+            "status": "implemented",
+            "notes": [
+              "The real-integer escape hatch — exact semantics, bit-width storage; also usable in `@param`/`@returns` ([TDD-00123](../tdd/TDD-00123.md))"
+            ]
+          },
+          {
+            "feature": "Extended float keywords (`@type {float32, float64}`)",
+            "status": "implemented",
+            "notes": [
+              "`float64` is the default `number`; `float32` is a narrower slot ([TDD-00080](../tdd/TDD-00080.md))"
+            ]
+          },
+          {
+            "feature": "`@erased` (generic single-body compilation)",
+            "status": "implemented",
+            "notes": [
+              "Opts a generic function out of monomorphization — the JSDoc analogue of a `<T>` the compiler compiles once ([TDD-00010](../tdd/TDD-00010.md) V2)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "id": "timers",
+  "file": "TIMERS.md",
+  "title": "Timers",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. WHATWG/browser-standard timer APIs."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`setTimeout(fn, ms)` / `clearTimeout(id)`",
+            "status": "implemented",
+            "caveats": [
+              "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function ([ADR-00200](../adr/ADR-00200.md))"
+            ],
+            "notes": [
+              "Bare global functions, matching real JS (not a namespace)",
+              "See [ADR-00031](../adr/ADR-00031.md)"
+            ]
+          },
+          {
+            "feature": "`setInterval(fn, ms)` / `clearInterval(id)`",
+            "status": "implemented",
+            "notes": [
+              "Same scope as `setTimeout`",
+              "An active interval that's never cleared keeps the process running indefinitely, matching real Node",
+              "See [ADR-00031](../adr/ADR-00031.md)"
+            ]
+          },
+          {
+            "feature": "`setImmediate(fn)` / `clearImmediate(id)`",
+            "status": "implemented",
+            "caveats": [
+              "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's `__kml_timer_drain` is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")"
+            ],
+            "notes": [
+              "Reuses the exact same timer queue as delay-0 `setTimeout` (`clearImmediate` is `clearTimeout` under another name)",
+              "See [ADR-00092](../adr/ADR-00092.md)"
+            ]
+          },
+          {
+            "feature": "`queueMicrotask(fn)`",
+            "status": "implemented",
+            "notes": [
+              "A real microtask FIFO distinct from the timer queue, drained after the synchronous script and before timers ([TDD-00083](../tdd/TDD-00083.md) Stage 3)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

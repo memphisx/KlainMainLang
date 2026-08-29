@@ -63,6 +63,29 @@ func (e *Emitter) emitAssertModuleCall(property string, args []ast.Expression, p
 		return Value{Ty: TypeVoid}, nil
 	case "throws":
 		return e.emitAssertThrows(args, pos)
+	case "match", "doesNotMatch":
+		// assert.match(str, regexp[, message]) — regexp.test(str) under the
+		// hood (a synthesized member call on the regexp argument).
+		if len(args) < 2 || len(args) > 3 {
+			return Value{}, fmt.Errorf("%d:%d: assert.%s takes (string, regexp, message?)", pos.Line, pos.Col, property)
+		}
+		if !e.inferExprType(args[1]).IsRegExp {
+			return Value{}, fmt.Errorf("%d:%d: assert.%s's second argument must be a RegExp", pos.Line, pos.Col, property)
+		}
+		testMem := ast.NewMemberExpression(args[1], "test", pos)
+		matched, err := e.emitRegexTest(testMem, args[:1], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		cond := e.toBool(matched)
+		failMsg := "the input did not match the regular expression"
+		if property == "doesNotMatch" {
+			neg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", neg, cond.Ref))
+			cond = Value{Ref: neg, Ty: TypeBool}
+			failMsg = "the input was expected to not match the regular expression"
+		}
+		return e.emitAssertCheck(cond, args, 2, failMsg, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: unsupported assert.%s", pos.Line, pos.Col, property)
 }

@@ -247,52 +247,45 @@ func (e *Emitter) emitNewServerResponse() string {
 	return res
 }
 
-// emitHTTPCreateServerListen implements Node's chained
-// `http.createServer((req, res) => …).listen(port[, listeningCb])` (TDD-00131).
-// It reuses the entire bespoke HTTP bind/accept/dispatch/response-writing core,
-// only switching the dispatcher into res-mode: the handler is `(req, res) =>
-// void` and the response is read off the mutated `res` rather than a returned
-// object.
-func (e *Emitter) emitHTTPCreateServerListen(cbExpr, portExpr, listeningCb ast.Expression, pos ast.Pos) (Value, error) {
-	if e.httpListenCallSeen {
-		return Value{}, fmt.Errorf("%d:%d: only one HTTP server (http.listen or http.createServer(...).listen(...)) is supported per program (V1)", pos.Line, pos.Col)
+// chainedCreateServerListen matches the chained Node idiom
+// `http.createServer(...).listen(...)` (either the qualified form or a named
+// `createServer` import — both reach codegen as a call on the http marker),
+// returning the two calls' argument lists. Shared by expression emission, the
+// var-decl split (`const server = …` must store the handle *before* the ready
+// callback and the event loop run inside listen), and call-type inference.
+func chainedCreateServerListen(ex *ast.CallExpression) (createArgs, listenArgs []ast.Expression, ok bool) {
+	mem, isMem := ex.Callee.(*ast.MemberExpression)
+	if !isMem || mem.Property != "listen" {
+		return nil, nil, false
 	}
-	e.httpListenCallSeen = true
+	inner, isCall := mem.Object.(*ast.CallExpression)
+	if !isCall {
+		return nil, nil, false
+	}
+	im, isMem2 := inner.Callee.(*ast.MemberExpression)
+	if !isMem2 || im.Property != "createServer" {
+		return nil, nil, false
+	}
+	id, isID := im.Object.(*ast.Identifier)
+	if !isID || id.Name != "http__kml_builtin" {
+		return nil, nil, false
+	}
+	return inner.Args, ex.Args, true
+}
 
-	portVal, err := e.emitExpr(portExpr)
+// emitChainedCreateServerListen emits the chained form via the bound-handle
+// machinery: build the handle, optionally pre-store it (the var-decl split),
+// then listen — which fires the ready callback, runs the event loop, and
+// returns the handle (Node's listen() returns the server).
+func (e *Emitter) emitChainedCreateServerListen(createArgs, listenArgs []ast.Expression, store func(Value), pos ast.Pos) (Value, error) {
+	handle, err := e.emitHTTPCreateServer(createArgs, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	portVal = e.coerce(portVal, TypeI64)
-
-	if err := e.emitHTTPCreateServerCore(cbExpr, pos); err != nil {
-		return Value{}, err
+	if store != nil {
+		store(handle)
 	}
-
-	port32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, portVal.Ref))
-	listenfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s)", listenfd, port32))
-	e.emitInstr("call void @__kml_http_cluster_fork(i64 0)")
-	e.emitInstr(fmt.Sprintf("store i32 %s, ptr @__kml_listen_fd, align 4", listenfd))
-
-	// The optional `listening` callback fires once the server is bound, before
-	// the loop takes over (Node calls it on the 'listening' event).
-	if listeningCb != nil {
-		cbVal, err := e.emitExpr(listeningCb)
-		if err != nil {
-			return Value{}, err
-		}
-		if cbVal.Ty.IsFunc {
-			if err := e.emitClosureCallByPtrVoid(cbVal); err != nil {
-				return Value{}, err
-			}
-		}
-	}
-
-	e.emitInstr("call void @__kml_event_loop_run()")
-	e.emitPostLoopFlush()
-	return Value{Ty: TypeVoid}, nil
+	return e.emitHTTPServerListen(handle, listenArgs, pos)
 }
 
 // unwrapTestWrapper returns the callback wrapped by a `test` builtin counting
@@ -362,6 +355,21 @@ func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos) e
 	// whose return type mirrors the wrapped callback, so annotating the inner
 	// arrow types the whole expression.
 	contextTypeArrowParams(cbExpr, "IncomingMessage", "ServerResponse")
+	// A zero-parameter listener — Node's `createServer(common.mustNotCall())`
+	// idiom (a server that must never see a request), or any `() => …` —
+	// wraps into a synthesized (req, res) handler that invokes it, so the
+	// mustNotCall wrapper still registers its exit-verified failure on a hit.
+	if t := e.inferExprType(cbExpr); t.IsFunc && len(t.FuncParams) == 0 {
+		cbExpr = ast.NewArrowFunction(
+			[]ast.Param{
+				{Name: "req", Type: &ast.TypeAnnotation{Name: "IncomingMessage", Source: "ts"}},
+				{Name: "res", Type: &ast.TypeAnnotation{Name: "ServerResponse", Source: "ts"}},
+			},
+			nil, nil,
+			ast.NewBlockStatement([]ast.Statement{
+				ast.NewExpressionStatement(ast.NewCallExpression(cbExpr, nil, pos), pos),
+			}, pos), pos)
+	}
 	e.emittingHTTPHandler = true
 	e.httpHandlerNode = cbExpr
 	handlerVal, err := e.emitExpr(cbExpr)
@@ -778,7 +786,9 @@ func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos 
 
 	e.emitInstr("call void @__kml_event_loop_run()")
 	e.emitPostLoopFlush()
-	return Value{Ty: TypeVoid}, nil
+	// Node's listen() returns the server, enabling the chained-binding idiom
+	// `const server = http.createServer(cb).listen(0, cb2)`.
+	return objVal, nil
 }
 
 // emitServerResponseMethod translates a `res.writeHead/setHeader/write/end`

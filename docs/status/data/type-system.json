@@ -1,0 +1,326 @@
+{
+  "id": "type-system",
+  "file": "TYPE-SYSTEM.md",
+  "title": "Type System",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "multiCategory"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "Type primitives",
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`number` → `double`",
+            "status": "implemented",
+            "caveats": [
+              "A plain `number` past 2^53 loses precision exactly as JS does (`9007199254740993` is `…992`) — inherent to the double model, not a defect (use `int64`/`uint64` for exact 64-bit integers)",
+              "Mixing an explicit integer type with a bare literal promotes to double (`int32 / 2` is `3.5`); use two integer-typed operands for integer division"
+            ],
+            "notes": [
+              "`number` is a JS-faithful IEEE-754 double — `0.1 + 0.2` is `0.30000000000000004`, `10 / 3` is `3.3333333333333335`, `2 ** -1` is `0.5`, `1 / 0` is `Infinity` (TDD-00123 Stage 1 / [ADR-00377](../adr/ADR-00377.md))",
+              "`/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides per-binding — the integer types are the escape hatch for real integer semantics (integer `/`, exact >2^53, bit-width storage)",
+              "Bitwise `& \\| ^ ~ << >> >>>` use JS 32-bit semantics and their result is a `number` (`(7 & 6) / (7 & 5)` is `1.2`), as are the count/index builtins `.length`/`indexOf`/`lastIndexOf`/`findIndex`/`search`/`charCodeAt`/`push` (`arr.length / other.length` is a float divide) — TDD-00123 Stages 2–3 / [ADR-00379](../adr/ADR-00379.md)"
+            ]
+          },
+          {
+            "feature": "`string` → `ptr`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`boolean` → `i1`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`void`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`null` / `undefined`",
+            "status": "implemented",
+            "notes": [
+              "Sentinel `ptr null`"
+            ]
+          },
+          {
+            "feature": "JSDoc extended integers",
+            "status": "implemented",
+            "notes": [
+              "`@type {int8\\|int16\\|int32\\|int64\\|uint8…uint64}`"
+            ]
+          },
+          {
+            "feature": "JSDoc extended floats",
+            "status": "implemented",
+            "notes": [
+              "`@type {float32\\|float64}`",
+              "Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript `Number::toString` — `1.1 + 2.2` prints `3.3000000000000003`, integers-valued floats drop the point, and the fixed/exponential switch matches JS's thresholds ([TDD-00080](../tdd/TDD-00080.md)/[ADR-00233](../adr/ADR-00233.md))",
+              "`console.log(-0)` prints `0` (this compiler's `console.log` uses `ToString`, and `String(-0)`/`${-0}` are `\"0\"` in JS too); Node's `console.log` shows `-0` only via `util.inspect`, a console-display quirk",
+              "A `float32` prints against its widened `double`"
+            ]
+          },
+          {
+            "feature": "`any`",
+            "status": "implemented",
+            "caveats": [
+              "Arithmetic on an `any` is a clean compile error",
+              "Nested positions `any[]`/`{ x: any }` are clean compile errors",
+              "A boxed array keeps only its data pointer — length/elements aren't recoverable, so it stringifies to the `[object Array]` tag, not its contents ([ADR-00177](../adr/ADR-00177.md))"
+            ],
+            "notes": [
+              "Runtime-tagged value ([TDD-00062](../tdd/TDD-00062.md))",
+              "Supports declare/assign/reassign/print/`typeof`/`===` + bare `any` param/return on every function shape",
+              "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))"
+            ]
+          },
+          {
+            "feature": "`unknown`",
+            "status": "implemented",
+            "caveats": [
+              "Same as `any` (see above)"
+            ],
+            "notes": [
+              "Same Staged V1 scope as `any`"
+            ]
+          },
+          {
+            "feature": "`never`",
+            "status": "implemented",
+            "notes": [
+              "A `(): never` function that always throws works correctly"
+            ]
+          },
+          {
+            "feature": "`symbol`",
+            "status": "implemented",
+            "caveats": [
+              "No dynamic property keys",
+              "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md)), not evaluable `Symbol` values",
+              "No `Symbol.for`/`Symbol.keyFor` registry"
+            ],
+            "notes": [
+              "V1 opaque unique values — `Symbol()`/`Symbol(\"desc\")`, `===`/`!==`, `typeof`, `.description`, `.toString()`",
+              "The fixed-shape object model has no dynamic-property-bag mechanism (blocks dynamic keys) and no runtime protocol-dispatch point (blocks the registry) ([TDD-00044](../tdd/TDD-00044.md))"
+            ]
+          },
+          {
+            "feature": "`bigint`",
+            "status": "implemented",
+            "caveats": [
+              "No `.toLocaleString()`, `BigInt.asIntN`/`asUintN`; bare `Number(bigint)` conversion unsupported (part of a general `Number()`/`String()` gap)"
+            ],
+            "notes": [
+              "Backend-agnostic `__kml_bigint_*` ABI over an opaque `ptr` handle, selectable via `-bigint=libtommath\\|gmp` (default `libtommath`, public domain; `gmp` LGPL) — each an embedded C file compiled+linked only when a program uses bigint ([TDD-00074](../tdd/TDD-00074.md)/[ADR-00216](../adr/ADR-00216.md))",
+              "`123n`/hex/bin/oct/`_`-separator literals, `+ - * / % ** & \\| ^ ~ << >>`, same-type comparisons **and cross-type comparison with an integer `number`** (`10n < 5`, `10n == 10`, exact), unary `-`/`~`, truthiness (`0n` falsy), `typeof`, `++`/`--`, compound assignment, `.toString([radix])`, params/returns/fields/arrays, `BigInt(int\\|string)`, and the console-`n`-suffix vs `String()`-bare print split all work",
+              "Division/modulo by zero throws a catchable `Error` (the same path as the i64 operators)",
+              "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
+              "`>>>`, unary `+`, and `JSON.stringify` on a bigint are clean compile errors (all TypeErrors in JS)",
+              "libbf (MIT) backend deferred to a follow-on stage"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "Type system features",
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`T \\| null` (nullable)",
+            "status": "implemented",
+            "notes": [
+              "A single-branch `T \\| null` uses the presence-flagged nullable-scalar slot (`{ i1, T }`, [TDD-00064](../tdd/TDD-00064.md)); a multi-branch `A \\| B \\| null` is handled by the union box instead (see the Union types row) — both are supported"
+            ]
+          },
+          {
+            "feature": "Object types (interfaces / inline `{}`)",
+            "status": "implemented",
+            "notes": [
+              "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))"
+            ]
+          },
+          {
+            "feature": "Array types `T[]`",
+            "status": "implemented",
+            "notes": [
+              "`{ptr, i64}` aggregate"
+            ]
+          },
+          {
+            "feature": "`Promise<T>`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Function types `(a: T) => R`",
+            "status": "implemented",
+            "notes": [
+              "Closure struct `{funcPtr, envPtr}`"
+            ]
+          },
+          {
+            "feature": "`Map<K,V>`",
+            "status": "implemented",
+            "notes": [
+              "Separate helpers for `<string,number>`, `<string,string>`, etc."
+            ]
+          },
+          {
+            "feature": "`Set<T>`",
+            "status": "implemented"
+          },
+          {
+            "feature": "Union types beyond `T \\| null`",
+            "status": "implemented",
+            "caveats": [
+              "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (one object member ([TDD-00115](../tdd/TDD-00115.md)), or ≥2 as a **discriminated union** sharing a first-position string-literal tag ([TDD-00116](../tdd/TDD-00116.md))), and a `ReadableStream` member ([TDD-00119](../tdd/TDD-00119.md)); array/`ArrayBuffer` members, number-literal tags, and a non-first-position tag aren't supported",
+              "Usable at the top level of a var declaration/function param/return and as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)); as an **array element** it's still rejected (element-level checking not wired)",
+              "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access ([TDD-00114](../tdd/TDD-00114.md))"
+            ],
+            "notes": [
+              "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/ADR-00355.md))"
+            ]
+          },
+          {
+            "feature": "Intersection types",
+            "status": "implemented",
+            "caveats": [
+              "Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error",
+              "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)",
+              "Inherits object types' missing-field leniency: a partial object literal for an `A & B`-typed target is not rejected (a pre-existing object-literal behavior, not intersection-specific)"
+            ],
+            "notes": [
+              "Collapses at `resolveType` into one merged `ObjectType` (member fields concatenated, compatible duplicates deduped) — no runtime tag, unlike a union; reuses all existing object machinery unchanged ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))",
+              "`&` binds tighter than `\\|` (`A & B \\| C` ≡ `(A & B) \\| C`)",
+              "Works as a named interface / inline `{...}` / `type` alias member, and in variable/param/return/field/array-element positions"
+            ]
+          },
+          {
+            "feature": "Tuple types",
+            "status": "implemented",
+            "caveats": [
+              "No rest/optional/named elements",
+              "Constant index only — no non-constant index; compound assignment to an element (`t[0] += x`) is a clean rejection",
+              "No array methods (`.map`/`.filter`/…) on a tuple (`.length` works)",
+              "Not supported nested in `any` or a union"
+            ],
+            "notes": [
+              "Fixed-arity, heterogeneous, positional value stored as a fixed-shape struct ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md))",
+              "Supports declaration + tuple literal, constant-index read **and assignment** (`t[0]`, `t[0] = x`), `.length` (compile-time constant), destructuring (`const [a, b] = t`, `for (const [a, b] of tuples)`, nested), tuple parameters/returns/fields, array-shaped rendering (JSON/`String()`/`console.log`)",
+              "`Map`/`Array`/`Object.entries()` return real `[K, V]` tuples"
+            ]
+          },
+          {
+            "feature": "Mapped & utility types",
+            "status": "implemented",
+            "caveats": [
+              "`Partial`/`Required`/`Readonly` are structural no-ops — the object model already zero-fills omitted fields and does no mutation checking; the visibly-effective utilities are `Pick`/`Omit`/`Record`",
+              "Mapped value body handles `T[K]` (homomorphic), a bare `K`, a concrete type (uniform), or `T[K]` wrapped one level in `Array`/`Promise`/`Set`; a `T[K]` nested deeper isn't substituted",
+              "No key remapping (`as`) or modifier-removal (`-?`/`-readonly`); `?`/`readonly` are accepted but near-no-ops",
+              "String-literal types resolve to `string` — the literal value is not narrowed/enforced",
+              "An unrecognized `Name<Args>` (or a malformed `Pick`/`Omit`) is not yet a clean rejection — [TDD-00079](../tdd/TDD-00079.md) Stage 0"
+            ],
+            "notes": [
+              "`Partial`/`Required`/`Readonly`/`NonNullable`/`Pick`/`Omit`/`Record`, the general mapped form `{ [K in keyof T]: V }`, `keyof`, indexed access `T[K]`, and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))"
+            ]
+          },
+          {
+            "feature": "Conditional types (`T extends U ? X : Y`)",
+            "status": "implemented",
+            "caveats": [
+              "`infer` supported for `Array<infer E>`/`Promise<infer V>` and a bare `infer R`; function-signature inference (`(...) => infer R`) and deeper `infer` nesting are deferred",
+              "`assignable` is structural width subtyping (objects), element-wise (arrays), IR-equality with numeric leniency (scalars) — not full variance"
+            ],
+            "notes": [
+              "Evaluated at compile time off the monomorphized (concrete) check type — generic type aliases (`type A<T> = …`), `infer` capture, and the first general structural assignability predicate ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00231](../adr/ADR-00231.md))",
+              "Nested conditionals are right-associative"
+            ]
+          },
+          {
+            "feature": "Generics on user functions/interfaces/classes",
+            "status": "implemented",
+            "caveats": [
+              "No explicit call-site type arguments for a *function* (`identity<number>(5)`) — inference-only, blocked by the `a<b>(c)` grammar ambiguity (a generic class still takes an explicit `new Box<T>(...)` list)",
+              "A generic function needs an inferable `T`/`T[]`-typed parameter for each of its type parameters",
+              "Map/Set/Promise/closure/dynamic type arguments are a clean rejection (scalars, arrays, and object/interface/class types are supported)",
+              "V2 `@erased` covers functions only (not interfaces/classes) and bare `T` positions only — `T[]` or `T` nested in an object field is a clean compile error",
+              "Arithmetic on an erased `T` hits the same \"operator on any/unknown\" rejection as plain `any`"
+            ],
+            "notes": [
+              "V1 (default): monomorphization — one specialized implementation per distinct combination of concrete types actually used; an object/interface/class type argument mangles structurally (a class by name), so field access/destructuring/`T[]` on a `T`-bound object ride the per-instantiation body ([TDD-00069](../tdd/TDD-00069.md)/[ADR-00352](../adr/ADR-00352.md))",
+              "`<T extends X>` constraints are parsed and enforced (structural width subtyping) on functions and classes ([TDD-00113](../tdd/TDD-00113.md)/[ADR-00353](../adr/ADR-00353.md))",
+              "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md))",
+              "A generic class needs an explicit type-argument list at each `new Box<T>(...)` site; can't use `extends`/`implements`/`abstract`/static members ([ADR-00103](../adr/ADR-00103.md)/[TDD-00010](../tdd/TDD-00010.md))",
+              "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/ADR-00121.md))"
+            ]
+          },
+          {
+            "feature": "Index signatures (`{ [k: string]: T }`)",
+            "status": "implemented",
+            "caveats": [
+              "String key only, map-backed ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)) — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work",
+              "A numeric index (`[i: number]: T`) and a mixed named+index shape (`{ id: number; [k: string]: T }`) are clean rejections",
+              "`JSON.stringify` of an index-signature dict is a clean rejection (no field table to walk) — build it from `Object.keys(...)`; a map-iterating stringify path is deferred"
+            ]
+          },
+          {
+            "feature": "`typeof` type queries (`type T = typeof x`)",
+            "status": "implemented",
+            "caveats": [
+              "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path ([ADR-00389](../adr/ADR-00389.md)) — usable as a `type` alias, an inline annotation, or a parameter/return type. A function-local binding shadowing a top-level one of the same name isn't distinguished (the top-level wins), and an unresolvable query degrades to the `number` default rather than erroring"
+            ]
+          },
+          {
+            "feature": "Type assertions (`x as T`, `as const`, `satisfies T`)",
+            "status": "implemented",
+            "caveats": [
+              "**Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect ([ADR-00371](../adr/ADR-00371.md))"
+            ],
+            "notes": [
+              "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity"
+            ]
+          },
+          {
+            "feature": "Template literal types (`` `a-${T}` ``)",
+            "status": "missing",
+            "caveats": [
+              "Not parsed in a type position (`expected type name, got TEMPLATE_HEAD`). Distinct from template literal *values*, which work"
+            ]
+          },
+          {
+            "feature": "`readonly T[]` array-type modifier",
+            "status": "implemented",
+            "caveats": [
+              "**Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered ([ADR-00373](../adr/ADR-00373.md))"
+            ]
+          },
+          {
+            "feature": "Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`)",
+            "status": "implemented",
+            "caveats": [
+              "Parsed and erased ([ADR-00388](../adr/ADR-00388.md)) — the no-body/no-init forms and the brace-bodied `global`/`module`/`namespace`/`class` blocks all compile away. Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so a runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

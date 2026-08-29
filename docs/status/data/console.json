@@ -1,0 +1,117 @@
+{
+  "id": "console",
+  "file": "CONSOLE.md",
+  "title": "console",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`console.log(...)`",
+            "status": "implemented",
+            "caveats": [
+              "A printed string is written via `printf`'s `\"%s\"`, so a value with an embedded null byte truncates *on display* at the first `\\0` — the stored string is intact (`.length` and every operation see the full bytes); a binary-safe `fwrite` print is deferred as display-only, low-value ([TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)). Use `process.stdout.write` for binary output"
+            ],
+            "notes": [
+              "Multiple arguments join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `\"0\"`) — [ADR-00285](../adr/ADR-00285.md)"
+            ]
+          },
+          {
+            "feature": "`console.error(...)`",
+            "status": "implemented",
+            "notes": [
+              "Writes to stderr"
+            ]
+          },
+          {
+            "feature": "`console.warn(...)`",
+            "status": "implemented",
+            "notes": [
+              "Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/ADR-00285.md))"
+            ]
+          },
+          {
+            "feature": "`console.info(...)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`console.debug(...)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`console.trace(...)`",
+            "status": "implemented",
+            "caveats": [
+              "Prints `\"Trace: <message>\"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all"
+            ],
+            "notes": [
+              "Same generic print path as `.debug()`/`.info()`, no stack-walking logic. See [ADR-00166](../adr/ADR-00166.md)."
+            ]
+          },
+          {
+            "feature": "`console.assert(cond, msg)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`console.table()`",
+            "status": "missing",
+            "notes": [
+              "Deliberately deferred, not attempted — needs a genuinely new algorithm (dynamic per-column width computation, box-drawing header/index rows over arbitrarily-shaped input), not a quick extension of existing print machinery like the other rows below"
+            ]
+          },
+          {
+            "feature": "`console.time()` / `.timeEnd()`",
+            "status": "implemented",
+            "caveats": [
+              "V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label"
+            ],
+            "notes": [
+              "See [ADR-00029](../adr/ADR-00029.md)."
+            ]
+          },
+          {
+            "feature": "`console.count()` / `.countReset()`",
+            "status": "implemented",
+            "notes": [
+              "Backed by a real `Map<string, number>` — matches real Node's per-label semantics exactly, unlike `time`'s single-slot narrowing above. See [ADR-00029](../adr/ADR-00029.md)."
+            ]
+          },
+          {
+            "feature": "`console.group()` / `.groupEnd()`",
+            "status": "implemented",
+            "notes": [
+              "Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/ADR-00029.md)."
+            ]
+          },
+          {
+            "feature": "`console.dir()`",
+            "status": "implemented",
+            "caveats": [
+              "The real API's second `options` argument — depth/color controls — is accepted syntactically but ignored"
+            ],
+            "notes": [
+              "Prints a single value exactly like a single-argument `console.log`. See [ADR-00029](../adr/ADR-00029.md)."
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

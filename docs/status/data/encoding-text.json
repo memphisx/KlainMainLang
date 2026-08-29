@@ -1,0 +1,55 @@
+{
+  "id": "encoding-text",
+  "file": "ENCODING-TEXT.md",
+  "title": "Encoding / Text",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "block",
+      "text": "`atob`/`btoa` and `encodeURI(Component)`/`decodeURI(Component)` are tracked as bare globals in [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md), not here."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`TextEncoder`",
+            "status": "implemented",
+            "notes": [
+              "`new TextEncoder().encode(str): Uint8Array` — UTF-8 only, which matches the spec (`TextEncoder` is UTF-8-only by spec, not a narrowing)",
+              "Strings are already raw UTF-8 byte sequences, so `encode`/`decode` are direct byte copies with no real transcoding",
+              "See [ADR-00112](../adr/ADR-00112.md)"
+            ]
+          },
+          {
+            "feature": "`TextDecoder`",
+            "status": "implemented",
+            "caveats": [
+              "UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on in [TDD-00034](../tdd/TDD-00034.md), not started",
+              "The optional `label` argument is evaluated (for side effects) and then ignored, not validated — always decodes as UTF-8, permissive rather than throwing a `RangeError` for an unrecognized label"
+            ],
+            "notes": [
+              "`new TextDecoder(label?).decode(bytes): string` — accepts a `Uint8Array` or `ArrayBuffer`",
+              "See [ADR-00112](../adr/ADR-00112.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/json.json; edit the JSON, then run `make status`. -->
+
 # JSON
 
 > Part of the [Implementation Status](README.md) index.

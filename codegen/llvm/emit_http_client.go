@@ -195,14 +195,14 @@ func (e *Emitter) emitPostLoopFlush() {
 // emitHTTPClientGet implements http.get(url, cb?) — a GET request whose response
 // is handed to cb as an IncomingMessage. http.request(url, cb) reduces here too
 // in V1 (method defaults to GET; request-body writes are Stage 2).
-func (e *Emitter) emitHTTPClientGet(args []ast.Expression, pos ast.Pos) (Value, error) {
-	return e.emitHTTPClientGetScheme(args, pos, "http")
+func (e *Emitter) emitHTTPClientGet(args []ast.Expression, pos ast.Pos, deferred bool) (Value, error) {
+	return e.emitHTTPClientGetScheme(args, pos, "http", deferred)
 }
 
 // emitHTTPClientGetScheme is emitHTTPClientGet with the URL scheme the
 // options-object form composes with — "https" when dispatched through the
 // https module.
-func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, scheme string) (Value, error) {
+func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, scheme string, deferred bool) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: http.get takes (url, callback?)", pos.Line, pos.Col)
 	}
@@ -221,8 +221,16 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 				pathExpr = prop.Value
 			case "host", "hostname":
 				hostExpr = prop.Value
+			case "agent":
+				// Accepted, evaluated for effect, and otherwise ignored: this
+				// client opens one connection per request — exactly Node's
+				// behavior with `agent: false`/a non-keepAlive Agent, so no
+				// observable pooling semantics are being silently dropped.
+				if _, err := e.emitExpr(prop.Value); err != nil {
+					return Value{}, err
+				}
 			default:
-				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host } only (got '%s')", pos.Line, pos.Col, prop.Key)
+				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, agent } only (got '%s')", pos.Line, pos.Col, prop.Key)
 			}
 		}
 		if portExpr == nil {
@@ -266,6 +274,65 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 			return Value{}, err
 		}
 		urlVal = acc
+	} else if objTy := e.inferExprType(args[0]); objTy.IsObject {
+		// A *variable-bound* options object (`const options = { port, … };
+		// http.get(options, cb)`). Before this branch existed the object
+		// pointer fell through as the URL string — a silent-garbage request
+		// that hung; read the typed fields instead.
+		objVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		loadField := func(name string) (Value, bool) {
+			idx, fty, ok := objVal.Ty.FieldIndex(name)
+			if !ok {
+				return Value{}, false
+			}
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fty.IR, gep, fty.Align()))
+			return Value{Ref: r, Ty: fty}, true
+		}
+		for _, f := range objVal.Ty.Fields {
+			switch f.Name {
+			case "port", "path", "host", "hostname", "agent":
+			default:
+				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, agent } only (got '%s')", pos.Line, pos.Col, f.Name)
+			}
+		}
+		portVal, ok := loadField("port")
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: http.get's options object requires a 'port'", pos.Line, pos.Col)
+		}
+		portStr, err := e.emitValueToString(portVal)
+		if err != nil {
+			return Value{}, err
+		}
+		host := Value{Ref: e.internString("127.0.0.1"), Ty: TypePtr}
+		if hv, ok := loadField("host"); ok && isStringTy(hv.Ty) {
+			host = hv
+		} else if hv, ok := loadField("hostname"); ok && isStringTy(hv.Ty) {
+			host = hv
+		}
+		acc, err := e.emitStringConcat(Value{Ref: e.internString(scheme + "://"), Ty: TypePtr}, host)
+		if err != nil {
+			return Value{}, err
+		}
+		if acc, err = e.emitStringConcat(acc, Value{Ref: e.internString(":"), Ty: TypePtr}); err != nil {
+			return Value{}, err
+		}
+		if acc, err = e.emitStringConcat(acc, portStr); err != nil {
+			return Value{}, err
+		}
+		if pv, ok := loadField("path"); ok && isStringTy(pv.Ty) {
+			if acc, err = e.emitStringConcat(acc, pv); err != nil {
+				return Value{}, err
+			}
+		} else if acc, err = e.emitStringConcat(acc, Value{Ref: e.internString("/"), Ty: TypePtr}); err != nil {
+			return Value{}, err
+		}
+		urlVal = acc
 	} else {
 		v, err := e.emitExpr(args[0])
 		if err != nil {
@@ -298,55 +365,100 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 		userCb = cb.hdrPtr
 	}
 
-	method := e.internString("GET")
-	pending := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr null, ptr null, ptr null)", pending, urlVal.Ref, method))
-
-	// Register a completion reaction (env = { userCb, pending }) — fired when
-	// the transfer is done, either by the running event loop (so an in-process
-	// http.listen server is serviced concurrently) or by the busy-drive fallback
-	// when there is no event loop.
-	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
-	e0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userCb, e0))
-	e1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pending, e1))
-	thunk := e.emitHTTPCompletionThunk()
-	closure := e.buildBuiltinClosure(thunk, env)
-	e.emitInstr(fmt.Sprintf("call void @__kml_httpc_register(ptr %s, ptr %s)", pending, closure))
-	e.emitInstr("store ptr @__kml_httpc_flush, ptr @__kml_httpc_flush_hook, align 8")
-
-	// If an http.listen listener is registered, the event loop will drive the
-	// transfer and fire the reaction — return immediately. Otherwise (no loop),
-	// busy-drive to completion here.
-	listenfd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_listen_fd, align 8", listenfd))
-	hasLoop := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", hasLoop, listenfd))
-	deferL := e.freshLabel("httpc.defer")
-	driveL := e.freshLabel("httpc.drive")
-	afterL := e.freshLabel("httpc.after")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasLoop, deferL, driveL))
-	e.emitLabel(driveL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_httpc_drive(ptr %s)", pending))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-	e.emitLabel(deferL)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-	e.emitLabel(afterL)
-	// V1: http.get returns void (the ClientRequest surface is a follow-on).
-	return Value{Ty: TypeVoid}, nil
+	// Build the ClientRequest handle (ADR-00430): { ptr url, ptr cb, i64
+	// state }. `get` fires immediately (state 1); `request` waits for
+	// .end() (state 0), matching Node's "nothing is sent until end()".
+	e.ensureHTTPClientBegin()
+	req := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 24)", req))
+	g0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 0", g0, req))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", urlVal.Ref, g0))
+	g1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 1", g1, req))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userCb, g1))
+	g2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 2", g2, req))
+	if deferred {
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", g2))
+	} else {
+		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", g2))
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_begin(ptr %s, ptr %s)", urlVal.Ref, userCb))
+	}
+	return Value{Ref: req, Ty: ClientRequestType()}, nil
 }
 
-// emitHTTPCompletionThunk emits the reaction fired when a client transfer
+// ensureHTTPClientBegin emits @__kml_httpc_begin(url, usercb) once: start the
+// transfer (fetch_async), register the completion reaction, and either defer
+// to the running event loop or busy-drive when there is none. Also
+// @__kml_httpc_req_end(req) — the ClientRequest .end() trigger.
+func (e *Emitter) ensureHTTPClientBegin() {
+	if e.usedHTTPCBegin {
+		return
+	}
+	e.usedHTTPCBegin = true
+	thunk := e.emitHTTPCompletionThunk()
+	e.emitStandaloneFunc("void @__kml_httpc_begin(ptr %url, ptr %usercb)", func() string {
+		method := e.internString("GET")
+		pending := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %%url, ptr %s, ptr null, ptr null, ptr null)", pending, method))
+		env := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+		e0 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
+		e.emitInstr(fmt.Sprintf("store ptr %%usercb, ptr %s, align 8", e0))
+		e1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pending, e1))
+		closure := e.buildBuiltinClosure(thunk, env)
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_register(ptr %s, ptr %s)", pending, closure))
+		e.emitInstr("store ptr @__kml_httpc_flush, ptr @__kml_httpc_flush_hook, align 8")
+		listenfd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_listen_fd, align 8", listenfd))
+		hasLoop := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", hasLoop, listenfd))
+		deferL := e.freshLabel("httpc.defer")
+		driveL := e.freshLabel("httpc.drive")
+		afterL := e.freshLabel("httpc.after")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasLoop, deferL, driveL))
+		e.emitLabel(driveL)
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_drive(ptr %s)", pending))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+		e.emitLabel(deferL)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+		e.emitLabel(afterL)
+		return "ret void"
+	})
+	e.emitGlobal(`
+define void @__kml_httpc_req_end(ptr %req) {
+entry:
+  %st_p = getelementptr { ptr, ptr, i64 }, ptr %req, i32 0, i32 2
+  %st = load i64, ptr %st_p, align 8
+  %pending = icmp eq i64 %st, 0
+  br i1 %pending, label %fire, label %ret
+fire:
+  store i64 1, ptr %st_p, align 8
+  %url_p = getelementptr { ptr, ptr, i64 }, ptr %req, i32 0, i32 0
+  %url = load ptr, ptr %url_p, align 8
+  %cb_p = getelementptr { ptr, ptr, i64 }, ptr %req, i32 0, i32 1
+  %cb = load ptr, ptr %cb_p, align 8
+  call void @__kml_httpc_begin(ptr %url, ptr %cb)
+  br label %ret
+ret:
+  ret void
+}`)
+}
+
+// emitHTTPCompletionThunk emits (once) the reaction fired when a client transfer
 // completes: read status/body off the (now-done) pending, build the
 // IncomingMessage, invoke the user callback (which registers res.on(...)), then
 // deliver the body as one 'data' chunk + 'end'. env = { ptr userCb, ptr pending }.
 func (e *Emitter) emitHTTPCompletionThunk() string {
-	e.streamSiteCtr++
-	fn := fmt.Sprintf("@__kml_httpc_thunk_%d", e.streamSiteCtr)
+	fn := "@__kml_httpc_thunk"
+	if e.usedHTTPCThunk {
+		return fn
+	}
+	e.usedHTTPCThunk = true
 	restore := e.beginThunkEmit()
 
 	userCb := e.freshReg()
@@ -494,4 +606,124 @@ func (e *Emitter) emitIncomingMessageCall(objExpr ast.Expression, method string,
 		return objVal, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: an http IncomingMessage has no method '%s'", pos.Line, pos.Col, method)
+}
+
+// emitClientRequestMethod dispatches methods on the http.get/request handle
+// (ADR-00430): .end() fires a deferred request; .abort()/.destroy() cancel a
+// not-yet-fired one; .on('response') binds the callback slot, .on('error')
+// is accepted (there is no async transport-error delivery to feed it — a
+// transport failure surfaces as a thrown Error instead, so a mustNotCall
+// error listener behaves correctly on the success path).
+func (e *Emitter) emitClientRequestMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	self := Value{Ref: objVal.Ref, Ty: ClientRequestType()}
+	stGEP := func() string {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 2", g, objVal.Ref))
+		return g
+	}
+	switch method {
+	case "end":
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("%d:%d: req.end() with a body is not supported (this client sends GET requests only — TDD-00138 Stage 2)", pos.Line, pos.Col)
+		}
+		e.ensureHTTPClientBegin()
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_req_end(ptr %s)", objVal.Ref))
+		return self, nil
+	case "abort", "destroy":
+		// Cancel only a not-yet-fired request (state 0 → 2); an in-flight
+		// libcurl transfer is not torn down (disclosed caveat).
+		g := stGEP()
+		st := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, g))
+		isPending := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isPending, st))
+		doL := e.freshLabel("creq.cancel")
+		doneL := e.freshLabel("creq.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPending, doL, doneL))
+		e.emitLabel(doL)
+		e.emitInstr(fmt.Sprintf("store i64 2, ptr %s, align 8", g))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		return self, nil
+	case "on", "once":
+		evt, err := stringLiteralArg(args, 0, "req.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: req.on takes (event, listener)", pos.Line, pos.Col)
+		}
+		switch evt {
+		case "response":
+			contextTypeArrowParams(args[1], "__kml_client_response")
+			cb, err := e.resolveCallbackWithHints(args[1], []Type{IncomingMessageType()})
+			if err != nil {
+				return Value{}, err
+			}
+			if cb.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: req.on('response') needs an arrow function literal", pos.Line, pos.Col)
+			}
+			g := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 1", g, objVal.Ref))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, g))
+			return self, nil
+		case "error":
+			// Evaluated and held nowhere: no async transport-error delivery
+			// exists to fire it (failures throw instead).
+			if _, err := e.emitExpr(args[1]); err != nil {
+				return Value{}, err
+			}
+			return self, nil
+		}
+		return Value{}, fmt.Errorf("%d:%d: req.on supports 'response' and 'error' (got '%s')", pos.Line, pos.Col, evt)
+	}
+	return Value{}, fmt.Errorf("%d:%d: a ClientRequest supports .end(), .abort()/.destroy(), and .on('response'|'error') (got '%s')", pos.Line, pos.Col, method)
+}
+
+// emitNewHTTPAgent implements `new http.Agent(options?)` (ADR-00432): an
+// inert pool-config token. This client opens one connection per request —
+// Node's own behavior with a non-keepAlive Agent — so the recognized options
+// are validated (unknown keys are a clean rejection) and their values
+// evaluated, but nothing is stored: there is no pool to configure.
+func (e *Emitter) emitNewHTTPAgent(ex *ast.NewHTTPAgentExpression) (Value, error) {
+	pos := ex.GetPos()
+	if ex.Options != nil {
+		lit, ok := ex.Options.(*ast.ObjectLiteral)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: new Agent's options must be an object literal", pos.Line, pos.Col)
+		}
+		allowed := map[string]bool{
+			"keepAlive": true, "keepAliveMsecs": true, "maxSockets": true,
+			"maxFreeSockets": true, "maxTotalSockets": true, "timeout": true,
+			"scheduling": true,
+		}
+		for _, prop := range lit.Properties {
+			if !allowed[prop.Key] {
+				return Value{}, fmt.Errorf("%d:%d: unknown Agent option '%s'", pos.Line, pos.Col, prop.Key)
+			}
+			if _, err := e.emitExpr(prop.Value); err != nil {
+				return Value{}, err
+			}
+		}
+	}
+	e.ensureCalloc()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 8)", r))
+	return Value{Ref: r, Ty: HTTPAgentType()}, nil
+}
+
+// emitHTTPAgentMethod: `.destroy()` is the one supported Agent method — a
+// no-op (there are no pooled sockets to destroy).
+func (e *Emitter) emitHTTPAgentMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if _, err := e.emitExpr(objExpr); err != nil {
+		return Value{}, err
+	}
+	if method == "destroy" && len(args) == 0 {
+		return Value{Ty: TypeVoid}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: an http.Agent supports .destroy() only (there is no connection pool — one connection per request)", pos.Line, pos.Col)
 }

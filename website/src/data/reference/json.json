@@ -1,0 +1,210 @@
+{
+  "surface": "json",
+  "title": "JSON",
+  "kind": "language",
+  "statusPage": "JSON.md",
+  "coverage": { "loose": "13/15", "strict": "10/15" },
+  "coversRows": "all",
+  "lede": "Type-directed JSON, not a dynamic parser. JSON.stringify covers numbers, strings, booleans, uniform arrays, objects, pretty-printing, and a class toJSON() override; JSON.parse projects the parse tree onto a compile-time target type, so it needs an annotated position and refuses `any`/`unknown` dynamic shapes. The two real gaps are heterogeneous mixed-type arrays and dynamic parsing — everything else works, with a few literal-only argument restrictions on the pretty-printer.",
+  "entries": [
+    {
+      "id": "json.stringify.number",
+      "name": "JSON.stringify(number)",
+      "statusRow": "JSON.stringify(number)",
+      "signature": "JSON.stringify(value: number): string",
+      "badge": "exact",
+      "description": "Serializes a number to its JSON text. Integers and floats both round-trip through the type-directed path.",
+      "returns": { "type": "string", "desc": "The JSON representation." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const n: number = 42\nconsole.log(JSON.stringify(n))       // 42",
+      "seeAlso": ["json.parse.number", "json.stringify.string"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.string",
+      "name": "JSON.stringify(string)",
+      "statusRow": "JSON.stringify(string)",
+      "signature": "JSON.stringify(value: string): string",
+      "badge": "exact",
+      "description": "Serializes a string with the JSON escaping rules (double-quoted, embedded quotes escaped).",
+      "returns": { "type": "string", "desc": "The quoted, escaped JSON string." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const esc: string = \"say 'hi'\"\nconsole.log(JSON.stringify(esc))     // 'say \\\"hi\\\"'",
+      "seeAlso": ["json.stringify.number", "json.parse.number"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.number-array",
+      "name": "JSON.stringify(number[])",
+      "statusRow": "JSON.stringify(number[])",
+      "signature": "JSON.stringify(value: number[]): string",
+      "badge": "exact",
+      "description": "Serializes a numeric array to a JSON array. An empty array renders as [].",
+      "returns": { "type": "string", "desc": "A JSON array." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const nums: number[] = [1, 2, 3]\nconsole.log(JSON.stringify(nums))    // [1,2,3]",
+      "seeAlso": ["json.stringify.string-array", "json.stringify.object-array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.string-array",
+      "name": "JSON.stringify(string[])",
+      "statusRow": "JSON.stringify(string[])",
+      "signature": "JSON.stringify(value: string[]): string",
+      "badge": "exact",
+      "description": "Serializes a string array, each element quoted and escaped.",
+      "returns": { "type": "string", "desc": "A JSON array of strings." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const words: string[] = ['foo', 'bar', 'baz']\nconsole.log(JSON.stringify(words))   // ['foo','bar','baz']",
+      "seeAlso": ["json.stringify.number-array", "json.stringify.boolean-array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.object",
+      "name": "JSON.stringify(object)",
+      "statusRow": "JSON.stringify(object)",
+      "signature": "JSON.stringify(value: object): string",
+      "badge": "exact",
+      "description": "Serializes an object's fields, including nested object literals. Date fields serialize as an ISO string via their own toISOString path.",
+      "returns": { "type": "string", "desc": "A JSON object." },
+      "exampleKey": "json/json_obj",
+      "snippet": "const person = { name: 'Alexandros', address: { city: 'Thessaloniki', zip: 10001 } }\nconsole.log(JSON.stringify(person))\n// {\"name\":\"Alexandros\",\"address\":{\"city\":\"Thessaloniki\",\"zip\":10001}}",
+      "seeAlso": ["json.stringify.object-array", "json.stringify.tojson"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.boolean-array",
+      "name": "JSON.stringify(boolean[])",
+      "statusRow": "JSON.stringify(boolean[])",
+      "signature": "JSON.stringify(value: boolean[]): string",
+      "badge": "exact",
+      "description": "Serializes a boolean array to true/false JSON literals.",
+      "returns": { "type": "string", "desc": "A JSON array of booleans." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const flags: boolean[] = [true, false, true]\nconsole.log(JSON.stringify(flags))   // [true,false,true]",
+      "seeAlso": ["json.stringify.number-array", "json.stringify.string-array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.object-array",
+      "name": "JSON.stringify(object[])",
+      "statusRow": "JSON.stringify(object[])",
+      "signature": "JSON.stringify(value: T[]): string",
+      "badge": "exact",
+      "description": "Serializes an array of objects, each object rendered by its field set.",
+      "returns": { "type": "string", "desc": "A JSON array of objects." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const points: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }]\nconsole.log(JSON.stringify(points))  // [{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]",
+      "seeAlso": ["json.stringify.object", "json.stringify.mixed-array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.pretty",
+      "name": "JSON.stringify(value, null, space) — pretty-printing",
+      "statusRow": "JSON.stringify(value, null, space) (pretty-printing)",
+      "signature": "JSON.stringify(value, null, space: number | string): string",
+      "badge": "caveats",
+      "description": "Pretty-prints with an indent unit and a space after each colon. A numeric space indents with N spaces; a string space is used literally as the indent unit. Empty containers stay inline even when pretty-printing.",
+      "returns": { "type": "string", "desc": "Indented JSON text." },
+      "exampleKey": "json/json_methods",
+      "snippet": "console.log(JSON.stringify(user, null, 2))\n// {\n//   \"name\": \"bob\",\n//   \"active\": true,\n//   ...\n// }",
+      "differences": [
+        "`space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error",
+        "The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored"
+      ],
+      "seeAlso": ["json.stringify.object", "json.stringify.tojson"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.stringify.tojson",
+      "name": "JSON.stringify honors a class toJSON()",
+      "statusRow": "JSON.stringify honors a class toJSON()",
+      "signature": "class C { toJSON(): T }",
+      "badge": "exact",
+      "description": "A class with a toJSON() method serializes its result instead of its own fields, matching JS — same override dispatch as toString(). A toJSON() returning its own type is bounded against compile-time infinite recursion. Date keeps its own toISOString-based path rather than being unified.",
+      "returns": { "type": "string", "desc": "The JSON of the toJSON() result." },
+      "exampleKey": "json/json_methods",
+      "snippet": "class Money {\n  amount: number = 42\n  currency: string = 'EUR'\n  toJSON(): string { return this.amount + this.currency }\n}\nconsole.log(JSON.stringify(new Money()))              // \"42EUR\"",
+      "seeAlso": ["json.stringify.object", "json.stringify.pretty"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify#tojson_behavior" }
+    },
+    {
+      "id": "json.stringify.mixed-array",
+      "name": "JSON.stringify(mixedTypeArray)",
+      "statusRow": "JSON.stringify(mixedTypeArray)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Heterogeneous arrays aren't supported: array literals and their inferred element type are uniform-type only, so a mixed-type array has no single element type to stringify against.",
+      "seeAlso": ["json.stringify.object-array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" }
+    },
+    {
+      "id": "json.parse.number",
+      "name": "JSON.parse(s) → number",
+      "statusRow": "JSON.parse(s) → number",
+      "signature": "JSON.parse(s: string): number",
+      "badge": "exact",
+      "description": "Parses a numeric JSON string. Integers go through atoll, floats (including a float64/float32-typed variable) through strtod on the node's raw lexeme, via the type-directed projection.",
+      "returns": { "type": "number", "desc": "The parsed number." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const parsed: number = JSON.parse('123')\nconsole.log(parsed)                  // 123",
+      "seeAlso": ["json.parse.object", "json.stringify.number"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
+    },
+    {
+      "id": "json.parse.object",
+      "name": "JSON.parse(s) → object",
+      "statusRow": "JSON.parse(s) → object (nested objects, array & object-array fields)",
+      "signature": "JSON.parse(s: string): T",
+      "badge": "exact",
+      "description": "Type-directed projection off the parse tree: nested objects, array-typed fields, and object-array fields (Item[]) all project through one path. A nullable-scalar field keeps its null-vs-value boxing; a missing field falls back to its type's default.",
+      "returns": { "type": "T", "desc": "An instance of the annotated target type." },
+      "exampleKey": "json/json_methods",
+      "snippet": "interface Member { name: string; addr: Addr; tags: string[] }\nconst m: Member = JSON.parse('{\"name\":\"Nikos\",\"addr\":{\"city\":\"Thessaloniki\",\"zip\":54600},\"tags\":[\"admin\",\"dev\"]}')\nconsole.log(m.addr.city)            // Thessaloniki",
+      "seeAlso": ["json.parse.array", "json.parse.number"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
+    },
+    {
+      "id": "json.parse.array",
+      "name": "JSON.parse(s) → top-level T[]",
+      "statusRow": "JSON.parse(s) → top-level T[] (incl. object & nested arrays)",
+      "signature": "const xs: T[] = JSON.parse(s)",
+      "badge": "caveats",
+      "description": "Projects the tree's array node into the standard {ptr,i64} aggregate, reusing the array-literal build path, including object and nested arrays.",
+      "returns": { "type": "T[]", "desc": "The parsed array in an annotated position." },
+      "exampleKey": "json/json_methods",
+      "snippet": "const members: Member[] = JSON.parse('[{\"name\":\"A\",\"addr\":{\"city\":\"X\",\"zip\":1},\"tags\":[]},{\"name\":\"B\",\"addr\":{\"city\":\"Y\",\"zip\":2},\"tags\":[\"x\"]}]')\nconsole.log(members.length)         // 2",
+      "differences": [
+        "Only in a type-annotated position (`const xs: T[] = …`, or a field) — a bare reassignment `xs = JSON.parse(...)` has no target type to project against and isn't supported"
+      ],
+      "seeAlso": ["json.parse.object", "json.parse.dynamic"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
+    },
+    {
+      "id": "json.parse.validate",
+      "name": "JSON.parse(s) validates input",
+      "statusRow": "JSON.parse(s) validates input (throws SyntaxError on malformed JSON)",
+      "signature": "JSON.parse(s: string): T  // throws SyntaxError",
+      "badge": "caveats",
+      "description": "A real recursive-descent parser builds and validates a tagged value tree. Strict JSON only (double quotes, no trailing commas/leading zeros/trailing junk), with \\uXXXX + surrogate decoding and a 512-deep runtime depth guard on untrusted input. A malformed input throws a catchable SyntaxError; Response.json() inherits the same parser.",
+      "returns": { "type": "T", "desc": "The parsed value, or throws SyntaxError." },
+      "exampleKey": "json/json_methods",
+      "snippet": "try {\n  const bad: number = JSON.parse(\"{oops}\")\n} catch (e) {\n  console.log(e.name)                // SyntaxError\n}",
+      "differences": [
+        "The `SyntaxError` message is position-based (`Unexpected token in JSON at position N`), not Node/V8's exact per-token wording"
+      ],
+      "seeAlso": ["json.parse.object", "json.parse.number"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
+    },
+    {
+      "id": "json.parse.dynamic",
+      "name": "JSON.parse(s) → any/unknown (dynamic shape)",
+      "statusRow": "JSON.parse(s) → any/unknown (dynamic shape)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Dynamic-shape parsing into any/unknown isn't implemented: it needs the parse tree kept as a dynamic value, which is coupled to the dynamic object model still to come.",
+      "seeAlso": ["json.parse.object", "json.parse.array"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "surface": "url",
+  "title": "URL & URLSearchParams",
+  "kind": "web",
+  "statusPage": "URL.md",
+  "coversRows": "all",
+  "coverage": { "loose": "3/3", "loosePct": 100, "strict": "0/3", "strictPct": 0 },
+  "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. Parsing reuses libcurl's already-linked URL API rather than a hand-rolled parser. The recurring divergence is single-value-per-key: URLSearchParams is backed by a plain Map<string,string>, so a repeated key keeps only its last value and getAll() never returns more than one element. URLPattern is object-literal init only, and its exec() returns a merged Map rather than the spec's per-component result object.",
+  "entries": [
+    {
+      "id": "url.URL",
+      "name": "URL",
+      "statusRow": "URL",
+      "signature": "new URL(url: string): URL",
+      "badge": "caveats",
+      "description": "Parses an absolute URL into its component fields. Fields — href, protocol, host, hostname, port, pathname, search, hash, origin, searchParams — are plain object field reads, no dispatched methods. A part absent from the URL reads back as \"\", matching real URL's own default. A malformed URL throws a catchable Error (\"Invalid URL\"). Parsing goes through libcurl's URL API rather than a hand-rolled parser.",
+      "params": [{ "name": "url", "type": "string", "desc": "The absolute URL to parse." }],
+      "returns": { "type": "URL", "desc": "The parsed URL with its component fields." },
+      "exampleKey": "url/url",
+      "snippet": "const u = new URL(\"https://example.com:8080/a/b?x=1&y=hello%20world#frag\")\nconsole.log(u.hostname)  // example.com\nconsole.log(u.port)      // 8080\nconsole.log(u.searchParams.get(\"y\"))  // hello world",
+      "differences": [
+        "`new URL(url)` — single-argument form only, no base-URL resolution"
+      ],
+      "seeAlso": ["url.URLSearchParams", "url.URLPattern"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URL" }
+    },
+    {
+      "id": "url.URLSearchParams",
+      "name": "URLSearchParams",
+      "statusRow": "URLSearchParams",
+      "signature": "new URLSearchParams(init?: string): URLSearchParams",
+      "badge": "caveats",
+      "description": "Reads and builds query strings. new URLSearchParams() starts empty; new URLSearchParams(init) parses a query string and tolerates a leading '?', so passing a URL's own .search straight through just works. Backed by a plain Map<string,string>, so get/set/has/delete/size/keys()/values()/entries()/forEach() all come for free from the Map machinery, plus toString() (percent-encodes back into a query string) and getAll().",
+      "params": [{ "name": "init", "type": "string", "desc": "Optional query string to parse (a leading '?' is tolerated)." }],
+      "returns": { "type": "URLSearchParams", "desc": "The parameter collection." },
+      "exampleKey": "url/url",
+      "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello%20world&page=2",
+      "differences": [
+        "**Single value per key**: a repeated query-string key (`?a=1&a=2`) silently keeps only its last value — `.get()`/`.getAll()` never see the first one, so `.getAll()` never returns more than one element",
+        "There is no true multi-value `.append()`, since it can't be represented faithfully on top of the `Map<string,string>` backing structure"
+      ],
+      "seeAlso": ["url.URL"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams" }
+    },
+    {
+      "id": "url.URLPattern",
+      "name": "URLPattern",
+      "statusRow": "URLPattern",
+      "signature": "new URLPattern(init?: { protocol?; hostname?; port?; pathname?; search?; hash? }): URLPattern",
+      "badge": "caveats",
+      "description": "WHATWG route matching. Each component pattern compiles once at construction to an anchored PCRE2 regex; .test/.exec match a full URL string, which parses via libcurl's URL API. An omitted init component defaults to \"*\" and reads back as such from the component fields. An unparseable input is false/null, never a throw; an invalid pattern throws a catchable TypeError at construction.",
+      "params": [{ "name": "init", "type": "object", "desc": "Object-literal init over protocol/hostname/port/pathname/search/hash." }],
+      "returns": { "type": "URLPattern", "desc": "The compiled pattern." },
+      "exampleKey": "url/urlpattern",
+      "snippet": "const pattern = new URLPattern({ pathname: \"/books/:id\" })\nconsole.log(pattern.test(\"https://example.com/books/123\"))  // true\nconst m = pattern.exec(\"https://example.com/books/123\")\nif (m !== null) { console.log(m.get(\"id\")) }  // 123",
+      "differences": [
+        "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash` — no constructor-string form, no `baseURL`, no `username`/`password` components",
+        "Pattern grammar is literals, `\\` escapes, `*`, `:name`, and `:name?` — `{}` groups, `+` modifiers, and inline `(regex)` groups throw a `TypeError` at construction",
+        "`.exec()` returns a merged `Map<string, string> | null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model",
+        "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"
+      ],
+      "seeAlso": ["url.URL", "url.URLSearchParams"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLPattern" }
+    }
+  ]
+}

@@ -49,25 +49,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 	}
 	// Node's chained `http.createServer((req, res) => …).listen(port[, cb])`
-	// (TDD-00131) — the callee is `<createServer call>.listen`.
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "listen" {
-		if inner, ok := mem.Object.(*ast.CallExpression); ok {
-			if im, ok := inner.Callee.(*ast.MemberExpression); ok && im.Property == "createServer" {
-				if id, ok := im.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" {
-					if len(inner.Args) != 1 {
-						return Value{}, fmt.Errorf("%d:%d: http.createServer takes one listener (req, res) => void", inner.GetPos().Line, inner.GetPos().Col)
-					}
-					if len(ex.Args) < 1 {
-						return Value{}, fmt.Errorf("%d:%d: server.listen requires a port", ex.GetPos().Line, ex.GetPos().Col)
-					}
-					var listeningCb ast.Expression
-					if len(ex.Args) >= 2 {
-						listeningCb = ex.Args[1]
-					}
-					return e.emitHTTPCreateServerListen(inner.Args[0], ex.Args[0], listeningCb, ex.GetPos())
-				}
-			}
-		}
+	// (TDD-00131) — the callee is `<createServer call>.listen`. Routed through
+	// the bound-handle machinery; listen() returns the server handle.
+	if createArgs, listenArgs, ok := chainedCreateServerListen(ex); ok {
+		return e.emitChainedCreateServerListen(createArgs, listenArgs, nil, ex.GetPos())
 	}
 	// A `res.writeHead/setHeader/write/end(...)` call on Node's http.createServer
 	// `res` object (TDD-00131).
@@ -267,6 +252,24 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if objTy := e.inferExprType(mem.Object); objTy.IsChildProcess || objTy.IsCPStream || objTy.IsCPStdin {
 			return e.emitChildProcessMethodCall(mem.Object, objTy, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsClusterWorker {
+			return e.emitClusterWorkerMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsClientRequest {
+			return e.emitClientRequestMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsHTTPAgent {
+			return e.emitHTTPAgentMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsWebview {
+			return e.emitWebviewMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsEmbeddedAssets {
+			return e.emitEmbeddedAssetsMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assets__kml_builtin" {
+			return e.emitAssetsModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.inferExprType(mem.Object).IsReadline {
 			return e.emitReadlineMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -416,6 +419,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "streampromises__kml_builtin" {
 			return e.emitStreamPromisesCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "stream__kml_builtin" {
+			return e.emitStreamModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" {
 			switch mem.Property {
 			case "all":
@@ -487,6 +493,20 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessHrtime(ex.Args, ex.GetPos())
 			case "emitWarning":
 				return e.emitProcessEmitWarning(ex.Args, ex.GetPos())
+			case "send":
+				return e.emitProcessSend(ex.Args, ex.GetPos())
+			case "getuid", "geteuid", "getgid", "getegid":
+				if len(ex.Args) != 0 {
+					return Value{}, fmt.Errorf("%d:%d: process.%s takes no arguments", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+				}
+				return e.emitProcessGetID(mem.Property), nil
+			case "disconnect":
+				if len(ex.Args) != 0 {
+					return Value{}, fmt.Errorf("%d:%d: process.disconnect takes no arguments", ex.GetPos().Line, ex.GetPos().Col)
+				}
+				e.ensureIPCChildRuntime()
+				e.emitInstr("call void @__kml_ipcc_disconnect()")
+				return Value{Ty: TypeVoid}, nil
 			}
 		}
 		// process.hrtime.bigint(): a nested two-level member call.
@@ -651,6 +671,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
 			return e.emitTestModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "nodecrypto__kml_builtin" {
+			return e.emitNodeCryptoModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.isCryptoSubtle(mem.Object) {
 			return e.emitCryptoSubtleCall(mem.Property, ex.Args, ex.GetPos())
 		}
@@ -674,7 +697,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "closeAllConnections":
 				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
 			case "get", "request":
-				return e.emitHTTPClientGet(ex.Args, ex.GetPos())
+				return e.emitHTTPClientGet(ex.Args, ex.GetPos(), mem.Property == "request")
 			case "createServer":
 				// The chained createServer(cb).listen(...) expression is
 				// intercepted earlier; reaching here means the variable-bound
@@ -690,7 +713,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "get", "request":
 				// TLS is the libcurl client's native ground — same emitter as
 				// http.get/request; the options-object form composes https URLs.
-				return e.emitHTTPClientGetScheme(ex.Args, ex.GetPos(), "https")
+				return e.emitHTTPClientGetScheme(ex.Args, ex.GetPos(), "https", mem.Property == "request")
 			case "createServer":
 				return Value{}, fmt.Errorf("%d:%d: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped; serve plain http.createServer behind TLS termination, or use tls.createServer for a raw TLS socket server", ex.GetPos().Line, ex.GetPos().Col)
 			}

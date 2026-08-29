@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/jsdoc.json; edit the JSON, then run `make status`. -->
+
 # JSDoc
 
 > Part of the [Implementation Status](README.md) index.
@@ -56,8 +58,8 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 | `@see` | ✅ | | • Documentation-only, no type effect — accepted, parity with TS |
 | `@link` | ✅ | | • Documentation-only, no type effect — accepted, parity with TS |
 | `@author` | ✅ | | • Documentation-only, no type effect — accepted, parity with TS |
-| `@import` | ❌ | • The comment-form import statement is not synthesized; use a normal `import` plus an `import("./m").T` type reference (which resolves — see the type-expression table) |  |
-| `@constructor` (alias `@class`) | ❌ | • Marks a plain function as a constructor (legacy pre-`class` JS) — unsupported; this compiler uses real `class` declarations, not function-as-constructor |  |
+| `@import` | ❌ | • The comment-form import statement is not synthesized; use a normal `import` plus an `import("./m").T` type reference (which resolves — see the type-expression table) | |
+| `@constructor` (alias `@class`) | ❌ | • Marks a plain function as a constructor (legacy pre-`class` JS) — unsupported; this compiler uses real `class` declarations, not function-as-constructor | |
 
 ## JSDoc type expressions
 
@@ -72,7 +74,7 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 | Non-null (`!T`) | ✅ | • The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | Object shape (`{ a: string, b: number }`) | ✅ | • Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | `Array.<T>` / `Array<T>` (generic array form) | ✅ | | • [TDD-00125](../tdd/TDD-00125.md) Stage 4; the Closure dot (`Array.<T>`) is normalized to `Array<T>` |
-| `Object.<K, V>` (index map) | ❌ | • Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would — [TYPE-SYSTEM.md](TYPE-SYSTEM.md) |  |
+| `Object.<K, V>` (index map) | ❌ | • Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would — [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | |
 | Function type (`function(A): B`) | ✅ | • Rewritten to the arrow form `(arg0: A) => B`; a nested `function(...)` inside another type is not rewritten (rare) | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | `*` / `?` (Closure any/unknown) | ✅ | | • Both normalized to `any` ([TDD-00125](../tdd/TDD-00125.md) Stage 4) |
 | `import("./m").T` type | ✅ | • The `import("./m").Name` qualifier is dropped to the bare `Name`, which resolves under whole-program compilation when that module is part of the build (typically because the file also imports from it) — a `Name` not otherwise pulled in won't resolve; the `typeof import(...)` value form is out of scope | • [TDD-00125](../tdd/TDD-00125.md) Stage 6 |

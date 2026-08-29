@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/memory-management.json; edit the JSON, then run `make status`. -->
+
 # Memory Management
 
 > Part of the [Implementation Status](README.md) index. Selected once per compiled binary via the `-mm=manual|gc|auto` CLI flag (default `manual`). Full design: [TDD-00001](../tdd/TDD-00001.md).

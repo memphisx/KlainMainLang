@@ -1,0 +1,124 @@
+{
+  "id": "json",
+  "file": "JSON.md",
+  "title": "JSON",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`JSON.stringify(number)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(string)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(number[])`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(string[])`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(object)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(boolean[])`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(object[])`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`JSON.stringify(value, null, space)` (pretty-printing)",
+            "status": "implemented",
+            "caveats": [
+              "`space` must be a literal number (N spaces, capped at 10) or literal string — a runtime `space` value is a clean compile error ([ADR-00222](../adr/ADR-00222.md))",
+              "The `replacer` (2nd) argument is supported only as `null`/undefined — a function/array replacer is a clean compile error, not silently ignored"
+            ],
+            "notes": [
+              "A `jsonIndent{unit,depth}` threaded through the serializer; empty containers stay inline (`{}`/`[]`), an array's empty-vs-non-empty close is a runtime `select` on its length ([TDD-00077](../tdd/TDD-00077.md) Track S)"
+            ]
+          },
+          {
+            "feature": "`JSON.stringify` honors a class `toJSON()`",
+            "status": "implemented",
+            "notes": [
+              "A class with a `toJSON()` method serializes its result instead of its own fields, matching JS — same override dispatch as `toString()`. A `toJSON()` returning its own type is bounded against compile-time infinite recursion (cf. [ADR-00221](../adr/ADR-00221.md)). `Date` keeps its own `toISOString`-based path rather than being unified ([ADR-00222](../adr/ADR-00222.md))"
+            ]
+          },
+          {
+            "feature": "`JSON.stringify(mixedTypeArray)`",
+            "status": "missing",
+            "notes": [
+              "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against"
+            ]
+          },
+          {
+            "feature": "`JSON.parse(s)` → number",
+            "status": "implemented",
+            "notes": [
+              "Integer via `atoll`, float (incl. a `/** @type {float64} */`/`float32` variable) via `strtod` on the node's raw lexeme, through the type-directed projection ([ADR-00224](../adr/ADR-00224.md))"
+            ]
+          },
+          {
+            "feature": "`JSON.parse(s)` → object (nested objects, array & object-array fields)",
+            "status": "implemented",
+            "notes": [
+              "Type-directed projection off the parse tree ([TDD-00077](../tdd/TDD-00077.md)/[ADR-00224](../adr/ADR-00224.md)): nested objects, array-typed fields, and object-array fields (`Item[]`) all project through one path. A nullable-scalar field keeps its null-vs-value boxing; a missing field falls back to its type's default"
+            ]
+          },
+          {
+            "feature": "`JSON.parse(s)` → top-level `T[]` (incl. object & nested arrays)",
+            "status": "implemented",
+            "caveats": [
+              "Only in a type-annotated position (`const xs: T[] = …`, or a field) — a bare reassignment `xs = JSON.parse(...)` has no target type to project against and isn't supported"
+            ],
+            "notes": [
+              "Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md))"
+            ]
+          },
+          {
+            "feature": "`JSON.parse(s)` validates input (throws `SyntaxError` on malformed JSON)",
+            "status": "implemented",
+            "caveats": [
+              "The `SyntaxError` message is position-based (`Unexpected token in JSON at position N`), not Node/V8's exact per-token wording"
+            ],
+            "notes": [
+              "A real recursive-descent parser ([TDD-00077](../tdd/TDD-00077.md)/[ADR-00223](../adr/ADR-00223.md)) (embedded C, `__kml_json_*` ABI) builds+validates a tagged value tree. Strict JSON (double quotes, no trailing commas/leading zeros/trailing junk), `\\uXXXX`+surrogate decoding, a 512-deep runtime depth guard on untrusted input. `Response.json()` inherits it"
+            ]
+          },
+          {
+            "feature": "`JSON.parse(s)` → `any`/`unknown` (dynamic shape)",
+            "status": "missing",
+            "notes": [
+              "Needs the tree kept as a dynamic value — [TDD-00077](../tdd/TDD-00077.md) Track P P4, coupled to the dynamic object model ([TDD-00068](../tdd/TDD-00068.md))"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -20,6 +20,8 @@ import (
 func (e *Emitter) emitChildProcessModuleCall(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensureChildProcRuntime()
 	switch method {
+	case "fork":
+		return e.emitCPFork(args, pos)
 	case "spawn":
 		return e.emitCPSpawn(args, pos)
 	case "exec":
@@ -233,16 +235,76 @@ func (e *Emitter) emitCPExecFileSync(args []ast.Expression, pos ast.Pos) (Value,
 }
 
 // cpSpawnCall emits the @__kml_cp_spawn call and returns the handle register.
-func (e *Emitter) cpSpawnCall(fileRef, argsPtr, argsLen string, mode int) string {
+// cwdRef is a string ptr (the child chdir()s to it before exec) or "null".
+func (e *Emitter) cpSpawnCall(fileRef, argsPtr, argsLen string, mode int, cwdRef string) string {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn(ptr %s, ptr %s, i64 %s, i64 %d)", r, fileRef, argsPtr, argsLen, mode))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn(ptr %s, ptr %s, i64 %s, i64 %d, ptr %s)", r, fileRef, argsPtr, argsLen, mode, cwdRef))
 	return r
+}
+
+// cpSpawnOptions handles spawn()'s optional 3rd options argument (ADR-00433):
+// `cwd` is wired through (child chdir); `shell` is accepted and ignored — on
+// the POSIX corpus its value is `common.isWindows` (false), and commands are
+// always exec'd directly, never through a shell (disclosed caveat); `stdio`
+// accepts the literal 'pipe' (the only wiring this runtime has). Anything
+// else — `env`, `detached`, stdio arrays — is a clean rejection. Accepts an
+// object literal or a variable-bound typed object (same treatment as the
+// http client options, ADR-00429).
+func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (string, error) {
+	cwdRef := "null"
+	if lit, ok := arg.(*ast.ObjectLiteral); ok {
+		for _, prop := range lit.Properties {
+			switch prop.Key {
+			case "cwd":
+				v, err := e.emitExpr(prop.Value)
+				if err != nil {
+					return "", err
+				}
+				cwdRef = e.coerce(v, TypePtr).Ref
+			case "shell":
+				if _, err := e.emitExpr(prop.Value); err != nil {
+					return "", err
+				}
+			case "stdio":
+				sl, ok := prop.Value.(*ast.StringLiteral)
+				if !ok || sl.Value != "pipe" {
+					return "", fmt.Errorf("%d:%d: child_process.spawn supports stdio: 'pipe' only (the default)", pos.Line, pos.Col)
+				}
+			default:
+				return "", fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell, stdio: 'pipe' } only (got '%s')", pos.Line, pos.Col, prop.Key)
+			}
+		}
+		return cwdRef, nil
+	}
+	objTy := e.inferExprType(arg)
+	if !objTy.IsObject {
+		return "", fmt.Errorf("%d:%d: child_process.spawn's options must be an object", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(arg)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range objVal.Ty.Fields {
+		switch f.Name {
+		case "cwd", "shell":
+		default:
+			return "", fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell } only (got '%s')", pos.Line, pos.Col, f.Name)
+		}
+	}
+	if idx, fty, ok := objVal.Ty.FieldIndex("cwd"); ok && isStringTy(fty) {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+		cwdRef = r
+	}
+	return cwdRef, nil
 }
 
 // emitCPSpawn implements spawn(command, args?): streaming ChildProcess.
 func (e *Emitter) emitCPSpawn(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: child_process.spawn takes (command, args?)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.spawn takes (command, args?, options?)", pos.Line, pos.Col)
 	}
 	fileVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -250,14 +312,88 @@ func (e *Emitter) emitCPSpawn(args []ast.Expression, pos ast.Pos) (Value, error)
 	}
 	fileVal = e.coerce(fileVal, TypePtr)
 	argsPtr, argsLen := "null", "0"
-	if len(args) == 2 {
-		p, l, err := e.cpResolveArgv(args[1], pos, "spawn")
+	rest := args[1:]
+	if len(rest) >= 1 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); !isObj && !e.inferExprType(rest[0]).IsObject {
+			p, l, err := e.cpResolveArgv(rest[0], pos, "spawn")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			rest = rest[1:]
+		} else if len(rest) == 2 {
+			p, l, err := e.cpResolveArgv(rest[0], pos, "spawn")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			rest = rest[1:]
+		}
+	}
+	cwdRef := "null"
+	if len(rest) >= 1 {
+		c, err := e.cpSpawnOptions(rest[0], pos)
 		if err != nil {
 			return Value{}, err
 		}
-		argsPtr, argsLen = p, l
+		cwdRef = c
 	}
-	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 0)
+	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 0, cwdRef)
+	return Value{Ref: cp, Ty: ChildProcessType()}, nil
+}
+
+// cpForkIsSelfPath reports whether a fork() path argument is the self-fork
+// shape — `__filename` or `process.argv[1]` — the only fork this compiler
+// supports (TDD-00141): the child is a re-exec of the current binary.
+func cpForkIsSelfPath(arg ast.Expression) bool {
+	if id, ok := arg.(*ast.Identifier); ok && id.Name == "__filename" {
+		return true
+	}
+	if idx, ok := arg.(*ast.IndexExpression); ok {
+		if lit, isNum := idx.Index.(*ast.NumberLiteral); isNum && lit.Value == "1" {
+			if mem, isMem := idx.Object.(*ast.MemberExpression); isMem && mem.Property == "argv" {
+				if id, isID := mem.Object.(*ast.Identifier); isID && id.Name == "process" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// emitCPFork implements the self-fork form of child_process.fork
+// (TDD-00141): `fork(__filename)` / `fork(process.argv[1])`, with optional
+// extra string[] args. The child is a fresh re-exec of this same binary with
+// an inherited-stdio socketpair IPC channel (NODE_CHANNEL_FD), exactly
+// Node's own mechanism — so `if (process.send)` child-detection works.
+func (e *Emitter) emitCPFork(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: child_process.fork takes (modulePath, args?)", pos.Line, pos.Col)
+	}
+	if !cpForkIsSelfPath(args[0]) {
+		return Value{}, fmt.Errorf("%d:%d: child_process.fork supports self-fork only — the path must be __filename or process.argv[1] (forking a different module would need a second compiled program)", pos.Line, pos.Col)
+	}
+	argsPtr, argsLen := "null", "0"
+	rest := args[1:]
+	if len(rest) >= 1 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); !isObj {
+			p, l, err := e.cpResolveArgv(rest[0], pos, "fork")
+			if err != nil {
+				return Value{}, err
+			}
+			argsPtr, argsLen = p, l
+			rest = rest[1:]
+		}
+	}
+	if len(rest) >= 1 {
+		lit, ok := rest[0].(*ast.ObjectLiteral)
+		if !ok || len(lit.Properties) > 0 {
+			return Value{}, fmt.Errorf("%d:%d: child_process.fork's options object is not supported (only an empty {} literal)", pos.Line, pos.Col)
+		}
+	}
+	e.ensureCPForkRuntime()
+	cp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_fork(ptr %s, i64 %s)", cp, argsPtr, argsLen))
 	return Value{Ref: cp, Ty: ChildProcessType()}, nil
 }
 
@@ -281,7 +417,7 @@ func (e *Emitter) emitCPExec(args []ast.Expression, pos ast.Pos) (Value, error) 
 	s1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", s1, argvPtr))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cmdVal.Ref, s1))
-	cp := e.cpSpawnCall(e.internString("/bin/sh"), argvPtr, "2", 1)
+	cp := e.cpSpawnCall(e.internString("/bin/sh"), argvPtr, "2", 1, "null")
 	if err := e.cpStoreExecCallback(cp, args[1], pos, "exec"); err != nil {
 		return Value{}, err
 	}
@@ -308,7 +444,7 @@ func (e *Emitter) emitCPExecFile(args []ast.Expression, pos ast.Pos) (Value, err
 		}
 		argsPtr, argsLen = p, l
 	}
-	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 1)
+	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 1, "null")
 	if err := e.cpStoreExecCallback(cp, cbArg, pos, "execFile"); err != nil {
 		return Value{}, err
 	}
@@ -454,9 +590,38 @@ func (e *Emitter) emitCPHandleMethod(objVal Value, method string, args []ast.Exp
 				return Value{}, err
 			}
 			e.cpStoreField(objVal.Ref, 12, cb)
+		case "message":
+			// The fork IPC channel (TDD-00141) — string payloads. See through
+			// a `test` counting wrapper the way ADR-00412/00422 sites do.
+			contextTypeArrowParams(args[1], "string")
+			cb, err := e.cpArrowClosure(args[1], []Type{TypePtr}, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			e.cpStoreField(objVal.Ref, 18, cb)
 		default:
-			return Value{}, fmt.Errorf("%d:%d: child.on supports 'close', 'exit' and 'error' (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: child.on supports 'close', 'exit', 'error' and 'message' (got '%s')", pos.Line, pos.Col, evt)
 		}
+		return Value{Ty: TypeVoid}, nil
+	case "send":
+		// fork IPC: send one string message to the child (TDD-00141).
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: child.send takes one message", pos.Line, pos.Col)
+		}
+		mv, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		if !isStringTy(mv.Ty) {
+			return Value{}, fmt.Errorf("%d:%d: child.send supports string messages in this version", pos.Line, pos.Col)
+		}
+		e.ensureCPForkRuntime()
+		ok := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_cp_send(ptr %s, ptr %s)", ok, objVal.Ref, mv.Ref))
+		return Value{Ref: ok, Ty: TypeBool}, nil
+	case "disconnect":
+		e.ensureCPForkRuntime()
+		e.emitInstr(fmt.Sprintf("call void @__kml_cp_disconnect(ptr %s)", objVal.Ref))
 		return Value{Ty: TypeVoid}, nil
 	case "kill":
 		e.ensureCPKill()

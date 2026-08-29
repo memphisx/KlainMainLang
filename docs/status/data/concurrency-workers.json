@@ -1,0 +1,84 @@
+{
+  "id": "concurrency-workers",
+  "file": "CONCURRENCY-WORKERS.md",
+  "title": "Concurrency (Workers)",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. Real OS threads and cross-thread messaging."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`Worker`",
+            "status": "implemented",
+            "caveats": [
+              "One listener per event, arrow-function literals only",
+              "One message type per direction, declared by annotation",
+              "Payloads: structured-clone-safe values only (plus `SharedArrayBuffer`/`MessagePort`, which cross by reference — [ADR-00308](../adr/ADR-00308.md)/[ADR-00309](../adr/ADR-00309.md)); strings share their buffer across threads; no arrays through `onmessage`/`e.data`",
+              "`'error'` carries the message string, not an Error object; no `self.onerror`",
+              "`terminate()` is cooperative, keeps queued messages, always exits 1",
+              "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
+              "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"
+            ],
+            "notes": [
+              "Two surfaces: Node `worker_threads` and the browser `Worker`/`onmessage` shape ([TDD-00098](../tdd/TDD-00098.md), [ADR-00305](../adr/ADR-00305.md), [ADR-00306](../adr/ADR-00306.md))",
+              "The worker file compiles into the same binary as its own entry function",
+              "Each thread runs its own event loop (runtime singletons are `thread_local`); messages travel over pipes as pointer envelopes, deep-copied at the boundary",
+              "`-mm=gc` registers each thread with Boehm",
+              "Uncaught worker exception → `'error'` + `'exit'(1)` on the parent, or process exit if unhandled",
+              "darwin/arm64 and Linux (glibc/arm64, Docker) both verified across the whole worker suite, including `-mm=gc` ([ADR-00351](../adr/ADR-00351.md)). `--static` + `-pthread` recheck still pending"
+            ]
+          },
+          {
+            "feature": "`BroadcastChannel`",
+            "status": "implemented",
+            "caveats": [
+              "Channel name must be a string literal; one message type per channel name, program-wide (first `postMessage` or annotated `onmessage` fixes it)",
+              "`onmessage` property only (arrow-function literal, `(e: { data: T })`); no `addEventListener`, no `'messageerror'`",
+              "Array payloads not supported through `onmessage`",
+              "`close()` leaks the endpoint's two pipe fds by design (closes a race against an in-flight post)",
+              "`-mm=manual` leaks per delivery (payload ownership passes to the listener)"
+            ],
+            "notes": [
+              "Process-wide name-keyed registry; each subscriber gets its own deep copy (codegen-synthesized clone thunk, called once per subscriber); delivery rides each thread's `select()` loop over per-endpoint pipes ([TDD-00099](../tdd/TDD-00099.md), [ADR-00309](../adr/ADR-00309.md))",
+              "A registered `onmessage` holds its thread's loop alive until `close()` (Node ref semantics)",
+              "Works same-thread and across workers",
+              "verified on darwin/arm64 and Linux (glibc/arm64, Docker)"
+            ]
+          },
+          {
+            "feature": "`MessageChannel` / `MessagePort`",
+            "status": "implemented",
+            "caveats": [
+              "Message type fixed at construction (`new MessageChannel<T>()`, default `number`), symmetric for both ports",
+              "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload — and is **shared, not neutered**: the sender must stop using a sent port (unsynchronized use from two threads is memory-safe but unordered); the `MessageChannel` pair box itself never crosses",
+              "`onmessage` property only (arrow literal); no `on('message')`, no `start()`/`'close'` event, no array payloads via `onmessage`",
+              "`close()` leaks two pipe fds; `-mm=manual` leaks per message"
+            ],
+            "notes": [
+              "Importable under Node's module name too — `import { MessageChannel/MessagePort/BroadcastChannel } from 'worker_threads'` ([ADR-00431](../adr/ADR-00431.md))",
+              "One shared endpoint runtime with `BroadcastChannel` (pipe per endpoint, peer-linked halves); a port is drained by whichever thread registered its `onmessage` — no adoption protocol needed when a port moves to a worker ([TDD-00099](../tdd/TDD-00099.md), [ADR-00309](../adr/ADR-00309.md))",
+              "`postMessage` into a closed peer silently discards, matching spec",
+              "Verified same-thread, port-as-`workerData`, and port-as-`postMessage`-payload round trips (darwin/arm64 and Linux glibc/arm64, Docker)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

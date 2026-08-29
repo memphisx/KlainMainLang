@@ -147,6 +147,22 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		// globals. Type matches emitVarDecl's own `TypedArrayType(init.ElemKind)`.
 		return TypedArrayType(init.ElemKind), true
 	}
+	// An http server handle — `const server = http.createServer(cb)` or the
+	// chained `…createServer(cb).listen(0, readyCb)` binding — is a single
+	// ptr slot with a constant type, so it promotes like the builtin `new`
+	// handles below. Promoting it is what lets a top-level `function
+	// doRequest() { … server.address().port … }` (the corpus's helper-fn
+	// idiom, ADR-00423/00425 residue) see the binding.
+	if call, ok := v.Init.(*ast.CallExpression); ok {
+		if _, _, isChain := chainedCreateServerListen(call); isChain {
+			return HTTPServerType(), true
+		}
+		if mem, ok := call.Callee.(*ast.MemberExpression); ok {
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" && mem.Property == "createServer" {
+				return HTTPServerType(), true
+			}
+		}
+	}
 	if v.TypeAnnot != nil {
 		ty := e.resolveType(v.TypeAnnot)
 		if ty.IsArray && ty.ElemType != nil {
@@ -462,6 +478,19 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		e.storePtrHandleVarDecl(v, val)
 		return nil
 	}
+	// Chained `const server = http.createServer(cb).listen(0, readyCb)`: the
+	// ready callback (and the event loop) run *inside* listen, and the corpus
+	// idiom reads `server.address()` in that callback — so the handle must be
+	// stored into the binding before listen is emitted, not after the whole
+	// initializer finishes.
+	if call, ok := v.Init.(*ast.CallExpression); ok {
+		if createArgs, listenArgs, isChain := chainedCreateServerListen(call); isChain {
+			_, err := e.emitChainedCreateServerListen(createArgs, listenArgs, func(handle Value) {
+				e.storePtrHandleVarDecl(v, handle)
+			}, v.GetPos())
+			return err
+		}
+	}
 	if init, ok := v.Init.(*ast.NewNodeStreamExpression); ok {
 		val, err := e.emitNewNodeStream(init)
 		if err != nil {
@@ -600,6 +629,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = EventSourceType()
 		case *ast.NewEventTargetExpression:
 			ty = EventTargetType()
+		case *ast.NewHTTPAgentExpression:
+			ty = HTTPAgentType()
+		case *ast.NewWebviewExpression:
+			ty = WebviewType()
 		case *ast.NewAbortControllerExpression:
 			ty = AbortControllerType()
 		case *ast.NewEventExpression:

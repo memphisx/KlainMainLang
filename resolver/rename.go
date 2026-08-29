@@ -65,6 +65,14 @@ type builtinMemberRef struct {
 	Marker, Member string
 }
 
+// streamClassNames are the 'stream' members that are parse-time constructor
+// names (bound as identity); every other stream member is a plain function
+// dispatched via the marker member-expression route.
+var streamClassNames = map[string]bool{
+	"Readable": true, "Writable": true, "Duplex": true,
+	"Transform": true, "PassThrough": true,
+}
+
 // lookupTable bundles the tables a file's rename pass needs: names (this
 // file's own mangled declarations plus its ordinary/default import
 // bindings — local name -> the mangled name it refers to, exactly what
@@ -512,8 +520,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				// The stream module's class names bind as identity — the
 				// constructors are recognized by name at parse time, and
 				// their statics (Readable.from) dispatch on the bare name
-				// (TDD-00097 Stage 8).
-				if ref.Marker == "stream__kml_builtin" {
+				// (TDD-00097 Stage 8). Its *function* members (pipeline/
+				// finished/duplexPair) instead take the ordinary marker
+				// member-expression route below, dispatched in codegen like
+				// stream/promises' members.
+				if ref.Marker == "stream__kml_builtin" && streamClassNames[ref.Member] {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
 				// worker_threads members likewise (TDD-00098): Worker is a
@@ -525,6 +536,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				// stream/web re-exports the ambient WHATWG stream constructors —
 				// identity, same as stream's class names.
 				if ref.Marker == "streamweb__kml_builtin" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
+				// klain:webview's Webview is a parse-time constructor — identity
+				// (TDD-00142), same as stream's class names.
+				if ref.Marker == "webview__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
@@ -813,6 +829,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.Parts != nil {
 			e.Parts = rewriteExpr(e.Parts, sc, lu)
 		}
+		if e.Options != nil {
+			e.Options = rewriteExpr(e.Options, sc, lu)
+		}
+	case *ast.NewWebviewExpression:
+		// The options object may reference bindings (a variable of functions),
+		// whose identifiers must be renamed like any other (TDD-00142 Stage 5).
 		if e.Options != nil {
 			e.Options = rewriteExpr(e.Options, sc, lu)
 		}

@@ -1,0 +1,235 @@
+{
+  "id": "number-math",
+  "file": "NUMBER-MATH.md",
+  "title": "Number / Math",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`Number.isInteger(x)`",
+            "status": "implemented",
+            "caveats": [
+              "`Number.isInteger(Infinity)`/`(-Infinity)` return `true` — should be `false`; `emitNumberIsInteger` checks `floor(x) == x` only, never finiteness, and `floor(Infinity) == Infinity` is trivially true ([ADR-00166](../adr/ADR-00166.md))"
+            ]
+          },
+          {
+            "feature": "`Number.isFinite(x)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.isNaN(x)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.isSafeInteger(x)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.parseInt(s)`",
+            "status": "implemented",
+            "caveats": [
+              "No hex auto-detect when radix is omitted — `\"0x1F\"` parses as `0`, not `31` ([ADR-00287](../adr/ADR-00287.md))"
+            ],
+            "notes": [
+              "Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))"
+            ]
+          },
+          {
+            "feature": "`Number.parseFloat(s)`",
+            "status": "implemented",
+            "caveats": [
+              "Inherits `strtod` extras — `\"inf\"` parses to `Infinity` (JS only accepts the full word `Infinity`) and C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md))"
+            ],
+            "notes": [
+              "A no-conversion input returns a real `NaN` via the endptr check ([ADR-00287](../adr/ADR-00287.md))"
+            ]
+          },
+          {
+            "feature": "`Number.MAX_SAFE_INTEGER`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.MIN_SAFE_INTEGER`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.EPSILON`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.MAX_VALUE`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.MIN_VALUE`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.POSITIVE_INFINITY`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.NEGATIVE_INFINITY`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.NaN`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Number.prototype.toFixed(n)`",
+            "status": "implemented",
+            "caveats": [
+              "The `digits` argument is required here, not optional — `(3.14159).toFixed()` hard compile-errors with \"toFixed takes exactly 1 argument\"; real JS defaults `digits` to `0` ([ADR-00166](../adr/ADR-00166.md))"
+            ]
+          },
+          {
+            "feature": "`Number.prototype.toString(radix?)`",
+            "status": "implemented",
+            "caveats": [
+              "Truncates a non-integer receiver to its integer part first (real JS renders fractional digits)",
+              "Radix trusted, not validated (real JS throws a `RangeError` for an out-of-range radix)",
+              "Minor cosmetic deviations from real JS, the same `sprintf`-based exponent padding as the two rows below ([ADR-00065](../adr/ADR-00065.md))"
+            ],
+            "notes": [
+              "Hand-rolled digit loop"
+            ]
+          },
+          {
+            "feature": "`Number.prototype.toPrecision(n)`",
+            "status": "implemented",
+            "caveats": [
+              "Exponent pads to 2 digits — `e+05` vs real JS's `e+5` ([ADR-00065](../adr/ADR-00065.md))"
+            ],
+            "notes": [
+              "`sprintf(\"%#.*g\", ...)`"
+            ]
+          },
+          {
+            "feature": "`Number.prototype.toExponential(n)`",
+            "status": "implemented",
+            "caveats": [
+              "Same exponent-padding deviation — `e+05` vs `e+5` ([ADR-00065](../adr/ADR-00065.md))"
+            ],
+            "notes": [
+              "`sprintf(\"%.*e\", ...)`"
+            ]
+          },
+          {
+            "feature": "`parseInt(s, radix?)` (global)",
+            "status": "implemented",
+            "caveats": [
+              "Same residual as `Number.parseInt(s)` above — no hex auto-detect when radix is omitted ([ADR-00287](../adr/ADR-00287.md))"
+            ],
+            "notes": [
+              "No-digits input → real `NaN` ([ADR-00287](../adr/ADR-00287.md))"
+            ]
+          },
+          {
+            "feature": "`parseFloat(s)` (global)",
+            "status": "implemented",
+            "caveats": [
+              "Same `strtod` extras as `Number.parseFloat(s)` above ([ADR-00287](../adr/ADR-00287.md))"
+            ],
+            "notes": [
+              "No-conversion input → real `NaN` ([ADR-00287](../adr/ADR-00287.md))"
+            ]
+          },
+          {
+            "feature": "`isNaN(x)` (global)",
+            "status": "implemented"
+          },
+          {
+            "feature": "`isFinite(x)` (global)",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.floor/ceil/round/trunc`",
+            "status": "implemented",
+            "notes": [
+              "A float input stays a double end-to-end, so `NaN`/`±Infinity` pass through unchanged; `Math.round` uses JS's tie-toward-`+Infinity` (`Math.round(-4.5) === -4`) incl. the `-0` result for `Math.round(-0.5)` ([ADR-00286](../adr/ADR-00286.md)); integer input keeps the exact-i64 path"
+            ]
+          },
+          {
+            "feature": "`Math.abs`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.sqrt/pow/hypot`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.log/log2/log10`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.sin/cos/tan`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.min/max`",
+            "status": "implemented",
+            "notes": [
+              "Any float argument promotes the fold to `llvm.minimum`/`llvm.maximum` — `NaN` propagates and `-0.0` orders below `+0.0`, as the JS spec; all-integer calls stay exact i64 ([ADR-00286](../adr/ADR-00286.md))"
+            ]
+          },
+          {
+            "feature": "`Math.sign`",
+            "status": "implemented",
+            "notes": [
+              "Float path returns ±1.0 or the input itself (`NaN` stays `NaN`, a signed zero keeps its sign); integer path exact i64 ([ADR-00286](../adr/ADR-00286.md))"
+            ]
+          },
+          {
+            "feature": "`Math.random()`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.PI/E/LN2/LN10/SQRT2/LOG2E/LOG10E`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.cbrt/expm1/log1p`",
+            "status": "implemented",
+            "notes": [
+              "`cbrt` uses a deterministic, correctly-rounded fdlibm implementation (`@__kml_cbrt`) rather than platform libm, whose runtime `cbrt` is not reliably correctly-rounded and diverged by OS (glibc `cbrt(27)` → `3.0000000000000004`); `expm1`/`log1p` delegate to libm ([ADR-00242](../adr/ADR-00242.md))"
+            ]
+          },
+          {
+            "feature": "`Math.asin/acos/atan/atan2`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.sinh/cosh/tanh`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`Math.clz32/fround/imul`",
+            "status": "implemented",
+            "notes": [
+              "`clz32` via LLVM's own `llvm.ctlz.i32` intrinsic; `fround` via an `fptrunc`/`fpext` float32 round-trip; `imul` via 32-bit `mul` + sign-extend, giving real 32-bit-wraparound integer multiplication distinct from plain `*`'s double-precision result ([ADR-00065](../adr/ADR-00065.md))"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

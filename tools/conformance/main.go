@@ -446,6 +446,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	var cerr error
 	var linkLibs []string
 	var cSources []llvm.CSource
+	var embedBlobs []llvm.EmbeddedBlob
 	if perr == nil {
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
@@ -453,6 +454,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		linkLibs = em.LinkLibs()
 		if cerr == nil {
 			cSources, cerr = em.EmbeddedCSources()
+			embedBlobs, _ = em.EmbeddedBlobs()
 		}
 	}
 	compileErr := perr
@@ -490,7 +492,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	// CLI driver links. Without these, any test needing one fails to *link*
 	// (e.g. every number-to-string via dtoa) even though the IR is valid.
 	for _, cs := range cSources {
-		cPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.c", workerID, cs.Name))
+		cPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.%s", workerID, cs.Name, cs.SrcExt()))
 		if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
 			res.Reason = normalizeReason("WRITE_ERROR", err.Error())
 			return res
@@ -498,6 +500,15 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		clangArgs = append(clangArgs, cPath)
 		clangArgs = append(clangArgs, cs.CFlags...)
 		clangArgs = append(clangArgs, cs.Libs...)
+	}
+	// Embedded asset blobs (TDD-00142 Stage 7) — parallel to the CLI; the
+	// conformance corpus never embeds, but this keeps the two drivers drift-free.
+	for _, b := range embedBlobs {
+		binPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.bin", workerID, b.Symbol))
+		asmPath := filepath.Join(workDir, fmt.Sprintf("w%d.%s.s", workerID, b.Symbol))
+		_ = os.WriteFile(binPath, b.Blob, 0644)
+		_ = os.WriteFile(asmPath, []byte(llvm.EmbedBlobAsm(b.Symbol, binPath, runtime.GOOS)), 0644)
+		clangArgs = append(clangArgs, asmPath)
 	}
 
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)

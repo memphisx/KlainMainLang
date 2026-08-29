@@ -19,8 +19,10 @@ import (
 )
 
 // clusterWorkerIR: a Worker handle returned by cluster.fork() — { i64 id,
-// i64 pid }. Field 0 is the worker id, field 1 the child pid.
-const clusterWorkerIR = "{ i64, i64 }"
+// i64 pid, ptr cp }. Field 0 is the worker id, field 1 the child pid, field
+// 2 the ChildProcess handle carrying the worker's IPC channel (TDD-00141
+// reuse): worker.send/.on('message'/'exit'/...) route through it.
+const clusterWorkerIR = "{ i64, i64, ptr }"
 
 func (e *Emitter) ensureClusterRuntime() {
 	if e.usedClusterRuntime {
@@ -28,6 +30,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	}
 	e.usedClusterRuntime = true
 	e.ensureHTTPClusterFork() // declares @__kml_cluster_worker_id + fork()
+	e.ensureCPForkRuntime()   // socketpair + __kml_cp_wrap_ipc (worker IPC channel)
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemset()
@@ -37,8 +40,8 @@ func (e *Emitter) ensureClusterRuntime() {
 
 	e.ensureSetenvDecl()
 	e.emitGlobal("declare i32 @atoi(ptr noundef)")
-	e.emitGlobal("declare i32 @execv(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
+	e.ensureExecvDecl()
+	e.ensureExitRawDecl()
 	e.ensureWaitpidDecl()
 	if runtime.GOOS == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr noundef, ptr noundef)")
@@ -52,6 +55,7 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.emitGlobal("@__kml_cluster_pid_cap = internal global i64 0, align 8")
 
 	envName := e.internString("KML_CLUSTER_WORKER_ID")
+	chanEnvName := e.internString("NODE_CHANNEL_FD")
 	idFmt := e.internString("%lld")
 
 	// __kml_cluster_seed_id(): a re-exec'd worker carries its id in the env;
@@ -137,30 +141,47 @@ define ptr @__kml_cluster_fork() {
 entry:
   %%id = load i64, ptr @__kml_cluster_next_id, align 8
   call i32 @fflush(ptr null)
+  ; the worker's IPC channel (TDD-00141): NODE_CHANNEL_FD, like fork()
+  %%sv = alloca [2 x i32], align 4
+  %%svp = getelementptr [2 x i32], ptr %%sv, i32 0, i32 0
+  call i32 @socketpair(i32 1, i32 1, i32 0, ptr %%svp)
+  %%p0_p = getelementptr [2 x i32], ptr %%sv, i32 0, i32 0
+  %%p1_p = getelementptr [2 x i32], ptr %%sv, i32 0, i32 1
+  %%pfd = load i32, ptr %%p0_p, align 4
+  %%cfd = load i32, ptr %%p1_p, align 4
   %%pid = call i32 @fork()
   %%ischild = icmp eq i32 %%pid, 0
   br i1 %%ischild, label %%child, label %%parent
 child:
+  call i32 @close(i32 %%pfd)
   %%idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%idbuf, ptr %s, i64 %%id)
   call i32 @setenv(ptr %s, ptr %%idbuf, i32 1)
+  %%fdbuf = call ptr @malloc(i64 24)
+  %%cfd64 = sext i32 %%cfd to i64
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%fdbuf, ptr %s, i64 %%cfd64)
+  call i32 @setenv(ptr %s, ptr %%fdbuf, i32 1)
   %%exe = call ptr @__kml_cluster_self_exe()
   %%argv = load ptr, ptr @__argv_ptr, align 8
   call i32 @execv(ptr %%exe, ptr %%argv)
   call void @_exit(i32 127)
   unreachable
 parent:
+  call i32 @close(i32 %%cfd)
   %%pid64 = sext i32 %%pid to i64
   call void @__kml_cluster_register_pid(i64 %%pid64)
   %%next = add i64 %%id, 1
   store i64 %%next, ptr @__kml_cluster_next_id, align 8
-  %%w = call ptr @malloc(i64 16)
+  %%cp = call ptr @__kml_cp_wrap_ipc(i64 %%pid64, i32 %%pfd)
+  %%w = call ptr @malloc(i64 24)
   %%wid = getelementptr %s, ptr %%w, i32 0, i32 0
   store i64 %%id, ptr %%wid, align 8
   %%wpid = getelementptr %s, ptr %%w, i32 0, i32 1
   store i64 %%pid64, ptr %%wpid, align 8
+  %%wcp = getelementptr %s, ptr %%w, i32 0, i32 2
+  store ptr %%cp, ptr %%wcp, align 8
   ret ptr %%w
-}`, idFmt, envName, clusterWorkerIR, clusterWorkerIR))
+}`, idFmt, envName, idFmt, chanEnvName, clusterWorkerIR, clusterWorkerIR, clusterWorkerIR))
 
 	// __kml_cluster_wait_all(): the primary blocks until every forked worker
 	// exits (keeping the primary alive while workers serve, like Node). A

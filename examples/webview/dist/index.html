@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Klain SPA</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 3rem; }
+    h1 { color: #2d6cdf; }
+  </style>
+</head>
+<body data-ready="1">
+  <h1>Served from dist/</h1>
+  <p>This page was served by <code>http.createServer</code> running in a Worker
+  thread, and rendered by the system webview — a compiled desktop binary.</p>
+  <p id="clock"></p>
+  <script>
+    function tick() {
+      document.getElementById('clock').textContent = new Date().toLocaleTimeString()
+    }
+    setInterval(tick, 1000)
+    tick()
+  </script>
+</body>
+</html>

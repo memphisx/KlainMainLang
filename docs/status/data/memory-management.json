@@ -1,0 +1,78 @@
+{
+  "id": "memory-management",
+  "file": "MEMORY-MANAGEMENT.md",
+  "title": "Memory Management",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. Selected once per compiled binary via the `-mm=manual|gc|auto` CLI flag (default `manual`). Full design: [TDD-00001](../tdd/TDD-00001.md)."
+    },
+    {
+      "kind": "block",
+      "text": "**Coverage**: 2/3 modes (`manual`, `gc`); `auto` is design-only."
+    },
+    {
+      "kind": "block",
+      "text": "**Strict Coverage**: 0/3 — both implemented modes carry a real, disclosed caveat (a non-empty Caveats cell), so neither counts."
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "The three modes",
+        "featureColumn": "Mode",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`manual` (default)",
+            "status": "implemented",
+            "caveats": [
+              "Never frees on its own — a program's footprint grows monotonically with runtime unless the programmer calls `Memory.free(x)` by hand",
+              "Same footguns as C, including that a string *literal* is a compile-time global constant, not `malloc`'d, so freeing one crashes exactly like C's `free(\"literal\")`"
+            ],
+            "notes": [
+              "Freed by the programmer via explicit `Memory.free(x)`, which resolves `x`'s underlying heap pointer (array data pointer, object struct pointer, closure header + environment, Map/Set backing buffers) and frees it — shallow only, never anything reachable *through* it",
+              "[ADR-00030](../adr/ADR-00030.md) (Stage 1 of the staged plan in [TDD-00001](../tdd/TDD-00001.md))"
+            ]
+          },
+          {
+            "feature": "`gc`",
+            "status": "implemented",
+            "caveats": [
+              "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
+              "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it"
+            ],
+            "notes": [
+              "Boehm–Demers–Weiser collector (`libgc`): swaps the declared `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc` and links `-lgc` — no per-feature codegen change beyond the allocation call sites, since the collector conservatively scans the native stack/registers/managed heap for live pointers",
+              "`Memory.free(x)` stays legal (lowers to `GC_free`, an always-safe early-release optimization Boehm documents)",
+              "See [ADR-00071](../adr/ADR-00071.md), [ADR-00080](../adr/ADR-00080.md), [ADR-00093](../adr/ADR-00093.md)"
+            ]
+          },
+          {
+            "feature": "`auto`",
+            "status": "missing",
+            "notes": [
+              "Not started. Compiler-inserted frees at compile-time-proven-safe points, no runtime collector — sequenced last because a wrong escape analysis is a use-after-free, not just a delayed free",
+              "Staged: Stage 2 is a `/** @free */` annotation plus a conservative local escape check (insert `free()` at every block exit path, reject if the value might escape); Stage 3 is an `@owned` linear-value annotation with real last-use liveness analysis",
+              "`Memory.free(x)` would be a compile error in this mode (the compiler's own inserted frees can't account for a manual free it didn't plan for)",
+              "See [TDD-00001](../tdd/TDD-00001.md)'s Design section for the full staging rationale and why a Rust-style borrow checker was ruled out as disproportionate"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Why this matters"
+    },
+    {
+      "kind": "block",
+      "text": "Every heap allocation this compiler emits (arrays growing/`push`ing, object literals, closure environments, string concatenation/slicing/template literals, `Map`/`Set` backing tables, JSON/Date formatting scratch buffers, boxed `any`/`unknown` payloads, …) goes through a plain `malloc`/`realloc` call. In `manual` mode that's never freed except by an explicit `Memory.free(x)` — a complete non-issue for the short-lived CLI processes every example/test compiles to today, but a hard blocker for this project's other stated direction: long-running microservice-style processes fronting `http.listen`. `-mm=gc` is a one-flag opt-in fix for exactly that gap; see the [Roadmap](README.md#roadmap)'s Structural priorities for the current sequencing read."
+    }
+  ]
+}

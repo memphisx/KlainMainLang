@@ -1,0 +1,273 @@
+{
+  "surface": "fetch",
+  "title": "fetch & HTTP client",
+  "kind": "web",
+  "statusPage": "NETWORKING.md",
+  "coverageScope": "subset",
+  "coverage": {
+    "loose": "3/3",
+    "loosePct": 100,
+    "strict": "1/3",
+    "strictPct": 33
+  },
+  "lede": "The WHATWG fetch client — fetch(), Response, Request, Headers — over libcurl, non-blocking under the event loop. The defining divergence from standard fetch: the response body accessors (.text()/.json()/.arrayBuffer()) are synchronous, returning the value directly rather than a Promise (awaiting them is a harmless no-op). Response headers can't be read yet. WebSocket, EventSource, and XMLHttpRequest are separate Networking surfaces, documented elsewhere.",
+  "entries": [
+    {
+      "id": "fetch.fetch",
+      "name": "fetch(url, init?)",
+      "statusRow": "fetch(url) / fetch(url, init) / fetch(request)",
+      "signature": "fetch(url: string | Request, init?: RequestInit): Promise<Response>",
+      "badge": "caveats",
+      "description": "Issues an HTTP request and resolves when the response headers arrive; the body is read lazily. Genuinely non-blocking — awaited inside an http.listen handler it yields to the event loop, so a slow upstream call doesn't stall other connections. A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally — .ok distinguishes it, matching real fetch.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string | Request",
+          "desc": "The target URL, or a Request object as the sole argument."
+        },
+        {
+          "name": "init?",
+          "type": "RequestInit",
+          "desc": "Any value with a subset of method: string / headers: Map<string,string> | Headers / body: string."
+        }
+      ],
+      "returns": {
+        "type": "Promise<Response>",
+        "desc": "Resolves once response headers arrive."
+      },
+      "exampleKey": "fetch/fetch_init",
+      "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconsole.log(r.status, r.ok)   // 200 true",
+      "differences": [
+        "Setting a `body` without an explicit `method` sends it as `POST` (libcurl's `CURLOPT_POSTFIELDS` implies `POST` unless overridden); an explicit `method` always wins over that default.",
+        "A fetch carrying an `AbortSignal` resolves at completion, not when headers arrive."
+      ],
+      "seeAlso": [
+        "fetch.response.status",
+        "fetch.request",
+        "fetch.headers"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch"
+      }
+    },
+    {
+      "id": "fetch.response.status",
+      "name": "Response.status / .ok",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "readonly status: number; readonly ok: boolean",
+      "badge": "exact",
+      "description": "The HTTP status code, and whether it is in the 2xx range. A non-2xx response still resolves — check .ok rather than relying on fetch to throw.",
+      "returns": {
+        "type": "number | boolean",
+        "desc": "The status code / the 2xx flag."
+      },
+      "exampleKey": "fetch/fetch",
+      "snippet": "const missing = await fetch('http://127.0.0.1:8765/status/404')\nconsole.log(missing.status, missing.ok)   // 404 false",
+      "seeAlso": [
+        "fetch.fetch",
+        "fetch.response.text"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/status"
+      }
+    },
+    {
+      "id": "fetch.response.text",
+      "name": "Response.text()",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "text(): string",
+      "badge": "caveats",
+      "description": "Reads the body to completion and returns it as a string. Both call styles work: const s = r.text() and await r.text() (awaiting a non-thenable is identity).",
+      "returns": {
+        "type": "string",
+        "desc": "The response body as text."
+      },
+      "exampleKey": "fetch/fetch",
+      "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconst body: string = r.text()",
+      "differences": [
+        "**Synchronous** — returns `string` directly, not the `Promise<string>` real WHATWG fetch returns.",
+        "The result is a null-terminated string: a binary body with an embedded null byte truncates at the first one — use `.arrayBuffer()` for binary.",
+        "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed `TypeError`."
+      ],
+      "seeAlso": [
+        "fetch.response.json",
+        "fetch.response.arrayBuffer",
+        "fetch.response.body"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/text"
+      }
+    },
+    {
+      "id": "fetch.response.json",
+      "name": "Response.json()",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "json(): T",
+      "badge": "caveats",
+      "description": "Reads and parses the body as JSON, projecting it into a declared type. Reuses JSON.parse's machinery — validates the body (a non-JSON body throws a catchable SyntaxError) and projects nested objects, array/object-array fields, and top-level T[].",
+      "returns": {
+        "type": "T",
+        "desc": "The parsed value, projected to the annotated type."
+      },
+      "exampleKey": "fetch/fetch",
+      "snippet": "interface Ip { origin: string }\nconst info: Ip = (await fetch('http://127.0.0.1:8765/ip')).json()",
+      "differences": [
+        "**Synchronous** — returns the parsed value directly, not `Promise<any>`.",
+        "Only `any`/`unknown` dynamic shapes are unsupported; every statically-typed shape projects.",
+        "Same embedded-null truncation as `.text()` — the body is read as a null-terminated string."
+      ],
+      "seeAlso": [
+        "fetch.response.text",
+        "fetch.response.arrayBuffer"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/json"
+      }
+    },
+    {
+      "id": "fetch.response.arrayBuffer",
+      "name": "Response.arrayBuffer()",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "arrayBuffer(): ArrayBuffer",
+      "badge": "caveats",
+      "description": "Reads the body to completion and returns it as an ArrayBuffer, carrying the real byte count and coming back whole regardless of content. The binary-safe body accessor — use it for any body that may contain null bytes.",
+      "returns": {
+        "type": "ArrayBuffer",
+        "desc": "The complete response body as bytes."
+      },
+      "differences": [
+        "**Synchronous** — returns `ArrayBuffer` directly, not `Promise<ArrayBuffer>`."
+      ],
+      "seeAlso": [
+        "fetch.response.text",
+        "fetch.response.body"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/arrayBuffer"
+      }
+    },
+    {
+      "id": "fetch.response.body",
+      "name": "Response.body",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "readonly body: ReadableStream<Uint8Array>",
+      "badge": "caveats",
+      "description": "A real ReadableStream<Uint8Array> fed incrementally from libcurl's write callback with backpressure via curl pause/unpause. On an already-completed transfer it replays the buffered bytes as one chunk.",
+      "returns": {
+        "type": "ReadableStream<Uint8Array>",
+        "desc": "The streaming body."
+      },
+      "differences": [
+        "Reading `.text()` after consuming `.body` returns `\"\"` rather than the spec's already-disturbed `TypeError`; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field."
+      ],
+      "seeAlso": [
+        "fetch.response.arrayBuffer",
+        "fetch.response.text"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/body"
+      }
+    },
+    {
+      "id": "fetch.response.headers",
+      "name": "Response headers",
+      "statusRow": null,
+      "signature": "// not available",
+      "badge": "missing",
+      "description": "Reading response headers is not supported — no HEADERFUNCTION capture exists in this codebase yet. There is no .headers accessor on a Response, and XMLHttpRequest's .getResponseHeader()/.getAllResponseHeaders() are absent for the same reason. Request-side headers work fully.",
+      "seeAlso": [
+        "fetch.headers",
+        "fetch.response.status"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/headers"
+      }
+    },
+    {
+      "id": "fetch.request",
+      "name": "new Request(url, init?)",
+      "statusRow": "Request / Headers objects",
+      "signature": "new Request(url: string, init?: RequestInit): Request",
+      "badge": "exact",
+      "description": "A real Request class bundling a URL with method/headers/body — all readable directly (.url/.method/.headers/.body). method defaults to \"GET\", headers to an empty Headers, body to null. Works as fetch's sole argument, or supply a plain-object init to fetch directly.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "desc": "The request URL."
+        },
+        {
+          "name": "init?",
+          "type": "RequestInit",
+          "desc": "method / headers / body."
+        }
+      ],
+      "returns": {
+        "type": "Request",
+        "desc": "The request object."
+      },
+      "exampleKey": "fetch/fetch_request_headers",
+      "snippet": "const req = new Request('http://127.0.0.1:8765/post', {\n  method: 'POST', headers: headers, body: JSON.stringify({ hello: 'world' })\n})\nconst posted = await fetch(req)",
+      "seeAlso": [
+        "fetch.fetch",
+        "fetch.headers"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Request/Request"
+      }
+    },
+    {
+      "id": "fetch.headers",
+      "name": "new Headers()",
+      "statusRow": "Request / Headers objects",
+      "signature": "new Headers(): Headers",
+      "badge": "exact",
+      "description": "A case-insensitive (lowercased-key) header bag. get/set/has/delete behave like Map<string,string>'s own — because storage-wise it is one. A real Headers instance is accepted anywhere fetch takes headers, alongside a plain Map<string,string>.",
+      "returns": {
+        "type": "Headers",
+        "desc": "An empty header bag."
+      },
+      "exampleKey": "fetch/fetch_request_headers",
+      "snippet": "const headers = new Headers()\nheaders.set('Content-Type', 'application/json')\nconsole.log(headers.get('content-type'))   // application/json",
+      "seeAlso": [
+        "fetch.headers.append",
+        "fetch.request"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Headers/Headers"
+      }
+    },
+    {
+      "id": "fetch.headers.append",
+      "name": "Headers.append(name, value)",
+      "statusRow": "Request / Headers objects",
+      "signature": "append(name: string, value: string): void",
+      "badge": "exact",
+      "description": "Adds a header value, combining with a comma if name is already present instead of overwriting — the one behavior that distinguishes it from .set().",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "desc": "Header name (case-insensitive)."
+        },
+        {
+          "name": "value",
+          "type": "string",
+          "desc": "Value to add."
+        }
+      ],
+      "returns": {
+        "type": "void",
+        "desc": "Nothing."
+      },
+      "exampleKey": "fetch/fetch_request_headers",
+      "snippet": "headers.append('X-Trace', 'a')\nheaders.append('X-Trace', 'b')\nconsole.log(headers.get('x-trace'))   // a, b",
+      "seeAlso": [
+        "fetch.headers"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Headers/append"
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/networking.json; edit the JSON, then run `make status`. -->
+
 # Networking
 
 > Part of the [Implementation Status](README.md) index. All require linking a network library (libcurl for fetch/HTTP; system sockets for WebSocket). A server-side HTTP listener (`http.listen(port, handler)`) is tracked under [HTTP-SERVER.md](HTTP-SERVER.md) instead — listening for incoming connections has no browser-side Web API equivalent.

@@ -1,0 +1,84 @@
+{
+  "id": "os",
+  "file": "OS.md",
+  "title": "os",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information. See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md)."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "API",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`os.platform()`",
+            "status": "implemented",
+            "notes": [
+              "Reuses `process.platform`'s existing `runtime.GOOS`-constant mechanism"
+            ]
+          },
+          {
+            "feature": "`os.homedir()`",
+            "status": "implemented",
+            "notes": [
+              "`getenv(\"HOME\")`; throws a catchable Error if unset (matches real Node)"
+            ]
+          },
+          {
+            "feature": "`os.tmpdir()`",
+            "status": "implemented",
+            "notes": [
+              "`getenv(\"TMPDIR\")`, falling back to `\"/tmp\"` — never throws"
+            ]
+          },
+          {
+            "feature": "`os.hostname()`",
+            "status": "implemented",
+            "notes": [
+              "POSIX `gethostname()`"
+            ]
+          },
+          {
+            "feature": "`os.cpus()`",
+            "status": "implemented",
+            "caveats": [
+              "Darwin `speed` is 0 on Apple Silicon — `sysctlbyname(\"hw.cpufrequency\")` has no answer on M-series (Apple removed the fixed-clock model from M1 on); matches real Node's documented M-series behavior, not a defect",
+              "Darwin `times.irq` is always 0 — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice)"
+            ],
+            "notes": [
+              "Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `\"Apple M4 Pro\"`, live tick counters)",
+              "Linux `speed` reflects the CPU's current/scaled frequency (from `/proc/cpuinfo`'s `cpu MHz`), not a rated base/max clock — matches what libuv/real Node reports on Linux"
+            ]
+          },
+          {
+            "feature": "`os.totalmem()` / `os.freemem()`",
+            "status": "implemented",
+            "notes": [
+              "Verified on Linux and on Apple Silicon M4 Pro — `totalmem()` matches `sysctl hw.memsize`; Darwin `freemem()` (Mach `host_statistics`) returns a live free-page figure"
+            ]
+          },
+          {
+            "feature": "`os.EOL`",
+            "status": "implemented",
+            "notes": [
+              "Always `\"\\n\"` — this compiler is POSIX-only (no Windows target), so there's no real `\"\\r\\n\"` case"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

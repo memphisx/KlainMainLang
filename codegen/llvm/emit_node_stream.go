@@ -8,6 +8,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -108,6 +109,12 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 	e.ensureNodeStreamRuntime()
 
 	inTy, outTy := TypeI64, TypeI64
+	if ex.Kind == "passthrough" {
+		// PassThrough defaults to string chunks — Node's non-objectMode
+		// streams carry strings/Buffers, and the identity shape has no
+		// callback whose signature could pin the type. `<T>` overrides.
+		inTy, outTy = TypePtr, TypePtr
+	}
 	if ex.InType != nil {
 		inTy = e.resolveType(ex.InType)
 	}
@@ -206,8 +213,14 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
 		return Value{Ref: nsReg, Ty: nsTy}, nil
 
-	case "transform":
-		opts, err := destructureNodeStreamOptions(ex.Options, nodeStreamOptionKeys("transform", "flush"), "Transform", pos)
+	case "transform", "passthrough":
+		// PassThrough is Node's identity Transform: same wiring, no
+		// transform/flush callbacks allowed (there is nothing to customize).
+		optKeys, what := nodeStreamOptionKeys("transform", "flush"), "Transform"
+		if ex.Kind == "passthrough" {
+			optKeys, what = nodeStreamOptionKeys(), "PassThrough"
+		}
+		opts, err := destructureNodeStreamOptions(ex.Options, optKeys, what, pos)
 		if err != nil {
 			return Value{}, err
 		}
@@ -598,25 +611,7 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 		pt.PromiseTask = true
 		return Value{Ref: ref, Ty: pt}
 	}
-	closedPromOf := func(v Value) (string, error) {
-		if v.Ty.IsNodeWritable {
-			ws := e.nodeStreamSide(v.Ref, 1)
-			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 14", gep, wstreamStructIR, ws))
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
-			return r, nil
-		}
-		if v.Ty.IsNodeReadable {
-			rs := e.nodeStreamSide(v.Ref, 0)
-			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 16", gep, rstreamStructIR, rs))
-			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
-			return r, nil
-		}
-		return "", fmt.Errorf("%d:%d: expected a Node stream", pos.Line, pos.Col)
-	}
+	closedPromOf := func(v Value) (string, error) { return e.streamClosedProm(v, pos) }
 
 	switch method {
 	case "finished":
@@ -635,45 +630,291 @@ func (e *Emitter) emitStreamPromisesCall(method string, args []ast.Expression, p
 		return voidPromise(cp), nil
 
 	case "pipeline":
-		if len(args) < 2 {
-			return Value{}, fmt.Errorf("%d:%d: pipeline() takes at least a source and a destination", pos.Line, pos.Col)
+		last, err := e.emitStreamPipelineWire(args, pos)
+		if err != nil {
+			return Value{}, err
 		}
-		vals := make([]Value, len(args))
-		for i, a := range args {
-			v, err := e.emitExpr(a)
-			if err != nil {
-				return Value{}, err
-			}
-			v = e.asNodeStreamValue(v)
-			if !v.Ty.IsNodeReadable && !v.Ty.IsNodeWritable {
-				return Value{}, fmt.Errorf("%d:%d: pipeline() arguments must be Node streams", pos.Line, pos.Col)
-			}
-			vals[i] = v
-		}
-		e.ensureStreamPipeRuntime()
-		for i := 0; i < len(vals)-1; i++ {
-			src, dst := vals[i], vals[i+1]
-			if !src.Ty.IsNodeReadable {
-				return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be readable", pos.Line, pos.Col, i+1)
-			}
-			if !dst.Ty.IsNodeWritable {
-				return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be writable", pos.Line, pos.Col, i+2)
-			}
-			outTy := TypeI64
-			if src.Ty.StreamOut != nil {
-				outTy = *src.Ty.StreamOut
-			}
-			rs := e.nodeStreamSide(src.Ref, 0)
-			dws := e.nodeStreamSide(dst.Ref, 1)
-			decode := e.emitStreamDecodeThunk(outTy)
-			ign := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null)", ign, rs, dws, decode))
-		}
-		cp, err := closedPromOf(vals[len(vals)-1])
+		cp, err := closedPromOf(last)
 		if err != nil {
 			return Value{}, err
 		}
 		return voidPromise(cp), nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown stream/promises member '%s'", pos.Line, pos.Col, method)
+}
+
+// streamClosedProm loads the stream's completion promise: a Writable's closed
+// promise (wstream field 14) or a Readable's (rstream field 16) — what
+// finished()/pipeline() settle on, in both the Promise and callback forms.
+func (e *Emitter) streamClosedProm(v Value, pos ast.Pos) (string, error) {
+	if v.Ty.IsNodeWritable {
+		ws := e.nodeStreamSide(v.Ref, 1)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 14", gep, wstreamStructIR, ws))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+		return r, nil
+	}
+	if v.Ty.IsNodeReadable {
+		rs := e.nodeStreamSide(v.Ref, 0)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 16", gep, rstreamStructIR, rs))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+		return r, nil
+	}
+	return "", fmt.Errorf("%d:%d: expected a Node stream", pos.Line, pos.Col)
+}
+
+// emitStreamPipelineWire evaluates pipeline()'s stream arguments, validates
+// the readable→writable chain, wires each adjacent pair with __kml_pipe_to,
+// and returns the final destination's Value. Shared by the Promise form
+// ('stream/promises') and the callback form ('stream').
+func (e *Emitter) emitStreamPipelineWire(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 2 {
+		return Value{}, fmt.Errorf("%d:%d: pipeline() takes at least a source and a destination", pos.Line, pos.Col)
+	}
+	vals := make([]Value, len(args))
+	for i, a := range args {
+		v, err := e.emitExpr(a)
+		if err != nil {
+			return Value{}, err
+		}
+		v = e.asNodeStreamValue(v)
+		if !v.Ty.IsNodeReadable && !v.Ty.IsNodeWritable {
+			return Value{}, fmt.Errorf("%d:%d: pipeline() arguments must be Node streams", pos.Line, pos.Col)
+		}
+		vals[i] = v
+	}
+	e.ensureStreamPipeRuntime()
+	for i := 0; i < len(vals)-1; i++ {
+		src, dst := vals[i], vals[i+1]
+		if !src.Ty.IsNodeReadable {
+			return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be readable", pos.Line, pos.Col, i+1)
+		}
+		if !dst.Ty.IsNodeWritable {
+			return Value{}, fmt.Errorf("%d:%d: pipeline() stage %d must be writable", pos.Line, pos.Col, i+2)
+		}
+		outTy := TypeI64
+		if src.Ty.StreamOut != nil {
+			outTy = *src.Ty.StreamOut
+		}
+		rs := e.nodeStreamSide(src.Ref, 0)
+		dws := e.nodeStreamSide(dst.Ref, 1)
+		decode := e.emitStreamDecodeThunk(outTy)
+		ign := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pipe_to(ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null)", ign, rs, dws, decode))
+	}
+	return vals[len(vals)-1], nil
+}
+
+// emitStreamFinishedReaction attaches the classic Node completion callback
+// (`(err?) => …`) to a stream's closed promise: a per-site runner fires on
+// settlement and calls the callback with null on fulfill / the error on
+// reject. The callback may declare zero parameters or one (the error).
+func (e *Emitter) emitStreamFinishedReaction(promRef string, cbExpr ast.Expression, what string, pos ast.Pos) error {
+	e.ensurePromiseRuntime()
+	e.ensureMicrotasks()
+	cb, err := e.resolveCallbackWithHints(cbExpr, []Type{errorObjType})
+	if err != nil {
+		return fmt.Errorf("%d:%d: %s's callback: %v", pos.Line, pos.Col, what, err)
+	}
+	nparams := len(cb.paramTypes())
+	if nparams > 1 {
+		return fmt.Errorf("%d:%d: %s's callback takes at most one (error) parameter", pos.Line, pos.Col, what)
+	}
+
+	// Per-site runner: env = { ptr prom, ptr cloOrNull }.
+	e.streamSiteCtr++
+	runner := fmt.Sprintf("@__kml_sfin_run_%d", e.streamSiteCtr)
+	errArg := ""
+	if nparams == 1 {
+		errArg = ", ptr %errp"
+	}
+	var callIR string
+	switch cb.kind {
+	case cbClosure:
+		callIR = "  %fp_p = getelementptr { ptr, ptr }, ptr %clo, i32 0, i32 0\n" +
+			"  %fp = load ptr, ptr %fp_p, align 8\n" +
+			"  %ep_p = getelementptr { ptr, ptr }, ptr %clo, i32 0, i32 1\n" +
+			"  %ep = load ptr, ptr %ep_p, align 8\n" +
+			fmt.Sprintf("  call void %%fp(ptr %%ep%s)\n", errArg)
+	case cbNamed:
+		callIR = fmt.Sprintf("  call void @%s(%s)\n", cb.name, strings.TrimPrefix(errArg, ", "))
+	default:
+		return fmt.Errorf("%d:%d: %s's callback must be a function", pos.Line, pos.Col, what)
+	}
+	e.emitGlobal(fmt.Sprintf(`
+define void %s(ptr %%env) {
+entry:
+  %%p_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0
+  %%p = load ptr, ptr %%p_p, align 8
+  %%clo_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
+  %%clo = load ptr, ptr %%clo_p, align 8
+  %%res_p = getelementptr %s, ptr %%p, i32 0, i32 0
+  %%res = load i64, ptr %%res_p, align 8
+  %%v0_p = getelementptr %s, ptr %%p, i32 0, i32 2
+  %%v0 = load i64, ptr %%v0_p, align 8
+  %%isrej = icmp eq i64 %%res, 2
+  %%e0 = inttoptr i64 %%v0 to ptr
+  %%errp = select i1 %%isrej, ptr %%e0, ptr null
+%s  ret void
+}`, runner, promiseStructIR, promiseStructIR, callIR))
+
+	cloEnv := "null"
+	if cb.kind == cbClosure {
+		cloEnv = cb.hdrPtr
+	}
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	g0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", promRef, g0))
+	g1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cloEnv, g1))
+	e.emitAttachPromiseReaction(promRef, e.buildBuiltinClosure(runner, env))
+	return nil
+}
+
+// emitStreamModuleCall dispatches the 'stream' module's function members —
+// the callback forms of finished()/pipeline() (their Promise twins live in
+// 'stream/promises') and duplexPair().
+func (e *Emitter) emitStreamModuleCall(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureNodeStreamRuntime()
+	switch method {
+	case "finished":
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: finished() takes a stream and a callback", pos.Line, pos.Col)
+		}
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		v = e.asNodeStreamValue(v)
+		cp, err := e.streamClosedProm(v, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := e.emitStreamFinishedReaction(cp, args[1], "finished()", pos); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: "0", Ty: TypeVoid}, nil
+
+	case "pipeline":
+		if len(args) < 3 {
+			return Value{}, fmt.Errorf("%d:%d: pipeline() takes at least a source, a destination, and a callback", pos.Line, pos.Col)
+		}
+		last, err := e.emitStreamPipelineWire(args[:len(args)-1], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		cp, err := e.streamClosedProm(last, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := e.emitStreamFinishedReaction(cp, args[len(args)-1], "pipeline()", pos); err != nil {
+			return Value{}, err
+		}
+		return last, nil
+
+	case "duplexPair":
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("%d:%d: duplexPair() takes no arguments", pos.Line, pos.Col)
+		}
+		return e.emitDuplexPair(pos)
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown stream member '%s'", pos.Line, pos.Col, method)
+}
+
+// emitDuplexPair builds stream.duplexPair(): two cross-wired Duplex handles —
+// whatever is written to one side comes out as 'data' on the other, and
+// ending one side ends the other's readable. Each side is the existing
+// identity-transform wiring (a TSCTX whose sink enqueues into the *other*
+// side's rstream — the only difference from a Transform, whose sink feeds its
+// own). Chunks are strings (the same default as PassThrough).
+func (e *Emitter) emitDuplexPair(pos ast.Pos) (Value, error) {
+	e.ensureNodeStreamRuntime()
+	e.ensureStreamPipeRuntime()
+	chunkTy := TypePtr
+
+	// Per-side allocation: rstream + wstream.
+	mkSide := func() (rs, ws string) {
+		fulfill := e.emitStreamFulfillThunk(chunkTy)
+		rs = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 0.0, ptr %s)", rs, fulfill))
+		ws = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
+		return rs, ws
+	}
+	rsA, wsA := mkSide()
+	rsB, wsB := mkSide()
+
+	// ctx = { rs(other side), ws(own), transform=null (identity), flush=null,
+	// parked flags/words, parked prom, spare } — the same TSCTX the Transform
+	// constructor builds, with the rs swapped to the peer's.
+	mkCtx := func(peerRS, ownWS string) string {
+		ctx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+		storePtr := func(idx int, val string) {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, ctx, idx))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+		}
+		storePtr(0, peerRS)
+		storePtr(1, ownWS)
+		storePtr(2, "null")
+		storePtr(3, "null")
+		for i := 4; i <= 6; i++ {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+		}
+		storePtr(7, "null")
+		storePtr(8, "null")
+		e.storeWStreamField(ownWS, 9, e.buildBuiltinClosure("@__kml_ts_sink_write", ctx))
+		e.storeWStreamField(ownWS, 10, e.buildBuiltinClosure("@__kml_ts_sink_close", ctx))
+		e.storeWStreamField(ownWS, 11, e.buildBuiltinClosure("@__kml_ts_sink_abort", ctx))
+		return ctx
+	}
+	ctxA := mkCtx(rsB, wsA) // A's writes surface on B
+	ctxB := mkCtx(rsA, wsB) // B's writes surface on A
+	// A chunk parked in ctxA waits on rsB's capacity, so rsB's pull resumes
+	// ctxA (and vice versa) — the cross of the Transform's own-ctx pull.
+	e.storeStreamField(rsB, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctxA))
+	e.storeStreamField(rsA, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctxB))
+	for _, s := range []struct{ fn, arg string }{
+		{"@__kml_rs_started", rsA}, {"@__kml_rs_started", rsB},
+		{"@__kml_ws_started", wsA}, {"@__kml_ws_started", wsB},
+	} {
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure(s.fn, s.arg)))
+	}
+
+	nsTy := NodeTransformType(chunkTy, chunkTy)
+	mkNS := func(rs, ws string) string {
+		inv := e.emitNodeInvokeDataThunk(chunkTy)
+		dec := e.emitStreamDecodeThunk(chunkTy)
+		ns := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr %s, ptr %s, ptr %s)", ns, rs, ws, inv, dec))
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", ns))
+		return ns
+	}
+	nsA := mkNS(rsA, wsA)
+	nsB := mkNS(rsB, wsB)
+
+	// Package as a 2-element array so `const [a, b] = duplexPair()` and
+	// `pair[0]` both work through the ordinary array machinery.
+	data := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", data))
+	g0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", g0, data))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nsA, g0))
+	g1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", g1, data))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nsB, g1))
+	agg0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, data))
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 2, 1", agg, agg0))
+	return Value{Ref: agg, Ty: ArrayOf(nsTy)}, nil
 }

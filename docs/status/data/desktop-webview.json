@@ -1,0 +1,199 @@
+{
+  "id": "desktop-webview",
+  "file": "DESKTOP-WEBVIEW.md",
+  "title": "Desktop — `klain:webview`",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "Native desktop windows over the **system** browser engine (WKWebView on macOS,\nWebKitGTK on Linux) via the vendored [webview/webview](https://github.com/webview/webview)\nC++ library — the Tauri architecture with this compiler as the backend. A\ncompiled binary opens a window, renders an HTML/CSS/JS UI (any SPA that builds\nto static assets), and its buttons call straight into typed native functions."
+    },
+    {
+      "kind": "block",
+      "text": "Design: [TDD-00142](../tdd/TDD-00142.md). Implementation:\n[ADR-00436](../adr/ADR-00436.md) (Stage 0 — C++ build plumbing),\n[ADR-00437](../adr/ADR-00437.md) (Stage 1 — the window),\n[ADR-00438](../adr/ADR-00438.md) (Stage 2 — bind/IPC + served SPA),\n[ADR-00439](../adr/ADR-00439.md) (Stage 3 — loop fusion + async bind),\n[ADR-00440](../adr/ADR-00440.md) (Stage 4 — packaging),\n[ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md) (Stage 5–6 —\ntyped bind, `bindings`, `--emit-window-dts`),\n[ADR-00443](../adr/ADR-00443.md) (Stage 7 — SPA embedding)."
+    },
+    {
+      "kind": "block",
+      "text": "`import { Webview } from 'klain:webview'`"
+    },
+    {
+      "kind": "block",
+      "text": "**Coverage: 20/20 surface, 100%. Strict: 0/20** — the module-wide V1 caveats\nbelow exclude every row from Strict."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "Surface",
+        "featureColumn": "Feature",
+        "hasCaveats": false,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`new Webview({ title, width, height, debug })`",
+            "status": "implemented",
+            "notes": [
+              "Parse-time constructor; ptr-slot handle. All options optional"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.navigate(url)`",
+            "status": "implemented",
+            "notes": [
+              "`http(s)://…` and `data:` URIs"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.html(doc)`",
+            "status": "implemented",
+            "notes": [
+              "Inline document (small UIs / single-file SPA builds)"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.setTitle(s)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.setSize(w, h)`",
+            "status": "implemented",
+            "notes": [
+              "`WEBVIEW_HINT_NONE`"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.init(js)`",
+            "status": "implemented",
+            "notes": [
+              "Runs before every page load"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.eval(js)`",
+            "status": "implemented",
+            "notes": [
+              "Fire-and-forget; routed through `webview_dispatch` (thread-safe from a Worker)"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.bind(name, cb)`",
+            "status": "implemented",
+            "notes": [
+              "`window.name(...)` in the page → native `cb(reqJSON)`; returns a page-side Promise"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.bind` async (`cb` returns `Promise<string>`)",
+            "status": "implemented",
+            "notes": [
+              "Page promise settles when the native promise settles — driven on the GUI thread by the page-tick pump ([ADR-00439](../adr/ADR-00439.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.unbind(name)`",
+            "status": "implemented"
+          },
+          {
+            "feature": "`.run()`",
+            "status": "implemented",
+            "notes": [
+              "Blocks — owns the GUI main loop; statements after it are the shutdown path"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "Timers/microtasks on the GUI thread",
+            "status": "implemented",
+            "notes": [
+              "`setTimeout`/`setInterval`/promise reactions run under `run()` without a Worker, via a page-driven tick pump ([ADR-00439](../adr/ADR-00439.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.terminate()`",
+            "status": "implemented",
+            "notes": [
+              "Ends `run()` (from a bound callback or another thread)"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`.destroy()`",
+            "status": "implemented"
+          },
+          {
+            "feature": "bind throw → page-promise reject",
+            "status": "implemented",
+            "notes": [
+              "Via the setjmp catch scaffold"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`bindings: { … }` + `.bindTyped(name, fn)` (typed)",
+            "status": "implemented",
+            "notes": [
+              "Auto-decode the page's args into the callback's declared parameter types, auto-JSON-encode the return, incl. **async** (`Promise<T>`, settled value encoded) and nested-tuple params; the `bindings` keys are the exposed `window.*` allowlist ([ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`--emit-window-dts`",
+            "status": "implemented",
+            "notes": [
+              "Writes `<output>.window.d.ts` declaring `interface Window { … }` from the typed bindings — page-side autocomplete + the audit surface for the allowlist ([ADR-00442](../adr/ADR-00442.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`new Webview({ serve: \"./dist\" })`",
+            "status": "implemented",
+            "notes": [
+              "Embeds a built SPA/SSG directory into the binary at compile time (`.incbin`) and serves it from an in-binary static server on an ephemeral loopback port, then navigates — a **single-file** desktop app, no external `dist/` ([ADR-00443](../adr/ADR-00443.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`klain:assets` `embedDir(path)` + `.get(path)`",
+            "status": "implemented",
+            "notes": [
+              "Embed a directory at compile time; `.get(path): ArrayBuffer` reads an embedded file byte-exact (binary-safe) over the static blob, no copy ([ADR-00443](../adr/ADR-00443.md))"
+            ],
+            "notesPlain": true
+          },
+          {
+            "feature": "`klainmain -package` → `.app` / `.desktop`",
+            "status": "implemented",
+            "notes": [
+              "Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md))"
+            ],
+            "notesPlain": true
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Loading patterns"
+    },
+    {
+      "kind": "block",
+      "text": "- **Inline** — `.html(...)` (see `examples/webview/inline.ts`: a counter kept in\n  native state + a `fs.readdirSync` file browser).\n- **Served SPA** — `http.createServer` serves `dist/` in a Worker thread; the\n  main thread `.navigate`s to it (see `examples/webview/spa.ts` +\n  `spa_server.ts`).\n- **Embedded (single-file)** — `new Webview({ serve: \"./dist\" })` embeds the build\n  into the binary and serves it from an in-binary server; no `dist/` at runtime\n  (see `examples/webview/embedded.ts`).\n- **External URL** — `.navigate(\"https://…\")`."
+    },
+    {
+      "kind": "block",
+      "text": "## Caveats (what's left)"
+    },
+    {
+      "kind": "block",
+      "text": "- **One window per process** (V1). A second `new Webview` is a clean\n  compile-time rejection. Multi-window is deferred — the codegen guard is one\n  line, but true multi-window needs reworking Cocoa run-loop / app-delegate\n  ownership in the vendored engine.\n- **Two bind contracts.** `w.bind(name, cb)` is the raw escape hatch — the page's\n  argument list arrives as one JSON-array string and the callback returns a JSON\n  string (sync, or `async` returning `Promise<string>` settled later,\n  [ADR-00439](../adr/ADR-00439.md)). **Typed** bind (`bindings: {…}` on the\n  constructor, or `w.bindTyped(name, fn)`) auto-decodes the args into the\n  callback's declared parameter types and JSON-encodes the return\n  ([ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md)); the\n  `bindings` keys are the exposed `window.*` allowlist. **Async** typed bind (a\n  callback returning `Promise<T>` settles the page promise with the JSON-encoded\n  `T`) and nested-tuple params work; `--emit-window-dts` writes the page-side\n  `Window` typing. A rejection carries a fixed message, not `error.message`.\n- **Loop fusion is page-driven.** `setTimeout`/`setInterval`/microtasks/promise\n  reactions run on the GUI thread under `run()` via a page-injected tick pump\n  (16ms) — no Worker needed for timers or async `bind`. Servers and other\n  fd-driven loops (stream pumps, fork IPC) still belong in a Worker; the pump\n  drives this runtime's timer/microtask/task queues, not `select()`.\n- **Single-file apps.** `new Webview({ serve: \"./dist\" })` embeds the built SPA\n  into the binary and serves it from an in-binary server, so a packaged `.app`\n  needs no external `dist/` (this closes the earlier packaging gap). The `serve`\n  path is resolved at *compile* time (relative to the compiler's CWD).\n- **Platform**: macOS needs zero extra deps (WebKit.framework ships with the\n  OS); Linux needs the WebKitGTK dev packages at build time — see README\n  Requirements. Windows is out of scope.\n- **Verified on macOS (Apple Silicon M4)** — window creation, method surface,\n  the page→native→terminate roundtrip, both example apps, the Stage 3 page-tick\n  pump + async-bind roundtrips (gated windowed smoke tests), Stage 4 packaging\n  (`-package` → a `.app` that `plutil` lints clean and `open` launches as a\n  foreground GUI app; `.png`→`.icns` icon pipeline), Stage 5 typed bind (a\n  page calling typed `window.add`/`mkPoint` round-trips scalar + object), Stage 6 async-typed + nested-tuple round-trips + `--emit-window-dts`, and Stage 7\n  embedding (`embedDir`/`get` byte-exact incl. a binary asset; `Webview({ serve })`\n  renders the embedded page with no `dist/` on disk). **Linux:\n  compile-tier only** — the vendored binding compiles and links against\n  `webkit2gtk-4.1` (Docker `ubuntu:24.04`, no display; CI links it too), but a\n  windowed run on Linux is not yet exercised."
+    }
+  ]
+}

@@ -606,3 +606,36 @@ func (e *Emitter) ensureStrerror() {
 	e.usedStrerror = true
 	e.emitGlobal("declare ptr @strerror(i32 noundef)")
 }
+
+// ensureExecvDecl / ensureExitRawDecl / ensureExecvpDecl: the exec-family +
+// _exit POSIX decls, shared so runtimes that co-occur (cluster + fork IPC +
+// child_process + process.execFileSync) never emit a duplicate declaration.
+func (e *Emitter) ensureExecvDecl() {
+	if !e.usedExecvDecl {
+		e.emitGlobal("declare i32 @execv(ptr noundef, ptr noundef)")
+		e.usedExecvDecl = true
+	}
+}
+
+func (e *Emitter) ensureExecvpDecl() {
+	if !e.usedExecvpDecl {
+		e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
+		e.usedExecvpDecl = true
+	}
+}
+
+func (e *Emitter) ensureExitRawDecl() {
+	if !e.usedExitRawDecl {
+		e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
+		e.usedExitRawDecl = true
+	}
+}
+
+// ensureChdirDecl declares POSIX chdir once — shared by process.chdir and
+// child_process spawn's cwd option.
+func (e *Emitter) ensureChdirDecl() {
+	if !e.usedChdirDecl {
+		e.emitGlobal("declare i32 @chdir(ptr noundef)")
+		e.usedChdirDecl = true
+	}
+}

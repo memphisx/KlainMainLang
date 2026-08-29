@@ -1213,6 +1213,8 @@ ccdone:
   %dgkeep = call i1 @__kml_dgram_keepalive()
   ; process.stdin: an open stream with a 'data' listener keeps this loop alive.
   %sdkeep = call i1 @__kml_stdin_keepalive()
+  ; fork IPC (child side): an open channel with a 'message' listener.
+  %ipcckeep = call i1 @__kml_ipcc_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1223,7 +1225,8 @@ ccdone:
   %anywork6b = or i1 %anywork6, %rlkeep
   %anywork6c = or i1 %anywork6b, %netkeep
   %anywork6d = or i1 %anywork6c, %dgkeep
-  %anywork = or i1 %anywork6d, %sdkeep
+  %anywork6e = or i1 %anywork6d, %sdkeep
+  %anywork = or i1 %anywork6e, %ipcckeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1380,6 +1383,8 @@ wscsetdone:
   %cpfz0 = load i1, ptr %forcezero, align 1
   %cpfz1 = or i1 %cpfz0, %cpfdforce
   store i1 %cpfz1, ptr %forcezero, align 1
+  ; fork IPC (child side): add the channel fd while open.
+  call i1 @__kml_ipcc_fdset_add(ptr %fdset, ptr %maxfd)
   ; readline: add stdin (fd 0) while an interface is open.
   %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
   %rlfz0 = load i1, ptr %forcezero, align 1
@@ -1651,6 +1656,8 @@ afterselectok:
   call void @__kml_chan_dispatch()
   ; child_process: drain spawned children's stdout/stderr and finalize exits.
   call void @__kml_cp_dispatch()
+  ; fork IPC (child side): drain the channel and fire 'message' listeners.
+  call void @__kml_ipcc_dispatch()
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
   ; process.stdin: drain stdin and emit 'data'/'end' events.

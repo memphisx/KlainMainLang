@@ -7,7 +7,7 @@ actually mean, what was previously mislabeled, and the ranked list of work that
 would move them. Update this file whenever the oracle's failure histogram
 shifts materially.
 
-Last reconciled: 2026-08-27 (Mac), against the pinned `nodejs/node` checkout.
+Last reconciled: 2026-08-28 (Mac), against the pinned `nodejs/node` checkout.
 
 ## The two numbers are different claims
 
@@ -15,7 +15,7 @@ Last reconciled: 2026-08-27 (Mac), against the pinned `nodejs/node` checkout.
   features this compiler *chose to target*, how many work for their core typed
   use case, with caveats disclosed per row." It is a claim about the targeted
   subset, not about Node.
-- **The Node oracle pass rate (35 of 2451 attempted files, ~1.4%)** measures:
+- **The Node oracle pass rate (37 of 2451 attempted files, ~1.5%)** measures:
   "how much of Node's *own* behavioral suite runs verbatim after a mechanical
   CommonJS→typed-ESM transform." It is a floor, and it is low.
 
@@ -44,10 +44,11 @@ should either quote both numbers or say "targeted subset" explicitly.
 
 ## Current totals
 
-3478 files: **28 passed, 2263 failed, 1187 skipped**. Earlier runs reported
-26 passed / 1318 failed / 2134 skipped — the difference is almost entirely
-reclassification (shims + unimplemented-module FAILs), i.e. the old skip
-column was hiding ~1000 files of in-scope work.
+3478 files: **37 passed, 2414 failed, 1027 skipped**. Earlier runs reported
+26–28 passed with ~2100 skipped — the shift is mostly reclassification
+(shims + unimplemented-module FAILs; the old skip column hid ~1000 files
+of in-scope work), plus the incremental passes from the idiom-closure
+batches (ADR-00406–00435).
 
 ## The module-level gap map (from MODULE_NOT_IMPLEMENTED counts)
 
@@ -83,12 +84,70 @@ column was hiding ~1000 files of in-scope work.
 5. ~~`expected {, got .`~~ closed — it was `class X extends
    events.EventEmitter`, the qualified-base twin of qualified `new`
    (ADR-00408).
-6. **`worker_threads.MessageChannel`**, **`stream`
-   `PassThrough`/`pipeline`/`duplexPair` named exports**, **`crypto.generateKeyPair`**
-   (~15 each).
+6. **`worker_threads.MessageChannel`**, **`crypto.generateKeyPair`**
+   (~15 each). ~~`stream` `PassThrough`/`pipeline`/`finished`/`duplexPair`
+   named exports~~ closed (ADR-00422) — the affected files now surface
+   their *next* blockers, per-reason across the stream corpus: method-
+   shorthand stream callbacks (`new Readable({ read() {} })` — the option
+   must currently be an arrow/function expression; ~17), `mustCall`'s
+   0-2-simple-params ABI bound (~4 here, more corpus-wide), the `Duplex`
+   *class* itself (`new Duplex`/`instanceof Duplex`; ~6),
+   `.destroy()`/`.read()`/`.setEncoding()` methods, `encoding`/`final`
+   options, and `_readableState`/`_writableState` internals (out of
+   scope). Aggregate pass count unmoved (35) — expected: these files
+   stack multiple blockers.
 
-Recently closed: variable-bound `http.createServer` handle + named import +
-contextual `(req, res)` typing (ADR-00406); qualified `new mod.Class(...)`
+Recently closed (same session, closing batches): `new http.Agent(...)` as
+an inert pool-config token (18→1 — ADR-00432); spawn options — `cwd`
+wired through, `shell`/`stdio: 'pipe'` tolerated (28→0 — ADR-00433); the
+Node `crypto` **module** — `generateKeyPair(Sync)` in PEM over the
+existing keygen ABI, `randomBytes`, module-named re-exports, mustCall
+arity 2→3 for `(err, a, b)` callbacks (ADR-00434 — the 16 remaining
+generateKeyPair files now name their real blockers: `rsa-pss`/`dsa`/`dh`
+types, `cipher`/`der` encodings); `const { subtle } = globalThis.crypto`
+binds a compile-time subtle alias (ADR-00435).
+
+Recently closed (earlier same-session batches — aggregate reached **37**):
+cluster workers ride the fork IPC channel (`worker.send`/`.on('message'/
+'online'/'exit')`, in-worker `process.send` — ADR-00427);
+`assert.match`/`doesNotMatch` (~13) + `process.getuid` family +
+unhandled-builtin-member diagnostics now name the module instead of
+leaking the internal marker (ADR-00428); http client: **variable-bound
+options objects** (previously a silent-garbage-URL *hang* — the worst
+kind of wrongness) + the `agent` key (ADR-00429); the **ClientRequest
+handle** — `http.request(...).end()`, bound `req.end()`, `abort`/
+`destroy`, `on('response'/'error')` (~30 first-blockers — ADR-00430);
+`worker_threads` re-exports `MessageChannel`/`MessagePort`/
+`BroadcastChannel` (~13, one resolver line — ADR-00431). Remaining
+ranked next: multi-server-per-program (V1 single-server, ~14 direct),
+`crypto.generateKeyPair` (13), spawn options objects (28, mostly
+`process.execPath` re-spawns), `new http.Agent` as a value (18).
+
+Recently closed (same session, middle batches — aggregate 35→36, ~500
+reason-changes per batch as stacked blockers surface): `process.<stdio>.isTTY`
++ zero-param `createServer(mustNotCall())` listeners (ADR-00424);
+**`child_process.fork` self-fork with a real NODE_CHANNEL_FD IPC channel**
+(TDD-00141/ADR-00425 — `fork(__filename)`/`fork(process.argv[1])`, string
+messages, both `process.send`-detection and argv-branching idioms; forking a
+*different* module remains a clean rejection, ~23 files); http server-handle
+bindings promoted to module globals so top-level helper functions can
+reference them (ADR-00426 — 'address' residue 60→54, remainder is dgram/net
+`this.address()` in `function()` callbacks). `cluster.fork()` messaging can
+now reuse the IPC channel (next).
+
+Recently closed before that: the chained-binding idiom `const server =
+http.createServer(cb).listen(0, readyCb)` (~61 'address' + ~34 'close'
+member errors — listen() now returns the handle, stored before the ready
+callback; ADR-00423) and function-less `mustCall()`/`mustCall(n)` (~19
+incl. the bound-wrapper form; same ADR) — 278 files moved to new reasons,
+aggregate still 35 (stacked blockers). The residue of the 'address'
+cluster (~59) is different shapes: `this.address()` inside `function()`
+callbacks (dgram/net `.bind(0, function() { this... })`), and a top-level
+`function doRequest()` referencing the sibling server-handle binding
+(the ADR-00342 promotion excludes these handles).
+
+Recently closed before that: variable-bound `http.createServer` handle +
+named import + contextual `(req, res)` typing (ADR-00406); qualified `new mod.Class(...)`
 and `extends mod.Class` parsing (~168 parse failures, ADR-00408);
 `https` client + `stream/web` (ADR-00410); the `spawnSync` family incl.
 `{ cwd, encoding }` options (ADR-00411); the full Node test idiom —

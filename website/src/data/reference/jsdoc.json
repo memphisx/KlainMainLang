@@ -1,0 +1,703 @@
+{
+  "surface": "jsdoc",
+  "title": "JSDoc",
+  "kind": "language",
+  "statusPage": "JSDOC.md",
+  "coversRows": "all",
+  "coverageScope": "subset",
+  "coverage": {
+    "loose": "34/37",
+    "strict": "8/37"
+  },
+  "lede": "JSDoc here is a real typing surface, not decoration: the type body of a tag is parsed by the same type parser an inline annotation uses, so a comment can supply a type where nothing else does. The recurring divergence is deliberate erasure — the class/access tags (@readonly, @private, @override, @satisfies, @enum, @implements) are accepted and stripped without enforcement, matching how this compiler already erases the inline TS keywords they mirror; enforcing only the doc-comment spelling would be backwards. @param/@returns/@typedef/@template do the load-bearing work but never override an inline type, and two legacy function-as-constructor tags (@import, @constructor) are out of scope in favor of real class declarations.",
+  "entries": [
+    {
+      "id": "jsdoc.type",
+      "name": "@type",
+      "statusRow": "@type",
+      "signature": "/** @type {T} */ let x = value",
+      "badge": "caveats",
+      "description": "Annotates a variable, class field, or type-alias position. The value string runs through the real type parser, so the whole type-expression grammar below is available inside it — including this compiler's integer width keywords.",
+      "exampleKey": "jsdoc/widths",
+      "snippet": "/** @type {uint8} */\nlet r = 255\nr = r + 1\nconsole.log(r)                    // 0  (wrapped at 8 bits)",
+      "differences": [
+        "Applies to variable, class-field, and type-alias positions"
+      ],
+      "seeAlso": [
+        "jsdoc.typedef",
+        "jsdoc.intwidth"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#type"
+      }
+    },
+    {
+      "id": "jsdoc.param",
+      "name": "@param (aliases @arg, @argument)",
+      "statusRow": "@param (aliases @arg, @argument)",
+      "signature": "/** @param {T} name */",
+      "badge": "caveats",
+      "description": "Types a parameter from the doc comment — the core of the typed-JavaScript workflow. It fills in only where the parameter has no inline annotation, so an existing `: T` always wins. The type body uses the full grammar below, and a `{number=}` or `[name]` optional decoration is recognized and stripped.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @param {int32} a\n * @param {int32} b\n * @returns {int32}\n */\nfunction idiv(a, b) {\n  return a / b\n}",
+      "differences": [
+        "Fills only a parameter with no inline `: T` annotation and no destructuring pattern (an inline type wins)",
+        "A `{...T}` varargs type is stripped to its base `T`; binding it to a body that reads `arguments` still needs the unsupported `arguments` object — use a declared `...rest: T[]` parameter"
+      ],
+      "seeAlso": [
+        "jsdoc.returns",
+        "jsdoc.varargs"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#param-and-returns"
+      }
+    },
+    {
+      "id": "jsdoc.returns",
+      "name": "@returns (alias @return)",
+      "statusRow": "@returns (alias @return)",
+      "signature": "/** @returns {T} */",
+      "badge": "caveats",
+      "description": "Supplies a function's return type from the doc comment, filling in only when there is no inline `: RetType`.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @param {string} s\n * @returns {number} the code unit count\n */\nfunction width(s) {\n  return s.length\n}",
+      "differences": [
+        "Fills only when the function has no inline `: RetType`"
+      ],
+      "seeAlso": [
+        "jsdoc.param"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#param-and-returns"
+      }
+    },
+    {
+      "id": "jsdoc.typedef",
+      "name": "@typedef",
+      "statusRow": "@typedef",
+      "signature": "/** @typedef {Object} Name */ + @property, or @typedef {{x: number}} Name",
+      "badge": "caveats",
+      "description": "Declares a named type. Both spellings work — the `@typedef {Object} Name` + `@property {T} field` form and the inline `@typedef {{x: number}} Name` object literal — and the result is synthesized into a `type Name = …` declaration, so it resolves anywhere a type name does.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @typedef {Object} Point\n * @property {number} x\n * @property {number} y\n */\n\n/** @param {Point} p */\nfunction manhattan(p) {\n  return p.x + p.y\n}",
+      "differences": [
+        "Both forms work: `@typedef {Object} Name` + `@property {T} field`, and the inline `@typedef {{x: number}} Name` object literal",
+        "A `@typedef {T} Name` alias to a **width keyword** (`int32`) does not propagate the integer semantics — the same pre-existing limit a TS `type X = int32` alias has"
+      ],
+      "seeAlso": [
+        "jsdoc.callback",
+        "jsdoc.definednames"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#typedef-callback-and-param"
+      }
+    },
+    {
+      "id": "jsdoc.callback",
+      "name": "@callback",
+      "statusRow": "@callback",
+      "signature": "/** @callback Name */ + @param / @returns",
+      "badge": "caveats",
+      "description": "Declares a named function type from its `@param`/`@returns` tags, synthesized into a function-type alias that is usable wherever a type name is.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @callback Combine\n * @param {number} a\n * @param {number} b\n * @returns {number}\n */\n\n/** @param {Combine} fn */\nfunction run(fn) {\n  return fn(10, 5)\n}",
+      "differences": [
+        "Param/return types use the full type-expression grammar"
+      ],
+      "seeAlso": [
+        "jsdoc.typedef",
+        "jsdoc.definednames"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#typedef-callback-and-param"
+      }
+    },
+    {
+      "id": "jsdoc.template",
+      "name": "@template",
+      "statusRow": "@template",
+      "signature": "/** @template T */",
+      "badge": "caveats",
+      "description": "The JSDoc form of a `<T>` generic — it sets the function's type-parameter list and drives the exact same monomorphization a TS `<T>` does. `@erased` is the compile-once variant.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @template T\n * @param {T[]} arr\n * @returns {T}\n */\nfunction firstOf(arr) {\n  return arr[0]\n}",
+      "differences": [
+        "Inherits the TS generics scope: V1 monomorphization needs an inferable `T`/`T[]`-typed parameter, no explicit call-site type arguments; a `{Base}` constraint on a multi-name tag applies to the first name (matching TS)"
+      ],
+      "seeAlso": [
+        "jsdoc.erased",
+        "jsdoc.param"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#template"
+      }
+    },
+    {
+      "id": "jsdoc.satisfies",
+      "name": "@satisfies",
+      "statusRow": "@satisfies",
+      "signature": "/** @satisfies {T} */",
+      "badge": "caveats",
+      "description": "Accepted and erased, parity with the erased TS `satisfies` operator — the value keeps its own type and gets no conformance check.",
+      "differences": [
+        "Accepted and erased — the value keeps its own type, no `satisfies`-style excess-property/conformance check (parity with the erased TS `satisfies` operator)"
+      ],
+      "seeAlso": [
+        "jsdoc.type"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#satisfies"
+      }
+    },
+    {
+      "id": "jsdoc.enum",
+      "name": "@enum",
+      "statusRow": "@enum",
+      "signature": "/** @enum {T} */ const Dir = { ... }",
+      "badge": "caveats",
+      "description": "Tags a `const` object for value access (`Dir.Up`). It stays a plain object, not a nominal enum type.",
+      "differences": [
+        "The tagged `const` object works for value access (`Dir.Up`); it is a plain object, not a nominal enum type — no reverse mapping, no enum-member type narrowing"
+      ],
+      "seeAlso": [
+        "jsdoc.type"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#enum"
+      }
+    },
+    {
+      "id": "jsdoc.this",
+      "name": "@this",
+      "statusRow": "@this",
+      "signature": "/** @this {T} */",
+      "badge": "caveats",
+      "description": "Accepted and erased. A `this` parameter type is not separately modeled — `this` is bound by the class method it lives in.",
+      "differences": [
+        "Accepted and erased; a `this` parameter type is not separately modeled (`this` is bound by the class method it lives in)"
+      ],
+      "seeAlso": [
+        "jsdoc.extends"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#this"
+      }
+    },
+    {
+      "id": "jsdoc.extends",
+      "name": "@extends (alias @augments)",
+      "statusRow": "@extends (alias @augments)",
+      "signature": "/** @extends {Base} */",
+      "badge": "caveats",
+      "description": "Accepted and erased — the class's own `extends` clause does the work; the tag does not add type arguments to a generic base.",
+      "differences": [
+        "Accepted and erased — the class's own `extends` clause does the work; the tag does not add type arguments to a generic base"
+      ],
+      "seeAlso": [
+        "jsdoc.implements"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#extends-and-implements"
+      }
+    },
+    {
+      "id": "jsdoc.implements",
+      "name": "@implements",
+      "statusRow": "@implements",
+      "signature": "/** @implements {Iface} */",
+      "badge": "caveats",
+      "description": "Accepted and erased — like a TS `implements` clause here, it does not strictly enforce structural conformance.",
+      "differences": [
+        "Accepted and erased — like a TS `implements` clause here, it does not strictly enforce structural conformance"
+      ],
+      "seeAlso": [
+        "jsdoc.extends"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#extends-and-implements"
+      }
+    },
+    {
+      "id": "jsdoc.public",
+      "name": "@public",
+      "statusRow": "@public",
+      "signature": "/** @public */",
+      "badge": "caveats",
+      "description": "Accepted and erased, not enforced — the same stance as the TS `public` field modifier here.",
+      "differences": [
+        "Accepted and erased, not enforced — the same stance as the TS `public` field modifier here"
+      ],
+      "seeAlso": [
+        "jsdoc.private",
+        "jsdoc.protected"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#public-private-and-protected"
+      }
+    },
+    {
+      "id": "jsdoc.private",
+      "name": "@private",
+      "statusRow": "@private",
+      "signature": "/** @private */",
+      "badge": "caveats",
+      "description": "Accepted and erased, not enforced — no access checking (the TS `private` modifier is likewise erased, not enforced, here).",
+      "differences": [
+        "Accepted and erased, not enforced — no access checking (the TS `private` modifier is likewise erased, not enforced, here)"
+      ],
+      "seeAlso": [
+        "jsdoc.public",
+        "jsdoc.protected"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#public-private-and-protected"
+      }
+    },
+    {
+      "id": "jsdoc.protected",
+      "name": "@protected",
+      "statusRow": "@protected",
+      "signature": "/** @protected */",
+      "badge": "caveats",
+      "description": "Accepted and erased, not enforced.",
+      "differences": [
+        "Accepted and erased, not enforced"
+      ],
+      "seeAlso": [
+        "jsdoc.public",
+        "jsdoc.private"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#public-private-and-protected"
+      }
+    },
+    {
+      "id": "jsdoc.readonly",
+      "name": "@readonly",
+      "statusRow": "@readonly",
+      "signature": "/** @readonly */",
+      "badge": "caveats",
+      "description": "Accepted and erased, not enforced — no mutation checking, parity with the erased TS `readonly` modifier.",
+      "differences": [
+        "Accepted and erased, not enforced — no mutation checking (parity with the erased TS `readonly` modifier)"
+      ],
+      "seeAlso": [
+        "jsdoc.private"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#readonly"
+      }
+    },
+    {
+      "id": "jsdoc.override",
+      "name": "@override",
+      "statusRow": "@override",
+      "signature": "/** @override */",
+      "badge": "caveats",
+      "description": "Accepted and erased — no override-consistency check.",
+      "differences": [
+        "Accepted and erased — no override-consistency check"
+      ],
+      "seeAlso": [
+        "jsdoc.extends"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#override"
+      }
+    },
+    {
+      "id": "jsdoc.deprecated",
+      "name": "@deprecated",
+      "statusRow": "@deprecated",
+      "signature": "/** @deprecated */",
+      "badge": "caveats",
+      "description": "Documentation-only; accepted with no compile effect, parity with TS's runtime behavior.",
+      "differences": [
+        "Documentation-only; accepted with no compile effect, but there is no tooling layer to surface a deprecation warning"
+      ],
+      "seeAlso": [
+        "jsdoc.see"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#deprecated"
+      }
+    },
+    {
+      "id": "jsdoc.see",
+      "name": "@see",
+      "statusRow": "@see",
+      "signature": "/** @see reference */",
+      "badge": "exact",
+      "description": "Documentation-only, no type effect — accepted, parity with TS.",
+      "seeAlso": [
+        "jsdoc.link"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#see"
+      }
+    },
+    {
+      "id": "jsdoc.link",
+      "name": "@link",
+      "statusRow": "@link",
+      "signature": "{@link target}",
+      "badge": "exact",
+      "description": "Documentation-only, no type effect — accepted, parity with TS.",
+      "seeAlso": [
+        "jsdoc.see"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#link"
+      }
+    },
+    {
+      "id": "jsdoc.author",
+      "name": "@author",
+      "statusRow": "@author",
+      "signature": "/** @author name */",
+      "badge": "exact",
+      "description": "Documentation-only, no type effect — accepted, parity with TS.",
+      "seeAlso": [
+        "jsdoc.see"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html"
+      }
+    },
+    {
+      "id": "jsdoc.import",
+      "name": "@import",
+      "statusRow": "@import",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "The comment-form import statement is not synthesized. Use a normal `import` plus an `import(\"./m\").T` type reference, which does resolve — see the type-expression table.",
+      "differences": [
+        "The comment-form import statement is not synthesized; use a normal `import` plus an `import(\"./m\").T` type reference (which resolves — see the type-expression table)"
+      ],
+      "seeAlso": [
+        "jsdoc.importtype"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#import-types"
+      }
+    },
+    {
+      "id": "jsdoc.constructor",
+      "name": "@constructor (alias @class)",
+      "statusRow": "@constructor (alias @class)",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Marks a plain function as a constructor (legacy pre-`class` JS). Unsupported by design — this compiler uses real `class` declarations, not function-as-constructor.",
+      "differences": [
+        "Marks a plain function as a constructor (legacy pre-`class` JS) — unsupported; this compiler uses real `class` declarations, not function-as-constructor"
+      ],
+      "seeAlso": [
+        "jsdoc.extends"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#constructor"
+      }
+    },
+    {
+      "id": "jsdoc.bareprimitive",
+      "name": "Bare primitive (string, number, boolean, …)",
+      "statusRow": "Bare primitive (string, number, boolean, …)",
+      "signature": "{string} | {number} | {boolean} | …",
+      "badge": "exact",
+      "description": "Resolved by the same type resolver a TS annotation uses.",
+      "seeAlso": [
+        "jsdoc.legacy"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.array",
+      "name": "T[] array",
+      "statusRow": "T[] array",
+      "signature": "{T[]}",
+      "badge": "exact",
+      "description": "The `[]` suffix is handled by the resolver.",
+      "seeAlso": [
+        "jsdoc.genericarray"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.optional",
+      "name": "Optional param (T=, [name])",
+      "statusRow": "Optional param (T=, [name])",
+      "signature": "{T=} | @param {T} [name]",
+      "badge": "caveats",
+      "description": "The optional decoration is recognized at the `@param` name/type level and stripped.",
+      "differences": [
+        "Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?`"
+      ],
+      "seeAlso": [
+        "jsdoc.param"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#param-and-returns"
+      }
+    },
+    {
+      "id": "jsdoc.varargs",
+      "name": "Varargs/rest (...T)",
+      "statusRow": "Varargs/rest (...T)",
+      "signature": "{...T}",
+      "badge": "caveats",
+      "description": "Stripped to the base `T`; the varargs value flows into a declared `...rest` parameter.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/**\n * @param {...number} nums\n */\nfunction total(nums: number[]) {\n  let t = 0\n  for (const n of nums) t += n\n  return t\n}",
+      "differences": [
+        "Stripped to the base `T`; the varargs body needs a declared `...rest` parameter (no `arguments`)"
+      ],
+      "seeAlso": [
+        "jsdoc.param"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#param-and-returns"
+      }
+    },
+    {
+      "id": "jsdoc.union",
+      "name": "Union (A | B)",
+      "statusRow": "Union (A | B)",
+      "signature": "{A | B}",
+      "badge": "caveats",
+      "description": "The JSDoc string is parsed by the real type parser, so a union resolves like an inline one.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/** @param {number | string} v */\nfunction kind(v) {\n  return typeof v\n}",
+      "differences": [
+        "Inherits the union V1 scope (scalar/object/`ReadableStream` members, narrowing rules — see the Type system page)"
+      ],
+      "seeAlso": [
+        "jsdoc.nullable"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.nullable",
+      "name": "Nullable (?T)",
+      "statusRow": "Nullable (?T)",
+      "signature": "{?T}",
+      "badge": "caveats",
+      "description": "A leading `?` marker becomes a union with null (`?number` → `number | null`).",
+      "differences": [
+        "The leading marker (`?number` → `number | null`); a `?` buried mid-expression is left to the parser"
+      ],
+      "seeAlso": [
+        "jsdoc.nonnull",
+        "jsdoc.union"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.nonnull",
+      "name": "Non-null (!T)",
+      "statusRow": "Non-null (!T)",
+      "signature": "{!T}",
+      "badge": "caveats",
+      "description": "The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change.",
+      "differences": [
+        "The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change"
+      ],
+      "seeAlso": [
+        "jsdoc.nullable"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.objectshape",
+      "name": "Object shape ({ a: string, b: number })",
+      "statusRow": "Object shape ({ a: string, b: number })",
+      "signature": "{{ a: string, b: number }}",
+      "badge": "caveats",
+      "description": "Inline object shapes resolve, and nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/** @param {{name: string, age: number}} u */\nfunction greet(u) {\n  return u.name\n}",
+      "differences": [
+        "Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning"
+      ],
+      "seeAlso": [
+        "jsdoc.typedef"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.genericarray",
+      "name": "Array.<T> / Array<T> (generic array form)",
+      "statusRow": "Array.<T> / Array<T> (generic array form)",
+      "signature": "{Array.<T>} | {Array<T>}",
+      "badge": "exact",
+      "description": "The Closure dot form (`Array.<T>`) is normalized to `Array<T>`.",
+      "seeAlso": [
+        "jsdoc.array"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.indexmap",
+      "name": "Object.<K, V> (index map)",
+      "statusRow": "Object.<K, V> (index map)",
+      "signature": "{Object.<K, V>}",
+      "badge": "missing",
+      "description": "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported, so it compiles only where a `Record` would.",
+      "differences": [
+        "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would"
+      ],
+      "seeAlso": [
+        "jsdoc.objectshape"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.functiontype",
+      "name": "Function type (function(A): B)",
+      "statusRow": "Function type (function(A): B)",
+      "signature": "{function(A): B}",
+      "badge": "caveats",
+      "description": "Rewritten to the arrow form `(arg0: A) => B`.",
+      "exampleKey": "jsdoc/typed-javascript",
+      "snippet": "/** @param {function(number): number} f */\nfunction twice(f) {\n  return f(f(3))\n}",
+      "differences": [
+        "Rewritten to the arrow form `(arg0: A) => B`; a nested `function(...)` inside another type is not rewritten (rare)"
+      ],
+      "seeAlso": [
+        "jsdoc.callback"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.closureany",
+      "name": "* / ? (Closure any/unknown)",
+      "statusRow": "* / ? (Closure any/unknown)",
+      "signature": "{*} | {?}",
+      "badge": "exact",
+      "description": "Both are normalized to `any`.",
+      "seeAlso": [
+        "jsdoc.type"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.importtype",
+      "name": "import(\"./m\").T type",
+      "statusRow": "import(\"./m\").T type",
+      "signature": "{import(\"./m\").T}",
+      "badge": "caveats",
+      "description": "The `import(\"./m\").Name` qualifier is dropped to the bare `Name`, which resolves under whole-program compilation when that module is part of the build.",
+      "differences": [
+        "The `import(\"./m\").Name` qualifier is dropped to the bare `Name`, which resolves under whole-program compilation when that module is part of the build (typically because the file also imports from it) — a `Name` not otherwise pulled in won't resolve; the `typeof import(...)` value form is out of scope"
+      ],
+      "seeAlso": [
+        "jsdoc.import"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#import-types"
+      }
+    },
+    {
+      "id": "jsdoc.definednames",
+      "name": "@typedef/@callback-defined names",
+      "statusRow": "@typedef/@callback-defined names",
+      "signature": "{MyTypedef} | {MyCallback}",
+      "badge": "exact",
+      "description": "Names introduced by `@typedef`/`@callback` resolve wherever a type name does; inline `{{…}}` typedefs work too.",
+      "seeAlso": [
+        "jsdoc.typedef",
+        "jsdoc.callback"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#typedef-callback-and-param"
+      }
+    },
+    {
+      "id": "jsdoc.legacy",
+      "name": "Legacy synonyms (String→string, …)",
+      "statusRow": "Legacy synonyms (String→string, …)",
+      "signature": "{String} → {string}, …",
+      "badge": "caveats",
+      "description": "The capitalized Closure-era synonyms remap to their lowercase primitives.",
+      "differences": [
+        "`String`/`Number`/`Boolean`/`Void`/`Undefined`/`Null` remap to the lowercase primitive; bare `Object`/`object` are left as-is"
+      ],
+      "seeAlso": [
+        "jsdoc.bareprimitive"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#types"
+      }
+    },
+    {
+      "id": "jsdoc.intwidth",
+      "name": "Integer width keywords (@type {int8..int64, uint8..uint64})",
+      "statusRow": "Integer width keywords (@type {int8..int64, uint8..uint64})",
+      "signature": "/** @type {int32} */ | /** @param {uint8} x */",
+      "badge": "exact",
+      "extension": true,
+      "description": "A compiler extension with no TypeScript equivalent: the real-integer escape hatch — exact semantics and bit-width storage, also usable in `@param`/`@returns`.",
+      "exampleKey": "jsdoc/widths",
+      "snippet": "/** @type {int64} */\nlet bigExact = 9007199254740993\nconsole.log(bigExact)             // 9007199254740993  (exact, via int64)",
+      "seeAlso": [
+        "jsdoc.type",
+        "jsdoc.floatwidth"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#type"
+      }
+    },
+    {
+      "id": "jsdoc.floatwidth",
+      "name": "Extended float keywords (@type {float32, float64})",
+      "statusRow": "Extended float keywords (@type {float32, float64})",
+      "signature": "/** @type {float32} */ | /** @type {float64} */",
+      "badge": "exact",
+      "extension": true,
+      "description": "A compiler extension with no TypeScript equivalent: `float64` is the default `number`; `float32` is a narrower slot.",
+      "exampleKey": "jsdoc/widths",
+      "snippet": "/** @type {float32} */\nlet ratio = 1 / 3\nconsole.log(ratio)                // 0.3333333432674408  (float32 rounding)",
+      "seeAlso": [
+        "jsdoc.intwidth",
+        "jsdoc.type"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#type"
+      }
+    },
+    {
+      "id": "jsdoc.erased",
+      "name": "@erased (generic single-body compilation)",
+      "statusRow": "@erased (generic single-body compilation)",
+      "signature": "/** @erased */",
+      "badge": "exact",
+      "extension": true,
+      "description": "A compiler extension with no TypeScript equivalent: opts a generic function out of monomorphization — the JSDoc analogue of a `<T>` the compiler compiles once.",
+      "seeAlso": [
+        "jsdoc.template"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#template"
+      }
+    }
+  ]
+}

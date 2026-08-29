@@ -23,7 +23,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	case targetTy.IsDynamic:
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into any/unknown is not yet supported", pos.Line, pos.Col)
 	case targetTy.IsTuple:
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a tuple type is not yet supported", pos.Line, pos.Col)
+		return e.emitJSONProjectTuple(node, targetTy, pos)
 	case targetTy.IsArray:
 		return e.emitJSONProjectArray(node, targetTy, pos)
 	case targetTy.IsObject:
@@ -94,6 +94,52 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 		// Store the projected value directly into the field slot in each branch
 		// (rather than a phi), since a nested object/array projection emits its
 		// own control flow and would break a phi's single-predecessor assumption.
+		e.emitLabel(foundL)
+		foundRef, err := e.emitJSONFieldFound(child, f.Ty, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(missingL)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+		e.emitLabel(mergeL)
+	}
+	return Value{Ref: dataReg, Ty: targetTy}, nil
+}
+
+// emitJSONProjectTuple projects a JSON array node onto a fixed-arity tuple
+// struct: a fresh malloc'd struct whose field i is projected from the array's
+// i-th element (or a type-appropriate default when the array has fewer than i+1
+// elements). Structurally identical to emitJSONProjectObject — same malloc /
+// StructIR / per-field found-missing-merge branch / emitJSONFieldFound /
+// jsonDefaultRef — except the child node is fetched positionally via
+// __kml_json_item(node, i) rather than by key. Nested object/array/tuple
+// elements recurse through emitJSONFieldFound → emitJSONProject.
+func (e *Emitter) emitJSONProjectTuple(node string, targetTy Type, pos ast.Pos) (Value, error) {
+	e.ensureMalloc()
+	structIR := targetTy.StructIR()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, targetTy.StructSize()))
+
+	for i, f := range targetTy.Fields {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, i))
+		fieldIR := StructFieldIR(f.Ty)
+
+		child := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_item(ptr %s, i64 %d)", child, node, i))
+		isMissing := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isMissing, child))
+
+		foundL := e.freshLabel("jsonp.tfound")
+		missingL := e.freshLabel("jsonp.tmissing")
+		mergeL := e.freshLabel("jsonp.tmerge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isMissing, missingL, foundL))
+
 		e.emitLabel(foundL)
 		foundRef, err := e.emitJSONFieldFound(child, f.Ty, pos)
 		if err != nil {

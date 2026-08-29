@@ -1,0 +1,396 @@
+{
+  "surface": "object",
+  "title": "Object, Map & Set",
+  "kind": "language",
+  "statusPage": "OBJECT-COLLECTIONS.md",
+  "coversRows": "all",
+  "coverage": { "loose": "28/29", "loosePct": 97, "strict": "17/29", "strictPct": 59 },
+  "lede": "Objects are fixed-shape heap structs, not dynamic bags — the recurring divergence throughout: no prototype chain, no runtime property add/delete, and shapes resolved at compile time. That model gives Object.freeze real per-heap-identity enforcement and turns Object.hasOwn into a compile-time field lookup, but rules out Object.create. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as the null stand-in.",
+  "entries": [
+    {
+      "id": "object.literal",
+      "name": "Object literals { a: 1 }",
+      "statusRow": "Object literals { a: 1 }",
+      "signature": "let point: { x: number; y: number } = { x: 10, y: 20 }",
+      "badge": "exact",
+      "description": "Object literals build fixed-shape heap structs. The type may be annotated or inferred from the initializer; objects pass by reference (heap pointer), so a mutation through a function parameter is visible to the caller.",
+      "exampleKey": "objects/objects",
+      "snippet": "let point: { x: number; y: number } = { x: 10, y: 20 }\nconsole.log(point.x)   // 10",
+      "seeAlso": ["object.fieldaccess", "object.shorthand", "object.spread"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Object_initializer" }
+    },
+    {
+      "id": "object.fieldaccess",
+      "name": "Field access obj.field",
+      "statusRow": "Field access obj.field",
+      "signature": "obj.field; obj.field = value; obj.field += n",
+      "badge": "exact",
+      "description": "Reads and writes to a struct field by name, including compound assignment. Field access is a compile-time resolved struct offset.",
+      "exampleKey": "objects/objects",
+      "snippet": "point.x = 30\npoint.y += 5\nconsole.log(point.y)   // 25",
+      "seeAlso": ["object.literal", "object.hasown"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Property_accessors" }
+    },
+    {
+      "id": "object.destructuring",
+      "name": "Object destructuring",
+      "statusRow": "Object destructuring",
+      "signature": "const { x, y } = point",
+      "badge": "exact",
+      "description": "Binds fields of an object to local variables by name in a single declaration.",
+      "seeAlso": ["object.literal", "object.spread"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment" }
+    },
+    {
+      "id": "object.keys",
+      "name": "Object.keys(obj)",
+      "statusRow": "Object.keys(obj)",
+      "signature": "Object.keys(obj): string[]",
+      "badge": "exact",
+      "description": "Returns a string[] of the object's field names in declaration order. The result can be iterated directly without an intermediate variable.",
+      "returns": { "type": "string[]", "desc": "Field names in declaration order." },
+      "exampleKey": "objects/object_static",
+      "snippet": "for (const k of Object.keys(person)) {\n  console.log(k)\n}\nconsole.log(Object.keys(person).length)   // 3",
+      "seeAlso": ["object.values", "object.entries"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/keys" }
+    },
+    {
+      "id": "object.values",
+      "name": "Object.values(obj)",
+      "statusRow": "Object.values(obj)",
+      "signature": "Object.values(obj): string[]",
+      "badge": "exact",
+      "description": "Returns a string[] of each field value converted to a string, in declaration order.",
+      "returns": { "type": "string[]", "desc": "Field values, stringified." },
+      "exampleKey": "objects/object_static",
+      "snippet": "for (const v of Object.values(person)) {\n  console.log(v)\n}",
+      "seeAlso": ["object.keys", "object.entries"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/values" }
+    },
+    {
+      "id": "object.entries",
+      "name": "Object.entries(obj)",
+      "statusRow": "Object.entries(obj)",
+      "signature": "Object.entries(obj): [string, string][]",
+      "badge": "caveats",
+      "description": "Returns a real [string, string][] tuple array; destructure with for (const [k, v] of Object.entries(obj)).",
+      "returns": { "type": "[string, string][]", "desc": "Field name/value tuples." },
+      "exampleKey": "objects/object_static",
+      "snippet": "for (const [key, value] of Object.entries(dims)) {\n  console.log(key + ': ' + value)\n}",
+      "differences": [
+        "Values are stringified — a heterogeneous object's value type is a union not yet representable"
+      ],
+      "seeAlso": ["object.keys", "object.values"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/entries" }
+    },
+    {
+      "id": "object.groupby",
+      "name": "Object.groupBy(arr, fn)",
+      "statusRow": "Object.groupBy(arr, fn)",
+      "signature": "Object.groupBy(arr, fn): { [key: string]: T[] }",
+      "badge": "exact",
+      "description": "Groups an array's elements by the string key each returns from fn, producing a dynamic object mapping each key to the array of its members. Access groups by key and enumerate them via Object.keys.",
+      "exampleKey": "objects/group_by",
+      "snippet": "const byLetter = Object.groupBy(words, (w) => w.substring(0, 1))\nconst aWords = byLetter['a']\nconsole.log(aWords.length)        // 3",
+      "seeAlso": ["object.keys", "object.computedkeys"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/groupBy" }
+    },
+    {
+      "id": "object.assign",
+      "name": "Object.assign(target, ...src)",
+      "statusRow": "Object.assign(target, ...src)",
+      "signature": "Object.assign(target, ...src): target",
+      "badge": "caveats",
+      "description": "Copies each source's fields into target in argument order — a later source overwrites an earlier one on a shared field. Mutates and returns target (same heap object, no copy).",
+      "exampleKey": "objects/object_static",
+      "snippet": "const applied = Object.assign(defaults, userPrefs)\nconsole.log(defaults.theme)     // dark (same object)",
+      "differences": [
+        "Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS"
+      ],
+      "seeAlso": ["object.spread", "object.freeze"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign" }
+    },
+    {
+      "id": "object.create",
+      "name": "Object.create()",
+      "statusRow": "Object.create()",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": "Out of scope: its core is prototype-chain creation, which this compiler's fixed-shape struct object model can't represent — the deferred dynamic/prototype object model.",
+      "seeAlso": ["object.literal"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/create" }
+    },
+    {
+      "id": "object.freeze",
+      "name": "Object.freeze(obj)",
+      "statusRow": "Object.freeze(obj)",
+      "signature": "Object.freeze(obj): obj",
+      "badge": "exact",
+      "description": "Real runtime enforcement, not a no-op: tracks obj's heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias or function parameter. Adding/deleting fields is already structurally impossible, so value-write is the only thing freeze needs to enforce.",
+      "exampleKey": "objects/object_static",
+      "snippet": "Object.freeze(conf)\ntry {\n  conf.port = 9090\n} catch (e) {\n  console.log('blocked: cannot write to a frozen object')\n}",
+      "seeAlso": ["object.seal", "object.assign"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze" }
+    },
+    {
+      "id": "object.seal",
+      "name": "Object.seal(obj)",
+      "statusRow": "Object.seal(obj)",
+      "signature": "Object.seal(obj): obj",
+      "badge": "exact",
+      "description": "A genuine no-op, not a scope-narrowed approximation: seal's guarantee (\"no new/deleted fields\") is already structurally impossible for this compiler's fixed-shape objects, so there's nothing further to enforce — existing fields stay freely writable.",
+      "exampleKey": "objects/object_static",
+      "snippet": "Object.seal(sealed)\nsealed.port = 2\nconsole.log(sealed.port)  // 2 (seal never blocked the value write)",
+      "seeAlso": ["object.freeze"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/seal" }
+    },
+    {
+      "id": "object.hasown",
+      "name": "Object.hasOwn() / .hasOwnProperty()",
+      "statusRow": "Object.hasOwn() / .hasOwnProperty()",
+      "signature": "Object.hasOwn(obj, key): boolean; obj.hasOwnProperty(key): boolean",
+      "badge": "caveats",
+      "description": "Field-presence check. Object shapes are fully structural/static, so this is a compile-time FieldIndex lookup, not a runtime scan. The `in` operator applies the same check as an operator form.",
+      "returns": { "type": "boolean", "desc": "Whether the field exists on the object." },
+      "exampleKey": "objects/objects",
+      "snippet": "console.log(Object.hasOwn(base, 'x'))     // 1\nconsole.log(base.hasOwnProperty('q'))     // 0\nconsole.log('x' in base)                  // 1",
+      "differences": [
+        "The key must be a string literal — a runtime-computed key is a clean compile error (no runtime field-name table to check it against)"
+      ],
+      "seeAlso": ["object.fieldaccess", "object.keys"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/hasOwn" }
+    },
+    {
+      "id": "object.fromentries",
+      "name": "Object.fromEntries()",
+      "statusRow": "Object.fromEntries()",
+      "signature": "Object.fromEntries(entries: [string, V][]): dynamic object",
+      "badge": "caveats",
+      "description": "Returns a dynamic object (a Map<string,V>-backed value); read via obj.field / obj[key]. Seeds via the same [K,V][] walker new Map(entries) uses.",
+      "differences": [
+        "Keys must be strings (a `[string, V][]` array) — real JS stringifies any key and accepts symbol keys"
+      ],
+      "seeAlso": ["object.computedkeys", "map.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/fromEntries" }
+    },
+    {
+      "id": "object.spread",
+      "name": "Object spread { ...obj, key: val }",
+      "statusRow": "Object spread { ...obj, key: val }",
+      "signature": "{ ...obj, key: val }",
+      "badge": "exact",
+      "description": "Copies a source object's fields, then applies later properties in source order — a property mentioned again simply overwrites the earlier value. Spread is a shallow copy: nested object fields are shared, not cloned. A spread may also add new fields not present on the source.",
+      "exampleKey": "objects/objects",
+      "snippet": "let moved = { ...base, y: 20 }\nconsole.log(moved.y)   // 20\nlet withZ = { ...base, z: 3 }\nconsole.log(withZ.z)   // 3",
+      "seeAlso": ["object.assign", "object.destructuring"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax" }
+    },
+    {
+      "id": "object.computedkeys",
+      "name": "Computed property keys { [expr]: value }",
+      "statusRow": "Computed property keys { [expr]: value }",
+      "signature": "{ [expr]: value }",
+      "badge": "caveats",
+      "description": "A dynamic object — storage-wise a real Map<string,V> reusing new Map<K,V>()'s runtime, with .field / [expr] sugar layered on top. A well-known-symbol key (Symbol.asyncIterator / Symbol.iterator) is the exception: it desugars to a reserved static key so the literal stays a static struct driving for...of / for await...of.",
+      "exampleKey": "objects/computed_keys",
+      "snippet": "const k = 'b'\nconst obj = { a: 1, [k]: 2 }\nconsole.log(obj[k])     // 2\nobj['c'] = 99\nconsole.log(obj.c)      // 99",
+      "differences": [
+        "`V` is inferred from the first property only",
+        "`...spread` combined with a computed key isn't supported yet",
+        "The declared-type form (`{ [key: string]: T }`) isn't supported yet"
+      ],
+      "seeAlso": ["object.fromentries", "map.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Object_initializer#computed_property_names" }
+    },
+    {
+      "id": "object.shorthand",
+      "name": "Shorthand property { x }",
+      "statusRow": "Shorthand property { x }",
+      "signature": "{ x }  // sugar for { x: x }",
+      "badge": "exact",
+      "description": "`{ x }` is sugar for `{ x: x }`, referencing the in-scope variable of the same name. Shorthand and explicit properties can be mixed freely.",
+      "exampleKey": "objects/objects",
+      "snippet": "let sx: number = 5\nlet sy: number = 6\nlet shorthandPoint = { sx, sy }\nconsole.log(shorthandPoint.sx)   // 5",
+      "seeAlso": ["object.literal", "object.methodshorthand"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Object_initializer#property_definitions" }
+    },
+    {
+      "id": "object.methodshorthand",
+      "name": "Method shorthand { foo() {...} }",
+      "statusRow": "Method shorthand { foo() {...} }",
+      "signature": "{ foo() {...} }  // sugar for { foo: function() {...} }",
+      "badge": "caveats",
+      "description": "Desugars to { foo: function() {...} } — a plain anonymous function value, reusing the same closure machinery. A string-literal key can carry a method body too.",
+      "exampleKey": "objects/objects",
+      "snippet": "const calculator = {\n  add(a: number, b: number): number {\n    return a + b\n  },\n  label: \"calc\"\n}\nconsole.log(calculator.add(2, 3))   // 5",
+      "differences": [
+        "No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong",
+        "No `async`/generator method shorthand either, matching this compiler's class methods"
+      ],
+      "seeAlso": ["object.shorthand", "object.literal"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Method_definitions" }
+    },
+    {
+      "id": "map.core",
+      "name": "Map.set/get/has/delete/keys/values",
+      "statusRow": "Map.set/get/has/delete/keys/values",
+      "signature": "new Map<K, V>(); m.set(k, v); m.get(k); m.has(k); m.delete(k); m.keys()",
+      "badge": "caveats",
+      "description": ".get() on a scalar-valued map returns V | null — a missing key is distinguishable from a stored 0/false via the presence-flagged nullable-scalar representation.",
+      "exampleKey": "map/map",
+      "snippet": "const scores = new Map<string, number>();\nscores.set(\"alice\", 95);\nconsole.log(scores.get(\"alice\")); // 95\nconsole.log(scores.has(\"dave\"));  // 0",
+      "differences": [
+        "A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `\"null\"` stand-in on a miss"
+      ],
+      "seeAlso": ["map.size", "map.entries", "map.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map" }
+    },
+    {
+      "id": "map.size",
+      "name": "Map.size",
+      "statusRow": "Map.size",
+      "signature": "m.size: number",
+      "badge": "exact",
+      "description": "The number of entries currently in the map.",
+      "returns": { "type": "number", "desc": "Entry count." },
+      "exampleKey": "map/map",
+      "snippet": "console.log(scores.size);         // 3\nscores.delete(\"bob\");\nconsole.log(scores.size);         // 2",
+      "seeAlso": ["map.core", "map.clear"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/size" }
+    },
+    {
+      "id": "map.entries",
+      "name": "Map.entries()",
+      "statusRow": "Map.entries()",
+      "signature": "m.entries(): [K, V][]",
+      "badge": "exact",
+      "description": "Returns a real [K, V][] tuple array; iterate with for (const [k, v] of m.entries()).",
+      "returns": { "type": "[K, V][]", "desc": "Key/value tuples." },
+      "exampleKey": "map/map",
+      "snippet": "for (const [key, value] of lookup.entries()) {\n  console.log(key + \" = \" + value);\n}",
+      "seeAlso": ["map.core", "map.foreach"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/entries" }
+    },
+    {
+      "id": "map.foreach",
+      "name": "Map.forEach()",
+      "statusRow": "Map.forEach()",
+      "signature": "m.forEach(fn: (value, key) => void): void",
+      "badge": "caveats",
+      "description": "Calls fn(value, key), matching real JS's argument order.",
+      "exampleKey": "map/map",
+      "snippet": "scores.forEach((v, k) => {\n  console.log(k + \" -> \" + v);\n});",
+      "differences": [
+        "The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes)"
+      ],
+      "seeAlso": ["map.entries", "set.foreach"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/forEach" }
+    },
+    {
+      "id": "map.clear",
+      "name": "Map.clear()",
+      "statusRow": "Map.clear()",
+      "signature": "m.clear(): void",
+      "badge": "exact",
+      "description": "Resets size to 0 in place — doesn't free/reallocate the backing arrays (\"leak by design\" memory model); immediately reusable afterward.",
+      "exampleKey": "map/map",
+      "snippet": "scores.clear();\nconsole.log(scores.size); // 0\nscores.set(\"dave\", 100);\nconsole.log(scores.size); // 1",
+      "seeAlso": ["map.size", "set.clear"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/clear" }
+    },
+    {
+      "id": "map.new",
+      "name": "new Map(entries)",
+      "statusRow": "new Map(entries)",
+      "signature": "new Map(entries: [K, V][]): Map<K, V>",
+      "badge": "caveats",
+      "description": "K/V are inferred from the entries when no <K, V> is given; duplicate keys resolve last-wins; the entries source may be a bare literal or an already-declared [K, V][] variable.",
+      "exampleKey": "map/map",
+      "snippet": "const prices = new Map([[\"pen\", 2], [\"notebook\", 5], [\"eraser\", 1]]);\nconsole.log(prices.get(\"notebook\")); // 5",
+      "differences": [
+        "Accepts only a `[K, V][]` array of 2-tuples, narrowed from the spec's `Iterable<[K, V]>` — the only iterable/pair concept a general expression has here"
+      ],
+      "seeAlso": ["map.core", "set.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/Map" }
+    },
+    {
+      "id": "set.new",
+      "name": "new Set(iterable)",
+      "statusRow": "new Set(iterable)",
+      "signature": "new Set(iterable: T[]): Set<T>",
+      "badge": "caveats",
+      "description": "Pre-populates a set from an array, collapsing duplicates. K/V type inferred from the elements, or given explicitly with <T>.",
+      "exampleKey": "set/set",
+      "snippet": "const fromLiteral = new Set([1, 2, 3, 2, 1]);\nconsole.log(fromLiteral.size); // 3",
+      "differences": [
+        "Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here"
+      ],
+      "seeAlso": ["set.core", "map.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/Set" }
+    },
+    {
+      "id": "set.core",
+      "name": "Set.add/has/delete/values",
+      "statusRow": "Set.add/has/delete/values",
+      "signature": "new Set<T>(); s.add(v); s.has(v); s.delete(v); s.values()",
+      "badge": "exact",
+      "description": "Adds, tests membership, removes, and enumerates elements. Adding a value already present is a no-op.",
+      "exampleKey": "set/set",
+      "snippet": "const seen = new Set<string>();\nseen.add(\"apple\");\nseen.add(\"apple\");  // duplicate — no effect\nconsole.log(seen.size);         // 2\nconsole.log(seen.has(\"apple\")); // 1",
+      "seeAlso": ["set.size", "set.new"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set" }
+    },
+    {
+      "id": "set.size",
+      "name": "Set.size",
+      "statusRow": "Set.size",
+      "signature": "s.size: number",
+      "badge": "exact",
+      "description": "The number of distinct elements currently in the set.",
+      "returns": { "type": "number", "desc": "Element count." },
+      "exampleKey": "set/set",
+      "snippet": "console.log(ids.size);    // 2\nconsole.log(ids.has(20)); // 1",
+      "seeAlso": ["set.core", "set.clear"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/size" }
+    },
+    {
+      "id": "set.foreach",
+      "name": "Set.forEach()",
+      "statusRow": "Set.forEach()",
+      "signature": "s.forEach(fn: (element[, element]) => void): void",
+      "badge": "exact",
+      "description": "Calls fn(element[, element]) — real JS's Set.prototype.forEach passes the value twice ((value, value, set)) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter.",
+      "exampleKey": "set/set",
+      "snippet": "ids.forEach((id) => {\n  console.log(\"id \" + id);\n});",
+      "seeAlso": ["set.core", "map.foreach"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/forEach" }
+    },
+    {
+      "id": "set.clear",
+      "name": "Set.clear()",
+      "statusRow": "Set.clear()",
+      "signature": "s.clear(): void",
+      "badge": "exact",
+      "description": "Removes every element, size drops to 0, set stays usable. Same in-place reset as Map.clear().",
+      "exampleKey": "set/set",
+      "snippet": "seen.clear();\nconsole.log(seen.size); // 0\nseen.add(\"date\");\nconsole.log(seen.size); // 1",
+      "seeAlso": ["set.size", "map.clear"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/clear" }
+    },
+    {
+      "id": "object.weak",
+      "name": "WeakMap / WeakSet / WeakRef",
+      "statusRow": "WeakMap / WeakSet / WeakRef",
+      "signature": "new WeakMap(); new WeakSet(); new WeakRef(obj)",
+      "badge": "caveats",
+      "description": "Object-identity-keyed weak collections and references. Under -mm=gc these are genuinely weak via Boehm disappearing links (a collected referent's .deref() / WeakMap.has observably drops); gc() forces a full collection under gc, a no-op under manual.",
+      "differences": [
+        "Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)",
+        "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc`",
+        "A `new WeakMap()` initial-entries argument is out of V1 scope"
+      ],
+      "seeAlso": ["map.core", "set.core"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap" }
+    }
+  ]
+}

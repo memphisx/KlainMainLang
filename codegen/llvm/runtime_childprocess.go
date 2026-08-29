@@ -31,7 +31,9 @@ import "fmt"
 // 10 ptr 'close' listener         · 11 ptr 'exit' listener  · 12 ptr 'error'
 // 13 i64 mode      (0 streaming spawn · 1 buffered exec)
 // 14 ptr stdoutAccum {ptr,i64,i64} · 15 ptr stderrAccum · 16 ptr execCallback
-const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr }"
+// 17 i32 ipcFd (0 none · >0 open · -1 closed — TDD-00141 fork channel)
+// 18 ptr 'message' listener · 19 ptr ipc channel (C-side line buffer)
+const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr }"
 
 func (e *Emitter) ensureChildProcRuntime() {
 	if e.usedChildProcRuntime {
@@ -52,8 +54,9 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureForkDecl()
 	e.emitGlobal("declare i32 @dup2(i32 noundef, i32 noundef)")
 	e.ensureCloseDecl()
-	e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @_exit(i32 noundef) noreturn")
+	e.ensureExecvpDecl()
+	e.ensureExitRawDecl()
+	e.ensureChdirDecl()
 	e.ensureReadDecl()
 	e.ensureWriteDecl()
 	e.ensureWaitpidDecl()
@@ -341,11 +344,18 @@ drain:
   %%a15_p = getelementptr %s, ptr %%cp, i32 0, i32 15
   %%a15 = load ptr, ptr %%a15_p, align 8
   call void @__kml_cp_drain(ptr %%cp, ptr %%fd3, ptr %%d8, ptr %%e9, ptr %%a15, i64 %%mode)
+  call void @__kml_cp_ipc_drain(ptr %%cp)
   %%ofd = load i32, ptr %%fd2, align 4
   %%efd = load i32, ptr %%fd3, align 4
   %%oclosed = icmp slt i32 %%ofd, 0
   %%eclosed = icmp slt i32 %%efd, 0
-  %%botheof = and i1 %%oclosed, %%eclosed
+  %%botheof0 = and i1 %%oclosed, %%eclosed
+  ; a fork child with an open IPC channel is not finalizable yet
+  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
+  %%ipcfd = load i32, ptr %%ipc_p, align 4
+  %%ipcopen = icmp sgt i32 %%ipcfd, 0
+  %%ipcdone = xor i1 %%ipcopen, 1
+  %%botheof = and i1 %%botheof0, %%ipcdone
   br i1 %%botheof, label %%fin, label %%next
 fin:
   call void @__kml_cp_finalize(ptr %%cp)
@@ -356,7 +366,7 @@ next:
   br label %%loop
 done:
   ret void
-}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp))
+}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp))
 
 	// __kml_cp_fdset_add(fdset, maxfd): add every live child's read fds; force
 	// a zero select() timeout when a child has both pipes at EOF but is not
@@ -394,14 +404,24 @@ chke:
   %%fd3_p = getelementptr %s, ptr %%cp, i32 0, i32 3
   %%efd = load i32, ptr %%fd3_p, align 4
   %%eopen = icmp sge i32 %%efd, 0
-  br i1 %%eopen, label %%adde, label %%chkforce
+  br i1 %%eopen, label %%adde, label %%chki
 adde:
   call void @__kml_worker_fd_setbit(i32 %%efd, ptr %%fdset, ptr %%maxfd)
+  br label %%chki
+chki:
+  %%ipc_p = getelementptr %s, ptr %%cp, i32 0, i32 17
+  %%ipcfd = load i32, ptr %%ipc_p, align 4
+  %%ipcopen = icmp sgt i32 %%ipcfd, 0
+  br i1 %%ipcopen, label %%addi, label %%chkforce
+addi:
+  call void @__kml_worker_fd_setbit(i32 %%ipcfd, ptr %%fdset, ptr %%maxfd)
   br label %%chkforce
 chkforce:
   %%obad = icmp slt i32 %%ofd, 0
   %%ebad = icmp slt i32 %%efd, 0
-  %%both = and i1 %%obad, %%ebad
+  %%both0 = and i1 %%obad, %%ebad
+  %%ipcdone = xor i1 %%ipcopen, 1
+  %%both = and i1 %%both0, %%ipcdone
   br i1 %%both, label %%setforce, label %%next
 setforce:
   store i1 1, ptr %%force, align 1
@@ -413,7 +433,7 @@ next:
 done:
   %%f = load i1, ptr %%force, align 1
   ret i1 %%f
-}`, cp, cp, cp))
+}`, cp, cp, cp, cp))
 
 	// __kml_cp_keepalive(): true while any child handle is not yet finalized.
 	e.emitGlobal(fmt.Sprintf(`
@@ -476,7 +496,7 @@ store:
 	// pipes; returns the ChildProcess handle. The two read fds are made
 	// non-blocking; buffered mode pre-allocates the accumulators.
 	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode) {
+define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd) {
 entry:
   %%argvlen = add i64 %%argslen, 2
   %%argvbytes = mul i64 %%argvlen, 8
@@ -517,6 +537,13 @@ setnull:
   %%ischild = icmp eq i32 %%pid, 0
   br i1 %%ischild, label %%child, label %%parent
 child:
+  ; optional working directory (ADR-00433)
+  %%hascwd = icmp ne ptr %%cwd, null
+  br i1 %%hascwd, label %%dochdir, label %%setupfds
+dochdir:
+  call i32 @chdir(ptr %%cwd)
+  br label %%setupfds
+setupfds:
   call i32 @dup2(i32 %%inr, i32 0)
   call i32 @dup2(i32 %%outw, i32 1)
   call i32 @dup2(i32 %%errw, i32 2)
@@ -541,7 +568,7 @@ parent:
   %%efln = or i32 %%efl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%errr, i32 4, i32 %%efln)
 
-  %%cp = call ptr @calloc(i64 1, i64 136)
+  %%cp = call ptr @calloc(i64 1, i64 160)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   %%pid64 = zext i32 %%pid to i64
   store i64 %%pid64, ptr %%pid_p, align 8

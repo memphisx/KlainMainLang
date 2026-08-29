@@ -1,3 +1,5 @@
+<!-- GENERATED FILE — do not edit. Source of truth: docs/status/data/object-collections.json; edit the JSON, then run `make status`. -->
+
 # Object / Collections
 
 > Part of the [Implementation Status](README.md) index.

@@ -1,0 +1,198 @@
+{
+  "id": "modules",
+  "file": "MODULES.md",
+  "title": "Modules",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`export function` / `const`/`let`/`var` / `interface` / `type` / `enum`",
+            "status": "implemented",
+            "notes": [
+              "A declaration-level modifier, nothing more — consumed entirely by the resolver"
+            ]
+          },
+          {
+            "feature": "`import { a, b } from './relative/path'`",
+            "status": "implemented",
+            "notes": [
+              "Named imports only; relative paths only (`./`, `../`), `.ts` auto-appended if omitted",
+              "Resolved against the importing file's own directory, not `cwd`"
+            ]
+          },
+          {
+            "feature": "Circular imports",
+            "status": "implemented",
+            "caveats": [
+              "Supported only for the declarations-only case — a file in an import cycle can't run arbitrary top-level side-effecting code"
+            ],
+            "notes": [
+              "Two files may call each other's exported functions"
+            ]
+          },
+          {
+            "feature": "Diamond-shaped import graphs",
+            "status": "implemented",
+            "notes": [
+              "A file imported from multiple places is parsed once and merged once (memoized by absolute path)"
+            ]
+          },
+          {
+            "feature": "Imported (non-entry) files may run top-level side-effecting code",
+            "status": "implemented",
+            "caveats": [
+              "A file that genuinely participates in an import cycle keeps the declarations-only restriction (no bare executable top-level statements), and additionally requires a top-level `var`/`let`/`const` initializer to be a compile-time literal — no TDZ/live-binding modeling"
+            ],
+            "notes": [
+              "An *acyclic* imported file's top-level statements run exactly once, in real dependency order, strictly before whatever imports it — no restriction to declarations-only",
+              "Diamond-shared dependencies still run exactly once (existing per-path memoization)",
+              "The literal-only initializer rule exists because a cyclic pair reading each other's not-yet-initialized binding would be an uninitialized read; a literal can never observe one. See [TDD-00052](../tdd/TDD-00052.md)/[ADR-00145](../adr/ADR-00145.md)"
+            ]
+          },
+          {
+            "feature": "True per-file module scope (mangled internal names)",
+            "status": "implemented",
+            "notes": [
+              "Every top-level declaration gets a file-private mangled name, and every reference to it is rewritten via a real scope-aware walk — two unrelated files may freely declare the same top-level name",
+              "Binding two different files' exports to the *same local name* in one importing file with no `as` is still rejected (a real conflict, same as real ES modules)",
+              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md)"
+            ]
+          },
+          {
+            "feature": "Import aliasing (`import { a as b }`)",
+            "status": "implemented",
+            "notes": [
+              "A direct consequence of the per-file rename mechanism above — `b` is simply bound to the target's mangled name for `a`, no separate rename step",
+              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md)"
+            ]
+          },
+          {
+            "feature": "`export default`",
+            "status": "implemented",
+            "notes": [
+              "Named (`export default function foo() {...}`/`class Foo {...}`/`interface`/`type`/`enum`) and anonymous function/class forms, plus an arbitrary expression (`export default 42`, wrapped as a synthetic `const`)",
+              "Exposed only under the export key `\"default\"` — a named default export's own name stays usable for intra-file self-reference (recursion, etc.) but is not itself importable via `import { foo }`, matching real ES modules",
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+            ]
+          },
+          {
+            "feature": "`import x from './path'` (default import)",
+            "status": "implemented",
+            "notes": [
+              "Also combinable with a named list in one statement: `import x, { a, b } from './path'`",
+              "Sugar over the same specifier machinery as a named import (`{Imported: \"default\", Local: \"x\"}`) — no separate resolver mechanism",
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+            ]
+          },
+          {
+            "feature": "`import * as ns from '...'` (namespace import)",
+            "status": "implemented",
+            "caveats": [
+              "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message",
+              "Type-position access (`let x: ns.SomeInterface`) and `new ns.SomeClass(...)` are not supported — the latter a pre-existing, namespace-independent restriction (`new` already only accepts a single bare identifier)"
+            ],
+            "notes": [
+              "`ns.member` is rewritten directly to that member's mangled name during resolution",
+              "Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does",
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+            ]
+          },
+          {
+            "feature": "Static CommonJS `require('<literal>')`",
+            "status": "implemented",
+            "caveats": [
+              "Top-level, string-literal specifier only. `const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
+            ],
+            "notes": [
+              "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import`; interoperates with `import` in the same file",
+              "See [ADR-00369](../adr/ADR-00369.md)"
+            ]
+          },
+          {
+            "feature": "Re-exports (`export { x } from './other'`, `export * from './other'`)",
+            "status": "implemented",
+            "caveats": [
+              "No namespace re-exports (`export * as ns from`) — parsed and explicitly rejected with a clear error rather than silently mis-parsed, no concrete use case yet",
+              "Re-exporting from a built-in module (`export { readFileSync } from 'fs'`) is an explicit, rejected scope cut, not an oversight"
+            ],
+            "notes": [
+              "Named re-export list (with `as` aliasing) and star re-export both work, including default re-export in either direction (`export { default } from`/`export { default as Foo } from` to re-export another module's default; `export { foo as default } from` to re-export a named export as this module's own default)",
+              "`export *` never forwards a `default`, matching real ES modules",
+              "Chains of arbitrary depth resolve transitively (a file re-exporting from a file that itself re-exports resolves through)",
+              "A re-export forwards a name to this file's importers only — it does *not* become a usable bare identifier inside the re-exporting file itself, same as real ES modules",
+              "See [TDD-00051](../tdd/TDD-00051.md)/[ADR-00144](../adr/ADR-00144.md)"
+            ]
+          },
+          {
+            "feature": "Bare/package-style imports (`import x from 'somepackage'`)",
+            "status": "implemented",
+            "caveats": [
+              "klmpm is Stage 1 only ([TDD-00054](../tdd/TDD-00054.md)) — deliberately just the resolution half; no klmpm tool exists yet to fetch/version/lock a dependency, so a `klain_modules/<name>/` directory has to be hand-constructed today",
+              "npm/`node_modules` interop is a separate, unstarted, differently-scoped mechanism — see [TDD-00053](../tdd/TDD-00053.md)"
+            ],
+            "notes": [
+              "A bare specifier resolves against `klain_modules/<name>/klain.json`'s `\"main\"` field, found by walking upward once from the *entry file's* own directory (not re-walked per importing file, unlike Node — every file in the whole program, including one inside a fetched package, resolves a given name against the same single `klain_modules`)",
+              "A real built-in module name (`'fs'`/`'path'`/etc.) is always checked, and always wins, before any `klain_modules` lookup is attempted"
+            ]
+          },
+          {
+            "feature": "Dynamic `import(...)`",
+            "status": "missing",
+            "notes": [
+              "Parses cleanly (recognized in expression position) and is explicitly rejected with a \"not yet supported\" error, rather than a generic parse failure",
+              "Real support is staged separately: [TDD-00055](../tdd/TDD-00055.md) (eager, literal-specifier-only, wrapped in a resolved `Promise` — this compiler's whole-program AOT model means the target's top-level code would still run at startup regardless of whether the call site executes) or [TDD-00056](../tdd/TDD-00056.md) (V2 — real laziness via a `dlopen`'d shared library per target, incompatible with `--static`)"
+            ]
+          },
+          {
+            "feature": "`import.meta.url`",
+            "status": "implemented",
+            "caveats": [
+              "`import.meta.url` is the only supported member — bare `import.meta` or any other member (`import.meta.resolve`, etc.) is a clean parse-time error"
+            ],
+            "notes": [
+              "Resolved entirely at compile time, per file, into a plain string literal (`\"file://\" + that file's own absolute path`, matching real Node/browser convention); codegen never sees a real \"module metadata object\"",
+              "See [TDD-00055](../tdd/TDD-00055.md) Stage 1/[ADR-00148](../adr/ADR-00148.md)"
+            ]
+          },
+          {
+            "feature": "Import-gated built-in bindings (`fs`/`path`/`os`/`querystring`/`assert`/`http`/`cluster`/`Memory`)",
+            "status": "implemented",
+            "notes": [
+              "`import fs from 'fs'`, `import * as fs from 'fs'`, and `import { readFileSync } from 'fs'` (including aliasing and combining a default with named specifiers in one statement) all bind through the same scope-aware machinery as a real file import; every Node-named builtin also resolves under the **`node:` prefix** (`import test from 'node:test'` — [ADR-00419](../adr/ADR-00419.md))",
+              "A local variable of the same name correctly shadows it instead of silently colliding ([TDD-00049](../tdd/TDD-00049.md))",
+              "Importing an unknown member is a clean, explicit rejection",
+              "Node-style built-ins require a default, namespace, or named import; `process`/`console` stay ambient by design, matching real Node/JS",
+              "See [ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Known limitations"
+    },
+    {
+      "kind": "block",
+      "text": "- Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` merges the entry file plus every transitive import into one `*ast.Program` before codegen. No linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md)/[ADR-00134](../adr/ADR-00134.md)/[ADR-00135](../adr/ADR-00135.md)."
+    }
+  ]
+}

@@ -16,9 +16,21 @@ import (
 // `crypto.subtle` member expression — the receiver shape of every
 // crypto.subtle.<method>(...) call.
 func (e *Emitter) isCryptoSubtle(expr ast.Expression) bool {
+	// A `const { subtle } = globalThis.crypto` alias (ADR-00434).
+	if id, ok := expr.(*ast.Identifier); ok && e.cryptoSubtleAliases[id.Name] {
+		if _, bound := e.lookup(id.Name); !bound {
+			return true
+		}
+	}
 	mem, ok := expr.(*ast.MemberExpression)
 	if !ok || mem.Property != "subtle" {
 		return false
+	}
+	// globalThis.crypto.subtle
+	if inner, ok := mem.Object.(*ast.MemberExpression); ok {
+		if g, _ := cryptoGlobalExpr(inner); g {
+			return true
+		}
 	}
 	id, ok := mem.Object.(*ast.Identifier)
 	return ok && id.Name == "crypto" && !e.isShadowedByLocal("crypto")

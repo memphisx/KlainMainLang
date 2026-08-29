@@ -1,0 +1,122 @@
+{
+  "id": "networking",
+  "file": "NETWORKING.md",
+  "title": "Networking",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. All require linking a network library (libcurl for fetch/HTTP; system sockets for WebSocket). A server-side HTTP listener (`http.listen(port, handler)`) is tracked under [HTTP-SERVER.md](HTTP-SERVER.md) instead — listening for incoming connections has no browser-side Web API equivalent."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`fetch(url)` / `fetch(url, init)` / `fetch(request)`",
+            "status": "implemented",
+            "caveats": [
+              "Setting a `body` without an explicit `method` sends it as `POST` (libcurl's `CURLOPT_POSTFIELDS` implies `POST` unless overridden); an explicit `method` always wins over that default",
+              "A fetch carrying an `AbortSignal` resolves at completion, not headers ([ADR-00299](../adr/ADR-00299.md))"
+            ],
+            "notes": [
+              "`init` is any value with some subset of `method: string` / `headers: Map<string,string> \\| Headers` / `body: string` fields; a real `Request` object works as the sole argument too, destructured the same way",
+              "Non-blocking I/O ([ADR-00050](../adr/ADR-00050.md)): uses libcurl's multi-interface, driven by the same `select()`-based event loop `http.listen` uses, so `await fetch(...)` inside a connection-handler fiber yields — a slow upstream call doesn't stall other connections or timers",
+              "Outside any fiber (plain top-level code, no `http.listen`), there's nothing else to overlap with, so it busy-spins the same multi-interface calls to the same effect as a blocking wait",
+              "A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally (`.ok` distinguishes it), matching real `fetch`",
+              "See [ADR-00021](../adr/ADR-00021.md), [ADR-00050](../adr/ADR-00050.md), [ADR-00052](../adr/ADR-00052.md), [ADR-00074](../adr/ADR-00074.md), [ADR-00130](../adr/ADR-00130.md)",
+              "`await fetch(...)` resolves when the response **headers** arrive (as in real JS, [ADR-00299](../adr/ADR-00299.md)); the body is read lazily — `.text()`/`.json()`/`.arrayBuffer()` drive the transfer to completion, `.body` streams it. A signal-carrying fetch still resolves at completion (its abort machinery lives in the full await)"
+            ]
+          },
+          {
+            "feature": "`Response` (`.status`, `.ok`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`)",
+            "status": "implemented",
+            "caveats": [
+              "**These three methods are synchronous** — they return `string`/parsed value/`ArrayBuffer` directly, not the `Promise<string>`/`Promise<any>`/`Promise<ArrayBuffer>` real WHATWG `fetch` returns. Both call styles work: `const body: string = r.text()` and `await r.text()`/`.json()`/`.arrayBuffer()` (awaiting a non-thenable is identity — a harmless no-op — including the type-directed `.json()` projection through the `await`; [ADR-00241](../adr/ADR-00241.md))",
+              "`.json()` reuses `JSON.parse`'s machinery, including its full scope: it validates the body (a non-JSON body — e.g. an HTML error page — throws a catchable `SyntaxError`, [ADR-00223](../adr/ADR-00223.md)) and projects nested objects, array/object-array fields, and top-level `T[]` off the parse tree ([ADR-00224](../adr/ADR-00224.md)); only `any`/`unknown` dynamic shapes remain unsupported",
+              "`.text()`/`.json()` are plain null-terminated strings: a binary body with an embedded null byte truncates at the first one, by design — use `.arrayBuffer()` for a binary body",
+              "No response-header access yet (no `HEADERFUNCTION` capture exists in this codebase) — see the `XMLHttpRequest` row for the same gap on that side",
+              "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed TypeError; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field"
+            ],
+            "notes": [
+              "Plain object with `status`/`ok` fields plus `text()`/`json()`/`arrayBuffer()` methods; `.body` is a real `ReadableStream<Uint8Array>` fed incrementally from libcurl's write callback with backpressure via curl pause/unpause ([TDD-00097](../tdd/TDD-00097.md) Stage 4, [ADR-00299](../adr/ADR-00299.md)) — on an already-completed transfer it replays the buffered bytes as one chunk",
+              "`.arrayBuffer()` ([ADR-00094](../adr/ADR-00094.md)) carries the real byte count and comes back whole regardless of content",
+              "Every string in this compiler is a plain null-terminated C string (`.length` is `strlen`-based), so any string value with an embedded `\\0` reads as shorter than it actually is; `.text()`/`.json()` keep that behavior by design (JSON/text bodies aren't expected to legitimately contain embedded nulls) — use `.arrayBuffer()` for a binary body (see [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md))",
+              "See [ADR-00021](../adr/ADR-00021.md), [ADR-00094](../adr/ADR-00094.md)"
+            ]
+          },
+          {
+            "feature": "`Request` / `Headers` objects",
+            "status": "implemented",
+            "notes": [
+              "Real classes, not just `fetch`'s plain-object `init` (which still works unchanged)",
+              "`Headers` is a case-insensitive (lowercased-key) wrapper: `get`/`set`/`has`/`delete` behave like `Map<string,string>`'s own (because storage-wise it *is* one), plus `append(name, value)`, which combines with a comma if `name` is already present instead of overwriting",
+              "`new Request(url)` / `new Request(url, init)` builds a plain object (`url`/`method`/`headers`/`body`, all readable directly) — `method` defaults to `\"GET\"`, `headers` to an empty `Headers`, `body` to `null`",
+              "Reverses [ADR-00074](../adr/ADR-00074.md)'s original decision to reject these — see [ADR-00130](../adr/ADR-00130.md)",
+              "`http.listen`'s own server-side request-object type annotation is `HttpRequest`, not `Request` — freed up by this change (see the ADR for why)"
+            ]
+          },
+          {
+            "feature": "`WebSocket`",
+            "status": "implemented",
+            "caveats": [
+              "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`, [TDD-00039](../tdd/TDD-00039.md) Stage 4/[ADR-00346](../adr/ADR-00346.md)); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side `wss` (a TLS listener) is not offered — front it with `tls`/a reverse proxy",
+              "Neither side supports binary `.send()` (`ArrayBuffer` payloads)",
+              "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification)",
+              "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline"
+            ],
+            "notes": [
+              "Both server and client",
+              "Server: `http.listen(port, handler, { ws })`'s optional third-argument handler is called once per successfully upgraded connection with a `WSConnection` (`.onmessage`/`.send(data: string)`/`.close()`), coexisting with ordinary HTTP requests on the same listener; a client `ping` gets an automatic `pong` reply with identical payload (RFC 6455 §5.5.2), and both a peer `close` frame and `.close()` itself send a proper Close frame before the connection ends (RFC 6455 §5.5.1)",
+              "A failed connect never throws (`.onerror`/`.onclose` fire instead, matching real `WebSocket`)",
+              "See [TDD-00039](../tdd/TDD-00039.md) ([ADR-00125](../adr/ADR-00125.md) Stage 0 frame codec/SHA-1, [ADR-00126](../adr/ADR-00126.md) Stage 1 server handshake, [ADR-00127](../adr/ADR-00127.md) Stage 2 ping/pong + close handshake, [ADR-00128](../adr/ADR-00128.md) Stage 3 client)"
+            ]
+          },
+          {
+            "feature": "`EventSource`",
+            "status": "implemented",
+            "caveats": [
+              "The `Content-Type` check on connect is a case-sensitive `\"text/event-stream\"` prefix match",
+              "A `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value"
+            ],
+            "notes": [
+              "Server-sent events (SSE) over HTTP — connection plumbing (`readyState`/`close()`), `onmessage`/`onopen`/`onerror`, `addEventListener`/`removeEventListener` for named (`event: name`) records (`data`/`event`/`id`/`retry` field parsing, multi-line `data:` concatenation), `\\n\\n`/`\\r\\n\\r\\n`/bare-`\\r\\r` record boundaries, and auto-reconnect (retries after a dropped connection or network-level connect failure, honoring a server-sent `retry:` delay — default 3000ms — and replaying `Last-Event-ID` as a request header) all work",
+              "A response that *arrives* with the wrong shape (non-2xx status, or a 2xx with a `Content-Type` that isn't `text/event-stream`) fails permanently instead of retrying, matching the real spec's distinction between a network failure (retryable) and a malformed response (terminal)",
+              "See [TDD-00038](../tdd/TDD-00038.md)"
+            ]
+          },
+          {
+            "feature": "`XMLHttpRequest`",
+            "status": "implemented",
+            "caveats": [
+              "Modeled as the real spec's legacy *synchronous* mode: `.send()`/`.send(body)` runs the request to completion before returning, then fires every registered callback once, synchronously — there's no default-async, callback-interleaved mode (this compiler has no re-entrant-into-already-returned-caller callback machinery to support one)",
+              "`.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing",
+              "`.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call",
+              "`.responseText`/`.response` are identical values — only a text `responseType` is supported; no `responseType` other than the default",
+              "`.onreadystatechange`/`.onload`/`.onerror` callbacks are zero-argument (deliberately — a payload-carrying callback isn't representable for this particular type, see [ADR-00131](../adr/ADR-00131.md))",
+              "`.abort()` is a best-effort `readyState` reset — there's nothing to actually interrupt once a synchronous `.send()` has returned",
+              "No `.getResponseHeader()`/`.getAllResponseHeaders()` (same missing-response-header-capture gap `Response` has)"
+            ],
+            "notes": [
+              "Not a blocking implementation: `.send()` is built on the exact same non-blocking `__kml_fetch_async` primitive `fetch()` itself uses, so it still yields the current fiber (rather than blocking every other connection) when called from inside an `http.listen` connection handler",
+              "Supports `.open(method, url)`, `.setRequestHeader(name, value)`, `.send()`/`.send(body)`, `.abort()`, `.readyState`, `.status`, `.responseText`/`.response`, and the zero-argument callbacks",
+              "A network-level failure fires `.onerror` (never throws), matching real `XMLHttpRequest`",
+              "See [ADR-00131](../adr/ADR-00131.md)"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

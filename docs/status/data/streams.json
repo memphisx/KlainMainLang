@@ -1,0 +1,147 @@
+{
+  "id": "streams",
+  "file": "STREAMS.md",
+  "title": "Streams API",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. `ReadableStream`, `WritableStream`, and `TransformStream` are the WHATWG (browser-standard) backbone of pipeline-style data processing. Node has its own, older, differently-shaped `stream` module — see the Node rows below — that real Node code (including `fs`/`http`/`child_process` internally) actually uses far more than the WHATWG API."
+    },
+    {
+      "kind": "coverage",
+      "style": "standard"
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format)."
+    },
+    {
+      "kind": "block",
+      "text": "Full design: [TDD-00097](../tdd/TDD-00097.md) ([ADR-00296](../adr/ADR-00296.md)–[ADR-00302](../adr/ADR-00302.md), [ADR-00304](../adr/ADR-00304.md)). `pipeTo` (all four shutdown-propagation rules + `prevent*` + `AbortSignal`), `pipeThrough`, and `tee()` come with the rows below; in-memory pipelines run on the promise/microtask runtime alone — no fibers or libcurl. HTTP integration is tracked where it surfaces: fetch `Response.body` on [NETWORKING.md](NETWORKING.md), streaming response/request bodies on [HTTP-SERVER.md](HTTP-SERVER.md)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "featureColumn": "Feature",
+        "hasCaveats": true,
+        "hasNotes": true,
+        "countsTowardParity": true,
+        "rows": [
+          {
+            "feature": "`ReadableStream`",
+            "status": "implemented",
+            "caveats": [
+              "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
+              "`ReadableStream.from()` accepts arrays only, not async iterables",
+              "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
+              "`read()` on a closed stream yields the chunk type's zero value, not `undefined`; `controller.desiredSize` is `0` (not `null`) once closed/errored",
+              "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
+              "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
+              "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
+              "A synchronously-throwing pull/start propagates to the caller instead of erroring the stream",
+              "`tee()` forwards the last cancelling branch's reason instead of composing both; a signal abort of `pipeTo` takes effect at the next chunk boundary"
+            ],
+            "notes": [
+              "One 144-byte heap struct fuses stream + controller + reader (compile-time retyping); chunk queue + pending-read promise FIFO with HWM/size accounting; spec CallPullIfNeeded; per-site fulfill thunk builds typed `{value,done}` records ([ADR-00296](../adr/ADR-00296.md))",
+              "Runs on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines"
+            ]
+          },
+          {
+            "feature": "`WritableStream`",
+            "status": "implemented",
+            "caveats": [
+              "`desiredSize` is `0` (not `null`) once errored; `releaseLock()` doesn't reject a pending-write view",
+              "A synchronously-throwing sink write propagates instead of erroring the stream (an async rejection is handled per spec)",
+              "A sink abort callback can't take a reason parameter; no transformer/sink `start` promise-vs-write interlock beyond the started flag"
+            ],
+            "notes": [
+              "128-byte fused stream+controller+writer struct; 32-byte write-queue entries carry their own per-write promise; `ready` re-armed on backpressure flips ([ADR-00297](../adr/ADR-00297.md))"
+            ]
+          },
+          {
+            "feature": "`TransformStream`",
+            "status": "implemented",
+            "caveats": [
+              "No transformer `start` callback",
+              "Cancelling the readable side doesn't error the writable side",
+              "An identity transform (no callback) requires matching I/O chunk representations"
+            ],
+            "notes": [
+              "Writable sink write runs the transform when the readable side has capacity, else parks the chunk (at most one, by write serialization); readable pull resumes it; spec defaults writable HWM 1 / readable HWM 0 ([ADR-00298](../adr/ADR-00298.md))"
+            ]
+          },
+          {
+            "feature": "`CompressionStream` / `DecompressionStream`",
+            "status": "implemented",
+            "caveats": [
+              "The format argument must be a string literal (\"gzip\", \"deflate\", \"deflate-raw\") — a runtime-computed format string is a compile error",
+              "Chunks are `Uint8Array` only (no ArrayBuffer/DataView BufferSource variants)"
+            ],
+            "notes": [
+              "A `%kml.ts` TransformStream context with native zlib transform/flush closures; `-lz` linked only when constructed; inflate auto-detects gzip/zlib wrappers ([ADR-00302](../adr/ADR-00302.md))"
+            ]
+          },
+          {
+            "feature": "`Blob.stream()`",
+            "status": "implemented",
+            "caveats": [
+              "Delivers the blob's bytes as a **single** `Uint8Array` chunk (the whole blob), not incrementally chunked as a real byte source would be"
+            ],
+            "notes": [
+              "Returns a `ReadableStream<Uint8Array>` — one owned-copy chunk then closed; an empty blob yields no chunk ([ADR-00341](../adr/ADR-00341.md)). Consumable via `for await` or `.getReader()`"
+            ]
+          },
+          {
+            "feature": "`stream.Readable` / `.Writable` / `.Transform` / `.PassThrough` (`new Duplex` ❌)",
+            "status": "implemented",
+            "caveats": [
+              "`new PassThrough()` is the identity Transform — string chunks by default (`<T>` overrides), `highWaterMark`/`objectMode` options only ([ADR-00422](../adr/ADR-00422.md)); `new Duplex(...)` itself is still rejected (`duplexPair()` is the one Duplex producer)",
+              "`class X extends Readable/Writable` with a `this`-based `_read()` / `_write(chunk, enc, cb)` override is supported; `extends Duplex`/`Transform` is not yet (rejected at compile time). Options form (`new Readable({ read })`) also stays",
+              "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
+              "`highWaterMark` (options form and class-form `super({ highWaterMark })`) sets the queue watermark; `objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode). A `super(options)` `highWaterMark` must be a literal/construction-scope constant — it can't reference a constructor parameter",
+              "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
+              "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
+              "No `.read()`/`.unshift()`/`.destroy()`/`.setEncoding()`",
+              "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
+              "`fs`/`http` still don't hand out Node streams (their surfaces are WHATWG-based or buffered)"
+            ],
+            "notes": [
+              "Wrappers over the WHATWG internals: rstream/wstream sides + the EventEmitter listener-list runtime; flowing mode is a reaction-driven read→emit loop started by the first `'data'` listener; `Readable.from`/`.fromWeb`/`.toWeb` bridge both worlds ([ADR-00304](../adr/ADR-00304.md))",
+              "The class form is a synthetic-root model mirroring `extends EventEmitter`: a hidden Node-stream handle field, the runtime pull/sink routed to the subclass's `_read`/`_write` method ([ADR-00393](../adr/ADR-00393.md))"
+            ]
+          },
+          {
+            "feature": "`stream.pipeline()` / `.finished()`",
+            "status": "implemented",
+            "caveats": [
+              "The callback forms' callback takes zero parameters or one (the error) — no `(err, value)` extras",
+              "`finished(s, cb)` returns nothing, not Node's cleanup function",
+              "Function-stage pipelines (`pipeline(src, async function* …)`) are not supported — stages must be streams"
+            ],
+            "notes": [
+              "Both forms: the `stream/promises` promise-returning ones ([ADR-00304](../adr/ADR-00304.md)) and the callback-style `stream.pipeline(a, b, cb)`/`stream.finished(s, cb)` named exports — a per-site runner on the destination's closed promise calls the callback with `null`/the error; `pipeline`'s callback form returns the destination stream ([ADR-00422](../adr/ADR-00422.md))"
+            ]
+          },
+          {
+            "feature": "`stream/promises`",
+            "status": "implemented",
+            "notes": [
+              "`import { pipeline, finished } from 'stream/promises'` ([ADR-00304](../adr/ADR-00304.md))"
+            ]
+          },
+          {
+            "feature": "`stream.duplexPair()`",
+            "status": "implemented",
+            "caveats": [
+              "String chunks only (no `<T>` form)",
+              "The sides are Duplex *handles* (`write`/`end`/`on`/`pipe`/…), not `Duplex` class instances — no `instanceof Duplex`, `cork`/`uncork`, `.read()`, or `'readable'` events"
+            ],
+            "notes": [
+              "Two cross-wired identity-transform sides: each side's sink enqueues into the peer's readable (backpressure parks on the peer's capacity); ending one side ends the other's readable. Returned as a 2-element array, so `const [a, b] = duplexPair()` and `pair[0]` both work ([ADR-00422](../adr/ADR-00422.md))"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

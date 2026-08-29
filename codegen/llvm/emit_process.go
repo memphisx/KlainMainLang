@@ -435,6 +435,22 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.usedProcessLifecycle = true
 		e.ensureExceptionHelpers() // the hook lives in __kml_throw's uncaught path
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_uncaught_handler, align 8", cb.hdrPtr))
+	case "message":
+		// The fork IPC channel's child side (TDD-00141): (msg: string) => void.
+		// Arms the channel (parses NODE_CHANNEL_FD) and holds the event loop
+		// open while it stays connected.
+		contextTypeArrowParams(args[1], "string")
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		if cb.kind != cbClosure {
+			return Value{}, fmt.Errorf("%d:%d: a process 'message' listener must be an arrow function literal", pos.Line, pos.Col)
+		}
+		e.ensureIPCChildRuntime()
+		fd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_ipcc_fd()", fd))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_ipcc_msg_listener, align 8", cb.hdrPtr))
 	case "warning":
 		// The listener receives the warning as an Error: (warning) => void.
 		// process.emitWarning still prints to stderr (matching Node's always-on
@@ -509,4 +525,64 @@ func (e *Emitter) emitProcessStreamWrite(args []ast.Expression, streamName strin
 		e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtPtr, val.Ref))
 	}
 	return Value{Ty: TypeVoid}, nil
+}
+
+// ensureIsatty declares POSIX isatty(3) once — process.<stdio>.isTTY.
+func (e *Emitter) ensureIsatty() {
+	if !e.usedIsatty {
+		e.emitGlobal("declare i32 @isatty(i32 noundef)")
+		e.usedIsatty = true
+	}
+}
+
+// emitProcessStreamIsTTY implements process.stdout/.stderr/.stdin `.isTTY`:
+// a real isatty(fd) probe, so piped/redirected runs see false exactly as
+// Node does.
+func (e *Emitter) emitProcessStreamIsTTY(fd int) Value {
+	e.ensureIsatty()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @isatty(i32 %d)", r, fd))
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+	return Value{Ref: b, Ty: TypeBool}
+}
+
+// emitProcessSend implements the fork IPC child side's process.send(msg)
+// (TDD-00141): a string message written to the NODE_CHANNEL_FD channel.
+// Returns false (never throws) when the process wasn't forked.
+func (e *Emitter) emitProcessSend(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.send takes one message", pos.Line, pos.Col)
+	}
+	mv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(mv.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: process.send supports string messages in this version", pos.Line, pos.Col)
+	}
+	e.ensureIPCChildRuntime()
+	ok := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_ipcc_send(ptr %s)", ok, mv.Ref))
+	return Value{Ref: ok, Ty: TypeBool}, nil
+}
+
+// emitProcessGetID implements process.getuid/geteuid/getgid/getegid — the
+// POSIX credential reads (never present on Windows in Node; this compiler is
+// POSIX-only, so they're unconditional). Returns a `number`.
+func (e *Emitter) emitProcessGetID(which string) Value {
+	if !e.usedProcessGetID {
+		e.usedProcessGetID = true
+		e.emitGlobal("declare i32 @getuid()")
+		e.emitGlobal("declare i32 @geteuid()")
+		e.emitGlobal("declare i32 @getgid()")
+		e.emitGlobal("declare i32 @getegid()")
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @%s()", r, which))
+	w := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", w, r))
+	d := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, w))
+	return Value{Ref: d, Ty: TypeF64}
 }

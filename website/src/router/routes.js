@@ -1,4 +1,5 @@
 import examplesTree from 'src/data/examples-tree.json'
+import { index as referenceIndex } from 'src/data/reference-index.js'
 
 // Flatten the example tree into per-file routes (static paths → prerendered).
 function collectExampleRoutes (nodes, acc) {
@@ -19,6 +20,15 @@ function collectExampleRoutes (nodes, acc) {
 
 const exampleRoutes = collectExampleRoutes(examplesTree, [])
 
+// One prerendered route per API-reference surface, from the generated index
+// so a new surface JSON registers itself (no per-surface wiring).
+const referenceRoutes = referenceIndex.map(({ surface }) => ({
+  path: 'reference/' + surface,
+  name: 'reference-' + surface,
+  component: () => import('pages/docs/reference/ReferencePage.vue'),
+  props: { surface }
+}))
+
 const routes = [
   {
     path: '/',
@@ -37,9 +47,14 @@ const routes = [
       { path: 'getting-started', name: 'getting-started', component: () => import('pages/docs/GettingStarted.vue') },
       { path: 'language', name: 'language', component: () => import('pages/docs/LanguageGuide.vue') },
       { path: 'stdlib', name: 'stdlib', component: () => import('pages/docs/StdLib.vue') },
+      { path: 'klain', name: 'klain', component: () => import('pages/docs/Klain.vue') },
+      { path: 'klain/webview', name: 'klain-webview', component: () => import('pages/docs/KlainWebview.vue') },
+      { path: 'klain/http', name: 'klain-http', component: () => import('pages/docs/KlainHttp.vue') },
+      { path: 'klain/sync', name: 'klain-sync', component: () => import('pages/docs/KlainSync.vue') },
       { path: 'cli', name: 'cli', component: () => import('pages/docs/Cli.vue') },
       { path: 'coverage', name: 'coverage', component: () => import('pages/docs/Coverage.vue') },
       { path: 'examples', name: 'examples', component: () => import('pages/docs/Examples.vue') },
+      ...referenceRoutes,
       ...exampleRoutes
     ]
   },
