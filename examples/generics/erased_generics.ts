@@ -38,3 +38,9 @@ console.log(labeled("str:", "seven"));
 //
 // /** @erased */
 // function add<T>(a: T, b: T): T { return a + b; }
+
+// Explicit call-site type arguments pick the instantiation directly —
+// the way to call a generic with nothing to infer from.
+function emptyOf<T>(): T[] { return []; }
+const nums = emptyOf<number>();
+console.log(nums.length); // 0

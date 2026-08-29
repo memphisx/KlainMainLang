@@ -262,14 +262,16 @@ b.when.setFullYear(2020)
 	}
 }
 
-func TestE2EDateSetterMultiArgRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const d: Date = new Date(0)
-d.setFullYear(2020, 5)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a multi-argument Date setter overload, got none")
-	}
+func TestE2EDateSetterMultiArg(t *testing.T) {
+	// ADR-00488: multi-argument setter overloads cascade into the
+	// following fields, per JS.
+	assertOutput(t, `
+const d = new Date(2020, 0, 1, 0, 0, 0, 0);
+d.setFullYear(2021, 5, 15);
+console.log(d.getFullYear(), d.getMonth(), d.getDate());
+d.setHours(10, 30, 45, 500);
+console.log(d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds());
+`, "2021 5 15\n10 30 45 500")
 }
 
 func TestE2EDateMinusDateGivesMillisDifference(t *testing.T) {

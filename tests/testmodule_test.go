@@ -121,3 +121,30 @@ import { mustCall } from 'test'
 const never = mustCall()
 `, 1)
 }
+
+// ADR-00496: the counting trampoline forwards any fixed ABI slot list, so
+// array params (split ptr/len), >3 args, and nullable scalars all wrap; a
+// failing count still exits non-zero with those shapes.
+func TestE2EMustCallWideSignatures(t *testing.T) {
+	assertOutputImports(t, `
+import { mustCall } from 'test'
+const arrCb = mustCall((xs: number[]) => { console.log("len:", xs.length, "first:", xs[0]) })
+arrCb([7, 8, 9])
+const many = mustCall((a: number, b: number, c: number, d: number, e2: number) => { console.log(a + b + c + d + e2) })
+many(1, 2, 3, 4, 5)
+const nullb = mustCall((x: number | null) => { console.log("got:", x === null ? -1 : x) }, 2)
+nullb(42)
+nullb(null)
+`, "len: 3 first: 7\n15\ngot: 42\ngot: -1")
+}
+
+func TestE2EMustCallArrayParamUnmetFails(t *testing.T) {
+	_, code := compileAndRunExpectExitImports(t, `
+import { mustCall } from 'test'
+const cb = mustCall((xs: string[]) => {})
+console.log("registered")
+`)
+	if code != 1 {
+		t.Fatalf("expected exit 1 for an unmet mustCall, got %d", code)
+	}
+}

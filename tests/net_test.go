@@ -332,3 +332,38 @@ sock.bind(0, () => {
 })
 `, "dgram port ok")
 }
+
+func TestE2ENetIsIPv4RejectsLeadingZeros(t *testing.T) {
+	// Node rejects leading-zero octets; macOS inet_pton accepts them, so a
+	// strict pre-check guards the v4 path (ADR-00457).
+	assertOutputImports(t, `
+import net from 'net';
+console.log(net.isIPv4('8.8.8.8'));
+console.log(net.isIPv4('001.002.003.004'));
+console.log(net.isIPv4('0.0.0.0'));
+console.log(net.isIP('01.1.1.1'));
+console.log(net.isIPv6('fe80::7:8%eth0'));
+console.log(net.isIPv6('02001:db8::1'));
+console.log(net.isIPv6('::ffff:001.2.3.4'));
+`, "true\nfalse\ntrue\n0\ntrue\nfalse\nfalse")
+}
+
+// Socket 'close' + post-connect 'connect'/'ready' listeners (ADR-00501):
+// close fires once on teardown, after 'end' (Node's ordering).
+func TestE2ENetSocketCloseAndReadyEvents(t *testing.T) {
+	assertOutputImports(t, `
+import * as net from 'net'
+import { mustCall } from 'test'
+const server = net.createServer((sock) => {
+  sock.end("bye")
+})
+server.on('listening', mustCall(() => {
+  const c = net.connect(server.address().port, "127.0.0.1")
+  c.on('ready', mustCall(() => { console.log("ready") }))
+  c.on('data', (chunk: string) => { console.log("data:", chunk) })
+  c.on('end', mustCall(() => { console.log("end") }))
+  c.on('close', mustCall(() => { console.log("close"); server.close(); process.exit(0) }))
+}))
+server.listen(0)
+`, "ready\ndata: bye\nend\nclose")
+}

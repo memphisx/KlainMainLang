@@ -361,6 +361,32 @@ func (p *Parser) parseExponentiation() (ast.Expression, error) {
 }
 
 func (p *Parser) parseUnary() (ast.Expression, error) {
+	// `delete expr` (ADR-00487): `delete` is a reserved word in JS, so an
+	// IDENT spelling it in prefix position is unambiguously the operator.
+	if p.check(lexer.IDENT) && p.peek().Literal == "delete" {
+		op := p.advance()
+		arg, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return ast.NewUnaryExpression("delete", true, arg, posOf(op)), nil
+	}
+
+	// Old-style TS type assertion `<T>expr` (ADR-00451): a `<` can never
+	// begin an expression otherwise, so this position is unambiguous in .ts
+	// (no JSX here). Erased exactly like the postfix `expr as T` form
+	// (ADR-00371) — the angle-bracketed type is parsed and dropped, and the
+	// operand's own inferred type is kept.
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		if _, err := p.parseTypeAnnotation("as"); err != nil {
+			return nil, err
+		}
+		if err := p.expectGT("type assertion"); err != nil {
+			return nil, err
+		}
+		return p.parseUnary()
+	}
 	switch p.peek().Type {
 	case lexer.NOT, lexer.BITNOT:
 		op := p.advance()
@@ -476,6 +502,53 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 				return nil, err
 			}
 			expr = ast.NewIndexExpression(expr, index, posOf(lbrak))
+		case lexer.LT:
+			// Explicit call-site type arguments `f<string>(x)` (ADR-00473).
+			// Ambiguous with comparison (`a < b > (c)`), resolved by
+			// backtracking: only when a type-annotation list closes with `>`
+			// and `(` follows is it a call; otherwise the `<` is left for
+			// the binary-operator level. Only tried on an identifier/member
+			// callee, mirroring TS's own disambiguation.
+			if _, isIdent := expr.(*ast.Identifier); !isIdent {
+				if _, isMem := expr.(*ast.MemberExpression); !isMem {
+					return expr, nil
+				}
+			}
+			save := p.pos
+			p.advance() // '<'
+			var targs []*ast.TypeAnnotation
+			okParse := true
+			for {
+				ta, err := p.parseTypeAnnotation("ts")
+				if err != nil {
+					okParse = false
+					break
+				}
+				targs = append(targs, ta)
+				if !p.match(lexer.COMMA) {
+					break
+				}
+			}
+			if okParse {
+				if err := p.expectGT("call-site type arguments"); err != nil {
+					okParse = false
+				}
+			}
+			if !okParse || !p.check(lexer.LPAREN) {
+				p.pos = save
+				return expr, nil
+			}
+			lparen := p.advance()
+			args, err := p.parseArgList()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+			call := ast.NewCallExpression(expr, args, posOf(lparen))
+			call.TypeArgs = targs
+			expr = call
 		case lexer.LPAREN:
 			lparen := p.advance()
 			args, err := p.parseArgList()

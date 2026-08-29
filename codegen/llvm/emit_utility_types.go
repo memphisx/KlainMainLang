@@ -95,7 +95,13 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			}
 			return ObjectType(fields), true
 		}
-		return MapType(TypePtr, valTy), true
+		// The open-key form is the index-signature dict (IsDynamicObject —
+		// ADR-00485): bracket read/write, Object.keys/values/entries,
+		// for…of, and JSON.stringify all ride the map-backed machinery,
+		// exactly like `{ [k: string]: V }`. Previously a plain MapType,
+		// whose value has none of the object-style surface.
+		keyTy := TypePtr
+		return Type{IR: "ptr", IsMap: true, IsDynamicObject: true, MapKey: &keyTy, MapVal: &valTy}, true
 	}
 	return Type{}, false
 }

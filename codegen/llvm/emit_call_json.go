@@ -215,12 +215,20 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 
 	// A map-backed dynamic object (a computed-key literal or a string
-	// index-signature dict, TDD-00012/TDD-00130) has no fixed field table to
-	// walk; serializing it needs a map-iteration path not yet built. Reject
-	// cleanly rather than emit an empty string — iterate `Object.keys(d)` and
-	// build the JSON by hand for now.
+	// index-signature dict, TDD-00012/TDD-00130) and a string-keyed Map both
+	// serialize by iterating the runtime key list (ADR-00482, clearing the
+	// TDD-00130 deferral). A number-keyed Map keeps the rejection (JSON
+	// object keys are strings; real JS stringifies a Map to "{}" — matching
+	// that would silently drop data).
 	if argTy.IsDynamicObject || argTy.IsMap {
-		return Value{}, fmt.Errorf("%d:%d: JSON.stringify of an index-signature / dynamic-key object is not yet supported — build it from Object.keys(...) for now", pos.Line, pos.Col)
+		if argTy.MapKey != nil && !isStringTy(*argTy.MapKey) {
+			return Value{}, fmt.Errorf("%d:%d: JSON.stringify of a number-keyed Map is not supported — JSON object keys are strings", pos.Line, pos.Col)
+		}
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyMapDict(v, ind)
 	}
 
 	val, err := e.emitExpr(args[0])
@@ -478,4 +486,107 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_json_free(ptr %s)", tree))
 	return result, nil
+}
+
+
+// emitJSONStringifyMapDict serializes a map-backed dynamic object / string-
+// keyed Map to a JSON object by iterating its runtime key list (ADR-00482):
+// the same accumulator-loop shape emitJSONStringifyArrayData uses, with each
+// entry rendered as `"key":<value>` — the key through the escaping
+// __kml_json_str_str, the value re-read via __kml_map_str_get and delegated
+// to emitJSONStringifyValue under the map's declared value type.
+func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value, error) {
+	e.ensureJSONStringifyStr()
+	e.ensureMapStrHelpers()
+	valTy := TypePtr
+	if mapVal.Ty.MapVal != nil {
+		valTy = *mapVal.Ty.MapVal
+	}
+	keys := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keys, mapVal.Ref))
+	kPtr, kLen := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", kPtr, keys))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", kLen, keys))
+
+	accAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("{"), accAlloca))
+	idxPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+
+	condL := e.freshLabel("jsonmap.cond")
+	bodyL := e.freshLabel("jsonmap.body")
+	doneL := e.freshLabel("jsonmap.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i0, c := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i0, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i0, kLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, doneL))
+
+	e.emitLabel(bodyL)
+	i1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1, idxPtr))
+	kg, key := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kg, kPtr, i1))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kg))
+	acc0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", acc0, accAlloca))
+	// Separator: "," for every entry after the first.
+	isFirst := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isFirst, i1))
+	sep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sep, isFirst, e.internString(""), e.internString(",")))
+	acc1, err := e.emitStringConcat(Value{Ref: acc0, Ty: TypePtr}, Value{Ref: sep, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	keyJSON := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", keyJSON, key))
+	acc2, err := e.emitStringConcat(acc1, Value{Ref: keyJSON, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	acc3, err := e.emitStringConcat(acc2, Value{Ref: e.internString(":"), Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapVal.Ref, key))
+	var vVal Value
+	switch {
+	case valTy.IR == "ptr":
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, raw))
+		vVal = Value{Ref: p, Ty: valTy}
+	case valTy.IR == "double":
+		d := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", d, raw))
+		vVal = Value{Ref: d, Ty: valTy}
+	case valTy.IR == "i1":
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i1", b, raw))
+		vVal = Value{Ref: b, Ty: valTy}
+	default:
+		vVal = Value{Ref: raw, Ty: valTy}
+	}
+	vJSON, err := e.emitJSONStringifyValue(vVal, ind)
+	if err != nil {
+		return Value{}, err
+	}
+	acc4, err := e.emitStringConcat(acc3, vJSON)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", acc4.Ref, accAlloca))
+	i2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i2, i1))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i2, idxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	preClose := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
+	return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("}"), Ty: TypePtr})
 }

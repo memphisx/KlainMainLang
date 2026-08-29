@@ -147,11 +147,12 @@
             "feature": "`atob(s)`",
             "status": "implemented",
             "caveats": [
-              "Permissive: malformed length/characters decode as best-effort rather than throwing"
+              "Whitespace is rejected rather than stripped (forgiving-base64 strips it), and a length not a multiple of 4 silently drops the trailing group"
             ],
             "notes": [
               "Base64 decode",
-              "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/ADR-00024.md)."
+              "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/ADR-00024.md).",
+              "An input character outside the base64 alphabet throws a real `InvalidCharacterError` DOMException, matching WHATWG atob ([ADR-00458](../adr/ADR-00458.md))"
             ]
           },
           {

@@ -1642,6 +1642,12 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		}
 	}
 
+	// A method body referencing `arguments` gets the same synthesized
+	// parameter array a plain function body does (ADR-00387/ADR-00464).
+	if err := e.synthesizeArgumentsObject(&ast.FunctionDeclaration{Params: params, Body: body}, sig); err != nil {
+		return err
+	}
+
 	for _, stmt := range body.Body {
 		if err := e.emitStmt(stmt); err != nil {
 			return err

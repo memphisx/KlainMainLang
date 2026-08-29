@@ -2210,3 +2210,85 @@ C.inc();
 console.log(C.count);
 `, "2")
 }
+
+// --- arrow functions capture the enclosing method's `this` (ADR-00460) ---
+
+func TestE2EArrowCapturesLexicalThis(t *testing.T) {
+	assertOutput(t, `
+class Counter {
+    n: number = 0;
+    bump(times: number): void {
+        const inc = (): void => { this.n = this.n + 1; };
+        for (let i = 0; i < times; i++) { inc(); }
+        const nested = (): number => (() => this.n * 10)();
+        console.log(nested());
+    }
+}
+const c = new Counter();
+c.bump(3);
+console.log(c.n);
+`, "30\n3")
+}
+
+func TestE2EAsyncArrowCapturesThis(t *testing.T) {
+	assertOutput(t, `
+class C {
+    v: number = 7;
+    async get(): Promise<number> {
+        const fn = async (): Promise<number> => this.v;
+        return await fn();
+    }
+}
+async function run(): Promise<void> {
+    console.log(await new C().get());
+}
+run();
+`, "7")
+}
+
+func TestE2EFunctionExpressionThisStillRejected(t *testing.T) {
+	// A `function(){}` body keeps its own dynamic `this` — no lexical
+	// capture, still a clean rejection (ADR-00460).
+	_, err := parseAndCompile(`
+class C { m(): void { const f = function(): number { return this.x; }; } }
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for 'this' inside a function expression")
+	}
+}
+
+func TestE2EArgumentsObjectInMethod(t *testing.T) {
+	// ADR-00464: the synthesized `arguments` array (ADR-00387) works in
+	// class method bodies too, same same-typed-parameters scope.
+	assertOutput(t, `
+class C {
+    sum(a: number, b: number): number {
+        let t = 0;
+        for (let i = 0; i < arguments.length; i++) { t += arguments[i]; }
+        return t;
+    }
+    join(a: string, b: string): string {
+        let out = "";
+        for (const s of arguments) { out += s; }
+        return out;
+    }
+}
+console.log(new C().sum(3, 4));
+console.log(new C().join("x", "y"));
+`, "7\nxy")
+}
+
+func TestE2EReadonlyFieldModifier(t *testing.T) {
+	// ADR-00480: `readonly` field modifier parses (recorded, not enforced —
+	// the ADR-00447 ctor-param stance); a field literally named `readonly`
+	// still works.
+	assertOutput(t, `
+class C {
+    readonly id: number = 7;
+    static readonly tag: string = "C";
+    readonly = 5;
+}
+const c = new C();
+console.log(c.id, C.tag, c.readonly);
+`, "7 C 5")
+}

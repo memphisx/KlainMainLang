@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 28/29 (~97%) · **Strict Coverage**: 17/29 (~59%).
+**Coverage**: 28/29 (~97%) · **Strict Coverage**: 16/29 (~55%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,8 +14,8 @@ Format: [Status page format](README.md#status-page-format).
 | Field access `obj.field` | ✅ | | |
 | Object destructuring | ✅ | | |
 | `Object.keys(obj)` | ✅ | | |
-| `Object.values(obj)` | ✅ | | |
-| `Object.entries(obj)` | ✅ | • Values are stringified — a heterogeneous object's value type is a union not yet representable ([TDD-00066](../tdd/TDD-00066.md)) | • Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))` |
+| `Object.values(obj)` | ✅ | • A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]` | |
+| `Object.entries(obj)` | ✅ | • A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples | • Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))` |
 | `Object.groupBy(arr, fn)` | ✅ | | |
 | `Object.assign(target, ...src)` | ✅ | • Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS ([ADR-00054](../adr/ADR-00054.md)) | • Mutates and returns `target` |
 | `Object.create()` | ❌ | | • Out of scope: its core is prototype-chain creation, which this compiler's fixed-shape struct object model can't represent — the deferred dynamic/prototype object model ([TDD-00068](../tdd/TDD-00068.md)) |

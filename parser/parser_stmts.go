@@ -20,6 +20,69 @@ import (
 func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 	pos := posOf(p.peek())
 	p.advance() // consume 'declare'
+
+	// ADR-00471: `declare function` and `declare var/let/const` become real
+	// declarations instead of blanket erasure. An ambient function gets a
+	// synthesized throwing body ("no implementation") — the program
+	// compiles and links, matching TS's accept, and fails with a clear
+	// error only if the ambient is actually called; consecutive redeclared
+	// signatures collapse via the existing var/function-redeclaration rule.
+	// An ambient variable is an ordinary uninitialized `var` (zero/undefined
+	// default). Everything else (`declare class/namespace/module/global`)
+	// keeps the balanced-token erasure below.
+	if p.check(lexer.FUNCTION) {
+		p.advance() // 'function'
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		fd, err := p.parseFunctionRest(nameTok.Literal, false, true, false)
+		if err != nil {
+			return nil, err
+		}
+		if fd.Body == nil {
+			throwStmt := ast.NewThrowStatement(
+				ast.NewNewErrorExpression("Error",
+					ast.NewStringLiteral("ambient function '"+nameTok.Literal+"' has no implementation", pos), pos), pos)
+			fd.Body = ast.NewBlockStatement([]ast.Statement{throwStmt}, pos)
+			fd.IsAbstract = false
+		}
+		return fd, nil
+	}
+	// `declare namespace X {}` / `declare module X {}` (identifier-named —
+	// the string-named external-module and `global` forms keep the erasure
+	// below) route through the real namespace parser with ambient member
+	// semantics (ADR-00474): var members zero-init, function members become
+	// throwing stubs, so `Foo.Bar.foo = 5` after an ambient declaration works.
+	if p.check(lexer.IDENT) && (p.peek().Literal == "namespace" || p.peek().Literal == "module") &&
+		p.peekNth(1).Type == lexer.IDENT &&
+		(p.peekNth(2).Type == lexer.LBRACE || p.peekNth(2).Type == lexer.DOT) {
+		return p.parseNamespaceDecl(true)
+	}
+
+	// `declare [const] enum E { … }` is a real enum (ADR-00476) — members
+	// without initializers auto-increment exactly like a non-ambient enum.
+	if (p.check(lexer.IDENT) && p.peek().Literal == "enum") ||
+		(p.check(lexer.CONST) && p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "enum") {
+		return p.parseEnumDeclaration()
+	}
+
+	if p.check(lexer.VAR) || p.check(lexer.LET) || p.check(lexer.CONST) {
+		p.advance() // kind (ambient bindings are all zero-initialized vars here)
+		nameTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		var ta *ast.TypeAnnotation
+		if p.match(lexer.COLON) {
+			ta, err = p.parseTypeAnnotation("ts")
+			if err != nil {
+				return nil, err
+			}
+		}
+		p.consumeSemicolon()
+		return ast.NewVarDeclaration("var", nameTok.Literal, ta, nil, pos), nil
+	}
 	startLine := p.peek().Line
 	depth := 0
 	sawBrace := false
@@ -97,6 +160,10 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		if p.peekNth(1).Type == lexer.DOT || p.peekNth(1).Type == lexer.LPAREN {
 			return p.parseExpressionStatement()
 		}
+		// TS import-equals alias `import X = Y.Z;` (ADR-00456).
+		if p.peekNth(1).Type == lexer.IDENT && p.peekNth(2).Type == lexer.ASSIGN {
+			return p.parseImportEquals("", false)
+		}
 		return p.parseImportDeclaration()
 	case lexer.EXPORT:
 		return p.parseExportDeclaration()
@@ -145,7 +212,17 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 			return p.parseEnumDeclaration()
 		case "namespace":
 			if p.peekNth(1).Type == lexer.IDENT {
-				return p.parseNamespaceDecl()
+				return p.parseNamespaceDecl(false)
+			}
+		case "module":
+			// The pre-ES2015 internal-module spelling `module X { }` — a
+			// synonym for `namespace X { }` (TDD-00148 Stage 1). Contextual:
+			// requires IDENT `{` (or a dotted name, cleanly rejected inside)
+			// so `module.exports`-style expressions and a variable named
+			// `module` keep parsing as before.
+			if p.peekNth(1).Type == lexer.IDENT &&
+				(p.peekNth(2).Type == lexer.LBRACE || p.peekNth(2).Type == lexer.DOT) {
+				return p.parseNamespaceDecl(false)
 			}
 		case "declare":
 			return p.parseAmbientDeclaration()
@@ -167,19 +244,58 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 	return p.parseExpressionStatement()
 }
 
-// parseNamespaceDecl parses `namespace X { export function f() {...} export
-// const c = ... }` (TDD-00095 V1: top-level only, exported function/const/let
-// members only). Members desugar to ordinary top-level declarations named
-// ast.NamespaceMangle(X, member); the member set is recorded so `X.member`
-// use sites resolve. Returns the first desugared declaration (or an empty
-// block for an empty namespace); the rest flow through pendingTopLevel.
-func (p *Parser) parseNamespaceDecl() (ast.Statement, error) {
-	nsTok := p.advance() // 'namespace'
-	nameTok, err := p.expect(lexer.IDENT)
+// parseNamespaceDecl parses `namespace X { ... }` / `module X { ... }`
+// (TDD-00095 V1, extended by TDD-00148 V2). Value members (function,
+// const/let/var — exported or not) desugar to ordinary top-level
+// declarations named ast.NamespaceMangle(X, member), recorded with their
+// exportedness so `X.member` use sites resolve (and non-exported outside
+// access is a clean rejection). Type members (class/interface/type/enum)
+// desugar to *bare-name* top-level declarations, matching the qualified
+// `new X.C(...)`/`extends X.C` final-segment precedent (ADR-00408).
+// Returns the first desugared declaration (or an empty block for an empty
+// namespace); the rest flow through pendingTopLevel. Dotted names
+// (`module A.B.C`) stay a clean rejection (TDD-00148 V3).
+func (p *Parser) parseNamespaceDecl(ambient bool) (ast.Statement, error) {
+	nsTok := p.advance() // 'namespace' / 'module'
+	ns, err := p.parseNamespaceName()
 	if err != nil {
 		return nil, err
 	}
+	decls, err := p.parseNamespaceBody(nsTok, ns, ambient)
+	if err != nil {
+		return nil, err
+	}
+	if len(decls) == 0 {
+		return ast.NewBlockStatement(nil, ast.Pos{Line: nsTok.Line, Col: nsTok.Col}), nil
+	}
+	p.pendingTopLevel = append(p.pendingTopLevel, decls[1:]...)
+	return decls[0], nil
+}
+
+// parseNamespaceName parses the (possibly dotted, `A.B.C` — TDD-00148 V3)
+// name after `namespace`/`module`, returning the dotted string.
+func (p *Parser) parseNamespaceName() (string, error) {
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return "", err
+	}
 	ns := nameTok.Literal
+	for p.check(lexer.DOT) {
+		p.advance()
+		seg, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return "", err
+		}
+		ns = ns + "." + seg.Literal
+	}
+	return ns, nil
+}
+
+// parseNamespaceBody parses `{ ...members }` for the namespace named ns
+// (dotted for a nested/dotted namespace) and returns the desugared
+// declarations. Nested `namespace`/`module` members recurse with the
+// extended dotted name.
+func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) ([]ast.Statement, error) {
 	if _, err := p.expect(lexer.LBRACE); err != nil {
 		return nil, err
 	}
@@ -190,49 +306,179 @@ func (p *Parser) parseNamespaceDecl() (ast.Statement, error) {
 		p.namespaces[ns] = map[string]bool{}
 	}
 	var decls []ast.Statement
-	for !p.check(lexer.RBRACE) {
-		if _, err := p.expect(lexer.EXPORT); err != nil {
-			return nil, fmt.Errorf("%d:%d: every namespace member must be an `export function` or `export const/let` declaration (V1)", p.peek().Line, p.peek().Col)
-		}
+	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+		exported := p.match(lexer.EXPORT)
 		isAsync := false
 		if p.check(lexer.ASYNC) && p.peekNth(1).Type == lexer.FUNCTION {
 			p.advance()
 			isAsync = true
 		}
+		isAbstract := false
+		if p.check(lexer.ABSTRACT) && p.peekNth(1).Type == lexer.CLASS {
+			p.advance()
+			isAbstract = true
+		}
 		switch p.peek().Type {
+		case lexer.IMPORT:
+			// `[export] import X = N;` — a namespace-scoped alias (ADR-00456).
+			if p.peekNth(1).Type == lexer.IDENT && p.peekNth(2).Type == lexer.ASSIGN {
+				if _, err := p.parseImportEquals(ns, exported); err != nil {
+					return nil, err
+				}
+				continue
+			}
 		case lexer.FUNCTION:
+			// An ambient namespace's function member gets the same
+			// throwing-stub treatment a top-level `declare function` does
+			// (ADR-00471/ADR-00474).
+			if ambient {
+				p.advance() // 'function'
+				nameTok, err := p.expect(lexer.IDENT)
+				if err != nil {
+					return nil, err
+				}
+				fd, err := p.parseFunctionRest(nameTok.Literal, false, true, false)
+				if err != nil {
+					return nil, err
+				}
+				if fd.Body == nil {
+					throwStmt := ast.NewThrowStatement(
+						ast.NewNewErrorExpression("Error",
+							ast.NewStringLiteral("ambient function '"+nameTok.Literal+"' has no implementation", posOf(nsTok)), posOf(nsTok)), posOf(nsTok))
+					fd.Body = ast.NewBlockStatement([]ast.Statement{throwStmt}, posOf(nsTok))
+					fd.IsAbstract = false
+				}
+				p.namespaces[ns][fd.Name] = exported
+				fd.Name = ast.NamespaceMangle(ns, fd.Name)
+				decls = append(decls, fd)
+				continue
+			}
 			fd, err := p.parseFunctionDecl(isAsync, "")
 			if err != nil {
 				return nil, err
 			}
-			p.namespaces[ns][fd.Name] = true
+			p.namespaces[ns][fd.Name] = exported
 			fd.Name = ast.NamespaceMangle(ns, fd.Name)
 			decls = append(decls, fd)
+			continue
 		case lexer.CONST, lexer.LET, lexer.VAR:
+			// `const enum Name {…}` is an enum member, not a const binding —
+			// the same disambiguation parseStatement does.
+			if p.peek().Type == lexer.CONST && p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "enum" {
+				ed, err := p.parseEnumDeclaration()
+				if err != nil {
+					return nil, err
+				}
+				decls = append(decls, ed)
+				continue
+			}
+			// An ambient namespace's binding member (`const y: number;`) is
+			// a zero-initialized var, like a top-level `declare var`
+			// (ADR-00474) — no initializer required, `const`-ness dropped.
+			if ambient {
+				p.advance() // kind
+				nameTok, err := p.expect(lexer.IDENT)
+				if err != nil {
+					return nil, err
+				}
+				var ta *ast.TypeAnnotation
+				if p.match(lexer.COLON) {
+					ta, err = p.parseTypeAnnotation("ts")
+					if err != nil {
+						return nil, err
+					}
+				}
+				p.consumeSemicolon()
+				vd := ast.NewVarDeclaration("var", nameTok.Literal, ta, nil, posOf(nsTok))
+				p.namespaces[ns][vd.Name] = exported
+				vd.Name = ast.NamespaceMangle(ns, vd.Name)
+				decls = append(decls, vd)
+				continue
+			}
 			vd, err := p.parseVarDecl(true)
 			if err != nil {
 				return nil, err
 			}
 			switch d := vd.(type) {
 			case *ast.VarDeclaration:
-				p.namespaces[ns][d.Name] = true
+				p.namespaces[ns][d.Name] = exported
 				d.Name = ast.NamespaceMangle(ns, d.Name)
 				decls = append(decls, d)
 			default:
-				return nil, fmt.Errorf("%d:%d: a namespace const/let member must declare exactly one binding (V1)", nsTok.Line, nsTok.Col)
+				return nil, fmt.Errorf("%d:%d: a namespace const/let member must declare exactly one binding", nsTok.Line, nsTok.Col)
 			}
-		default:
-			return nil, fmt.Errorf("%d:%d: unsupported namespace member — V1 supports `export function` and `export const/let` only", p.peek().Line, p.peek().Col)
+			continue
+		case lexer.CLASS:
+			cd, err := p.parseClassDecl(isAbstract, "")
+			if err != nil {
+				return nil, err
+			}
+			decls = append(decls, cd)
+			continue
 		}
+		if p.check(lexer.IDENT) {
+			switch p.peek().Literal {
+			case "namespace", "module":
+				// Nested namespace (TDD-00148 V3): recurse with the extended
+				// dotted name; its desugared members flatten into this list.
+				if p.peekNth(1).Type == lexer.IDENT {
+					p.advance() // 'namespace'/'module'
+					sub, err := p.parseNamespaceName()
+					if err != nil {
+						return nil, err
+					}
+					subDecls, err := p.parseNamespaceBody(nsTok, ns+"."+sub, ambient)
+					if err != nil {
+						return nil, err
+					}
+					decls = append(decls, subDecls...)
+					continue
+				}
+			case "declare":
+				// An ambient member (`export declare var x;` — ADR-00462):
+				// erased exactly like a top-level ambient declaration.
+				if _, err := p.parseAmbientDeclaration(); err != nil {
+					return nil, err
+				}
+				continue
+			case "interface":
+				id, err := p.parseInterfaceDecl()
+				if err != nil {
+					return nil, err
+				}
+				decls = append(decls, id)
+				continue
+			case "type":
+				td, err := p.parseTypeAliasDecl()
+				if err != nil {
+					return nil, err
+				}
+				decls = append(decls, td)
+				continue
+			case "enum":
+				ed, err := p.parseEnumDeclaration()
+				if err != nil {
+					return nil, err
+				}
+				decls = append(decls, ed)
+				continue
+			}
+		}
+		// Anything else is an executable statement (`module M { doInit(); }`)
+		// — real TS runs namespace-body statements at initialization; here
+		// they flatten to top level in declaration order like every other
+		// desugared member (ADR-00468). Genuinely invalid input still errors
+		// from parseStatement itself.
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		decls = append(decls, stmt)
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	if len(decls) == 0 {
-		return ast.NewBlockStatement(nil, ast.Pos{Line: nsTok.Line, Col: nsTok.Col}), nil
-	}
-	p.pendingTopLevel = append(p.pendingTopLevel, decls[1:]...)
-	return decls[0], nil
+	return decls, nil
 }
 
 func (p *Parser) parseLabeledStatement() (*ast.LabeledStatement, error) {
@@ -353,11 +599,43 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 			return nil, err
 		}
 	}
-	fd, err := p.parseFunctionRest(name, isAsync, false)
+	fd, err := p.parseFunctionRest(name, isAsync, false, true)
 	if err != nil {
 		return nil, err
 	}
 	fd.IsGenerator = isGenerator
+	// TS overload group: one or more body-less signatures immediately followed
+	// by the implementation, all sharing one name. Signatures are erased —
+	// only the implementation survives into the AST. (The corpus's exported
+	// overload groups repeat `export` per line, so a leading `export` between
+	// group members is tolerated and folds into the caller's own export
+	// handling of the first declaration.)
+	for fd.IsOverloadSig {
+		sigTok := p.peek()
+		p.match(lexer.EXPORT)
+		nextAsync := false
+		if p.check(lexer.ASYNC) && p.peekNth(1).Type == lexer.FUNCTION {
+			p.advance()
+			nextAsync = true
+		}
+		if !p.check(lexer.FUNCTION) {
+			return nil, fmt.Errorf("%d:%d: overload signature for '%s' must be followed by another overload signature or its implementation", sigTok.Line, sigTok.Col, name)
+		}
+		p.advance() // 'function'
+		isGen := p.match(lexer.STAR)
+		nTok, err := p.expect(lexer.IDENT)
+		if err != nil {
+			return nil, err
+		}
+		if nTok.Literal != name {
+			return nil, fmt.Errorf("%d:%d: expected the implementation of overloaded function '%s', got 'function %s'", nTok.Line, nTok.Col, name, nTok.Literal)
+		}
+		fd, err = p.parseFunctionRest(name, nextAsync, false, true)
+		if err != nil {
+			return nil, err
+		}
+		fd.IsGenerator = isGen
+	}
 	// TDD-00125: type an otherwise-untyped parameter / return from a leading
 	// `@param {T} name` / `@returns {T}`, the "typed JS" workflow. Fills in
 	// only where there is no inline annotation (an inline `: T` wins).
@@ -426,7 +704,13 @@ func applyJSDocFuncTypes(fd *ast.FunctionDeclaration, doc *jsdoc.Comment) {
 // bodyOptional is TDD-00009 Stage 4: an abstract method signature
 // (`abstract foo(): T;`) has no body at all — terminated by `;` instead of
 // a `{...}` block. Never set by a top-level function (always false there).
-func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*ast.FunctionDeclaration, error) {
+// overloadOK permits a body-less TS overload *signature* (`f(x: string):
+// void;` — terminated by `;`, not abstract): the declaration comes back with
+// Body nil and IsOverloadSig set, and the caller is responsible for erasing
+// it and verifying an implementation follows. Only the two declaration
+// contexts where TS permits overloads set it (top-level `function` and class
+// members); function expressions and object-literal methods never do.
+func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional, overloadOK bool) (*ast.FunctionDeclaration, error) {
 	// Position of whatever comes right after the already-consumed name (a
 	// `<` or the opening `(`) — close enough to the declaration's own
 	// position for error-reporting purposes. Backfilled via SetPos on every
@@ -473,6 +757,17 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional bool) (*as
 		p.advance()
 		fd := &ast.FunctionDeclaration{
 			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsAbstract: true,
+		}
+		fd.SetPos(pos)
+		return fd, nil
+	}
+
+	// A TS overload signature: no body, terminated by `;`. Comes back flagged
+	// for the caller to erase after verifying the implementation follows.
+	if overloadOK && !bodyOptional && p.check(lexer.SEMICOLON) {
+		p.advance()
+		fd := &ast.FunctionDeclaration{
+			Name: name, TypeParams: typeParams, TypeParamConstraints: typeParamConstraints, Params: params, ReturnType: retType, Body: nil, IsAsync: isAsync, IsOverloadSig: true,
 		}
 		fd.SetPos(pos)
 		return fd, nil
@@ -626,6 +921,11 @@ func strictBindingErrorStmt(s ast.Statement) error {
 }
 
 func (p *Parser) parseParamList() ([]ast.Param, error) {
+	// Capture-and-clear the constructor-parameter gate immediately: it must
+	// apply to this list only, never to a nested function/arrow parameter
+	// list encountered inside a default-value expression or the body.
+	allowPropParams := p.inCtorParams
+	p.inCtorParams = false
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		// A leading `this` parameter (`function f(this: T, x: number)`) is TS's
@@ -646,6 +946,40 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				break
 			}
 			continue
+		}
+
+		// TS parameter properties: `constructor(public x: number, readonly y:
+		// string)` — an accessibility modifier and/or contextual `readonly`
+		// before the parameter name. Only legal in a constructor's parameter
+		// list (p.inCtorParams); `readonly` is a modifier only when a real
+		// parameter name follows, so a parameter literally named `readonly`
+		// keeps working.
+		var propVis string
+		var propSeen, propReadonly bool
+		for {
+			switch p.peek().Type {
+			case lexer.PUBLIC:
+				propSeen, propVis = true, "public"
+				p.advance()
+				continue
+			case lexer.PRIVATE:
+				propSeen, propVis = true, "private"
+				p.advance()
+				continue
+			case lexer.PROTECTED:
+				propSeen, propVis = true, "protected"
+				p.advance()
+				continue
+			}
+			if p.check(lexer.IDENT) && p.peek().Literal == "readonly" && p.peekNth(1).Type == lexer.IDENT {
+				propSeen, propReadonly = true, true
+				p.advance()
+				continue
+			}
+			break
+		}
+		if propSeen && !allowPropParams {
+			return nil, fmt.Errorf("%d:%d: a parameter property (public/private/protected/readonly) is only allowed in a class constructor", p.peek().Line, p.peek().Col)
 		}
 
 		rest := p.match(lexer.ELLIPSIS)
@@ -734,7 +1068,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				return nil, err
 			}
 		}
-		params = append(params, ast.Param{Name: nameTok.Literal, Type: ta, Rest: rest, Default: dflt, Optional: optional})
+		params = append(params, ast.Param{Name: nameTok.Literal, Type: ta, Rest: rest, Default: dflt, Optional: optional, PropVisibility: propVis, PropReadonly: propReadonly})
 		if rest {
 			break // rest param must be last
 		}
@@ -1515,6 +1849,19 @@ func (p *Parser) parseExpressionStatement() (*ast.ExpressionStatement, error) {
 	expr, err := p.parseExpression()
 	if err != nil {
 		return nil, err
+	}
+	// Statement-level comma operator (`a(), b();` — ADR-00476): folds into
+	// the existing SequenceExpression, evaluating left to right.
+	if p.check(lexer.COMMA) {
+		exprs := []ast.Expression{expr}
+		for p.match(lexer.COMMA) {
+			next, err := p.parseExpression()
+			if err != nil {
+				return nil, err
+			}
+			exprs = append(exprs, next)
+		}
+		expr = ast.NewSequenceExpression(exprs, expr.GetPos())
 	}
 	p.consumeSemicolon()
 	return ast.NewExpressionStatement(expr, expr.GetPos()), nil

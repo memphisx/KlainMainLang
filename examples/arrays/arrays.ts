@@ -96,3 +96,18 @@ function doubled(arr: number[]): number[] {
 let d = doubled(r)
 console.log(d[3])  // 6
 console.log(d[5])  // 10
+
+// concat takes any number of arrays or plain values; new Array<T>() is empty.
+const parts = new Array<number>();
+parts.push(1);
+console.log(parts.concat([2, 3], 4).join("+"));
+
+// Elisions: holes read as undefined (zero value) and count in the length.
+const holes: number[] = [1, , 3];
+console.log(holes.length);
+
+// Array.from over a Set and a string.
+const uniq = new Set<string>();
+uniq.add("a"); uniq.add("b");
+console.log(Array.from(uniq).join("-"));
+console.log(Array.from("xyz").join("."));

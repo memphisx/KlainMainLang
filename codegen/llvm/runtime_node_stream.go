@@ -166,6 +166,25 @@ done:
   ret void
 }`, ns))
 
+	// __kml_ns_destroy_close(n): destroy()'s 'close' emission for a
+	// readable that is NOT flowing (ADR-00483) — a flowing stream's own
+	// flow loop already emits 'end'/'close' when the closed source drains,
+	// so emitting here too would double-fire. Enqueued as a microtask by
+	// the destroy() call site, keeping Node's asynchronous 'close' order.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_ns_destroy_close(ptr %%n) {
+entry:
+  %%f3 = getelementptr %s, ptr %%n, i32 0, i32 3
+  %%fl = load i64, ptr %%f3, align 8
+  %%isflow = icmp eq i64 %%fl, 1
+  br i1 %%isflow, label %%ret, label %%emit
+emit:
+  call void @__kml_ns_emit_common(ptr %%n, ptr %s, i64 0, i64 0, i64 0)
+  ret void
+ret:
+  ret void
+}`, nodeStreamStructIR, e.internString("close")))
+
 	// Flow loop: reaction-driven read → emit('data') → read …; done emits
 	// 'end' then 'close'; a rejected read emits 'error'.
 	e.emitGlobal(fmt.Sprintf(`

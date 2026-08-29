@@ -543,6 +543,11 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 					if prev.path == path && isVarOrFuncKind(prev.kind) && isVarOrFuncKind(ref.Kind) {
 						continue
 					}
+					// A same-file class+interface merge pair shares one
+					// mangled name by design (ADR-00466).
+					if prev.path == path && isClassIfaceMergePair(prev.kind, ref.Kind) {
+						continue
+					}
 					return nil, fmt.Errorf("internal error: mangled name '%s' collided between %s and %s", ref.Name, prev.path, path)
 				}
 				declaredIn[ref.Name] = declSite{path: path, kind: ref.Kind}
@@ -555,6 +560,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// ExportDeclaration everywhere, since codegen/llvm knows neither node.
 	merged := &ast.Program{}
 	mergeNamespaces := func(src *ast.Program) {
+		merged.NSAliases = append(merged.NSAliases, src.NSAliases...)
 		for ns, members := range src.Namespaces {
 			if merged.Namespaces == nil {
 				merged.Namespaces = map[string]map[string]bool{}
@@ -562,8 +568,11 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 			if merged.Namespaces[ns] == nil {
 				merged.Namespaces[ns] = map[string]bool{}
 			}
-			for m := range members {
-				merged.Namespaces[ns][m] = true
+			for m, exported := range members {
+				// The value is the member's exportedness (TDD-00148) — carry
+				// it through; a duplicate across files keeps "exported" if
+				// either side exports it.
+				merged.Namespaces[ns][m] = merged.Namespaces[ns][m] || exported
 			}
 		}
 	}
@@ -696,6 +705,17 @@ type declRef struct {
 // `function` (hoisted; a var and a same-named function coexist as one binding).
 func isVarOrFuncKind(kind string) bool { return kind == "var" || kind == "function" }
 
+// isClassIfaceMergePair reports a class+interface same-name pair (either
+// order) — TS declaration merging's most common shape (ADR-00466).
+func isClassIfaceMergePair(a, b string) bool {
+	if a == "interface" && b == "interface" {
+		// interface+interface declaration merging (ADR-00479): the two
+		// declarations' members union at registration.
+		return true
+	}
+	return (a == "class" && b == "interface") || (a == "interface" && b == "class")
+}
+
 // declRefsOf returns every top-level name stmt introduces, unwrapping
 // ExportDeclaration first. Empty (not nil) for a statement that introduces
 // no top-level name at all (import/export-from, or any executable
@@ -784,7 +804,15 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 				// own freshReg alloca and re-points the symbol, so the second
 				// declaration is observably just an assignment.
 				if !isVarOrFuncKind(prevKind) || !isVarOrFuncKind(ref.Kind) {
-					return nil, fmt.Errorf("'%s' is declared more than once in %s", ref.Name, path)
+					// TS declaration merging (ADR-00466): an interface may
+					// coexist with a same-name class (either order) — the
+					// class wins as the binding; the interface's extra
+					// members are ignored at registration (codegen skips
+					// registering an interface shadowed by a class), a
+					// disclosed narrowing of real merge semantics.
+					if !isClassIfaceMergePair(prevKind, ref.Kind) {
+						return nil, fmt.Errorf("'%s' is declared more than once in %s", ref.Name, path)
+					}
 				}
 				// Idempotent: re-point to the existing mangled name rather than
 				// minting a second one for the same binding.

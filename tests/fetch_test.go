@@ -1096,3 +1096,19 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 })
 `, "got pong 200")
 }
+
+// Response.headers (ADR-00490): raw header capture parsed lazily into a
+// Map<string,string> with lowercased keys per fetch Headers semantics.
+func TestE2EFetchResponseHeaders(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    const h: Map<string, string> = r.headers
+    console.log(h.get("content-type"))
+    console.log(h.has("x-nonexistent"))
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "application/json\nfalse")
+}

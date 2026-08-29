@@ -596,6 +596,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return ReadableStreamType(TypedArrayType("uint8"))
 			}
 		}
+		// Response.headers — must match the ADR-00490 emit path.
+		if ex.Property == "headers" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+				return HeadersType()
+			}
+		}
 		// TransformStream sides — must match emitTransformStreamProperty.
 		if ex.Property == "readable" || ex.Property == "writable" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsTransformStream {
@@ -631,6 +637,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.Property == "port1" || ex.Property == "port2" {
 			if objTy := e.inferExprType(ex.Object); objTy.IsMessageChannel {
 				return MessagePortType(*objTy.ElemType)
+			}
+		}
+		// Growable-buffer properties (ADR-00494) — must match
+		// emitBufferGrowableProps.
+		if ex.Property == "growable" || ex.Property == "resizable" || ex.Property == "maxByteLength" {
+			if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer {
+				if ex.Property == "maxByteLength" {
+					return TypeI64
+				}
+				return TypeBool
 			}
 		}
 		// DataView properties — must match emitDataViewProp.
@@ -673,6 +689,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return e.inferExprType(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 				}
 			}
+		}
+		// Nested-namespace member `A.B.member` (TDD-00148 V3) — must match emitMember.
+		if members, nsName := e.namespaceByChain(ex.Object); members != nil && members[ex.Property] {
+			return e.inferExprType(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
+		}
+		// Namespace-qualified type-member chain (ADR-00480) — must match emitMember.
+		if bare := e.stripNSTypeQualifier(ex.Object); bare != nil {
+			return e.inferExprType(&ast.MemberExpression{Object: bare, Property: ex.Property})
 		}
 		// Static field read: ClassName.staticField (TDD-00009 Stage 4).
 		if id, ok := ex.Object.(*ast.Identifier); ok {
@@ -788,6 +812,17 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// klain:assets (TDD-00142 Stage 7): embedDir(...) → EmbeddedAssets,
 		// assets.get(...) → ArrayBuffer.
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			// Symbol.for / Symbol.keyFor (ADR-00488) — must match emitSymbolStatic.
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Symbol" && !e.isShadowedByLocal("Symbol") {
+				if mem.Property == "for" {
+					return SymbolType()
+				}
+				if mem.Property == "keyFor" {
+					nt := TypePtr
+					nt.Nullable = true
+					return nt
+				}
+			}
 			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assets__kml_builtin" && mem.Property == "embedDir" {
 				return EmbeddedAssetsType()
 			}
@@ -921,8 +956,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 			if objTy := e.inferExprType(mem.Object); objTy.IsNodeReadable || objTy.IsNodeWritable {
 				switch mem.Property {
-				case "on", "once", "pause", "resume", "end":
+				case "on", "once", "pause", "resume", "end", "destroy", "setEncoding", "unshift":
 					return objTy
+				case "read":
+					// Sync read yields the chunk type (ADR-00484).
+					if objTy.StreamOut != nil {
+						return *objTy.StreamOut
+					}
+					return TypePtr
 				case "push", "write":
 					return TypeBool
 				case "pipe":
@@ -1054,7 +1095,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			// argument types, purely (see genericCallReturnType's doc
 			// comment for why this must never trigger real emission).
 			if decl, found := e.genericFuncs[id.Name]; found {
-				if ty, ok := e.genericCallReturnType(decl, ex.Args); ok {
+				if ty, ok := e.genericCallReturnType(decl, ex.Args, ex.TypeArgs); ok {
 					return ty
 				}
 			}
@@ -1147,6 +1188,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 						return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
 					}
 				}
+			}
+			// Nested-namespace member call `A.B.f(...)` (TDD-00148 V3).
+			if members, nsName := e.namespaceByChain(mem.Object); members != nil && members[mem.Property] {
+				return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "console" && !e.isShadowedByLocal(id.Name) {
 				// Every console.* method returns void (emitConsolePrint and
@@ -1278,6 +1323,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeBool
 				case "readdirSync":
 					return ArrayOf(TypePtr)
+				case "statSync", "lstatSync", "fstatSync":
+					return StatsType()
+				case "openSync", "writeSync", "readSync":
+					return TypeI64
+				case "realpathSync", "mkdtempSync", "readlinkSync":
+					return TypePtr
 				case "createReadStream":
 					return NodeReadableType(TypePtr)
 				case "createWriteStream":
@@ -1315,6 +1366,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeVoid
 				case "send":
 					return TypeBool
+				}
+			}
+			// fs.statSync Stats methods (ADR-00495).
+			if mem.Property == "isFile" || mem.Property == "isDirectory" || mem.Property == "isSymbolicLink" {
+				if e.inferExprType(mem.Object).IsStats {
+					return TypeBool
+				}
+			}
+			// XMLHttpRequest response-header reads (ADR-00490).
+			if mem.Property == "getResponseHeader" || mem.Property == "getAllResponseHeaders" {
+				if e.inferExprType(mem.Object).IsXHR {
+					return TypePtr
 				}
 			}
 			// ClientRequest methods chain (end/abort/on return the handle).
@@ -1560,10 +1623,47 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					}
 					return ArrayOf(TypeI64)
 				case "from":
+					// 2-arg mapFn form (ADR-00491): infer through the same
+					// .map() desugar the emitter uses, so the closure's
+					// parameters are typed contextually against the source
+					// element type (inferring the bare closure here would
+					// bind its `number` params to the standalone default
+					// instead).
+					if len(ex.Args) == 2 {
+						fromCall := ast.NewCallExpression(
+							ast.NewMemberExpression(ast.NewIdentifier("Array", ex.GetPos()), "from", ex.GetPos()),
+							ex.Args[:1], ex.GetPos())
+						mapCall := ast.NewCallExpression(
+							ast.NewMemberExpression(fromCall, "map", ex.GetPos()),
+							ex.Args[1:2], ex.GetPos())
+						return e.inferExprType(mapCall)
+					}
 					if len(ex.Args) == 1 {
 						argTy := e.inferExprType(ex.Args[0])
 						if argTy.IsArray {
 							return ArrayOf(*argTy.ElemType)
+						}
+						// Map → entries tuple array; Set → element array;
+						// string → string[] (ADR-00482, matching emitArrayFrom).
+						if argTy.IsMap && !argTy.IsSet {
+							keyTy, valTy := TypePtr, TypePtr
+							if argTy.MapKey != nil {
+								keyTy = *argTy.MapKey
+							}
+							if argTy.MapVal != nil {
+								valTy = *argTy.MapVal
+							}
+							return ArrayOf(TupleType([]Type{keyTy, valTy}))
+						}
+						if argTy.IsSet {
+							elemTy := TypePtr
+							if argTy.MapKey != nil {
+								elemTy = *argTy.MapKey
+							}
+							return ArrayOf(elemTy)
+						}
+						if isStringTy(argTy) && !argTy.IsClass && !argTy.IsObject {
+							return ArrayOf(TypePtr)
 						}
 						if argTy.IsClass {
 							if info, ok3 := e.classes[argTy.ClassName]; ok3 {
@@ -1698,8 +1798,30 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 							}
 						}
 					}
+					if mem.Property == "values" {
+						// Same homogeneous-typed-values rule as entries
+						// (ADR-00492) — must match emitObjectValues.
+						if len(ex.Args) >= 1 {
+							if argTy := e.inferExprType(ex.Args[0]); argTy.IsObject {
+								if vt, ok := homogeneousFieldType(argTy.VisibleFields()); ok {
+									return ArrayOf(vt)
+								}
+							}
+						}
+						return ArrayOf(TypePtr)
+					}
 					if mem.Property == "entries" {
-						entryTy := TupleType([]Type{TypePtr, TypePtr})
+						// Homogeneous fixed-shape objects keep real typed
+						// values (ADR-00492) — must match emitObjectEntries.
+						valTy := TypePtr
+						if len(ex.Args) >= 1 {
+							if argTy := e.inferExprType(ex.Args[0]); argTy.IsObject {
+								if vt, ok := homogeneousFieldType(argTy.VisibleFields()); ok {
+									valTy = vt
+								}
+							}
+						}
+						entryTy := TupleType([]Type{TypePtr, valTy})
 						return ArrayOf(entryTy)
 					}
 					return ArrayOf(TypePtr)
@@ -2085,11 +2207,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		return TypeI64
 	case *ast.NewNodeStreamExpression:
-		inTy, outTy := TypeI64, TypeI64
-		if ex.Kind == "passthrough" {
-			// Mirrors emitNewNodeStream: PassThrough defaults to string chunks.
-			inTy, outTy = TypePtr, TypePtr
-		}
+		// Mirrors emitNewNodeStream: every Node-stream constructor defaults to
+		// string chunks (Node's non-objectMode streams carry strings/Buffers);
+		// `<T>` overrides.
+		inTy, outTy := TypePtr, TypePtr
 		if ex.InType != nil {
 			inTy = e.resolveType(ex.InType)
 		}
@@ -2177,10 +2298,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	case *ast.NewURLPatternExpression:
 		return URLPatternType()
 	case *ast.NewArrayBufferExpression:
+		ty := ArrayBufferType()
 		if ex.Shared {
-			return SharedArrayBufferType()
+			ty = SharedArrayBufferType()
 		}
-		return ArrayBufferType()
+		ty.BufferGrowable = ex.MaxByteLength != nil
+		return ty
 	case *ast.NewBroadcastChannelExpression:
 		return BroadcastChannelType(ex.Name)
 	case *ast.NewMessageChannelExpression:

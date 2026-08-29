@@ -127,6 +127,21 @@ func (p *Parser) parseExportDeclaration() (ast.Statement, error) {
 		return ast.NewExportDeclaration(decl, true, pos), nil
 	}
 
+	// `export declare …`: ambient — parse it directly (the ambient parser
+	// may return a namespace's desugared declarations, which must not be
+	// re-wrapped) with exportness dropped, as for namespaces below (ADR-00474).
+	if p.check(lexer.IDENT) && p.peek().Literal == "declare" {
+		return p.parseAmbientDeclaration()
+	}
+
+	// `export namespace X {}` / `export module X {}`: exportness is
+	// meaningless in the single-file namespace scope (TDD-00148 Stage 1) —
+	// parse as the plain declaration rather than rejecting.
+	if p.check(lexer.IDENT) && (p.peek().Literal == "namespace" || p.peek().Literal == "module") &&
+		p.peekNth(1).Type == lexer.IDENT {
+		return p.parseNamespaceDecl(false)
+	}
+
 	decl, err := p.parseStatement()
 	if err != nil {
 		return nil, err
@@ -135,6 +150,11 @@ func (p *Parser) parseExportDeclaration() (ast.Statement, error) {
 	case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.InterfaceDeclaration,
 		*ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ClassDeclaration:
 		return ast.NewExportDeclaration(decl, false, pos), nil
+	case *ast.BlockStatement:
+		// The erased forms — `export declare …` (ambient) and an exported
+		// namespace's own empty-desugar — arrive as the empty block their
+		// parsers return; pass it through unwrapped (ADR-00468).
+		return decl, nil
 	default:
 		return nil, fmt.Errorf("%d:%d: 'export' can only precede a function, variable, interface, type alias, enum, or class declaration", pos.Line, pos.Col)
 	}
@@ -305,4 +325,32 @@ func (p *Parser) parseImportExpr() (ast.Expression, error) {
 	default:
 		return nil, fmt.Errorf("%d:%d: expected '.' or '(' after 'import' in an expression, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 	}
+}
+
+// parseImportEquals parses a TS import-equals alias declaration
+// (`import X = Y.Z;`, ADR-00456) — positioned at the `import` keyword.
+// scope is the dotted name of the declaring namespace ("" at top level);
+// exported marks the namespace-scoped `export import` form. The alias is
+// recorded for codegen to resolve once every namespace is known; the
+// statement itself desugars to nothing. The CommonJS form
+// (`import x = require('...')`) is a clean rejection.
+func (p *Parser) parseImportEquals(scope string, exported bool) (ast.Statement, error) {
+	tok := p.advance() // 'import'
+	nameTok, err := p.expect(lexer.IDENT)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.ASSIGN); err != nil {
+		return nil, err
+	}
+	if p.check(lexer.IDENT) && p.peek().Literal == "require" && p.peekNth(1).Type == lexer.LPAREN {
+		return nil, fmt.Errorf("%d:%d: `import %s = require(...)` is not supported — use an ES import declaration instead", tok.Line, tok.Col, nameTok.Literal)
+	}
+	target, err := p.parseNamespaceName()
+	if err != nil {
+		return nil, err
+	}
+	p.consumeSemicolon()
+	p.nsAliases = append(p.nsAliases, ast.NSAliasDecl{Scope: scope, Name: nameTok.Literal, Target: target, Exported: exported})
+	return ast.NewBlockStatement(nil, posOf(tok)), nil
 }

@@ -92,7 +92,7 @@ batches (ADR-00406–00435).
    must currently be an arrow/function expression; ~17), `mustCall`'s
    0-2-simple-params ABI bound (~4 here, more corpus-wide), the `Duplex`
    *class* itself (`new Duplex`/`instanceof Duplex`; ~6),
-   `.destroy()`/`.read()`/`.setEncoding()` methods, `encoding`/`final`
+   `.unshift()` (`.destroy()`/`.setEncoding()`/`.read()` shipped — ADR-00483/ADR-00484), `encoding`/`final`
    options, and `_readableState`/`_writableState` internals (out of
    scope). Aggregate pass count unmoved (35) — expected: these files
    stack multiple blockers.

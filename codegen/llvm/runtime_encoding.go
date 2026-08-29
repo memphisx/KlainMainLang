@@ -246,11 +246,11 @@ done:
 }
 
 // ensureBase64Decode declares __kml_atob: the inverse of __kml_btoa.
-// Permissive, not strict: malformed input (length not a multiple of 4)
-// silently drops the trailing incomplete group rather than throwing, and
-// characters outside the base64 alphabet decode as 0 rather than raising
-// an error — simpler than real atob's InvalidCharacterError, a documented
-// V1 simplification.
+// A character outside the base64 alphabet (plus '=' padding and ASCII
+// whitespace) throws a real `InvalidCharacterError` DOMException, matching
+// WHATWG atob (ADR-00458). Remaining V1 simplifications: whitespace is
+// *rejected* rather than stripped (forgiving-base64 strips it), and a
+// length not a multiple of 4 silently drops the trailing group.
 func (e *Emitter) ensureBase64Decode() {
 	if e.usedBase64Decode {
 		return
@@ -258,6 +258,7 @@ func (e *Emitter) ensureBase64Decode() {
 	e.usedBase64Decode = true
 	e.ensureStrlen()
 	e.ensureMalloc()
+	e.ensureExceptionHelpers()
 
 	table := make([]byte, 256)
 	for i, c := range []byte(base64Alphabet) {
@@ -269,18 +270,59 @@ func (e *Emitter) ensureBase64Decode() {
 	}
 	e.ensureStrHeaderRuntime()
 	e.emitGlobal(fmt.Sprintf("@__kml_base64_decode_table = private unnamed_addr constant [256 x i8] [%s]", strings.Join(entries, ", ")))
+	valid := make([]byte, 256)
+	for _, c := range []byte(base64Alphabet) {
+		valid[c] = 1
+	}
+	valid['='] = 1
+	ventries := make([]string, 256)
+	for i, v := range valid {
+		ventries[i] = fmt.Sprintf("i8 %d", v)
+	}
+	e.emitGlobal(fmt.Sprintf("@__kml_base64_valid_table = private unnamed_addr constant [256 x i8] [%s]", strings.Join(ventries, ", ")))
+	e.emitGlobal(`@.kml_atob_errmsg = private unnamed_addr constant [54 x i8] c"The string to be decoded contains invalid characters.\00"`)
+	e.emitGlobal(`@.kml_atob_errname = private unnamed_addr constant [22 x i8] c"InvalidCharacterError\00"`)
 	e.emitGlobal(`
 define ptr @__kml_atob(ptr %str) {
 entry:
   %len = call i64 @strlen(ptr %str)
+  br label %vloop
+vloop:
+  %vi = phi i64 [0, %entry], [%vin, %vcont]
+  %vdone = icmp sge i64 %vi, %len
+  br i1 %vdone, label %decode, label %vchk
+vchk:
+  %vp = getelementptr i8, ptr %str, i64 %vi
+  %vc = load i8, ptr %vp, align 1
+  %vc64 = zext i8 %vc to i64
+  %vtp = getelementptr [256 x i8], ptr @__kml_base64_valid_table, i64 0, i64 %vc64
+  %vv = load i8, ptr %vtp, align 1
+  %vok = icmp ne i8 %vv, 0
+  br i1 %vok, label %vcont, label %vthrow
+vcont:
+  %vin = add i64 %vi, 1
+  br label %vloop
+vthrow:
+  %emsg = call ptr @__kml_str_from_cstr(ptr @.kml_atob_errmsg)
+  %ename = call ptr @__kml_str_from_cstr(ptr @.kml_atob_errname)
+  %errobj = call ptr @malloc(i64 24)
+  %kindp = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 0
+  store i64 7, ptr %kindp, align 8
+  %msgp = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 1
+  store ptr %emsg, ptr %msgp, align 8
+  %namep = getelementptr { i64, ptr, ptr }, ptr %errobj, i32 0, i32 2
+  store ptr %ename, ptr %namep, align 8
+  call void @__kml_throw(ptr %errobj)
+  unreachable
+decode:
   %ngroups = udiv i64 %len, 4
   %outlen_est = mul i64 %ngroups, 3
   %out = call ptr @__kml_str_alloc(i64 %outlen_est)
   br label %loopcheck
 
 loopcheck:
-  %i = phi i64 [ 0, %entry ], [ %i_next, %loopbody ]
-  %oi = phi i64 [ 0, %entry ], [ %oi_next, %loopbody ]
+  %i = phi i64 [ 0, %decode ], [ %i_next, %loopbody ]
+  %oi = phi i64 [ 0, %decode ], [ %oi_next, %loopbody ]
   %i4 = add i64 %i, 4
   %cont = icmp sle i64 %i4, %len
   br i1 %cont, label %loopbody, label %done

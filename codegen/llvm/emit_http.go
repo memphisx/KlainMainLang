@@ -410,12 +410,24 @@ func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos) e
 // (single-server V1, same @__kml_listen_* globals as the chained form).
 func (e *Emitter) emitHTTPCreateServer(args []ast.Expression, pos ast.Pos) (Value, error) {
 	// Node's (options, listener) two-arg form: an empty options literal is
-	// accepted (the common `createServer({}, cb)`); any actual option is a
-	// clean rejection rather than a silent ignore.
+	// accepted (the common `createServer({}, cb)`), as is
+	// `{requireHostHeader: false}` — this dispatcher never enforced a Host
+	// header, so accepting the flag states existing behavior rather than
+	// silently changing any (ADR-00503). Every other option (timeouts,
+	// h2 settings, …) stays a clean rejection rather than a silent ignore.
 	if len(args) == 2 {
 		lit, ok := args[0].(*ast.ObjectLiteral)
-		if !ok || len(lit.Properties) > 0 {
-			return Value{}, fmt.Errorf("%d:%d: createServer's options object is not supported (only the bare listener form, or an empty {} options literal)", pos.Line, pos.Col)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: createServer's options object is not supported (only the bare listener form, or an options literal)", pos.Line, pos.Col)
+		}
+		for _, prop := range lit.Properties {
+			if prop.Key == "requireHostHeader" {
+				if bl, isB := prop.Value.(*ast.BooleanLiteral); isB && !bl.Value {
+					continue
+				}
+				return Value{}, fmt.Errorf("%d:%d: createServer's requireHostHeader option supports only the literal false (this dispatcher never enforces a Host header)", pos.Line, pos.Col)
+			}
+			return Value{}, fmt.Errorf("%d:%d: createServer option '%s' is not supported (only {} or {requireHostHeader: false})", pos.Line, pos.Col, prop.Key)
 		}
 		args = args[1:]
 	}
@@ -434,8 +446,10 @@ func (e *Emitter) emitHTTPCreateServer(args []ast.Expression, pos ast.Pos) (Valu
 		return Value{}, err
 	}
 	e.ensureCalloc()
+	// 16 bytes: slot 0 = listen fd (-1 until .listen()), slot 1 = a
+	// pending 'listening' listener closure (ADR-00502).
 	srv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 8)", srv))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 16)", srv))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", srv))
 	return Value{Ref: srv, Ty: HTTPServerType()}, nil
 }
@@ -671,8 +685,38 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		if err != nil {
 			return Value{}, err
 		}
+		if evt == "listening" {
+			// Registered before .listen(): stash in handle slot 1;
+			// emitHTTPServerListen fires it right after binding. If the
+			// server is already listening (fd >= 0), fire now (ADR-00502).
+			if len(args) != 2 {
+				return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
+			}
+			cb, err := e.resolveCallback(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			if cb.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: a 'listening' listener must be a function literal", pos.Line, pos.Col)
+			}
+			slot := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", slot, objVal.Ref))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, slot))
+			fd := e.freshReg()
+			bound := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd, objVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", bound, fd))
+			nowL := e.freshLabel("httplisten.now")
+			afterL := e.freshLabel("httplisten.after")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bound, nowL, afterL))
+			e.emitLabel(nowL)
+			e.emitHTTPFireListeningSlot(objVal.Ref)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+			e.emitLabel(afterL)
+			return Value{Ty: TypeVoid}, nil
+		}
 		if evt != "request" && evt != "stream" {
-			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request', (req, res)) and .on('stream', (stream, headers)) (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening', listener) (got '%s')", pos.Line, pos.Col, evt)
 		}
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
@@ -773,6 +817,7 @@ func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos 
 	fd64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", fd64, listenfd))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, objVal.Ref))
+	e.emitHTTPFireListeningSlot(objVal.Ref)
 
 	if cbExpr != nil {
 		cb, err := e.resolveCallback(cbExpr)
@@ -2307,4 +2352,31 @@ func (e *Emitter) emitH2ClientStreamMethod(objExpr ast.Expression, method string
 		return Value{Ty: TypeVoid}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: a ClientHttp2Stream supports .on('response'|'data'|'end'), .end(), .close() (got '%s')", pos.Line, pos.Col, method)
+}
+
+// emitHTTPFireListeningSlot fires (once, then clears) the pending
+// 'listening' listener in an http.Server handle's slot 1 (ADR-00502).
+func (e *Emitter) emitHTTPFireListeningSlot(srvRef string) {
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", slot, srvRef))
+	cb := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cb, slot))
+	has := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, cb))
+	fireL := e.freshLabel("httplfire")
+	afterL := e.freshLabel("httplafter")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, fireL, afterL))
+	e.emitLabel(fireL)
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	fp := e.freshReg()
+	ep := e.freshReg()
+	fpp := e.freshReg()
+	epp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, cb))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, cb))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+	e.emitInstr(fmt.Sprintf("call void %s(ptr %s)", fp, ep))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(afterL)
 }

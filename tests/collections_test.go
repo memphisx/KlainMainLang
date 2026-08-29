@@ -624,3 +624,19 @@ c.scores.clear()
 console.log(c.scores.size)
 `, "0")
 }
+
+func TestE2EForOfMapEntriesDecomposition(t *testing.T) {
+	// ADR-00481: `for (const [k, v] of map)` decomposes entries (clearing
+	// the ADR-00011 values-only caveat); bare-variable iteration still
+	// yields values.
+	assertOutput(t, `
+const m = new Map<string, number>();
+m.set("a", 1);
+m.set("b", 2);
+for (const [k, v] of m) { console.log(k, v); }
+const n = new Map<number, string>();
+n.set(10, "x");
+for (const [key, val] of n) { console.log(key, val); }
+for (const v of m) { console.log("val", v); }
+`, "a 1\nb 2\n10 x\nval 1\nval 2")
+}

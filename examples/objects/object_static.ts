@@ -154,3 +154,14 @@ console.log(typeof nums)       // object  (arrays are objects)
 
 function greet(x: string): string { return 'hi ' + x }
 console.log(typeof greet)      // function
+
+// ── typed values for homogeneous shapes ─────────────────────────────────────
+// When every field shares one type, Object.values/entries keep real typed
+// values (mixed-type shapes stringify their values instead).
+interface Distances { toAthens: number; toSofia: number }
+const fromThessaloniki: Distances = { toAthens: 502, toSofia: 298 }
+let sum = 0
+for (const v of Object.values(fromThessaloniki)) {
+    sum = sum + v
+}
+console.log(sum)  // 800

@@ -48,3 +48,21 @@ console.log(a === 5)         // 1 (comparing against a plain literal also works)
 
 let f: any = 5.0
 console.log(a === f)         // 1 (5 === 5.0 numerically, matching JS number semantics)
+
+// A concretely-typed closure behind an any-signature slot adapts at the
+// boundary: returns box, parameters unbox, values survive intact.
+const format: (n: number) => any = (n: number): string => "#" + String(n)
+console.log(format(3))           // #3
+
+class Mapper {
+    map<U>(n: number, f: (n: number) => U): U { return f(n) }
+}
+console.log(new Mapper().map(6, (n: number): number => n * 7))  // 42
+
+// Arrays and nullable scalars adapt too — an any-boxed array keeps its
+// length (heap {ptr, len} header), so it unboxes back into a real array.
+const dbl: (n: number) => number[] = (n: number): any => [n, n * 2]
+const pair = dbl(3)
+console.log(pair.length, pair[1])   // 2 6
+const opt: (x: number | null) => any = (x: number | null): number | null => x
+console.log(opt(9))                 // 9

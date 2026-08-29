@@ -36,28 +36,32 @@
             "status": "implemented",
             "notes": [
               "Both dot and bracket notation; returns a possibly-null string (same convention as `.find()`), so `process.env.X ?? \"default\"` works"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "Exit codes (`process.exit(code)`)",
             "status": "implemented",
             "notes": [
               "Calls C `exit()`; never returns, code after it is correctly unreachable"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "Reading stdin (sync line read)",
             "status": "implemented",
             "notes": [
               "`process.readLineSync()` — one line via POSIX `getline()` (handles arbitrarily long lines), stripped of its trailing `\\n`/`\\r\\n`. Returns `null` at EOF (same possibly-null convention as `process.env`). See [ADR-00024](../adr/ADR-00024.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "Simple synchronous file read/write (`fs.readFileSync`/`writeFileSync`-style)",
             "status": "implemented",
             "notes": [
               "See [FILE-SYSTEM.md](FILE-SYSTEM.md)"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.execFileSync(file, args?)`",
@@ -76,42 +80,48 @@
             "status": "implemented",
             "notes": [
               "Current working directory, via POSIX `getcwd(NULL, 0)` (auto-sizing). See [ADR-00026](../adr/ADR-00026.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.chdir(path)`",
             "status": "implemented",
             "notes": [
               "Changes the current working directory via POSIX `chdir()`. Throws a catchable `Error` (same \"`<opDesc>` '`<path>`': `<strerror>`\" shape `fs.*`'s failures already use) if the path doesn't exist or isn't a directory. See [ADR-00026](../adr/ADR-00026.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.pid`",
             "status": "implemented",
             "notes": [
               "The current process ID, via POSIX `getpid()`. A property read, not a call, matching `process.argv`. See [ADR-00026](../adr/ADR-00026.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.platform`",
             "status": "implemented",
             "notes": [
               "A pure compile-time constant (`\"darwin\"`/`\"linux\"`/`\"win32\"`/...) baked in from the Go compiler's own `runtime.GOOS` — no runtime code at all, since this compiler doesn't cross-compile. See [ADR-00026](../adr/ADR-00026.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.arch`",
             "status": "implemented",
             "notes": [
               "A compile-time constant (`\"arm64\"`/`\"x64\"`/...) from the Go compiler's `runtime.GOARCH`, exactly like `process.platform` ([ADR-00332](../adr/ADR-00332.md))"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.execPath`",
             "status": "implemented",
             "notes": [
               "The absolute, symlink-resolved path of the running executable — the compiled program is itself the binary (no separate runtime), resolved via `_NSGetExecutablePath`+`realpath` (macOS) / `/proc/self/exe` (Linux), so it's always absolute like Node's, not a raw `argv[0]` ([ADR-00395](../adr/ADR-00395.md))"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.emitWarning(message, type?)`",
@@ -128,7 +138,8 @@
             "status": "implemented",
             "notes": [
               "Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX \"does this process exist\" check and never actually delivers a signal. See [ADR-00026](../adr/ADR-00026.md)."
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline)",
@@ -146,11 +157,11 @@
             "feature": "Writing `process.env` (`process.env.KEY = val` / `process.env[\"KEY\"] = val`)",
             "status": "implemented",
             "caveats": [
-              "Write only — no `delete process.env.KEY` (`delete` is not a parser keyword; the fixed-shape object model has no dynamic delete)",
               "Compound assignment (`process.env.X += …`) is a clean rejection"
             ],
             "notes": [
-              "`setenv(key, String(val), overwrite)` ([ADR-00333](../adr/ADR-00333.md)); a written variable is inherited by child processes"
+              "`setenv(key, String(val), overwrite)` ([ADR-00333](../adr/ADR-00333.md)); a written variable is inherited by child processes",
+              "`delete process.env.KEY` unsets the variable for real ([ADR-00487](../adr/ADR-00487.md))"
             ]
           },
           {
@@ -195,14 +206,16 @@
             "status": "implemented",
             "notes": [
               "Direct POSIX credential reads returning a `number` — present unconditionally (this compiler is POSIX-only), matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md))"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.memoryUsage()`",
             "status": "missing",
             "notes": [
               "RSS/heap-size reporting — not meaningful in `manual` memory-management mode the same way it is under a real GC; more relevant once `-mm=gc` is the default (see [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md))"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.nextTick(fn)`",
@@ -231,7 +244,8 @@
             "status": "implemented",
             "notes": [
               "Seconds (a `double`) since process start, captured once at `main` entry via `CLOCK_MONOTONIC` ([ADR-00332](../adr/ADR-00332.md))"
-            ]
+            ],
+            "caveats": []
           },
           {
             "feature": "`process.stdin` (streamed reads, not just `readLineSync()`)",

@@ -733,7 +733,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 						// reasoning as the NewExpression branch below —
 						// emitVarDecl's pre-inference switch must not trigger
 						// real emission as a side effect.
-						if retTy, ok := e.genericCallReturnType(genDecl, init.Args); ok {
+						if retTy, ok := e.genericCallReturnType(genDecl, init.Args, init.TypeArgs); ok {
 							ty = retTy
 						}
 					}
@@ -807,9 +807,11 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if err := validateCompositeType(ty, v.GetPos().Line, v.GetPos().Col); err != nil {
 		return err
 	}
-	if ty.UnionMembers != nil && !ty.Nullable && v.Init == nil {
-		return fmt.Errorf("%d:%d: a union type without null/undefined as a member requires an initializer", v.GetPos().Line, v.GetPos().Col)
-	}
+	// An uninitialized union-typed binding defaults to a boxed `undefined`
+	// (the IsDynamic no-init path below), matching JS's hoisted-var/`let`
+	// semantics — previously a rejection (ADR-00475); `const` without an
+	// initializer is still rejected at parse time, and `let` reads before
+	// assignment stay definite-assignment errors.
 	if ty.IsArray {
 		return e.emitArrayVarDecl(v, ty)
 	}
@@ -895,10 +897,19 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			return err
 		}
 		// A void-typed initializer (a call to a function/method that returns
-		// nothing, e.g. `arr.forEach(...)`) has no value to bind — reject cleanly
-		// rather than emitting a store of an empty/void operand (invalid IR).
+		// nothing). An *untyped* binding takes JS's own semantics — the call
+		// ran for its side effects and the binding is `undefined`
+		// (ADR-00479; the pre-inference default alloca above is simply left
+		// dead). An annotated binding keeps the clean rejection.
 		if val.Ty.IR == "void" {
-			return fmt.Errorf("%d:%d: cannot assign the result of a void expression to a variable — the initializer returns no value", v.GetPos().Line, v.GetPos().Col)
+			if v.TypeAnnot != nil {
+				return fmt.Errorf("%d:%d: cannot assign the result of a void expression to a variable — the initializer returns no value", v.GetPos().Line, v.GetPos().Col)
+			}
+			undefPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", undefPtr))
+			e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", undefPtr))
+			e.define(v.Name, Symbol{Ptr: undefPtr, Ty: TypeUndefined, IsConst: v.Kind == "const"})
+			return nil
 		}
 		if ty.IsDynamic {
 			if ty.UnionMembers != nil && !unionAllowsAssignmentFrom(ty, val.Ty) {

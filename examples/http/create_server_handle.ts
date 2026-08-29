@@ -9,6 +9,12 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
   res.end("hello from " + req.path);
 });
 
+// 'listening' can also be registered as an event before listen() —
+// it fires right after the bind, with address() already usable.
+server.on('listening', () => {
+  console.log("listening event fired:", server.address().port > 0);
+});
+
 server.listen(0, () => {
   const port: number = server.address().port;
   console.log("listening on port", port);

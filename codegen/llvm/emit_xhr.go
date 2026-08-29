@@ -52,6 +52,7 @@ func (e *Emitter) emitNewXMLHttpRequestExpression(ex *ast.NewXMLHttpRequestExpre
 	storeField("onreadystatechange", "ptr", "null", 8)
 	storeField("onload", "ptr", "null", 8)
 	storeField("onerror", "ptr", "null", 8)
+	storeField(XHRRespHeadersField, "ptr", "null", 8)
 
 	return Value{Ref: objReg, Ty: ty}, nil
 }
@@ -244,6 +245,10 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", respTextReg, bodyPtrReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", respNulReg, respTextReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", respNulReg))
+	e.ensureFetchHeadersMap()
+	respHdrsReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_map(ptr %s)", respHdrsReg, pendingReg))
+	e.xhrStoreField(objVal, XHRRespHeadersField, Value{Ref: respHdrsReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "status", Value{Ref: statusReg, Ty: TypeI64})
 	e.xhrStoreField(objVal, "responseText", Value{Ref: respTextReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "response", Value{Ref: respTextReg, Ty: TypePtr})
@@ -284,4 +289,68 @@ func (e *Emitter) emitXHRAbort(objExpr ast.Expression, args []ast.Expression, po
 	}
 	e.xhrStoreField(objVal, "readyState", Value{Ref: "0", Ty: TypeI64})
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitXHRGetResponseHeader implements xhr.getResponseHeader(name): a
+// case-insensitive lookup (the parsed map's keys are lowercased, so the
+// query is lowercased too, same as Headers.get) against the response-header
+// map send() stored. Before send() completes — or after a network failure —
+// the map is null and the result is a null string, matching the spec's null
+// return for the not-yet/absent cases.
+func (e *Emitter) emitXHRGetResponseHeader(objExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: xhr.getResponseHeader() requires 1 argument (name)", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	lowered, err := e.emitLoweredHeaderName(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	idx, fieldTy, _ := objVal.Ty.FieldIndex(XHRRespHeadersField)
+	mapVal := e.loadFieldValue(objVal, idx, fieldTy)
+
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, mapVal.Ref))
+	nullL := e.freshLabel("xhr.grh.null")
+	getL := e.freshLabel("xhr.grh.get")
+	doneL := e.freshLabel("xhr.grh.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, getL))
+
+	e.emitLabel(getL)
+	e.ensureMapStrHelpers()
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapVal.Ref, lowered))
+	asPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", asPtr, raw))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(nullL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", res, asPtr, getL, nullL))
+	return Value{Ref: res, Ty: TypePtr}, nil
+}
+
+// emitXHRGetAllResponseHeaders implements xhr.getAllResponseHeaders():
+// the "name: value\r\n" concatenation, serialized by
+// __kml_xhr_headers_all from the same parsed map getResponseHeader() reads.
+func (e *Emitter) emitXHRGetAllResponseHeaders(objExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: xhr.getAllResponseHeaders() takes no arguments", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	idx, fieldTy, _ := objVal.Ty.FieldIndex(XHRRespHeadersField)
+	mapVal := e.loadFieldValue(objVal, idx, fieldTy)
+	e.ensureXHRHeadersAll()
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_xhr_headers_all(ptr %s)", res, mapVal.Ref))
+	return Value{Ref: res, Ty: TypePtr}, nil
 }

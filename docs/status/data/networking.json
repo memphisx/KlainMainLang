@@ -40,13 +40,12 @@
             ]
           },
           {
-            "feature": "`Response` (`.status`, `.ok`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`)",
+            "feature": "`Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`)",
             "status": "implemented",
             "caveats": [
               "**These three methods are synchronous** — they return `string`/parsed value/`ArrayBuffer` directly, not the `Promise<string>`/`Promise<any>`/`Promise<ArrayBuffer>` real WHATWG `fetch` returns. Both call styles work: `const body: string = r.text()` and `await r.text()`/`.json()`/`.arrayBuffer()` (awaiting a non-thenable is identity — a harmless no-op — including the type-directed `.json()` projection through the `await`; [ADR-00241](../adr/ADR-00241.md))",
               "`.json()` reuses `JSON.parse`'s machinery, including its full scope: it validates the body (a non-JSON body — e.g. an HTML error page — throws a catchable `SyntaxError`, [ADR-00223](../adr/ADR-00223.md)) and projects nested objects, array/object-array fields, and top-level `T[]` off the parse tree ([ADR-00224](../adr/ADR-00224.md)); only `any`/`unknown` dynamic shapes remain unsupported",
               "`.text()`/`.json()` are plain null-terminated strings: a binary body with an embedded null byte truncates at the first one, by design — use `.arrayBuffer()` for a binary body",
-              "No response-header access yet (no `HEADERFUNCTION` capture exists in this codebase) — see the `XMLHttpRequest` row for the same gap on that side",
               "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed TypeError; `Object.keys`/JSON of a Response expose an internal `__kml_pending` field"
             ],
             "notes": [
@@ -106,7 +105,7 @@
               "`.responseText`/`.response` are identical values — only a text `responseType` is supported; no `responseType` other than the default",
               "`.onreadystatechange`/`.onload`/`.onerror` callbacks are zero-argument (deliberately — a payload-carrying callback isn't representable for this particular type, see [ADR-00131](../adr/ADR-00131.md))",
               "`.abort()` is a best-effort `readyState` reset — there's nothing to actually interrupt once a synchronous `.send()` has returned",
-              "No `.getResponseHeader()`/`.getAllResponseHeaders()` (same missing-response-header-capture gap `Response` has)"
+              "`.getAllResponseHeaders()` returns headers in arrival order, not the spec’s lowercase-sorted order ([ADR-00490](../adr/ADR-00490.md))"
             ],
             "notes": [
               "Not a blocking implementation: `.send()` is built on the exact same non-blocking `__kml_fetch_async` primitive `fetch()` itself uses, so it still yields the current fiber (rather than blocking every other connection) when called from inside an `http.listen` connection handler",

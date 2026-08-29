@@ -637,6 +637,81 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		return e.emitForOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
 	}
 
+	// `for (const [k, v] of map)` decomposes ENTRIES (ADR-00481, clearing
+	// the ADR-00011 caveat): a two-plain-name array pattern over a Map
+	// iterates the keys and values arrays in parallel (the runtime emits
+	// both in one insertion order). Anything else keeps the values-only
+	// iteration below.
+	if len(s.ArrayPattern) == 2 && s.ObjectPattern == nil {
+		plain := s.ArrayPattern[0].Name != "" && s.ArrayPattern[1].Name != "" &&
+			s.ArrayPattern[0].SubArray == nil && s.ArrayPattern[0].SubObject == nil &&
+			s.ArrayPattern[1].SubArray == nil && s.ArrayPattern[1].SubObject == nil &&
+			!s.ArrayPattern[0].Rest && !s.ArrayPattern[1].Rest
+		if iterTy := e.inferExprType(s.Iterable); plain && iterTy.IsMap && !iterTy.IsSet && !iterTy.IsDynamicObject {
+			mapVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			keysVal, err := e.emitMapCall(iterTy, mapVal.Ref, "keys", nil, s.GetPos())
+			if err != nil {
+				return err
+			}
+			valsVal, err := e.mapOrSetValuesArray(iterTy, mapVal.Ref)
+			if err != nil {
+				return err
+			}
+			keyTy, valTy := *keysVal.Ty.ElemType, *valsVal.Ty.ElemType
+			kData, kLen := e.splitArrayAggregate(keysVal)
+			vData, _ := e.splitArrayAggregate(valsVal)
+
+			idxPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+			kPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", kPtr, keyTy.IR, keyTy.Align()))
+			vPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", vPtr, valTy.IR, valTy.Align()))
+			e.define(s.ArrayPattern[0].Name, Symbol{Ptr: kPtr, Ty: keyTy})
+			e.define(s.ArrayPattern[1].Name, Symbol{Ptr: vPtr, Ty: valTy})
+
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(condL)
+			idxV, lenV, cond := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxV, idxPtr))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenV, kLen))
+			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cond, idxV, lenV))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond, bodyL, endL))
+
+			e.emitLabel(bodyL)
+			idx2 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx2, idxPtr))
+			kd, kg := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", kd, kData))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kg, keyTy.IR, kd, idx2))
+			kv := e.loadArrayElem(kg, keyTy)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", keyTy.IR, kv.Ref, kPtr, keyTy.Align()))
+			vd, vg := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", vd, vData))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vg, valTy.IR, vd, idx2))
+			vv := e.loadArrayElem(vg, valTy)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", valTy.IR, vv.Ref, vPtr, valTy.Align()))
+			for _, st := range s.Body.Body {
+				if err := e.emitStmt(st); err != nil {
+					return err
+				}
+			}
+			e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
+			e.emitLabel(incL)
+			idx3, idx4 := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx3, idxPtr))
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idx4, idx3))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idx4, idxPtr))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(endL)
+			return nil
+		}
+	}
+
 	// Resolve the iterable to a data-ptr alloca and a len alloca.
 	// For named variables we reuse their existing allocas (no copy).
 	// For any other expression we evaluate it, extract the aggregate fields,

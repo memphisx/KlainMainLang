@@ -69,6 +69,30 @@
             ]
           },
           {
+            "feature": "`fs.statSync(path)` / `fs.lstatSync(path)`",
+            "status": "implemented",
+            "caveats": [
+              "Only `size`, `mtimeMs`, `isFile()`, `isDirectory()`, `isSymbolicLink()` — no `mode`/`uid`/`atimeMs`/other Stats surface ([ADR-00495](../adr/ADR-00495.md)/[ADR-00497](../adr/ADR-00497.md))",
+              "Linux struct-stat offsets are encoded but verified on Mac only so far"
+            ]
+          },
+          {
+            "feature": "`fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync`",
+            "status": "implemented",
+            "caveats": [
+              "`rmSync` options must be a `{recursive, force}` boolean-literal object; no `maxRetries`/`retryDelay`",
+              "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (F_OK) with no `fs.constants` to name others ([ADR-00497](../adr/ADR-00497.md))"
+            ]
+          },
+          {
+            "feature": "`fs.openSync` / `closeSync` / `readSync` / `writeSync` / `fstatSync`",
+            "status": "implemented",
+            "caveats": [
+              "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names",
+              "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer` ([ADR-00498](../adr/ADR-00498.md))"
+            ]
+          },
+          {
             "feature": "`fs.unlinkSync(path)`",
             "status": "implemented",
             "notes": [
@@ -79,7 +103,7 @@
             "feature": "`fs.mkdirSync(path)`",
             "status": "implemented",
             "caveats": [
-              "No `{recursive: true}` option — throws (e.g. `EEXIST`) if the path already exists or a parent directory is missing"
+              "Options support only the literal `{ recursive: true }` (creates every missing prefix, idempotent — [ADR-00487](../adr/ADR-00487.md)); the plain form still throws on an existing path or missing parent"
             ],
             "notes": [
               "Creates a directory via POSIX `mkdir()`, mode `0777` reduced by the process umask as usual",

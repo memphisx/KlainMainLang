@@ -32,13 +32,14 @@
             ]
           },
           {
-            "feature": "`assert` (`.ok`, bare `assert(cond, msg?)`, `.equal`/`.strictEqual`, `.notEqual`/`.notStrictEqual`, `.deepEqual`/`.deepStrictEqual` (+`not*`), `.fail`, `.throws`, `.match`/`.doesNotMatch`)",
+            "feature": "`assert` (`.ok`, bare `assert(cond, msg?)`, `.equal`/`.strictEqual`, `.notEqual`/`.notStrictEqual`, `.deepEqual`/`.deepStrictEqual` (+`not*`), `.fail`, `.throws`, `.doesNotThrow`, `.ifError`, `.match`/`.doesNotMatch`)",
             "status": "implemented",
             "caveats": [
               "`equal`/`strictEqual` and `deepEqual`/`deepStrictEqual` (and their `not*` counterparts) are aliases of each other — this compiler's `==` has no implicit coercion to distinguish them",
               "`deepStrictEqual` covers scalars, strings, arrays, and objects (recursively, incl. nested); Map/Set/class instances, nullable-scalar members, and TypedArrays are a clean compile error (V1)",
               "`.match`/`.doesNotMatch`'s regexp argument must be statically a RegExp ([ADR-00428](../adr/ADR-00428.md))",
-              "`.throws` only checks that *something* was thrown, not the thrown value's type/message"
+              "`.throws` only checks that *something* was thrown, not the thrown value's type/message",
+              "No `assert.rejects`/`doesNotReject` (needs await-a-rejection machinery) and no `AssertionError` class ([ADR-00499](../adr/ADR-00499.md))"
             ]
           },
           {
@@ -46,7 +47,7 @@
             "status": "implemented",
             "caveats": [
               "Runner ([TDD-00140](../tdd/TDD-00140.md)/[ADR-00419](../adr/ADR-00419.md)): **run-at-registration** (top-level code after a `test()` runs after it here, before it in Node); `beforeEach`/`afterEach` are single slots (last wins) and also fire for subtests; no `mock.*`, `t.plan`, `run()`, concurrency, or snapshots",
-              "`mustCall` supports callbacks of **0–3 simple (scalar/pointer) parameters** — a rest param, >3 args, or an array/nullable-scalar param is a clean compile error (the counting trampoline is signature-parametric)",
+              "`mustCall` rejects rest-parameter callbacks (a rest tail is not a fixed ABI slot list); every fixed signature — arrays, nullable scalars, any arity — wraps ([ADR-00496](../adr/ADR-00496.md))",
               "`mustNotCall()` returns a `() => void`; using it where a non-zero-arity callback is expected is a type mismatch",
               "`mustSucceed` is count-only (the \"err is falsy\" check is deferred); `expectWarning` runs the thunk but doesn't capture warnings"
             ],
@@ -69,7 +70,7 @@
             ]
           },
           {
-            "feature": "`net` (TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`)",
+            "feature": "`net` (TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end'\\|'close'\\|'connect'/'ready')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`)",
             "status": "implemented",
             "caveats": [
               "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout; a connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event ([ADR-00328](../adr/ADR-00328.md))",
@@ -79,13 +80,15 @@
               "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls; `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are **accepted but no-ops** (the blocking read model has no separately-schedulable flow or idle timer, and a socket's chunk type already follows the listener's declared parameter type)",
               "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
               "Listeners must be arrow/function-expression literals",
-              "`net.Server`/`net.Socket` are not exposed as constructible classes"
+              "`net.Server`/`net.Socket` are not exposed as constructible classes",
+              "Socket `'close'` fires with no `hadError` argument, and `'error'` listeners stay a rejection — the runtime's failure paths throw instead of emitting ([ADR-00501](../adr/ADR-00501.md))"
             ],
             "notes": [
               "Accept loop and per-connection read pipes fold into the same `select()` event loop as `child_process` ([ADR-00324](../adr/ADR-00324.md)); a client socket reuses the same machinery once connected. A plausible base for a future `WebSocket` (see [NETWORKING.md](NETWORKING.md))",
               "`address()` reads the real bound address+port via `getsockname`+`inet_ntop`, making the `listen(0)` ephemeral-port idiom (`listen(0, () => net.connect(server.address().port, …))`) usable; `net.isIP` parses via `inet_pton` (0/4/6) ([ADR-00397](../adr/ADR-00397.md)/[ADR-00399](../adr/ADR-00399.md))",
               "`'data'` delivers a Buffer; `.write`/`.end` take a string/Buffer/ArrayBuffer/DataView",
-              "See [ADR-00358](../adr/ADR-00358.md)"
+              "See [ADR-00358](../adr/ADR-00358.md)",
+              "`isIP`/`isIPv4`/`isIPv6` match Node's strict parser, not the platform `inet_pton`: leading-zero v4 octets and >4-digit v6 groups rejected, `%zone` IDs accepted ([ADR-00457](../adr/ADR-00457.md))"
             ]
           },
           {
@@ -169,7 +172,7 @@
               "GET only (no request bodies/method override — `req.end(body)` is a clean rejection); response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding` — see [TDD-00138](../tdd/TDD-00138.md)",
               "Both calls return a ClientRequest handle ([ADR-00430](../adr/ADR-00430.md)): `request()` sends nothing until `.end()`; `.abort()`/`.destroy()` cancel only a not-yet-fired request (an in-flight transfer isn't torn down); `.on('error')` is accepted but never fired — transport failures throw instead",
               "`new http.Agent(options)`/`new https.Agent(options)` construct an inert token ([ADR-00432](../adr/ADR-00432.md)): recognized pool options are validated but configure nothing (one connection per request), `.destroy()` is a no-op, and `.sockets`/`.requests` reject cleanly",
-              "Options objects (literal **or variable-bound**, [ADR-00429](../adr/ADR-00429.md)) support `{ port, path, host/hostname, agent }`; `headers`/`method` are clean rejections",
+              "Options objects (literal **or variable-bound**, [ADR-00429](../adr/ADR-00429.md)) support `{ port, path, host/hostname, method, headers, agent }`; `headers` is literal-form-only, and there is still no request body (`req.write()`) ([ADR-00500](../adr/ADR-00500.md))",
               "`agent` is accepted and ignored — this client opens one connection per request (Node's own `agent: false` behavior); `new http.Agent(...)` itself is not implemented, and no pooling ever happens"
             ],
             "notes": [

@@ -484,3 +484,61 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00443](ADR-00443.md) | klain:webview Stage 7 — embed a SPA bundle into the executable (`klain:assets` + `Webview({ serve })`) | Implements [TDD-00142](../tdd/TDD-00142.md); Extends [ADR-00437](ADR-00437.md), [ADR-00411](ADR-00411.md) |
 | [00444](ADR-00444.md) | docs/status flipped to a JSON source of truth with generated Markdown | Implements [TDD-00145](../tdd/TDD-00145.md) |
 | [00445](ADR-00445.md) | statusgen importer retained as on-demand tooling (TDD-00145 Phase 5) | Implements [TDD-00145](../tdd/TDD-00145.md); Extends [ADR-00444](ADR-00444.md) |
+| [00446](ADR-00446.md) | TS overload signatures parsed and erased | |
+| [00447](ADR-00447.md) | constructor parameter properties | |
+| [00448](ADR-00448.md) | object-type method signatures and bare call signatures | |
+| [00449](ADR-00449.md) | Node stream constructors default to string chunks | Extends [ADR-00422](ADR-00422.md) |
+| [00450](ADR-00450.md) | namespaces V2 — module synonym, non-exported/type members, sibling references | Implements [TDD-00148](../tdd/TDD-00148.md); Extends [ADR-00290](ADR-00290.md) |
+| [00451](ADR-00451.md) | old-style angle-bracket type assertions `<T>expr` | Extends [ADR-00371](ADR-00371.md) |
+| [00452](ADR-00452.md) | interface `extends` lists with field merging; constructor types erased | |
+| [00453](ADR-00453.md) | namespaces V3 — nesting, dotted names, relative references | Implements [TDD-00148](../tdd/TDD-00148.md); Extends [ADR-00450](ADR-00450.md) |
+| [00454](ADR-00454.md) | `var` exempted from definite-assignment (no TDZ) | Extends [ADR-00215](ADR-00215.md), [ADR-00452](ADR-00452.md) |
+| [00455](ADR-00455.md) | callable interfaces (lone call/construct signature) | Extends [ADR-00448](ADR-00448.md) |
+| [00456](ADR-00456.md) | import-equals namespace aliases (`import X = Y.Z`) | Extends [ADR-00453](ADR-00453.md) |
+| [00457](ADR-00457.md) | Node-strict net.isIP / isIPv4 / isIPv6 | |
+| [00458](ADR-00458.md) | atob throws InvalidCharacterError; typeof DOMException | |
+| [00459](ADR-00459.md) | numeric-literal types; string-named enum members | |
+| [00460](ADR-00460.md) | arrow functions capture the enclosing method's lexical `this` | |
+| [00461](ADR-00461.md) | number index signatures | Extends [TDD-00130](../tdd/TDD-00130.md) |
+| [00462](ADR-00462.md) | ambient namespace members; construct signatures in object types | Extends [ADR-00450](ADR-00450.md), [ADR-00448](ADR-00448.md) |
+| [00463](ADR-00463.md) | N-ary array concat; zero-arg Array constructor | |
+| [00464](ADR-00464.md) | `arguments` object in class method bodies | Extends [ADR-00387](ADR-00387.md) |
+| [00465](ADR-00465.md) | URL component assignment is a clean rejection | |
+| [00466](ADR-00466.md) | class + interface declaration merging (coexistence) | Extends [ADR-00452](ADR-00452.md) |
+| [00467](ADR-00467.md) | array literal elisions | |
+| [00468](ADR-00468.md) | namespace-body statements; `export declare` pass-through | Extends [ADR-00453](ADR-00453.md), [ADR-00462](ADR-00462.md) |
+| [00469](ADR-00469.md) | generic function types erased (`<T>(x: T) => T`) | Extends [ADR-00371](ADR-00371.md) |
+| [00470](ADR-00470.md) | qualified type references (`ns.Type`) | Extends [ADR-00450](ADR-00450.md), [ADR-00408](ADR-00408.md) |
+| [00471](ADR-00471.md) | ambient value declarations become real bindings | |
+| [00472](ADR-00472.md) | conformance oracles measure under `-compat=js` shadowing | Extends [TDD-00121](../tdd/TDD-00121.md) |
+| [00473](ADR-00473.md) | explicit call-site type arguments (`id<string>(x)`) | Extends [ADR-00452](ADR-00452.md) |
+| [00474](ADR-00474.md) | type predicates, bare class fields, ambient namespaces | Extends [ADR-00471](ADR-00471.md), [ADR-00450](ADR-00450.md) |
+| [00475](ADR-00475.md) | uninitialized unions; generic-method rejection; any-return closure bug (deferred) | Extends [ADR-00454](ADR-00454.md), [ADR-00469](ADR-00469.md) |
+| [00476](ADR-00476.md) | class index-sig erasure; comma statements; ambient enums | Extends [ADR-00461](ADR-00461.md), [ADR-00471](ADR-00471.md) |
+| [00477](ADR-00477.md) | closure adapter trampolines (the any-boundary boxing fix) | Fixes [ADR-00475](ADR-00475.md)'s deferred bug |
+| [00478](ADR-00478.md) | adapter aggregate coverage; any-boxed arrays keep their length | Completes [ADR-00477](ADR-00477.md) |
+| [00479](ADR-00479.md) | interface merging; overloaded call signatures; void-init binds undefined | Extends [ADR-00466](ADR-00466.md), [ADR-00455](ADR-00455.md) |
+| [00480](ADR-00480.md) | caveat clearing — readonly fields, enum brackets, namespace type-member chains | Extends [ADR-00447](ADR-00447.md), [ADR-00450](ADR-00450.md) |
+| [00481](ADR-00481.md) | `for (const [k, v] of map)` decomposes entries | Clears [ADR-00011](ADR-00011.md)'s caveat |
+| [00482](ADR-00482.md) | Array.from iterables; JSON.stringify of map-backed dicts | Clears TDD-00130's stringify deferral |
+| [00483](ADR-00483.md) | Node stream destroy() and setEncoding() | Extends [ADR-00449](ADR-00449.md) |
+| [00484](ADR-00484.md) | synchronous Readable.read() | Completes [ADR-00483](ADR-00483.md) |
+| [00485](ADR-00485.md) | Readable.unshift(); Record<string, V> bracket parity | Clears TDD-00130's last deferral |
+| [00486](ADR-00486.md) | HTTP status reason phrases | |
+| [00487](ADR-00487.md) | delete operator; fs.mkdirSync recursive | |
+| [00488](ADR-00488.md) | Date multi-argument setters; Symbol.for registry | |
+| [00489](ADR-00489.md) | Blob parts from a string[] variable | |
+| [00490](ADR-00490.md) | Response headers + XHR getResponseHeader/getAllResponseHeaders | |
+| [00491](ADR-00491.md) | Array.from mapFn argument | |
+| [00492](ADR-00492.md) | Typed Object.values/entries for homogeneous shapes | |
+| [00493](ADR-00493.md) | new Duplex(options) | |
+| [00494](ADR-00494.md) | Growable SharedArrayBuffer / resizable ArrayBuffer | |
+| [00495](ADR-00495.md) | fs.statSync | |
+| [00496](ADR-00496.md) | mustCall for any fixed callback signature | |
+| [00497](ADR-00497.md) | Path-based fs sync ops batch | |
+| [00498](ADR-00498.md) | fd-based fs ops (openSync/readSync/writeSync/fstatSync) | |
+| [00499](ADR-00499.md) | assert.ifError + assert.doesNotThrow | |
+| [00500](ADR-00500.md) | http.get/request method + headers options | |
+| [00501](ADR-00501.md) | net socket close + connect/ready listeners | |
+| [00502](ADR-00502.md) | http.Server listening event | |
+| [00503](ADR-00503.md) | createServer({requireHostHeader: false}) | |

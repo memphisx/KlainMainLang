@@ -1168,3 +1168,94 @@ pair2[1].on("end", () => { console.log("side2 ended"); });
 pair2[0].end("bar");
 `, "client got: foo\nside2 got: bar\nside2 ended")
 }
+
+func TestE2ENodeReadableDefaultStringChunks(t *testing.T) {
+	// The un-parameterized `new Readable()` defaults to string chunks
+	// (ADR-00449) — previously the i64 default silently coerced a pushed
+	// string's pointer into the numeric chunk and printed garbage.
+	assertOutputImports(t, `
+import stream from 'stream';
+const r = new stream.Readable({ read() {} });
+r.push("hello");
+r.push(null);
+r.on('data', (c) => { console.log(c.toString()); });
+`, "hello")
+}
+
+func TestE2ENodeStreamDestroyAndSetEncoding(t *testing.T) {
+	// ADR-00483: destroy() closes both sides (pending data still flushes
+	// through the reaction queue, then 'close' fires); setEncoding('utf8')
+	// is an accepted no-op on the string-chunk default.
+	assertOutputImports(t, `
+import stream from 'stream';
+const r = new stream.Readable({ read() {} });
+r.setEncoding("utf8");
+r.push("one");
+r.on('data', (c) => { console.log(c.toString()); });
+r.on('close', () => { console.log("closed"); });
+r.destroy();
+console.log("done");
+`, "done\none\nclosed")
+}
+
+func TestE2ENodeReadableSyncRead(t *testing.T) {
+	// ADR-00484: synchronous read() pops one queued chunk; empty → null.
+	assertOutputImports(t, `
+import stream from 'stream';
+const r = new stream.Readable({ read() {} });
+r.push("first");
+r.push("second");
+console.log(r.read());
+console.log(r.read());
+console.log(r.read() === null);
+`, "first\nsecond\ntrue")
+}
+
+func TestE2ENodeReadableUnshift(t *testing.T) {
+	// ADR-00485: unshift() puts a chunk back at the FRONT of the queue —
+	// the peek-then-put-back pairing with read().
+	assertOutputImports(t, `
+import stream from 'stream';
+const r = new stream.Readable({ read() {} });
+r.push("b");
+r.unshift("a");
+console.log(r.read(), r.read(), r.read() === null);
+r.push("x");
+const got = r.read();
+r.unshift(got);
+console.log(r.read());
+`, "a b true\nx")
+}
+
+func TestE2ERecordStringBracketParity(t *testing.T) {
+	// ADR-00485: Record<string, V> is the index-signature dict — bracket
+	// read/write, Object.keys, and JSON.stringify all work.
+	assertOutput(t, `
+const r: Record<string, number> = {};
+r["k"] = 1;
+r["j"] = 2;
+console.log(r["k"], Object.keys(r).length);
+console.log(JSON.stringify(r));
+`, "1 2\n{\"k\":1,\"j\":2}")
+}
+
+// new Duplex({read, write, final}) — two independent sides on one handle
+// (ADR-00493): the read callback feeds 'data' consumers while write/final
+// consume the writable side, with no cross-feeding (unlike Transform).
+func TestE2ENodeDuplexConstructor(t *testing.T) {
+	assertOutputImports(t, `
+import { Duplex } from 'stream'
+const seen: string[] = []
+const d = new Duplex({
+    read: (s) => { s.push("r1"); s.push(null) },
+    write: (chunk: string) => { seen.push("w:" + chunk) },
+    final: () => { seen.push("finished") },
+})
+d.on('data', (c: string) => { console.log("data:" + c) })
+d.write("hello")
+d.end()
+setTimeout(() => {
+    console.log(seen.join(","))
+}, 10)
+`, "data:r1\nw:hello,finished")
+}

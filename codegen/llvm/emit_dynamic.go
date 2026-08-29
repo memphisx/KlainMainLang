@@ -352,21 +352,22 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pl))
 		return Value{Ref: r1, Ty: TypeAny}, nil
 	}
-	// An array value is a { ptr, i64 } aggregate (data pointer + length), which
-	// doesn't fit the box's single i64 payload slot. Box its *data pointer* as
-	// the identity: arrays are reference types in JS, so `===` on two boxed
-	// arrays is reference equality (kmlTagArray, compared by pointer in
-	// __kml_any_eq), and the data pointer is the stable per-array identity a
-	// value-typed array has (`a === a` is the same pointer boxed twice → true;
-	// two distinct literals have distinct buffers → false). The length and
-	// element type are *not* preserved — a boxed array supports `===`/`!==` and
-	// `typeof` (→ "object"), but not indexing, `.length`, or content-accurate
-	// printing (its toString is the `[object Array]` tag string, TDD-00062).
+	// An array value is a { ptr, i64 } aggregate (data pointer + length),
+	// which doesn't fit the box's single i64 payload slot. The payload is a
+	// heap *header* holding the full aggregate — the same 16-byte shape the
+	// nested-array element box already uses (boxArrayValue) — so the length
+	// survives the round trip and an `any`-boxed array can be unboxed back
+	// into a real array (ADR-00478; previously only the data pointer was
+	// boxed and the length was documented-lost). Identity semantics are
+	// preserved by comparing the *data pointers inside* the headers in
+	// __kml_any_eq (two boxings of one array malloc two headers, but the
+	// data pointer is the stable per-array identity). The element type is
+	// still not carried — `typeof` → "object" and toString stays the
+	// `[object Array]` tag string (TDD-00062).
 	if v.Ty.IsArray {
-		dataPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", dataPtr, v.Ref))
+		hdr := e.boxArrayValue(v)
 		payload := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", payload, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", payload, hdr))
 		r0 := e.freshReg()
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagArray))
@@ -515,10 +516,10 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	store(e.internString("undefined"))
 	e.emitLabel(nextL)
 
-	// A boxed array stringifies to the `[object Array]` tag: the box holds only
-	// the array's data pointer (see emitBoxValue), so the length and element
-	// type needed to render its contents (`1,2,3`) are not recoverable — this
-	// fixed tag string is the honest, non-garbage stand-in (a deviation from
+	// A boxed array stringifies to the `[object Array]` tag: the box's
+	// header preserves the (ptr, len) pair (ADR-00478) but not the element
+	// type, so its contents (`1,2,3`) still can't be rendered — this fixed
+	// tag string is the honest, non-garbage stand-in (a deviation from
 	// JS's `String([1,2,3]) === "1,2,3"`, documented in TDD-00062).
 	matchL, nextL = e.emitTagCheck(tag, kmlTagArray, "dynstr.array")
 	e.emitLabel(matchL)

@@ -12,6 +12,16 @@ func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
 	var elems []ast.Expression
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
 		var elem ast.Expression
+		if p.check(lexer.COMMA) {
+			// Elision (`[1,,3]`, `[,,]` — ADR-00467): a hole reads as
+			// `undefined` (the element type's zero value here) and counts
+			// toward the length, matching JS. Desugars to the same
+			// undefined literal an explicit `undefined` element uses; the
+			// comma is consumed by the shared loop tail below.
+			elems = append(elems, ast.NewNullLiteral(true, posOf(p.peek())))
+			p.advance() // consume ','
+			continue
+		}
 		if p.check(lexer.ELLIPSIS) {
 			spreadTok := p.advance()
 			arg, err := p.parseAssignment()
@@ -79,7 +89,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				var val ast.Expression
 				if p.check(lexer.LPAREN) {
 					fnPos := posOf(p.peek())
-					fd, err := p.parseFunctionRest("", false, false)
+					fd, err := p.parseFunctionRest("", false, false, false)
 					if err != nil {
 						return nil, err
 					}
@@ -130,7 +140,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			// methods: no `async`/generator method shorthand (neither is
 			// supported for class methods either — a separate, larger gap).
 			fnPos := posOf(p.peek())
-			fd, err := p.parseFunctionRest("", false, false)
+			fd, err := p.parseFunctionRest("", false, false, false)
 			if err != nil {
 				return nil, err
 			}
@@ -209,6 +219,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewNodeStreamBody(pos, "transform")
 	case "PassThrough":
 		return p.parseNewNodeStreamBody(pos, "passthrough")
+	case "Duplex":
+		return p.parseNewNodeStreamBody(pos, "duplex")
 	case "Agent":
 		return p.parseNewAgentBody(pos)
 	case "Webview":
@@ -884,11 +896,26 @@ func (p *Parser) parseNewArrayBufferBody(pos ast.Pos) (*ast.NewArrayBufferExpres
 	if err != nil {
 		return nil, err
 	}
+	// Optional options literal: `{maxByteLength: m}` marks the buffer
+	// growable (ADR-00494).
+	var maxByteLength ast.Expression
+	if p.peek().Type == lexer.COMMA {
+		p.advance()
+		lit, err := p.parseObjectLiteral()
+		if err != nil {
+			return nil, err
+		}
+		if len(lit.Properties) != 1 || lit.Properties[0].Key != "maxByteLength" {
+			return nil, fmt.Errorf("%d:%d: the buffer options literal supports exactly {maxByteLength: n}", pos.Line, pos.Col)
+		}
+		maxByteLength = lit.Properties[0].Value
+	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
 	ex := ast.NewNewArrayBufferExpression(byteLength, pos)
 	ex.Shared = shared
+	ex.MaxByteLength = maxByteLength
 	return ex, nil
 }
 
@@ -988,9 +1015,14 @@ func (p *Parser) parseNewArrayBody(pos ast.Pos) (*ast.NewArrayExpression, error)
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, err
 	}
-	size, err := p.parseExpression()
-	if err != nil {
-		return nil, err
+	// Zero-arg `new Array<T>()` is an empty array (ADR-00463) — size 0.
+	var size ast.Expression = ast.NewNumberLiteral("0", pos)
+	if !p.check(lexer.RPAREN) {
+		var err error
+		size, err = p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
@@ -1780,7 +1812,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if p.check(lexer.IDENT) {
 			name = p.advance().Literal
 		}
-		fd, err := p.parseFunctionRest(name, false, false)
+		fd, err := p.parseFunctionRest(name, false, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1800,7 +1832,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			if p.check(lexer.IDENT) {
 				name = p.advance().Literal
 			}
-			fd, err := p.parseFunctionRest(name, true, false)
+			fd, err := p.parseFunctionRest(name, true, false, false)
 			if err != nil {
 				return nil, err
 			}

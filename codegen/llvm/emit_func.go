@@ -5,6 +5,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -36,6 +37,20 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	if decl.IsGenerator {
 		return fmt.Errorf("%d:%d: a nested generator function declaration is not yet supported", decl.GetPos().Line, decl.GetPos().Col)
 	}
+	// Namespace-member context for the bare-sibling-reference fallback
+	// (TDD-00148 Stage 4): a `X__kmlns_f` name marks this function as
+	// namespace X's member. Restored by defer so nested function emission
+	// (which passes back through here with a non-namespace name and clears
+	// it) unwinds correctly even on error paths.
+	savedCurNamespace := e.curNamespace
+	e.curNamespace = ""
+	if i := strings.LastIndex(llvmName, "__kmlns_"); i > 0 {
+		// A nested namespace's flattened name restores its dots
+		// (`A__kmlns_B__kmlns_f` → namespace "A.B" — TDD-00148 V3).
+		e.curNamespace = strings.ReplaceAll(llvmName[:i], "__kmlns_", ".")
+	}
+	defer func() { e.curNamespace = savedCurNamespace }()
+
 	// Save current function context.
 	savedAllocas := e.allocas
 	savedBody := e.body
@@ -630,6 +645,14 @@ func (e *Emitter) resolveFuncRef(name string) (string, FuncSig, bool) {
 	if sig, ok := e.funcs[name]; ok {
 		return name, sig, true
 	}
+	// Bare sibling reference inside a namespace member function (TDD-00148
+	// Stage 4): retry under the mangled sibling name. Last, so every local/
+	// nested/top-level binding of the bare name shadows the sibling.
+	if m := e.nsSibling(name); m != "" && m != name {
+		if sig, ok := e.funcs[m]; ok {
+			return m, sig, true
+		}
+	}
 	return "", FuncSig{}, false
 }
 
@@ -1091,6 +1114,16 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 		}
 		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
 	}
+	// An arrow shares the enclosing method's lexical `this` (ADR-00460):
+	// when the body uses `this` (outside any nested `function(){}`, which
+	// keeps its own dynamic this) and a receiver is in scope, capture it
+	// like any other variable — emitThisExpression's `lookup("this")` then
+	// resolves to the captured cell inside the closure body.
+	if lexicalThisIn(af) {
+		if sym, found := e.lookup("this"); found {
+			caps = append(caps, CapturedVar{Name: "this", Ty: sym.Ty, Sym: sym})
+		}
+	}
 	// Sort for deterministic LLVM output.
 	for i := 0; i < len(caps); i++ {
 		for j := i + 1; j < len(caps); j++ {
@@ -1387,6 +1420,19 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				}
 				e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
 			}
+		} else if isNullableScalar(retTy) {
+			// Mirrors emitReturn's own nullable-scalar branch (emit_stmts.go):
+			// the presence-aware boxing must see the AST (a null literal or a
+			// nullable identifier keeps its absent bit) — an ordinary
+			// emitExpr read auto-unwraps to the bare payload and would wrap
+			// everything present (ADR-00478; previously this shortcut emitted
+			// the bare payload where the { i1, T } aggregate was expected — a
+			// hard clang error).
+			agg, err := e.emitNullableScalarBoxedValue(af.Body, retTy)
+			if err != nil {
+				return err
+			}
+			e.emitTerminator(fmt.Sprintf("ret %s %s", nullableScalarStorageIR(retTy), agg))
 		} else {
 			val, err := e.emitExprWithObjectHint(af.Body, retTy)
 			if err != nil {
@@ -2711,4 +2757,61 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		return Value{Ref: result, Ty: retTy}, nil
 	}
 	return Value{}, fmt.Errorf("unknown callback kind")
+}
+
+
+// lexicalThisIn reports whether n's subtree contains a `this` expression
+// that would bind lexically — the walk recurses through nested arrows (they
+// share the enclosing `this`) but stops at function expressions and
+// function declarations, whose bodies have their own dynamic `this`
+// (ADR-00460). Implemented as a small reflective walk so every present and
+// future AST node shape is covered without a hand-maintained visitor.
+func lexicalThisIn(n any) bool {
+	switch n.(type) {
+	case nil:
+		return false
+	case *ast.ThisExpression:
+		return true
+	case *ast.FunctionExpression, *ast.FunctionDeclaration:
+		return false
+	}
+	rv := reflect.ValueOf(n)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < rv.NumField(); i++ {
+		f := rv.Field(i)
+		if !f.CanInterface() {
+			continue
+		}
+		if lexicalThisInValue(f) {
+			return true
+		}
+	}
+	return false
+}
+
+func lexicalThisInValue(f reflect.Value) bool {
+	switch f.Kind() {
+	case reflect.Interface, reflect.Ptr:
+		if f.IsNil() {
+			return false
+		}
+		return lexicalThisIn(f.Interface())
+	case reflect.Slice:
+		for i := 0; i < f.Len(); i++ {
+			if lexicalThisInValue(f.Index(i)) {
+				return true
+			}
+		}
+	case reflect.Struct:
+		return lexicalThisIn(f.Interface())
+	}
+	return false
 }

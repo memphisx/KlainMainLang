@@ -95,3 +95,30 @@ try { dv.getInt32(14); } catch (e) { console.log("oob caught"); }
 try { const bad = new DataView(buf, 12, 8); } catch (e) { console.log("ctor oob caught"); }
 `, "8 4 44\n16\n99\noob caught\nctor oob caught")
 }
+
+// Growable SharedArrayBuffer / resizable ArrayBuffer (ADR-00494): the
+// {maxByteLength} option reserves the max upfront (views never move), so
+// grow()/resize() only bumps the length word; out-of-range throws a
+// catchable RangeError. Fixed-size buffers report growable=false and
+// maxByteLength=byteLength.
+func TestE2EGrowableBuffers(t *testing.T) {
+	assertOutput(t, `
+const sab = new SharedArrayBuffer(8, {maxByteLength: 32})
+console.log(sab.byteLength)
+console.log(sab.growable)
+console.log(sab.maxByteLength)
+sab.grow(16)
+console.log(sab.byteLength)
+const view = new Int32Array(sab)
+view[3] = 42
+console.log(view[3])
+const fixed = new SharedArrayBuffer(4)
+console.log(fixed.growable)
+console.log(fixed.maxByteLength)
+const ab = new ArrayBuffer(4, {maxByteLength: 8})
+console.log(ab.resizable)
+ab.resize(8)
+console.log(ab.byteLength)
+try { sab.grow(8) } catch (e) { console.log("caught RangeError:", e.message.indexOf("RangeError") === 0) }
+`, "8\ntrue\n32\n16\n42\nfalse\n4\ntrue\n8\ncaught RangeError: true")
+}

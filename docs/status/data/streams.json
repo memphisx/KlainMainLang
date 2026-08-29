@@ -92,16 +92,16 @@
             ]
           },
           {
-            "feature": "`stream.Readable` / `.Writable` / `.Transform` / `.PassThrough` (`new Duplex` ❌)",
+            "feature": "`stream.Readable` / `.Writable` / `.Duplex` / `.Transform` / `.PassThrough`",
             "status": "implemented",
             "caveats": [
-              "`new PassThrough()` is the identity Transform — string chunks by default (`<T>` overrides), `highWaterMark`/`objectMode` options only ([ADR-00422](../adr/ADR-00422.md)); `new Duplex(...)` itself is still rejected (`duplexPair()` is the one Duplex producer)",
+              "All five constructors default to **string chunks** (`<T>` overrides — [ADR-00449](../adr/ADR-00449.md); previously `Readable`/`Writable`/`Transform` defaulted to a numeric chunk that silently mangled pushed strings); `new PassThrough()` is the identity Transform, `highWaterMark`/`objectMode` options only ([ADR-00422](../adr/ADR-00422.md)); `new Duplex(...)` accepts only `read`/`write`/`final` callbacks plus the shared options ([ADR-00493](../adr/ADR-00493.md))",
               "`class X extends Readable/Writable` with a `this`-based `_read()` / `_write(chunk, enc, cb)` override is supported; `extends Duplex`/`Transform` is not yet (rejected at compile time). Options form (`new Readable({ read })`) also stays",
               "The options-form `read`/`write` callback receives the stream as a parameter, not as `this` (object-literal callbacks have no `this` binding); the class form has the real `this`",
               "`highWaterMark` (options form and class-form `super({ highWaterMark })`) sets the queue watermark; `objectMode` is accepted but has no effect (chunks are already typed by `<T>`, effectively object-mode). A `super(options)` `highWaterMark` must be a literal/construction-scope constant — it can't reference a constructor parameter",
               "A class-form `_write` completion callback is treated as fired when `_write` returns — it can't defer the write past the call",
               "Event names must be string literals; supported events are `data`/`end`/`error`/`close`/`finish`/`drain`",
-              "No `.read()`/`.unshift()`/`.destroy()`/`.setEncoding()`",
+              "Synchronous `.read([size])` pops one queued chunk (empty → null, size ignored — [ADR-00484](../adr/ADR-00484.md)); `.destroy([err])` closes both sides (the error argument is dropped, no 'error' re-emission) and `.setEncoding('utf8')` is a no-op on the string-chunk default ([ADR-00483](../adr/ADR-00483.md))",
               "Event delivery can lag Node's synchronous re-entrancy by a microtask (emissions ride the reaction queue)",
               "`fs`/`http` still don't hand out Node streams (their surfaces are WHATWG-based or buffered)"
             ],

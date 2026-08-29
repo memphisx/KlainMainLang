@@ -296,3 +296,10 @@ let fromIter: number[] = Array.from(new CountUp(4))
 console.log(fromIter.length) // 4
 console.log(fromIter[0])     // 1
 console.log(fromIter[3])     // 4
+
+// The 2-argument mapFn form — Array.from(iterable, fn) builds the copy and
+// maps it in one call (thisArg is not supported)
+let squares: number[] = Array.from([1, 2, 3], (x: number) => x * x)
+console.log(squares.join(","))  // 1,4,9
+let positions: number[] = Array.from([7, 8, 9], (x: number, i: number) => i)
+console.log(positions.join(",")) // 0,1,2

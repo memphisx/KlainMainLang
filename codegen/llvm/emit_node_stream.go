@@ -108,13 +108,12 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 	pos := ex.GetPos()
 	e.ensureNodeStreamRuntime()
 
-	inTy, outTy := TypeI64, TypeI64
-	if ex.Kind == "passthrough" {
-		// PassThrough defaults to string chunks — Node's non-objectMode
-		// streams carry strings/Buffers, and the identity shape has no
-		// callback whose signature could pin the type. `<T>` overrides.
-		inTy, outTy = TypePtr, TypePtr
-	}
+	// Every Node-stream constructor defaults to string chunks — Node's
+	// non-objectMode streams carry strings/Buffers. The old `i64` default
+	// (pre-ADR-00449) silently coerced a pushed string's pointer into the
+	// numeric chunk and printed garbage; `<T>` still overrides for numeric/
+	// typed-array chunk streams.
+	inTy, outTy := TypePtr, TypePtr
 	if ex.InType != nil {
 		inTy = e.resolveType(ex.InType)
 	}
@@ -210,6 +209,83 @@ func (e *Emitter) emitNewNodeStream(ex *ast.NewNodeStreamExpression) (Value, err
 		nsTy := NodeWritableType(inTy)
 		nsReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr null, ptr %s, ptr null, ptr null)", nsReg, ws))
+		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
+		return Value{Ref: nsReg, Ty: nsTy}, nil
+
+	case "duplex":
+		// new Duplex({read, write, final}): two *independent* sides on one
+		// handle (ADR-00493) — a Readable whose read callback pushes, plus a
+		// Writable whose write/final callbacks consume — unlike Transform,
+		// where the writable side feeds the readable one. Exactly Node's
+		// contract: Duplex implements both, with separate internal states.
+		opts, err := destructureNodeStreamOptions(ex.Options, nodeStreamOptionKeys("read", "write", "final"), "Duplex", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		hwm, err := e.streamHWMOperand(opts, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		fulfill := e.emitStreamFulfillThunk(outTy)
+		rs := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double %s, ptr %s)", rs, hwm, fulfill))
+		ws := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double %s)", ws, hwm))
+		inv := e.emitNodeInvokeDataThunk(outTy)
+		dec := e.emitStreamDecodeThunk(outTy)
+		nsTy := NodeTransformType(inTy, outTy)
+		nsReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr %s, ptr %s, ptr %s)", nsReg, rs, ws, inv, dec))
+		if readExpr, ok := opts["read"]; ok {
+			userClo, err := e.streamCallbackClosure(readExpr, []Type{nsTy}, "read callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: a Duplex read callback takes at most one (stream) parameter", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamPullWrap(userClo.Ty)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nsReg, g1))
+			e.storeStreamField(rs, 9, e.buildBuiltinClosure(wrap, env))
+		}
+		if writeExpr, ok := opts["write"]; ok {
+			userClo, err := e.streamCallbackClosure(writeExpr, []Type{inTy}, "write callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: a Duplex write callback takes one (chunk) parameter", pos.Line, pos.Col)
+			}
+			wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
+			env := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+			g0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+			g1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ws, g1))
+			e.storeWStreamField(ws, 9, e.buildBuiltinClosure(wrap, env))
+		}
+		if finalExpr, ok := opts["final"]; ok {
+			userClo, err := e.streamCallbackClosure(finalExpr, nil, "final callback", pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if len(userClo.Ty.FuncParams) > 0 {
+				return Value{}, fmt.Errorf("%d:%d: a Duplex final callback takes no parameters", pos.Line, pos.Col)
+			}
+			e.storeWStreamField(ws, 10, e.buildBuiltinClosure(e.emitStreamCloseWrap(userClo.Ty), userClo.Ref))
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
 		e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
 		return Value{Ref: nsReg, Ty: nsTy}, nil
 
@@ -379,6 +455,7 @@ func nodeEventPayload(ty Type, event string, pos ast.Pos) (Type, bool, error) {
 var nodeStreamMethodNames = map[string]bool{
 	"on": true, "once": true, "push": true, "pause": true,
 	"resume": true, "write": true, "end": true, "pipe": true,
+	"destroy": true, "setEncoding": true, "read": true, "unshift": true,
 }
 
 func isNodeStreamMethodName(name string) bool { return nodeStreamMethodNames[name] }
@@ -523,6 +600,108 @@ func (e *Emitter) emitNodeStreamCallOn(ty Type, ptr string, method string, args 
 		closed := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_close(ptr %s)", closed, ws))
 		return self, nil
+
+	case "destroy":
+		// destroy([error]) tears the stream down (ADR-00483): the readable
+		// side closes its source queue, the writable side closes its sink.
+		// The optional error argument is evaluated (for side effects) and
+		// dropped — 'error'-event re-emission isn't modeled.
+		if len(args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: destroy() takes at most one error argument", pos.Line, pos.Col)
+		}
+		if len(args) == 1 {
+			if _, err := e.emitExpr(args[0]); err != nil {
+				return Value{}, err
+			}
+		}
+		if ty.IsNodeReadable {
+			rs := e.nodeStreamSide(ptr, 0)
+			cl := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", cl, rs))
+			// A non-flowing readable has no flow loop to emit 'close' —
+			// queue the guarded direct emission (async, Node's order).
+			e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ns_destroy_close", ptr)))
+		}
+		if ty.IsNodeWritable {
+			ws := e.nodeStreamSide(ptr, 1)
+			cl := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_close(ptr %s)", cl, ws))
+		}
+		return self, nil
+
+	case "unshift":
+		// Push a chunk back onto the FRONT of the queue (ADR-00485) — the
+		// standard peek-then-put-back pairing with read().
+		if !ty.IsNodeReadable {
+			return Value{}, fmt.Errorf("%d:%d: unshift() requires a Readable", pos.Line, pos.Col)
+		}
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: unshift() takes one chunk argument", pos.Line, pos.Col)
+		}
+		rsSide := e.nodeStreamSide(ptr, 0)
+		cvU, err := e.emitExprWithObjectHint(args[0], outTy)
+		if err != nil {
+			return Value{}, err
+		}
+		cvU = e.coerce(cvU, outTy)
+		u0, u1 := e.streamChunkWords(cvU)
+		e.emitInstr(fmt.Sprintf("call void @__kml_rs_qunshift(ptr %s, i64 %s, i64 %s, double 1.0)", rsSide, u0, u1))
+		return self, nil
+
+	case "read":
+		// Synchronous read (ADR-00484): one queued chunk, or null (a
+		// scalar-chunk stream yields the zero stand-in) when the queue is
+		// empty. A `size` argument is evaluated and ignored (chunks are
+		// whole pushes here, not a byte buffer).
+		if !ty.IsNodeReadable {
+			return Value{}, fmt.Errorf("%d:%d: read() requires a Readable", pos.Line, pos.Col)
+		}
+		if len(args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: read() takes at most one size argument", pos.Line, pos.Col)
+		}
+		if len(args) == 1 {
+			if _, err := e.emitExpr(args[0]); err != nil {
+				return Value{}, err
+			}
+		}
+		rs := e.nodeStreamSide(ptr, 0)
+		trip := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_rs_tryread(ptr %s)", trip, rs))
+		has := e.freshReg()
+		v0 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, 0", has, trip))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, 1", v0, trip))
+		hasB := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", hasB, has))
+		switch {
+		case outTy.IR == "ptr":
+			p0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p0, v0))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", r, hasB, p0))
+			return Value{Ref: r, Ty: outTy}, nil
+		case outTy.IR == "double":
+			d := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", d, v0))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0.0", r, hasB, d))
+			return Value{Ref: r, Ty: outTy}, nil
+		default:
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", r, hasB, v0))
+			return Value{Ref: r, Ty: outTy}, nil
+		}
+
+	case "setEncoding":
+		// Chunks are already strings by default (ADR-00449), so
+		// setEncoding('utf8') is an accepted no-op; any other encoding is a
+		// clean rejection (ADR-00483).
+		if len(args) == 1 {
+			if sl, ok := args[0].(*ast.StringLiteral); ok && (sl.Value == "utf8" || sl.Value == "utf-8") {
+				return self, nil
+			}
+		}
+		return Value{}, fmt.Errorf("%d:%d: setEncoding supports only 'utf8' (chunks are strings already)", pos.Line, pos.Col)
 
 	case "pipe":
 		if !ty.IsNodeReadable {

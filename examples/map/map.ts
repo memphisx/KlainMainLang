@@ -74,3 +74,11 @@ console.log(codes.get(200)); // OK
 const pairs: [string, number][] = [["x", 10], ["y", 20]];
 const coords = new Map(pairs);
 console.log(coords.get("y")); // 20
+
+// Entry decomposition in for-of.
+const inventory = new Map<string, number>();
+inventory.set("apples", 3);
+inventory.set("pears", 5);
+for (const [item, count] of inventory) {
+    console.log(item + ": " + String(count));
+}

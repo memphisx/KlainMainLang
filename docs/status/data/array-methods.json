@@ -28,8 +28,11 @@
             "status": "implemented"
           },
           {
-            "feature": "`new Array<T>(n)`",
-            "status": "implemented"
+            "feature": "`new Array<T>(n?)`",
+            "status": "implemented",
+            "notes": [
+              "Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md))"
+            ]
           },
           {
             "feature": "`.length`",
@@ -172,7 +175,10 @@
           },
           {
             "feature": "`.concat(...arrays)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "Any number of arguments — arrays flatten one level, plain values append; zero arguments copy the receiver ([ADR-00463](../adr/ADR-00463.md))"
+            ]
           },
           {
             "feature": "`.flat(depth?)`",
@@ -237,10 +243,10 @@
             "status": "implemented"
           },
           {
-            "feature": "`Array.from(iterable)`",
+            "feature": "`Array.from(iterable, mapFn?)`",
             "status": "implemented",
             "caveats": [
-              "Array-like overload only — a plain array, or a class implementing `next(): T \\| null`; no `mapFn`/`thisArg`, no direct string/Map/Set iteration ([ADR-00063](../adr/ADR-00063.md)/[ADR-00088](../adr/ADR-00088.md))"
+              "Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \\| null` — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))"
             ]
           },
           {

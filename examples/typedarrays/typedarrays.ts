@@ -88,3 +88,16 @@ console.log(bigs[0])            // 9007199254740993n
 const ubigs = new BigUint64Array([18446744073709551615n])
 console.log(ubigs[0])           // 18446744073709551615n
 for (const v of bigs.subarray(0, 1)) { console.log(v) } // 9007199254740993n
+
+// ── growable / resizable buffers ────────────────────────────────────────────
+// The {maxByteLength} option reserves the maximum upfront, so existing views
+// stay valid across a grow — grow()/resize() only extends the visible length
+// (and only up to the max; shrinking or exceeding it throws a RangeError).
+const grow = new SharedArrayBuffer(8, { maxByteLength: 32 })
+console.log(grow.growable)       // true
+grow.grow(16)
+console.log(grow.byteLength)     // 16
+const rz = new ArrayBuffer(4, { maxByteLength: 8 })
+console.log(rz.resizable)        // true
+rz.resize(8)
+console.log(rz.byteLength)       // 8

@@ -256,6 +256,19 @@ type Emitter struct {
 	workerEntries          map[string]*workerEntryInfo
 	currentWorkerMod       string
 	workerAdaptCtr         int
+	// genericDepth counts nested generic interface/alias instantiations in
+	// resolveType — the cap that turns an infinitely expanding generic
+	// (`interface Foo<T> { x: Foo<Foo<T>> }`) into an opaque tail instead of
+	// an unbounded recursion (ADR-00452).
+	genericDepth int
+	// curNamespace is the namespace whose member function is currently being
+	// emitted (TDD-00148 Stage 4) — derived from the `__kmlns_` infix of the
+	// function's mangled name in emitFunctionDeclAs; "" outside namespace
+	// members. Drives the bare-sibling-reference fallback (nsSibling).
+	curNamespace string
+	// closureAdaptCtr numbers the generated closure adapter trampolines
+	// (`@__kml_fnadapt_N`, ADR-00477).
+	closureAdaptCtr int
 	// TDD-00099: shared memory + channels.
 	usedGCUncollectable bool
 	usedWeakHelpers     bool
@@ -392,6 +405,16 @@ type Emitter struct {
 	usedCryptoDerive         bool
 	usedStrerror             bool
 	usedFsMkdir              bool
+	usedFsMkdirP             bool
+	usedUnsetenv             bool
+	usedSymbolRegistry       bool
+	usedFetchHeadersMap      bool
+	usedXHRHeadersAll        bool
+	usedFsStat               bool
+	usedFsLstat              bool
+	usedFsPathOps            bool
+	usedFsRm                 bool
+	usedFsFdOps              bool
 	usedFsRmdir              bool
 	usedFsRename             bool
 	usedFsReaddir            bool
@@ -481,6 +504,9 @@ type Emitter struct {
 	usedWsSpan               bool
 	usedJsPow                bool
 	namespaces               map[string]map[string]bool
+	// nsAliases maps a fully-resolved alias name (dotted for a namespace-
+	// scoped `export import`) to the dotted namespace it targets (ADR-00456).
+	nsAliases map[string]string
 	usedTaskRuntime          bool
 	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
 	usedPromiseSettle        bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
@@ -1050,6 +1076,11 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// String-literal type (`"north"`, TDD-00079): as a value type it is just a
 	// string; the literal value is only consumed at the AST level by
 	// Pick/Omit/Record key collection, not here.
+	// Numeric-literal type (`1`, ADR-00459): as a value type it is just a
+	// number, mirroring the string-literal stance below.
+	if ta.IsNumberLiteral {
+		return TypeF64
+	}
 	if ta.IsStringLiteral {
 		// String-shaped, but carry the literal value so a discriminated-union
 		// tag field can be matched at compile time (TDD-00116). Behaves as
@@ -1152,19 +1183,38 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	// generic ElemType fallback below, same reasoning as
 	// Promise/Map/Set/EventEmitter above.
 	if genDecl, ok := e.genericInterfaces[ta.Name]; ok && len(ta.TypeArgs) > 0 {
-		subs := e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs)
-		return e.instantiateGenericInterface(genDecl, subs)
+		// Depth cap for infinitely expanding generics (`interface Foo<T> {
+		// x: Foo<Foo<T>> }`) — TS handles these lazily, this eager
+		// instantiation would recurse forever (observed as a real oracle
+		// hang). Past the cap the remaining tail becomes an opaque empty
+		// object type; a program that never touches fields that deep is
+		// unaffected. The cap is 8, not deeper: expansion is eager, so a
+		// doubly-recursive type costs O(2^depth) type nodes.
+		if e.genericDepth > 8 {
+			return ObjectType(nil)
+		}
+		e.genericDepth++
+		t := e.instantiateGenericInterface(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, ta.TypeArgs))
+		e.genericDepth--
+		return t
 	}
 	// Generic type alias `type Name<T> = ...` (TDD-00079 Stage 3): substitute the
 	// concrete type arguments into the alias body annotation, then resolve it.
 	if aliasDecl, ok := e.genericTypeAliases[ta.Name]; ok && len(ta.TypeArgs) > 0 {
+		// Same infinite-expansion depth cap as the generic-interface branch.
+		if e.genericDepth > 8 {
+			return ObjectType(nil)
+		}
 		subs := make(map[string]*ast.TypeAnnotation, len(aliasDecl.TypeParams))
 		for i, param := range aliasDecl.TypeParams {
 			if i < len(ta.TypeArgs) {
 				subs[param] = ta.TypeArgs[i]
 			}
 		}
-		return e.resolveType(substituteAnnotation(aliasDecl.Type, subs))
+		e.genericDepth++
+		t := e.resolveType(substituteAnnotation(aliasDecl.Type, subs))
+		e.genericDepth--
+		return t
 	}
 	// Built-in utility types (TDD-00079) — after the user-generic registry so a
 	// user-defined type of the same name still wins, before the generic ElemType
@@ -1402,6 +1452,7 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// mangled declarations; the member table is what use sites resolve
 	// through (emitCall/emitMember/inferExprType).
 	e.namespaces = prog.Namespaces
+	e.registerNSAliases(prog.NSAliases)
 
 	// TDD-00098: known before any emission (the resolver recorded worker
 	// modules), so every gc-fiber emission site can pick the thread-aware
@@ -1466,9 +1517,22 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// function is the opposite: it has exactly one signature (already
 	// registered into e.funcs by registerFunctions above), so it's emitted
 	// here unconditionally, same as a plain function.
+	// A redeclared function name (legal JS re-declaration — including a
+	// run of `declare function f(…);` ambient signatures, ADR-00471) emits
+	// only its *last* declaration, matching JS's last-wins hoisting;
+	// emitting each would be an LLVM redefinition error.
+	lastDeclFor := map[string]ast.Statement{}
+	for _, stmt := range prog.Body {
+		if fd, ok := stmt.(*ast.FunctionDeclaration); ok {
+			lastDeclFor[fd.Name] = stmt
+		}
+	}
 	for _, stmt := range prog.Body {
 		fd, ok := stmt.(*ast.FunctionDeclaration)
 		if !ok {
+			continue
+		}
+		if lastDeclFor[fd.Name] != stmt {
 			continue
 		}
 		if fd.IsGenerator {
@@ -1803,9 +1867,23 @@ func (e *Emitter) registerEnums(prog *ast.Program) {
 // registerInterfaces pre-scans all top-level interface and type alias declarations
 // and records them in e.interfaces so resolveType can resolve named object types.
 func (e *Emitter) registerInterfaces(prog *ast.Program) {
+	// TS declaration merging (ADR-00466): an interface sharing a class's
+	// name yields to the class — registering it would make annotations of
+	// that name resolve to a plain object shape instead of the class
+	// instance. The interface's extra members are ignored (disclosed
+	// narrowing of real merge semantics).
+	classNames := map[string]bool{}
+	for _, stmt := range prog.Body {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+			classNames[cd.Name] = true
+		}
+	}
 	for _, stmt := range prog.Body {
 		switch s := stmt.(type) {
 		case *ast.InterfaceDeclaration:
+			if classNames[s.Name] {
+				continue
+			}
 			// A generic interface's field types reference an unresolvable
 			// bare type-parameter name — defer to on-demand instantiation
 			// at each usage site instead (TDD-00010 V1, see
@@ -1820,13 +1898,39 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 				e.interfaces[s.Name] = e.indexSignatureType(s.IndexSig)
 				continue
 			}
+			// A callable interface (lone call signature — ADR-00455)
+			// registers as the equivalent function type.
+			if s.CallSig != nil {
+				e.interfaces[s.Name] = e.resolveType(s.CallSig)
+				continue
+			}
 			fields := make([]Field, len(s.Fields))
 			for i, f := range s.Fields {
 				fields[i] = Field{Name: f.Name, Ty: e.resolveType(f.Type)}
 			}
+			// interface+interface declaration merging (ADR-00479): a second
+			// same-name interface unions its members into the first (first
+			// declaration wins on a member-name collision, mirroring TS's
+			// no-conflicting-members rule without checking it).
+			if prev, ok := e.interfaces[s.Name]; ok && prev.IsObject {
+				seen := map[string]bool{}
+				for _, f := range prev.Fields {
+					seen[f.Name] = true
+				}
+				merged := prev.Fields
+				for _, f := range fields {
+					if !seen[f.Name] {
+						merged = append(merged, f)
+					}
+				}
+				fields = merged
+			}
 			e.interfaces[s.Name] = ObjectType(fields)
 			if len(s.Methods) > 0 {
-				sigs := make(map[string]FuncSig, len(s.Methods))
+				sigs := e.interfaceMethodSigs[s.Name]
+				if sigs == nil {
+					sigs = make(map[string]FuncSig, len(s.Methods))
+				}
 				for _, m := range s.Methods {
 					sig := e.buildParamSig(m.Params)
 					if m.ReturnType != nil {
@@ -1846,6 +1950,84 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			} else {
 				e.interfaces[s.Name] = e.resolveType(s.Type)
 			}
+		}
+	}
+
+	// Merge `interface C extends A, B` base members (ADR-00451 batch):
+	// base fields precede own fields; own declarations win on a name
+	// collision; method signatures merge the same way. Iterated to a
+	// fixpoint so multi-level chains resolve regardless of declaration
+	// order; a cycle simply stops changing and stays as declared.
+	type ifaceExt struct {
+		name    string
+		extends []string
+	}
+	var pending []ifaceExt
+	for _, stmt := range prog.Body {
+		if s, ok := stmt.(*ast.InterfaceDeclaration); ok && len(s.Extends) > 0 && len(s.TypeParams) == 0 && s.IndexSig == nil {
+			pending = append(pending, ifaceExt{s.Name, s.Extends})
+		}
+	}
+	for pass := 0; pass < len(pending)+1; pass++ {
+		changed := false
+		for _, ie := range pending {
+			own, ok := e.interfaces[ie.name]
+			if !ok || !own.IsObject {
+				continue
+			}
+			// The resolver suffixes per-module names (`C__kml_mod0`); the
+			// Extends list holds source-written bare names, so retry each
+			// base under the owner's own module suffix.
+			suffix := ""
+			if i := strings.LastIndex(ie.name, "__kml_mod"); i > 0 {
+				suffix = ie.name[i:]
+			}
+			var merged []Field
+			seen := map[string]bool{}
+			for _, base := range ie.extends {
+				bt, ok := e.interfaces[base]
+				if !ok && suffix != "" {
+					base = base + suffix
+					bt, ok = e.interfaces[base]
+				}
+				if !ok || !bt.IsObject {
+					continue
+				}
+				for _, f := range bt.Fields {
+					if !seen[f.Name] {
+						seen[f.Name] = true
+						merged = append(merged, f)
+					}
+				}
+				for mn, ms := range e.interfaceMethodSigs[base] {
+					if _, exists := e.interfaceMethodSigs[ie.name][mn]; !exists {
+						if e.interfaceMethodSigs[ie.name] == nil {
+							e.interfaceMethodSigs[ie.name] = map[string]FuncSig{}
+						}
+						e.interfaceMethodSigs[ie.name][mn] = ms
+						changed = true
+					}
+				}
+			}
+			for _, f := range own.Fields {
+				if seen[f.Name] {
+					// Own re-declaration wins: replace the base's entry.
+					for i := range merged {
+						if merged[i].Name == f.Name {
+							merged[i] = f
+						}
+					}
+					continue
+				}
+				merged = append(merged, f)
+			}
+			if len(merged) != len(own.Fields) {
+				e.interfaces[ie.name] = ObjectType(merged)
+				changed = true
+			}
+		}
+		if !changed {
+			break
 		}
 	}
 }
@@ -2037,3 +2219,63 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 }
 
 // emitFunctionDecl emits one user-defined function into e.functions.
+
+
+// registerNSAliases resolves `import X = Y.Z` alias declarations
+// (ADR-00456) against the now-complete namespace table. Each target is
+// resolved scope-relatively (innermost enclosing namespace outward, then
+// absolute), following already-resolved aliases; two passes handle an
+// alias whose target alias is declared later. An unresolvable alias is
+// simply not registered — its use sites keep their ordinary undefined
+// diagnostics.
+func (e *Emitter) registerNSAliases(decls []ast.NSAliasDecl) {
+	e.nsAliases = map[string]string{}
+	resolveTarget := func(scope, target string) (string, bool) {
+		try := func(cand string) (string, bool) {
+			if _, ok := e.namespaces[cand]; ok {
+				return cand, true
+			}
+			if t, ok := e.nsAliases[cand]; ok {
+				return t, true
+			}
+			// A dotted target whose first segment is itself an alias
+			// (`import r = M.X` where X aliases M.N).
+			if i := strings.Index(cand, "."); i > 0 {
+				if t, ok := e.nsAliases[cand[:i]]; ok {
+					whole := t + cand[i:]
+					if _, ok := e.namespaces[whole]; ok {
+						return whole, true
+					}
+				}
+			}
+			return "", false
+		}
+		if scope != "" {
+			parts := strings.Split(scope, ".")
+			for k := len(parts); k >= 1; k-- {
+				if t, ok := try(strings.Join(parts[:k], ".") + "." + target); ok {
+					return t, true
+				}
+				// A dotted alias name declared in an enclosing scope.
+				if t, ok := e.nsAliases[strings.Join(parts[:k], ".")+"."+target]; ok {
+					return t, true
+				}
+			}
+		}
+		return try(target)
+	}
+	for pass := 0; pass < 2; pass++ {
+		for _, d := range decls {
+			full := d.Name
+			if d.Scope != "" {
+				full = d.Scope + "." + d.Name
+			}
+			if _, done := e.nsAliases[full]; done {
+				continue
+			}
+			if t, ok := resolveTarget(d.Scope, d.Target); ok {
+				e.nsAliases[full] = t
+			}
+		}
+	}
+}

@@ -80,11 +80,21 @@ check_null_undef:
   %is_null_or_undef = or i1 %is_null, %is_undef
   br i1 %is_null_or_undef, label %ret_true, label %check_object
 check_object:
-  %is_object = icmp eq i8 %tagA, 6
   %is_array = icmp eq i8 %tagA, 7
+  br i1 %is_array, label %cmp_array, label %check_obj_ref
+cmp_array:
+  ; the payload is a { ptr, i64 } header (ADR-00478); identity is the data
+  ; pointer inside it, so two boxings of the same array still compare equal.
+  %ha = inttoptr i64 %payA to ptr
+  %hb = inttoptr i64 %payB to ptr
+  %da = load ptr, ptr %ha, align 8
+  %db = load ptr, ptr %hb, align 8
+  %arr_eq = icmp eq ptr %da, %db
+  ret i1 %arr_eq
+check_obj_ref:
+  %is_object = icmp eq i8 %tagA, 6
   %is_funcref = icmp eq i8 %tagA, 8
-  %is_obj_or_arr = or i1 %is_object, %is_array
-  %is_ref = or i1 %is_obj_or_arr, %is_funcref
+  %is_ref = or i1 %is_object, %is_funcref
   br i1 %is_ref, label %cmp_object, label %not_equal
 cmp_object:
   %oa = inttoptr i64 %payA to ptr

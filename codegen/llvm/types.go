@@ -299,6 +299,15 @@ type Type struct {
 	// the allocation (GC_malloc_uncollectable, since the only live
 	// reference may be on another thread).
 	IsSharedArrayBuffer bool
+	// IsStats marks fs.statSync's result (ADR-00495): a plain heap object
+	// whose hidden first field is the raw st_mode word, backing the
+	// isFile()/isDirectory() method dispatch.
+	IsStats bool
+	// BufferGrowable marks a buffer constructed with `{maxByteLength}`
+	// (ADR-00494): its header is the 24-byte {len, data, max} shape, so
+	// `.growable`/`.maxByteLength`/`.grow()` may read word 2. Buffers from
+	// every other producer keep the 16-byte header and must never read it.
+	BufferGrowable bool
 	// IsDataView marks `new DataView(buffer, byteOffset?, byteLength?)`: an
 	// arbitrary-endian read/write view over an ArrayBuffer sub-range. Same
 	// hidden-heap-struct convention as IsArrayBuffer — a ptr to
@@ -809,6 +818,10 @@ const (
 	XHRMethodField  = "__kml_xhr_method"
 	XHRURLField     = "__kml_xhr_url"
 	XHRHeadersField = "__kml_xhr_headers"
+	// XHRRespHeadersField holds the parsed response-header map after send()
+	// (ADR-00490) — null until DONE; getResponseHeader()/
+	// getAllResponseHeaders() read it.
+	XHRRespHeadersField = "__kml_xhr_resp_headers"
 )
 
 // XMLHttpRequestType returns `new XMLHttpRequest()`'s result type
@@ -828,6 +841,7 @@ func XMLHttpRequestType() Type {
 		{Name: XHRMethodField, Ty: TypePtr},
 		{Name: XHRURLField, Ty: TypePtr},
 		{Name: XHRHeadersField, Ty: TypePtr},
+		{Name: XHRRespHeadersField, Ty: TypePtr},
 		{Name: "readyState", Ty: TypeI64},
 		{Name: "status", Ty: TypeI64},
 		{Name: "responseText", Ty: TypePtr},
@@ -963,6 +977,19 @@ func MessageChannelType(msg Type) Type {
 
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
 // the ArrayBuffer representation plus the shared-across-workers flag.
+// StatsType returns fs.statSync's result type (ADR-00495): visible
+// size/mtimeMs fields over a hidden leading st_mode word (the
+// isFile()/isDirectory() backing, never exposed via Object.keys/JSON).
+func StatsType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_mode", Ty: TypeI64},
+		{Name: "size", Ty: TypeI64},
+		{Name: "mtimeMs", Ty: TypeI64},
+	})
+	ty.IsStats = true
+	return ty
+}
+
 func SharedArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true, IsSharedArrayBuffer: true}
 }
@@ -1570,8 +1597,10 @@ func (t Type) VisibleFields() []Field {
 		fields = fields[1:]
 	case t.IsWebSocketClient && len(fields) > 0:
 		fields = fields[1:]
-	case t.IsXHR && len(fields) > 2:
-		fields = fields[3:]
+	case t.IsXHR && len(fields) > 3:
+		fields = fields[4:]
+	case t.IsStats && len(fields) > 0:
+		fields = fields[1:]
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
 		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are

@@ -82,12 +82,12 @@
             "feature": "`Date` setters (`setFullYear`, `setMonth`, `setDate`, `setHours`, `setMinutes`, `setSeconds`, `setMilliseconds`, `setTime`)",
             "status": "implemented",
             "caveats": [
-              "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)",
-              "Only the single-argument form of each setter (no `setFullYear(y, m, d)`-style overloads)"
+              "Requires a named-variable receiver (not a field access or call result — this compiler's Date is a plain number, not a reference object, so there's no heap location to mutate otherwise)"
             ],
             "notes": [
               "Mutate a named Date variable in place and return the new timestamp, matching real JS",
-              "See [ADR-00016](../adr/ADR-00016.md)"
+              "See [ADR-00016](../adr/ADR-00016.md)",
+              "Multi-argument setter overloads cascade into the following fields (`setFullYear(y, m, d)`, `setHours(h, m, s, ms)`, …) ([ADR-00488](../adr/ADR-00488.md))"
             ]
           },
           {

@@ -183,8 +183,17 @@ func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value
 // setHours(h, m, s, ms) — not supported here). Returns the new timestamp,
 // matching real JS's setter return value.
 func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Date.%s takes exactly 1 argument (multi-argument overloads are not supported)", pos.Line, pos.Col, method)
+	// Multi-argument overloads (ADR-00488): each extra argument cascades
+	// into the following field, per JS — setFullYear(y, m?, d?),
+	// setMonth(m, d?), setHours(h, m?, s?, ms?), setMinutes(m, s?, ms?),
+	// setSeconds(s, ms?). setDate/setMilliseconds/setTime stay one-arg.
+	maxArgs := map[string]int{
+		"setFullYear": 3, "setMonth": 2, "setDate": 1,
+		"setHours": 4, "setMinutes": 3, "setSeconds": 2,
+		"setMilliseconds": 1, "setTime": 1,
+	}[method]
+	if len(args) < 1 || len(args) > maxArgs {
+		return Value{}, fmt.Errorf("%d:%d: Date.%s takes 1 to %d arguments", pos.Line, pos.Col, method, maxArgs)
 	}
 	id, ok := mem.Object.(*ast.Identifier)
 	if !ok {
@@ -198,15 +207,18 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		return Value{}, fmt.Errorf("%d:%d: '%s' is not a Date", pos.Line, pos.Col, id.Name)
 	}
 
-	argVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	argVals := make([]string, len(args))
+	for i, a := range args {
+		v, err := e.emitExpr(a)
+		if err != nil {
+			return Value{}, err
+		}
+		argVals[i] = e.coerce(v, TypeI64).Ref
 	}
-	argVal = e.coerce(argVal, TypeI64)
 
 	if method == "setTime" {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", argVal.Ref, sym.Ptr))
-		return Value{Ref: argVal.Ref, Ty: TypeI64}, nil
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", argVals[0], sym.Ptr))
+		return Value{Ref: argVals[0], Ty: TypeI64}, nil
 	}
 
 	curReg := e.freshReg()
@@ -225,21 +237,15 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 	sec := extract(6)
 	millis := extract(7)
 
-	switch method {
-	case "setFullYear":
-		year = argVal.Ref
-	case "setMonth":
-		month0 = argVal.Ref
-	case "setDate":
-		day = argVal.Ref
-	case "setHours":
-		hour = argVal.Ref
-	case "setMinutes":
-		min = argVal.Ref
-	case "setSeconds":
-		sec = argVal.Ref
-	case "setMilliseconds":
-		millis = argVal.Ref
+	// The settable-field chain in cascade order (weekday is derived, never
+	// set); the setter picks its start position and extra args continue.
+	slots := []*string{&year, &month0, &day, &hour, &min, &sec, &millis}
+	start := map[string]int{
+		"setFullYear": 0, "setMonth": 1, "setDate": 2,
+		"setHours": 3, "setMinutes": 4, "setSeconds": 5, "setMilliseconds": 6,
+	}[method]
+	for i, av := range argVals {
+		*slots[start+i] = av
 	}
 
 	month1 := e.freshReg()

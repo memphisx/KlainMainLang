@@ -50,6 +50,27 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 		}
 		return Value{Ref: zeroRef(target), Ty: target}
 	}
+	// A closure whose signature disagrees with the target function type in
+	// dynamism gets an adapter trampoline (ADR-00477) — a raw header copy
+	// would let the call site reinterpret concrete words as dynamic boxes
+	// (or vice versa). Checked before the same-IR passthrough, since both
+	// sides are "ptr".
+	if v.Ty.IsFunc && target.IsFunc {
+		if needed, supported := funcAdapterPlan(v.Ty, target); needed && supported {
+			if adapted, ok := e.emitClosureAdapter(v, target); ok {
+				return adapted
+			}
+		}
+	}
+	// A bare scalar flowing into a nullable-scalar slot wraps as a present
+	// { i1, T } aggregate (ADR-00478). Type.IR is the *bare* T for both
+	// sides, so without this the IR-equality passthrough below returned the
+	// unwrapped payload where the aggregate was expected — a real clang
+	// error found via an expression-bodied arrow returning its own
+	// `number | null` parameter.
+	if isNullableScalar(target) && !isNullableScalar(v.Ty) && !v.Ty.IsNull && v.Ty.IR == target.IR {
+		return Value{Ref: e.makeNullableScalarAgg(target, "true", v.Ref), Ty: target}
+	}
 	if v.Ty.IR == target.IR {
 		return v
 	}

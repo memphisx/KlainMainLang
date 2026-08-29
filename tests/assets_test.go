@@ -2,14 +2,27 @@ package tests
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // assets_test.go — TDD-00142 Stage 7: compile-time SPA embedding (klain:assets +
 // Webview({ serve })). The fixture is tests/testdata/embedfixture (a tiny dist:
-// index.html + a binary assets/blob.bin), resolved relative to the tests/ CWD at
-// emit time.
+// index.html + a binary assets/blob.bin), embedded at emit time. embedDir
+// resolves its path against the compiler's CWD, which differs between harnesses
+// (`go test ./tests/` runs in tests/, but the compiled test binary used by
+// `make test-par` runs from the repo root), so the tests anchor an absolute
+// fixture path to this file's own location instead of a CWD-relative one.
+
+// embedFixtureDir returns the absolute path of the embed fixture, independent of
+// the process CWD.
+func embedFixtureDir() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "testdata", "embedfixture")
+}
 
 // TestE2EEmbedGetByteExact embeds the fixture and reads its files back through
 // embedDir/get, asserting the byte-exact length + checksum of a BINARY asset
@@ -17,7 +30,7 @@ import (
 func TestE2EEmbedGetByteExact(t *testing.T) {
 	out := compileAndRunImports(t, `
 import { embedDir } from 'klain:assets'
-const d = embedDir("./testdata/embedfixture")
+const d = embedDir(`+strconv.Quote(embedFixtureDir())+`)
 const html = d.get("/index.html")
 const blob = d.get("/assets/blob.bin")
 console.log("html=" + html.byteLength + " blob=" + blob.byteLength)
@@ -40,7 +53,7 @@ console.log("miss=" + miss.byteLength)
 func TestE2EWebviewServeCompiles(t *testing.T) {
 	src := `
 import { Webview } from 'klain:webview'
-const w = new Webview({ title: "Emb", width: 400, height: 300, serve: "./testdata/embedfixture" })
+const w = new Webview({ title: "Emb", width: 400, height: 300, serve: ` + strconv.Quote(embedFixtureDir()) + ` })
 w.html("<h1>x</h1>")
 w.terminate()
 `
@@ -72,7 +85,7 @@ func TestE2EWebviewServeSmoke(t *testing.T) {
 	}
 	src := `
 import { Webview } from 'klain:webview'
-const w = new Webview({ title: "Emb", width: 400, height: 300, serve: "./testdata/embedfixture" })
+const w = new Webview({ title: "Emb", width: 400, height: 300, serve: ` + strconv.Quote(embedFixtureDir()) + ` })
 w.bind("done", (raw: string): string => {
   console.log("page title: " + raw)
   w.terminate()

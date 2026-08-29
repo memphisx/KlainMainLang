@@ -96,3 +96,9 @@ console.log(suitName(Suit.Spades))  // spades
 
 const hand: Suit[] = [Suit.Clubs, Suit.Spades]
 console.log(hand[1])                // S
+
+// Bracket access and the numeric reverse mapping.
+enum Size { S, M, L }
+console.log(Size["M"]);   // 1
+console.log(Size[2]);     // L
+console.log(Size[42]);    // undefined

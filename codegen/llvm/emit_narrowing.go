@@ -249,6 +249,45 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 	}
 	_, payload := e.emitUnboxTagPayload(Value{Ref: boxRef})
 	switch {
+	case target.IsArray:
+		// The array payload is a { ptr, i64 } heap header (ADR-00478) —
+		// load the real aggregate back out. A zero payload (a box holding
+		// null/undefined, or a zeroed slot) yields the {null, 0} empty-
+		// array sentinel instead of dereferencing null.
+		hdr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", hdr, payload))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdr))
+		loadL := e.freshLabel("unbarr.load")
+		mergeL := e.freshLabel("unbarr.merge")
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, mergeL, loadL))
+		e.emitLabel(loadL)
+		agg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, hdr))
+		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(mergeL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: target}
+	case isNullableScalar(target):
+		// Unbox into a { i1, T } nullable scalar (ADR-00478): a null/
+		// undefined tag is the absent aggregate; anything else unboxes the
+		// payload as the bare scalar and wraps it present.
+		tag, _ := e.emitUnboxTagPayload(Value{Ref: boxRef})
+		isN := e.freshReg()
+		isU := e.freshReg()
+		absent := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isN, tag, kmlTagNull))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isU, tag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isN, isU))
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, absent))
+		bare := e.emitUnboxBoxToType(boxRef, target.withoutNullable())
+		return Value{Ref: e.makeNullableScalarAgg(target, present, bare.Ref), Ty: target}
 	case target.IR == "ptr":
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))

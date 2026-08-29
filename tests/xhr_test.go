@@ -114,3 +114,21 @@ func TestE2EXHRWrongArgCountsRejected(t *testing.T) {
 		}
 	}
 }
+
+// getResponseHeader/getAllResponseHeaders (ADR-00490): case-insensitive
+// single-header lookup + the "name: value\r\n" concatenation, both read
+// from the response-header capture the shared fetch runtime records.
+func TestE2EXHRResponseHeaders(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+const xhr = new XMLHttpRequest()
+xhr.open("GET", "%s/flat")
+console.log(xhr.getAllResponseHeaders() === "")
+xhr.send()
+console.log(xhr.getResponseHeader("Content-Type"))
+console.log(xhr.getResponseHeader("content-type"))
+const all: string = xhr.getAllResponseHeaders()
+console.log(all.indexOf("content-type: application/json") > -1)
+`, srv.URL)
+	assertOutput(t, src, "true\napplication/json\napplication/json\ntrue")
+}

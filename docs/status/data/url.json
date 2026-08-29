@@ -27,7 +27,8 @@
             "feature": "`URL`",
             "status": "implemented",
             "caveats": [
-              "`new URL(url)` — single-argument form only, no base-URL resolution"
+              "`new URL(url)` — single-argument form only, no base-URL resolution",
+              "Component *setters* (`url.href = …`, `url.hash = …`) are clean rejections — a bare field store would desync the derived components; construct a new URL ([ADR-00465](../adr/ADR-00465.md))"
             ],
             "notes": [
               "Parses via libcurl's URL API (`curl_url`/`curl_url_set`/`curl_url_get`) rather than a hand-rolled parser — the same \"reuse the already-linked C library\" approach `fetch` established",

@@ -1,5 +1,7 @@
 package ast
 
+import "strings"
+
 // Pos tracks source location.
 type Pos struct{ Line, Col int }
 
@@ -25,12 +27,23 @@ type Expression interface {
 
 type Program struct {
 	Body []Statement
-	// Namespaces records TS `namespace X { export ... }` declarations
-	// (TDD-00095): namespace name → member-name set. The members themselves
-	// were desugared by the parser into ordinary top-level declarations named
+	// Namespaces records TS `namespace X { ... }` / `module X { ... }`
+	// declarations (TDD-00095, extended by TDD-00148): namespace name →
+	// value-member name → exported. The members themselves were desugared by
+	// the parser into ordinary top-level declarations named
 	// NamespaceMangle(X, member); this table is what lets `X.member` call/
-	// value sites resolve through them. Nil when a program declares none.
+	// value sites resolve through them (a present-but-false entry is a
+	// non-exported member — a clean rejection outside the namespace, but
+	// resolvable from a sibling member's body). Type members (class/
+	// interface/type/enum) desugar to bare-name declarations and are not
+	// recorded here. Nil when a program declares none.
 	Namespaces map[string]map[string]bool
+	// NSAliases records TS import-equals alias declarations
+	// (`import X = Y.Z`, and `[export] import X = N` inside a namespace —
+	// TDD-00148/ADR-00456). Targets are recorded as written; codegen
+	// resolves them against the namespace table (scope-relative, innermost
+	// outward) once every namespace is known.
+	NSAliases []NSAliasDecl
 	// WorkerPaths is filled by the parser for a single file's program: the
 	// raw string-literal path of every `new Worker('...')` in the file, so
 	// the resolver can resolve worker entry files as dependencies without a
@@ -46,6 +59,14 @@ type Program struct {
 	WorkerModules []WorkerModule
 }
 
+// NSAliasDecl is one `import X = Y.Z` alias declaration (ADR-00456).
+// Scope is the dotted name of the declaring namespace ("" at top level);
+// Target is the dotted right-hand side as written.
+type NSAliasDecl struct {
+	Scope, Name, Target string
+	Exported            bool
+}
+
 // WorkerModule is one worker entry file's diverted top-level statement list
 // (TDD-00098). Path is the canonical absolute file path — the same key a
 // NewWorkerExpression's ResolvedPath carries, which is how codegen matches a
@@ -58,9 +79,11 @@ type WorkerModule struct {
 // NamespaceMangle is the flat top-level name a namespace member desugars to —
 // shared by the parser (declaration side) and codegen (use side). The
 // `__kmlns_` infix can't collide with user identifiers in practice, the same
-// convention other internal manglings rely on.
+// convention other internal manglings rely on. A nested/dotted namespace
+// ("A.B", TDD-00148 V3) flattens its dots through the same infix, so
+// `A.B` member `f` becomes `A__kmlns_B__kmlns_f`.
 func NamespaceMangle(ns, member string) string {
-	return ns + "__kmlns_" + member
+	return strings.ReplaceAll(ns, ".", "__kmlns_") + "__kmlns_" + member
 }
 
 func (*Program) nodeMarker() {}
@@ -157,7 +180,13 @@ type FunctionDeclaration struct {
 	// silent no-op. V1 scope: top-level/nested function declarations only —
 	// not class/object methods, not function expressions/arrows.
 	IsGenerator bool
-	pos         Pos
+	// IsOverloadSig marks a body-less TypeScript overload *signature*
+	// (`function f(x: string): void;` / `bar(x: string): void;` before the
+	// implementation). Signatures are erased at parse time — the parser
+	// verifies an implementation follows and returns only the
+	// implementation, so codegen never sees this flag set.
+	IsOverloadSig bool
+	pos           Pos
 }
 
 func (*FunctionDeclaration) nodeMarker()   {}
@@ -192,7 +221,20 @@ type Param struct {
 	// a destructuring statement and a destructured parameter.
 	ArrayPattern  []ArrayPatternElem
 	ObjectPattern []DestructProp
+	// PropVisibility/PropReadonly: TS constructor *parameter properties*
+	// (`constructor(public x: number, readonly y: string)`). PropVisibility
+	// holds the modifier as written ("public"/"private"/"protected"; "" when
+	// none) and PropReadonly the `readonly` modifier. Either one being set
+	// marks the parameter as a property: the class parser desugars it into a
+	// declared field plus a `this.x = x` prologue assignment, so codegen
+	// never inspects these. Outside a constructor they are a parse error.
+	PropVisibility string
+	PropReadonly   bool
 }
+
+// IsPropertyParam reports whether this parameter carries a TS parameter-
+// property modifier (public/private/protected/readonly).
+func (p Param) IsPropertyParam() bool { return p.PropVisibility != "" || p.PropReadonly }
 
 type ReturnStatement struct {
 	Value Expression // nil for bare return
@@ -703,7 +745,11 @@ func NewAssignmentExpression(op string, left, right Expression, pos Pos) *Assign
 type CallExpression struct {
 	Callee Expression
 	Args   []Expression
-	pos    Pos
+	// TypeArgs holds explicit call-site type arguments (`id<string>(x)` —
+	// ADR-00473); nil for ordinary calls. Consumed by the generic-function
+	// dispatch; ignored (erased) on non-generic callees.
+	TypeArgs []*TypeAnnotation
+	pos      Pos
 }
 
 func (*CallExpression) nodeMarker()   {}
@@ -1485,6 +1531,10 @@ type NewArrayBufferExpression struct {
 	// and construction, but the result crosses a worker boundary by
 	// reference instead of being deep-copied (TDD-00099).
 	Shared bool
+	// MaxByteLength holds the `{maxByteLength}` option's expression when
+	// present (`new SharedArrayBuffer(n, {maxByteLength: m})`, ADR-00494) —
+	// nil for a fixed-size buffer.
+	MaxByteLength Expression
 	pos    Pos
 }
 
@@ -1644,7 +1694,17 @@ type InterfaceDeclaration struct {
 	// IndexSig is the value type of a string index signature `[k: string]: V`
 	// (TDD-00130) — a map-backed dynamic object; V1 disallows named Fields with it.
 	IndexSig *TypeAnnotation
-	pos      Pos
+	// CallSig, when non-nil, is the interface's lone bare call signature
+	// (`interface F { (n: number): string }`) as its equivalent function
+	// type — the interface registers as that function type (ADR-00455).
+	// The parser rejects a call signature mixed with any other member.
+	CallSig *TypeAnnotation
+	// Extends lists the simple (unqualified, non-generic) base-interface
+	// names of an `extends A, B` clause — merged field/method-wise at
+	// registration (ADR-00451 batch). Generic/qualified bases are parsed
+	// but dropped (not listed here).
+	Extends []string
+	pos     Pos
 }
 
 func (*InterfaceDeclaration) nodeMarker()   {}
@@ -1913,6 +1973,10 @@ type TypeAnnotation struct {
 	// resolveType; as a standalone value type it resolves to `string` (the
 	// literal value is not narrowed/enforced — a disclosed V1 simplification).
 	IsStringLiteral bool
+	// IsNumberLiteral marks a numeric-literal type (`1`, `-1.5` — ADR-00459).
+	// As a value type it resolves to `number`; the literal value is not
+	// narrowed/enforced, mirroring IsStringLiteral's V1 stance.
+	IsNumberLiteral bool
 	LiteralValue    string
 	// keyof T (TDD-00079 Stage 2): the operand's key set. As a standalone value
 	// type it resolves to string; its main use is a mapped-type source.

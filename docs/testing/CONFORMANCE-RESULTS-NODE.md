@@ -10,9 +10,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **37 passed**, 2414 failed, 1027 skipped (out of scope).
+3478 files total: **42 passed**, 2409 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **37 passed (1.5%)**.
+Of the 2451 files that compiled far enough to run, **42 passed (1.7%)**.
 
 ## By module (top 40 by file count)
 
@@ -20,14 +20,14 @@ Of the 2451 files that compiled far enough to run, **37 passed (1.5%)**.
 |---|---|---|---|---|
 | http | 0 | 343 | 31 | 374 |
 | http2 | 0 | 205 | 46 | 251 |
-| fs | 1 | 156 | 73 | 230 |
+| fs | 2 | 155 | 73 | 230 |
 | tls | 0 | 129 | 62 | 191 |
 | stream | 0 | 152 | 17 | 169 |
-| net | 2 | 120 | 23 | 145 |
+| net | 4 | 118 | 23 | 145 |
 | worker | 0 | 113 | 16 | 129 |
 | child | 0 | 62 | 42 | 104 |
 | crypto | 0 | 60 | 39 | 99 |
-| process | 5 | 61 | 17 | 83 |
+| process | 6 | 60 | 17 | 83 |
 | cluster | 0 | 62 | 19 | 81 |
 | vm | 0 | 69 | 10 | 79 |
 | repl | 0 | 37 | 39 | 76 |
@@ -65,46 +65,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 249 | COMPILE_ERROR: a number has no method '%s' |
-| 118 | COMPILE_ERROR: undefined variable '%s' |
+| 268 | COMPILE_ERROR: a number has no method '%s' |
+| 116 | COMPILE_ERROR: undefined variable '%s' |
 | 94 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 86 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
-| 73 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 59 | COMPILE_ERROR: no field '%s' |
-| 56 | COMPILE_ERROR: unknown class '%s' |
+| 75 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 60 | COMPILE_ERROR: no field '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 52 | COMPILE_ERROR: fs has no method '%s' |
-| 49 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 43 | COMPILE_ERROR: undefined function or closure '%s' |
+| 51 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
+| 51 | COMPILE_ERROR: unknown class '%s' |
+| 46 | COMPILE_ERROR: undefined function or closure '%s' |
+| 39 | COMPILE_ERROR: fs has no method '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 33 | COMPILE_ERROR: an http.Server supports .on('%s', (req, res)) and .on('%s', (stream, headers)) (got '… |
-| 29 | COMPILE_ERROR: a net socket supports '%s' and '%s' (got '%s') |
+| 29 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 28 | COMPILE_ERROR: initializer'%s's type — this compiler is a typed subset |
 | 28 | COMPILE_ERROR: process has no method '%s' |
-| 27 | COMPILE_ERROR: http.get options support { port, path, host, agent } only (got '%s') |
-| 26 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 25 | COMPILE_ERROR: expected ), got => |
+| 23 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
 | 23 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
-| 21 | COMPILE_ERROR: a Request has no method '%s' |
+| 22 | COMPILE_ERROR: a Request has no method '%s' |
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 21 | RUN_TIMEOUT |
+| 19 | COMPILE_ERROR: '%s' is not an array |
+| 19 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
+| 19 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 19 | COMPILE_ERROR: https.createServer is not implemented yet — the HTTP accept loop is not TLS-wrapped… |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
-| 19 | RUN_TIMEOUT |
-| 18 | COMPILE_ERROR: '%s' is not an array |
-| 18 | COMPILE_ERROR: createServer's options object is not supported (only the bare listener form, or an em… |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
 | 16 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
-| 16 | COMPILE_ERROR: unknown stream method '%s' |
+| 16 | COMPILE_ERROR: cannot convert type ptr to string in template literal |
 | 15 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
 | 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 14 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
-| 14 | COMPILE_ERROR: cannot convert type ptr to string in template literal |
 | 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
+| 14 | MODULE_NOT_IMPLEMENTED: module |
+| 13 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 
 ## Top skip reasons
 
@@ -138,7 +138,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (37)
+## Passing files (42)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -153,9 +153,13 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-eval.js` | eval |  |
 | `test-eventsource.js` | eventsource |  |
 | `test-fs-read-file-sync-hostname.js` | fs |  |
+| `test-fs-read-stream-resume.js` | fs |  |
 | `test-global-customevent-disabled.js` | global |  |
+| `test-global-domexception.js` | global |  |
 | `test-global-webcrypto-disbled.js` | global |  |
 | `test-net-connect-after-destroy.js` | net |  |
+| `test-net-isipv4.js` | net |  |
+| `test-net-isipv6.js` | net |  |
 | `test-net-socket-connect-invalid-autoselectfamily.js` | net |  |
 | `test-next-tick-doesnt-hang.js` | next |  |
 | `test-no-node-snapshot.js` | no |  |
@@ -163,6 +167,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-path-dirname.js` | path | −9 |
 | `test-path-relative.js` | path | −1 |
 | `test-process-chdir-errormessage.js` | process |  |
+| `test-process-env-delete.js` | process |  |
 | `test-process-env-deprecation.js` | process |  |
 | `test-process-exit-recursive.js` | process |  |
 | `test-process-exit.js` | process |  |

@@ -485,3 +485,25 @@ console.log(firstOf("y", true));
 		t.Fatalf("expected no V1-style mangled instantiation of an @erased function, got one\n%s", ir)
 	}
 }
+
+// --- explicit call-site type arguments (ADR-00473) ---
+
+func TestE2EExplicitCallSiteTypeArguments(t *testing.T) {
+	assertOutput(t, `
+function id<T>(x: T): T { return x; }
+console.log(id<string>("hi"));
+console.log(id<number>(41) + 1);
+function make<T>(): T[] { return []; }
+const xs = make<number>();
+console.log(xs.length);
+`, "hi\n42\n0")
+}
+
+func TestE2ELessThanStillParsesAsComparison(t *testing.T) {
+	assertOutput(t, `
+let a = 3; let b = 2; let c = 4;
+console.log(a < b);
+console.log(b < c && c > a);
+console.log(a > (b));
+`, "false\ntrue\ntrue")
+}

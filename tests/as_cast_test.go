@@ -49,3 +49,25 @@ const p = { name: "kb" } as P
 console.log(p.name)
 `, "kb")
 }
+
+// --- Old-style angle-bracket type assertions (ADR-00451) ---
+
+func TestE2EAngleBracketTypeAssertionErased(t *testing.T) {
+	assertOutput(t, `
+const n: number = <number>5;
+const s = <string>("a" + "b");
+console.log(n + 1);
+console.log(s);
+console.log(<number>n * 2);
+const arr = <number[]>[1, 2, 3];
+console.log(arr.length);
+`, "6\nab\n10\n3")
+}
+
+func TestE2EAngleBracketAssertionDoesNotBreakLessThan(t *testing.T) {
+	assertOutput(t, `
+let a = 3; let b = 2;
+console.log(a < b);
+console.log(1 < 2);
+`, "false\ntrue")
+}

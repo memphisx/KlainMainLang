@@ -211,8 +211,9 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 	// at runtime: http://<host>:<port><path>. Other option keys (headers,
 	// method, agent, …) are rejected rather than silently ignored.
 	var urlVal Value
+	methodRef, headersRef := "null", "null"
 	if lit, ok := args[0].(*ast.ObjectLiteral); ok {
-		var portExpr, pathExpr, hostExpr ast.Expression
+		var portExpr, pathExpr, hostExpr, methodExpr, headersExpr ast.Expression
 		for _, prop := range lit.Properties {
 			switch prop.Key {
 			case "port":
@@ -221,6 +222,10 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 				pathExpr = prop.Value
 			case "host", "hostname":
 				hostExpr = prop.Value
+			case "method":
+				methodExpr = prop.Value
+			case "headers":
+				headersExpr = prop.Value
 			case "agent":
 				// Accepted, evaluated for effect, and otherwise ignored: this
 				// client opens one connection per request — exactly Node's
@@ -230,7 +235,7 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 					return Value{}, err
 				}
 			default:
-				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, agent } only (got '%s')", pos.Line, pos.Col, prop.Key)
+				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, method, headers, agent } only (got '%s')", pos.Line, pos.Col, prop.Key)
 			}
 		}
 		if portExpr == nil {
@@ -274,6 +279,39 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 			return Value{}, err
 		}
 		urlVal = acc
+		if methodExpr != nil {
+			mv, err := e.emitExpr(methodExpr)
+			if err != nil {
+				return Value{}, err
+			}
+			methodRef = e.coerce(mv, TypePtr).Ref
+		}
+		if headersExpr != nil {
+			hl, ok := headersExpr.(*ast.ObjectLiteral)
+			if !ok {
+				return Value{}, fmt.Errorf("%d:%d: http.get's headers option must be an object literal", pos.Line, pos.Col)
+			}
+			// Build a string map from the literal, then the same curl_slist
+			// fetch(url, init) uses (ADR-00500).
+			e.ensureMapStrHelpers()
+			m := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
+			for _, hp := range hl.Properties {
+				hv, err := e.emitExpr(hp.Value)
+				if err != nil {
+					return Value{}, err
+				}
+				hv = e.coerce(hv, TypePtr)
+				vi := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", vi, hv.Ref))
+				e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, e.internString(hp.Key), vi))
+			}
+			hlist, err := e.buildFetchHeaderList(m)
+			if err != nil {
+				return Value{}, err
+			}
+			headersRef = hlist
+		}
 	} else if objTy := e.inferExprType(args[0]); objTy.IsObject {
 		// A *variable-bound* options object (`const options = { port, … };
 		// http.get(options, cb)`). Before this branch existed the object
@@ -296,9 +334,9 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 		}
 		for _, f := range objVal.Ty.Fields {
 			switch f.Name {
-			case "port", "path", "host", "hostname", "agent":
+			case "port", "path", "host", "hostname", "agent", "method":
 			default:
-				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, agent } only (got '%s')", pos.Line, pos.Col, f.Name)
+				return Value{}, fmt.Errorf("%d:%d: http.get options support { port, path, host, method, headers, agent } only (got '%s')", pos.Line, pos.Col, f.Name)
 			}
 		}
 		portVal, ok := loadField("port")
@@ -314,6 +352,9 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 			host = hv
 		} else if hv, ok := loadField("hostname"); ok && isStringTy(hv.Ty) {
 			host = hv
+		}
+		if mv, ok := loadField("method"); ok && isStringTy(mv.Ty) {
+			methodRef = mv.Ref
 		}
 		acc, err := e.emitStringConcat(Value{Ref: e.internString(scheme + "://"), Ty: TypePtr}, host)
 		if err != nil {
@@ -370,7 +411,7 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 	// .end() (state 0), matching Node's "nothing is sent until end()".
 	e.ensureHTTPClientBegin()
 	req := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 24)", req))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 40)", req))
 	g0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 0", g0, req))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", urlVal.Ref, g0))
@@ -379,11 +420,17 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userCb, g1))
 	g2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 2", g2, req))
+	g3 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 3", g3, req))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", methodRef, g3))
+	g4 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 4", g4, req))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", headersRef, g4))
 	if deferred {
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", g2))
 	} else {
 		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", g2))
-		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_begin(ptr %s, ptr %s)", urlVal.Ref, userCb))
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_begin(ptr %s, ptr %s, ptr %s, ptr %s)", urlVal.Ref, userCb, methodRef, headersRef))
 	}
 	return Value{Ref: req, Ty: ClientRequestType()}, nil
 }
@@ -398,10 +445,14 @@ func (e *Emitter) ensureHTTPClientBegin() {
 	}
 	e.usedHTTPCBegin = true
 	thunk := e.emitHTTPCompletionThunk()
-	e.emitStandaloneFunc("void @__kml_httpc_begin(ptr %url, ptr %usercb)", func() string {
-		method := e.internString("GET")
+	e.emitStandaloneFunc("void @__kml_httpc_begin(ptr %url, ptr %usercb, ptr %method, ptr %headers)", func() string {
+		defMethod := e.internString("GET")
+		mNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %%method, null", mNull))
+		method := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %%method", method, mNull, defMethod))
 		pending := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %%url, ptr %s, ptr null, ptr null, ptr null)", pending, method))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %%url, ptr %s, ptr %%headers, ptr null, ptr null)", pending, method))
 		env := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
 		e0 := e.freshReg()
@@ -442,7 +493,11 @@ fire:
   %url = load ptr, ptr %url_p, align 8
   %cb_p = getelementptr { ptr, ptr, i64 }, ptr %req, i32 0, i32 1
   %cb = load ptr, ptr %cb_p, align 8
-  call void @__kml_httpc_begin(ptr %url, ptr %cb)
+  %m_p = getelementptr ptr, ptr %req, i64 3
+  %m = load ptr, ptr %m_p, align 8
+  %h_p = getelementptr ptr, ptr %req, i64 4
+  %h = load ptr, ptr %h_p, align 8
+  call void @__kml_httpc_begin(ptr %url, ptr %cb, ptr %m, ptr %h)
   br label %ret
 ret:
   ret void

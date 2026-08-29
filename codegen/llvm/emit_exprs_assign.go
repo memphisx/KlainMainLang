@@ -134,6 +134,31 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 }
 
 func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
+	// A namespace-member assignment (`X.member = v` / `A.B.member = v`,
+	// TDD-00148/ADR-00474) rewrites to an assignment to the desugared flat
+	// binding, mirroring the call/value-read dispatch in emitCall/emitMember.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
+		if id, isID := memEx.Object.(*ast.Identifier); isID {
+			if members, nsName := e.namespaceMembers(id.Name); members != nil && !e.isShadowedByLocal(id.Name) {
+				if exported, present := members[memEx.Property]; present {
+					if !exported && e.curNamespace != nsName {
+						return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name, memEx.Property, nsName)
+					}
+					rewritten := ast.NewAssignmentExpression(ex.Op, ast.NewIdentifier(ast.NamespaceMangle(nsName, memEx.Property), ex.GetPos()), ex.Right, ex.GetPos())
+					return e.emitAssign(rewritten)
+				}
+			}
+		} else if members, nsName := e.namespaceByChain(memEx.Object); members != nil {
+			if exported, present := members[memEx.Property]; present {
+				if !exported && e.curNamespace != nsName {
+					return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, nsName, memEx.Property, nsName)
+				}
+				rewritten := ast.NewAssignmentExpression(ex.Op, ast.NewIdentifier(ast.NamespaceMangle(nsName, memEx.Property), ex.GetPos()), ex.Right, ex.GetPos())
+				return e.emitAssign(rewritten)
+			}
+		}
+	}
+
 	// TDD-00098 stage 6, browser Worker surface. Parent side:
 	// `w.onmessage = ...` / `w.onerror = ...` on a Worker-typed receiver.
 	// Worker side: a bare (or self.) `onmessage = ...` at the module top
@@ -366,6 +391,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("field assignment on non-object")
+		}
+		// A URL's components are derived from one parse — a bare field store
+		// (`url.href = ''`) would silently desync every other component, so
+		// component setters are a clean rejection instead (ADR-00465).
+		if objVal.Ty.IsURL {
+			return Value{}, fmt.Errorf("%d:%d: assigning to a URL component ('%s') is not supported — URL setters would re-parse the whole URL; construct a new URL instead", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
 		}
 		// TDD-00030: a class accessor (getter/setter) is checked before the
 		// plain-field FieldIndex path below — an accessor-only property

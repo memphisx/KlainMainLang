@@ -40,8 +40,8 @@ func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error)
 	if err != nil {
 		return nil, err
 	}
-	if keyTok.Literal != "string" {
-		return nil, fmt.Errorf("%d:%d: only a string index signature `[k: string]: T` is supported (a `%s` key is not yet supported)", keyTok.Line, keyTok.Col, keyTok.Literal)
+	if keyTok.Literal != "string" && keyTok.Literal != "number" {
+		return nil, fmt.Errorf("%d:%d: only a string or number index signature `[k: string]: T` / `[i: number]: T` is supported (a `%s` key is not yet supported)", keyTok.Line, keyTok.Col, keyTok.Literal)
 	}
 	if _, err := p.expect(lexer.RBRACKET); err != nil {
 		return nil, err
@@ -52,10 +52,88 @@ func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error)
 	return p.parseTypeAnnotation(source)
 }
 
+// parseObjectTypeSignatureTail parses the `(params): R` tail of an object-type
+// method signature (`{ foo(bar: string): string }`) or bare call signature
+// (`{ (n: number): string }`), positioned at the opening `(`. Parameter names
+// are documentation-only (as in function types); an omitted return type
+// defaults to `void`, matching TS's method-signature shorthand semantics as
+// closely as this typed subset can. Returns the equivalent function-type
+// annotation.
+func (p *Parser) parseObjectTypeSignatureTail(source string) (*ast.TypeAnnotation, error) {
+	p.advance() // consume '('
+	var funcParams []ast.TypeAnnotation
+	hasRest := false
+	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		if p.check(lexer.ELLIPSIS) {
+			if hasRest {
+				return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a method signature", p.peek().Line, p.peek().Col)
+			}
+			p.advance()
+			hasRest = true
+		} else if hasRest {
+			return nil, fmt.Errorf("%d:%d: a rest parameter must be last in a method signature", p.peek().Line, p.peek().Col)
+		}
+		// Optional `name:` / `name?:` prefix (documentation-only).
+		if p.check(lexer.IDENT) &&
+			(p.peekNth(1).Type == lexer.COLON ||
+				(p.peekNth(1).Type == lexer.QUESTION && p.peekNth(2).Type == lexer.COLON)) {
+			p.advance() // name
+			p.match(lexer.QUESTION)
+			p.advance() // ':'
+		}
+		pt, err := p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
+		}
+		funcParams = append(funcParams, *pt)
+		p.match(lexer.COMMA)
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	retType := &ast.TypeAnnotation{Name: "void", Source: source}
+	if p.check(lexer.COLON) {
+		p.advance()
+		var err error
+		retType, err = p.parseTypeAnnotation(source)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ast.TypeAnnotation{Source: source, IsFuncType: true, FuncParams: funcParams, FuncRetType: retType, FuncHasRest: hasRest}, nil
+}
+
 func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
+	// Assertion signature `asserts x [is T]` (ADR-00474): a return-type-only
+	// form — parses and erases to void (the assertion itself isn't modeled;
+	// the function body's own throw is what enforces it at runtime).
+	if p.check(lexer.IDENT) && p.peek().Literal == "asserts" &&
+		(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.THIS) {
+		p.advance() // 'asserts'
+		p.advance() // the asserted binding (or 'this')
+		if p.check(lexer.IDENT) && p.peek().Literal == "is" {
+			p.advance()
+			if _, err := p.parseUnionType(source); err != nil {
+				return nil, err
+			}
+		}
+		return &ast.TypeAnnotation{Name: "void", Source: source}, nil
+	}
+
 	left, err := p.parseUnionType(source)
 	if err != nil {
 		return nil, err
+	}
+
+	// Type predicate `x is T` (ADR-00474): a return-type-only form — the
+	// function is an ordinary boolean predicate at runtime, so the
+	// annotation resolves to boolean; the narrowing itself isn't modeled.
+	if p.check(lexer.IDENT) && p.peek().Literal == "is" && p.peekNth(1).Type != lexer.COLON {
+		p.advance() // 'is'
+		if _, err := p.parseUnionType(source); err != nil {
+			return nil, err
+		}
+		return &ast.TypeAnnotation{Name: "boolean", Source: source}, nil
 	}
 	if !p.check(lexer.EXTENDS) {
 		return left, nil
@@ -188,6 +266,22 @@ func (p *Parser) parseTypeAnnotationIntersection(source string) (*ast.TypeAnnota
 func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, error) {
 	tok := p.peek()
 
+	// Numeric-literal type: `1` / `-1.5` (ADR-00459) — resolves to `number`,
+	// mirroring the string-literal type's V1 stance (value not narrowed).
+	if tok.Type == lexer.NUMBER ||
+		(tok.Type == lexer.MINUS && p.peekNth(1).Type == lexer.NUMBER) {
+		lit := ""
+		if tok.Type == lexer.MINUS {
+			p.advance()
+			lit = "-"
+		}
+		numTok := p.advance()
+		lit += numTok.Literal
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{
+			Source: source, IsNumberLiteral: true, LiteralValue: lit,
+		})
+	}
+
 	// String-literal type: "north" (TDD-00079). Primarily the key argument of
 	// Pick/Omit/Record (`Pick<T, "a" | "b">`, a union of these); usable as a
 	// standalone value type too, where it resolves to `string`.
@@ -230,6 +324,36 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		p.advance() // 'infer'
 		nameTok := p.advance()
 		return &ast.TypeAnnotation{Source: source, IsInfer: true, InferName: nameTok.Literal}, nil
+	}
+
+	// Constructor type `new (params) => R` — parsed like the function type
+	// it structurally is; the `new`-ness itself isn't modeled (no
+	// first-class constructor values), so this is accept-and-erase to the
+	// equivalent function type (ADR-00451 batch).
+	if tok.Type == lexer.NEW && p.peekNth(1).Type == lexer.LPAREN {
+		p.advance() // consume 'new'
+		return p.parseTypeAnnotationAtom(source)
+	}
+
+	// Generic function type `<T>(x: T) => R` (ADR-00469): the type-parameter
+	// list is parsed and its names erased to `any` in the signature —
+	// generic functions here are monomorphized declarations, not
+	// first-class values, so the parameters have nothing to bind to.
+	if tok.Type == lexer.LT {
+		tps, _, err := p.parseTypeParamList("generic function type")
+		if err != nil {
+			return nil, err
+		}
+		inner, err := p.parseTypeAnnotationAtom(source)
+		if err != nil {
+			return nil, err
+		}
+		set := map[string]bool{}
+		for _, tp := range tps {
+			set[tp] = true
+		}
+		eraseTypeParamsIn(inner, set)
+		return inner, nil
 	}
 
 	// Function type annotation: (param: type, ...) => retType
@@ -351,6 +475,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 
 		var fields []ast.AnnotField
 		var indexSig *ast.TypeAnnotation
+		var callSig *ast.TypeAnnotation
 		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 			if p.check(lexer.LBRACKET) {
 				valTy, err := p.parseIndexSignature(source)
@@ -364,10 +489,62 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 				p.match(lexer.SEMICOLON, lexer.COMMA)
 				continue
 			}
+			// A bare call signature member `(n: number): string` makes the
+			// whole object type callable. This compiler has no callable-object
+			// values, so the only supported shape is a call signature *alone*
+			// — desugared to the equivalent function type (checked after the
+			// loop, so a mix with other members gets a clean rejection). A
+			// construct signature `new (): T` erases its `new` and rides the
+			// same path (ADR-00462).
+			if p.check(lexer.NEW) && p.peekNth(1).Type == lexer.LPAREN {
+				p.advance() // 'new'
+			}
+			if p.check(lexer.LPAREN) {
+				if callSig != nil {
+					return nil, fmt.Errorf("%d:%d: at most one call signature is supported per object type", tok.Line, tok.Col)
+				}
+				sig, err := p.parseObjectTypeSignatureTail(source)
+				if err != nil {
+					return nil, err
+				}
+				callSig = sig
+				p.match(lexer.SEMICOLON, lexer.COMMA)
+				continue
+			}
 			nameTok, err := p.expect(lexer.IDENT)
 			if err != nil {
 				return nil, err
 			}
+			// Method signature member `name(params): R` (optionally `name?`,
+			// optionally generic `name<T>(…)` with T erased — ADR-00469),
+			// TS shorthand for a function-typed property — desugared to
+			// exactly that.
+			if p.check(lexer.LPAREN) || p.check(lexer.LT) || (p.check(lexer.QUESTION) && p.peekNth(1).Type == lexer.LPAREN) {
+				p.match(lexer.QUESTION)
+				var tps []string
+				if p.check(lexer.LT) {
+					var err error
+					tps, _, err = p.parseTypeParamList(nameTok.Literal + "<T>")
+					if err != nil {
+						return nil, err
+					}
+				}
+				sig, err := p.parseObjectTypeSignatureTail(source)
+				if err != nil {
+					return nil, err
+				}
+				if len(tps) > 0 {
+					set := map[string]bool{}
+					for _, tp := range tps {
+						set[tp] = true
+					}
+					eraseTypeParamsIn(sig, set)
+				}
+				fields = append(fields, ast.AnnotField{Name: nameTok.Literal, Type: sig})
+				p.match(lexer.SEMICOLON, lexer.COMMA)
+				continue
+			}
+			p.match(lexer.QUESTION)
 			if _, err := p.expect(lexer.COLON); err != nil {
 				return nil, err
 			}
@@ -383,6 +560,12 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 		}
 		if indexSig != nil && len(fields) > 0 {
 			return nil, fmt.Errorf("%d:%d: combining named properties with an index signature is not yet supported — use an index signature alone", tok.Line, tok.Col)
+		}
+		if callSig != nil {
+			if len(fields) > 0 || indexSig != nil {
+				return nil, fmt.Errorf("%d:%d: a call signature combined with other object-type members is not supported — a callable object value has no runtime shape here; use a plain function type or split the members", tok.Line, tok.Col)
+			}
+			return parseTrailingArrayBrackets(p, source, callSig)
 		}
 		ta := &ast.TypeAnnotation{Source: source, Fields: fields, IndexSig: indexSig}
 		return parseTrailingArrayBrackets(p, source, ta)
@@ -445,6 +628,15 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 	}
 	nameTok := p.advance()
 	name := nameTok.Literal
+
+	// Qualified type reference (`ns.Type`, ADR-00470): namespace type
+	// members desugar to bare top-level names (ADR-00450), so the chain
+	// resolves to its final segment — the same rule qualified `new`/
+	// `extends` already use (ADR-00408).
+	for p.check(lexer.DOT) && p.peekNth(1).Type == lexer.IDENT {
+		p.advance() // '.'
+		name = p.advance().Literal
+	}
 
 	// Promise<T> / Array<T> / Set<T> / EventEmitter<T>: single type
 	// parameter — parse it for real instead of skipping, same as the
@@ -560,10 +752,47 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		typeParams = tp
 		typeParamConstraints = tc
 	}
-	// Skip optional `extends Base` clause.
+	// Skip optional `extends Base, Other<T>, ns.Qualified` clause — the base
+	// list is consumed but not merged (interface conformance stays purely
+	// structural here); a generic base's type arguments and a qualified
+	// name's segments are parsed and dropped the same way (ADR-00451 batch).
+	var extendsNames []string
 	if p.peek().Type == lexer.EXTENDS {
 		p.advance() // extends
-		p.advance() // base name
+		for {
+			baseTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			qualified := false
+			for p.check(lexer.DOT) {
+				qualified = true
+				p.advance()
+				if _, err := p.expect(lexer.IDENT); err != nil {
+					return nil, err
+				}
+			}
+			if !qualified && !p.check(lexer.LT) {
+				extendsNames = append(extendsNames, baseTok.Literal)
+			}
+			if p.check(lexer.LT) {
+				p.advance()
+				for {
+					if _, err := p.parseTypeAnnotation("ts"); err != nil {
+						return nil, err
+					}
+					if !p.match(lexer.COMMA) {
+						break
+					}
+				}
+				if err := p.expectGT("interface extends"); err != nil {
+					return nil, err
+				}
+			}
+			if !p.match(lexer.COMMA) {
+				break
+			}
+		}
 	}
 	if _, err := p.expect(lexer.LBRACE); err != nil {
 		return nil, err
@@ -571,6 +800,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	var fields []ast.AnnotField
 	var methods []ast.InterfaceMethodSig
 	var indexSig *ast.TypeAnnotation
+	var callSig *ast.TypeAnnotation
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
 		if p.check(lexer.LBRACKET) {
@@ -585,14 +815,50 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 			p.match(lexer.SEMICOLON, lexer.COMMA)
 			continue
 		}
+		// Bare call signature member `(n: number): string` — a callable
+		// interface. Supported only when it is the interface's *only* member
+		// (checked at the end), where the interface registers as the
+		// equivalent function type; mixed with fields/methods it stays a
+		// clean rejection (same shape as object-type call signatures,
+		// ADR-00448/ADR-00455).
+		if p.check(lexer.LPAREN) || (p.check(lexer.NEW) && p.peekNth(1).Type == lexer.LPAREN) {
+			p.match(lexer.NEW) // construct signature: erased to the call form
+			sig, err := p.parseObjectTypeSignatureTail("ts")
+			if err != nil {
+				return nil, err
+			}
+			if callSig == nil {
+				// Additional call/construct signatures (an overloaded
+				// callable interface) are erased — the first signature is
+				// the one call sites check against, the same first-wins
+				// stance overload signatures take (ADR-00446/ADR-00479).
+				callSig = sig
+			}
+			p.match(lexer.SEMICOLON, lexer.COMMA)
+			continue
+		}
+
 		fieldTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
 
 		// Method signature (TDD-00009 Stage 4, for `implements` conformance
-		// checking): `name(...): T;` — no body, ever.
-		if p.check(lexer.LPAREN) {
+		// checking): `name(...): T;` — no body, ever. A generic signature
+		// (`name<T>(…)`) parses its type-parameter list and erases the
+		// names to `any` in the parameter annotations (ADR-00469).
+		if p.check(lexer.LPAREN) || (p.check(lexer.LT) && p.peekNth(1).Type == lexer.IDENT) {
+			var tps map[string]bool
+			if p.check(lexer.LT) {
+				names, _, err := p.parseTypeParamList(fieldTok.Literal + "<T>")
+				if err != nil {
+					return nil, err
+				}
+				tps = map[string]bool{}
+				for _, n := range names {
+					tps[n] = true
+				}
+			}
 			p.advance()
 			params, err := p.parseParamList()
 			if err != nil {
@@ -608,6 +874,12 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 				if err != nil {
 					return nil, err
 				}
+			}
+			if tps != nil {
+				for i := range params {
+					eraseTypeParamsIn(params[i].Type, tps)
+				}
+				eraseTypeParamsIn(retType, tps)
 			}
 			methods = append(methods, ast.InterfaceMethodSig{Name: fieldTok.Literal, Params: params, ReturnType: retType})
 			p.match(lexer.SEMICOLON, lexer.COMMA)
@@ -641,10 +913,15 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	if indexSig != nil && len(fields) > 0 {
 		return nil, fmt.Errorf("%d:%d: combining named properties with an index signature is not yet supported — use an index signature alone", nameTok.Line, nameTok.Col)
 	}
+	if callSig != nil && (len(fields) > 0 || len(methods) > 0 || indexSig != nil) {
+		return nil, fmt.Errorf("%d:%d: a call signature combined with other interface members is not supported — a callable object value has no runtime shape here", nameTok.Line, nameTok.Col)
+	}
 	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.IndexSig = indexSig
+	decl.CallSig = callSig
+	decl.Extends = extendsNames
 	return decl, nil
 }
 
@@ -700,9 +977,21 @@ func (p *Parser) parseEnumDeclaration() (*ast.EnumDeclaration, error) {
 	}
 	var members []ast.EnumMember
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
-		memberTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
+		// A member name may be a string literal (`enum E { A, "non id" }`) —
+		// only reachable via the bracketless `E.A` form for identifier-shaped
+		// names; a string-named member is declarable but its value is only
+		// reachable through positions this compiler doesn't model
+		// (`E["non id"]`), so declaring it just advances the counter
+		// (ADR-00459).
+		var memberTok lexer.Token
+		if p.check(lexer.STRING) {
+			memberTok = p.advance()
+		} else {
+			var err error
+			memberTok, err = p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
 		}
 		var val ast.Expression
 		if p.match(lexer.ASSIGN) {
@@ -721,4 +1010,42 @@ func (p *Parser) parseEnumDeclaration() (*ast.EnumDeclaration, error) {
 		return nil, err
 	}
 	return ast.NewEnumDeclaration(nameTok.Literal, isConst, members, pos), nil
+}
+
+// eraseTypeParamsIn rewrites bare references to the given type-parameter
+// names into `any` inside a parsed annotation — the erasure a generic
+// function *type* (`<T>(x: T) => T`, ADR-00469) gets: this compiler's
+// generic functions are monomorphized declarations, never first-class
+// values, so the annotation's own type parameters have nothing to bind to
+// and erase like the `as`-cast family.
+func eraseTypeParamsIn(ta *ast.TypeAnnotation, params map[string]bool) {
+	if ta == nil {
+		return
+	}
+	if params[ta.Name] {
+		ta.Name = "any"
+	} else if len(ta.Name) > 2 && params[ta.Name[:len(ta.Name)-2]] && ta.Name[len(ta.Name)-2:] == "[]" {
+		ta.Name = "any[]"
+	}
+	eraseTypeParamsIn(ta.ElemType, params)
+	eraseTypeParamsIn(ta.KeyType, params)
+	eraseTypeParamsIn(ta.FuncRetType, params)
+	for i := range ta.FuncParams {
+		eraseTypeParamsIn(&ta.FuncParams[i], params)
+	}
+	for _, m := range ta.TypeArgs {
+		eraseTypeParamsIn(m, params)
+	}
+	for _, m := range ta.UnionMembers {
+		eraseTypeParamsIn(m, params)
+	}
+	for _, m := range ta.IntersectionMembers {
+		eraseTypeParamsIn(m, params)
+	}
+	for _, m := range ta.TupleElems {
+		eraseTypeParamsIn(m, params)
+	}
+	for i := range ta.Fields {
+		eraseTypeParamsIn(ta.Fields[i].Type, params)
+	}
 }

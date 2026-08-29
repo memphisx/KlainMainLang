@@ -63,6 +63,9 @@ func runTSSuite(workDir string, timeout time.Duration) {
 			if err != nil || info.IsDir() || !strings.HasSuffix(p, ".ts") || strings.HasSuffix(p, ".d.ts") {
 				return nil
 			}
+			if os.Getenv("TS_VERBOSE") != "" {
+				fmt.Fprintf(os.Stderr, "case: %s\n", p)
+			}
 			results = append(results, runOneTS(p, group, hasErrorsBaseline, workDir))
 			return nil
 		})

@@ -32,3 +32,14 @@ if (isWindows) {
 }
 
 console.log('all expectations registered; they are checked at exit')
+
+// mustCall wraps any fixed-signature callback — arrays, nullable scalars,
+// and wide arities included; only rest parameters stay unsupported.
+const sum5 = mustCall((a: number, b: number, c: number, d: number, e: number) => {
+    console.log(a + b + c + d + e)  // 15
+})
+sum5(1, 2, 3, 4, 5)
+const takeList = mustCall((xs: string[]) => {
+    console.log(xs.join("+"))       // alpha+beta
+})
+takeList(["alpha", "beta"])

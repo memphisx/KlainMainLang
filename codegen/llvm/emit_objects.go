@@ -214,9 +214,12 @@ func (e *Emitter) emitDynamicObjectLiteral(lit *ast.ObjectLiteral) (Value, error
 		keyExpr := prop.KeyExpr
 		if keyExpr == nil {
 			keyExpr = ast.NewStringLiteral(prop.Key, lit.GetPos())
-		} else if !isStringTy(e.inferExprType(keyExpr)) {
-			pos := keyExpr.GetPos()
-			return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+		} else {
+			var err error
+			keyExpr, err = e.dynObjectKeyExpr(keyExpr, keyExpr.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
 		}
 		if _, err := e.emitMapCall(ty, mapPtr, "set", []ast.Expression{keyExpr, prop.Value}, lit.GetPos()); err != nil {
 			return Value{}, err
@@ -232,8 +235,9 @@ func (e *Emitter) emitDynamicObjectLiteral(lit *ast.ObjectLiteral) (Value, error
 // emitDynamicObjectLiteral already apply to a computed key, rather than
 // letting a non-string key silently bit-reinterpret via valueToMapKey.
 func (e *Emitter) emitDynamicObjectGet(ty Type, mapPtr string, keyExpr ast.Expression, pos ast.Pos) (Value, error) {
-	if !isStringTy(e.inferExprType(keyExpr)) {
-		return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+	keyExpr, err := e.dynObjectKeyExpr(keyExpr, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	return e.emitMapCall(ty, mapPtr, "get", []ast.Expression{keyExpr}, pos)
 }
@@ -251,12 +255,13 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	if ty.MapVal != nil {
 		valTy = *ty.MapVal
 	}
-	keyVal, err := e.emitExpr(keyExpr)
+	keyExpr, err := e.dynObjectKeyExpr(keyExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if !isStringTy(keyVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: computed property key must be a string", pos.Line, pos.Col)
+	keyVal, err := e.emitExpr(keyExpr)
+	if err != nil {
+		return Value{}, err
 	}
 	kRef := e.valueToMapKey(keyVal, TypePtr)
 
@@ -931,29 +936,39 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.values requires an object with known fields", pos.Line, pos.Col)
 	}
+	// Homogeneous fixed shapes keep real typed values (ADR-00492) — same
+	// rule Object.entries applies below; mixed shapes still stringify.
+	valTy, homogeneous := homogeneousFieldType(visFields)
+	if !homogeneous {
+		valTy = TypePtr
+	}
 	n := int64(len(visFields))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*8))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(valTy.Align())))
 	for i, f := range visFields {
 		idx, _, _ := objVal.Ty.FieldIndex(f.Name)
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, f.Ty.IR, gepReg, f.Ty.Align()))
-		strVal, err := e.emitValueToString(Value{Ref: rawReg, Ty: f.Ty})
-		if err != nil {
-			return Value{}, fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
+		elemVal := Value{Ref: rawReg, Ty: f.Ty}
+		if !homogeneous {
+			strVal, err := e.emitValueToString(elemVal)
+			if err != nil {
+				return Value{}, fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+			}
+			elemVal = strVal
 		}
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slotReg, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strVal.Ref, slotReg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slotReg, StructFieldIR(valTy), dataReg, i))
+		e.storeArrayElem(slotReg, valTy, elemVal)
 	}
 	r0 := e.freshReg()
 	r1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %d, 1", r1, r0, n))
-	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
+	return Value{Ref: r1, Ty: ArrayOf(valTy)}, nil
 }
 
 // emitObjectEntries implements Object.entries(obj) → {key: string, value: string}[].
@@ -982,11 +997,15 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	if !objVal.Ty.IsObject || (!objVal.Ty.IsClass && len(visFields) == 0) {
 		return Value{}, fmt.Errorf("%d:%d: Object.entries requires an object with known fields", pos.Line, pos.Col)
 	}
-	// Each entry is a real [string, string] tuple (TDD-00066) — values are
-	// still stringified (a heterogeneous object's value type is a union this
-	// compiler can't yet form), but the tuple shape is what makes
-	// `for (const [k, v] of Object.entries(obj))` work.
-	entryTy := TupleType([]Type{TypePtr, TypePtr})
+	// Each entry is a real [string, V] tuple (TDD-00066). When every visible
+	// field shares one type, V is that real type (ADR-00492); a heterogeneous
+	// object still stringifies its values (the union V would need is
+	// representable only as `any`, whose operators aren't dispatched yet).
+	valTy, homogeneous := homogeneousFieldType(visFields)
+	if !homogeneous {
+		valTy = TypePtr
+	}
+	entryTy := TupleType([]Type{TypePtr, valTy})
 	entrySize := int64(entryTy.StructSize())
 	n := int64(len(visFields))
 	e.ensureMalloc()
@@ -1007,13 +1026,17 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
 		rawReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rawReg, StructFieldIR(f.Ty), gepReg, f.Ty.Align()))
-		strVal, err := e.emitValueToString(Value{Ref: rawReg, Ty: f.Ty})
-		if err != nil {
-			return Value{}, fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+		entryVal := Value{Ref: rawReg, Ty: f.Ty}
+		if !homogeneous {
+			strVal, err := e.emitValueToString(entryVal)
+			if err != nil {
+				return Value{}, fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+			}
+			entryVal = strVal
 		}
 		valSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strVal.Ref, valSlot))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(valTy), entryVal.Ref, valSlot, valTy.Align()))
 		// Store entry pointer in the outer array.
 		slotReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slotReg, dataReg, i))
@@ -1287,4 +1310,42 @@ func (e *Emitter) registerCryptoSubtleAliases(prog *ast.Program) {
 			e.cryptoSubtleAliases[d.Props[0].Local] = true
 		}
 	}
+}
+
+
+// dynObjectKeyExpr normalizes a computed-key expression for the map-backed
+// dynamic object: string keys pass through; a numeric key is wrapped in a
+// synthetic String(...) conversion — JS object keys are strings, and a
+// number index signature (`[i: number]: T`, ADR-00461) stores under the
+// stringified key exactly as real JS does. Any other key type keeps the
+// clean rejection.
+func (e *Emitter) dynObjectKeyExpr(keyExpr ast.Expression, pos ast.Pos) (ast.Expression, error) {
+	kt := e.inferExprType(keyExpr)
+	if isStringTy(kt) {
+		return keyExpr, nil
+	}
+	if kt.IR == "double" || kt.IR == "i64" || kt.IR == "i32" || kt.IR == "i16" || kt.IR == "i8" {
+		return ast.NewCallExpression(ast.NewIdentifier("String", pos), []ast.Expression{keyExpr}, pos), nil
+	}
+	return nil, fmt.Errorf("%d:%d: computed property key must be a string or number", pos.Line, pos.Col)
+}
+
+// homogeneousFieldType reports whether every field shares one storage type,
+// and returns it — the "can Object.entries keep real typed values" test
+// (ADR-00492). Compared on the storage IR plus the flags that change how a
+// value behaves downstream; mixed shapes fall back to stringified values.
+func homogeneousFieldType(fields []Field) (Type, bool) {
+	if len(fields) == 0 {
+		return TypePtr, false
+	}
+	first := fields[0].Ty
+	for _, f := range fields[1:] {
+		t := f.Ty
+		if t.IR != first.IR || t.Float != first.Float || t.Signed != first.Signed ||
+			t.IsArray != first.IsArray || t.IsFunc != first.IsFunc ||
+			t.IsObject != first.IsObject || t.IsMap != first.IsMap {
+			return TypePtr, false
+		}
+	}
+	return first, true
 }

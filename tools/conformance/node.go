@@ -53,7 +53,12 @@ func frontEnd(entryPath string) (e emitted, err error) {
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
-	prog, perr := resolver.ResolveProgram(entryPath)
+	// -compat=js semantics (allowGlobalShadowing): both oracles' referents
+	// — TypeScript and Node — permit a user binding to shadow a Tier-1
+	// global (`var Symbol = …`), so the permissive compat mode is the
+	// faithful measurement configuration (ADR-00472). Tier-2 names stay
+	// reserved either way.
+	prog, perr := resolver.ResolveProgramWithOptions(entryPath, true)
 	if perr != nil {
 		return emitted{}, perr
 	}

@@ -4,6 +4,7 @@ import (
 	"KlainMainLang/ast"
 	"fmt"
 	"runtime"
+	"sort"
 )
 
 // emitOptionalMember emits `obj?.property`. For ptr-typed objects it emits a
@@ -285,6 +286,63 @@ func (e *Emitter) emitTupleElemAssign(ex *ast.IndexExpression, tupleTy Type, op 
 }
 
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
+	// Enum bracket access (ADR-00480): `E["B"]` with a literal string key is
+	// the member's value; `E[0]` / `E[expr]` with a numeric key is the
+	// *reverse* mapping (value → member name string), resolved at compile
+	// time for a literal and via a chain of compares for a runtime value.
+	if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
+		if members, found := e.enums[id.Name]; found {
+			if sl, ok := ex.Index.(*ast.StringLiteral); ok {
+				if val, ok := members[sl.Value]; ok {
+					return val, nil
+				}
+				return Value{}, fmt.Errorf("%d:%d: no member '%s' in enum '%s'", ex.GetPos().Line, ex.GetPos().Col, sl.Value, id.Name)
+			}
+			// Reverse mapping is numeric-enum only (a string enum's values
+			// aren't i64 comparands) — a string enum's numeric index stays a
+			// clean rejection.
+			allNumeric := true
+			names := make([]string, 0, len(members))
+			for name, mv := range members {
+				names = append(names, name)
+				if mv.Ty.IR != "i64" {
+					allNumeric = false
+				}
+			}
+			if !allNumeric {
+				return Value{}, fmt.Errorf("%d:%d: a numeric reverse lookup is only supported on a numeric enum", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			sort.Strings(names)
+			idxVal, err := e.emitExpr(ex.Index)
+			if err != nil {
+				return Value{}, err
+			}
+			idxVal = e.coerce(idxVal, TypeI64)
+			// Reverse mapping: compare against each member's value; an
+			// unmatched value yields "undefined" (JS: E[99] === undefined).
+			result := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", result))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("undefined"), result))
+			doneL := e.freshLabel("enumrev.done")
+			for _, name := range names {
+				mv := members[name]
+				matchL := e.freshLabel("enumrev.hit")
+				nextL := e.freshLabel("enumrev.next")
+				cmp := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", cmp, idxVal.Ref, mv.Ref))
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cmp, matchL, nextL))
+				e.emitLabel(matchL)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(name), result))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+				e.emitLabel(nextL)
+			}
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, result))
+			return Value{Ref: out, Ty: TypePtr}, nil
+		}
+	}
 	// process.env["KEY"]: dynamic-key environment variable lookup.
 	if e.isProcessEnvExpr(ex.Object) {
 		return e.emitProcessEnvGetDynamic(ex.Index)
@@ -346,7 +404,16 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 			return Value{}, err
 		}
 		if keyVal.Ty.IR != "ptr" {
-			return Value{}, fmt.Errorf("%d:%d: a Map<string, …> bracket index must be a string", ex.GetPos().Line, ex.GetPos().Col)
+			// A numeric key stringifies (JS object keys are strings) —
+			// what a number index signature reads through (ADR-00461).
+			if keyVal.Ty.IR == "double" || keyVal.Ty.IR == "i64" || keyVal.Ty.IR == "i32" || keyVal.Ty.IR == "i16" || keyVal.Ty.IR == "i8" {
+				keyVal, err = e.emitValueToString(keyVal)
+				if err != nil {
+					return Value{}, err
+				}
+			} else {
+				return Value{}, fmt.Errorf("%d:%d: a Map<string, …> bracket index must be a string", ex.GetPos().Line, ex.GetPos().Col)
+			}
 		}
 		raw := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, objVal.Ref, keyVal.Ref))
@@ -419,6 +486,13 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
+	}
+	// A namespace-qualified type-member chain (`X.Color.Red`,
+	// `X.C.staticField` — ADR-00480): drop the namespace qualifier up
+	// front — a pure AST rewrite — so every dispatch below sees the bare
+	// desugared name.
+	if bare := e.stripNSTypeQualifier(ex.Object); bare != nil {
+		return e.emitMember(&ast.MemberExpression{Object: bare, Property: ex.Property})
 	}
 	// http2.constants members are compile-time literals (TDD-00139 Stage 4);
 	// `http2.constants` itself binds as a flagged namespace value.
@@ -497,10 +571,22 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	// resolve through the desugared flat declaration. A local binding
 	// shadowing the namespace name wins.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
-		if members, nsName := e.namespaceMembers(id.Name); members != nil && members[ex.Property] {
-			if !e.isShadowedByLocal(id.Name) {
+		if members, nsName := e.namespaceMembers(id.Name); members != nil {
+			if exported, present := members[ex.Property]; present && !e.isShadowedByLocal(id.Name) {
+				if !exported && e.curNamespace != nsName {
+					return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name, ex.Property, nsName)
+				}
 				return e.emitIdent(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 			}
+		}
+	}
+	// Nested-namespace member in value position `A.B.member` (TDD-00148 V3).
+	if members, nsName := e.namespaceByChain(ex.Object); members != nil {
+		if exported, present := members[ex.Property]; present {
+			if !exported && e.curNamespace != nsName {
+				return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, nsName, ex.Property, nsName)
+			}
+			return e.emitIdent(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 		}
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Number" && !e.isShadowedByLocal(id.Name) {
@@ -683,6 +769,26 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.emitResponseBodyStream(ex)
 		}
 	}
+	// Response.headers (ADR-00490): lazily parse the raw header text the
+	// fetch runtime captured (CURLOPT_HEADERFUNCTION side buffer) into a
+	// Map<string,string> with lowercased keys. Combinator-built Responses
+	// have a null __kml_pending and yield an empty map.
+	if ex.Property == "headers" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsResponse {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			pendIdx, pendTy, ok := objVal.Ty.FieldIndex("__kml_pending")
+			if ok {
+				pend := e.loadFieldValue(objVal, pendIdx, pendTy)
+				e.ensureFetchHeadersMap()
+				m := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_map(ptr %s)", m, pend.Ref))
+				return Value{Ref: m, Ty: HeadersType()}, nil
+			}
+		}
+	}
 	// ReadableStream/reader/controller properties (TDD-00097 Stage 1) —
 	// dedicated reads over the hidden %kml.rstream struct, same pattern
 	// Map/Set's .size uses below.
@@ -730,6 +836,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitMessageChannelPortRead(objVal, ex.Property)
+		}
+	}
+	// Growable-buffer properties (ADR-00494).
+	if ex.Property == "growable" || ex.Property == "resizable" || ex.Property == "maxByteLength" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitBufferGrowableProps(objVal, ex.Property)
 		}
 	}
 	if ex.Property == "byteLength" {

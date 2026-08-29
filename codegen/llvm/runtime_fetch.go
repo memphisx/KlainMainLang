@@ -244,7 +244,7 @@ initmulti:
 havemulti:
   %multi2 = load ptr, ptr @__kml_curl_multi, align 8
 
-  %buf = call ptr @malloc(i64 32)
+  %buf = call ptr @malloc(i64 40)
   %buf_data_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 0
   %buf_len_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 1
   %buf_cap_p = getelementptr { ptr, i64, i64 }, ptr %buf, i32 0, i32 2
@@ -253,11 +253,26 @@ havemulti:
   store i64 0, ptr %buf_cap_p, align 8
   %buf_pend_p = getelementptr ptr, ptr %buf, i64 3
   store ptr null, ptr %buf_pend_p, align 8
+  ; header-capture buffer (ADR-00490): same growable {data,len,cap} shape,
+  ; fed by the same write callback via HEADERFUNCTION/HEADERDATA
+  ; (CURLOPT 20079/10029 — frozen curl ABI values), reachable from the
+  ; body buffer's slot 4 so the Response can parse it lazily.
+  %hbuf = call ptr @malloc(i64 24)
+  %hb_d = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 0
+  %hb_l = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 1
+  %hb_c = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 2
+  store ptr null, ptr %hb_d, align 8
+  store i64 0, ptr %hb_l, align 8
+  store i64 0, ptr %hb_c, align 8
+  %buf_hb_p = getelementptr ptr, ptr %buf, i64 4
+  store ptr %hbuf, ptr %buf_hb_p, align 8
 
   %curl = call ptr @curl_easy_init()
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10002, ptr %url)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 20011, ptr @__kml_curl_write_cb)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10001, ptr %buf)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 20079, ptr @__kml_curl_write_cb)
+  call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 10029, ptr %hbuf)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 52, i64 1)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 13, i64 30)
   call i32 (ptr, i32, ...) @curl_easy_setopt(ptr %curl, i32 99, i64 1)
@@ -1082,4 +1097,241 @@ finish:
   %%raw = call { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %%pending)
   ret { i1, i64, ptr, ptr, i64 } %%raw
 }`))
+}
+
+
+// ensureFetchHeadersMap declares __kml_fetch_headers_map (ADR-00490):
+// lazily parses a Response's captured raw header text (the hbuf reachable
+// from the body buffer's slot 4) into a Map<string,string> with
+// **lowercased** keys, matching the Fetch spec's Headers case rule. Status
+// lines and blank lines are skipped; values are left-trimmed of spaces. A
+// null pending (combinator-built Response) yields an empty map.
+func (e *Emitter) ensureFetchHeadersMap() {
+	if e.usedFetchHeadersMap {
+		return
+	}
+	e.usedFetchHeadersMap = true
+	e.ensureFetch()
+	e.ensureMapStrHelpers()
+	e.ensureStrHeaderRuntime()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	e.emitGlobal(`
+define ptr @__kml_fetch_headers_map(ptr %pending) {
+entry:
+  %map = call ptr @__kml_map_str_create()
+  %pnull = icmp eq ptr %pending, null
+  br i1 %pnull, label %ret, label %getbuf
+getbuf:
+  %bufp = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 1
+  %buf = load ptr, ptr %bufp, align 8
+  %bnull = icmp eq ptr %buf, null
+  br i1 %bnull, label %ret, label %gethb
+gethb:
+  %hbpp = getelementptr ptr, ptr %buf, i64 4
+  %hbuf = load ptr, ptr %hbpp, align 8
+  %hnull = icmp eq ptr %hbuf, null
+  br i1 %hnull, label %ret, label %getraw
+getraw:
+  %rawp = getelementptr { ptr, i64, i64 }, ptr %hbuf, i32 0, i32 0
+  %raw = load ptr, ptr %rawp, align 8
+  %rnull = icmp eq ptr %raw, null
+  br i1 %rnull, label %ret, label %outer
+outer:
+  %line = phi ptr [ %raw, %getraw ], [ %nextline, %advance ]
+  %c0 = load i8, ptr %line, align 1
+  %atend = icmp eq i8 %c0, 0
+  br i1 %atend, label %ret, label %inner
+inner:
+  %p = phi ptr [ %line, %outer ], [ %pn, %icont ]
+  %c = load i8, ptr %p, align 1
+  switch i8 %c, label %icont [
+    i8 0, label %ret
+    i8 13, label %noheader
+    i8 10, label %noheader
+    i8 58, label %colon
+  ]
+icont:
+  %pn = getelementptr i8, ptr %p, i64 1
+  br label %inner
+colon:
+  %klen_p = ptrtoint ptr %p to i64
+  %kstart = ptrtoint ptr %line to i64
+  %klen = sub i64 %klen_p, %kstart
+  %kz = icmp eq i64 %klen, 0
+  br i1 %kz, label %noheader, label %copykey
+copykey:
+  %klen1 = add i64 %klen, 1
+  %kbuf = call ptr @malloc(i64 %klen1)
+  br label %kloop
+kloop:
+  %ki = phi i64 [ 0, %copykey ], [ %kin, %kstore ]
+  %kdone = icmp sge i64 %ki, %klen
+  br i1 %kdone, label %kfin, label %kbody
+kbody:
+  %ksrc = getelementptr i8, ptr %line, i64 %ki
+  %kc = load i8, ptr %ksrc, align 1
+  %isUp1 = icmp sge i8 %kc, 65
+  %isUp2 = icmp sle i8 %kc, 90
+  %isUp = and i1 %isUp1, %isUp2
+  %low = add i8 %kc, 32
+  %kcl = select i1 %isUp, i8 %low, i8 %kc
+  br label %kstore
+kstore:
+  %kdst = getelementptr i8, ptr %kbuf, i64 %ki
+  store i8 %kcl, ptr %kdst, align 1
+  %kin = add i64 %ki, 1
+  br label %kloop
+kfin:
+  %kterm = getelementptr i8, ptr %kbuf, i64 %klen
+  store i8 0, ptr %kterm, align 1
+  br label %vskip
+vskip:
+  %v = phi ptr [ %p, %kfin ], [ %vn, %vskipnext ]
+  %vn = getelementptr i8, ptr %v, i64 1
+  %vc = load i8, ptr %vn, align 1
+  %issp = icmp eq i8 %vc, 32
+  br i1 %issp, label %vskipnext, label %vstartb
+vskipnext:
+  br label %vskip
+vstartb:
+  br label %vscan
+vscan:
+  %q = phi ptr [ %vn, %vstartb ], [ %qn, %vcont ]
+  %qc = load i8, ptr %q, align 1
+  %qend1 = icmp eq i8 %qc, 13
+  %qend2 = icmp eq i8 %qc, 10
+  %qend3 = icmp eq i8 %qc, 0
+  %qe12 = or i1 %qend1, %qend2
+  %qend = or i1 %qe12, %qend3
+  br i1 %qend, label %vfin, label %vcont
+vcont:
+  %qn = getelementptr i8, ptr %q, i64 1
+  br label %vscan
+vfin:
+  %vi_end = ptrtoint ptr %q to i64
+  %vi_start = ptrtoint ptr %vn to i64
+  %vlen = sub i64 %vi_end, %vi_start
+  %vlen1 = add i64 %vlen, 1
+  %vbuf = call ptr @malloc(i64 %vlen1)
+  %ign2 = call ptr @memcpy(ptr %vbuf, ptr %vn, i64 %vlen)
+  %vterm = getelementptr i8, ptr %vbuf, i64 %vlen
+  store i8 0, ptr %vterm, align 1
+  %kh = call ptr @__kml_str_from_cstr(ptr %kbuf)
+  %vh = call ptr @__kml_str_from_cstr(ptr %vbuf)
+  %vhi = ptrtoint ptr %vh to i64
+  call void @__kml_map_str_set(ptr %map, ptr %kh, i64 %vhi)
+  br label %skipnl0
+skipnl0:
+  br label %skipnl
+noheader:
+  br label %skipnl
+skipnl:
+  %sp0 = phi ptr [ %q, %skipnl0 ], [ %p, %noheader ], [ %spn, %spcont ]
+  %sc = load i8, ptr %sp0, align 1
+  %isnl1 = icmp eq i8 %sc, 13
+  %isnl2 = icmp eq i8 %sc, 10
+  %isnl = or i1 %isnl1, %isnl2
+  br i1 %isnl, label %spcont, label %advance
+spcont:
+  %spn = getelementptr i8, ptr %sp0, i64 1
+  br label %skipnl
+advance:
+  %nextline = phi ptr [ %sp0, %skipnl ]
+  br label %outer
+ret:
+  ret ptr %map
+}`)
+}
+
+
+// ensureXHRHeadersAll declares __kml_xhr_headers_all (ADR-00490):
+// serializes a parsed response-header map into the "name: value\r\n"
+// concatenation getAllResponseHeaders() returns, in stored (arrival)
+// order. A null map (send() not yet DONE, or a network failure) yields
+// the empty string, matching the spec's "" return for those states.
+func (e *Emitter) ensureXHRHeadersAll() {
+	if e.usedXHRHeadersAll {
+		return
+	}
+	e.usedXHRHeadersAll = true
+	e.ensureMapStrHelpers()
+	e.ensureStrHeaderRuntime()
+	e.ensureStrlen()
+	e.ensureMemcpy()
+	e.emitGlobal(`
+define ptr @__kml_xhr_headers_all(ptr %map) {
+entry:
+  %mnull = icmp eq ptr %map, null
+  br i1 %mnull, label %empty, label %measure
+empty:
+  %es = call ptr @__kml_str_alloc(i64 0)
+  store i8 0, ptr %es, align 1
+  ret ptr %es
+measure:
+  %size = load i64, ptr %map, align 8
+  %keys_p = getelementptr i8, ptr %map, i64 16
+  %keys = load ptr, ptr %keys_p, align 8
+  %vals_p = getelementptr i8, ptr %map, i64 24
+  %vals = load ptr, ptr %vals_p, align 8
+  br label %mloop
+mloop:
+  %i = phi i64 [ 0, %measure ], [ %in, %mbody ]
+  %tot = phi i64 [ 0, %measure ], [ %tot2, %mbody ]
+  %mdone = icmp sge i64 %i, %size
+  br i1 %mdone, label %alloc, label %mbody
+mbody:
+  %kslot = getelementptr ptr, ptr %keys, i64 %i
+  %kp = load ptr, ptr %kslot, align 8
+  %klen = call i64 @strlen(ptr %kp)
+  %vslot = getelementptr i64, ptr %vals, i64 %i
+  %vraw = load i64, ptr %vslot, align 8
+  %vp = inttoptr i64 %vraw to ptr
+  %vlen = call i64 @strlen(ptr %vp)
+  %pair = add i64 %klen, %vlen
+  %pair4 = add i64 %pair, 4
+  %tot2 = add i64 %tot, %pair4
+  %in = add i64 %i, 1
+  br label %mloop
+alloc:
+  %out = call ptr @__kml_str_alloc(i64 %tot)
+  br label %wloop
+wloop:
+  %j = phi i64 [ 0, %alloc ], [ %jn, %wbody ]
+  %off = phi i64 [ 0, %alloc ], [ %off4, %wbody ]
+  %wdone = icmp sge i64 %j, %size
+  br i1 %wdone, label %fin, label %wbody
+wbody:
+  %kslot2 = getelementptr ptr, ptr %keys, i64 %j
+  %kp2 = load ptr, ptr %kslot2, align 8
+  %klen2 = call i64 @strlen(ptr %kp2)
+  %dst0 = getelementptr i8, ptr %out, i64 %off
+  %ign1 = call ptr @memcpy(ptr %dst0, ptr %kp2, i64 %klen2)
+  %off1 = add i64 %off, %klen2
+  %dst1 = getelementptr i8, ptr %out, i64 %off1
+  store i8 58, ptr %dst1, align 1
+  %off1b = add i64 %off1, 1
+  %dst1b = getelementptr i8, ptr %out, i64 %off1b
+  store i8 32, ptr %dst1b, align 1
+  %off2 = add i64 %off1b, 1
+  %vslot2 = getelementptr i64, ptr %vals, i64 %j
+  %vraw2 = load i64, ptr %vslot2, align 8
+  %vp2 = inttoptr i64 %vraw2 to ptr
+  %vlen2 = call i64 @strlen(ptr %vp2)
+  %dst2 = getelementptr i8, ptr %out, i64 %off2
+  %ign2 = call ptr @memcpy(ptr %dst2, ptr %vp2, i64 %vlen2)
+  %off3 = add i64 %off2, %vlen2
+  %dst3 = getelementptr i8, ptr %out, i64 %off3
+  store i8 13, ptr %dst3, align 1
+  %off3b = add i64 %off3, 1
+  %dst3b = getelementptr i8, ptr %out, i64 %off3b
+  store i8 10, ptr %dst3b, align 1
+  %off4 = add i64 %off3b, 1
+  %jn = add i64 %j, 1
+  br label %wloop
+fin:
+  %term = getelementptr i8, ptr %out, i64 %tot
+  store i8 0, ptr %term, align 1
+  ret ptr %out
+}`)
 }

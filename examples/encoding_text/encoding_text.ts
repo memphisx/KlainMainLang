@@ -28,3 +28,11 @@ view[2] = 108 // l
 view[3] = 108 // l
 view[4] = 111 // o
 console.log(decoder.decode(buf))
+
+// atob validates its input: a character outside the base64 alphabet throws
+// a real InvalidCharacterError DOMException, matching WHATWG atob.
+try {
+    atob("not base64!");
+} catch (e) {
+    console.log(e.name);
+}

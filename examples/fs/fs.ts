@@ -129,3 +129,43 @@ fs.writeFileSync(binPath, buf)
 console.log(fs.readFileSyncBytes(binPath).length)   // 3
 
 fs.unlinkSync(binPath)
+
+// Recursive mkdir + delete of an env var.
+fs.mkdirSync("/tmp/kml_fs_example/x/y", { recursive: true });
+console.log(fs.existsSync("/tmp/kml_fs_example/x/y"));
+fs.rmdirSync("/tmp/kml_fs_example/x/y");
+fs.rmdirSync("/tmp/kml_fs_example/x");
+fs.rmdirSync("/tmp/kml_fs_example");
+
+// ── statSync ────────────────────────────────────────────────────────────────
+// size/mtimeMs plus isFile()/isDirectory(); a missing path throws.
+fs.writeFileSync('/tmp/kml_stat_example.txt', 'stat me')
+const st = fs.statSync('/tmp/kml_stat_example.txt')
+console.log(st.size)           // 7
+console.log(st.isFile())       // true
+console.log(st.isDirectory())  // false
+fs.unlinkSync('/tmp/kml_stat_example.txt')
+
+// ── temp dirs, symlinks, and recursive removal ──────────────────────────────
+const tmpd = fs.mkdtempSync('/tmp/kml-example-')
+fs.writeFileSync(tmpd + '/data.txt', 'hello')
+fs.symlinkSync(tmpd + '/data.txt', tmpd + '/alias')
+console.log(fs.lstatSync(tmpd + '/alias').isSymbolicLink())  // true
+console.log(fs.readlinkSync(tmpd + '/alias') === tmpd + '/data.txt')  // true
+fs.truncateSync(tmpd + '/data.txt', 2)
+console.log(fs.statSync(tmpd + '/data.txt').size)  // 2
+fs.rmSync(tmpd, { recursive: true })   // removes the whole tree
+console.log(fs.existsSync(tmpd))       // false
+
+// ── fd-based I/O ────────────────────────────────────────────────────────────
+// openSync/writeSync/readSync/fstatSync/closeSync over raw POSIX fds.
+const fd = fs.openSync('/tmp/kml_fd_example.txt', 'w')
+fs.writeSync(fd, 'raw fd write')
+fs.closeSync(fd)
+const rfd = fs.openSync('/tmp/kml_fd_example.txt', 'r')
+console.log(fs.fstatSync(rfd).size)   // 12
+const head = new Uint8Array(3)
+fs.readSync(rfd, head)
+console.log(head[0])                  // 114 ('r')
+fs.closeSync(rfd)
+fs.unlinkSync('/tmp/kml_fd_example.txt')

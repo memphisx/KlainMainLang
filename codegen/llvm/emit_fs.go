@@ -177,8 +177,22 @@ func (e *Emitter) emitFsUnlinkSync(args []ast.Expression, pos ast.Pos) (Value, e
 }
 
 func (e *Emitter) emitFsMkdirSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.mkdirSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.mkdirSync takes (path[, { recursive: true }])", pos.Line, pos.Col)
+	}
+	// `{ recursive: true }` (ADR-00487): creates every missing prefix and
+	// tolerates already-exists. Only the literal `recursive: true` form —
+	// anything else in the options object is a clean rejection.
+	recursive := false
+	if len(args) == 2 {
+		ol, ok := args[1].(*ast.ObjectLiteral)
+		if !ok || len(ol.Properties) != 1 || ol.Properties[0].Key != "recursive" {
+			return Value{}, fmt.Errorf("%d:%d: fs.mkdirSync options support only `{ recursive: true }`", pos.Line, pos.Col)
+		}
+		if b, ok := ol.Properties[0].Value.(*ast.BooleanLiteral); !ok || !b.Value {
+			return Value{}, fmt.Errorf("%d:%d: fs.mkdirSync options support only `{ recursive: true }`", pos.Line, pos.Col)
+		}
+		recursive = true
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -186,6 +200,11 @@ func (e *Emitter) emitFsMkdirSync(args []ast.Expression, pos ast.Pos) (Value, er
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
 
+	if recursive {
+		e.ensureFsMkdirP()
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_mkdir_p(ptr %s)", pathVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+	}
 	e.ensureFsMkdir()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_mkdir(ptr %s)", pathVal.Ref))
 	return Value{Ty: TypeVoid}, nil
@@ -273,4 +292,351 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir(ptr %s)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: ArrayOf(TypePtr)}, nil
+}
+
+// emitFsStatSync implements fs.statSync(path) (ADR-00495): __kml_fs_stat
+// throws on failure (ENOENT etc. via the shared fs error), otherwise the
+// {mode, size, mtimeMs} triple fills a fresh Stats object.
+func (e *Emitter) emitFsStatSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.statSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	e.ensureFsStat()
+	e.ensureMalloc()
+	trip := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_stat(ptr %s)", trip, pathVal.Ref))
+	ty := StatsType()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, ty.StructSize()))
+	for i, name := range []string{"__kml_mode", "size", "mtimeMs"} {
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, %d", v, trip, i))
+		idx, _, _ := ty.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), obj, idx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, gep))
+	}
+	return Value{Ref: obj, Ty: ty}, nil
+}
+
+// emitStatsKindCall implements stats.isFile()/isDirectory(): mask the hidden
+// st_mode word with S_IFMT (0xF000) and compare against S_IFREG (0x8000) /
+// S_IFDIR (0x4000) — identical values on every POSIX target here.
+func (e *Emitter) emitStatsKindCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: stats.%s() takes no arguments", pos.Line, pos.Col, method)
+	}
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	idx, fieldTy, _ := objVal.Ty.FieldIndex("__kml_mode")
+	mode := e.loadFieldValue(objVal, idx, fieldTy)
+	masked := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 61440", masked, mode.Ref))
+	want := "32768"
+	switch method {
+	case "isDirectory":
+		want = "16384"
+	case "isSymbolicLink":
+		want = "40960"
+	}
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", res, masked, want))
+	return Value{Ref: res, Ty: TypeBool}, nil
+}
+
+// emitFsLstatSync — statSync's non-following twin (ADR-00497).
+func (e *Emitter) emitFsLstatSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.lstatSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	e.ensureFsLstat()
+	e.ensureMalloc()
+	trip := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_lstat(ptr %s)", trip, pathVal.Ref))
+	return e.buildStatsObject(trip), nil
+}
+
+// buildStatsObject fills a fresh Stats heap object from a {mode,size,mtimeMs}
+// runtime triple — shared by statSync and lstatSync.
+func (e *Emitter) buildStatsObject(trip string) Value {
+	ty := StatsType()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, ty.StructSize()))
+	for i, name := range []string{"__kml_mode", "size", "mtimeMs"} {
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, %d", v, trip, i))
+		idx, _, _ := ty.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), obj, idx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, gep))
+	}
+	return Value{Ref: obj, Ty: ty}
+}
+
+// emitFsPathOp handles the one-shot path-based ops (ADR-00497): a string
+// argument in, void or a string out, throwing the shared fs error on
+// failure. chmod/truncate/access take an optional numeric second argument.
+func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	argN := map[string][2]int{
+		"realpathSync": {1, 1}, "mkdtempSync": {1, 1}, "readlinkSync": {1, 1},
+		"symlinkSync": {2, 2}, "chmodSync": {2, 2}, "truncateSync": {1, 2}, "accessSync": {1, 2},
+	}[method]
+	if len(args) < argN[0] || len(args) > argN[1] {
+		return Value{}, fmt.Errorf("%d:%d: fs.%s: wrong argument count", pos.Line, pos.Col, method)
+	}
+	e.ensureFsPathOps()
+	p0, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	p0 = e.coerce(p0, TypePtr)
+	switch method {
+	case "realpathSync", "mkdtempSync", "readlinkSync":
+		// The runtime returns a raw C string — wrap it into a
+		// length-prefixed header string so .length/concat/indexOf work.
+		fn := map[string]string{"realpathSync": "realpath", "mkdtempSync": "mkdtemp", "readlinkSync": "readlink"}[method]
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_%s(ptr %s)", raw, fn, p0.Ref))
+		e.ensureStrHeaderRuntime()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, raw))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	case "symlinkSync":
+		p1, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		p1 = e.coerce(p1, TypePtr)
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_symlink(ptr %s, ptr %s)", p0.Ref, p1.Ref))
+		return Value{Ty: TypeVoid}, nil
+	case "chmodSync", "truncateSync", "accessSync":
+		numRef := "0"
+		if len(args) == 2 {
+			nv, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			numRef = e.coerce(nv, TypeI64).Ref
+		}
+		fn := map[string]string{"chmodSync": "chmod", "truncateSync": "truncate", "accessSync": "access"}[method]
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_%s(ptr %s, i64 %s)", fn, p0.Ref, numRef))
+		return Value{Ty: TypeVoid}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: fs.%s not handled", pos.Line, pos.Col, method)
+}
+
+// emitFsRmSync implements fs.rmSync(path[, {recursive, force}]) (ADR-00497).
+// Options must be a literal, same as mkdirSync's {recursive: true}.
+func (e *Emitter) emitFsRmSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.rmSync takes (path[, options])", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	recursive, force := "false", "false"
+	if len(args) == 2 {
+		ol, ok := args[1].(*ast.ObjectLiteral)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: fs.rmSync options must be an object literal", pos.Line, pos.Col)
+		}
+		for _, prop := range ol.Properties {
+			bl, isBool := prop.Value.(*ast.BooleanLiteral)
+			if !isBool {
+				return Value{}, fmt.Errorf("%d:%d: fs.rmSync option '%s' must be a boolean literal", pos.Line, pos.Col, prop.Key)
+			}
+			val := "false"
+			if bl.Value {
+				val = "true"
+			}
+			switch prop.Key {
+			case "recursive":
+				recursive = val
+			case "force":
+				force = val
+			default:
+				return Value{}, fmt.Errorf("%d:%d: unknown fs.rmSync option '%s'", pos.Line, pos.Col, prop.Key)
+			}
+		}
+	}
+	e.ensureFsRm()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_rm(ptr %s, i1 %s, i1 %s)", pathVal.Ref, recursive, force))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitFsOpenSync implements fs.openSync(path[, flags[, mode]]) (ADR-00498):
+// flags must be a compile-time string literal (mapped to the host's O_*
+// bits via openFlagBits) or a numeric expression; mode defaults to 0o666.
+func (e *Emitter) emitFsOpenSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.openSync takes (path[, flags[, mode]])", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	flagsRef := "0"
+	if len(args) >= 2 {
+		if lit, ok := args[1].(*ast.StringLiteral); ok {
+			bits, known := openFlagBits(lit.Value)
+			if !known {
+				return Value{}, fmt.Errorf("%d:%d: fs.openSync: unsupported flags '%s' (r, r+, w, w+, a, a+, wx, ax)", pos.Line, pos.Col, lit.Value)
+			}
+			flagsRef = fmt.Sprintf("%d", bits)
+		} else {
+			fv, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			flagsRef = e.coerce(fv, TypeI64).Ref
+		}
+	}
+	modeRef := "438"
+	if len(args) == 3 {
+		mv, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		modeRef = e.coerce(mv, TypeI64).Ref
+	}
+	e.ensureFsFdOps()
+	fd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fs_open(ptr %s, i64 %s, i64 %s)", fd, pathVal.Ref, flagsRef, modeRef))
+	return Value{Ref: fd, Ty: TypeI64}, nil
+}
+
+// emitFsCloseSync implements fs.closeSync(fd).
+func (e *Emitter) emitFsCloseSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.closeSync takes exactly 1 argument (fd)", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	e.ensureFsFdOps()
+	f32 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", f32, fd.Ref))
+	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", f32))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitFsWriteSync implements fs.writeSync(fd, string[, position]) — string
+// data only (Node's Buffer form needs the offset/length variant readSync
+// has; a string is this compiler's canonical chunk). Returns bytes written.
+func (e *Emitter) emitFsWriteSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.writeSync takes (fd, string[, position])", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	dv, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	dv = e.coerce(dv, TypePtr)
+	posRef := "-1"
+	if len(args) == 3 {
+		pv, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		posRef = e.coerce(pv, TypeI64).Ref
+	}
+	e.ensureFsFdOps()
+	e.ensureStrHeaderRuntime()
+	ln := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", ln, dv.Ref))
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fs_fdrw(i64 %s, ptr %s, i64 %s, i64 %s, i1 true)", n, fd.Ref, dv.Ref, ln, posRef))
+	return Value{Ref: n, Ty: TypeI64}, nil
+}
+
+// emitFsReadSync implements fs.readSync(fd, buffer[, offset, length,
+// position]) — buffer is a Uint8Array/Buffer; returns bytes read.
+func (e *Emitter) emitFsReadSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 2 || len(args) > 5 {
+		return Value{}, fmt.Errorf("%d:%d: fs.readSync takes (fd, buffer[, offset, length, position])", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[1], pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if elemTy.Align() != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.readSync's buffer must be a Uint8Array/Buffer", pos.Line, pos.Col)
+	}
+	offRef := "0"
+	if len(args) >= 3 {
+		ov, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		offRef = e.coerce(ov, TypeI64).Ref
+	}
+	lnRef := ""
+	if len(args) >= 4 {
+		lv, err := e.emitExpr(args[3])
+		if err != nil {
+			return Value{}, err
+		}
+		lnRef = e.coerce(lv, TypeI64).Ref
+	} else {
+		lnRef = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", lnRef, lenReg, offRef))
+	}
+	posRef := "-1"
+	if len(args) == 5 {
+		pv, err := e.emitExpr(args[4])
+		if err != nil {
+			return Value{}, err
+		}
+		posRef = e.coerce(pv, TypeI64).Ref
+	}
+	e.ensureFsFdOps()
+	dst := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, ptrReg, offRef))
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fs_fdrw(i64 %s, ptr %s, i64 %s, i64 %s, i1 false)", n, fd.Ref, dst, lnRef, posRef))
+	return Value{Ref: n, Ty: TypeI64}, nil
+}
+
+// emitFsFstatSync implements fs.fstatSync(fd) — statSync over an open fd.
+func (e *Emitter) emitFsFstatSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.fstatSync takes exactly 1 argument (fd)", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	e.ensureFsFdOps()
+	e.ensureMalloc()
+	trip := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_fstat(i64 %s)", trip, fd.Ref))
+	return e.buildStatsObject(trip), nil
 }

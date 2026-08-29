@@ -27,7 +27,10 @@
             "feature": "`ArrayBuffer`",
             "status": "implemented",
             "notes": [
-              "`new ArrayBuffer(byteLength)` — a fixed-length, zero-initialized (`calloc`'d) raw byte buffer, plus `.byteLength` and `.slice(start?, end?)` (a copy, with array-slice negative-index/clamping rules — [ADR-00312](../adr/ADR-00312.md)). A general expression (works anywhere), unlike the TypedArrays below. See [ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
+              "`new ArrayBuffer(byteLength, {maxByteLength}?)` — a fixed-length (or resizable — `.resizable`/`.maxByteLength`/`.resize(n)`, [ADR-00494](../adr/ADR-00494.md)), zero-initialized (`calloc`'d) raw byte buffer, plus `.byteLength` and `.slice(start?, end?)` (a copy, with array-slice negative-index/clamping rules — [ADR-00312](../adr/ADR-00312.md)). A general expression (works anywhere), unlike the TypedArrays below. See [ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
+            ],
+            "caveats": [
+              "`resize(n)` can only extend, never shrink (spec allows shrinking); it requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/ADR-00494.md))"
             ]
           },
           {
@@ -85,7 +88,7 @@
             "status": "implemented",
             "caveats": [
               "`.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally ([ADR-00341](../adr/ADR-00341.md))",
-              "The parts argument must be an inline array literal; no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
+              "The parts argument is an inline array literal or a `string[]` variable ([ADR-00489](../adr/ADR-00489.md)); no `endings` option; the `type` string is stored as-is (no spec lowercasing)",
               "`.text()` truncates at an embedded null byte (the standard string-boundary caveat)"
             ],
             "notes": [
@@ -97,7 +100,7 @@
             "feature": "`SharedArrayBuffer`",
             "status": "implemented",
             "caveats": [
-              "No `growable`/`grow()`",
+              "`grow(n)` requires the `{maxByteLength}` construction option (compile-time rejection otherwise, vs the spec's runtime TypeError); the maximum is reserved upfront ([ADR-00494](../adr/ADR-00494.md))",
               "Crosses a worker boundary whole or as an object field; a TypedArray **view** doesn't cross — send the buffer, re-view on the other side",
               "Views over it can't be captured by closures (the general array-capture limitation), so cross-thread handlers re-view inside the handler"
             ],

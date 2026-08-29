@@ -63,6 +63,22 @@ func (e *Emitter) emitAssertModuleCall(property string, args []ast.Expression, p
 		return Value{Ty: TypeVoid}, nil
 	case "throws":
 		return e.emitAssertThrows(args, pos)
+	case "doesNotThrow":
+		return e.emitAssertDoesNotThrow(args, pos)
+	case "ifError":
+		// assert.ifError(value): fails on any truthy value — Node's
+		// callback-style (err, ...) guard.
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: assert.ifError takes exactly 1 argument", pos.Line, pos.Col)
+		}
+		cond, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		b := e.toBool(cond)
+		neg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", neg, b.Ref))
+		return e.emitAssertCheck(Value{Ref: neg, Ty: TypeBool}, args, 1, "ifError got unwanted exception", pos)
 	case "match", "doesNotMatch":
 		// assert.match(str, regexp[, message]) — regexp.test(str) under the
 		// hood (a synthesized member call on the regexp argument).
@@ -367,6 +383,52 @@ func (e *Emitter) emitAssertThrows(args []ast.Expression, pos ast.Pos) (Value, e
 
 	e.emitLabel(caughtL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitAssertDoesNotThrow — assert.throws' inverse: run the thunk inside a
+// try-frame and fail only if it DID throw (ADR-00499).
+func (e *Emitter) emitAssertDoesNotThrow(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: assert.doesNotThrow takes 1-2 arguments", pos.Line, pos.Col)
+	}
+	if fnTy := e.inferExprType(args[0]); !fnTy.IsFunc {
+		return Value{}, fmt.Errorf("%d:%d: assert.doesNotThrow's first argument must be a function", pos.Line, pos.Col)
+	}
+	fnVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureExceptionHelpers()
+	tryL := e.freshLabel("assert.dnt.try")
+	caughtL := e.freshLabel("assert.dnt.caught")
+	doneL := e.freshLabel("assert.dnt.done")
+	jmpbuf := e.freshReg()
+	sjRet := e.freshReg()
+	threw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sjRet, jmpbuf))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, caughtL, tryL))
+
+	e.emitLabel(tryL)
+	if _, err := e.emitClosureCallByPtr(fnVal.Ref, fnVal.Ty, nil, pos); err != nil {
+		return Value{}, err
+	}
+	e.emitInstr("call void @__kml_pop_jmpbuf()")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(caughtL)
+	msgPtr := e.internString("got unwanted exception")
+	if len(args) == 2 {
+		msgPtr, err = e.emitAssertMessage(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitAssertThrowFail(msgPtr)
 
 	e.emitLabel(doneL)
 	return Value{Ty: TypeVoid}, nil

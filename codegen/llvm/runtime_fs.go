@@ -372,6 +372,59 @@ ok:
 }`, opDescPtr))
 }
 
+// ensureFsMkdirP declares __kml_fs_mkdir_p: `mkdirSync(path, {recursive:
+// true})` (ADR-00487) — creates each missing path prefix, ignoring
+// already-exists at every step; verifies the final directory exists via
+// access(2) and throws only when it genuinely couldn't be created.
+func (e *Emitter) ensureFsMkdirP() {
+	if e.usedFsMkdirP {
+		return
+	}
+	e.usedFsMkdirP = true
+	e.ensureFsMkdir()
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+	e.ensureFsExists() // for the access(2) decl + existence probe
+	opDescPtr := e.internString("mkdirSync (recursive)")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_mkdir_p(ptr %%path) {
+entry:
+  %%len = call i64 @strlen(ptr %%path)
+  %%len1 = add i64 %%len, 1
+  %%buf = call ptr @malloc(i64 %%len1)
+  %%ign0 = call ptr @memcpy(ptr %%buf, ptr %%path, i64 %%len1)
+  br label %%loop
+loop:
+  %%i = phi i64 [ 1, %%entry ], [ %%inext, %%cont ]
+  %%atEnd = icmp sge i64 %%i, %%len
+  br i1 %%atEnd, label %%final, label %%chk
+chk:
+  %%p = getelementptr i8, ptr %%buf, i64 %%i
+  %%c = load i8, ptr %%p, align 1
+  %%isSlash = icmp eq i8 %%c, 47
+  br i1 %%isSlash, label %%mk, label %%cont
+mk:
+  store i8 0, ptr %%p, align 1
+  %%r1 = call i32 @mkdir(ptr %%buf, i32 511)
+  store i8 47, ptr %%p, align 1
+  br label %%cont
+cont:
+  %%inext = add i64 %%i, 1
+  br label %%loop
+final:
+  %%r2 = call i32 @mkdir(ptr %%buf, i32 511)
+  %%acc = call i32 @access(ptr %%buf, i32 0)
+  %%missing = icmp ne i32 %%acc, 0
+  br i1 %%missing, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}`, opDescPtr))
+}
+
 // ensureFsRename declares __kml_fs_rename: renames/moves a file via POSIX
 // rename(). Throws on failure, using the same "<opDesc> '<path>': <reason>"
 // shape as every other fs.* failure — with the *old* path in the message,
@@ -521,4 +574,444 @@ done:
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
 }`, opDescPtr, direntNameOffset(), dotPtr, dotdotPtr))
+}
+
+
+// statLayout returns the host libc's struct stat field offsets (mode/size/
+// st_mtim seconds+nanoseconds) plus the mode field's load width in bits —
+// struct stat has no portable layout, so these are per-OS/arch constants,
+// the same approach direntNameOffset takes. Darwin (64-bit-inode default):
+// st_mode u16 @4, mtimespec @48, st_size @96. glibc x86-64: st_mode u32
+// @24, st_size @48, st_mtim @88. glibc aarch64: st_mode u32 @16, st_size
+// @48, st_mtim @88.
+func statLayout() (modeOff, modeBits, sizeOff, mtimeSecOff, mtimeNsecOff int) {
+	if runtime.GOOS == "darwin" {
+		return 4, 16, 96, 48, 56
+	}
+	if runtime.GOARCH == "arm64" {
+		return 16, 32, 48, 88, 96
+	}
+	return 24, 32, 48, 88, 96
+}
+
+// ensureFsStat declares __kml_fs_stat (ADR-00495): stat(2) into a 256-byte
+// scratch buffer, extracting {mode, size, mtimeMs} at statLayout()'s host
+// offsets. Throws the shared fs error on failure (ENOENT and friends).
+func (e *Emitter) ensureFsStat() {
+	if e.usedFsStat {
+		return
+	}
+	e.usedFsStat = true
+	e.ensureFsThrow()
+	e.ensureMalloc()
+	e.emitGlobal("declare i32 @stat(ptr noundef, ptr noundef)")
+	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
+	opDescPtr := e.internString("cannot stat path")
+	e.emitGlobal(fmt.Sprintf(`
+define { i64, i64, i64 } @__kml_fs_stat(ptr %%path) {
+entry:
+  %%buf = alloca [256 x i8], align 8
+  %%r = call i32 @stat(ptr %%path, ptr %%buf)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+
+ok:
+  %%modep = getelementptr i8, ptr %%buf, i64 %d
+  %%modew = load i%d, ptr %%modep, align 2
+  %%mode = zext i%d %%modew to i64
+  %%sizep = getelementptr i8, ptr %%buf, i64 %d
+  %%size = load i64, ptr %%sizep, align 8
+  %%secp = getelementptr i8, ptr %%buf, i64 %d
+  %%sec = load i64, ptr %%secp, align 8
+  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
+  %%nsec = load i64, ptr %%nsecp, align 8
+  %%ms1 = mul i64 %%sec, 1000
+  %%ms2 = sdiv i64 %%nsec, 1000000
+  %%ms = add i64 %%ms1, %%ms2
+  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
+  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
+  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
+  ret { i64, i64, i64 } %%r2
+}`, opDescPtr, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
+}
+
+
+// ensureFsLstat declares __kml_fs_lstat — statSync's twin over lstat(2)
+// (does not follow symlinks), sharing statLayout()'s offsets (ADR-00497).
+func (e *Emitter) ensureFsLstat() {
+	if e.usedFsLstat {
+		return
+	}
+	e.usedFsLstat = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @lstat(ptr noundef, ptr noundef)")
+	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
+	opDescPtr := e.internString("cannot lstat path")
+	e.emitGlobal(fmt.Sprintf(`
+define { i64, i64, i64 } @__kml_fs_lstat(ptr %%path) {
+entry:
+  %%buf = alloca [256 x i8], align 8
+  %%r = call i32 @lstat(ptr %%path, ptr %%buf)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+
+ok:
+  %%modep = getelementptr i8, ptr %%buf, i64 %d
+  %%modew = load i%d, ptr %%modep, align 2
+  %%mode = zext i%d %%modew to i64
+  %%sizep = getelementptr i8, ptr %%buf, i64 %d
+  %%size = load i64, ptr %%sizep, align 8
+  %%secp = getelementptr i8, ptr %%buf, i64 %d
+  %%sec = load i64, ptr %%secp, align 8
+  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
+  %%nsec = load i64, ptr %%nsecp, align 8
+  %%ms1 = mul i64 %%sec, 1000
+  %%ms2 = sdiv i64 %%nsec, 1000000
+  %%ms = add i64 %%ms1, %%ms2
+  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
+  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
+  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
+  ret { i64, i64, i64 } %%r2
+}`, opDescPtr, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
+}
+
+// ensureFsPathOps declares the one-shot path-based helpers (ADR-00497):
+// realpath, mkdtemp, symlink, readlink, chmod, truncate, access — each a
+// thin libc wrapper throwing the shared fs error on failure.
+func (e *Emitter) ensureFsPathOps() {
+	if e.usedFsPathOps {
+		return
+	}
+	e.usedFsPathOps = true
+	e.ensureFsThrow()
+	e.ensureMalloc()
+	e.ensureStrlen()
+	e.ensureMemcpy()
+	e.ensureFsExists() // owns the `access` decl
+	e.emitGlobal("declare ptr @realpath(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare ptr @mkdtemp(ptr noundef)")
+	e.emitGlobal("declare i32 @symlink(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i64 @readlink(ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i32 @chmod(ptr noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @truncate(ptr noundef, i64 noundef)")
+	realpathDesc := e.internString("cannot resolve path")
+	mkdtempDesc := e.internString("cannot create temp directory")
+	symlinkDesc := e.internString("cannot create symlink")
+	readlinkDesc := e.internString("cannot read symlink")
+	chmodDesc := e.internString("cannot chmod path")
+	truncateDesc := e.internString("cannot truncate path")
+	accessDesc := e.internString("cannot access path")
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_fs_realpath(ptr %%path) {
+entry:
+  %%r = call ptr @realpath(ptr %%path, ptr null)
+  %%failed = icmp eq ptr %%r, null
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret ptr %%r
+}
+
+define ptr @__kml_fs_mkdtemp(ptr %%prefix) {
+entry:
+  %%plen = call i64 @strlen(ptr %%prefix)
+  %%tlen = add i64 %%plen, 7
+  %%tmpl = call ptr @malloc(i64 %%tlen)
+  %%ign = call ptr @memcpy(ptr %%tmpl, ptr %%prefix, i64 %%plen)
+  %%xs = getelementptr i8, ptr %%tmpl, i64 %%plen
+  store i8 88, ptr %%xs, align 1
+  %%x1 = getelementptr i8, ptr %%xs, i64 1
+  store i8 88, ptr %%x1, align 1
+  %%x2 = getelementptr i8, ptr %%xs, i64 2
+  store i8 88, ptr %%x2, align 1
+  %%x3 = getelementptr i8, ptr %%xs, i64 3
+  store i8 88, ptr %%x3, align 1
+  %%x4 = getelementptr i8, ptr %%xs, i64 4
+  store i8 88, ptr %%x4, align 1
+  %%x5 = getelementptr i8, ptr %%xs, i64 5
+  store i8 88, ptr %%x5, align 1
+  %%nul = getelementptr i8, ptr %%xs, i64 6
+  store i8 0, ptr %%nul, align 1
+  %%r = call ptr @mkdtemp(ptr %%tmpl)
+  %%failed = icmp eq ptr %%r, null
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%prefix)
+  unreachable
+ok:
+  ret ptr %%r
+}
+
+define void @__kml_fs_symlink(ptr %%target, ptr %%path) {
+entry:
+  %%r = call i32 @symlink(ptr %%target, ptr %%path)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}
+
+define ptr @__kml_fs_readlink(ptr %%path) {
+entry:
+  %%buf = call ptr @malloc(i64 4097)
+  %%n = call i64 @readlink(ptr %%path, ptr %%buf, i64 4096)
+  %%failed = icmp slt i64 %%n, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  %%end = getelementptr i8, ptr %%buf, i64 %%n
+  store i8 0, ptr %%end, align 1
+  ret ptr %%buf
+}
+
+define void @__kml_fs_chmod(ptr %%path, i64 %%mode) {
+entry:
+  %%m32 = trunc i64 %%mode to i32
+  %%r = call i32 @chmod(ptr %%path, i32 %%m32)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}
+
+define void @__kml_fs_truncate(ptr %%path, i64 %%len) {
+entry:
+  %%r = call i32 @truncate(ptr %%path, i64 %%len)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}
+
+define void @__kml_fs_access(ptr %%path, i64 %%mode) {
+entry:
+  %%m32 = trunc i64 %%mode to i32
+  %%r = call i32 @access(ptr %%path, i32 %%m32)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}`, realpathDesc, mkdtempDesc, symlinkDesc, readlinkDesc, chmodDesc, truncateDesc, accessDesc))
+}
+
+// ensureFsRm declares __kml_fs_rm (ADR-00497): fs.rmSync. remove(3) first
+// (covers files and empty directories); on failure with recursive set,
+// walks the directory via opendir/readdir (lstat is deliberately not
+// needed: children are recursed blindly and remove() handles non-dirs) and
+// rmdir()s the emptied directory. force swallows a missing path.
+func (e *Emitter) ensureFsRm() {
+	if e.usedFsRm {
+		return
+	}
+	e.usedFsRm = true
+	e.ensureFsThrow()
+	e.ensureFsUnlink()
+	e.ensureFsRmdir() // owns the `rmdir` decl
+	e.ensureFsReaddir()
+	e.ensureFsExists()
+	e.ensureMalloc()
+	e.ensureStrlen()
+	e.ensureMemcpy()
+	rmDesc := e.internString("cannot remove path")
+	nameOff := direntNameOffset()
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_rm(ptr %%path, i1 %%recursive, i1 %%force) {
+entry:
+  %%r = call i32 @remove(ptr %%path)
+  %%ok0 = icmp eq i32 %%r, 0
+  br i1 %%ok0, label %%done, label %%notplain
+notplain:
+  br i1 %%force, label %%chkexists, label %%chkrec
+chkexists:
+  %%ex = call i1 @__kml_fs_exists(ptr %%path)
+  br i1 %%ex, label %%chkrec, label %%done
+chkrec:
+  br i1 %%recursive, label %%walk, label %%fail
+walk:
+  %%d = call ptr @opendir(ptr %%path)
+  %%dnull = icmp eq ptr %%d, null
+  br i1 %%dnull, label %%fail, label %%loop
+loop:
+  %%ent = call ptr @readdir(ptr %%d)
+  %%enull = icmp eq ptr %%ent, null
+  br i1 %%enull, label %%endwalk, label %%checkname
+checkname:
+  %%name = getelementptr i8, ptr %%ent, i64 %d
+  %%c0 = load i8, ptr %%name, align 1
+  %%isdot = icmp eq i8 %%c0, 46
+  br i1 %%isdot, label %%maybeskip, label %%recurse
+maybeskip:
+  %%c1p = getelementptr i8, ptr %%name, i64 1
+  %%c1 = load i8, ptr %%c1p, align 1
+  %%isend = icmp eq i8 %%c1, 0
+  br i1 %%isend, label %%loop, label %%maybedotdot
+maybedotdot:
+  %%isdot2 = icmp eq i8 %%c1, 46
+  br i1 %%isdot2, label %%maybeskip2, label %%recurse
+maybeskip2:
+  %%c2p = getelementptr i8, ptr %%name, i64 2
+  %%c2 = load i8, ptr %%c2p, align 1
+  %%isend2 = icmp eq i8 %%c2, 0
+  br i1 %%isend2, label %%loop, label %%recurse
+recurse:
+  %%plen = call i64 @strlen(ptr %%path)
+  %%nlen = call i64 @strlen(ptr %%name)
+  %%clen0 = add i64 %%plen, %%nlen
+  %%clen = add i64 %%clen0, 2
+  %%child = call ptr @malloc(i64 %%clen)
+  %%ign1 = call ptr @memcpy(ptr %%child, ptr %%path, i64 %%plen)
+  %%slashp = getelementptr i8, ptr %%child, i64 %%plen
+  store i8 47, ptr %%slashp, align 1
+  %%dstn = getelementptr i8, ptr %%slashp, i64 1
+  %%ign2 = call ptr @memcpy(ptr %%dstn, ptr %%name, i64 %%nlen)
+  %%endp = getelementptr i8, ptr %%dstn, i64 %%nlen
+  store i8 0, ptr %%endp, align 1
+  call void @__kml_fs_rm(ptr %%child, i1 true, i1 true)
+  br label %%loop
+endwalk:
+  %%ignc = call i32 @closedir(ptr %%d)
+  %%rr = call i32 @rmdir(ptr %%path)
+  %%okr = icmp eq i32 %%rr, 0
+  br i1 %%okr, label %%done, label %%fail
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+done:
+  ret void
+}`, nameOff, rmDesc))
+}
+
+
+// openFlagBits maps a Node open-flags string to the host's O_* bit mask —
+// per-OS constants (Darwin and glibc disagree on everything past
+// O_RDONLY/O_WRONLY/O_RDWR), resolved at compile time from the literal
+// (ADR-00498).
+func openFlagBits(flags string) (int, bool) {
+	creat, trunc, appnd, excl := 0x200, 0x400, 0x8, 0x800
+	if runtime.GOOS != "darwin" {
+		creat, trunc, appnd, excl = 0x40, 0x200, 0x400, 0x80
+	}
+	m := map[string]int{
+		"r": 0, "r+": 2,
+		"w": 1 | creat | trunc, "w+": 2 | creat | trunc,
+		"a": 1 | creat | appnd, "a+": 2 | creat | appnd,
+		"wx": 1 | creat | trunc | excl, "ax": 1 | creat | appnd | excl,
+	}
+	v, ok := m[flags]
+	return v, ok
+}
+
+// ensureFsFdOps declares the fd-based helpers (ADR-00498): open/close/
+// read/write/fstat over raw POSIX fds. open throws the shared fs error on
+// failure; the others throw on a negative return.
+func (e *Emitter) ensureFsFdOps() {
+	if e.usedFsFdOps {
+		return
+	}
+	e.usedFsFdOps = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @open(ptr noundef, i32 noundef, ...)")
+	e.emitGlobal("declare i32 @close(i32 noundef)")
+	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @lseek(i32 noundef, i64 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @fstat(i32 noundef, ptr noundef)")
+	openDesc := e.internString("cannot open path")
+	fdDesc := e.internString("fd operation failed")
+	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
+	e.emitGlobal(fmt.Sprintf(`
+define i64 @__kml_fs_open(ptr %%path, i64 %%flags, i64 %%mode) {
+entry:
+  %%f32 = trunc i64 %%flags to i32
+  %%m32 = trunc i64 %%mode to i32
+  %%fd = call i32 (ptr, i32, ...) @open(ptr %%path, i32 %%f32, i32 %%m32)
+  %%failed = icmp slt i32 %%fd, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+ok:
+  %%r = sext i32 %%fd to i64
+  ret i64 %%r
+}
+
+define i64 @__kml_fs_fdrw(i64 %%fd, ptr %%buf, i64 %%len, i64 %%position, i1 %%isWrite) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%seek = icmp sge i64 %%position, 0
+  br i1 %%seek, label %%doseek, label %%doio
+doseek:
+  %%s = call i64 @lseek(i32 %%f32, i64 %%position, i32 0)
+  br label %%doio
+doio:
+  br i1 %%isWrite, label %%dw, label %%dr
+dw:
+  %%wn = call i64 @write(i32 %%f32, ptr %%buf, i64 %%len)
+  br label %%chk
+dr:
+  %%rn = call i64 @read(i32 %%f32, ptr %%buf, i64 %%len)
+  br label %%chk
+chk:
+  %%n = phi i64 [ %%wn, %%dw ], [ %%rn, %%dr ]
+  %%failed = icmp slt i64 %%n, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr null)
+  unreachable
+ok:
+  ret i64 %%n
+}
+
+define { i64, i64, i64 } @__kml_fs_fstat(i64 %%fd) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%buf = alloca [256 x i8], align 8
+  %%r = call i32 @fstat(i32 %%f32, ptr %%buf)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr null)
+  unreachable
+ok:
+  %%modep = getelementptr i8, ptr %%buf, i64 %d
+  %%modew = load i%d, ptr %%modep, align 2
+  %%mode = zext i%d %%modew to i64
+  %%sizep = getelementptr i8, ptr %%buf, i64 %d
+  %%size = load i64, ptr %%sizep, align 8
+  %%secp = getelementptr i8, ptr %%buf, i64 %d
+  %%sec = load i64, ptr %%secp, align 8
+  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
+  %%nsec = load i64, ptr %%nsecp, align 8
+  %%ms1 = mul i64 %%sec, 1000
+  %%ms2 = sdiv i64 %%nsec, 1000000
+  %%ms = add i64 %%ms1, %%ms2
+  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
+  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
+  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
+  ret { i64, i64, i64 } %%r2
+}`, openDesc, fdDesc, fdDesc, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
 }

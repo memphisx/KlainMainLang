@@ -247,14 +247,16 @@ console.log(x)
 `, "null\nhi\n5\nnull")
 }
 
-func TestE2EUnionWithoutNullRequiresInitializer(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EUnionWithoutInitializerReadsUndefined(t *testing.T) {
+	// ADR-00475: an uninitialized union-typed binding is a boxed
+	// `undefined` (JS: `let x; console.log(x)` prints undefined), replacing
+	// the old requires-an-initializer rejection.
+	assertOutput(t, `
 let x: string | number
 console.log(x)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error declaring a non-nullable union with no initializer, got none")
-	}
+x = 5
+console.log(x)
+`, "undefined\n5")
 }
 
 func TestE2EUnionAsFunctionParamAndReturn(t *testing.T) {
@@ -491,4 +493,80 @@ console.log(it.value)
 	if err == nil {
 		t.Fatal("expected a compile error assigning a boolean to a string|number union field, got none")
 	}
+}
+
+func TestE2EGenericClassMethodViaAdapter(t *testing.T) {
+	// ADR-00477: generic class methods compile via any-erasure, with the
+	// closure adapter boxing/unboxing at the callback boundary.
+	assertOutput(t, `
+class Box {
+    v: number = 7;
+    map<U>(f: (n: number) => U): U { return f(this.v); }
+}
+const b = new Box();
+console.log(b.map((n: number): string => "v=" + String(n)));
+console.log(b.map((n: number): number => n * 3));
+`, "v=7\n21")
+}
+
+func TestE2EClosureAdapterMatrix(t *testing.T) {
+	// ADR-00477: every adapter direction — concrete→any and any→concrete
+	// on both returns and parameters, arity narrowing, argument-position
+	// coercion, and void→undefined.
+	assertOutput(t, `
+const g1: (n: number) => any = (n: number): string => "s" + String(n);
+const g2: (n: number) => any = (n: number): number => n * 2;
+const g3: (n: number) => any = (n: number): boolean => n > 0;
+console.log(g1(1), g2(21), g3(5));
+const h: (n: number) => string = (n: number): any => "h" + String(n);
+console.log(h(2));
+const p1: (s: string) => string = (x: any): string => "got:" + String(x);
+console.log(p1("word"));
+const p2: (x: any) => string = (s: string): string => s + "!";
+console.log(p2("hey"));
+const cb: (a: number, b: number) => any = (a: number): number => a + 100;
+console.log(cb(1, 2));
+function use(f: (n: number) => any): any { return f(3); }
+console.log(use((n: number): string => "used" + String(n)));
+const v: () => any = (): void => {};
+console.log(typeof v());
+`, "s1 42 true\nh2\ngot:word\nhey!\n101\nused3\nundefined")
+}
+
+func TestE2EClosureAdapterAggregates(t *testing.T) {
+	// ADR-00478: arrays (split ABI + header boxing) and nullable scalars
+	// through the adapter, both directions, params and returns; boxed-array
+	// identity survives the header representation.
+	assertOutput(t, `
+const f1: (xs: number[]) => any = (xs: number[]): number => xs.length;
+console.log(f1([1, 2, 3]));
+const f2: (xs: any) => number = (xs: number[]): number => xs[0] + xs[1];
+console.log(f2([10, 20]));
+const f4: (n: number) => number[] = (n: number): any => [n * 2, n * 3];
+const back = f4(4);
+console.log(back.length, back[0], back[1]);
+const g1: (x: number | null) => any = (x: number | null): number | null => x;
+console.log(g1(7));
+const g2: (x: any) => string = (x: number | null): string => x === null ? "none" : "some";
+console.log(g2(3), g2(null));
+const a: number[] = [1, 2];
+const x1: any = a;
+const x2: any = a;
+console.log(x1 === x2);
+const b2: number[] = [1, 2];
+const y: any = b2;
+console.log(x1 === y);
+`, "3\n30\n2 8 12\n7\nsome none\ntrue\nfalse")
+}
+
+func TestE2ENullableScalarExpressionArrowReturn(t *testing.T) {
+	// ADR-00478 (bug found in passing, pre-existing): an expression-bodied
+	// arrow with a nullable-scalar return type emitted the bare payload
+	// where the { i1, T } aggregate was expected — a hard clang error; and
+	// coerce treated a bare scalar and its nullable aggregate as identical.
+	assertOutput(t, `
+const id: (x: number | null) => number | null = (x: number | null): number | null => x;
+console.log(id(7));
+console.log(id(null));
+`, "7\nnull")
 }

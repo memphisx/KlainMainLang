@@ -275,6 +275,13 @@ func llvmDoubleLit(f float64) string {
 func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 	sym, ok := e.lookup(id.Name)
 	if !ok {
+		// A bare reference to a sibling namespace member from inside a
+		// member function body (TDD-00148 Stage 4) — retried under the
+		// mangled name. Only after the local lookup miss, so any local
+		// shadows the sibling.
+		if m := e.nsSibling(id.Name); m != "" {
+			return e.emitIdent(ast.NewIdentifier(m, id.GetPos()))
+		}
 		// Bare NaN/Infinity globals (real JS also has these outside the
 		// Number.* namespace) — only after a local lookup miss, so a
 		// user-declared variable of the same name still shadows them.

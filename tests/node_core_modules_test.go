@@ -194,3 +194,16 @@ try {
 console.log("ok")
 `, "caught: the input did not match the regular expression\nok")
 }
+
+// assert.ifError / assert.doesNotThrow (ADR-00499).
+func TestE2EAssertIfErrorAndDoesNotThrow(t *testing.T) {
+	assertOutputImports(t, `
+import assert from 'assert'
+assert.ifError(null)
+assert.ifError(0)
+assert.doesNotThrow(() => { console.log("ran clean") })
+try { assert.ifError("boom") } catch (e) { console.log("caught:", e.message) }
+try { assert.doesNotThrow(() => { throw new Error("x") }) } catch (e) { console.log("caught:", e.message) }
+console.log("done")
+`, "ran clean\ncaught: ifError got unwanted exception\ncaught: got unwanted exception\ndone")
+}

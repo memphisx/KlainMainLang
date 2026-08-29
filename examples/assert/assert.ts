@@ -54,3 +54,9 @@ try {
 } catch (e) {
   console.log(e.message)  // expected an error
 }
+
+// ifError fails on any truthy value (the Node callback-style error guard);
+// doesNotThrow is throws' inverse.
+assert.ifError(null)
+assert.doesNotThrow(() => { JSON.parse('{"ok": true}') })
+console.log('ifError + doesNotThrow passed')

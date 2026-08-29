@@ -58,7 +58,7 @@ secured:
   %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
   %%fln = or i32 %%fl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%fln)
-  %%sk = call ptr @calloc(i64 1, i64 48)
+  %%sk = call ptr @calloc(i64 1, i64 64)
   %%fd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
   %%fd64 = sext i32 %%fd to i64
   store i64 %%fd64, ptr %%fd_p, align 8

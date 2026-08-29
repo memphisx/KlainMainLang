@@ -21,6 +21,12 @@ type Parser struct {
 	// this file (TDD-00098), surfaced as Program.WorkerPaths so the resolver
 	// can treat worker entry files as dependency edges without an AST walk.
 	workerPaths []string
+	// nsAliases collects `import X = Y.Z` alias declarations (ADR-00456).
+	nsAliases []ast.NSAliasDecl
+	// inCtorParams is set by parseClassDecl for the duration of a
+	// constructor's parameter list, gating TS parameter-property modifiers
+	// (`constructor(public x: number)`) — the only position TS allows them.
+	inCtorParams bool
 }
 
 func New(tokens []lexer.Token) *Parser {
@@ -258,6 +264,7 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 		}
 	}
 	prog.Namespaces = p.namespaces
+	prog.NSAliases = p.nsAliases
 	prog.WorkerPaths = p.workerPaths
 	return prog, nil
 }

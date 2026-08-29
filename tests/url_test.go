@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -119,4 +120,19 @@ const m = new Map<string, string>()
 m.set("a", "1")
 console.log(m.get("z"))
 `, "null")
+}
+
+func TestE2EURLComponentAssignmentRejected(t *testing.T) {
+	// ADR-00465: a URL component store would silently desync the other
+	// derived components — a clean rejection instead of silent wrongness.
+	_, err := parseAndCompile(`
+const url = new URL('http://example.com/path');
+url.href = '';
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for assigning to a URL component")
+	}
+	if !strings.Contains(err.Error(), "assigning to a URL component") {
+		t.Errorf("unexpected error message: %v", err)
+	}
 }

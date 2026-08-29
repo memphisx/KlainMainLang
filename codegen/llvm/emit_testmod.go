@@ -102,16 +102,12 @@ func (e *Emitter) emitTestMustCall(property string, args []ast.Expression, pos a
 	if !fnTy.IsFunc {
 		return Value{}, fmt.Errorf("%d:%d: test.%s's first argument must be a function", pos.Line, pos.Col, property)
 	}
-	// ABI bound: 0-3 scalar/pointer params (the counting trampoline is
-	// signature-parametric; 3 covers Node's (err, a, b) callbacks), no rest,
-	// no array/nullable params.
-	if fnTy.FuncHasRest || len(fnTy.FuncParams) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: test.%s supports callbacks of 0-3 simple parameters (no rest / >3 args) in this version", pos.Line, pos.Col, property)
-	}
-	for _, p := range fnTy.FuncParams {
-		if p.IsArray || isNullableScalar(p) {
-			return Value{}, fmt.Errorf("%d:%d: test.%s does not yet support array or nullable-scalar callback parameters", pos.Line, pos.Col, property)
-		}
+	// ABI bound (ADR-00496): the counting trampoline forwards whatever ABI
+	// slots each parameter expands to (paramABITypes — split (ptr,len)
+	// arrays and {i1,T} nullable aggregates included), so only a rest tail
+	// (a different calling convention, not a fixed slot list) stays out.
+	if fnTy.FuncHasRest {
+		return Value{}, fmt.Errorf("%d:%d: test.%s does not support rest-parameter callbacks", pos.Line, pos.Col, property)
 	}
 
 	fnVal, err := e.emitExpr(args[0])

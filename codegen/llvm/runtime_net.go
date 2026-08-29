@@ -34,8 +34,11 @@ const netServerStructSize = 40
 // · 2 ptr 'data' listener · 3 ptr 'end' listener · 4 ptr pending 'connect'
 // listener (client sockets only; fired once on the first dispatch pass so it
 // runs after net.connect returns and the socket variable is bound, then
-// cleared — server-accepted sockets leave it null).
-const netSocketIR = "{ i64, i64, ptr, ptr, ptr, ptr }" // field 5 = SSL* (null for plaintext; set for a tls.connect socket, TDD-00109)
+// cleared — server-accepted sockets leave it null) · 5 ptr SSL* (null for
+// plaintext; set for a tls.connect socket, TDD-00109) · 6 ptr 'close'
+// listener (fired once — on EOF teardown or an explicit close/destroy —
+// then cleared, ADR-00501) · 7 spare.
+const netSocketIR = "{ i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }"
 
 // ensureNtohs declares ntohs exactly once — both the net and dgram runtimes
 // need it, and duplicate declarations are an LLVM redefinition error.
@@ -212,7 +215,7 @@ connected:
   %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
   %%fln = or i32 %%fl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%fln)
-  %%sk = call ptr @calloc(i64 1, i64 48)
+  %%sk = call ptr @calloc(i64 1, i64 64)
   %%fd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
   %%fd64 = sext i32 %%fd to i64
   store i64 %%fd64, ptr %%fd_p, align 8
@@ -270,6 +273,17 @@ craw:
   store i64 -1, ptr %%fd_p, align 8
   %%st_p = getelementptr %s, ptr %%sock, i32 0, i32 1
   store i64 1, ptr %%st_p, align 8
+  %%clsn_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }, ptr %%sock, i32 0, i32 6
+  %%clsn = load ptr, ptr %%clsn_p, align 8
+  %%hasclsn = icmp ne ptr %%clsn, null
+  br i1 %%hasclsn, label %%firecl, label %%ret
+firecl:
+  store ptr null, ptr %%clsn_p, align 8
+  %%clsnfp_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 0
+  %%clsnfp = load ptr, ptr %%clsnfp_p, align 8
+  %%clsnep_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 1
+  %%clsnep = load ptr, ptr %%clsnep_p, align 8
+  call void %%clsnfp(ptr %%clsnep)
   br label %%ret
 ret:
   ret void
@@ -447,7 +461,7 @@ doconn:
   %%nfln = or i32 %%nfl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%newfd, i32 4, i32 %%nfln)
   ; build the socket handle
-  %%sk = call ptr @calloc(i64 1, i64 48)
+  %%sk = call ptr @calloc(i64 1, i64 64)
   %%skfd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
   %%newfd64 = sext i32 %%newfd to i64
   store i64 %%newfd64, ptr %%skfd_p, align 8
@@ -455,16 +469,16 @@ doconn:
   store ptr %%sslval, ptr %%sk_ssl_p, align 8
   call void @__kml_net_conn_register(ptr %%sk)
   ; fire the server's connection listener (socket)
-  %%cl_p = getelementptr %s, ptr %%srv, i32 0, i32 1
-  %%cl = load ptr, ptr %%cl_p, align 8
-  %%hascl = icmp ne ptr %%cl, null
-  br i1 %%hascl, label %%firecl, label %%acc
+  %%clsn_p = getelementptr %s, ptr %%srv, i32 0, i32 1
+  %%clsn = load ptr, ptr %%clsn_p, align 8
+  %%hasclsn = icmp ne ptr %%clsn, null
+  br i1 %%hasclsn, label %%firecl, label %%acc
 firecl:
-  %%clfp_p = getelementptr { ptr, ptr }, ptr %%cl, i32 0, i32 0
-  %%clfp = load ptr, ptr %%clfp_p, align 8
-  %%clep_p = getelementptr { ptr, ptr }, ptr %%cl, i32 0, i32 1
-  %%clep = load ptr, ptr %%clep_p, align 8
-  call void %%clfp(ptr %%clep, ptr %%sk)
+  %%clsnfp_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 0
+  %%clsnfp = load ptr, ptr %%clsnfp_p, align 8
+  %%clsnep_p = getelementptr { ptr, ptr }, ptr %%clsn, i32 0, i32 1
+  %%clsnep = load ptr, ptr %%clsnep_p, align 8
+  call void %%clsnfp(ptr %%clsnep, ptr %%sk)
   br label %%acc
 snext:
   %%sinext = add i64 %%siv, 1
@@ -555,13 +569,27 @@ oneof:
   %%el_p = getelementptr %s, ptr %%sk2, i32 0, i32 3
   %%el = load ptr, ptr %%el_p, align 8
   %%hasel = icmp ne ptr %%el, null
-  br i1 %%hasel, label %%fireend, label %%cnext
+  br i1 %%hasel, label %%fireend, label %%eofclose
 fireend:
   %%efp_p = getelementptr { ptr, ptr }, ptr %%el, i32 0, i32 0
   %%efp = load ptr, ptr %%efp_p, align 8
   %%eep_p = getelementptr { ptr, ptr }, ptr %%el, i32 0, i32 1
   %%eep = load ptr, ptr %%eep_p, align 8
   call void %%efp(ptr %%eep)
+  br label %%eofclose
+eofclose:
+  ; 'close' fires after 'end' (Node ordering), listener or not (ADR-00501).
+  %%ecl_p = getelementptr { i64, i64, ptr, ptr, ptr, ptr, ptr, ptr }, ptr %%sk2, i32 0, i32 6
+  %%ecl = load ptr, ptr %%ecl_p, align 8
+  %%ehascl = icmp ne ptr %%ecl, null
+  br i1 %%ehascl, label %%eoffirecl, label %%cnext
+eoffirecl:
+  store ptr null, ptr %%ecl_p, align 8
+  %%eclfp_p = getelementptr { ptr, ptr }, ptr %%ecl, i32 0, i32 0
+  %%eclfp = load ptr, ptr %%eclfp_p, align 8
+  %%eclep_p = getelementptr { ptr, ptr }, ptr %%ecl, i32 0, i32 1
+  %%eclep = load ptr, ptr %%eclep_p, align 8
+  call void %%eclfp(ptr %%eclep)
   br label %%cnext
 cnext:
   %%cinext = add i64 %%civ, 1
@@ -627,24 +655,147 @@ fail:
 
 	// __kml_net_is_ip: 4 if s parses as an IPv4 literal, 6 if IPv6, else 0 —
 	// backs net.isIP/isIPv4/isIPv6.
-	e.emitGlobal(fmt.Sprintf(`
-define i32 @__kml_net_is_ip(ptr %%s) {
+	// __kml_net_v4_strict: Node rejects leading-zero octets ('001.2.3.4') in
+	// dotted-decimal IPv4 while macOS's inet_pton accepts them — this
+	// pre-check rejects any octet-initial '0' followed by another digit
+	// (ADR-00457, found via the Node oracle's test-net-isipv4).
+	e.emitGlobal(`
+define i1 @__kml_net_v4_strict(ptr %s) {
 entry:
-  %%buf = alloca [16 x i8], align 4
-  %%r4 = call i32 @inet_pton(i32 2, ptr %%s, ptr %%buf)
-  %%is4 = icmp eq i32 %%r4, 1
-  br i1 %%is4, label %%ret4, label %%try6
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%inext, %cont]
+  %prev = phi i8 [46, %entry], [%c, %cont]
+  %p = getelementptr i8, ptr %s, i64 %i
+  %c = load i8, ptr %p, align 1
+  %isnul = icmp eq i8 %c, 0
+  br i1 %isnul, label %ok, label %chk
+chk:
+  %iszero = icmp eq i8 %c, 48
+  %afterdot = icmp eq i8 %prev, 46
+  %lead = and i1 %iszero, %afterdot
+  br i1 %lead, label %chknext, label %cont
+chknext:
+  %in2 = add i64 %i, 1
+  %pn = getelementptr i8, ptr %s, i64 %in2
+  %cn = load i8, ptr %pn, align 1
+  %ge0 = icmp sge i8 %cn, 48
+  %le9 = icmp sle i8 %cn, 57
+  %dig = and i1 %ge0, %le9
+  br i1 %dig, label %bad, label %cont
+cont:
+  %inext = add i64 %i, 1
+  br label %loop
+ok:
+  ret i1 1
+bad:
+  ret i1 0
+}`)
+	// __kml_net_v6_strict: rejects two shapes the platform inet_pton is lax
+	// about vs Node — a hex group longer than 4 digits, and leading-zero
+	// octets in an embedded dotted-v4 tail (checked via v4_strict from the
+	// current group's start). ADR-00457.
+	e.emitGlobal(`
+define i1 @__kml_net_v6_strict(ptr %s) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%inext, %cont]
+  %run = phi i64 [0, %entry], [%runNext, %cont]
+  %gs = phi i64 [0, %entry], [%gsNext, %cont]
+  %p = getelementptr i8, ptr %s, i64 %i
+  %c = load i8, ptr %p, align 1
+  %isnul = icmp eq i8 %c, 0
+  br i1 %isnul, label %ok, label %chk
+chk:
+  %iscolon = icmp eq i8 %c, 58
+  br i1 %iscolon, label %reset, label %chkdot
+chkdot:
+  %isdot = icmp eq i8 %c, 46
+  br i1 %isdot, label %v4, label %chkpct
+chkpct:
+  %ispct = icmp eq i8 %c, 37
+  br i1 %ispct, label %ok, label %grow
+grow:
+  %run1 = add i64 %run, 1
+  %toolong = icmp sgt i64 %run1, 4
+  br i1 %toolong, label %bad, label %cont
+reset:
+  %gs1 = add i64 %i, 1
+  br label %cont
+cont:
+  %runNext = phi i64 [%run1, %grow], [0, %reset]
+  %gsNext = phi i64 [%gs, %grow], [%gs1, %reset]
+  %inext = add i64 %i, 1
+  br label %loop
+v4:
+  %gp = getelementptr i8, ptr %s, i64 %gs
+  %v4ok = call i1 @__kml_net_v4_strict(ptr %gp)
+  ret i1 %v4ok
+ok:
+  ret i1 1
+bad:
+  ret i1 0
+}`)
+	// __kml_net_pton6z: inet_pton(AF_INET6) with a Node-style zone ID
+	// (`fe80::1%%eth0`) stripped first — the platform inet_pton rejects the
+	// %%zone suffix that Node accepts (ADR-00457).
+	e.emitGlobal(fmt.Sprintf(`
+define i32 @__kml_net_pton6z(ptr %%s, ptr %%buf) {
+entry:
+  %%zb = alloca [48 x i8], align 1
+  br label %%scan
+scan:
+  %%i = phi i64 [0, %%entry], [%%in, %%cont]
+  %%p = getelementptr i8, ptr %%s, i64 %%i
+  %%c = load i8, ptr %%p, align 1
+  %%ispct = icmp eq i8 %%c, 37
+  br i1 %%ispct, label %%term, label %%chknul
+chknul:
+  %%isnul = icmp eq i8 %%c, 0
+  br i1 %%isnul, label %%term, label %%store
+store:
+  %%toolong = icmp sge i64 %%i, 46
+  br i1 %%toolong, label %%fail, label %%st2
+st2:
+  %%q = getelementptr i8, ptr %%zb, i64 %%i
+  store i8 %%c, ptr %%q, align 1
+  br label %%cont
+cont:
+  %%in = add i64 %%i, 1
+  br label %%scan
+term:
+  %%qe = getelementptr i8, ptr %%zb, i64 %%i
+  store i8 0, ptr %%qe, align 1
+  %%r = call i32 @inet_pton(i32 %d, ptr %%zb, ptr %%buf)
+  ret i32 %%r
+fail:
+  ret i32 0
+}`, netAFInet6()))
+	e.emitGlobal(`
+define i32 @__kml_net_is_ip(ptr %s) {
+entry:
+  %buf = alloca [16 x i8], align 4
+  %strict = call i1 @__kml_net_v4_strict(ptr %s)
+  br i1 %strict, label %do4, label %try6
+do4:
+  %r4 = call i32 @inet_pton(i32 2, ptr %s, ptr %buf)
+  %is4 = icmp eq i32 %r4, 1
+  br i1 %is4, label %ret4, label %try6
 try6:
-  %%r6 = call i32 @inet_pton(i32 %d, ptr %%s, ptr %%buf)
-  %%is6 = icmp eq i32 %%r6, 1
-  br i1 %%is6, label %%ret6, label %%ret0
+  %s6 = call i1 @__kml_net_v6_strict(ptr %s)
+  br i1 %s6, label %do6, label %ret0
+do6:
+  %r6 = call i32 @__kml_net_pton6z(ptr %s, ptr %buf)
+  %is6 = icmp eq i32 %r6, 1
+  br i1 %is6, label %ret6, label %ret0
 ret4:
   ret i32 4
 ret6:
   ret i32 6
 ret0:
   ret i32 0
-}`, netAFInet6()))
+}`)
 }
 
 // netAFInet6 is the platform's AF_INET6 value (macOS 30, Linux 10) — host-only,

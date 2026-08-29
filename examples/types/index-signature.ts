@@ -23,3 +23,9 @@ type Env = { [key: string]: string };
 const env: Env = { HOME: "/root" };
 env["SHELL"] = "/bin/sh";
 console.log(env["HOME"] + " " + env["SHELL"]); // /root /bin/sh
+
+// Number index signature: keys stringify (JS object keys are strings).
+interface Sparse { [i: number]: string; }
+const sparse: Sparse = {};
+sparse[7] = "seven";
+console.log(sparse[7]);

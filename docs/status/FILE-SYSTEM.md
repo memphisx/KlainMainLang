@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. Node-`fs`-shaped synchronous file I/O for reading/writing config, data, and logs — not `File`/`FileReader`/`FileSystemFileHandle` (those model browser sandbox/permission concepts that don't exist for a native CLI/microservice program with direct filesystem access).
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 7/14 (50%).
+**Coverage**: 16/17 (~94%) · **Strict Coverage**: 7/17 (~41%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -15,8 +15,11 @@ Format: [Status page format](README.md#status-page-format).
 | `fs.writeFileSync(path, data)` | ✅ | | • Creates or truncates the file with `data`. Throws on failure<br>• `data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type |
 | `fs.appendFileSync(path, data)` | ✅ | | • Like `writeFileSync`, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure<br>• Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync` |
 | `fs.existsSync(path)` | ✅ | | • Plain existence check via POSIX `access()`<br>• Deliberately does **not** throw for a missing path — matches real Node's own `existsSync`, one of the few `fs` functions that reports "doesn't exist" as `false` rather than an error |
+| `fs.statSync(path)` / `fs.lstatSync(path)` | ✅ | • Only `size`, `mtimeMs`, `isFile()`, `isDirectory()`, `isSymbolicLink()` — no `mode`/`uid`/`atimeMs`/other Stats surface ([ADR-00495](../adr/ADR-00495.md)/[ADR-00497](../adr/ADR-00497.md))<br>• Linux struct-stat offsets are encoded but verified on Mac only so far | |
+| `fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync` | ✅ | • `rmSync` options must be a `{recursive, force}` boolean-literal object; no `maxRetries`/`retryDelay`<br>• `readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (F_OK) with no `fs.constants` to name others ([ADR-00497](../adr/ADR-00497.md)) | |
+| `fs.openSync` / `closeSync` / `readSync` / `writeSync` / `fstatSync` | ✅ | • `openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names<br>• `writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer` ([ADR-00498](../adr/ADR-00498.md)) | |
 | `fs.unlinkSync(path)` | ✅ | | • Deletes a file. Throws on failure |
-| `fs.mkdirSync(path)` | ✅ | • No `{recursive: true}` option — throws (e.g. `EEXIST`) if the path already exists or a parent directory is missing | • Creates a directory via POSIX `mkdir()`, mode `0777` reduced by the process umask as usual<br>• See [ADR-00027](../adr/ADR-00027.md) |
+| `fs.mkdirSync(path)` | ✅ | • Options support only the literal `{ recursive: true }` (creates every missing prefix, idempotent — [ADR-00487](../adr/ADR-00487.md)); the plain form still throws on an existing path or missing parent | • Creates a directory via POSIX `mkdir()`, mode `0777` reduced by the process umask as usual<br>• See [ADR-00027](../adr/ADR-00027.md) |
 | `fs.rmdirSync(path)` | ✅ | • No recursive-delete option, matching `mkdirSync`'s lack of one | • Removes an *empty* directory via POSIX `rmdir()` — deliberately directory-only (fails on a plain file, unlike `remove()`/`unlinkSync`)<br>• See [ADR-00027](../adr/ADR-00027.md) |
 | `fs.readdirSync(path)` | ✅ | | • Lists a directory's entries (excluding `.`/`..`) as a `string[]`, in whatever order the OS's own `readdir()` returns them — no ordering guarantee, matching real Node<br>• Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux<br>• See [ADR-00027](../adr/ADR-00027.md) |
 | `fs.renameSync(oldPath, newPath)` | ✅ | | • Renames/moves a file via POSIX `rename()`. Throws on failure<br>• See [ADR-00027](../adr/ADR-00027.md) |

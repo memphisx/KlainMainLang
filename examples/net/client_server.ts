@@ -28,4 +28,8 @@ server.listen(0, () => {
     client.end();
     server.close();
   });
+  // 'close' fires once on teardown, after 'end' — Node's ordering.
+  client.on('close', () => {
+    console.log("client closed");
+  });
 });

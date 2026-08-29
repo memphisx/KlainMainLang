@@ -3,6 +3,7 @@ package llvm
 import (
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // fiberStackBytes is the size of each connection fiber's own malloc'd stack
@@ -929,14 +930,43 @@ doappend:
 	// then raw body bytes) is what actually makes bodyBytes' promise of
 	// surviving an embedded null byte true end to end, not just up to the
 	// Content-Length header.
-	respFmt := e.internString("HTTP/1.1 %lld OK\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n")
+	// __kml_http_reason: the standard reason phrase for a status code
+	// (ADR-00486 — previously every status rendered a fixed "OK"). Codes
+	// outside the table fall back to "OK", which real clients ignore anyway.
+	reasons := [][2]string{
+		{"100", "Continue"}, {"101", "Switching Protocols"},
+		{"200", "OK"}, {"201", "Created"}, {"202", "Accepted"}, {"204", "No Content"}, {"206", "Partial Content"},
+		{"301", "Moved Permanently"}, {"302", "Found"}, {"303", "See Other"}, {"304", "Not Modified"}, {"307", "Temporary Redirect"}, {"308", "Permanent Redirect"},
+		{"400", "Bad Request"}, {"401", "Unauthorized"}, {"403", "Forbidden"}, {"404", "Not Found"}, {"405", "Method Not Allowed"},
+		{"406", "Not Acceptable"}, {"408", "Request Timeout"}, {"409", "Conflict"}, {"410", "Gone"}, {"411", "Length Required"},
+		{"412", "Precondition Failed"}, {"413", "Payload Too Large"}, {"414", "URI Too Long"}, {"415", "Unsupported Media Type"},
+		{"418", "I'm a Teapot"}, {"422", "Unprocessable Entity"}, {"429", "Too Many Requests"},
+		{"500", "Internal Server Error"}, {"501", "Not Implemented"}, {"502", "Bad Gateway"}, {"503", "Service Unavailable"},
+		{"504", "Gateway Timeout"}, {"505", "HTTP Version Not Supported"},
+	}
+	var swCases, swBlocks strings.Builder
+	for i, rp := range reasons {
+		swCases.WriteString(fmt.Sprintf("    i64 %s, label %%r%d\n", rp[0], i))
+		swBlocks.WriteString(fmt.Sprintf("r%d:\n  ret ptr %s\n", i, e.internString(rp[1])))
+	}
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_http_reason(i64 %%status) {
+entry:
+  switch i64 %%status, label %%dflt [
+%s  ]
+%sdflt:
+  ret ptr %s
+}`, swCases.String(), swBlocks.String(), e.internString("OK")))
+
+	respFmt := e.internString("HTTP/1.1 %lld %s\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, i64 %%bodylen, ptr %%extraHeaders) {
 entry:
+  %%reason = call ptr @__kml_http_reason(i64 %%status)
   %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
-  %%bufsize1 = add i64 %%hdrlen, 128
+  %%bufsize1 = add i64 %%hdrlen, 160
   %%respbuf = call ptr @malloc(i64 %%bufsize1)
-  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, i64 %%bodylen, ptr %%extraHeaders)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, ptr %%reason, i64 %%bodylen, ptr %%extraHeaders)
   %%n64 = sext i32 %%n to i64
   call i64 @write(i32 %%connfd, ptr %%respbuf, i64 %%n64)
   call void @free(ptr %%respbuf)

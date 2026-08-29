@@ -31,27 +31,55 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 	// — invisible to this thread's Boehm scan — so header and data are
 	// GC_malloc_uncollectable (zeroed, never collected, still scanned).
 	// TDD-00099.
+	// A growable buffer (`{maxByteLength}`, ADR-00494) reserves its maximum
+	// upfront — views hold raw data pointers, so the data block can never
+	// move; grow() only bumps the length word. Header word 2 holds the max,
+	// or -1 for a fixed-size buffer (feeds `.growable`/`.maxByteLength`).
+	allocRef := sizeVal.Ref
+	maxRef := "-1"
+	if ex.MaxByteLength != nil {
+		maxVal, err := e.emitExpr(ex.MaxByteLength)
+		if err != nil {
+			return Value{}, err
+		}
+		maxVal = e.coerce(maxVal, TypeI64)
+		maxRef = maxVal.Ref
+		allocRef = maxVal.Ref
+	}
 	dataReg := e.freshReg()
 	hdrReg := e.freshReg()
+	hdrBytes := 16
+	if ex.MaxByteLength != nil {
+		hdrBytes = 24
+	}
 	if ex.Shared && e.isGCMode() {
 		e.ensureGCUncollectable()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", dataReg, sizeVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 16)", hdrReg))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", dataReg, allocRef))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %d)", hdrReg, hdrBytes))
 	} else {
 		e.ensureCalloc()
 		e.ensureMalloc()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", dataReg, sizeVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", dataReg, allocRef))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", hdrReg, hdrBytes))
 	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, hdrReg))
 	dataSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, dataSlot))
+	if ex.MaxByteLength != nil {
+		maxSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 2", maxSlot, hdrReg))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", maxRef, maxSlot))
+	}
 
 	if ex.Shared {
-		return Value{Ref: hdrReg, Ty: SharedArrayBufferType()}, nil
+		ty := SharedArrayBufferType()
+		ty.BufferGrowable = ex.MaxByteLength != nil
+		return Value{Ref: hdrReg, Ty: ty}, nil
 	}
-	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
+	ty := ArrayBufferType()
+	ty.BufferGrowable = ex.MaxByteLength != nil
+	return Value{Ref: hdrReg, Ty: ty}, nil
 }
 
 // emitArrayBufferByteLength reads word 0 of an ArrayBuffer's hidden header
@@ -664,4 +692,73 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 	ty.BigIntElem = recvTy.BigIntElem
 	ty.Clamped = recvTy.Clamped
 	return Value{Ref: r1, Ty: ty}, nil
+}
+
+// emitBufferGrowableProps reads `.growable`/`.maxByteLength` off a buffer's
+// header (ADR-00494). Word 2 is -1 for fixed-size buffers: growable=false,
+// and maxByteLength falls back to the current byteLength (the spec's value
+// for a non-growable buffer).
+func (e *Emitter) emitBufferGrowableProps(bufVal Value, prop string) (Value, error) {
+	if !bufVal.Ty.BufferGrowable {
+		// Fixed-size buffer (16-byte header — word 2 must not be read):
+		// growable/resizable is false; maxByteLength is the byteLength.
+		if prop == "growable" || prop == "resizable" {
+			return Value{Ref: "false", Ty: TypeBool}, nil
+		}
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, bufVal.Ref))
+		return Value{Ref: lenReg, Ty: TypeI64}, nil
+	}
+	maxSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 2", maxSlot, bufVal.Ref))
+	maxReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", maxReg, maxSlot))
+	isG := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", isG, maxReg))
+	if prop == "growable" || prop == "resizable" {
+		return Value{Ref: isG, Ty: TypeBool}, nil
+	}
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, bufVal.Ref))
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", res, isG, maxReg, lenReg))
+	return Value{Ref: res, Ty: TypeI64}, nil
+}
+
+// emitBufferGrow implements sab.grow(newLength) (ADR-00494): bounds-check
+// against the reserved max (and against shrinking — growable buffers only
+// grow), then bump the header's length word. The data block was reserved at
+// max size up front, so no view is ever invalidated.
+func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: grow() requires 1 argument (newByteLength)", pos.Line, pos.Col)
+	}
+	if !bufVal.Ty.BufferGrowable {
+		return Value{}, fmt.Errorf("%d:%d: grow()/resize() requires a buffer constructed with {maxByteLength}", pos.Line, pos.Col)
+	}
+	nVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	nVal = e.coerce(nVal, TypeI64)
+	maxSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 2", maxSlot, bufVal.Ref))
+	maxReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", maxReg, maxSlot))
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, bufVal.Ref))
+	tooBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooBig, nVal.Ref, maxReg))
+	shrinks := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", shrinks, nVal.Ref, lenReg))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, tooBig, shrinks))
+	throwL := e.freshLabel("sab.grow.throw")
+	okL := e.freshLabel("sab.grow.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
+	e.emitLabel(throwL)
+	e.emitInternalThrow(e.internString("RangeError: SharedArrayBuffer.grow: new length is below the current length or above maxByteLength"))
+	e.emitLabel(okL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nVal.Ref, bufVal.Ref))
+	return Value{Ty: TypeVoid}, nil
 }

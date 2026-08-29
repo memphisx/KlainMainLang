@@ -27,3 +27,23 @@ function label(this: void, name: string, n: number): string {
   return `${name}:${n}`
 }
 console.log(label("edges", 12))  // edges:12
+
+// --- old-style angle-bracket type assertion: erased like `as T` ---
+const casted = <number>21
+console.log(<number>casted * 2)  // 42
+
+// --- numeric-literal types: resolve to number, value not narrowed ---
+type Direction = -1 | 0 | 1
+const dir: Direction = 1
+console.log(dir * 10)            // 10
+
+// --- generic function types: <T>(x: T) => T erases T to any ---
+var idf: <T>(x: T) => T
+idf = (x: any): any => x
+console.log(idf("erased"))       // erased
+
+// --- type predicates: `x is T` returns are booleans; narrowing not modeled ---
+function isShort(s: string): s is string {
+  return s.length < 4
+}
+console.log(isShort("hey"))      // true

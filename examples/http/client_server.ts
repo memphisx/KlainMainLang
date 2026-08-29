@@ -14,7 +14,13 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
     res.on('end', () => {
       console.log("status:", res.statusCode);
       console.log("body:", body);
-      process.exit(0);
+      // Options-object form with method + headers: the request rides the
+      // same client; GET stays the default when method is omitted.
+      const req = http.request({ port: 18521, path: "/", method: "HEAD", headers: { "X-Client": "kml" } }, (res2) => {
+        console.log("head status:", res2.statusCode);
+        process.exit(0);
+      });
+      req.end();
     });
   });
 });

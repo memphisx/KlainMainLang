@@ -429,8 +429,26 @@ func (e *Emitter) emitNetSocketMethod(objExpr ast.Expression, method string, arg
 				return Value{}, err
 			}
 			e.netStorePtrField(objVal.Ref, netSocketIR, 3, cb)
+		case "close":
+			// Fired once on teardown — EOF or explicit end()/destroy()
+			// (ADR-00501). No hadError argument (this path has no error
+			// teardown to distinguish).
+			cb, err := e.netArrowClosure(args[1], nil, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			e.netStorePtrField(objVal.Ref, netSocketIR, 6, cb)
+		case "connect", "ready":
+			// A post-connect registration on an already-connected client
+			// socket: stored in the same pending slot net.connect's own
+			// callback uses; the dispatch pass fires and clears it.
+			cb, err := e.netArrowClosure(args[1], nil, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			e.netStorePtrField(objVal.Ref, netSocketIR, 4, cb)
 		default:
-			return Value{}, fmt.Errorf("%d:%d: a net socket supports 'data' and 'end' (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: a net socket supports 'data', 'end', 'close', and 'connect'/'ready' (got '%s')", pos.Line, pos.Col, evt)
 		}
 		return Value{Ty: TypeVoid}, nil
 	case "write":

@@ -44,7 +44,7 @@
             "feature": "`for…of` over arrays, `Map`, `Set`, and a class implementing `next(): T \\| null`",
             "status": "implemented",
             "caveats": [
-              "A `Map` iterates values, not `[key, value]` entries, so `for (const [k, v] of map)` does not decompose entries — use `.keys()` for keys ([ADR-00011](../adr/ADR-00011.md))"
+              "A bare `for (const v of map)` iterates values (use `.keys()` for keys — [ADR-00011](../adr/ADR-00011.md)); the two-name pattern `for (const [k, v] of map)` decomposes entries ([ADR-00481](../adr/ADR-00481.md))"
             ],
             "notes": [
               "The loop variable may be a destructuring pattern (`for (const [a, b] of pairs)` over an array-of-arrays, `for (const { x, y } of points)`), including nested patterns (`for (const [[a, b], c] of …)`) — see [ADR-00192](../adr/ADR-00192.md)/[ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stages 1–2",
@@ -242,7 +242,8 @@
             ],
             "notes": [
               "Evaluates each operand left to right, yields the last (its type is the sequence's type)",
-              "Also usable in a `for` header"
+              "Also usable in a `for` header",
+              "Works at statement level too (`a(), b();` — [ADR-00476](../adr/ADR-00476.md))"
             ]
           },
           {
@@ -279,7 +280,10 @@
           },
           {
             "feature": "Spread in array literals `[...a, ...b]`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "Elisions (`[1,,3]`) parse too — a hole reads as `undefined`/zero and counts toward the length ([ADR-00467](../adr/ADR-00467.md))"
+            ]
           }
         ]
       }
@@ -297,7 +301,7 @@
             "feature": "`const` / `let` / `var` declarations",
             "status": "implemented",
             "caveats": [
-              "Definite-assignment analysis is sound-not-complete: a typed `var`/`let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md))",
+              "Definite-assignment analysis is sound-not-complete: a typed `let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md))",
               "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, a *scalar*-returning un-annotated call (`emitVarDecl`'s `i64` default), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them ([TDD-00093](../tdd/TDD-00093.md))"
             ],
             "notes": [
@@ -305,7 +309,7 @@
               "`var` is function-scoped (leaks its enclosing block, and re-declarable with the same name); `let`/`const` are block-scoped; `const` rebinding is rejected",
               "Block-scoped `let`/`const` redeclaration is a compile error; the top-level duplicate check is kind-aware (`var x; var x` allowed, `let x; let x` / `let x; var x` rejected) and the cross-block `let x; { var x }` intersection is caught too — see [TDD-00070](../tdd/TDD-00070.md)/[ADR-00210](../adr/ADR-00210.md)/[ADR-00211](../adr/ADR-00211.md)",
               "A `let`/`const` read before its declaration is a distinct `cannot access 'x' before initialization` TDZ error (including the block-shadowing form) — [TDD-00071](../tdd/TDD-00071.md) Stage 1/[ADR-00212](../adr/ADR-00212.md)",
-              "A typed `var`/`let` read before assignment is a `used before being assigned` error for the common cases ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md))"
+              "A typed `let` read before assignment is a `used before being assigned` error for the common cases; `var` is exempt — hoisted and zero/`undefined`-initialized, no TDZ ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/ADR-00213.md)/[ADR-00454](../adr/ADR-00454.md))"
             ]
           },
           {
@@ -371,7 +375,7 @@
             "caveats": [
               "Cannot reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`, `BroadcastChannel`/`MessageChannel`, `XMLHttpRequest` — construction opens a thread/socket), a `Promise`, or a generic class instance with **inferred** rather than explicit type arguments (`new Box(5)`, or a nested `new Box<Box<number>>()`) — such a binding stays a `main()` local outside a named function's fresh scope, failing with `undefined variable`. Scalars, strings, arrays, `TypedArray`s, objects, `Map`/`Set`, class instances (including an explicit `new Box<number>()`), the value/event handles (`Blob`, `Date`, `Error`, `URL`, `URLSearchParams`, `URLPattern`, `RegExp`, `Headers`, `ArrayBuffer`, `DataView`, `TextEncoder`/`TextDecoder`, `Request`, `AbortController`, `Event`/`CustomEvent`, `EventTarget`), and the streams (`ReadableStream`/`WritableStream`/`TransformStream`/`CompressionStream`, the Node streams) + `EventEmitter`, and `http.createServer` handles ([ADR-00426](../adr/ADR-00426.md)) are promoted to module globals and are readable ([TDD-00093](../tdd/TDD-00093.md)/[ADR-00342](../adr/ADR-00342.md)); arrow functions/closures capture everything regardless ([TDD-00057](../tdd/TDD-00057.md))",
               "A genuinely circular pair of mutually-recursive unannotated functions can't converge on a return type and keeps the scalar-default fallback ([TDD-00058](../tdd/TDD-00058.md))",
-              "The `arguments` object is synthesized from the declared parameters when they all share one type ([ADR-00387](../adr/ADR-00387.md)) — `.length`, indexing, and `for…of` work; mixed-type parameters, a rest/destructured parameter, and an arrow function (which has no own `arguments` in JS) are clean rejections, and it reflects the declared parameters rather than growing with extra untyped arguments (there is no variadic call beyond an explicit `...rest`)"
+              "The `arguments` object is synthesized from the declared parameters when they all share one type ([ADR-00387](../adr/ADR-00387.md)) — `.length`, indexing, and `for…of` work; mixed-type parameters, a rest/destructured parameter, and an arrow function (which has no own `arguments` in JS) are clean rejections, and it reflects the declared parameters rather than growing with extra untyped arguments (there is no variadic call beyond an explicit `...rest`); class method bodies get the same synthesis ([ADR-00464](../adr/ADR-00464.md))"
             ],
             "notes": [
               "Named, typed params, typed return",
@@ -382,7 +386,8 @@
             "feature": "Arrow functions / lambdas",
             "status": "implemented",
             "notes": [
-              "Full closures; captures via heap-allocated env struct"
+              "Full closures; captures via heap-allocated env struct",
+              "An arrow inside a class method captures the enclosing lexical `this` like any other variable (nested arrows included; a `function(){}` body keeps its own dynamic `this` and stays a clean rejection) ([ADR-00460](../adr/ADR-00460.md))"
             ]
           },
           {
@@ -460,9 +465,12 @@
           },
           {
             "feature": "Function overload signatures (`function f(x: number): number;` + impl)",
-            "status": "missing",
+            "status": "implemented",
             "caveats": [
-              "A standalone overload signature (a `function` head terminated by `;` with no body, followed by the implementation) is a parse error (`expected {, got ;`). Write a single implementation signature — union the parameter/return types instead"
+              "Signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only, with no per-signature arity/type narrowing (an ill-formed group — a signature with no implementation, interrupted, or name-mismatched — is still a clean rejection)"
+            ],
+            "notes": [
+              "Top-level `function` groups, class methods, and constructor overloads ([ADR-00446](../adr/ADR-00446.md)); only the implementation is compiled"
             ]
           },
           {
@@ -594,7 +602,8 @@
             "feature": "Enums (numeric)",
             "status": "implemented",
             "notes": [
-              "Auto-increment, explicit values"
+              "Auto-increment, explicit values",
+              "Bracket access (`E[\"B\"]`) and the numeric reverse mapping (`E[1]` → `\"B\"`, unmatched → `\"undefined\"`) work; a string enum's reverse lookup is a clean rejection ([ADR-00480](../adr/ADR-00480.md))"
             ]
           },
           {
@@ -605,13 +614,21 @@
             ]
           },
           {
-            "feature": "Namespaces (`namespace X {}`, function merging)",
+            "feature": "Namespaces (`namespace X {}` / `module X {}`, function merging)",
             "status": "implemented",
             "caveats": [
-              "V1 scope: top-level only, members must be `export function` / `export const`/`let` (single binding); no nesting, no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private ([TDD-00095](../tdd/TDD-00095.md)/[ADR-00290](../adr/ADR-00290.md))"
+              "Top-level declarations only (a namespace inside a function body is not supported); no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private ([TDD-00095](../tdd/TDD-00095.md)/[TDD-00148](../tdd/TDD-00148.md))",
+              "Type members (class/interface/type/enum) desugar to *bare-name* top-level declarations — two namespaces declaring the same class name collide, ([ADR-00450](../adr/ADR-00450.md)); outside `X.Enum.Member` / `X.Class.static` chains resolve through the qualifier strip ([ADR-00480](../adr/ADR-00480.md))",
+              "A top-level namespace `const` initializer can't reference a sibling member (it evaluates outside the namespace context); sibling references *inside member function bodies* work, with consts subject to the [ADR-00342](../adr/ADR-00342.md) promotion type limits"
             ],
             "notes": [
-              "Merges with a same-name top-level `function X(...)` — TS's callable-object duality idiom (`assert(x)` + `assert.sameValue(...)`); members desugar to flat top-level declarations"
+              "Merges with a same-name top-level `function X(...)` — TS's callable-object duality idiom (`assert(x)` + `assert.sameValue(...)`); members desugar to flat top-level declarations",
+              "V2 ([TDD-00148](../tdd/TDD-00148.md)/[ADR-00450](../adr/ADR-00450.md)): the `module X {}` spelling, `export namespace/module` tolerated, non-exported members (visible to siblings, outside access cleanly rejected), class/interface/type/enum members, and bare sibling references between member functions",
+              "V3 ([ADR-00453](../adr/ADR-00453.md)): nested namespaces and dotted declarations (`module A.B {}`), flattened to dotted names; outside `A.B.member` chains and TS-order relative references (`B.f()` inside `A` finds `A.B`) resolve",
+              "Import-equals aliases (`import X = Y.Z`, `export import X = N` in a namespace body) resolve as namespace aliases; an alias to a *value* member and `import x = require('…')` stay clean rejections ([ADR-00456](../adr/ADR-00456.md))",
+              "`export declare …` ambient members are parsed and erased ([ADR-00462](../adr/ADR-00462.md))",
+              "Executable body statements run at initialization (flattened in order); top-level `export declare …` is ambient-erased ([ADR-00468](../adr/ADR-00468.md))",
+              "Qualified type references (`ns.Type` in annotations) resolve to the final segment's bare name, like qualified `new`/`extends` ([ADR-00470](../adr/ADR-00470.md))"
             ]
           },
           {
@@ -666,8 +683,11 @@
             ]
           },
           {
-            "feature": "`new Array<T>(n)`",
-            "status": "implemented"
+            "feature": "`new Array<T>(n?)`",
+            "status": "implemented",
+            "notes": [
+              "Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md))"
+            ]
           },
           {
             "feature": "`new Map<K,V>()`",
@@ -685,12 +705,22 @@
               "A computed/dynamic member name (identifier, call, or interpolation) is a clean rejection; the recognized well-known-symbol keys are `[Symbol.asyncIterator]` and `[Symbol.iterator]`, desugared to the async-/sync-iteration methods ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md))",
               "A class expression used as a runtime value (argument, return, nested binding) or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope",
               "Class early-error gaps (deferred, no valid program miscompiles): a field initializer containing `arguments` or a `super()` call, a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`",
-              "**Parameter properties are not supported** — a modifier on a constructor parameter (`constructor(public x: number)` / `private` / `readonly` / `protected`) is a parse error (`expected IDENT, got public`); declare the field explicitly and assign it in the constructor body instead",
-              "The **`readonly` field modifier** is not parsed (`readonly x: number` reads `readonly` as the field name); drop it — there's no mutation checking anyway"
+              "The **`readonly` field modifier** is not parsed (`readonly x: number` reads `readonly` as the field name); drop it — there's no mutation checking anyway",
+              "A bare field (`x;`) defaults to `number` (the unannotated-parameter convention; JSDoc `@type` overrides) — TS infers implicit `any`, so a non-numeric use is a shifted typed error ([ADR-00474](../adr/ADR-00474.md))"
             ],
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 1 — instances reuse the same heap-object/GEP machinery interfaces already use; methods compile to plain static calls (`this` as an implicit first arg), no closure indirection. See [ADR-00063](../adr/ADR-00063.md)",
               "Qualified constructors and bases parse: `new stream.Readable(...)` and `class X extends events.EventEmitter` dispatch on the final name exactly like the bare form (the qualifier is not validated against the module — [ADR-00408](../adr/ADR-00408.md))"
+            ]
+          },
+          {
+            "feature": "Constructor parameter properties (`constructor(public x: number, readonly y: T)`)",
+            "status": "implemented",
+            "caveats": [
+              "`readonly` is parsed and declares the field but is not enforced as immutability — a later write is not rejected"
+            ],
+            "notes": [
+              "Desugars at parse time to a declared field + `this.x = x` constructor prologue ([ADR-00447](../adr/ADR-00447.md)); `private`/`protected` get the same enforcement as declared fields; outside a constructor the modifiers are a clean parse error"
             ]
           },
           {

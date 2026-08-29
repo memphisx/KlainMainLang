@@ -79,8 +79,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			// other member dispatch, since a namespace name (like a class
 			// name) is a compile-time construct, never a runtime value. A
 			// local binding shadowing the namespace name wins.
-			if members, nsName := e.namespaceMembers(id.Name); members != nil && members[mem.Property] {
-				if !e.isShadowedByLocal(id.Name) {
+			if members, nsName := e.namespaceMembers(id.Name); members != nil {
+				if exported, present := members[mem.Property]; present && !e.isShadowedByLocal(id.Name) {
+					if !exported && e.curNamespace != nsName {
+						return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name, mem.Property, nsName)
+					}
 					mangled := ast.NamespaceMangle(nsName, mem.Property)
 					rewritten := ast.NewCallExpression(ast.NewIdentifier(mangled, ex.GetPos()), ex.Args, ex.GetPos())
 					return e.emitCall(rewritten)
@@ -88,6 +91,31 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 			if info, found := e.classes[id.Name]; found {
 				return e.emitStaticMethodCall(info, id.Name, mem.Property, ex.Args, ex.GetPos())
+			}
+		}
+		// Symbol.for / Symbol.keyFor (ADR-00488) — before class dispatch, a
+		// user binding named Symbol still wins via the shadow check.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Symbol" && !e.isShadowedByLocal("Symbol") &&
+			(mem.Property == "for" || mem.Property == "keyFor") {
+			return e.emitSymbolStatic(mem.Property, ex.Args, ex.GetPos())
+		}
+		// A namespace-qualified static call (`X.C.method()` — ADR-00480).
+		if bare := e.stripNSTypeQualifier(mem.Object); bare != nil {
+			if bid, ok := bare.(*ast.Identifier); ok {
+				if info, found := e.classes[bid.Name]; found {
+					return e.emitStaticMethodCall(info, bid.Name, mem.Property, ex.Args, ex.GetPos())
+				}
+			}
+		}
+		// Nested-namespace member call `A.B.f(args)` (TDD-00148 V3).
+		if members, nsName := e.namespaceByChain(mem.Object); members != nil {
+			if exported, present := members[mem.Property]; present {
+				if !exported && e.curNamespace != nsName {
+					return Value{}, fmt.Errorf("%d:%d: '%s.%s' is not exported from namespace '%s'", ex.GetPos().Line, ex.GetPos().Col, nsName, mem.Property, nsName)
+				}
+				mangled := ast.NamespaceMangle(nsName, mem.Property)
+				rewritten := ast.NewCallExpression(ast.NewIdentifier(mangled, ex.GetPos()), ex.Args, ex.GetPos())
+				return e.emitCall(rewritten)
 			}
 		}
 	}
@@ -553,6 +581,24 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsCopyFileSync(ex.Args, ex.GetPos())
 			case "readdirSync":
 				return e.emitFsReaddirSync(ex.Args, ex.GetPos())
+			case "statSync":
+				return e.emitFsStatSync(ex.Args, ex.GetPos())
+			case "lstatSync":
+				return e.emitFsLstatSync(ex.Args, ex.GetPos())
+			case "realpathSync", "mkdtempSync", "readlinkSync", "symlinkSync", "chmodSync", "truncateSync", "accessSync":
+				return e.emitFsPathOp(mem.Property, ex.Args, ex.GetPos())
+			case "rmSync":
+				return e.emitFsRmSync(ex.Args, ex.GetPos())
+			case "openSync":
+				return e.emitFsOpenSync(ex.Args, ex.GetPos())
+			case "closeSync":
+				return e.emitFsCloseSync(ex.Args, ex.GetPos())
+			case "writeSync":
+				return e.emitFsWriteSync(ex.Args, ex.GetPos())
+			case "readSync":
+				return e.emitFsReadSync(ex.Args, ex.GetPos())
+			case "fstatSync":
+				return e.emitFsFstatSync(ex.Args, ex.GetPos())
 			case "createReadStream":
 				return e.emitFsCreateReadStream(ex.Args, ex.GetPos())
 			case "createWriteStream":
@@ -793,6 +839,23 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "splice" {
 			return e.emitSplice(mem, ex.Args, ex.GetPos())
 		}
+		// fs.statSync Stats methods (ADR-00495).
+		if mem.Property == "isFile" || mem.Property == "isDirectory" || mem.Property == "isSymbolicLink" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsStats {
+				return e.emitStatsKindCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+			}
+		}
+		// SharedArrayBuffer.grow / ArrayBuffer.resize (ADR-00494) — only on
+		// buffers constructed with {maxByteLength}.
+		if mem.Property == "grow" || mem.Property == "resize" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsArrayBuffer {
+				objVal, err := e.emitExpr(mem.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitBufferGrow(objVal, ex.Args, ex.GetPos())
+			}
+		}
 		if mem.Property == "slice" {
 			objTy := e.inferExprType(mem.Object)
 			if objTy.IsBlob {
@@ -1026,6 +1089,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitXHRSend(mem.Object, ex.Args, ex.GetPos())
 			case "abort":
 				return e.emitXHRAbort(mem.Object, ex.Args, ex.GetPos())
+			case "getResponseHeader":
+				return e.emitXHRGetResponseHeader(mem.Object, ex.Args, ex.GetPos())
+			case "getAllResponseHeaders":
+				return e.emitXHRGetAllResponseHeaders(mem.Object, ex.Args, ex.GetPos())
 			}
 		}
 		// Headers-only methods (TDD-00040), checked before the generic Map
@@ -1257,7 +1324,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// prior instantiation) on demand, then dispatch exactly like a
 		// concrete named function.
 		if decl, found := e.genericFuncs[id.Name]; found {
-			return e.emitGenericFuncCall(decl, ex.Args, ex.GetPos())
+			return e.emitGenericFuncCall(decl, ex.Args, ex.TypeArgs, ex.GetPos())
 		}
 		// Closure variable — including a named function expression's own
 		// self-reference binding (TDD-00060).
@@ -1278,6 +1345,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// still wins.
 		if id.Name == "postMessage" && e.currentWorkerMod != "" {
 			return e.emitParentPortCall("postMessage", ex.Args, ex.GetPos())
+		}
+		// Sibling namespace member call by bare name from inside a member
+		// function body (TDD-00148 Stage 4) — retried under the mangled
+		// name. Checked after every user-binding lookup, so locals shadow.
+		if m := e.nsSibling(id.Name); m != "" {
+			rewritten := ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), ex.Args, ex.GetPos())
+			return e.emitCall(rewritten)
 		}
 		return Value{}, fmt.Errorf("%d:%d: undefined function or closure '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 	}
@@ -1805,14 +1879,163 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 // table stays keyed by the source name — so a miss retries with that suffix
 // stripped. Returns the member set (or nil) and the source-level namespace
 // name to mangle members against.
+// nsDottedChain flattens a member-expression chain of pure identifiers
+// (`A.B.C`) into its dotted name (TDD-00148 V3). ok is false when any link
+// is not a plain identifier/member step.
+func nsDottedChain(expr ast.Expression) (string, bool) {
+	switch ex := expr.(type) {
+	case *ast.Identifier:
+		return ex.Name, true
+	case *ast.MemberExpression:
+		if base, ok := nsDottedChain(ex.Object); ok {
+			return base + "." + ex.Property, true
+		}
+	}
+	return "", false
+}
+
+// namespaceByChain resolves a nested-namespace member-expression object
+// (`A.B` in `A.B.f()`) against the namespace table, including the
+// resolver's `__kml_modN` suffix on the root segment. Returns the member
+// table and the dotted namespace name, or nil. Single identifiers are
+// namespaceMembers' job — this only matches genuinely dotted chains.
+func (e *Emitter) namespaceByChain(obj ast.Expression) (map[string]bool, string) {
+	chain, ok := nsDottedChain(obj)
+	if !ok || !strings.Contains(chain, ".") {
+		return nil, ""
+	}
+	if m, ok := e.namespaces[chain]; ok {
+		return m, chain
+	}
+	if i := strings.Index(chain, "."); i > 0 {
+		root := chain[:i]
+		if j := strings.LastIndex(root, "__kml_mod"); j > 0 {
+			c2 := root[:j] + chain[i:]
+			if m, ok := e.namespaces[c2]; ok {
+				return m, c2
+			}
+			chain = c2
+		}
+	}
+	// Expand the longest alias prefix (`M.X.f` where `M.X` aliases `M.N` —
+	// ADR-00456), up to a small fixed number of expansions.
+	for range [4]int{} {
+		expanded := false
+		for p := chain; p != ""; {
+			if t, ok := e.nsAliases[p]; ok {
+				chain = t + chain[len(p):]
+				expanded = true
+				break
+			}
+			i := strings.LastIndex(p, ".")
+			if i < 0 {
+				break
+			}
+			p = p[:i]
+		}
+		if !expanded {
+			break
+		}
+		if m, ok := e.namespaces[chain]; ok {
+			return m, chain
+		}
+	}
+	return nil, ""
+}
+
+// stripNSTypeQualifier rewrites `ns.TypeName` — a namespace-qualified
+// reference to a *type* member (enum/class), which desugars to a bare
+// top-level name (ADR-00450) — to the bare `TypeName` identifier, so
+// chains like `X.Color.Red` and `X.C.staticMethod()` resolve (ADR-00480).
+// Returns nil when expr isn't that shape (value members, shadowed names,
+// and unknown properties are untouched).
+func (e *Emitter) stripNSTypeQualifier(expr ast.Expression) ast.Expression {
+	mem, ok := expr.(*ast.MemberExpression)
+	if !ok {
+		return nil
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok || e.isShadowedByLocal(id.Name) {
+		return nil
+	}
+	members, _ := e.namespaceMembers(id.Name)
+	if members == nil {
+		return nil
+	}
+	if _, isValueMember := members[mem.Property]; isValueMember {
+		return nil
+	}
+	// The type member's desugared bare name carries the resolver's
+	// per-file suffix (`Color__kml_mod0`) while the source chain holds the
+	// written name (the namespace root itself is never renamed, so there is
+	// no suffix to borrow) — match exact first, then by mangled prefix.
+	if _, isEnum := e.enums[mem.Property]; isEnum {
+		return ast.NewIdentifier(mem.Property, mem.GetPos())
+	}
+	if _, isClass := e.classes[mem.Property]; isClass {
+		return ast.NewIdentifier(mem.Property, mem.GetPos())
+	}
+	prefix := mem.Property + "__kml_mod"
+	for name := range e.enums {
+		if strings.HasPrefix(name, prefix) {
+			return ast.NewIdentifier(name, mem.GetPos())
+		}
+	}
+	for name := range e.classes {
+		if strings.HasPrefix(name, prefix) {
+			return ast.NewIdentifier(name, mem.GetPos())
+		}
+	}
+	return nil
+}
+
+// nsSibling maps a bare identifier referenced inside a namespace member
+// function to its sibling's mangled name (TDD-00148 Stage 4), or "" when
+// not in a namespace context or no such member exists. Exportedness is
+// irrelevant inside the namespace, so presence alone matches.
+func (e *Emitter) nsSibling(name string) string {
+	if e.curNamespace == "" {
+		return ""
+	}
+	if members, ok := e.namespaces[e.curNamespace]; ok {
+		if _, present := members[name]; present {
+			return ast.NamespaceMangle(e.curNamespace, name)
+		}
+	}
+	return ""
+}
+
 func (e *Emitter) namespaceMembers(name string) (map[string]bool, string) {
 	if m, ok := e.namespaces[name]; ok {
 		return m, name
+	}
+	// An import-equals alias for a namespace (ADR-00456).
+	if t, ok := e.nsAliases[name]; ok {
+		if m, ok := e.namespaces[t]; ok {
+			return m, t
+		}
 	}
 	if i := strings.LastIndex(name, "__kml_mod"); i > 0 {
 		base := name[:i]
 		if m, ok := e.namespaces[base]; ok {
 			return m, base
+		}
+	}
+	// Relative resolution from inside a namespace member (TDD-00148 V3):
+	// `B.f()` written inside namespace `A` resolves to `A.B`, innermost
+	// enclosing scope outward, matching TS's own lookup order.
+	if e.curNamespace != "" {
+		parts := strings.Split(e.curNamespace, ".")
+		for k := len(parts); k >= 1; k-- {
+			cand := strings.Join(parts[:k], ".") + "." + name
+			if m, ok := e.namespaces[cand]; ok {
+				return m, cand
+			}
+			if t, ok := e.nsAliases[cand]; ok {
+				if m, ok := e.namespaces[t]; ok {
+					return m, t
+				}
+			}
 		}
 	}
 	return nil, ""

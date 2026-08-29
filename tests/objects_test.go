@@ -695,14 +695,14 @@ console.log(obj[k])
 `, "hello\nworld")
 }
 
-func TestE2EComputedPropertyKeyNonStringKeyRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EComputedPropertyKeyNumericStringifies(t *testing.T) {
+	// ADR-00461: a numeric computed key stringifies (JS object keys are
+	// strings) instead of being rejected.
+	assertOutput(t, `
 const k = 5
 const obj = { [k]: 1 }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-string computed property key, got none")
-	}
+console.log(obj["5"])
+`, "1")
 }
 
 func TestE2EComputedPropertyKeySpreadCombinationRejected(t *testing.T) {
@@ -1370,4 +1370,22 @@ console.log(new Account(0).balance ?? -1)
 console.log(new Account(null).balance ?? -1)
 console.log(new Account(5).balance === null)
 `, "0\n-1\nfalse")
+}
+
+// Homogeneous fixed-shape objects keep real typed values in
+// Object.values/Object.entries (ADR-00492) — usable as numbers, not
+// stringified. Heterogeneous shapes still stringify (covered above).
+func TestE2EObjectValuesEntriesTyped(t *testing.T) {
+	assertOutput(t, `
+interface Scores { math: number; physics: number }
+const s: Scores = { math: 90, physics: 82 }
+let total: number = 0
+for (const v of Object.values(s)) {
+  total = total + v
+}
+console.log(total)
+for (const [k, v] of Object.entries(s)) {
+  console.log(k + ":" + (v + 1))
+}
+`, "172\nmath:91\nphysics:83")
 }

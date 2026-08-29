@@ -80,3 +80,17 @@ async function run(): Promise<void> {
 run();
 `, "0")
 }
+
+func TestE2EBlobVariableStringParts(t *testing.T) {
+	// ADR-00489: a variable-bound string[] parts array builds the Blob at
+	// runtime (two-pass length + copy).
+	assertOutput(t, `
+const parts: string[] = ["hello", " ", "blob"];
+const b = new Blob(parts, { type: "text/plain" });
+console.log(b.size, b.type);
+async function show(): Promise<void> {
+    console.log(await b.text());
+}
+show();
+`, "10 text/plain\nhello blob")
+}

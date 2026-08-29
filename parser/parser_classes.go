@@ -157,6 +157,11 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	var ctor *ast.FunctionDeclaration
 	var methods []*ast.FunctionDeclaration
 	var staticBlocks []*ast.BlockStatement
+	// pendingOverload holds the member name of an open TS overload group —
+	// body-less signatures (`bar(x: string): void;`) already seen and erased,
+	// still awaiting their implementation. TS requires the group to be
+	// consecutive and closed by an implementation; both are enforced here.
+	var pendingOverload string
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
 
@@ -173,10 +178,19 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			continue
 		}
 
-		// Zero or more modifiers, any order.
+		// Zero or more modifiers, any order. `readonly` is contextual (a
+		// field may itself be named `readonly`), so it's a modifier only
+		// when a member name follows; like the ctor-param form (ADR-00447)
+		// it is parsed and recorded but not enforced as immutability
+		// (ADR-00480).
 		var isStatic, isMemberAbstract bool
 		var visibility string
 		for {
+			if p.peek().Type == lexer.IDENT && p.peek().Literal == "readonly" &&
+				(isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
+				p.advance()
+				continue
+			}
 			switch p.peek().Type {
 			case lexer.STATIC:
 				isStatic = true
@@ -245,6 +259,18 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// rather than silently accepted or silently overridden, matching
 		// real TypeScript.
 		var memberTok lexer.Token
+		// A class-body index signature (`[n: number]: T;` — ADR-00476) is
+		// parsed and dropped: classes have fixed field layouts (no map
+		// backing), so the signature declares nothing reachable; indexing
+		// still gets its ordinary rejection at the use site. Distinguished
+		// from a computed member name (`[expr]…`) by the `IDENT :` prefix.
+		if p.check(lexer.LBRACKET) && p.peekNth(1).Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON {
+			if _, err := p.parseIndexSignature("ts"); err != nil {
+				return nil, err
+			}
+			p.match(lexer.SEMICOLON, lexer.COMMA)
+			continue
+		}
 		if p.check(lexer.LBRACKET) {
 			// Computed member name (TDD-00063 Stage 3): V1 supports only a
 			// compile-time-constant string or numeric literal, desugared to
@@ -309,14 +335,44 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 
 		// Method or constructor: `name(...) { ... }` (or, if isMemberAbstract,
 		// `name(...): T;` with no body).
-		if p.check(lexer.LPAREN) {
+		if p.check(lexer.LPAREN) || (p.check(lexer.LT) && p.peekNth(1).Type == lexer.IDENT) {
 			if memberTok.Literal == "constructor" && (isAsyncMethod || isGeneratorMethod) {
 				return nil, fmt.Errorf("%d:%d: a constructor cannot be async or a generator", memberTok.Line, memberTok.Col)
 			}
-			fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract)
+			if pendingOverload != "" && memberTok.Literal != pendingOverload {
+				return nil, fmt.Errorf("%d:%d: overload signature for '%s' must be followed by another overload signature or its implementation", memberTok.Line, memberTok.Col, pendingOverload)
+			}
+			p.inCtorParams = memberTok.Literal == "constructor"
+			fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract, !isMemberAbstract && accessorKind == "")
+			p.inCtorParams = false
 			if err != nil {
 				return nil, err
 			}
+			// A generic *method* (`map<U>(f): U`) erases its type parameters
+			// to `any` and compiles as a plain method — the ADR-00469 stance,
+			// unblocked by ADR-00477's closure adapter trampolines (the
+			// mistagged-return bug ADR-00475 deferred is fixed; a concrete
+			// callback passed for an `any`-signature parameter now adapts).
+			if len(fn.TypeParams) > 0 && memberTok.Literal != "constructor" {
+				set := map[string]bool{}
+				for _, tp := range fn.TypeParams {
+					set[tp] = true
+				}
+				for i := range fn.Params {
+					eraseTypeParamsIn(fn.Params[i].Type, set)
+				}
+				eraseTypeParamsIn(fn.ReturnType, set)
+				fn.TypeParams = nil
+				fn.TypeParamConstraints = nil
+			}
+
+			// A body-less overload signature: erase it and hold the group open
+			// until the implementation (same name, with a body) arrives.
+			if fn.IsOverloadSig {
+				pendingOverload = memberTok.Literal
+				continue
+			}
+			pendingOverload = ""
 			// A class body is always strict mode, so `eval`/`arguments` can
 			// never be a method/constructor parameter name — an early error
 			// unconditionally here, unlike a plain function where it only
@@ -343,11 +399,54 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				if ctor != nil {
 					return nil, fmt.Errorf("%d:%d: class '%s' declares more than one constructor", memberTok.Line, memberTok.Col, name)
 				}
+				// Desugar TS parameter properties: each modified parameter
+				// becomes a declared field plus a `this.x = x` assignment
+				// prepended to the constructor body (before user statements,
+				// matching TS emit order).
+				var propStmts []ast.Statement
+				for _, prm := range fn.Params {
+					if !prm.IsPropertyParam() {
+						continue
+					}
+					if prm.ArrayPattern != nil || prm.ObjectPattern != nil || prm.Rest {
+						return nil, fmt.Errorf("%d:%d: a parameter property cannot be a rest or destructured parameter", memberTok.Line, memberTok.Col)
+					}
+					ft := prm.Type
+					if ft == nil && prm.Default == nil {
+						// An unannotated plain parameter defaults to `number`
+						// (registerFunctions' rule); mirror it on the field so
+						// the two stay the same type.
+						ft = &ast.TypeAnnotation{Name: "number"}
+					}
+					vis := prm.PropVisibility
+					if vis == "public" {
+						vis = ""
+					}
+					fieldPos := ast.Pos{Line: memberTok.Line, Col: memberTok.Col}
+					var init ast.Expression
+					if ft == nil {
+						// Untyped with a default: let the field infer its type
+						// from the same default expression.
+						init = prm.Default
+					}
+					fields = append(fields, ast.AnnotField{Name: prm.Name, Type: ft, Initializer: init, Visibility: vis})
+					assign := ast.NewExpressionStatement(
+						ast.NewAssignmentExpression("=",
+							ast.NewMemberExpression(ast.NewThisExpression(fieldPos), prm.Name, fieldPos),
+							ast.NewIdentifier(prm.Name, fieldPos), fieldPos), fieldPos)
+					propStmts = append(propStmts, assign)
+				}
+				if len(propStmts) > 0 && fn.Body != nil {
+					fn.Body.Body = append(propStmts, fn.Body.Body...)
+				}
 				ctor = fn
 			} else {
 				methods = append(methods, fn)
 			}
 			continue
+		}
+		if pendingOverload != "" {
+			return nil, fmt.Errorf("%d:%d: overload signature for '%s' must be followed by another overload signature or its implementation", memberTok.Line, memberTok.Col, pendingOverload)
 		}
 		if accessorKind != "" {
 			return nil, fmt.Errorf("%d:%d: '%s %s' must be a method (missing '()')", memberTok.Line, memberTok.Col, accessorKind, memberTok.Literal)
@@ -385,10 +484,19 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			}
 		}
 		if ft == nil && initializer == nil {
-			return nil, fmt.Errorf("%d:%d: class field '%s' requires a type annotation or an initializer", memberTok.Line, memberTok.Col, memberTok.Literal)
+			// A bare field (`class C { x; }`) defaults to `number` — the
+			// same convention an unannotated parameter and an untyped
+			// variable already follow (ADR-00474); a JSDoc `@type` above
+			// the field still overrides. TS infers implicit `any` here, so
+			// a later non-numeric assignment is a shifted (typed) error
+			// rather than accepted — a disclosed narrowing.
+			ft = &ast.TypeAnnotation{Name: "number", Source: "ts"}
 		}
 		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
+	}
+	if pendingOverload != "" {
+		return nil, fmt.Errorf("overload signature for '%s' in class '%s' has no implementation", pendingOverload, name)
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err

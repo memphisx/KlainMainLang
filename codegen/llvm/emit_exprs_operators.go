@@ -478,7 +478,7 @@ func typeofString(ty Type) string {
 var typeofBuiltinConstructors = map[string]bool{
 	"Promise": true, "Map": true, "Set": true, "Date": true, "RegExp": true,
 	"Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
-	"ReferenceError": true, "EvalError": true, "URIError": true, "AggregateError": true,
+	"ReferenceError": true, "EvalError": true, "URIError": true, "AggregateError": true, "DOMException": true,
 	"ArrayBuffer": true, "Int8Array": true, "Uint8Array": true, "Uint8ClampedArray": true,
 	"Int16Array": true, "Uint16Array": true, "Int32Array": true, "Uint32Array": true,
 	"Float32Array": true, "Float64Array": true, "BigInt64Array": true, "BigUint64Array": true,
@@ -585,6 +585,49 @@ var typeofMathMethods = map[string]bool{
 }
 
 func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
+	// `delete` (ADR-00487): env vars unset for real; a map-backed dict key
+	// deletes through the map; everything else (fixed-shape fields, array
+	// elements) is a clean rejection — the static layouts have nothing to
+	// delete from.
+	if ex.Op == "delete" {
+		if mem, ok := ex.Arg.(*ast.MemberExpression); ok {
+			if e.isProcessEnvExpr(mem.Object) {
+				e.ensureUnsetenv()
+				e.emitInstr(fmt.Sprintf("call i32 @unsetenv(ptr %s)", e.internString(mem.Property)))
+				return Value{Ref: "1", Ty: TypeBool}, nil
+			}
+			if objTy := e.inferExprType(mem.Object); objTy.IsDynamicObject {
+				objVal, err := e.emitExpr(mem.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				res := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, objVal.Ref, e.internString(mem.Property)))
+				return Value{Ref: res, Ty: TypeBool}, nil
+			}
+		}
+		if idx, ok := ex.Arg.(*ast.IndexExpression); ok {
+			if objTy := e.inferExprType(idx.Object); objTy.IsDynamicObject {
+				objVal, err := e.emitExpr(idx.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				keyExpr, err := e.dynObjectKeyExpr(idx.Index, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				keyVal, err := e.emitExpr(keyExpr)
+				if err != nil {
+					return Value{}, err
+				}
+				res := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, objVal.Ref, keyVal.Ref))
+				return Value{Ref: res, Ty: TypeBool}, nil
+			}
+		}
+		return Value{}, fmt.Errorf("%d:%d: 'delete' supports process.env.KEY and index-signature/dynamic-object keys only — fixed-shape fields and array elements have static layouts", ex.GetPos().Line, ex.GetPos().Col)
+	}
+
 	// typeof is resolved purely from the inferred type — no code emitted for the
 	// argument — EXCEPT for any/unknown, where the concrete type can change at
 	// runtime, so it must become a genuine runtime tag dispatch instead.

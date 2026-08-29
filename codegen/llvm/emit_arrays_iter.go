@@ -194,8 +194,22 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 // realloc(NULL, n) is a valid, ordinary malloc(n) on the first element, so
 // the initial ptr can start as a bare null with no special-cased first step.
 func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, error) {
+	// Array.from(iterable, mapFn) desugars to Array.from(iterable).map(mapFn)
+	// (ADR-00491) — semantically exact here, since the one observable
+	// difference in real JS (mapFn seeing the source's holes/live length)
+	// can't arise for this compiler's dense, materialized arrays. thisArg
+	// stays unsupported.
+	if len(args) == 2 {
+		fromCall := ast.NewCallExpression(
+			ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "from", pos),
+			args[:1], pos)
+		mapCall := ast.NewCallExpression(
+			ast.NewMemberExpression(fromCall, "map", pos),
+			args[1:2], pos)
+		return e.emitExpr(mapCall)
+	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Array.from takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: Array.from takes 1 argument (iterable) or 2 (iterable, mapFn)", pos.Line, pos.Col)
 	}
 	srcTy := e.inferExprType(args[0])
 
@@ -216,6 +230,65 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
 		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	}
+
+	// Map → entries ([K, V][] tuple array), Set → elements, string → its
+	// characters (per byte, this compiler's string model) — ADR-00482.
+	if srcTy.IsMap && !srcTy.IsSet {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitMapCall(srcTy, v.Ref, "entries", nil, pos)
+	}
+	if srcTy.IsSet {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.mapOrSetValuesArray(srcTy, v.Ref)
+	}
+	if isStringTy(srcTy) && !srcTy.IsClass && !srcTy.IsObject {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureStrlen()
+		e.ensureMalloc()
+		sLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, v.Ref))
+		bytes := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, sLen))
+		buf := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bytes))
+		idxPtr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+		condL := e.freshLabel("strfrom.cond")
+		bodyL := e.freshLabel("strfrom.body")
+		endL := e.freshLabel("strfrom.end")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i1r, c := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1r, idxPtr))
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i1r, sLen))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, endL))
+		e.emitLabel(bodyL)
+		i2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i2, idxPtr))
+		ch := e.emitStringExtract(v.Ref, i2, "1")
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, i2))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ch.Ref, slot))
+		i3 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i3, i2))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i3, idxPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(endL)
+		r0, r1 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, buf))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sLen))
+		return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
 	}
 
 	if srcTy.IsClass {

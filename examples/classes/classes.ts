@@ -616,3 +616,24 @@ function dollars(m: Money): number {
   return m.cents / 100;
 }
 console.log(dollars(new Money(500))); // 5
+
+// An arrow inside a method captures the enclosing `this` lexically.
+class Tally {
+    total: number = 0;
+    addAll(xs: number[]): void {
+        xs.forEach((x: number): void => { this.total += x; });
+    }
+}
+const tally = new Tally();
+tally.addAll([1, 2, 3, 4]);
+console.log(tally.total);
+
+// The synthesized `arguments` array works in method bodies too.
+class Sum {
+    add(a: number, b: number, c: number): number {
+        let t = 0;
+        for (const v of arguments) { t += v; }
+        return t;
+    }
+}
+console.log(new Sum().add(1, 2, 3));

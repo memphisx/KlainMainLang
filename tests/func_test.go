@@ -1750,21 +1750,19 @@ outer();
 
 // --- definite assignment (TDD-00071 Stage 2, caveat #1) ---
 
-func TestE2EDefiniteAssignConditionalVarRejected(t *testing.T) {
-	// The flagship: a typed var assigned only on one branch, read after.
-	_, err := parseAndCompileImports(t, `
+func TestE2EDefiniteAssignConditionalVarAllowed(t *testing.T) {
+	// ADR-00454 policy revision: `var` has no TDZ in JS (hoisted,
+	// undefined-initialized), so a maybe-unassigned var read is legal and
+	// yields the deterministic zero default; only `let`/`const` keep
+	// definite-assignment enforcement.
+	assertOutput(t, `
 function f(c: boolean): void {
   if (c) { var r = 42; }
   console.log(r);
 }
 f(false);
-`)
-	if err == nil {
-		t.Fatal("expected a definite-assignment error, got none")
-	}
-	if !strings.Contains(err.Error(), "used before being assigned") {
-		t.Fatalf("expected 'used before being assigned', got: %v", err)
-	}
+f(true);
+`, "0\n42")
 }
 
 func TestE2EDefiniteAssignTypedLetNoInitRejected(t *testing.T) {

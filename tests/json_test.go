@@ -282,3 +282,19 @@ console.log(JSON.stringify({ a: 1 }, null, n))
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+func TestE2EJSONStringifyMapDict(t *testing.T) {
+	// ADR-00482: map-backed dicts (index-signature objects, computed-key
+	// literals, string-keyed Maps) serialize by key iteration, with
+	// escaping; a number-keyed Map stays a clean rejection.
+	assertOutput(t, `
+interface Dict { [k: string]: number; }
+const d: Dict = {};
+d["a"] = 1;
+d["b"] = 2.5;
+console.log(JSON.stringify(d));
+const m = new Map<string, string>();
+m.set("x", "he\"y");
+console.log(JSON.stringify(m));
+`, "{\"a\":1,\"b\":2.5}\n{\"x\":\"he\\\"y\"}")
+}

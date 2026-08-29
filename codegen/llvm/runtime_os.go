@@ -467,3 +467,12 @@ func (e *Emitter) ensureOSCpusDarwin() {
 	fmt.Fprintf(&b, "}")
 	e.emitGlobal(b.String())
 }
+
+// ensureUnsetenv declares unsetenv(3) — `delete process.env.KEY` (ADR-00487).
+func (e *Emitter) ensureUnsetenv() {
+	if e.usedUnsetenv {
+		return
+	}
+	e.usedUnsetenv = true
+	e.emitGlobal("declare i32 @unsetenv(ptr noundef)")
+}

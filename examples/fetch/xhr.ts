@@ -38,3 +38,12 @@ failed.open('GET', 'http://127.0.0.1:1/unreachable')
 failed.send()
 console.log(sawError)     // true
 console.log(failed.status)  // 0
+
+// ── response headers ────────────────────────────────────────────────────────
+// getResponseHeader is case-insensitive; getAllResponseHeaders returns the
+// full "name: value\r\n" concatenation (keys lowercased).
+const hdrs = new XMLHttpRequest()
+hdrs.open('GET', 'http://127.0.0.1:8765/get')
+hdrs.send()
+console.log(hdrs.getResponseHeader('Content-Type'))  // text/plain; charset=utf-8
+console.log(hdrs.getAllResponseHeaders().indexOf('content-type:') > -1)  // true

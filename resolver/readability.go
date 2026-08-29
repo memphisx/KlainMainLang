@@ -1214,9 +1214,14 @@ func gatherFuncVarsStmt(stmt ast.Statement, out map[string]bool) {
 		if name == "" {
 			return
 		}
-		if !out[name] { // first sighting wins; tracked stays true if any decl is tracked
-			out[name] = !isExemptAnnotation(ta)
-		}
+		// `var` is hoisted and undefined-initialized in JS — it has no TDZ,
+		// so a read before assignment is legal (yielding this compiler's
+		// deterministic zero/undefined default, ADR-00215). Definite
+		// assignment therefore never tracks `var` bindings — only `let`/
+		// `const` (real TDZ) are enforced (ADR-00454; previously `var` was
+		// lumped in with `let`).
+		_ = ta
+		out[name] = false
 	}
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:

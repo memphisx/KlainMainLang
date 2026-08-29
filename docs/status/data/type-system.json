@@ -84,7 +84,8 @@
             "notes": [
               "Runtime-tagged value ([TDD-00062](../tdd/TDD-00062.md))",
               "Supports declare/assign/reassign/print/`typeof`/`===` + bare `any` param/return on every function shape",
-              "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))"
+              "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))",
+              "An `any`-boxed array keeps its `(ptr, len)` pair via a heap header — it unboxes back into a real array; `===` identity and `typeof` are unchanged, and the element type is still not carried (toString stays `[object Array]`) ([ADR-00478](../adr/ADR-00478.md))"
             ]
           },
           {
@@ -109,12 +110,12 @@
             "status": "implemented",
             "caveats": [
               "No dynamic property keys",
-              "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md)), not evaluable `Symbol` values",
-              "No `Symbol.for`/`Symbol.keyFor` registry"
+              "No well-known symbols as runtime values (`Symbol.iterator`, etc.); the exceptions are `[Symbol.asyncIterator]` and `[Symbol.iterator]` recognized purely syntactically as class/object-literal computed-member keys ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md)), not evaluable `Symbol` values"
             ],
             "notes": [
               "V1 opaque unique values — `Symbol()`/`Symbol(\"desc\")`, `===`/`!==`, `typeof`, `.description`, `.toString()`",
-              "The fixed-shape object model has no dynamic-property-bag mechanism (blocks dynamic keys) and no runtime protocol-dispatch point (blocks the registry) ([TDD-00044](../tdd/TDD-00044.md))"
+              "The fixed-shape object model has no dynamic-property-bag mechanism (blocks dynamic keys) and no runtime protocol-dispatch point (blocks the registry) ([TDD-00044](../tdd/TDD-00044.md))",
+              "`Symbol.for(key)` interns per key (shared identity); `Symbol.keyFor(sym)` returns the key or `null` ([ADR-00488](../adr/ADR-00488.md))"
             ]
           },
           {
@@ -155,7 +156,14 @@
             "feature": "Object types (interfaces / inline `{}`)",
             "status": "implemented",
             "notes": [
-              "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))"
+              "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))",
+              "Method signatures `name(params): R` (and `name?(…)`) in an inline `{}` type desugar to function-typed properties; a lone call signature `{ (n: number): string }` desugars to the function type itself; `field?: T` is accepted-but-required, matching interfaces ([ADR-00448](../adr/ADR-00448.md))",
+              "Constructor types `new (params) => R` parse as the equivalent function type (accept-and-erase, [ADR-00452](../adr/ADR-00452.md))"
+            ],
+            "caveats": [
+              "`interface C extends A, B` merges simple base names' fields/method signatures (own declarations win); a **generic or qualified base** (`extends Boxed<number>`, `extends ns.Base`) parses but does not merge — its members stay missing from the derived interface ([ADR-00452](../adr/ADR-00452.md))",
+              "An inline `{}` type's bare call signature is only supported alone (it desugars to the function type); mixing it with fields/an index signature is a clean rejection ([ADR-00448](../adr/ADR-00448.md)); an interface's *lone* call/construct signature likewise registers as the function type, mixed members rejected ([ADR-00455](../adr/ADR-00455.md))",
+              "Declaration merging: same-name `interface` + `interface` pairs **merge** (members union, first wins on a collision — [ADR-00479](../adr/ADR-00479.md)); a same-name `interface` + `class` pair coexists with the class winning as the binding, the interface's extra members ignored ([ADR-00466](../adr/ADR-00466.md))"
             ]
           },
           {
@@ -173,7 +181,13 @@
             "feature": "Function types `(a: T) => R`",
             "status": "implemented",
             "notes": [
-              "Closure struct `{funcPtr, envPtr}`"
+              "Closure struct `{funcPtr, envPtr}`",
+              "A *generic* function type (`<T>(x: T) => T`) parses with its type parameters erased to `any` — generic functions are monomorphized declarations, not first-class values ([ADR-00469](../adr/ADR-00469.md))",
+              "Type predicates (`x is T`) resolve to `boolean` and assertion signatures (`asserts x [is T]`) to `void` — parsed, with the flow-narrowing itself not modeled ([ADR-00474](../adr/ADR-00474.md))",
+              "Generic class methods (`map<U>(f)`) compile via `any`-erasure through these adapters ([ADR-00477](../adr/ADR-00477.md))"
+            ],
+            "caveats": [
+              "Closure adapters convert at any↔concrete signature boundaries — scalars, strings, arrays (length-preserving header boxing), nullable scalars, rest tails, arity narrowing; an *absent* nullable boxed into `any` reads as `undefined`, and void→concrete returns stay a passthrough ([ADR-00477](../adr/ADR-00477.md)/[ADR-00478](../adr/ADR-00478.md))"
             ]
           },
           {
@@ -196,7 +210,8 @@
               "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null` (if/else branches + early return); a field/element, discriminated-union tag, `switch (typeof x)`, and `as` casts aren't narrowed; an un-narrowed object union has no field access ([TDD-00114](../tdd/TDD-00114.md))"
             ],
             "notes": [
-              "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/ADR-00355.md))"
+              "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/ADR-00355.md))",
+              "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/ADR-00475.md))"
             ]
           },
           {
@@ -239,7 +254,9 @@
               "An unrecognized `Name<Args>` (or a malformed `Pick`/`Omit`) is not yet a clean rejection — [TDD-00079](../tdd/TDD-00079.md) Stage 0"
             ],
             "notes": [
-              "`Partial`/`Required`/`Readonly`/`NonNullable`/`Pick`/`Omit`/`Record`, the general mapped form `{ [K in keyof T]: V }`, `keyof`, indexed access `T[K]`, and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))"
+              "`Partial`/`Required`/`Readonly`/`NonNullable`/`Pick`/`Omit`/`Record`, the general mapped form `{ [K in keyof T]: V }`, `keyof`, indexed access `T[K]`, and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))",
+              "Numeric-literal types (`type Dir = -1 | 0 | 1`, `{ retries: 3 }`) parse and resolve to `number` — like string-literal types, the value itself is not narrowed/enforced ([ADR-00459](../adr/ADR-00459.md))",
+              "`Record<string, V>` (open key) is the index-signature dict — bracket read/write, `Object.keys`, `JSON.stringify` all work; literal-union keys keep the fixed shape ([ADR-00485](../adr/ADR-00485.md))"
             ]
           },
           {
@@ -269,16 +286,20 @@
               "`<T extends X>` constraints are parsed and enforced (structural width subtyping) on functions and classes ([TDD-00113](../tdd/TDD-00113.md)/[ADR-00353](../adr/ADR-00353.md))",
               "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md))",
               "A generic class needs an explicit type-argument list at each `new Box<T>(...)` site; can't use `extends`/`implements`/`abstract`/static members ([ADR-00103](../adr/ADR-00103.md)/[TDD-00010](../tdd/TDD-00010.md))",
-              "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/ADR-00121.md))"
+              "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/ADR-00121.md))",
+              "Explicit call-site type arguments (`id<string>(x)`, `make<number>()`) pick the instantiation directly, bypassing inference; comparison expressions keep parsing via backtracking ([ADR-00473](../adr/ADR-00473.md))"
             ]
           },
           {
             "feature": "Index signatures (`{ [k: string]: T }`)",
             "status": "implemented",
             "caveats": [
-              "String key only, map-backed ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)) — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work",
-              "A numeric index (`[i: number]: T`) and a mixed named+index shape (`{ id: number; [k: string]: T }`) are clean rejections",
-              "`JSON.stringify` of an index-signature dict is a clean rejection (no field table to walk) — build it from `Object.keys(...)`; a map-iterating stringify path is deferred"
+              "String or number key, map-backed ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)/[ADR-00461](../adr/ADR-00461.md)) — `d[key]` read/write, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work",
+              "A mixed named+index shape (`{ id: number; [k: string]: T }`) is a clean rejection; the class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))",
+              "`JSON.stringify` of an index-signature dict serializes by key iteration (escaped keys, recursive values — [ADR-00482](../adr/ADR-00482.md)); compact output only (the `space` argument isn't threaded through this path)"
+            ],
+            "notes": [
+              "A `number` key is supported too — keys stringify (JS object keys are strings), sharing the map backing; the class-body form (`class C { [n: number]: T }`) stays a parse rejection ([ADR-00461](../adr/ADR-00461.md))"
             ]
           },
           {
@@ -289,13 +310,13 @@
             ]
           },
           {
-            "feature": "Type assertions (`x as T`, `as const`, `satisfies T`)",
+            "feature": "Type assertions (`x as T`, `as const`, `satisfies T`, `<T>x`)",
             "status": "implemented",
             "caveats": [
               "**Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect ([ADR-00371](../adr/ADR-00371.md))"
             ],
             "notes": [
-              "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity"
+              "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity; the old-style prefix `<T>expr` form parses in the unary position and is erased identically ([ADR-00451](../adr/ADR-00451.md))"
             ]
           },
           {
@@ -316,7 +337,12 @@
             "feature": "Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`)",
             "status": "implemented",
             "caveats": [
-              "Parsed and erased ([ADR-00388](../adr/ADR-00388.md)) — the no-body/no-init forms and the brace-bodied `global`/`module`/`namespace`/`class` blocks all compile away. Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so a runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error"
+              "`declare class` and the brace-bodied `global`/`module`/`namespace` blocks are parsed and erased ([ADR-00388](../adr/ADR-00388.md)); `declare var`/`function` are real bindings with defined fallback behavior ([ADR-00471](../adr/ADR-00471.md)). Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so a runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error"
+            ],
+            "notes": [
+              "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins; `declare class/namespace/module/global` stay erased ([ADR-00471](../adr/ADR-00471.md))",
+              "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/ADR-00474.md))",
+              "`declare [const] enum` is a real enum ([ADR-00476](../adr/ADR-00476.md))"
             ]
           }
         ]

@@ -457,3 +457,79 @@ fs.readdirSync()`)
 		t.Fatal("expected a compile error for fs.readdirSync() with no arguments, got none")
 	}
 }
+
+// fs.statSync (ADR-00495): size/mtimeMs fields + isFile()/isDirectory()
+// over the host's real struct stat offsets; a missing path throws the
+// shared catchable fs error. Verified on Mac (Linux offsets differ and are
+// encoded per-platform in statLayout).
+func TestE2EFsStatSync(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/probe.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+fs.writeFileSync("%s", "hello!")
+const st = fs.statSync("%s")
+console.log(st.size)
+console.log(st.isFile())
+console.log(st.isDirectory())
+console.log(st.mtimeMs > 1500000000000)
+console.log(fs.statSync("%s").isDirectory())
+try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.indexOf("cannot stat") > -1) }
+`, file, file, dir, dir)
+	assertOutputImports(t, src, "6\ntrue\nfalse\ntrue\ntrue\ncaught: true")
+}
+
+// Path-based fs sync ops (ADR-00497): mkdtempSync/symlinkSync/readlinkSync/
+// lstatSync (+isSymbolicLink)/realpathSync/chmodSync/truncateSync/accessSync/
+// rmSync (recursive + force). Mac-verified; Linux shares the libc calls but
+// the stat offsets carry ADR-00495's Linux-unverified caveat.
+func TestE2EFsPathOps(t *testing.T) {
+	assertOutputImports(t, `
+import * as fs from 'fs'
+const tmp = fs.mkdtempSync('/tmp/kmlops-')
+console.log(tmp.indexOf('/tmp/kmlops-') === 0)
+fs.writeFileSync(tmp + '/a.txt', 'data')
+fs.symlinkSync(tmp + '/a.txt', tmp + '/link')
+console.log(fs.readlinkSync(tmp + '/link') === tmp + '/a.txt')
+console.log(fs.lstatSync(tmp + '/link').isSymbolicLink())
+console.log(fs.lstatSync(tmp + '/link').isFile())
+console.log(fs.statSync(tmp + '/link').size)
+console.log(fs.realpathSync(tmp + '/link').indexOf('a.txt') > -1)
+fs.chmodSync(tmp + '/a.txt', 420)
+fs.truncateSync(tmp + '/a.txt', 2)
+console.log(fs.statSync(tmp + '/a.txt').size)
+fs.accessSync(tmp + '/a.txt')
+fs.mkdirSync(tmp + '/sub/deep', { recursive: true })
+fs.writeFileSync(tmp + '/sub/deep/f.txt', 'x')
+fs.rmSync(tmp, { recursive: true, force: true })
+console.log(fs.existsSync(tmp))
+fs.rmSync('/tmp/kml-definitely-absent-xyz', { force: true })
+console.log("force-ok")
+try { fs.rmSync('/tmp/kml-definitely-absent-xyz') } catch (e) { console.log("caught:", e.message.indexOf("cannot remove") > -1) }
+`, "true\ntrue\ntrue\nfalse\n4\ntrue\n2\nfalse\nforce-ok\ncaught: true")
+}
+
+// fd-based fs ops (ADR-00498): openSync (literal flags → host O_* bits) /
+// writeSync (string data) / readSync (Uint8Array, offset/length/position) /
+// fstatSync / closeSync.
+func TestE2EFsFdOps(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/fd.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const wfd = fs.openSync("%s", 'w')
+console.log(fs.writeSync(wfd, "hello world"))
+fs.closeSync(wfd)
+const rfd = fs.openSync("%s", 'r')
+console.log(fs.fstatSync(rfd).size)
+console.log(fs.fstatSync(rfd).isFile())
+const buf = new Uint8Array(5)
+console.log(fs.readSync(rfd, buf))
+console.log(buf[0])
+console.log(fs.readSync(rfd, buf, 0, 5, 6))
+console.log(buf[0])
+fs.closeSync(rfd)
+try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.message.indexOf("cannot open") > -1) }
+`, p, p, dir)
+	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
+}

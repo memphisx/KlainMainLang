@@ -1425,3 +1425,69 @@ const first = st.items.shift();
 console.log(first, st.items.length);
 `, "0,1,2,3,4\n1,2\n0,3,4\n1,2,9\n0\n1 2\nb 1\na 0")
 }
+
+// --- N-ary concat + zero-arg Array constructor (ADR-00463) ---
+
+func TestE2EArrayConcatMultipleArgsAndScalars(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [1, 2];
+const b = a.concat([3, 4], 5, [6]);
+console.log(b.length);
+console.log(b[0], b[2], b[4], b[5]);
+console.log(a.concat().length);
+const s: string[] = ["x"];
+console.log(s.concat("y", ["z"]).join(","));
+`, "6\n1 3 5 6\n2\nx,y,z")
+}
+
+func TestE2ENewArrayZeroArgs(t *testing.T) {
+	assertOutput(t, `
+const b = new Array<string>();
+b.push("x");
+b.push("y");
+console.log(b.length, b[1]);
+`, "2 y")
+}
+
+func TestE2EArrayLiteralElisions(t *testing.T) {
+	// ADR-00467: holes read as undefined (the element type's zero value
+	// stand-in) and count toward the length, matching JS.
+	assertOutput(t, `
+const a: number[] = [1, , 3];
+console.log(a.length, a[1]);
+const b: string[] = [, "x", ];
+console.log(b.length, b[1]);
+`, "3 0\n2 x")
+}
+
+func TestE2EArrayFromIterables(t *testing.T) {
+	// ADR-00482: Array.from over Set (elements), Map (entries), and string
+	// (characters), beside the existing array-like copy.
+	assertOutput(t, `
+const s = new Set<number>();
+s.add(3); s.add(1);
+const fromSet = Array.from(s);
+console.log(fromSet.length, fromSet[0], fromSet[1]);
+const m = new Map<string, number>();
+m.set("a", 1); m.set("b", 2);
+const fromMap = Array.from(m);
+console.log(fromMap.length, fromMap[0][0], fromMap[1][1]);
+const chars = Array.from("hey");
+console.log(chars.length, chars[0], chars[2]);
+`, "2 3 1\n2 a 2\n3 h y")
+}
+
+// Array.from(iterable, mapFn) — desugars to Array.from(iterable).map(mapFn)
+// (ADR-00491); exact for dense materialized arrays. Covers the index
+// parameter and a non-array (string) source.
+func TestE2EArrayFromMapFn(t *testing.T) {
+	src := `
+const doubled = Array.from([1, 2, 3], (x: number) => x * 2)
+console.log(doubled.join(","))
+const idx = Array.from([10, 20, 30], (x: number, i: number) => i)
+console.log(idx.join(","))
+const shouted = Array.from("abc", (c: string) => c + "!")
+console.log(shouted.join(","))
+`
+	assertOutput(t, src, "2,4,6\n0,1,2\na!,b!,c!")
+}

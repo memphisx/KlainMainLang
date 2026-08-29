@@ -195,6 +195,69 @@ app:
   ret void
 }`, rs, rs, rs, rs, rs))
 
+	// __kml_rs_qunshift: push a chunk back onto the FRONT of the queue
+	// (Readable.unshift — ADR-00485). Reuses the head slot when one is
+	// free; otherwise grows (same doubling as qpush) and memmoves the live
+	// region forward one slot.
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_rs_qunshift(ptr %%s, i64 %%v0, i64 %%v1, double %%sz) {
+entry:
+  %%qd_p = getelementptr %s, ptr %%s, i32 0, i32 2
+  %%qc_p = getelementptr %s, ptr %%s, i32 0, i32 3
+  %%qh_p = getelementptr %s, ptr %%s, i32 0, i32 4
+  %%ql_p = getelementptr %s, ptr %%s, i32 0, i32 5
+  %%head = load i64, ptr %%qh_p, align 8
+  %%hasRoom = icmp sgt i64 %%head, 0
+  br i1 %%hasRoom, label %%front, label %%shift
+front:
+  %%nh = sub i64 %%head, 1
+  store i64 %%nh, ptr %%qh_p, align 8
+  %%d0 = load ptr, ptr %%qd_p, align 8
+  %%off0 = mul i64 %%nh, 24
+  %%slot0 = getelementptr i8, ptr %%d0, i64 %%off0
+  br label %%write
+shift:
+  %%len = load i64, ptr %%ql_p, align 8
+  %%cap = load i64, ptr %%qc_p, align 8
+  %%full = icmp sge i64 %%len, %%cap
+  br i1 %%full, label %%grow, label %%mv
+grow:
+  %%d1 = load ptr, ptr %%qd_p, align 8
+  %%cap2 = mul i64 %%cap, 2
+  %%ge8 = icmp sgt i64 %%cap2, 8
+  %%nc = select i1 %%ge8, i64 %%cap2, i64 8
+  %%nbytes = mul i64 %%nc, 24
+  %%nd = call ptr @realloc(ptr %%d1, i64 %%nbytes)
+  store ptr %%nd, ptr %%qd_p, align 8
+  store i64 %%nc, ptr %%qc_p, align 8
+  br label %%mv
+mv:
+  %%d2 = load ptr, ptr %%qd_p, align 8
+  %%dst = getelementptr i8, ptr %%d2, i64 24
+  %%lb = mul i64 %%len, 24
+  call ptr @memmove(ptr %%dst, ptr %%d2, i64 %%lb)
+  %%nl = add i64 %%len, 1
+  store i64 %%nl, ptr %%ql_p, align 8
+  br label %%write2
+write2:
+  %%d3 = load ptr, ptr %%qd_p, align 8
+  br label %%writeM
+write:
+  br label %%writeM
+writeM:
+  %%slot = phi ptr [ %%slot0, %%write ], [ %%d3, %%write2 ]
+  store i64 %%v0, ptr %%slot, align 8
+  %%s1 = getelementptr i8, ptr %%slot, i64 8
+  store i64 %%v1, ptr %%s1, align 8
+  %%s2 = getelementptr i8, ptr %%slot, i64 16
+  store double %%sz, ptr %%s2, align 8
+  %%tot_p = getelementptr %s, ptr %%s, i32 0, i32 6
+  %%tot = load double, ptr %%tot_p, align 8
+  %%nt = fadd double %%tot, %%sz
+  store double %%nt, ptr %%tot_p, align 8
+  ret void
+}`, rs, rs, rs, rs, rs))
+
 	// __kml_rs_qpop: dequeue the head entry (caller guarantees non-empty) and
 	// subtract its size from the running total.
 	e.emitGlobal(fmt.Sprintf(`
@@ -233,6 +296,30 @@ out:
   %%r2 = insertvalue { i64, i64, double } %%r1, double %%sz, 2
   ret { i64, i64, double } %%r2
 }`, rs, rs, rs, rs))
+
+	// __kml_rs_tryread(s): the synchronous Readable.read() core (ADR-00484)
+	// — {has, v0, v1}: pops one queued chunk if the queue is non-empty,
+	// {0,0,0} otherwise (the caller renders that as null/zero).
+	e.emitGlobal(fmt.Sprintf(`
+define { i64, i64, i64 } @__kml_rs_tryread(ptr %%s) {
+entry:
+  %%ql_p = getelementptr %s, ptr %%s, i32 0, i32 5
+  %%len = load i64, ptr %%ql_p, align 8
+  %%qh_p = getelementptr %s, ptr %%s, i32 0, i32 4
+  %%head = load i64, ptr %%qh_p, align 8
+  %%avail = icmp sgt i64 %%len, %%head
+  br i1 %%avail, label %%pop, label %%empty
+pop:
+  %%c = call { i64, i64, double } @__kml_rs_qpop(ptr %%s)
+  %%v0 = extractvalue { i64, i64, double } %%c, 0
+  %%v1 = extractvalue { i64, i64, double } %%c, 1
+  %%r0 = insertvalue { i64, i64, i64 } undef, i64 1, 0
+  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%v0, 1
+  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%v1, 2
+  ret { i64, i64, i64 } %%r2
+empty:
+  ret { i64, i64, i64 } zeroinitializer
+}`, rs, rs))
 
 	// __kml_rs_rdpush / __kml_rs_rdpop: the pending-read promise FIFO (8-byte
 	// ptr entries, same compact-then-grow discipline as the chunk queue).

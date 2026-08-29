@@ -595,3 +595,13 @@ queueMicrotask(() => { console.log("m2") })
 console.log("s2")
 `, "s1\ns2\nm1\nm2\nm3")
 }
+
+func TestE2EAtobInvalidCharacterThrows(t *testing.T) {
+	// WHATWG atob: invalid input throws an InvalidCharacterError
+	// DOMException (ADR-00458); previously it silently decoded garbage.
+	assertOutput(t, `
+try { atob("we go!"); console.log("no throw"); } catch (e) { console.log(e.name); }
+console.log(typeof DOMException);
+console.log(atob(btoa("round trip")));
+`, "InvalidCharacterError\nfunction\nround trip")
+}

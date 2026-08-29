@@ -41,13 +41,16 @@
           },
           {
             "feature": "`Object.values(obj)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]`"
+            ]
           },
           {
             "feature": "`Object.entries(obj)`",
             "status": "implemented",
             "caveats": [
-              "Values are stringified — a heterogeneous object's value type is a union not yet representable ([TDD-00066](../tdd/TDD-00066.md))"
+              "A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples"
             ],
             "notes": [
               "Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))`"

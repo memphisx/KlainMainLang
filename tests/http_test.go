@@ -1880,3 +1880,97 @@ console.log("agent ok")
 		t.Errorf("agent flow failed: %q", out)
 	}
 }
+
+func TestE2EHTTPReasonPhrase(t *testing.T) {
+	// ADR-00486: the status line carries the standard reason phrase
+	// (previously a fixed "OK" for every status).
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(404)
+  res.end("nope")
+}).listen(8956)
+`
+	startHTTPServer(t, src, 8956)
+	resp, err := http.Get("http://127.0.0.1:8956/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.Status != "404 Not Found" {
+		t.Errorf("status line: got %q, want \"404 Not Found\"", resp.Status)
+	}
+}
+
+// http.request with method + headers options (ADR-00500): the transfer
+// rides fetch_async's existing method/header slots; GET stays the default.
+func TestE2EHTTPClientMethodAndHeaders(t *testing.T) {
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end(req.method + "|" + req.headers["x-probe"])
+}))
+server.listen(0, mustCall(() => {
+  const req = http.request({
+    port: server.address().port,
+    path: "/m",
+    method: "DELETE",
+    headers: { "X-Probe": "kml42" },
+  }, mustCall((res) => {
+    let d = ""
+    res.on('data', (c: string) => { d = d + c })
+    res.on('end', () => { console.log("got " + d) })
+    server.close()
+  }))
+  req.end()
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "got DELETE|kml42") {
+		t.Errorf("method/headers request failed: %q", out)
+	}
+}
+
+// server.on('listening') (ADR-00502): registered before listen(), fired
+// right after the bind — with the port already available via address().
+func TestE2EHTTPServerListeningEvent(t *testing.T) {
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer((req, res) => { res.end("ok") })
+server.on('listening', mustCall(() => {
+  console.log("listening on", server.address().port > 0)
+  http.get({ port: server.address().port, path: "/" }, mustCall((res) => {
+    res.on('data', (c: string) => {})
+    res.on('end', () => { server.close(); process.exit(0) })
+  }))
+}))
+server.listen(0)
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "listening on true") {
+		t.Errorf("listening event failed: %q", out)
+	}
+}
+
+// createServer({requireHostHeader: false}, cb) (ADR-00503): accepted because
+// this dispatcher never enforces a Host header anyway; any other option (or
+// the literal true) stays a clean rejection.
+func TestE2EHTTPCreateServerRequireHostHeaderFalse(t *testing.T) {
+	src := `
+import http from 'http'
+const server = http.createServer({ requireHostHeader: false }, (req, res) => { res.end("ok") })
+server.listen(0, () => {
+  http.get({ port: server.address().port }, (res) => {
+    console.log("status", res.statusCode)
+    res.on('data', (c: string) => {})
+    res.on('end', () => { server.close(); process.exit(0) })
+  })
+})
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "status 200") {
+		t.Errorf("requireHostHeader form failed: %q", out)
+	}
+}

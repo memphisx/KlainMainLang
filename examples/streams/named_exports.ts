@@ -2,7 +2,7 @@
 // Transform, string chunks by default), the callback forms of finished()
 // and pipeline() (their Promise twins live in 'stream/promises'), and
 // duplexPair() — two cross-wired Duplex handles.
-import { PassThrough, Writable, finished, pipeline, duplexPair } from 'stream';
+import { PassThrough, Writable, Duplex, finished, pipeline, duplexPair } from 'stream';
 
 // PassThrough echoes writes to its readable side untouched.
 const echo = new PassThrough();
@@ -24,3 +24,15 @@ const [clientSide, serverSide] = duplexPair();
 serverSide.on("data", (d) => { console.log("server saw:", d); });
 serverSide.on("end", () => { console.log("server side ended"); });
 clientSide.end("hello over the pair");
+
+// new Duplex({read, write, final}) — both sides on one handle, independent:
+// the read callback feeds 'data' consumers, write/final consume the
+// writable side (unlike Transform, nothing crosses between them).
+const dup = new Duplex({
+  read: (s) => { s.push("from-read"); s.push(null); },
+  write: (chunk: string) => { console.log("dup sink:", chunk); },
+  final: () => { console.log("dup finished"); },
+});
+dup.on("data", (c: string) => { console.log("dup data:", c); });
+dup.write("into-write");
+dup.end();

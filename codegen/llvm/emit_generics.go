@@ -284,10 +284,19 @@ func (e *Emitter) checkTypeParamConstraints(typeParams []string, constraints []*
 	return nil
 }
 
-func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, pos ast.Pos) (Value, error) {
-	subs, missing, ok := e.inferGenericCallConcreteTypes(decl, args)
+func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []*ast.TypeAnnotation, pos ast.Pos) (Value, error) {
+	if e.genericDepth > 8 {
+		return Value{}, fmt.Errorf("%d:%d: type instantiation for generic function '%s' is excessively deep (self-referential type arguments)", pos.Line, pos.Col, decl.Name)
+	}
+	e.genericDepth++
+	defer func() { e.genericDepth-- }()
+	subs, ok := e.explicitGenericSubs(decl, typeArgs)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from (explicit call-site type arguments aren't supported yet)", pos.Line, pos.Col, missing, decl.Name, missing, missing)
+		var missing string
+		subs, missing, ok = e.inferGenericCallConcreteTypes(decl, args)
+		if !ok {
+			return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from, or pass explicit call-site type arguments (`%s<T>(…)`)", pos.Line, pos.Col, missing, decl.Name, missing, missing, decl.Name)
+		}
 	}
 	if err := e.checkTypeParamConstraints(decl.TypeParams, decl.TypeParamConstraints, subs, "function", decl.Name, pos); err != nil {
 		return Value{}, err
@@ -310,10 +319,22 @@ func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.
 // (nothing to infer from, or an unsupported concrete type) — inferExprType
 // has no error return, so callers just fall through to its own final
 // default the same way every other unresolvable case here already does.
-func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []ast.Expression) (Type, bool) {
-	subs, _, ok := e.inferGenericCallConcreteTypes(decl, args)
-	if !ok {
+func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []*ast.TypeAnnotation) (Type, bool) {
+	// Same depth cap the generic-interface/alias instantiation uses
+	// (ADR-00452/ADR-00473): a self-referential instantiation
+	// (`foo<typeof y>()` whose y depends on the call) recurses through
+	// inference forever — observed as a real oracle stack overflow.
+	if e.genericDepth > 8 {
 		return Type{}, false
+	}
+	e.genericDepth++
+	defer func() { e.genericDepth-- }()
+	subs, ok := e.explicitGenericSubs(decl, typeArgs)
+	if !ok {
+		subs, _, ok = e.inferGenericCallConcreteTypes(decl, args)
+		if !ok {
+			return Type{}, false
+		}
 	}
 	if _, err := mangleTypeArgs(decl.TypeParams, subs); err != nil {
 		return Type{}, false
@@ -571,4 +592,21 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 		}
 	}
 	return nil
+}
+
+
+// explicitGenericSubs builds the type-parameter substitution map from
+// explicit call-site type arguments (`id<string>(x)` — ADR-00473),
+// positionally against decl's parameter list. ok is false when no explicit
+// arguments were given or the arity doesn't cover the parameters (callers
+// then fall back to inference).
+func (e *Emitter) explicitGenericSubs(decl *ast.FunctionDeclaration, typeArgs []*ast.TypeAnnotation) (map[string]Type, bool) {
+	if len(typeArgs) == 0 || len(typeArgs) < len(decl.TypeParams) {
+		return nil, false
+	}
+	subs := make(map[string]Type, len(decl.TypeParams))
+	for i, tp := range decl.TypeParams {
+		subs[tp] = e.resolveType(typeArgs[i])
+	}
+	return subs, true
 }

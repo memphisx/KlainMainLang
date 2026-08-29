@@ -7,22 +7,47 @@ import (
 )
 
 func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: concat takes exactly 1 argument", pos.Line, pos.Col)
-	}
+	// JS concat takes any number of arguments — each an array (flattened
+	// one level) or a plain value (appended) — and zero arguments copy the
+	// receiver (ADR-00463; previously exactly one array argument).
 	ptrReg1, lenReg1, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	ptrReg2, lenReg2, _, err2 := e.resolveArrayForHOF(args[0], pos)
-	if err2 != nil {
-		return Value{}, err2
+	type concatPart struct {
+		ptr, length string // array part
+		scalar      *Value // scalar part (length 1)
+	}
+	var parts []concatPart
+	for _, arg := range args {
+		if e.inferExprType(arg).IsArray {
+			p, l, _, err := e.resolveArrayForHOF(arg, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			parts = append(parts, concatPart{ptr: p, length: l})
+			continue
+		}
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		v = e.coerce(v, elemTy)
+		parts = append(parts, concatPart{scalar: &v})
 	}
 	e.ensureMalloc()
 	e.ensureMemcpy()
 
-	newLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newLen, lenReg1, lenReg2))
+	newLen := lenReg1
+	for _, p := range parts {
+		next := e.freshReg()
+		if p.scalar != nil {
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, newLen))
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, newLen, p.length))
+		}
+		newLen = next
+	}
 	totalBytes := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", totalBytes, newLen, elemTy.Align()))
@@ -32,11 +57,22 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes1, lenReg1, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg1, bytes1))
 
-	dstOff := e.freshReg()
-	bytes2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstOff, elemTy.IR, newPtr, lenReg1))
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes2, lenReg2, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dstOff, ptrReg2, bytes2))
+	off := lenReg1
+	for _, p := range parts {
+		dst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dst, elemTy.IR, newPtr, off))
+		next := e.freshReg()
+		if p.scalar != nil {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, p.scalar.Ref, dst, elemTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, off))
+		} else {
+			nb := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", nb, p.length, elemTy.Align()))
+			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, p.ptr, nb))
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, off, p.length))
+		}
+		off = next
+	}
 
 	r0 := e.freshReg()
 	r1 := e.freshReg()

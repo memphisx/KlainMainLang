@@ -112,11 +112,19 @@ for (const k of Object.keys(d)) { console.log(k); }
 `, "a\nb")
 }
 
-func TestE2EIndexSignatureNumberKeyRejected(t *testing.T) {
-	_, err := parseAndCompile(`interface NumIx { [i: number]: string; }`)
-	if err == nil {
-		t.Fatal("expected a compile error for a numeric index signature, got none")
-	}
+func TestE2EIndexSignatureNumberKey(t *testing.T) {
+	// ADR-00461: a number index signature is supported — keys stringify
+	// (JS object keys are strings), sharing the string-signature map
+	// backing; an absent key reads as null.
+	assertOutput(t, `
+interface Sparse { [i: number]: string; }
+const s: Sparse = {};
+s[0] = "zero";
+s[42] = "answer";
+console.log(s[0]);
+console.log(s[42]);
+console.log(s[1]);
+`, "zero\nanswer\nnull")
 }
 
 func TestE2EIndexSignatureMixedRejected(t *testing.T) {
@@ -124,4 +132,123 @@ func TestE2EIndexSignatureMixedRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a compile error for named properties combined with an index signature, got none")
 	}
+}
+
+func TestE2EGenericFunctionTypeErased(t *testing.T) {
+	// ADR-00469: `<T>(x: T) => T` in a type position erases T to `any` —
+	// generic functions are monomorphized declarations, not values.
+	assertOutput(t, `
+var f: <T>(x: T) => T;
+f = (x: any): any => x;
+console.log(f("hello"));
+console.log(f(42));
+`, "hello\n42")
+}
+
+func TestE2EAmbientValueDeclarations(t *testing.T) {
+	// ADR-00471: `declare var` is a zero-initialized var; `declare
+	// function` compiles to a throwing stub — a clear runtime error only
+	// if the ambient is actually called; redeclared signatures collapse
+	// last-wins.
+	assertOutput(t, `
+declare var flag: boolean;
+declare function before(): void;
+declare function overloaded(x: string): void;
+declare function overloaded(x: number): void;
+function safe(): string { return flag ? "on" : "off"; }
+console.log(safe());
+try { before(); } catch (e) { console.log(e.message); }
+`, "off\nambient function 'before' has no implementation")
+}
+
+func TestE2ETypePredicatesAndAssertSignatures(t *testing.T) {
+	// ADR-00474: `x is T` returns resolve to boolean; `asserts x [is T]`
+	// to void — the narrowing itself isn't modeled.
+	assertOutput(t, `
+function isNumber(x: any): x is number {
+    return typeof x === "number";
+}
+function assertString(x: any): asserts x is string {
+    if (typeof x !== "string") { throw new Error("not string"); }
+}
+console.log(isNumber(4));
+console.log(isNumber("s"));
+assertString("ok");
+console.log("done");
+`, "true\nfalse\ndone")
+}
+
+func TestE2EBareClassFieldDefaultsToNumber(t *testing.T) {
+	// ADR-00474: a bare field follows the unannotated-parameter precedent.
+	assertOutput(t, `
+class C {
+    x;
+    y;
+    constructor() { this.x = 1; }
+    sum(): number { return this.x + this.y; }
+}
+const c = new C();
+c.y = 41;
+console.log(c.sum());
+`, "42")
+}
+
+func TestE2EEnumBracketAndReverseMapping(t *testing.T) {
+	// ADR-00480: `E["B"]` literal-key access and the numeric reverse
+	// mapping (`E[1]` → "B", unmatched → "undefined", runtime index works).
+	assertOutput(t, `
+enum E { A, B, C }
+console.log(E["B"]);
+console.log(E[1]);
+console.log(E[99]);
+let i = 2;
+console.log(E[i]);
+`, "1\nB\nundefined\nC")
+}
+
+func TestE2EDeleteOperator(t *testing.T) {
+	// ADR-00487: `delete process.env.KEY` unsets for real; a dict key
+	// deletes through the map (dot and bracket forms); fixed-shape targets
+	// stay clean rejections.
+	assertOutput(t, `
+process.env.KML_DEL_T = "on";
+delete process.env.KML_DEL_T;
+console.log(process.env.KML_DEL_T === undefined || process.env.KML_DEL_T === "");
+interface D { [k: string]: number; }
+const d: D = {};
+d["x"] = 1;
+delete d["x"];
+console.log(Object.keys(d).length);
+d["y"] = 2;
+console.log(delete d.y, Object.keys(d).length);
+`, "true\n0\ntrue 0")
+}
+
+func TestE2EFsMkdirSyncRecursive(t *testing.T) {
+	// ADR-00487: { recursive: true } creates every missing prefix and is
+	// idempotent.
+	assertOutputImports(t, `
+import fs from 'fs';
+fs.mkdirSync("/tmp/kml_mkp_e2e/a/b", { recursive: true });
+fs.mkdirSync("/tmp/kml_mkp_e2e/a/b", { recursive: true });
+console.log(fs.existsSync("/tmp/kml_mkp_e2e/a/b"));
+fs.rmdirSync("/tmp/kml_mkp_e2e/a/b");
+fs.rmdirSync("/tmp/kml_mkp_e2e/a");
+fs.rmdirSync("/tmp/kml_mkp_e2e");
+console.log("ok");
+`, "true\nok")
+}
+
+func TestE2ESymbolForRegistry(t *testing.T) {
+	// ADR-00488: Symbol.for shares one symbol per key (identity), loose
+	// Symbol() stays distinct; keyFor returns the key or null.
+	assertOutput(t, `
+const a = Symbol.for("app.key");
+const b = Symbol.for("app.key");
+const c = Symbol("loose");
+console.log(a === b);
+console.log(a === c);
+console.log(Symbol.keyFor(a));
+console.log(Symbol.keyFor(c) === null);
+`, "true\nfalse\napp.key\ntrue")
 }
