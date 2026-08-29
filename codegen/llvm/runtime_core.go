@@ -137,6 +137,13 @@ func (e *Emitter) ensureCalloc() {
 	}
 }
 
+func (e *Emitter) ensureGetrusage() {
+	if !e.usedGetrusage {
+		e.emitGlobal("declare i32 @getrusage(i32 noundef, ptr noundef)")
+		e.usedGetrusage = true
+	}
+}
+
 func (e *Emitter) ensureRealloc() {
 	if !e.usedRealloc {
 		e.emitGlobal("declare ptr @realloc(ptr noundef, i64 noundef)")

@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "GLOBAL-FUNCTIONS.md",
   "coversRows": "all",
-  "coverage": { "loose": "19/21", "loosePct": 90, "strict": "8/21", "strictPct": 38 },
-  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. Two rows are out of scope: globalThis has no meaning in a single-file native program, and dynamic eval needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. The recurring divergence elsewhere is strtod/strerror permissiveness — the string forms of Number/parseFloat accept C spellings like \"inf\", and decodeURI/atob pass malformed input through as best-effort rather than throwing.",
+  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "8/21", "strictPct": 38 },
+  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. The recurring divergence elsewhere is strtod/strerror permissiveness — the string forms of Number/parseFloat accept C spellings like \"inf\", and decodeURI/atob pass malformed input through as best-effort rather than throwing.",
   "entries": [
     {
       "id": "globals.isNaN",
@@ -162,9 +162,11 @@
       "id": "globals.globalThis",
       "name": "globalThis",
       "statusRow": "globalThis",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Not meaningful in a native single-file context — there is no global object to reference. Top-level bindings are addressed by name directly.",
+      "signature": "globalThis.<knownGlobal>",
+      "badge": "caveats",
+      "description": "globalThis.X desugars to the bare ambient global X, so the standard portable alias works for member access — including nested and call forms like globalThis.JSON.stringify(...), globalThis.Math.max(...), and globalThis.setTimeout(...). There is no dynamic global object: only known globals resolve (an unknown globalThis.foo is a compile error), and a bare globalThis as a value, computed access (globalThis[\"x\"]), and assigning a new global are unsupported.",
+      "caveats": ["Only member access to known globals resolves — no dynamic global record", "Bare globalThis as a value, globalThis[\"x\"], and globalThis.x = … are unsupported"],
+      "snippet": "console.log(globalThis.JSON.stringify({ a: 1 }))",
       "seeAlso": ["globals.undefined"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/globalThis" }
     },

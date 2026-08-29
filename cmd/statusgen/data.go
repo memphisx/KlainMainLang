@@ -117,7 +117,41 @@ func generateAll(write bool) error {
 	files = append(files, "README.md")
 	sort.Strings(files)
 
+	// The ADR/TDD index READMEs live outside docs/status/ and are keyed by
+	// their full path (TDD-00149).
+	extra := map[string]string{}
+	tddMD, err := generateTDDIndex()
+	if err != nil {
+		return err
+	}
+	extra[filepath.Join(tddDir, "README.md")] = tddMD
+	adrMD, err := generateADRIndex()
+	if err != nil {
+		return err
+	}
+	extra[filepath.Join(adrDir, "README.md")] = adrMD
+	var extraPaths []string
+	for p := range extra {
+		extraPaths = append(extraPaths, p)
+	}
+	sort.Strings(extraPaths)
+
 	dirty := 0
+	for _, p := range extraPaths {
+		committed, err := os.ReadFile(p)
+		upToDate := err == nil && string(committed) == extra[p]
+		switch {
+		case write && !upToDate:
+			if err := os.WriteFile(p, []byte(extra[p]), 0o644); err != nil {
+				return err
+			}
+			fmt.Printf("  wrote %s\n", p)
+			dirty++
+		case !write && !upToDate:
+			fmt.Fprintf(os.Stderr, "  ✗ %s differs from its record files — run 'make status' (edit the TDD/ADR files, never the index table)\n", p)
+			dirty++
+		}
+	}
 	for _, f := range files {
 		path := filepath.Join(statusDir, f)
 		committed, err := os.ReadFile(path)
@@ -134,13 +168,14 @@ func generateAll(write bool) error {
 			dirty++
 		}
 	}
+	total := len(files) + len(extraPaths)
 	if write {
-		fmt.Printf("status: %d page(s) regenerated, %d up to date\n", dirty, len(files)-dirty)
+		fmt.Printf("status: %d page(s) regenerated, %d up to date\n", dirty, total-dirty)
 		return nil
 	}
 	if dirty > 0 {
-		return fmt.Errorf("status check: %d page(s) out of sync with %s", dirty, dataDir)
+		return fmt.Errorf("status check: %d page(s) out of sync", dirty)
 	}
-	fmt.Printf("status check OK — %d page(s) match %s\n", len(files), dataDir)
+	fmt.Printf("status check OK — %d page(s) match their source\n", total)
 	return nil
 }

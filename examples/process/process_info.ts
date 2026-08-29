@@ -22,6 +22,11 @@ const elapsed = process.hrtime.bigint() - start;
 console.log("did work, elapsed ns >= 0:", elapsed >= 0n);
 console.log("uptime >= 0:", process.uptime() >= 0);
 
+// memoryUsage() returns Node's shape; rss is a real value (peak resident set,
+// from getrusage). The V8-heap fields have no native analogue and report 0.
+const mem = process.memoryUsage();
+console.log("rss > 0:", mem.rss > 0, "heapUsed:", mem.heapUsed);
+
 process.on('exit', (code: number) => {
   console.log("exiting with code", code);
 });

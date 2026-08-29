@@ -211,11 +211,14 @@
           },
           {
             "feature": "`process.memoryUsage()`",
-            "status": "missing",
+            "status": "implemented",
             "notes": [
-              "RSS/heap-size reporting — not meaningful in `manual` memory-management mode the same way it is under a real GC; more relevant once `-mm=gc` is the default (see [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md))"
+              "`rss` is the process's peak resident set size, read from `getrusage(2)`'s `ru_maxrss` (bytes on macOS, kilobytes scaled on Linux) ([ADR-00507](../adr/ADR-00507.md))"
             ],
-            "caveats": []
+            "caveats": [
+              "Only `rss` carries a real value; `heapTotal`/`heapUsed`/`external`/`arrayBuffers` report 0 — there is no managed V8 heap to measure in a native build, so they are returned zeroed rather than fabricated",
+              "`rss` reports *peak* resident set (`ru_maxrss`), not the instantaneous value Node returns"
+            ]
           },
           {
             "feature": "`process.nextTick(fn)`",

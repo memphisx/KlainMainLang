@@ -11,7 +11,7 @@ EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
-.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check help
+.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
 
 ## all: build the compiler
 all: build
@@ -166,7 +166,7 @@ conformance-node: conformance-fetch
 conformance-ts: conformance-fetch
 	$(GO) run ./tools/conformance -suite=ts
 
-## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables
+## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables. Also regenerates the docs/adr/ and docs/tdd/ index README tables (and the status TDD backlog) from the ADR/TDD record files — edit those files, never the index tables.
 status:
 	$(GO) run ./cmd/statusgen generate
 
@@ -181,6 +181,10 @@ status-roundtrip:
 ## reference-check: fail if the website API reference (website/src/data/reference/*.json) has drifted from the status data — every ✅ status row needs a reference entry, badges must agree. The website is a SECOND projection of docs/status/data; run this same-commit as any change that flips/adds a ✅ status row. Node built-ins only, no npm install.
 reference-check:
 	node website/scripts/check-reference.mjs
+
+## reference-sync: rewrite each website reference surface's coverage counts/percentages from its status page (fixes stale numbers instead of erroring). Run after a change flips ✅ rows, then commit the updated reference JSON.
+reference-sync:
+	node website/scripts/check-reference.mjs --sync
 
 ## clean: remove the compiler binary and all compiled example artifacts
 clean:

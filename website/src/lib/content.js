@@ -107,27 +107,27 @@ $ ./klainmain app.ts   # → native binary
 $ ./app
 hello, native world`
 
-// Coverage figures — source: docs/status/README.md (2026-08-28).
+// Coverage figures — source: docs/status/README.md (2026-08-30).
 //   pct    = Coverage      (works for its core case; real caveats disclosed)
 //   strict = Strict Coverage (works with ZERO known caveats/bugs of any severity)
 // The gap between the two is "works, but with a documented divergence from JS".
 export const coverage = [
   { area: 'Async / Promise', pct: 100, strict: 100, group: 'Language' },
-  { area: 'Classes / OOP', pct: 100, strict: 59, group: 'Language' },
+  { area: 'Classes / OOP', pct: 100, strict: 56, group: 'Language' },
   { area: 'Array methods', pct: 100, strict: 63, group: 'Language' },
   { area: 'Number / Math', pct: 100, strict: 74, group: 'Language' },
   { area: 'Type primitives', pct: 100, strict: 58, group: 'Language' },
-  { area: 'Object & collections', pct: 97, strict: 59, group: 'Language' },
-  { area: 'Type system features', pct: 95, strict: 37, group: 'Language' },
+  { area: 'Object & collections', pct: 97, strict: 55, group: 'Language' },
+  { area: 'Type system features', pct: 95, strict: 26, group: 'Language' },
   { area: 'Modules', pct: 94, strict: 50, group: 'Language' },
   { area: 'String methods', pct: 93, strict: 70, group: 'Language' },
   { area: 'JSON', pct: 87, strict: 67, group: 'Language' },
 
   { area: 'Networking (fetch, WS, SSE)', pct: 100, strict: 17, group: 'Web platform' },
-  { area: 'Streams', pct: 100, strict: 13, group: 'Web platform' },
-  { area: 'Web Crypto', pct: 100, strict: 13, group: 'Web platform' },
+  { area: 'Streams', pct: 100, strict: 11, group: 'Web platform' },
+  { area: 'Web Crypto', pct: 100, strict: 11, group: 'Web platform' },
   { area: 'Workers / Concurrency', pct: 100, strict: 0, group: 'Web platform' },
-  { area: 'Binary data & Typed Arrays', pct: 100, strict: 11, group: 'Web platform' },
+  { area: 'Binary data & Typed Arrays', pct: 100, strict: 0, group: 'Web platform' },
   { area: 'URL', pct: 100, strict: 0, group: 'Web platform' },
   { area: 'Timers', pct: 100, strict: 50, group: 'Web platform' },
 
@@ -135,9 +135,9 @@ export const coverage = [
   { area: 'events (EventEmitter)', pct: 100, strict: 50, group: 'Node.js' },
   { area: 'path', pct: 100, strict: 88, group: 'Node.js' },
   { area: 'os', pct: 100, strict: 86, group: 'Node.js' },
-  { area: 'Process / CLI I/O', pct: 96, strict: 44, group: 'Node.js' },
-  { area: 'File System (fs)', pct: 93, strict: 50, group: 'Node.js' },
-  { area: 'Other core modules', pct: 93, strict: 7, group: 'Node.js' },
+  { area: 'Process / CLI I/O', pct: 100, strict: 45, group: 'Node.js' },
+  { area: 'File System (fs)', pct: 94, strict: 41, group: 'Node.js' },
+  { area: 'Other core modules', pct: 94, strict: 13, group: 'Node.js' },
 
   { area: 'Desktop (klain:webview)', pct: 100, strict: 0, group: 'Desktop' }
 ]
@@ -146,9 +146,9 @@ export const coverage = [
 // curated feature-area checklists — "does the core case work?" — NOT external
 // conformance. See `conformance` below for the honest, unflattering numbers.
 export const headline = [
-  { label: 'TypeScript core language', value: '~96%', sub: '336 / 351 targeted features' },
+  { label: 'TypeScript core language', value: '~96%', sub: '339 / 352 targeted features' },
   { label: 'Web Platform APIs', value: '100%', sub: '57 / 57 targeted features' },
-  { label: 'Node.js APIs', value: '~97%', sub: '93 / 96 targeted features' }
+  { label: 'Node.js APIs', value: '~98%', sub: '97 / 99 targeted features' }
 ]
 
 // External conformance — full public test suites, run unfiltered.
@@ -156,7 +156,7 @@ export const headline = [
 // feature numbers above measure the paths this compiler targets; these measure
 // it against everything, most of which is out of scope by design.
 export const conformance = [
-  { label: 'Test262 (in-scope subset)', value: '15.3%', sub: '5,236 / 34,334 · 11.3% over the full corpus' },
-  { label: 'TypeScript accept/reject', value: '53.8%', sub: '4,979 / 9,256 cases agree with tsc' },
-  { label: 'Node.js test/parallel', value: '1.4%', sub: '35 / 2,451 runnable files pass' }
+  { label: 'Test262 (in-scope subset)', value: '15.4%', sub: '5,279 / 34,334 · 11.3% over the full corpus' },
+  { label: 'TypeScript accept/reject', value: '57.2%', sub: '5,293 / 9,256 cases agree with tsc' },
+  { label: 'Node.js test/parallel', value: '1.8%', sub: '43 / 2,451 runnable files pass' }
 ]

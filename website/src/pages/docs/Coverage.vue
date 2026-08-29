@@ -38,9 +38,9 @@
       </div>
     </div>
     <ul>
-      <li><strong>Test262</strong> — 6,029 / 53,578 (11.3%) of the whole corpus; 5,236 / 34,334 (15.3%) once the out-of-scope tags (Intl, Temporal, dynamic <code>import()</code>, Proxy/Reflect, module/async/eval flags) are filtered out. The core-<em>language</em> category alone runs at ~21%.</li>
+      <li><strong>Test262</strong> — 6,072 / 53,578 (11.3%) of the whole corpus; 5,279 / 34,334 (15.4%) once the out-of-scope tags (Intl, Temporal, dynamic <code>import()</code>, Proxy/Reflect, module/async/eval flags) are filtered out. The core-<em>language</em> category alone runs at ~21%.</li>
       <li><strong>TypeScript</strong> — accept/reject agreement with <code>tsc</code> over ~9.3k single-file cases; disagreements are dominated by valid TS features this narrow subset doesn't implement.</li>
-      <li><strong>Node.js</strong> — of Node's full <code>test/parallel</code> suite, ~2,451 files compile far enough to run and 35 pass. It's a floor on “how much of Node's own suite runs verbatim,” not a module-correctness score.</li>
+      <li><strong>Node.js</strong> — of Node's full <code>test/parallel</code> suite, ~2,451 files compile far enough to run and 43 pass. It's a floor on “how much of Node's own suite runs verbatim,” not a module-correctness score.</li>
     </ul>
 
     <div class="km-covcell__legend">

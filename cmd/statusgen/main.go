@@ -31,7 +31,8 @@ const statusDir = "docs/status"
 const dataDir = "docs/status/data"
 
 func main() {
-	if len(os.Args) < 2 || (len(os.Args) < 3 && os.Args[1] != "export" && os.Args[1] != "generate" && os.Args[1] != "check") {
+	noFileCmds := map[string]bool{"export": true, "generate": true, "check": true, "gen-tdd-readme": true, "gen-adr-readme": true}
+	if len(os.Args) < 2 || (len(os.Args) < 3 && !noFileCmds[os.Args[1]]) {
 		fmt.Fprintln(os.Stderr, "usage: statusgen export|generate|check | import|gen|roundtrip <file>…")
 		os.Exit(2)
 	}
@@ -43,6 +44,14 @@ func main() {
 		check(generateAll(true))
 	case "check":
 		check(generateAll(false))
+	case "gen-tdd-readme":
+		md, err := generateTDDIndex()
+		check(err)
+		fmt.Print(md)
+	case "gen-adr-readme":
+		md, err := generateADRIndex()
+		check(err)
+		fmt.Print(md)
 	case "import":
 		raw, err := os.ReadFile(files[0])
 		check(err)

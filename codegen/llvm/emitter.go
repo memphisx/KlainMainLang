@@ -243,6 +243,7 @@ type Emitter struct {
 	usedClusterRuntime     bool
 	usedProcessUptime      bool
 	usedProcessHrtime      bool
+	usedGetrusage          bool
 	usedProcessLifecycle   bool
 	usedTestRuntime        bool // TDD-00122: the `test` module's mustCall registry + exit verifier
 	testTrampolines        map[string]bool

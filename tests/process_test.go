@@ -234,6 +234,24 @@ func TestE2EProcessPidIsPositive(t *testing.T) {
 	assertOutput(t, `console.log(process.pid > 0)`, "true")
 }
 
+func TestE2EProcessMemoryUsageRssPositive(t *testing.T) {
+	// rss is a real value (getrusage ru_maxrss); the V8-heap fields have no
+	// native analogue and report 0.
+	assertOutput(t, `
+const m = process.memoryUsage();
+console.log(m.rss > 0);
+console.log(m.heapUsed);
+console.log(m.external);
+console.log(m.arrayBuffers);`, "true\n0\n0\n0")
+}
+
+func TestE2EProcessMemoryUsageWrongArgCountRejected(t *testing.T) {
+	_, err := parseAndCompile(`process.memoryUsage(1)`)
+	if err == nil {
+		t.Fatal("expected a compile error for process.memoryUsage(1), got none")
+	}
+}
+
 func TestE2EProcessPlatform(t *testing.T) {
 	want := runtime.GOOS
 	if want == "windows" {

@@ -43,6 +43,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	if _, ok := ex.Callee.(*ast.SuperExpression); ok {
 		return e.emitSuperCall(ex)
 	}
+	// `globalThis.setTimeout(...)` / `globalThis.JSON.stringify(...)` — peel the
+	// `globalThis.` alias off the callee so it dispatches as the bare global.
+	if unwrapped := e.unwrapGlobalThis(ex.Callee); unwrapped != ex.Callee {
+		rewritten := ast.NewCallExpression(unwrapped, ex.Args, ex.GetPos())
+		rewritten.TypeArgs = ex.TypeArgs
+		return e.emitCall(rewritten)
+	}
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		if _, ok := mem.Object.(*ast.SuperExpression); ok {
 			return e.emitSuperMethodCall(mem.Property, ex.Args, ex.GetPos())
@@ -519,6 +526,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitProcessUptime(ex.Args, ex.GetPos())
 			case "hrtime":
 				return e.emitProcessHrtime(ex.Args, ex.GetPos())
+			case "memoryUsage":
+				return e.emitProcessMemoryUsage(ex.Args, ex.GetPos())
 			case "emitWarning":
 				return e.emitProcessEmitWarning(ex.Args, ex.GetPos())
 			case "send":

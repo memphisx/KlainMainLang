@@ -107,9 +107,12 @@
           },
           {
             "feature": "`globalThis`",
-            "status": "missing",
+            "status": "implemented",
             "notes": [
-              "Not meaningful in a native single-file context"
+              "`globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md))"
+            ],
+            "caveats": [
+              "Only member access resolves, and only to *known* globals — an unknown `globalThis.foo` is a compile error (there is no dynamic global record); a bare `globalThis` used as a standalone object value, computed access (`globalThis[\"x\"]`), and assigning a new global (`globalThis.x = …`) are unsupported"
             ]
           },
           {

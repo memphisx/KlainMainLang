@@ -345,6 +345,21 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 }
 
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
+	// `globalThis.X` (and its call form) infers as the bare global X — mirror
+	// the same alias-peeling emitMember/emitCall apply, so member-type-driven
+	// dispatch agrees with codegen.
+	if mem, ok := expr.(*ast.MemberExpression); ok {
+		if unwrapped := e.unwrapGlobalThis(mem); unwrapped != ast.Expression(mem) {
+			return e.inferExprType(unwrapped)
+		}
+	}
+	if call, ok := expr.(*ast.CallExpression); ok {
+		if unwrapped := e.unwrapGlobalThis(call.Callee); unwrapped != call.Callee {
+			rewritten := ast.NewCallExpression(unwrapped, call.Args, call.GetPos())
+			rewritten.TypeArgs = call.TypeArgs
+			return e.inferExprType(rewritten)
+		}
+	}
 	switch ex := expr.(type) {
 	case *ast.NumberLiteral:
 		if ex.IsBigInt {
@@ -1362,6 +1377,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeF64
 				case "hrtime":
 					return TupleType([]Type{TypeI64, TypeI64})
+				case "memoryUsage":
+					return memoryUsageType()
 				case "nextTick":
 					return TypeVoid
 				case "send":

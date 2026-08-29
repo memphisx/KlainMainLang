@@ -483,7 +483,38 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	return raw, nil
 }
 
+// unwrapGlobalThis rewrites a `globalThis.X` member chain into a bare
+// reference to X, so the ambient global is reached through the same dispatch as
+// writing X directly. `globalThis` is the standard alias for the global object;
+// this native single-file model has no dynamic global record, so only *known*
+// globals resolve — an unknown `globalThis.foo` falls through to the same
+// "unknown identifier" error a bare `foo` would give, never a runtime lookup.
+// Recurses, so `globalThis.JSON.stringify(...)` and `globalThis.setTimeout(...)`
+// both desugar (the leading `globalThis.` peels off, the rest dispatches
+// normally). Computed access (`globalThis["x"]`, an IndexExpression) and a bare
+// `globalThis` used as a standalone object value are not covered. A pathological
+// local shadow of `globalThis` is respected — the rewrite is skipped then.
+func (e *Emitter) unwrapGlobalThis(expr ast.Expression) ast.Expression {
+	mem, ok := expr.(*ast.MemberExpression)
+	if !ok {
+		return expr
+	}
+	newObj := e.unwrapGlobalThis(mem.Object)
+	if id, ok := newObj.(*ast.Identifier); ok && id.Name == "globalThis" && !e.isShadowedByLocal("globalThis") {
+		return ast.NewIdentifier(mem.Property, mem.GetPos())
+	}
+	if newObj == mem.Object {
+		return expr
+	}
+	m := ast.NewMemberExpression(newObj, mem.Property, mem.GetPos())
+	m.Optional = mem.Optional
+	return m
+}
+
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	if unwrapped := e.unwrapGlobalThis(ex); unwrapped != ast.Expression(ex) {
+		return e.emitExpr(unwrapped)
+	}
 	if ex.Optional {
 		return e.emitOptionalMember(ex)
 	}

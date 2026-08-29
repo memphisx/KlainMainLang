@@ -3,6 +3,7 @@ package llvm
 
 import (
 	"fmt"
+	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -371,6 +372,60 @@ func (e *Emitter) emitProcessVersions(pos ast.Pos) (Value, error) {
 		{Key: "klain", Value: ast.NewStringLiteral(klainVersion, pos)},
 	}
 	return e.emitObjectLiteral(ast.NewObjectLiteral(props, pos))
+}
+
+// memoryUsageType is the fixed shape of the process.memoryUsage() object,
+// matching Node's field set and order. All fields are byte counts (i64, the
+// default number representation).
+func memoryUsageType() Type {
+	return ObjectType([]Field{
+		{Name: "rss", Ty: TypeI64},
+		{Name: "heapTotal", Ty: TypeI64},
+		{Name: "heapUsed", Ty: TypeI64},
+		{Name: "external", Ty: TypeI64},
+		{Name: "arrayBuffers", Ty: TypeI64},
+	})
+}
+
+// emitProcessMemoryUsage implements process.memoryUsage(): an object with the
+// same shape Node returns. This compiler has no managed V8 heap, so the only
+// field with a real value is `rss` — the process's peak resident set size,
+// read from getrusage(2)'s ru_maxrss (bytes on macOS, kilobytes on Linux, so
+// the Linux path scales by 1024). heapTotal/heapUsed/external/arrayBuffers are
+// V8-specific and report 0 (calloc-zeroed), disclosed as a caveat rather than
+// fabricated. ru_maxrss sits at byte offset 32 of struct rusage on both
+// platforms (two struct timevals — 32 bytes — precede it).
+func (e *Emitter) emitProcessMemoryUsage(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: process.memoryUsage takes no arguments", pos.Line, pos.Col)
+	}
+	e.ensureGetrusage()
+	e.ensureCalloc()
+
+	// struct rusage is ~144 bytes on both platforms; over-allocate to be safe.
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = alloca [256 x i8], align 8", buf))
+	e.emitInstr(fmt.Sprintf("call i32 @getrusage(i32 0, ptr %s)", buf))
+	maxrssPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", maxrssPtr, buf))
+	maxrss := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", maxrss, maxrssPtr))
+	rss := maxrss
+	if runtime.GOOS == "linux" {
+		scaled := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 1024", scaled, maxrss))
+		rss = scaled
+	}
+
+	ty := memoryUsageType()
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	structIR := ty.StructIR()
+	idx, _, _ := ty.FieldIndex("rss")
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", rss, gep))
+	return Value{Ref: dataReg, Ty: ty}, nil
 }
 
 // emitProcessOn implements process.on('SIGINT' | 'SIGTERM', handler): TDD-00019.

@@ -89,3 +89,17 @@ console.log(encodeURI("http://example.com/path?a=1&b=2 space"))
 // http://example.com/path?a=1&b=2%20space (only the space got escaped)
 console.log(decodeURI("http://example.com/path%3Fa=1&b=2%20space"))
 // http://example.com/path%3Fa=1&b=2 space (%3F stays literal — it's '?', reserved)
+
+// ── globalThis ───────────────────────────────────────────────────────────────
+// The standard alias for the global object: `globalThis.X` reaches the same
+// ambient global X as writing X directly. Native single-file builds have no
+// dynamic global record, so only *known* globals resolve — an unknown
+// `globalThis.foo` is a compile error, not a runtime lookup. Works for global
+// functions, namespaces, and nested member/call chains.
+console.log(globalThis.parseInt("42", 10))              // 42
+console.log(globalThis.Math.max(3, 7, 5))               // 7
+console.log(globalThis.JSON.stringify({ a: 1, b: 2 }))  // {"a":1,"b":2}
+globalThis.console.log("via globalThis.console")        // via globalThis.console
+globalThis.setTimeout(() => {
+  console.log("globalThis.setTimeout fired")            // globalThis.setTimeout fired
+}, 0)

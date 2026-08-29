@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "PROCESS-CLI.md",
   "coversRows": "all",
-  "coverage": { "loose": "28/29", "loosePct": 97, "strict": "13/29", "strictPct": 45 },
+  "coverage": { "loose": "29/29", "loosePct": 100, "strict": "13/29", "strictPct": 45 },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
     {
@@ -285,9 +285,13 @@
       "id": "process.memoryUsage",
       "name": "process.memoryUsage()",
       "statusRow": "process.memoryUsage()",
-      "signature": "process.memoryUsage(): MemoryUsage",
-      "badge": "missing",
-      "description": "RSS/heap-size reporting — not implemented. It isn't meaningful in the default manual memory-management mode the way it is under a real GC; more relevant once -mm=gc is the default.",
+      "signature": "process.memoryUsage(): { rss: number; heapTotal: number; heapUsed: number; external: number; arrayBuffers: number }",
+      "badge": "caveats",
+      "description": "Returns Node's object shape. Only rss carries a real value — the process's peak resident set size, read from getrusage(2)'s ru_maxrss (bytes on macOS, kilobytes scaled on Linux). There is no managed V8 heap to measure in a native build, so heapTotal/heapUsed/external/arrayBuffers are returned as 0 rather than fabricated, and rss is peak rather than the instantaneous value Node reports.",
+      "returns": { "type": "object", "desc": "Memory-usage byte counts; only rss is populated." },
+      "caveats": ["heapTotal/heapUsed/external/arrayBuffers are always 0 (no managed heap)", "rss is peak resident set (ru_maxrss), not the live value"],
+      "exampleKey": "process/process_info",
+      "snippet": "const m = process.memoryUsage(); console.log(m.rss > 0)",
       "seeAlso": ["process.uptime"],
       "spec": { "mdn": "https://nodejs.org/api/process.html#processmemoryusage" }
     },

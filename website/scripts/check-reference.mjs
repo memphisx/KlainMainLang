@@ -49,6 +49,11 @@ function normRow (s) {
   const t = alnum(stripParens(s))
   return t || alnum(s)
 }
+// "20/21" → 95 (rounded integer percent), matching the hand-authored convention.
+function fractionPct (frac) {
+  const [n, d] = frac.split('/').map(Number)
+  return d ? Math.round((n / d) * 100) : 0
+}
 
 // ── Status-page parsing ───────────────────────────────────────────────────────
 function parseStatusPage (absPath) {
@@ -142,14 +147,34 @@ function checkSurface (jsonPath, errors, warnings, info) {
     }
   }
 
-  // Coverage badge vs. the page header (skipped for a declared subset).
+  // Coverage badge vs. the page header (skipped for a declared subset). In
+  // --sync mode, rewrite the surface's stored counts (and the derived
+  // percentages) from the page instead of erroring on a mismatch — the status
+  // pages are the source of truth, so a drift is a stale hand-edit to fix, not
+  // a failure to report (TDD-00149).
   const subset = surface.coverageScope === 'subset'
   if (!subset) {
-    if (page.loose && surface.coverage?.loose !== page.loose) {
-      errors.push(`[${tag}] coverage.loose ${surface.coverage?.loose} != page ${page.loose}`)
-    }
-    if (page.strict && surface.coverage?.strict !== page.strict) {
-      errors.push(`[${tag}] coverage.strict ${surface.coverage?.strict} != page ${page.strict}`)
+    if (SYNC && page.loose && page.strict && surface.coverage) {
+      // Surgical text edit of just the coverage numbers, so the file's
+      // hand-authored formatting (compact one-line objects/arrays) is preserved
+      // rather than reflowed by a JSON re-serialize.
+      const raw = readFileSync(jsonPath, 'utf8')
+      const updated = raw.replace(/"coverage"\s*:\s*\{[^}]*\}/, (block) => block
+        .replace(/("loose"\s*:\s*")[^"]*(")/, `$1${page.loose}$2`)
+        .replace(/("strict"\s*:\s*")[^"]*(")/, `$1${page.strict}$2`)
+        .replace(/("loosePct"\s*:\s*)\d+/, `$1${fractionPct(page.loose)}`)
+        .replace(/("strictPct"\s*:\s*)\d+/, `$1${fractionPct(page.strict)}`))
+      if (updated !== raw) {
+        writeFileSync(jsonPath, updated)
+        info.push(`[${tag}] synced coverage → ${page.loose} loose / ${page.strict} strict`)
+      }
+    } else {
+      if (page.loose && surface.coverage?.loose !== page.loose) {
+        errors.push(`[${tag}] coverage.loose ${surface.coverage?.loose} != page ${page.loose}`)
+      }
+      if (page.strict && surface.coverage?.strict !== page.strict) {
+        errors.push(`[${tag}] coverage.strict ${surface.coverage?.strict} != page ${page.strict}`)
+      }
     }
   }
 
@@ -198,6 +223,9 @@ function scaffold (statusRel) {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
+// --sync rewrites each surface's stored coverage counts/percentages from its
+// status page (TDD-00149) instead of erroring on drift.
+const SYNC = process.argv.includes('--sync')
 const scaffoldIdx = process.argv.indexOf('--scaffold')
 if (scaffoldIdx !== -1) {
   const target = process.argv[scaffoldIdx + 1]

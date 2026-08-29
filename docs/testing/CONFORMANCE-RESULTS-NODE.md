@@ -10,9 +10,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **42 passed**, 2409 failed, 1027 skipped (out of scope).
+3478 files total: **43 passed**, 2408 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **42 passed (1.7%)**.
+Of the 2451 files that compiled far enough to run, **43 passed (1.8%)**.
 
 ## By module (top 40 by file count)
 
@@ -65,7 +65,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 273 | COMPILE_ERROR: a number has no method '%s' |
+| 271 | COMPILE_ERROR: a number has no method '%s' |
 | 116 | COMPILE_ERROR: undefined variable '%s' |
 | 94 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 86 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
@@ -80,15 +80,15 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 31 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 28 | COMPILE_ERROR: initializer'%s's type — this compiler is a typed subset |
-| 28 | COMPILE_ERROR: process has no method '%s' |
 | 26 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
+| 26 | COMPILE_ERROR: process has no method '%s' |
 | 25 | COMPILE_ERROR: expected ), got => |
 | 23 | COMPILE_ERROR: a Request has no method '%s' |
 | 23 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
 | 22 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
-| 21 | RUN_TIMEOUT |
+| 20 | RUN_TIMEOUT |
 | 19 | COMPILE_ERROR: '%s' is not an array |
 | 19 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
@@ -138,7 +138,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (42)
+## Passing files (43)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -184,5 +184,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-url-format.js` | url |  |
 | `test-url-parse-format.js` | url |  |
 | `test-utf8-scripts.js` | utf8 |  |
+| `test-v8-flag-pool-size-0.js` | v8 |  |
 | `test-websocket.js` | websocket |  |
 | `test-zlib-no-stream.js` | zlib |  |

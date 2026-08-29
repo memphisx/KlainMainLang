@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 19/21 (~90%) · **Strict Coverage**: 8/21 (~38%).
+**Coverage**: 20/21 (~95%) · **Strict Coverage**: 8/21 (~38%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -20,7 +20,7 @@ Format: [Status page format](README.md#status-page-format).
 | `NaN` (global constant) | ✅ | • `let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
 | `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |
-| `globalThis` | ❌ | | • Not meaningful in a native single-file context |
+| `globalThis` | ✅ | • Only member access resolves, and only to *known* globals — an unknown `globalThis.foo` is a compile error (there is no dynamic global record); a bare `globalThis` used as a standalone object value, computed access (`globalThis["x"]`), and assigning a new global (`globalThis.x = …`) are unsupported | • `globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md)) |
 | `encodeURI(s)` | ✅ | | • Leaves the unreserved *and* reserved (`;/?:@&=+$,#`) character sets unescaped. See [ADR-00024](../adr/ADR-00024.md). |
 | `decodeURI(s)` | ✅ | • Permissive on malformed input (passes a bad/truncated escape through as literal text) rather than throwing a `URIError` | • Does **not** decode a `%XX` escape representing a reserved character (leaves it as literal `%XX` text) — the one real behavioral difference from `decodeURIComponent`. See [ADR-00024](../adr/ADR-00024.md). |
 | `encodeURIComponent(s)` | ✅ | | • Leaves only the unreserved set (letters, digits, `-_.!~*'()`) unescaped. See [ADR-00024](../adr/ADR-00024.md). |

@@ -25,6 +25,17 @@ type IndexSegment struct {
 	Text    string     `json:"text,omitempty"`
 	Columns []string   `json:"columns,omitempty"` // categoryTable header cells
 	Rows    []IndexRow `json:"rows,omitempty"`
+	// Editorial backs a "tddBacklog" segment: per-TDD status-page-specific
+	// title/notes keyed by TDD number (as a string). Which rows actually
+	// render is derived from each TDD file's authoritative Status (only
+	// not-yet-done ones), so a shipped TDD drops out automatically — the
+	// editorial map only supplies display text, never the filter (TDD-00149).
+	Editorial map[string]*tddBacklogEntry `json:"editorial,omitempty"`
+}
+
+type tddBacklogEntry struct {
+	Title string `json:"title"`
+	Notes string `json:"notes,omitempty"`
 }
 
 type IndexRow struct {
@@ -82,6 +93,13 @@ func importIndex(path, src string, areas map[string]*StatusArea) (*StatusIndex, 
 				line: c.line, seg: len(idx.Segments),
 			})
 			idx.Segments = append(idx.Segments, IndexSegment{Kind: "sectionTotal"})
+
+		case strings.HasPrefix(c.text, "| TDD | Status | Notes |"):
+			seg, err := parseTDDBacklogTable(c.text)
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: %v", path, c.line, err)
+			}
+			idx.Segments = append(idx.Segments, *seg)
 
 		case strings.HasPrefix(c.text, "|") && isCategoryTable(c.text):
 			seg, err := parseCategoryTable(c.text, c.line, path, areas)
@@ -250,6 +268,12 @@ func generateIndex(idx *StatusIndex, areas map[string]*StatusArea) (string, erro
 			parts = append(parts, fmt.Sprintf("**%d / %d features, %s coverage.**", n, d, fmtPct(n, d)))
 		case "categoryTable":
 			out, err := renderCategoryTable(&s, areas)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, out)
+		case "tddBacklog":
+			out, err := renderTDDBacklog(&s)
 			if err != nil {
 				return "", err
 			}
