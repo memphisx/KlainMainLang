@@ -1687,11 +1687,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					if !sym.Ty.IsArray {
 						return Value{}, fmt.Errorf("%d:%d: '%s' is not an array", arg.GetPos().Line, arg.GetPos().Col, arrId.Name)
 					}
-					ptrReg := e.freshReg()
+					// Object-reference model (TDD-00127): pass the array's header
+					// pointer so mutations inside the callee (push/splice)
+					// propagate back to this caller. The i64 length is redundant
+					// (kept for ABI stability).
+					header, lenSlot := e.arrayDataLenSlots(sym)
 					lenReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
-					argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
+					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				} else {
 					// Hint-aware (TDD-00028): an array-literal argument
 					// (or `new Array<T>(n)` with no explicit `<T>`) is
@@ -1709,11 +1712,13 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					if !val.Ty.IsArray {
 						return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", arg.GetPos().Line, arg.GetPos().Col)
 					}
-					ptrReg := e.freshReg()
+					// A transient array expression is materialized into a fresh
+					// header (TDD-00127); the callee may mutate it, but it has no
+					// caller-visible identity, so that is correct.
+					header := e.boxArrayValue(val)
 					lenReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
 					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-					argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				}
 			} else if isNullableScalar(paramTy) {
 				// A nullable-scalar parameter takes its boxed { i1, T }
@@ -1774,11 +1779,8 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				if !val.Ty.IsArray {
 					return Value{}, fmt.Errorf("default value for param %d does not yield an array", i)
 				}
-				ptrReg := e.freshReg()
-				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				header, lenReg := e.arrayArgFromAggregate(val)
+				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			} else if isNullableScalar(paramTy) {
 				argStr, err := e.emitNullableScalarArg(sig.Defaults[i], paramTy)
 				if err != nil {
@@ -1808,7 +1810,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			// A nullable scalar's omitted value is a genuinely absent
 			// { i1, T } aggregate (present = false).
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr null", "i64 0")
+				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
 			} else {
@@ -1841,9 +1843,10 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
 			}
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(ptrReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
-			argParts = append(argParts, "ptr null", "i64 0")
+			argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 		} else if anySpread(restArgs) {
 			// f(fixed..., ...a, x, ...b): a runtime-length mix of spreads and
 			// positional args feeding the rest slot — concat into one buffer.
@@ -1851,7 +1854,8 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(dataReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()
@@ -1867,7 +1871,8 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 			}
-			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
+			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
 	argsStr := strings.Join(argParts, ", ")

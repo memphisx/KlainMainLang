@@ -39,13 +39,14 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		}
 		safe := llvmSafeSymbol(v.Name)
 		if ty.IsArray {
-			// An array binding is two slots (data ptr + length) — two globals,
-			// matching the Ptr/LenPtr Named-Symbol shape emitArrayVarDecl uses.
-			dataG := "@__kml_global_" + safe + "_data"
-			lenG := "@__kml_global_" + safe + "_len"
-			e.emitGlobal(fmt.Sprintf("%s = internal global ptr null, align 8", dataG))
-			e.emitGlobal(fmt.Sprintf("%s = internal global i64 0, align 8", lenG))
-			e.moduleGlobals[v.Name] = Symbol{Ptr: dataG, LenPtr: lenG, Ty: ty, IsConst: v.Kind == "const"}
+			// Object-reference model (TDD-00127): an array global is a single
+			// slot holding a pointer to a heap {data, len} header, so a named
+			// function reads/mutates the same header the top-level init built —
+			// and a mutation propagates, exactly as for a local. emitArrayVarDecl
+			// mallocs the header at init time and stores its pointer here.
+			hdrG := "@__kml_global_" + safe + "_hdr"
+			e.emitGlobal(fmt.Sprintf("%s = internal global ptr null, align 8", hdrG))
+			e.moduleGlobals[v.Name] = Symbol{Ptr: hdrG, Ty: ty, IsConst: v.Kind == "const"}
 		} else {
 			gname := "@__kml_global_" + safe
 			e.emitGlobal(fmt.Sprintf("%s = internal global %s %s, align %d", gname, ty.IR, ty.zeroLiteral(), ty.Align()))

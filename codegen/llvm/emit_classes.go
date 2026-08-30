@@ -127,8 +127,14 @@ type ClassInfo struct {
 	// to every descendant, mirroring HasEventEmitter.
 	HasNodeReadable bool
 	HasNodeWritable bool
-	StreamOutTy     Type
-	StreamInTy      Type
+	// HasNodeTransform (TDD-00132 Stage C2) additionally marks the both-sided
+	// class as a Transform (vs a plain Duplex): its writable sink routes each
+	// chunk through a `_transform(chunk, enc, cb)` override whose `this.push`
+	// feeds the readable side, rather than an independent `_read`/`_write`
+	// pair. Set for `extends Transform` and every descendant.
+	HasNodeTransform bool
+	StreamOutTy      Type
+	StreamInTy       Type
 
 	// --- TDD-00009 Stage 4 ---
 
@@ -688,9 +694,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// all.
 		isEEDirect := cd.BaseClass == "EventEmitter"
 		rootReadable, rootWritable, isStreamRoot := nodeStreamRootKind(cd.BaseClass)
-		if isStreamRoot && (cd.BaseClass == "Duplex" || cd.BaseClass == "Transform") {
-			return fmt.Errorf("%d:%d: class '%s' extends %s — Duplex/Transform subclassing is not yet supported (Readable and Writable are)", cd.GetPos().Line, cd.GetPos().Col, cd.Name, cd.BaseClass)
-		}
 		haveBase := cd.BaseClass != "" && !isEEDirect && !isStreamRoot
 		if haveBase {
 			baseInfo = e.classes[cd.BaseClass]
@@ -704,16 +707,32 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// for Readable/Transform, else the writable-in type for Writable.
 		hasNodeReadable := (isStreamRoot && rootReadable) || (haveBase && baseInfo.HasNodeReadable)
 		hasNodeWritable := (isStreamRoot && rootWritable) || (haveBase && baseInfo.HasNodeWritable)
+		hasNodeTransform := (isStreamRoot && cd.BaseClass == "Transform") || (haveBase && baseInfo.HasNodeTransform)
 		streamOutTy := TypeI64
 		streamInTy := TypeI64
 		switch {
 		case isStreamRoot:
-			if len(cd.BaseTypeArgs) == 1 {
+			switch len(cd.BaseTypeArgs) {
+			case 1:
 				argTy := e.resolveType(cd.BaseTypeArgs[0])
+				// A both-sided root (Duplex/Transform): the single `<T>` names
+				// both the writable-in and readable-out chunk type. A
+				// single-sided root names only its own side.
 				if rootReadable {
 					streamOutTy = argTy
-				} else {
+				}
+				if rootWritable {
 					streamInTy = argTy
+				}
+			case 2:
+				// A both-sided root with `<In, Out>` (the Transform<I,O> form):
+				// first arg is the writable-in chunk type, second the
+				// readable-out type.
+				if rootWritable {
+					streamInTy = e.resolveType(cd.BaseTypeArgs[0])
+				}
+				if rootReadable {
+					streamOutTy = e.resolveType(cd.BaseTypeArgs[1])
 				}
 			}
 		case haveBase && (baseInfo.HasNodeReadable || baseInfo.HasNodeWritable):
@@ -855,6 +874,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			EventEmitterPayload:       eePayload,
 			HasNodeReadable:           hasNodeReadable,
 			HasNodeWritable:           hasNodeWritable,
+			HasNodeTransform:          hasNodeTransform,
 			StreamOutTy:               streamOutTy,
 			StreamInTy:                streamInTy,
 		}
@@ -1600,25 +1620,17 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 				fmt.Sprintf("ptr %%p_%s_ptr", p.Name),
 				fmt.Sprintf("i64 %%p_%s_len", p.Name),
 			)
-			ptrAlloca := "%v_" + p.Name + "_ptr"
-			lenAlloca := "%v_" + p.Name + "_len"
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
-			// Destructured array parameter — see emit_func.go's
-			// emitFunctionDeclAs for the identical reasoning (this is the
-			// same param-binding shape, just for a class method/constructor
-			// instead of a top-level function).
+			// Object-reference array param (TDD-00127): see bindArrayParam. Same
+			// shape as a top-level function, for a class method/constructor.
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
 				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			e.bindArrayParam(p.Name, pty)
 		} else if isNullableScalar(pty) {
 			// Nullable-scalar method/constructor parameter (TDD-00064 Stage 3),
 			// same presence-flagged { i1, T } aggregate a top-level function's
@@ -1813,11 +1825,8 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				if !val.Ty.IsArray {
 					return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 				}
-				ptrReg := e.freshReg()
-				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				header, lenReg := e.packArrayArg(a, val)
+				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
 			// Nullable-scalar constructor parameter (TDD-00064 Stage 3).
@@ -1948,7 +1957,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr null", "i64 0")
+				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 			}
@@ -1979,11 +1988,8 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 			}
-			ptrReg := e.freshReg()
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			header, lenReg := e.packArrayArg(a, val)
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			continue
 		}
 		// A nullable-scalar method parameter takes its boxed { i1, T }
@@ -2036,15 +2042,17 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
 			}
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(ptrReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
-			argParts = append(argParts, "ptr null", "i64 0")
+			argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 		} else if anySpread(restArgs) {
 			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(dataReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()
@@ -2060,7 +2068,8 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 			}
-			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
+			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
 	argsIR := strings.Join(argParts, ", ")
@@ -2158,9 +2167,10 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 		}
 		ptrReg := e.freshReg()
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, argVal.Ref))
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, argVal.Ref))
-		argParts = []string{"ptr " + thisVal.Ref, "ptr " + ptrReg, "i64 " + lenReg}
+		_ = ptrReg
+		header := e.boxArrayValue(argVal)
+		argParts = []string{"ptr " + thisVal.Ref, "ptr " + header, "i64 " + lenReg}
 		fnTypePart = "(ptr, ptr, i64)"
 	} else if isNullableScalar(paramTy) {
 		// Nullable-scalar setter parameter (TDD-00064 Stage 3): its boxed
@@ -2258,7 +2268,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
-				argParts = append(argParts, "ptr null", "i64 0")
+				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 			}
@@ -2275,11 +2285,8 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
 			}
-			ptrReg := e.freshReg()
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			header, lenReg := e.packArrayArg(a, val)
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			continue
 		}
 		// Nullable-scalar parameter (TDD-00064 Stage 3): its boxed aggregate.
@@ -2331,15 +2338,17 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
 			}
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(ptrReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
-			argParts = append(argParts, "ptr null", "i64 0")
+			argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 		} else if anySpread(restArgs) {
 			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(dataReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()
@@ -2355,7 +2364,8 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 			}
-			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
+			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
 	argsIR := strings.Join(argParts, ", ")

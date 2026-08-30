@@ -698,6 +698,22 @@
       "spec": {
         "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html#template"
       }
+    },
+    {
+      "id": "jsdoc.pure",
+      "name": "@pure (enforced side-effect-free function)",
+      "statusRow": "@pure (enforced side-effect-free function)",
+      "signature": "/** @pure */",
+      "badge": "exact",
+      "extension": true,
+      "description": "A compiler extension: asserts a function is side-effect-free and referentially transparent, and ENFORCES it with a front-end pass — zero runtime/codegen cost, output byte-identical to the untagged function. Inside a @pure function (declaration, arrow binding, or function-expression binding, including capturing closures) the compiler rejects the five impurity classes: mutating a parameter (or anything reachable from it), mutating a captured/global binding, I/O (console/fs/fetch/…), nondeterminism (Math.random/Date.now/new Date()), and calling a function that is not itself @pure (purity is contagious). Local mutation is allowed — only observable effects are constrained.",
+      "snippet": "/** @pure */\nfunction sq(n: number): number { return n * n }",
+      "seeAlso": [
+        "jsdoc.erased"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html"
+      }
     }
   ]
 }

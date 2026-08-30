@@ -21,6 +21,12 @@ type Parser struct {
 	// this file (TDD-00098), surfaced as Program.WorkerPaths so the resolver
 	// can treat worker entry files as dependency edges without an AST walk.
 	workerPaths []string
+	// dynamicImportPaths accumulates every dynamic `import('...')` string-literal
+	// specifier (TDD-00055/TDD-00056), surfaced as Program.DynamicImportPaths so
+	// the resolver treats dynamic-import targets as dependency edges without an
+	// AST walk — the same mechanism as workerPaths.
+	dynamicImportPaths []string
+	dynamicImportNodes []*ast.ImportCallExpression
 	// nsAliases collects `import X = Y.Z` alias declarations (ADR-00456).
 	nsAliases []ast.NSAliasDecl
 	// inCtorParams is set by parseClassDecl for the duration of a
@@ -266,5 +272,7 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	prog.Namespaces = p.namespaces
 	prog.NSAliases = p.nsAliases
 	prog.WorkerPaths = p.workerPaths
+	prog.DynamicImportPaths = p.dynamicImportPaths
+	prog.DynamicImportNodes = p.dynamicImportNodes
 	return prog, nil
 }

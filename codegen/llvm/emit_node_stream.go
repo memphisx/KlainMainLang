@@ -31,7 +31,9 @@ func (e *Emitter) emitNodeInvokeDataThunk(chunkTy Type) string {
 	if chunkTy.IsArray {
 		cp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", cp))
-		e.emitInstr(fmt.Sprintf("call void (ptr, ptr, i64) %s(ptr %s, ptr %s, i64 %%v1)", fp, ep, cp))
+		// The user closure's array param expects a header pointer (TDD-00127).
+		hdr := e.newArrayHeader(cp, "%v1")
+		e.emitInstr(fmt.Sprintf("call void (ptr, ptr, i64) %s(ptr %s, ptr %s, i64 %%v1)", fp, ep, hdr))
 	} else {
 		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
 		e.emitInstr(fmt.Sprintf("call void (ptr, %s) %s(ptr %s, %s %s)", chunkTy.IR, fp, ep, chunkTy.IR, chunk.Ref))

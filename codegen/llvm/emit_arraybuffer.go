@@ -276,10 +276,41 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 	return Value{Ref: newHdr, Ty: ArrayBufferType()}, nil
 }
 
+// emitNewTypedArrayAggregate builds a `new XArray(...)` as a general
+// expression, returning the `{ptr, i64}` array aggregate every array consumer
+// already understands — so a TypedArray construction can appear as a function
+// argument, a return value, an object field, a ternary arm, etc., not only a
+// variable declaration's initializer (TDD-00018 Stage 5 / ADR-00512). It reuses
+// the four var-decl construction forms verbatim by giving them two temporary
+// entry-block allocas, then loading those into the aggregate — a TypedArray IS
+// an array (IsTypedArray sets IsArray/ElemType), so the value form is identical
+// to a plain array's.
+func (e *Emitter) emitNewTypedArrayAggregate(nta *ast.NewTypedArrayExpression) (Value, error) {
+	taTy := TypedArrayType(nta.ElemKind)
+	elemTy := *taTy.ElemType
+	ptrA := e.freshReg()
+	lenA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrA))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenA))
+	if err := e.emitNewTypedArrayVarDecl(nta, ptrA, lenA, elemTy); err != nil {
+		return Value{}, err
+	}
+	ptrReg := e.freshReg()
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, ptrA))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenA))
+	a0 := e.freshReg()
+	agg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", a0, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg, a0, lenReg))
+	return Value{Ref: agg, Ty: taTy}, nil
+}
+
 // emitNewTypedArrayVarDecl implements `new Int8Array(...)`/.../
-// `new Float64Array(...)` as a variable declaration's initializer (the only
-// place these are allowed — see docs/tdd/TDD-00018.md). Dispatches on the
-// argument's inferred type to pick one of three construction forms.
+// `new Float64Array(...)` as a variable declaration's initializer (see
+// docs/tdd/TDD-00018.md). Dispatches on the argument's inferred type to pick
+// one of three construction forms. General-expression use goes through
+// emitNewTypedArrayAggregate above, which reuses these same forms.
 func (e *Emitter) emitNewTypedArrayVarDecl(nta *ast.NewTypedArrayExpression, ptrName, lenName string, elemTy Type) error {
 	// An inline array literal (`new Uint8Array([1, 2, 3])`) can't go through
 	// the generic emitExpr/resolveArrayForHOF path below at all — array

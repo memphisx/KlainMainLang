@@ -17,6 +17,7 @@ func main() {
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
 	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only) or gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed)")
+	dynImport := flag.String("dynamic-import", "eager", "dynamic `import()` `mode`: eager (default — a literal-specifier import resolved at compile time, target runs eagerly, wrapped in a resolved Promise) or lazy (each dynamic-import target compiled to a shared-library island loaded on first use — real laziness; incompatible with --static, produces multiple artifacts)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
@@ -103,14 +104,30 @@ func main() {
 		fatal("unrecognized -crypto value %q — must be one of: openssl (default), commoncrypto (macOS only)", *cryptoBackend)
 	}
 
+	switch *dynImport {
+	case "eager", "lazy":
+		// ok
+	default:
+		fatal("unrecognized -dynamic-import value %q — must be one of: eager (default), lazy", *dynImport)
+	}
+
 	inFile := flag.Arg(0)
-	prog, err := resolver.ResolveProgramWithOptions(inFile, *compat == "js")
+	prog, err := resolver.ResolveProgramWithOptions(inFile, *compat == "js", *dynImport == "lazy")
 	if err != nil {
 		fatal("parse error: %v", err)
 	}
 
+	// TDD-00056: the lazy backend loads shared-library islands via dlopen at
+	// runtime, which a statically-linked binary generally cannot do. Reject the
+	// combination cleanly (only when dynamic import is actually used), the same
+	// mutual-exclusion posture as -mm / -crypto above.
+	if *dynImport == "lazy" && *static && prog.UsesDynamicImport {
+		fatal("--static cannot be combined with -dynamic-import=lazy when the program uses dynamic import(): a statically-linked binary cannot dlopen() its shared-library islands at runtime. Use -dynamic-import=eager for a single self-contained --static binary, or drop --static to ship the islands alongside the executable")
+	}
+
 	em := llvm.NewEmitter()
 	em.SetMemMode(*mm)
+	em.SetDynamicImportMode(*dynImport)
 	em.SetRegexMode(*regex)
 	em.SetBigIntBackend(*bigint)
 	em.SetCryptoBackend(*cryptoBackend)
@@ -210,6 +227,72 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "compiled: %s\n", outBin)
+
+	// TDD-00056 lazy backend: compile each dynamic-import target into its own
+	// shared-library island beside the binary, in a `<binary>.d/` directory, so
+	// the executable dlopen()s it (self-locating) on first `import()`. Each
+	// island is an independent whole-program compile rooted at its target
+	// (nested dynamic imports inside an island stay eager in V1).
+	if *dynImport == "lazy" && len(prog.IslandRoots) > 0 {
+		islandDir := outBin + ".d"
+		if err := os.MkdirAll(islandDir, 0755); err != nil {
+			fatal("cannot create island directory %s: %v", islandDir, err)
+		}
+		soExt := ".so"
+		if runtime.GOOS == "darwin" {
+			soExt = ".dylib"
+		}
+		for _, root := range prog.IslandRoots {
+			hash := llvm.IslandHash(root)
+			iprog, err := resolver.ResolveProgramWithOptions(root, *compat == "js", false)
+			if err != nil {
+				fatal("island %s: parse error: %v", root, err)
+			}
+			iem := llvm.NewEmitter()
+			iem.SetMemMode(*mm)
+			iem.SetRegexMode(*regex)
+			iem.SetBigIntBackend(*bigint)
+			iem.SetCryptoBackend(*cryptoBackend)
+			iem.SetCompatMode(*compat)
+			iem.SetIslandHash(hash)
+			iir, err := iem.EmitProgram(iprog)
+			if err != nil {
+				fatal("island %s: codegen error: %v", root, err)
+			}
+			illFile := filepath.Join(islandDir, hash+".ll")
+			if err := os.WriteFile(illFile, []byte(iir), 0644); err != nil {
+				fatal("cannot write island IR: %v", err)
+			}
+			soPath := filepath.Join(islandDir, hash+soExt)
+			iArgs := []string{"-O2", "-shared", "-fPIC", illFile, "-o", soPath}
+			if iem.UsesWorkers() {
+				iArgs = append(iArgs, "-pthread")
+			}
+			for _, lib := range iem.LinkLibs() {
+				iArgs = append(iArgs, "-l"+lib)
+			}
+			iCSources, cerr := iem.EmbeddedCSources()
+			if cerr != nil {
+				fatal("island %s: %v", root, cerr)
+			}
+			for _, cs := range iCSources {
+				cPath := filepath.Join(islandDir, hash+"."+cs.Name+"."+cs.SrcExt())
+				if err := os.WriteFile(cPath, []byte(cs.Content), 0644); err != nil {
+					fatal("cannot write island %s source: %v", cs.Name, err)
+				}
+				iArgs = append(iArgs, cPath)
+				iArgs = append(iArgs, cs.CFlags...)
+				iArgs = append(iArgs, cs.Libs...)
+			}
+			icmd := exec.Command("clang", iArgs...)
+			icmd.Stdout = os.Stdout
+			icmd.Stderr = os.Stderr
+			if err := icmd.Run(); err != nil {
+				fatal("island %s: clang: %v", root, err)
+			}
+			fmt.Fprintf(os.Stderr, "  island: %s\n", soPath)
+		}
+	}
 
 	// --emit-window-dts (TDD-00142 Stage 6): write the page-side Window typing
 	// for this program's typed bindings next to the output.

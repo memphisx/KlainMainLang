@@ -27,12 +27,11 @@
       "statusRow": "Uint8Array / Int8Array / Uint16Array / Int16Array / Uint32Array / Int32Array / Float32Array / Float64Array",
       "signature": "new Uint8Array(size | ArrayBuffer | number[] | TypedArray)",
       "badge": "caveats",
-      "description": "Typed views over bytes, in three construction forms: a size (own new zero-filled buffer), an existing ArrayBuffer (a view sharing the same memory — writes through one view are visible through any other view over the same buffer, including a differently-typed one), the sub-range form new XArray(buf, byteOffset, length?), or a number[]/array literal/another TypedArray (a copy). Indexing, .length, the whole number[] HOF/iterator surface, plus the TypedArray-specific .set(source, offset?), .subarray(start?, end?) (a view, not a copy), and .byteLength. Non-clamped writes wrap mod 2^width, matching real JS.",
+      "description": "Typed views over bytes, in three construction forms: a size (own new zero-filled buffer), an existing ArrayBuffer (a view sharing the same memory — writes through one view are visible through any other view over the same buffer, including a differently-typed one), the sub-range form new XArray(buf, byteOffset, length?), or a number[]/array literal/another TypedArray (a copy). Indexing, .length, the whole number[] HOF/iterator surface, plus the TypedArray-specific .set(source, offset?), .subarray(start?, end?) (a view, not a copy), and .byteLength. Non-clamped writes wrap mod 2^width, matching real JS. Construction is a general expression — usable as a function argument, return value, object field, or method-chain head, not only a variable declaration's initializer.",
       "returns": { "type": "TypedArray", "desc": "A typed view or an own buffer." },
       "exampleKey": "typedarrays/typedarrays",
       "snippet": "const buf = new ArrayBuffer(8)\nconst bytes: Uint8Array = new Uint8Array(buf)\nconst ints: Int32Array = new Int32Array(buf)\nbytes[0] = 1\nconsole.log(ints[0])           // 1 — same 4 bytes as an i32",
       "differences": [
-        "Construction is restricted to a variable declaration's initializer — `new Uint8Array(...)` can't appear as a general expression (TypedArrays weren't in scope for the change that lifted the identical restriction on plain array literals and `new Array<T>(...)`/`new Map<K,V>()`/`new Set<T>()`/`new EventEmitter<T>()`, but not for TypedArrays)",
         "No `.buffer` property (would require every TypedArray, including the \"own buffer\" form, to carry a back-reference to a real `ArrayBuffer` object — a shape change from the plain `{ptr,i64}` array representation)"
       ],
       "seeAlso": ["typedarray.arraybuffer", "typedarray.uint8clampedarray", "typedarray.bigint64arraybiguint64ar", "typedarray.dataview"],

@@ -1,6 +1,9 @@
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+)
 
 // CSource is one embedded C runtime file that must be compiled and linked
 // alongside the emitted LLVM IR when the program uses the corresponding
@@ -76,6 +79,15 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	}
 	if e.UsesBufferCodecs() {
 		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
+	}
+	if e.usesDynamicImport && e.dynamicImportMode == "lazy" {
+		// The dlopen island loader (TDD-00056). Linux resolves dlopen from
+		// libdl (-ldl); macOS ships it in libSystem, so no extra lib there.
+		var libs []string
+		if runtime.GOOS != "darwin" {
+			libs = []string{"-ldl"}
+		}
+		out = append(out, CSource{"dynimport", DynImportShimSource(), nil, libs, ""})
 	}
 	if e.UsesJSONParse() {
 		out = append(out, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})

@@ -677,6 +677,13 @@ func (e *Emitter) cpArrowClosure(arg ast.Expression, hints []Type, pos ast.Pos) 
 	if cb.kind != cbClosure {
 		return "", fmt.Errorf("%d:%d: a ChildProcess listener must be an arrow function literal", pos.Line, pos.Col)
 	}
+	// A Uint8Array 'data' chunk crosses from the runtime as a raw (ptr, len)
+	// pair; its object-reference array parameter expects a header (TDD-00127),
+	// so wrap the listener in the header-boxing adapter. Non-array listeners
+	// ('end'/'close'/…) pass through unchanged.
+	if len(cb.ty.FuncParams) > 0 && cb.ty.FuncParams[0].IsArray {
+		return e.chunkHeaderAdapterClosure(cb.hdrPtr), nil
+	}
 	return cb.hdrPtr, nil
 }
 

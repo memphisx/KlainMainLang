@@ -217,10 +217,11 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 			return "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
 		elemTy = *sym.Ty.ElemType
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtrReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, dataSlot))
 		lenReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 	} else {
 		// Expression producing a {ptr, i64} aggregate (e.g. arr.slice(1), Object.keys(obj)).
 		arrVal, evalErr := e.emitExpr(ex.Object)
@@ -780,6 +781,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.loadFieldValue(objVal, idx, fieldTy), nil
 		}
 	}
+	// res.statusCode (ServerResponse, TDD-00131) reads the `status` field —
+	// Node names the property `statusCode`, the object field is `status`.
+	if ex.Property == "statusCode" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsServerResponse {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			idx, fieldTy, _ := objVal.Ty.FieldIndex("status")
+			return e.loadFieldValue(objVal, idx, fieldTy), nil
+		}
+	}
 	// complete the buffer in place before the plain field read below.
 	if ex.Property == "body" {
 		if objTy := e.inferExprType(ex.Object); objTy.IsRequest {
@@ -889,8 +902,9 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				return e.emitArrayBufferByteLength(Value{Ref: bufPtr, Ty: sym.Ty})
 			}
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsTypedArray {
+				_, lenSlot := e.arrayDataLenSlots(sym)
 				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 				bl, err := e.emitTypedArrayByteLength(lenReg, *sym.Ty.ElemType)
 				if err != nil {
 					return Value{}, err
@@ -930,8 +944,9 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 					return e.countToNumber(Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}), nil
 				}
 				if sym.Ty.IsArray {
+					_, lenSlot := e.arrayDataLenSlots(sym)
 					reg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.LenPtr))
+					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, lenSlot))
 					return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
 				}
 			}

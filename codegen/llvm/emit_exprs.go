@@ -157,7 +157,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 	case *ast.NewMessageChannelExpression:
 		return e.emitNewMessageChannelExpression(ex)
 	case *ast.NewTypedArrayExpression:
-		return Value{}, fmt.Errorf("%d:%d: a TypedArray constructor must be used in a variable declaration", ex.GetPos().Line, ex.GetPos().Col)
+		return e.emitNewTypedArrayAggregate(ex)
+	case *ast.ImportCallExpression:
+		return e.emitImportCall(ex)
 	case *ast.NewTextEncoderExpression:
 		return Value{Ref: "null", Ty: TextEncoderType()}, nil
 	case *ast.NewTextDecoderExpression:
@@ -344,10 +346,11 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// instead, once, so every caller of emitExpr on a bare array
 		// identifier gets the same correctly-shaped Value a HOF result or
 		// a return statement already would. See docs/adr/ADR-00061.md.
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		ptrReg := e.freshReg()
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 		r0 := e.freshReg()
 		r1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))

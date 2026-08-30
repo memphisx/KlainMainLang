@@ -839,7 +839,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 func resolveMultiFilePermissive(t *testing.T, files map[string]string, entryName string) (*ast.Program, error) {
 	t.Helper()
 	dir := writeMultiFile(t, files)
-	return resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true)
+	return resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true, false)
 }
 
 // buildBinaryMultiFilePermissive is buildBinaryMultiFile's
@@ -851,7 +851,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 	dir := writeMultiFile(t, files)
 
-	prog, err := resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true)
+	prog, err := resolver.ResolveProgramWithOptions(filepath.Join(dir, entryName), true, false)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

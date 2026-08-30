@@ -2494,14 +2494,13 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	varPtr := e.freshReg()
-	var varLenPtr string
 	if isPattern {
 		// no pre-loop binding — the element is unpacked in the body
 	} else if awaitedTy.IsArray {
-		varLenPtr = e.freshReg()
+		// Object-reference model (TDD-00127): a stable slot holding a pointer to
+		// the current element's header, rebuilt each iteration.
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
-		e.define(s.VarName, Symbol{Ptr: varPtr, LenPtr: varLenPtr, Ty: awaitedTy})
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
 	} else {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, awaitedTy.IR, awaitedTy.Align()))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
@@ -2556,12 +2555,9 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 		}
 	default:
 		if awaitedTy.IsArray {
-			ptrR := e.freshReg()
-			lenR := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrR, boundVal.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenR, boundVal.Ref))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrR, varPtr))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenR, varLenPtr))
+			// Point the loop variable's slot at a fresh header for this element.
+			elemHeader := e.boxArrayValue(boundVal)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemHeader, varPtr))
 		} else if awaitedTy.IR != "void" && awaitedTy.IR != "" {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, awaitedTy.Align()))
 		}

@@ -321,3 +321,26 @@ console.log(i32[0])
 console.log(i32.byteLength)
 `, "-100000\n16")
 }
+
+// TDD-00018 Stage 5 (ADR-00512): a TypedArray constructor as a general
+// expression — inline function argument, function return value, object field,
+// and an inline method chain — not only a variable declaration's initializer.
+func TestE2ETypedArrayGeneralExpression(t *testing.T) {
+	assertOutput(t, `
+function sum(a: Uint8Array): number {
+  let s = 0
+  for (const x of a) { s = s + x }
+  return s
+}
+function make(n: number): Uint8Array {
+  return new Uint8Array([n, n + 1, n + 2])
+}
+console.log(sum(new Uint8Array([10, 20, 30])))
+const m = make(5)
+console.log(m.length, m[2])
+console.log(sum(new Uint8Array(4)))
+console.log(new Int32Array([1, 2, 3]).map((x) => x * 2).join(","))
+const o: { buf: Uint8Array } = { buf: new Uint8Array([7, 8, 9]) }
+console.log(o.buf.length, o.buf[1])
+`, "60\n3 7\n0\n2,4,6\n3 8")
+}

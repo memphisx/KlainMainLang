@@ -29,7 +29,13 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		if !sym.Ty.IsArray || sym.Ty.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, obj.Name)
 		}
-		return sym.Ptr, sym.LenPtr, *sym.Ty.ElemType, nil
+		// Object-reference model (TDD-00127): the data/len field addresses of the
+		// array's *current* shared header. A mutator writing a new data ptr/len
+		// through these addresses updates the one header every alias — including a
+		// callee this array was passed to — observes, giving JS reference
+		// semantics (push/splice inside a callee grow the caller's array).
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		return dataSlot, lenSlot, *sym.Ty.ElemType, nil
 
 	case *ast.MemberExpression:
 		objVal, evalErr := e.emitExpr(obj.Object)

@@ -829,8 +829,13 @@ func (e *Emitter) emitHTTPServerListen(objVal Value, args []ast.Expression, pos 
 		}
 	}
 
-	e.emitInstr("call void @__kml_event_loop_run()")
-	e.emitPostLoopFlush()
+	// Non-blocking (TDD-00131 / ADR-00514): the listener is registered above and
+	// the ready callback has already fired synchronously; the event loop is NOT
+	// run here. The Pass 3 tail (emitter.go) drives it after the top-level
+	// script, so code following `server.listen(...)` runs first — Node's
+	// listen-then-continue flow. (`.address().port` works because the fd was
+	// bound and stored above, before this returns.)
+	e.usedHTTPListen = true
 	// Node's listen() returns the server, enabling the chained-binding idiom
 	// `const server = http.createServer(cb).listen(0, cb2)`.
 	return objVal, nil
@@ -903,6 +908,23 @@ func (e *Emitter) emitServerResponseMethod(resExpr ast.Expression, method string
 				return Value{}, err
 			}
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined.Ref, bgep))
+		}
+		// Node's res.write returns a boolean backpressure signal: false when the
+		// kernel buffer is full and the caller should await 'drain'. This
+		// response sink is buffered (flushed after the handler returns), so it
+		// never applies backpressure — write always reports true, matching a sink
+		// that accepted the chunk. res.end returns void here (Node returns the
+		// stream; the chaining return value is rarely used).
+		if method == "write" {
+			return Value{Ref: "true", Ty: TypeBool}, nil
+		}
+		return Value{Ty: TypeVoid}, nil
+	case "cork", "uncork":
+		// Writable hints to batch writes. For a buffered sink they are valid
+		// no-ops (nothing is written incrementally to coalesce). Accepted so
+		// portable Node code using them compiles and runs unchanged.
+		if len(args) != 0 {
+			return Value{}, fmt.Errorf("%d:%d: res.%s takes no arguments", pos.Line, pos.Col, method)
 		}
 		return Value{Ty: TypeVoid}, nil
 	}

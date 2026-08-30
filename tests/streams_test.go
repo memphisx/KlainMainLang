@@ -1019,6 +1019,86 @@ sink.end();
 `, "collected: alpha,beta")
 }
 
+// TDD-00132 Stage C1: `class X extends Duplex` — two independent sides on one
+// instance, a `_read()` push loop and a `_write(chunk)` sink, sharing the
+// hidden Node-stream handle. `<T>` names both the readable-out and writable-in
+// chunk type.
+func TestE2ENodeStreamClassExtendsDuplex(t *testing.T) {
+	assertOutputImports(t, `
+import { Duplex } from 'stream';
+import { finished } from 'stream/promises';
+class Echo extends Duplex<string> {
+  queue: string[] = ["one", "two", "three"];
+  i: number = 0;
+  received: string[] = [];
+  _read() {
+    if (this.i >= this.queue.length) { this.push(null); }
+    else { this.push(this.queue[this.i]); this.i = this.i + 1; }
+  }
+  _write(chunk: string, enc: string, cb: () => void) {
+    this.received.push(chunk);
+    cb();
+  }
+}
+const d = new Echo();
+const out: string[] = [];
+d.on("data", (c) => { out.push(c); });
+d.on("finish", () => { console.log("wrote:", d.received.join(",")); });
+d.write("alpha");
+d.write("beta");
+d.end();
+await finished(d);
+console.log("read:", out.join(" "));
+`, "wrote: alpha,beta\nread: one two three")
+}
+
+// TDD-00132 Stage C2: `class X extends Transform` — the writable sink routes
+// each chunk through a `_transform(chunk, enc, cb)` override whose `this.push`
+// feeds the readable side. Reuses the TransformStream TSCTX sink/pull machine.
+func TestE2ENodeStreamClassExtendsTransform(t *testing.T) {
+	assertOutputImports(t, `
+import { Transform } from 'stream';
+import { finished } from 'stream/promises';
+class Upper extends Transform<string> {
+  _transform(chunk: string, enc: string, cb: () => void) {
+    this.push(chunk.toUpperCase());
+    cb();
+  }
+}
+const up = new Upper();
+const out: string[] = [];
+up.on("data", (c) => { out.push(c); });
+up.write("kalimera");
+up.write("thessaloniki");
+up.end();
+await finished(up);
+console.log("out:", out.join(" "));
+`, "out: KALIMERA THESSALONIKI")
+}
+
+// TDD-00132 Stage C2: a class-form Transform as a `.pipe()` destination, with a
+// small highWaterMark exercising the TSCTX chunk-parking backpressure path.
+func TestE2ENodeStreamClassTransformPipe(t *testing.T) {
+	assertOutputImports(t, `
+import { Readable, Transform } from 'stream';
+import { finished } from 'stream/promises';
+class Doubler extends Transform<number> {
+  constructor() { super({ highWaterMark: 2 }); }
+  _transform(n: number, enc: string, cb: () => void) {
+    this.push(n * 2);
+    cb();
+  }
+}
+const src = Readable.from([1, 2, 3, 4, 5]);
+const d = new Doubler();
+const out: number[] = [];
+d.on("data", (v) => { out.push(v); });
+src.pipe(d);
+await finished(d);
+console.log("doubled:", out.join(","));
+`, "doubled: 2,4,6,8,10")
+}
+
 // TDD-00132: `super({ highWaterMark, objectMode })` threading into a stream
 // subclass's hidden handle, plus options-form highWaterMark.
 func TestE2ENodeStreamClassSuperOptions(t *testing.T) {

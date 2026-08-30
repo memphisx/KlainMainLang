@@ -49,6 +49,36 @@ type Program struct {
 	// the resolver can resolve worker entry files as dependencies without a
 	// full-AST walk (TDD-00098). Empty in the merged program.
 	WorkerPaths []string
+	// DynamicImportPaths is filled by the parser for a single file's program:
+	// the raw string-literal specifier of every dynamic `import('...')` with a
+	// literal argument, so the resolver can resolve dynamic-import targets as
+	// dependencies without a full-AST walk (TDD-00055/TDD-00056), mirroring
+	// WorkerPaths. A non-literal `import(expr)` is not recorded here (it is a
+	// clean codegen-time error). Empty in the merged program.
+	DynamicImportPaths []string
+	// DynamicImportNodes is the parser-filled list of the actual dynamic
+	// `import('...')` AST nodes with a literal specifier (same objects that end
+	// up in the merged Body), so the resolver can annotate each with its
+	// ResolvedPath in the per-file pass where the importing directory is known.
+	DynamicImportNodes []*ImportCallExpression
+	// UsesDynamicImport is set by the resolver on the merged program when the
+	// program contains at least one dynamic `import('...')` — used by main.go to
+	// gate the `--static` + `-dynamic-import=lazy` mutual-exclusion check
+	// (TDD-00056) without re-walking.
+	UsesDynamicImport bool
+	// IslandRoots is filled by the resolver on the merged program under the
+	// lazy dynamic-import backend (TDD-00056): the resolved absolute path of
+	// each distinct dynamic-import target that is compiled to its own
+	// shared-library island rather than merged into this program. Empty under
+	// the eager backend (where targets are merged like any static import).
+	IslandRoots []string
+	// EntryExportMangled is set by the resolver on every merged program: a map
+	// from each entry-file export's public name to its whole-program mangled
+	// name. Used when this program is compiled as a shared-library island
+	// (TDD-00056) to expose each export as a `__kml_dynmod_<hash>_<public>`
+	// accessor reading the mangled module global. Codegen at the loading call
+	// site reads the same public names to build the result object's fields.
+	EntryExportMangled map[string]string
 	// WorkerModules is filled by the resolver on the merged program: one
 	// entry per distinct worker entry file, holding that file's top-level
 	// statements — kept out of Body so codegen emits them into a dedicated
@@ -153,6 +183,12 @@ type FunctionDeclaration struct {
 	// every bare-T parameter/return position treated as TypeAny instead.
 	// Meaningless (always false) unless len(TypeParams) > 0.
 	Erased     bool
+	// Pure is set by a `/** @pure */` JSDoc annotation (TDD-00128): the function
+	// is asserted side-effect-free, and a front-end pass (codegen/llvm/
+	// pure_check.go) ENFORCES it — rejecting parameter/captured/global mutation,
+	// I/O, nondeterminism, and calls to non-@pure functions. Zero codegen effect;
+	// a violation is a compile error. `async`/generator are rejected at parse time.
+	Pure       bool
 	Params     []Param
 	ReturnType *TypeAnnotation
 	Body       *BlockStatement // nil for an abstract method (IsAbstract true) — signature only
@@ -861,6 +897,7 @@ type ArrowFunction struct {
 	Body    Expression      // non-nil for `=> expr`
 	Block   *BlockStatement // non-nil for `=> { stmts }`
 	IsAsync bool
+	Pure    bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
 	pos     Pos
 }
 
@@ -889,6 +926,7 @@ type FunctionExpression struct {
 	// supported — rewritten into a named generator declaration pre-emission;
 	// any other use is a clean codegen rejection.
 	IsGenerator bool
+	Pure        bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
 	pos         Pos
 }
 
@@ -1897,6 +1935,44 @@ func (*ImportMetaUrl) exprMarker()   {}
 func (i *ImportMetaUrl) GetPos() Pos { return i.pos }
 
 func NewImportMetaUrl(pos Pos) *ImportMetaUrl { return &ImportMetaUrl{pos: pos} }
+
+// ImportCallExpression represents a dynamic `import(specifier)` expression
+// (TDD-00055 / TDD-00056). Specifier stays a general expression at the parser
+// level so a non-string-literal argument becomes a clear resolve-time error
+// ("dynamic import requires a string-literal specifier") rather than a
+// confusing parse-time rejection. The resolver treats a literal specifier as a
+// dependency edge; under `-dynamic-import=lazy` (TDD-00056) the target becomes
+// a separately-compiled shared-library island loaded on first use.
+type ImportCallExpression struct {
+	Specifier Expression
+	// ResolvedPath is set by the resolver for a string-literal specifier: the
+	// target's absolute source path. Codegen uses it to compute the island hash
+	// (TDD-00056) and the dlopen path. Empty for a non-literal specifier (a
+	// clean codegen error).
+	ResolvedPath string
+	// Exports is set by the resolver under the lazy backend: the target's
+	// annotated top-level value exports, so the loading call site can build the
+	// typed result object (each field read via a dlsym'd island accessor).
+	// Only annotated `export const/let/var` bindings of simple type are
+	// included in V1.
+	Exports []ImportCallExport
+	pos     Pos
+}
+
+// ImportCallExport is one annotated value export of a dynamic-import target
+// (TDD-00056), used to shape the result object at the loading call site.
+type ImportCallExport struct {
+	Name      string
+	TypeAnnot *TypeAnnotation
+}
+
+func (*ImportCallExpression) nodeMarker()   {}
+func (*ImportCallExpression) exprMarker()   {}
+func (i *ImportCallExpression) GetPos() Pos { return i.pos }
+
+func NewImportCallExpression(specifier Expression, pos Pos) *ImportCallExpression {
+	return &ImportCallExpression{Specifier: specifier, pos: pos}
+}
 
 // --- Type annotations ---
 

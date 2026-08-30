@@ -552,7 +552,86 @@ func (e *Emitter) netArrowClosure(arg ast.Expression, hints []Type, pos ast.Pos)
 	if cb.kind != cbClosure {
 		return "", fmt.Errorf("%d:%d: a net socket listener must be an arrow function literal", pos.Line, pos.Col)
 	}
+	// The net/dgram runtime delivers a data/message chunk as a raw (ptr, len)
+	// pair. A `string` listener consumes that directly, but a `Uint8Array`
+	// listener's array parameter is an object-reference array expecting a header
+	// pointer (TDD-00127) — wrap it in an adapter that boxes (ptr, len) into a
+	// fresh header before forwarding.
+	if len(cb.ty.FuncParams) > 0 && cb.ty.FuncParams[0].IsArray {
+		return e.chunkHeaderAdapterClosure(cb.hdrPtr), nil
+	}
 	return cb.hdrPtr, nil
+}
+
+// ensureChunkHeaderAdapter emits (once) an adapter of the runtime chunk-listener
+// ABI `void(ptr %env, ptr %buf, i64 %n)` whose %env is the *real* listener
+// closure {fp, env}. It boxes (%buf, %n) into a fresh {data,len} header and
+// forwards to the real closure with (realEnv, header, %n) — the object-reference
+// array ABI a `Uint8Array` listener expects (TDD-00127).
+func (e *Emitter) ensureChunkHeaderAdapter() string {
+	fn := "@__kml_chunk_hdr_adapter"
+	if e.chunkHdrAdapterEmitted {
+		return fn
+	}
+	e.chunkHdrAdapterEmitted = true
+	e.ensureMalloc()
+	restore := e.beginThunkEmit()
+	rfpp := e.freshReg()
+	rfp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", rfpp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rfp, rfpp))
+	repp := e.freshReg()
+	rep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", repp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rep, repp))
+	hdr := e.newArrayHeader("%buf", "%n")
+	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %%n)", rfp, rep, hdr))
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env, ptr %%buf, i64 %%n) {\nentry:\n%sret void\n}\n", fn, body))
+	return fn
+}
+
+// chunkHeaderAdapterClosure wraps a real Uint8Array data/message listener
+// closure so the raw (ptr,len) chunk the runtime delivers is boxed into a header
+// first (see ensureChunkHeaderAdapter).
+func (e *Emitter) chunkHeaderAdapterClosure(realCloHdr string) string {
+	fn := e.ensureChunkHeaderAdapter()
+	return e.buildBuiltinClosure(fn, realCloHdr)
+}
+
+// ensureDgramMsgHeaderAdapter is ensureChunkHeaderAdapter's sibling for dgram's
+// 4-word message ABI `void(ptr %env, ptr %buf, i64 %n, ptr %rinfo)` — it boxes
+// (%buf, %n) into a header and forwards (realEnv, header, %n, %rinfo).
+func (e *Emitter) ensureDgramMsgHeaderAdapter() string {
+	fn := "@__kml_dgram_msg_hdr_adapter"
+	if e.dgramMsgHdrAdapterEmitted {
+		return fn
+	}
+	e.dgramMsgHdrAdapterEmitted = true
+	e.ensureMalloc()
+	restore := e.beginThunkEmit()
+	rfpp := e.freshReg()
+	rfp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", rfpp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rfp, rfpp))
+	repp := e.freshReg()
+	rep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", repp))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rep, repp))
+	hdr := e.newArrayHeader("%buf", "%n")
+	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %%n, ptr %%rinfo)", rfp, rep, hdr))
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env, ptr %%buf, i64 %%n, ptr %%rinfo) {\nentry:\n%sret void\n}\n", fn, body))
+	return fn
+}
+
+// dgramMsgHeaderAdapterClosure wraps a Uint8Array dgram 'message' listener so
+// the raw (ptr,len) message is boxed into a header (see the adapter above).
+func (e *Emitter) dgramMsgHeaderAdapterClosure(realCloHdr string) string {
+	fn := e.ensureDgramMsgHeaderAdapter()
+	return e.buildBuiltinClosure(fn, realCloHdr)
 }
 
 // isInlineCallback reports whether expr is a callback literal (arrow or

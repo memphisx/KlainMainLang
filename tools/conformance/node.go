@@ -58,7 +58,7 @@ func frontEnd(entryPath string) (e emitted, err error) {
 	// global (`var Symbol = …`), so the permissive compat mode is the
 	// faithful measurement configuration (ADR-00472). Tier-2 names stay
 	// reserved either way.
-	prog, perr := resolver.ResolveProgramWithOptions(entryPath, true)
+	prog, perr := resolver.ResolveProgramWithOptions(entryPath, true, false)
 	if perr != nil {
 		return emitted{}, perr
 	}

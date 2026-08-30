@@ -74,18 +74,12 @@ func (e *Emitter) unpackTuplePatternInto(objPtr string, tupleTy Type, elems []as
 		}
 
 		if fieldTy.IsArray {
-			// An array element binds as the two-alloca "Named Symbol" shape so
-			// its own .length/indexing work afterward (same as the array-source
-			// path and array-typed object fields).
+			// An array element binds under the object-reference model (TDD-00127):
+			// a stable slot holding a pointer to a fresh header wrapping the
+			// element's aggregate, so its .length/indexing/mutators work.
 			val := e.loadScalarOrNullableField(gepReg, fieldTy) // {ptr,i64} aggregate
-			ptrName := e.freshReg()
-			lenName := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
-			if err := e.storeArrayAggregateInto(val, ptrName, lenName); err != nil {
-				return err
-			}
-			e.define(elem.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: fieldTy})
+			slot := e.newArrayHeaderSlotFromAggregate(val)
+			e.define(elem.Name, Symbol{Ptr: slot, Ty: fieldTy})
 			continue
 		}
 

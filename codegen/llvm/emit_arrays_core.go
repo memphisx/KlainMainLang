@@ -7,22 +7,26 @@ import (
 
 func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	elemTy := *ty.ElemType
-	var ptrName, lenName string
-	// Module-global promotion (TDD-00093): a top-level array binding is backed by
-	// two pre-registered globals (data ptr + length) so a named function can read
-	// it; store into those rather than fresh local allocas. Already in
-	// e.moduleGlobals (lookup resolves it) and zero-initialized, so no local
-	// define/default is needed.
+	// Object-reference array model (TDD-00127): a named array is a *stable slot*
+	// (Symbol.Ptr) holding a pointer to a shared heap {data, len} header. The
+	// slot is a fresh `alloca ptr` for a local, or the pre-registered module
+	// global for a promoted top-level binding (TDD-00093). Allocate the header
+	// now and point the slot at it; every branch below then fills the header's
+	// data/len fields through ptrName/lenName exactly as it used to fill the two
+	// separate allocas — the field addresses are all that changed, so those
+	// branches are untouched.
+	var slot string
 	if e.promotedGlobalDecls[v] {
-		g := e.moduleGlobals[v.Name]
-		ptrName, lenName = g.Ptr, g.LenPtr
+		slot = e.moduleGlobals[v.Name].Ptr
 	} else {
-		ptrName = e.freshReg()
-		lenName = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
-		e.define(v.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: ty, IsConst: v.Kind == "const"})
+		slot = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.define(v.Name, Symbol{Ptr: slot, Ty: ty, IsConst: v.Kind == "const"})
 	}
+	ptrName := e.newArrayHeader("null", "0")
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrName, slot))
+	lenName := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenName, arrayHeaderTy, ptrName))
 
 	if v.Init == nil {
 		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
@@ -118,6 +122,123 @@ func (e *Emitter) boxArrayValue(val Value) string {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", box))
 	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", val.Ref, box))
 	return box
+}
+
+// arrayHeaderTy is the LLVM type of a named array's shared header cell — a
+// heap {data, len} record (TDD-00127). Under the object-reference array model,
+// a named array variable's Symbol.Ptr is a *stable slot* (an `alloca ptr`, or a
+// module global) holding a pointer to one of these headers. Reads/mutators
+// re-derive the data/len field addresses from the current header
+// (arrayDataLenSlots); a reassignment swaps the whole header pointer in the
+// slot (aliasing, faithful JS reference semantics); an in-place mutator
+// (push/splice/...) writes a new data pointer/length *through* the header, so it
+// propagates to every alias — including a callee the array was passed to, since
+// the header pointer is what crosses the call boundary. (No capacity field yet:
+// amortized-growth perf work is deliberately deferred — see the TDD.)
+const arrayHeaderTy = "{ ptr, i64 }"
+
+// newArrayHeader mallocs a fresh {ptr, i64} header initialised from a data
+// pointer and length, returning the header pointer (== the address of its data
+// field, since field 0 is at offset 0).
+func (e *Emitter) newArrayHeader(dataReg, lenReg string) string {
+	e.ensureMalloc()
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", h))
+	lp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, h))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, h))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lp))
+	return h
+}
+
+// arrayDataLenSlots derives the addresses of the data and length fields of an
+// array symbol's *current* header. dataSlot is the header pointer itself (field
+// 0 at offset 0); lenSlot is field 1. Every named-array read and in-place
+// mutator goes through here, so it always observes the header the slot points
+// at *now* (post any reassignment), and writes through it propagate to aliases.
+func (e *Emitter) arrayDataLenSlots(sym Symbol) (dataSlot, lenSlot string) {
+	h := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, sym.Ptr))
+	lenSlot = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenSlot, arrayHeaderTy, h))
+	return h, lenSlot
+}
+
+// newArrayHeaderSlot allocates a stable stack slot (`alloca ptr`) holding a
+// pointer to a fresh header built from (dataReg, lenReg), returning the slot —
+// the storage of a named array variable (object-reference model, TDD-00127).
+func (e *Emitter) newArrayHeaderSlot(dataReg, lenReg string) string {
+	header := e.newArrayHeader(dataReg, lenReg)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	return slot
+}
+
+// newArrayHeaderSlotFromAggregate boxes an array aggregate Value into a fresh
+// header and returns a stable slot (`alloca ptr`) pointing at it — the storage
+// of a named array variable initialised from an expression result (TDD-00127).
+func (e *Emitter) newArrayHeaderSlotFromAggregate(val Value) string {
+	header := e.boxArrayValue(val)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	return slot
+}
+
+// arrayArgFromAggregate materializes an array aggregate Value into a fresh
+// {data, len} header and returns (headerReg, lenReg) for packing as a (ptr, i64)
+// call argument under the object-reference ABI (TDD-00127). A transient
+// expression argument gets a fresh header (the callee may mutate it, but it has
+// no caller-visible identity); a named-variable argument should instead pass its
+// own header pointer so mutations propagate — see arrayDataLenSlots.
+func (e *Emitter) arrayArgFromAggregate(val Value) (header, lenReg string) {
+	header = e.boxArrayValue(val)
+	lenReg = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+	return
+}
+
+// packArrayArg produces the (headerReg, lenReg) pair to pass an array argument
+// under the object-reference ABI (TDD-00127). When the argument is a named array
+// variable, its own header pointer is passed, so an in-place mutation inside the
+// callee (push/splice) propagates back to the caller — JS reference semantics.
+// Any other array expression is a transient with no caller-visible identity, so
+// a fresh header wrapping its aggregate is passed instead. (A member/index
+// array — e.g. `obj.field` — currently takes the transient path, so passing an
+// object's array field to a mutating function does not propagate; that is a
+// known limitation, not new behaviour.)
+func (e *Emitter) packArrayArg(arg ast.Expression, val Value) (header, lenReg string) {
+	if id, ok := arg.(*ast.Identifier); ok {
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
+			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+			lr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lr, lenSlot))
+			return dataSlot, lr
+		}
+	}
+	return e.arrayArgFromAggregate(val)
+}
+
+// emptyArrayArgHeader returns a fresh {null, 0} header for an empty array/rest
+// argument, so the callee reads length 0 rather than dereferencing a null
+// header (TDD-00127).
+func (e *Emitter) emptyArrayArgHeader() string {
+	return e.newArrayHeader("null", "0")
+}
+
+// bindArrayParam binds an array-typed function/method/closure parameter under
+// the object-reference model (TDD-00127). The incoming `%p_<name>_ptr` argument
+// is the caller's {data, len} header pointer; a stable slot (`%v_<name>_ptr`)
+// holds it, so in-place mutations (push/splice) propagate back to the caller
+// while a whole-variable reassignment rebinds only this frame. The companion
+// `%p_<name>_len` argument is redundant (length lives in the header) and left
+// unused — kept only so the two-word (ptr, i64) array ABI is unchanged.
+func (e *Emitter) bindArrayParam(name string, pty Type) {
+	slot := "%v_" + name + "_ptr"
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", name, slot))
+	e.define(name, Symbol{Ptr: slot, Ty: pty})
 }
 
 // unboxArrayValue loads the {ptr, i64} aggregate out of a box pointer
@@ -271,8 +392,9 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		if !found || !sym.Ty.IsArray {
 			return "", "", fmt.Errorf("%d:%d: '%s' is not an array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
 		}
+		_, spLenSlot := e.arrayDataLenSlots(sym)
 		spLenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", spLenReg, sym.LenPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", spLenReg, spLenSlot))
 		newTotal := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalReg, spLenReg))
 		totalReg = newTotal
@@ -294,11 +416,12 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		if sp, ok := elem.(*ast.SpreadElement); ok {
 			spId := sp.Arg.(*ast.Identifier) // already validated above
 			sym, _ := e.lookup(spId.Name)
-			// Load source ptr and length.
+			// Load source ptr and length from its current header.
+			srcDataSlot, srcLenSlot := e.arrayDataLenSlots(sym)
 			srcPtr := e.freshReg()
 			srcLen := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcPtr, sym.Ptr))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcLen, sym.LenPtr))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcPtr, srcDataSlot))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcLen, srcLenSlot))
 			// GEP to cursor position in dest.
 			cVal := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
@@ -547,13 +670,8 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
 			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
 
-			ptrAlloca := e.freshReg()
-			lenAlloca := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", restLen, lenAlloca))
-			e.define(elem.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: ArrayOf(elemTy)})
+			slot := e.newArrayHeaderSlot(newPtr, restLen)
+			e.define(elem.Name, Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
 			continue
 		}
 
@@ -564,24 +682,21 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		afterL := e.freshLabel("destr.after")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBoundsReg, okL, oobL))
 
-		// A destructured element that's itself an array needs the two-alloca
-		// "Named Symbol" representation (Ptr+LenPtr — the project's own Array value
-		// duality note), not the single scalar alloca every other element
-		// type uses, so its own .length/indexing/etc. work afterward. See
+		// A destructured element that's itself an array is stored under the
+		// object-reference model (TDD-00127): a stable slot holding a pointer to
+		// a heap {data, len} header. Each branch builds its own header from the
+		// aggregate it produces and points the shared slot at it. See
 		// docs/tdd/TDD-00029.md.
 		if elemTy.IsArray {
-			ptrName := e.freshReg()
-			lenName := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenName))
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 
 			e.emitLabel(okL)
 			gepReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
 			val := e.loadArrayElem(gepReg, elemTy)
-			if err := e.storeArrayAggregateInto(val, ptrName, lenName); err != nil {
-				return err
-			}
+			okHeader := e.boxArrayValue(val)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", okHeader, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(oobL)
@@ -593,17 +708,16 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 				if !defVal.Ty.IsArray {
 					return fmt.Errorf("%d:%d: destructuring default must be an array to match '%s'", elem.Default.GetPos().Line, elem.Default.GetPos().Col, elem.Name)
 				}
-				if err := e.storeArrayAggregateInto(defVal, ptrName, lenName); err != nil {
-					return err
-				}
+				defHeader := e.boxArrayValue(defVal)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", defHeader, slot))
 			} else {
-				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
-				e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenName))
+				emptyHeader := e.newArrayHeader("null", "0")
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", emptyHeader, slot))
 			}
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(afterL)
-			e.define(elem.Name, Symbol{Ptr: ptrName, LenPtr: lenName, Ty: elemTy})
+			e.define(elem.Name, Symbol{Ptr: slot, Ty: elemTy})
 			continue
 		}
 
@@ -734,10 +848,11 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 		if !found || !sym.Ty.IsArray {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, src.Name)
 		}
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtr = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 		return dataPtr, lenReg, *sym.Ty.ElemType, nil
 
 	case *ast.CallExpression:
@@ -776,10 +891,11 @@ func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrRe
 		if sym.Ty.ElemType != nil {
 			elemTy = *sym.Ty.ElemType
 		}
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		ptrReg = e.freshReg()
 		lenReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 		return
 	}
 	// Non-identifier: evaluate and extract from {ptr, i64} aggregate.

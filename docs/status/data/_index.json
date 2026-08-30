@@ -85,7 +85,7 @@
         {
           "category": "Array methods",
           "pageFile": "ARRAY-METHODS.md",
-          "caveats": "• A length-mutating method (`.push`/`.pop`/`.shift`/`.unshift`/`.splice`) on an array that is a **function parameter** does not propagate the new length back to the caller — arrays cross a call boundary as a flat `(ptr, len)` copy; element writes still propagate ([TDD-00127](../tdd/TDD-00127.md))<br>• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md))<br>• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))<br>• `.pop()`/`.shift()` on an empty array return the element type's zero value, not `undefined` ([ADR-00157](../adr/ADR-00157.md) convention)"
+          "caveats": "• A length-mutating method (`.push`/`.pop`/`.shift`/`.unshift`/`.splice`) inside a callee now grows the caller's array when it is passed as a plain **variable** — full JS reference semantics ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)); residual: an array passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element still crosses as a copy<br>• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md))<br>• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))<br>• `.pop()`/`.shift()` on an empty array return the element type's zero value, not `undefined` ([ADR-00157](../adr/ADR-00157.md) convention)"
         },
         {
           "category": "Number / Math",
@@ -135,7 +135,7 @@
         {
           "category": "Modules",
           "pageFile": "MODULES.md",
-          "caveats": "• Whole-program compile only<br>• `klmpm` is Stage 1 only — a `klain_modules/<name>/` package must be hand-built, no package-manager tool yet ([TDD-00054](../tdd/TDD-00054.md))<br>• No namespace re-exports (`export * as ns from`); no npm/`node_modules` interop ([TDD-00053](../tdd/TDD-00053.md)); no dynamic `import()`/dynamic-or-lazy `require()` (parse-time cleanly rejected — [TDD-00055](../tdd/TDD-00055.md)/[TDD-00056](../tdd/TDD-00056.md))<br>• Static CommonJS `require('<literal>')` works, desugared to an import ([ADR-00369](../adr/ADR-00369.md))<br>• Node-style built-ins (`fs`/`path`/…) require a default, namespace, named, or `require` import, not ambient; the `node:` prefix resolves too ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00419](../adr/ADR-00419.md))"
+          "caveats": "• Whole-program compile only<br>• `klmpm` is Stage 1 only — a `klain_modules/<name>/` package must be hand-built, no package-manager tool yet ([TDD-00054](../tdd/TDD-00054.md))<br>• No namespace re-exports (`export * as ns from`); no npm/`node_modules` interop ([TDD-00053](../tdd/TDD-00053.md)); dynamic `import()` works opt-in via `-dynamic-import=lazy` — real laziness through a `dlopen`'d `.so`/`.dylib` island per target ([ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); the eager compile-time-merge backend ([TDD-00055](../tdd/TDD-00055.md)) and a dynamic-or-lazy `require()` stay unbuilt<br>• Static CommonJS `require('<literal>')` works, desugared to an import ([ADR-00369](../adr/ADR-00369.md))<br>• Node-style built-ins (`fs`/`path`/…) require a default, namespace, named, or `require` import, not ambient; the `node:` prefix resolves too ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00419](../adr/ADR-00419.md))"
         }
       ]
     },
@@ -198,7 +198,7 @@
         {
           "category": "Streams",
           "pageFile": "STREAMS.md",
-          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• `class X extends Readable/Writable` works (options form too); no `extends Duplex/Transform`; `PassThrough`, `new Duplex(...)`, callback-style `pipeline`/`finished`, and `duplexPair()` shipped (string chunks; `finished` returns no cleanup fn)<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
+          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• `class X extends Readable/Writable/Duplex/Transform` works (options form too; no `_flush` override); `PassThrough`, `new Duplex(...)`, callback-style `pipeline`/`finished`, and `duplexPair()` shipped (string chunks; `finished` returns no cleanup fn)<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
         },
         {
           "category": "Events & Cancellation",
@@ -358,7 +358,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Notes |\n|---|---|\n| Decorators | Requires metadata reflection |\n| `Proxy` / `Reflect` | Dynamic property intercept; likely impractical |\n| Dynamic `import()` — real lazy / runtime-conditional loading | `import.meta.url` exists ([ADR-00148](../adr/ADR-00148.md)); genuine laziness needs a `.so`/`.dylib` island per target, at odds with whole-program AOT — see [MODULES.md](MODULES.md)/[TDD-00055](../tdd/TDD-00055.md)/[TDD-00056](../tdd/TDD-00056.md) |\n| Opt-in dynamic property add/delete on objects | Objects are fixed-shape heap structs — no runtime property add/delete (which is also why `Object.freeze`/`.seal` need no enforcement). Would need a different object representation, likely behind an opt-in flag; the dynamic/prototype object model is [TDD-00068](../tdd/TDD-00068.md)'s deferred Axis 2. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |\n| Best-effort vanilla JavaScript compatibility (opt-in flag) | Plain untyped JS fails on four independent things: class fields assigned only in the constructor (no upfront declaration), unannotated-parameter type mismatches, prototype-based pre-ES6 \"classes,\" and dynamic property addition — the last two need the same different object representation as the row above and stay out of scope even here. A naive \"default everything unannotated to `any`\" approach would not work: today's `any` runtime rejects arithmetic/most operators, so it wouldn't make ordinary code like `function add(a,b){return a+b}` compile either. See [TDD-00022](../tdd/TDD-00022.md); the implicit-`any`/operator-dispatch half is scoped separately in [TDD-00076](../tdd/TDD-00076.md). |"
+      "text": "| Feature | Notes |\n|---|---|\n| Decorators | Requires metadata reflection |\n| `Proxy` / `Reflect` | Dynamic property intercept; likely impractical |\n| Dynamic `import()` — runtime-variable specifier | Real laziness **shipped** under `-dynamic-import=lazy` (a `.so`/`.dylib` island per literal-specifier target, [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); what remains out of scope is a genuinely *runtime-computed* specifier (`import(expr)`), which whole-program AOT can't resolve — a bounded template-literal form is a possible follow-on, see [TDD-00056](../tdd/TDD-00056.md) |\n| Opt-in dynamic property add/delete on objects | Objects are fixed-shape heap structs — no runtime property add/delete (which is also why `Object.freeze`/`.seal` need no enforcement). Would need a different object representation, likely behind an opt-in flag; the dynamic/prototype object model is [TDD-00068](../tdd/TDD-00068.md)'s deferred Axis 2. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |\n| Best-effort vanilla JavaScript compatibility (opt-in flag) | Plain untyped JS fails on four independent things: class fields assigned only in the constructor (no upfront declaration), unannotated-parameter type mismatches, prototype-based pre-ES6 \"classes,\" and dynamic property addition — the last two need the same different object representation as the row above and stay out of scope even here. A naive \"default everything unannotated to `any`\" approach would not work: today's `any` runtime rejects arithmetic/most operators, so it wouldn't make ordinary code like `function add(a,b){return a+b}` compile either. See [TDD-00022](../tdd/TDD-00022.md); the implicit-`any`/operator-dispatch half is scoped separately in [TDD-00076](../tdd/TDD-00076.md). |"
     },
     {
       "kind": "block",
@@ -453,7 +453,7 @@
         },
         "55": {
           "title": "Dynamic `import(...)` and `import.meta`",
-          "notes": "`import.meta.url` exists; dynamic `import()` is a clean parse-time rejection — see the Modules row"
+          "notes": "`import.meta.url` exists; dynamic `import()` works opt-in via `-dynamic-import=lazy` (real laziness via `.so` islands) — see the Modules row"
         },
         "56": {
           "title": "Dynamic `import(...)` V2 — runtime-loaded shared libraries",
@@ -506,10 +506,6 @@
         "126": {
           "title": "Opt-in JSDoc/inline-TS type-enforcement flag",
           "notes": "Promote the currently-erased modifier tags (`@readonly`/`@private`/…) to enforced front-end checks"
-        },
-        "127": {
-          "title": "Boxed array representation (length mutations cross call boundaries)",
-          "notes": "Bug fix: arrays cross a call boundary as a flat `(ptr,len)` copy, so `.push` in a callee doesn't propagate — see the Array-methods row"
         },
         "128": {
           "title": "`@pure` — compile-time function-purity enforcement",

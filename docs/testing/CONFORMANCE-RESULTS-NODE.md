@@ -65,22 +65,22 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 271 | COMPILE_ERROR: a number has no method '%s' |
+| 273 | COMPILE_ERROR: a number has no method '%s' |
 | 116 | COMPILE_ERROR: undefined variable '%s' |
 | 94 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 86 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 75 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 62 | COMPILE_ERROR: no field '%s' |
+| 60 | COMPILE_ERROR: no field '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
+| 52 | COMPILE_ERROR: unknown class '%s' |
 | 51 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 51 | COMPILE_ERROR: unknown class '%s' |
-| 46 | COMPILE_ERROR: undefined function or closure '%s' |
+| 47 | COMPILE_ERROR: undefined function or closure '%s' |
 | 39 | COMPILE_ERROR: fs has no method '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 31 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
+| 32 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 28 | COMPILE_ERROR: initializer'%s's type — this compiler is a typed subset |
-| 26 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
+| 27 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
 | 26 | COMPILE_ERROR: process has no method '%s' |
 | 25 | COMPILE_ERROR: expected ), got => |
 | 23 | COMPILE_ERROR: a Request has no method '%s' |

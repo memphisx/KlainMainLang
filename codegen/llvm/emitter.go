@@ -17,8 +17,11 @@ type Value struct {
 
 // Symbol represents a local variable in the symbol table.
 type Symbol struct {
-	Ptr     string // alloca for the value (scalars) or the data pointer (arrays)
-	LenPtr  string // alloca for the array length; empty for scalars
+	// Ptr is the value's storage slot. For a scalar it is the alloca holding the
+	// value. For an array (object-reference model, TDD-00127) it is a stable
+	// slot — an `alloca ptr`, or a module global — holding a pointer to a shared
+	// heap {data, len} header; arrayDataLenSlots derives the field addresses.
+	Ptr     string
 	Ty      Type
 	Boxed   bool // true once Ptr points to a heap cell shared with closures that capture it
 	IsConst bool // true for a `const`-declared binding; checked by emitAssign to reject plain `=` reassignment
@@ -94,6 +97,10 @@ type Emitter struct {
 	strIdx                int
 	linkLibs              map[string]bool // external non-libc libraries the compiled program needs (e.g. "curl")
 	memMode               string          // "" (== "manual", the default) or "gc" — see SetMemMode
+	dynamicImportMode     string          // "eager" (default) or "lazy" — see SetDynamicImportMode (TDD-00055/TDD-00056)
+	usesDynamicImport     bool            // set when an import(...) call is emitted
+	islandHash            string          // non-empty when compiling a shared-library island (TDD-00056): its stable hash
+	dynImportShimDeclared bool            // guards the one-time @__kml_dynimport_run declaration
 	regexMode             string          // "" (== the default, resolving to the highest implemented ES stage) or "pcre"/"es-ascii"/"es-unicode" — see SetRegexMode / TDD-00067
 	bigintBackend         string          // "" (== "libtommath", the default) or "gmp" — the __kml_bigint_* ABI implementation to link. See SetBigIntBackend / TDD-00074
 	compatMode            string          // "" (== "strict", the default) or "js" — the whole-program compatibility axis. See SetCompatMode / TDD-00075
@@ -439,6 +446,14 @@ type Emitter struct {
 	usedTimers               bool
 	usedHTTP                 bool
 	usedHTTPClose            bool
+	// usedHTTPListen marks the Node `http.createServer(...).listen(...)`
+	// bound-handle path (TDD-00131): unlike the bespoke `http.listen`, it does
+	// not run the event loop inline — `listen()` registers the listener and
+	// returns (non-blocking, Node's listen-then-continue flow), and the Pass 3
+	// tail drives the event loop after the top-level script, like timers/SSE.
+	// (The bespoke `http.listen` stays blocking: its `{workers}` cluster fork
+	// relies on children never running post-listen top-level code.)
+	usedHTTPListen bool
 	// usedEventSource marks whether the *program* actually constructs an
 	// EventSource — distinct from ensureEventSourceRuntime's own internal
 	// idempotency flag (usedEventSourceRuntime, runtime_eventsource.go),
@@ -495,97 +510,99 @@ type Emitter struct {
 	// httpServerHandlerPending marks a zero-arg http.createServer() handle
 	// still waiting for its request handler via server.on('request', cb);
 	// server.listen rejects until one is registered.
-	httpServerHandlerPending bool
-	usedHTTPThrow            bool
-	usedSplitFirst           bool
-	usedHTTPParseHeaders     bool
-	usedHTTPParseQuery       bool
-	usedHTTPSerializeHeaders bool
-	usedFiber                bool
-	usedGeneratorRuntime     bool
-	generatorBodyCtr         int
-	usedMathFuncs            bool
-	usedFloatMinMax          bool
-	usedToNumber             bool
-	usedBswap16              bool
-	usedBswap32              bool
-	usedBswap64              bool
-	usedRoundEven            bool
-	usesBufferCodecs         bool
-	usedMemcmp               bool
-	declaredBufferCodecs     bool
-	usedWsSpan               bool
-	usedJsPow                bool
-	namespaces               map[string]map[string]bool
+	httpServerHandlerPending  bool
+	usedHTTPThrow             bool
+	usedSplitFirst            bool
+	usedHTTPParseHeaders      bool
+	usedHTTPParseQuery        bool
+	usedHTTPSerializeHeaders  bool
+	usedFiber                 bool
+	usedGeneratorRuntime      bool
+	chunkHdrAdapterEmitted    bool
+	dgramMsgHdrAdapterEmitted bool
+	generatorBodyCtr          int
+	usedMathFuncs             bool
+	usedFloatMinMax           bool
+	usedToNumber              bool
+	usedBswap16               bool
+	usedBswap32               bool
+	usedBswap64               bool
+	usedRoundEven             bool
+	usesBufferCodecs          bool
+	usedMemcmp                bool
+	declaredBufferCodecs      bool
+	usedWsSpan                bool
+	usedJsPow                 bool
+	namespaces                map[string]map[string]bool
 	// nsAliases maps a fully-resolved alias name (dotted for a namespace-
 	// scoped `export import`) to the dotted namespace it targets (ADR-00456).
-	nsAliases map[string]string
-	usedTaskRuntime          bool
-	usedPromiseRuntime       bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
-	usedPromiseSettle        bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
-	usedFetchDriveRunner     bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
-	usedPromiseAdoptRunner   bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
-	usedAwaitTimerDrive      bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
-	usedMicrotasks           bool
-	thenCtr                  int // unique-name counter for .then/.catch/.finally reaction runners
-	newPromiseCtr            int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
-	usedCurrentTaskGlobal    bool
-	hasMaySuspend            bool // any async fn classified may-suspend (TDD-00083 Stage 2)
-	usedCbrt                 bool
-	usedCtlz32               bool
-	usedArc4Random           bool
-	usedStrtoll              bool
-	usedStrtod               bool
-	usedGroupMapHelpers      bool
-	usedQsort                bool
-	usedSortCmpI64           bool
-	usedSortCmpF64           bool
-	usedSortCmpStr           bool
-	usedSortTrampolineI64    bool
-	usedSortTrampolineF64    bool
-	usedSortTrampolineStr    bool
-	usedSortClosGlobal       bool
-	usedMapStrHelpers        bool
-	usedMapNumHelpers        bool
-	usedEventEmitterRuntime  bool
-	usedStreamRuntime        bool
-	usedWStreamRuntime       bool
-	usedStreamPipeRuntime    bool
-	usedAwaitFetchHeaders    bool
-	usedFetchBodyStream      bool
-	usedHTTPStreamRuntime    bool
-	usedReqBodyRuntime       bool
-	usedReqBodyStream        bool
-	usedReqBodyDrain         bool
-	usedZlibStreamRuntime    bool
-	usedZlibOneshot          bool
-	usedZlibExterns          bool
-	usedNodeStreamRuntime    bool
-	usedPromiseAddReaction   bool
-	streamSiteCtr            int
-	noopCallbackEmitted      bool
-	usedOSReadProcFile       bool
-	usedOSCpusLinux          bool
-	usedOSCpusDarwin         bool
-	usedGethostname          bool
-	usedSysconf              bool
-	usedSysctlbyname         bool
-	usedMachVM               bool
-	usedExceptionHelpers     bool
-	usedFrozenSet            bool
-	usedPathNormalize        bool
-	usedPathDirname          bool
-	usedPathBasename         bool
-	usedPathExtname          bool
-	usedRegexCompile         bool
-	usedRegexCompileContext  bool
-	usedRegexParseFlags      bool
-	usedRegexMatch           bool
-	usedRegexUTF16Convert    bool
-	usedRegexUTF8Width       bool
-	usedRegexESNormalize     bool
-	breakStack               []string // end labels for enclosing loops / switch
-	continueStack            []string // continue-target labels for enclosing loops
+	nsAliases               map[string]string
+	usedTaskRuntime         bool
+	usedPromiseRuntime      bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
+	usedPromiseSettle       bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
+	usedFetchDriveRunner    bool // @__kml_fetch_drive_run — deferred raw-fetch drive microtask for .then on a fetch
+	usedPromiseAdoptRunner  bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
+	usedAwaitTimerDrive     bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
+	usedMicrotasks          bool
+	thenCtr                 int // unique-name counter for .then/.catch/.finally reaction runners
+	newPromiseCtr           int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
+	usedCurrentTaskGlobal   bool
+	hasMaySuspend           bool // any async fn classified may-suspend (TDD-00083 Stage 2)
+	usedCbrt                bool
+	usedCtlz32              bool
+	usedArc4Random          bool
+	usedStrtoll             bool
+	usedStrtod              bool
+	usedGroupMapHelpers     bool
+	usedQsort               bool
+	usedSortCmpI64          bool
+	usedSortCmpF64          bool
+	usedSortCmpStr          bool
+	usedSortTrampolineI64   bool
+	usedSortTrampolineF64   bool
+	usedSortTrampolineStr   bool
+	usedSortClosGlobal      bool
+	usedMapStrHelpers       bool
+	usedMapNumHelpers       bool
+	usedEventEmitterRuntime bool
+	usedStreamRuntime       bool
+	usedWStreamRuntime      bool
+	usedStreamPipeRuntime   bool
+	usedAwaitFetchHeaders   bool
+	usedFetchBodyStream     bool
+	usedHTTPStreamRuntime   bool
+	usedReqBodyRuntime      bool
+	usedReqBodyStream       bool
+	usedReqBodyDrain        bool
+	usedZlibStreamRuntime   bool
+	usedZlibOneshot         bool
+	usedZlibExterns         bool
+	usedNodeStreamRuntime   bool
+	usedPromiseAddReaction  bool
+	streamSiteCtr           int
+	noopCallbackEmitted     bool
+	usedOSReadProcFile      bool
+	usedOSCpusLinux         bool
+	usedOSCpusDarwin        bool
+	usedGethostname         bool
+	usedSysconf             bool
+	usedSysctlbyname        bool
+	usedMachVM              bool
+	usedExceptionHelpers    bool
+	usedFrozenSet           bool
+	usedPathNormalize       bool
+	usedPathDirname         bool
+	usedPathBasename        bool
+	usedPathExtname         bool
+	usedRegexCompile        bool
+	usedRegexCompileContext bool
+	usedRegexParseFlags     bool
+	usedRegexMatch          bool
+	usedRegexUTF16Convert   bool
+	usedRegexUTF8Width      bool
+	usedRegexESNormalize    bool
+	breakStack              []string // end labels for enclosing loops / switch
+	continueStack           []string // continue-target labels for enclosing loops
 	// pendingFinallys is the stack of enclosing `finally` block bodies, innermost
 	// last. A `return` (or `break`/`continue`) that exits a try/catch runs these
 	// inline — innermost first — before its own terminator, so `finally` still
@@ -667,6 +684,20 @@ func NewEmitter() *Emitter {
 // — not a constructor argument, so every existing zero-arg NewEmitter() call
 // site (mainly tests/compiler_test.go) keeps working unchanged.
 func (e *Emitter) SetMemMode(mode string) { e.memMode = mode }
+
+// SetDynamicImportMode selects the dynamic import() backend: "eager" (default,
+// TDD-00055) or "lazy" (shared-library islands, TDD-00056).
+func (e *Emitter) SetDynamicImportMode(mode string) { e.dynamicImportMode = mode }
+
+// UsesDynamicImport reports whether the emitted program contained a dynamic
+// import() — for main.go's post-emit build steps.
+func (e *Emitter) UsesDynamicImport() bool { return e.usesDynamicImport }
+
+// SetIslandHash marks this compile as a shared-library island (TDD-00056) with
+// the given stable hash; EmitProgram then appends the island's run-once init
+// and per-export accessor functions (`__kml_dynmod_<hash>_*`) and the output is
+// linked with `clang -shared` instead of as an executable.
+func (e *Emitter) SetIslandHash(hash string) { e.islandHash = hash }
 
 func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
 
@@ -1457,6 +1488,11 @@ func (e *Emitter) rewriteTopLevelGeneratorExpressions(prog *ast.Program) {
 }
 
 func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
+	// TDD-00128: enforce `/** @pure */` before any codegen. A front-end-only
+	// check with zero effect on the emitted IR — a violation is a compile error.
+	if err := e.checkPurity(prog); err != nil {
+		return "", err
+	}
 	// Retained so a `typeof value` type query can resolve the referenced value's
 	// type from its top-level declaration even at eager type-alias registration
 	// (Pass 0), before module globals are bound.
@@ -1708,10 +1744,16 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
+		if e.usedHTTPListen {
+			// Non-blocking Node listen defers its event loop to here — flush the
+			// http-client reaction hook after it, exactly as an inline listen
+			// loop did (emit_http.go's emitPostLoopFlush).
+			e.emitPostLoopFlush()
+		}
 	} else if e.usedTaskRuntime {
 		// A may-suspend async program with no timers/SSE/WS: drain the coroutine
 		// scheduler until all spawned tasks complete.
@@ -1828,7 +1870,51 @@ done:
 	}
 	out.WriteString(e.body.String())
 	out.WriteString("}\n")
+	if e.islandHash != "" {
+		e.emitIslandGlue(prog, &out)
+	}
 	return out.String(), nil
+}
+
+// emitIslandGlue appends the shared-library island surface (TDD-00056): a
+// run-once `__kml_dynmod_<hash>_init` that drives the island's top-level
+// (main()) exactly once, and one `__kml_dynmod_<hash>_<name>` accessor per
+// module-global-promoted entry export, returning that binding's value. The
+// call site dlopen()s the island, calls init once, and dlsym()s the accessors
+// to build the dynamic-import result object. Exports whose type wasn't promoted
+// to a module global (classes, closures, non-simple types) are omitted in V1,
+// exactly as TDD-00055's own result-object synthesis omits them.
+func (e *Emitter) emitIslandGlue(prog *ast.Program, out *strings.Builder) {
+	h := e.islandHash
+	fmt.Fprintf(out, "\n@__kml_dynmod_%s_inited = internal global i1 0, align 1\n", h)
+	fmt.Fprintf(out, "define void @__kml_dynmod_%s_init() {\nentry:\n", h)
+	fmt.Fprintf(out, "  %%done = load i1, ptr @__kml_dynmod_%s_inited, align 1\n", h)
+	out.WriteString("  br i1 %done, label %skip, label %run\n")
+	out.WriteString("run:\n")
+	fmt.Fprintf(out, "  store i1 1, ptr @__kml_dynmod_%s_inited, align 1\n", h)
+	out.WriteString("  %ig = call i32 @main(i32 0, ptr null)\n")
+	out.WriteString("  br label %skip\n")
+	out.WriteString("skip:\n  ret void\n}\n")
+
+	publics := make([]string, 0, len(prog.EntryExportMangled))
+	for p := range prog.EntryExportMangled {
+		publics = append(publics, p)
+	}
+	sort.Strings(publics)
+	for _, public := range publics {
+		mangled := prog.EntryExportMangled[public]
+		sym, ok := e.moduleGlobals[mangled]
+		if !ok || sym.Ptr == "" || sym.Ty.IsArray {
+			// Not a scalar/string module global (an array global is a header
+			// slot, not a directly-loadable scalar; classes/closures/functions
+			// aren't promoted at all) — omitted in V1.
+			continue
+		}
+		ir := sym.Ty.IR
+		fmt.Fprintf(out, "define %s @__kml_dynmod_%s_%s() {\nentry:\n", ir, h, public)
+		fmt.Fprintf(out, "  %%v = load %s, ptr %s, align %d\n", ir, sym.Ptr, sym.Ty.Align())
+		fmt.Fprintf(out, "  ret %s %%v\n}\n", ir)
+	}
 }
 
 // registerEnums pre-scans all top-level enum declarations and resolves each member
@@ -2232,7 +2318,6 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 }
 
 // emitFunctionDecl emits one user-defined function into e.functions.
-
 
 // registerNSAliases resolves `import X = Y.Z` alias declarations
 // (ADR-00456) against the now-complete namespace table. Each target is

@@ -216,29 +216,21 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 				fmt.Sprintf("ptr %%p_%s_ptr", p.Name),
 				fmt.Sprintf("i64 %%p_%s_len", p.Name),
 			)
-			ptrAlloca := "%v_" + p.Name + "_ptr"
-			lenAlloca := "%v_" + p.Name + "_len"
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			// Object-reference model (TDD-00127): the incoming `ptr` argument is
+			// the caller's {data, len} header pointer; the `i64 len` argument is
+			// redundant (length lives in the header) but kept for ABI stability.
 			// A destructured array parameter (`[a, b]: number[]`) unpacks
-			// straight from the raw incoming (ptr, len) pair — no need to
-			// bind the whole array under its own synthetic name first, since
-			// nothing else in the function body can reference it by that
-			// name anyway (it was never real source syntax). See
-			// docs/tdd/TDD-00029.md's own two-alloca array Symbol shape,
-			// reused unchanged by unpackArrayPatternInto for a nested-array
-			// destructured element.
+			// straight from the header's data field + the passed length — no
+			// named binding, since nothing in the body can reference it.
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
 				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			e.bindArrayParam(p.Name, pty)
 		} else if isNullableScalar(pty) {
 			// A nullable-scalar parameter is passed and stored as its
 			// presence-flagged { i1, T } aggregate (TDD-00064 Stage 3).
@@ -387,13 +379,8 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 	if err != nil {
 		return err
 	}
-	ptrAlloca := e.freshReg()
-	lenAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", n, lenAlloca))
-	e.define("arguments", Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: ArrayOf(elemTy)})
+	slot := e.newArrayHeaderSlot(dataReg, fmt.Sprintf("%d", n))
+	e.define("arguments", Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
 	return nil
 }
 
@@ -1288,21 +1275,16 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		pty := paramTypes[i]
 		if pty.IsArray {
 			paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
-			ptrAlloca := "%v_" + p.Name + "_ptr"
-			lenAlloca := "%v_" + p.Name + "_len"
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			// Object-reference array param (TDD-00127): see bindArrayParam.
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
 				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			e.bindArrayParam(p.Name, pty)
 			continue
 		}
 		if isNullableScalar(pty) {
@@ -1401,10 +1383,11 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				if !sym.Ty.IsArray {
 					return fmt.Errorf("%d:%d: '%s' is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col, id.Name)
 				}
+				dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 				ptrReg := e.freshReg()
 				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 				r0 := e.freshReg()
 				r1 := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
@@ -2042,15 +2025,10 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		paramTypes = paramTypes[1:] // consume
 		if pty.IsArray {
 			paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
-			ptrAlloca := "%v_" + p.Name + "_ptr"
-			lenAlloca := "%v_" + p.Name + "_len"
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
-			e.emitInstr(fmt.Sprintf("store ptr %%p_%s_ptr, ptr %s, align 8", p.Name, ptrAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 %%p_%s_len, ptr %s, align 8", p.Name, lenAlloca))
+			// Object-reference array param (TDD-00127): see bindArrayParam.
 			if p.ArrayPattern != nil {
 				dataPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, ptrAlloca))
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
 				elemTy := TypeF64
 				if pty.ElemType != nil {
 					elemTy = *pty.ElemType
@@ -2060,7 +2038,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			e.bindArrayParam(p.Name, pty)
 			continue
 		}
 		if isNullableScalar(pty) {
@@ -2463,11 +2441,8 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		// {ptr,i64} aggregate (emitExprWithObjectHint/emitExpr's own
 		// IsArray handling), so this only needs to split it, not build it.
 		if paramTy.IsArray {
-			ptrReg := e.freshReg()
-			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			header, lenReg := e.packArrayArg(arg, val)
+			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			continue
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
@@ -2492,9 +2467,10 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			if srcElemTy.IR != elemTy.IR || srcElemTy.IsArray != elemTy.IsArray || srcElemTy.IsObject != elemTy.IsObject {
 				return Value{}, fmt.Errorf("%d:%d: spread array's element type does not match the rest parameter's element type", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
 			}
-			argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(ptrReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
-			argParts = append(argParts, "ptr null", "i64 0")
+			argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 		} else if anySpread(restArgs) {
 			// A runtime-length mix of spreads and positional args feeding the
 			// closure's rest slot (TDD-00106 V2) — same concat as the named path.
@@ -2502,7 +2478,8 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, "ptr "+dataReg, "i64 "+lenReg)
+			restHdr := e.newArrayHeader(dataReg, lenReg)
+			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
 			e.ensureMalloc()
@@ -2518,7 +2495,8 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
 			}
-			argParts = append(argParts, fmt.Sprintf("ptr %s", dataReg), fmt.Sprintf("i64 %d", n))
+			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
+			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
 
@@ -2702,11 +2680,10 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			// nested-array element as the callback's own parameter"
 			// caveat). See ADR-00151/TDD-00059.
 			if i < len(params) && params[i].IsArray {
-				ptrReg := e.freshReg()
-				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
-				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				// The callback's array argument is a transient element value —
+				// materialize a fresh header for it (TDD-00127).
+				header, lenReg := e.arrayArgFromAggregate(v)
+				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
 			ty := v.Ty.IR
@@ -2734,11 +2711,10 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			// ABI change: this branch also used to pass an array's raw
 			// {ptr,i64} aggregate as if it were a single scalar pointer.
 			if i < len(params) && params[i].IsArray {
-				ptrReg := e.freshReg()
-				lenReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
-				argParts = append(argParts, "ptr "+ptrReg, "i64 "+lenReg)
+				// The callback's array argument is a transient element value —
+				// materialize a fresh header for it (TDD-00127).
+				header, lenReg := e.arrayArgFromAggregate(v)
+				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
 			ty := v.Ty.IR

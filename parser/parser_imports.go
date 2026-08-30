@@ -321,7 +321,26 @@ func (p *Parser) parseImportExpr() (ast.Expression, error) {
 		p.advance() // 'url'
 		return ast.NewImportMetaUrl(pos), nil
 	case p.check(lexer.LPAREN):
-		return nil, fmt.Errorf("%d:%d: dynamic import() is not yet supported", pos.Line, pos.Col)
+		// Dynamic import(specifier) (TDD-00055/TDD-00056). The specifier stays a
+		// general expression here; the resolver enforces string-literal-only and
+		// treats it as a dependency edge.
+		p.advance() // '('
+		spec, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+		// Record a string-literal specifier as a dependency edge (mirrors
+		// workerPaths); a non-literal specifier is left for a clean
+		// codegen-time error.
+		node := ast.NewImportCallExpression(spec, pos)
+		if lit, ok := spec.(*ast.StringLiteral); ok {
+			p.dynamicImportPaths = append(p.dynamicImportPaths, lit.Value)
+			p.dynamicImportNodes = append(p.dynamicImportNodes, node)
+		}
+		return node, nil
 	default:
 		return nil, fmt.Errorf("%d:%d: expected '.' or '(' after 'import' in an expression, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 	}

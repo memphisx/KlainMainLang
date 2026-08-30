@@ -335,11 +335,10 @@ func (e *Emitter) emitWorkerListenerAdapter(userClosure Value, payloadTy Type) s
 	} else {
 		v := e.decodeWorkerPayload("%w0", "%w1", payloadTy)
 		if payloadTy.IsArray {
-			p := e.freshReg()
-			l := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", p, v.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", l, v.Ref))
-			e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", fp, ep, p, l))
+			// The listener's array parameter expects a header pointer, not the
+			// raw decoded (ptr,len) pair (object-reference model, TDD-00127).
+			header, l := e.arrayArgFromAggregate(v)
+			e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s, i64 %s)", fp, ep, header, l))
 		} else {
 			e.emitInstr(fmt.Sprintf("call void %s(ptr %s, %s %s)", fp, ep, payloadTy.IR, v.Ref))
 		}

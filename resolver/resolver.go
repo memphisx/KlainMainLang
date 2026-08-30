@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -108,7 +109,7 @@ func (info *fileInfo) publicMangled(name string) (string, bool) {
 // Equivalent to ResolveProgramWithOptions(entryPath, false) — see its doc
 // comment for allowGlobalShadowing's meaning (TDD-00050).
 func ResolveProgram(entryPath string) (*ast.Program, error) {
-	return ResolveProgramWithOptions(entryPath, false)
+	return ResolveProgramWithOptions(entryPath, false, false)
 }
 
 // ResolveProgramWithOptions is ResolveProgram plus allowGlobalShadowing
@@ -119,7 +120,7 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 // parser-level `new`-form built-ins) are rejected either way; there is no
 // flag value that lifts those, see reserved_names.go's own doc comment for
 // why.
-func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*ast.Program, error) {
+func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazyDynamicImport bool) (*ast.Program, error) {
 	entryAbs, err := filepath.Abs(entryPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolving entry path: %w", err)
@@ -161,6 +162,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// also be imported" conflict is detectable after the DFS.
 	importTargets := map[string]bool{}
 	workerTargets := map[string]bool{}
+	dynamicImportTargets := map[string]bool{}
 
 	var visit func(path string, isEntry bool) error
 	visit = func(path string, isEntry bool) error {
@@ -242,6 +244,47 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 				return fmt.Errorf("%s: cannot find worker module '%s' (resolved to %s)", path, wp, resolved)
 			}
 			workerTargets[resolved] = true
+			if err := visit(resolved, false); err != nil {
+				return err
+			}
+		}
+
+		// TDD-00055/TDD-00056: visit each dynamic `import('...')` literal target
+		// as a dependency, exactly like a static import or a worker path. Under
+		// the lazy backend (TDD-00056) these become shared-library islands
+		// rather than merged files; that partitioning happens later — here they
+		// are only discovered, parsed, and validated as real, resolvable files.
+		for _, node := range prog.DynamicImportNodes {
+			lit, ok := node.Specifier.(*ast.StringLiteral)
+			if !ok {
+				continue
+			}
+			dp := lit.Value
+			if _, isVirtual := virtualBuiltinMarkers[dp]; isVirtual {
+				return fmt.Errorf("%s: dynamic import('%s') of a built-in module is not supported", path, dp)
+			}
+			resolved, err := resolveImportPath(dir, dp, klainModulesDir)
+			if err != nil {
+				return fmt.Errorf("%s: resolving dynamic import('%s'): %w", path, dp, err)
+			}
+			node.ResolvedPath = resolved // annotate for codegen (island hash + dlopen path)
+			dynamicImportTargets[resolved] = true
+			if lazyDynamicImport {
+				// TDD-00056 lazy backend: the target is NOT merged — it becomes
+				// its own shared-library island, compiled separately and loaded
+				// on first use, so its top-level runs only when reached. Record
+				// it as an island root and extract its annotated value exports
+				// so the loading call site can shape the typed result object;
+				// don't visit()-merge it here.
+				exps, err := parseIslandExports(resolved)
+				if err != nil {
+					return fmt.Errorf("%s: reading dynamic import('%s') exports: %w", path, dp, err)
+				}
+				node.Exports = exps
+				continue
+			}
+			// Eager backend (TDD-00055): merge the target like a static import
+			// (its top-level runs unconditionally at startup).
 			if err := visit(resolved, false); err != nil {
 				return err
 			}
@@ -559,6 +602,26 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool) (*as
 	// full statement list — dropping ImportDeclaration and unwrapping
 	// ExportDeclaration everywhere, since codegen/llvm knows neither node.
 	merged := &ast.Program{}
+	merged.UsesDynamicImport = len(dynamicImportTargets) > 0
+	if ei, ok := files[entryAbs]; ok {
+		m := make(map[string]string, len(ei.exported))
+		for n := range ei.exported {
+			if mangled, ok := ei.publicMangled(n); ok {
+				m[n] = mangled
+			} else {
+				m[n] = n
+			}
+		}
+		merged.EntryExportMangled = m
+	}
+	if lazyDynamicImport {
+		roots := make([]string, 0, len(dynamicImportTargets))
+		for p := range dynamicImportTargets {
+			roots = append(roots, p)
+		}
+		sort.Strings(roots)
+		merged.IslandRoots = roots
+	}
 	mergeNamespaces := func(src *ast.Program) {
 		merged.NSAliases = append(merged.NSAliases, src.NSAliases...)
 		for ns, members := range src.Namespaces {
@@ -839,6 +902,44 @@ func mangleFileDecls(path string, prog *ast.Program, fileIdx int, allowGlobalSha
 		}
 	}
 	return mangled, nil
+}
+
+// parseIslandExports parses a dynamic-import target file and returns its
+// annotated top-level value exports (TDD-00056), used to shape the typed
+// result object at the loading call site. Only `export const/let/var name: T`
+// bindings with a type annotation are included — matching the island's own
+// scalar/string accessor surface; un-annotated or non-value exports are
+// omitted (the result object simply lacks those fields in V1).
+func parseIslandExports(path string) ([]ast.ImportCallExport, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	prog, err := parser.Parse(string(src))
+	if err != nil {
+		return nil, err
+	}
+	var out []ast.ImportCallExport
+	add := func(d *ast.VarDeclaration) {
+		if d.TypeAnnot != nil {
+			out = append(out, ast.ImportCallExport{Name: d.Name, TypeAnnot: d.TypeAnnot})
+		}
+	}
+	for _, stmt := range prog.Body {
+		ed, ok := stmt.(*ast.ExportDeclaration)
+		if !ok || ed.IsDefault {
+			continue
+		}
+		switch d := ed.Decl.(type) {
+		case *ast.VarDeclaration:
+			add(d)
+		case *ast.VarDeclarationList:
+			for _, vd := range d.Decls {
+				add(vd)
+			}
+		}
+	}
+	return out, nil
 }
 
 // exportedNames returns the set of top-level names a file exports. A

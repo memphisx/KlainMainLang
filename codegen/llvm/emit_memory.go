@@ -37,12 +37,20 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 			return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
 		}
 		if sym.Ty.IsArray {
+			// Object-reference model (TDD-00127): sym.Ptr is a slot holding a
+			// pointer to the heap {data, len} header. Free the data buffer, then
+			// reset the header to {null, 0} in place so a subsequent read sees an
+			// empty array (length 0, null data) rather than dereferencing freed
+			// memory — matching the pre-header behaviour that zeroed both slots.
+			// The tiny header itself is intentionally left allocated so the slot
+			// stays valid.
 			e.ensureFree()
+			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 			dataPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, sym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
 			e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", dataPtr))
-			e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", sym.LenPtr))
+			e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataSlot))
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenSlot))
 			return Value{Ty: TypeVoid}, nil
 		}
 		ptrReg := e.freshReg()

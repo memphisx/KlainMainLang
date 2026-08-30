@@ -142,6 +142,16 @@ func (e *Emitter) emitConstructNodeStreamHandle(info ClassInfo, className, dataR
 		return err
 	}
 
+	// Transform (TDD-00132 Stage C2): both-sided, but the writable sink routes
+	// each chunk through the subclass's `_transform(chunk, enc, cb)` override
+	// (whose `this.push` feeds the readable side) rather than an independent
+	// `_read`/`_write` pair. Reuse the TransformStream TSCTX sink/pull machine —
+	// the readable side is pushed to, not pulled, and closes when the writable
+	// side ends. Handled here and returned before the Readable/Writable path.
+	if info.HasNodeTransform {
+		return e.emitConstructNodeTransformHandle(info, className, dataReg, hwm, pos)
+	}
+
 	rs, ws := "null", "null"
 
 	if info.HasNodeReadable {
@@ -226,7 +236,9 @@ func (e *Emitter) emitClassStreamWrite(implFn string, chunkTy Type, nParams int,
 	if chunkTy.IsArray {
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", p))
-		chunkArg = fmt.Sprintf("ptr %s, i64 %%v1", p)
+		// The subclass method's array param expects a header (TDD-00127).
+		hdr := e.newArrayHeader(p, "%v1")
+		chunkArg = fmt.Sprintf("ptr %s, i64 %%v1", hdr)
 	} else {
 		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
 		chunkArg = fmt.Sprintf("%s %s", chunkTy.IR, chunk.Ref)
@@ -254,6 +266,80 @@ func (e *Emitter) emitClassStreamWrite(implFn string, chunkTy Type, nParams int,
 
 	e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(ptr %%inst, i64 %%v0, i64 %%v1) {\nentry:\n%s}\n", fn, body))
 	return fn
+}
+
+// emitConstructNodeTransformHandle builds a `class X extends Transform`
+// instance's Node-stream handle (TDD-00132 Stage C2). It mirrors the
+// options-form Transform wiring (emit_node_stream.go, `case "transform"`): an
+// rs + ws joined by a 72-byte TSCTX whose sink runs the transform when the
+// readable side has capacity (else parks the chunk) and whose pull resumes a
+// parked chunk. The one class-specific piece is the slot-2 transform closure:
+// it invokes the subclass's `_transform(chunk, enc, cb)` method, whose
+// `this.push(...)` enqueues into this same rs (the hidden handle set below).
+func (e *Emitter) emitConstructNodeTransformHandle(info ClassInfo, className, dataReg, hwm string, pos ast.Pos) error {
+	impl, ok := info.MethodImplementor["_transform"]
+	if !ok {
+		return fmt.Errorf("%d:%d: class '%s' extends Transform but does not implement _transform()", pos.Line, pos.Col, className)
+	}
+	sig := info.MethodSigs["_transform"]
+	if n := len(sig.ParamTypes); n != 1 && n != 3 {
+		return fmt.Errorf("%d:%d: class '%s' _transform must take (chunk) or Node's (chunk, encoding, callback), got %d parameter(s)", pos.Line, pos.Col, className, n)
+	}
+
+	outTy := info.StreamOutTy
+	inTy := info.StreamInTy
+
+	fulfill := e.emitStreamFulfillThunk(outTy)
+	rs := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 0.0, ptr %s)", rs, fulfill))
+	ws := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double %s)", ws, hwm))
+
+	ctx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+	storeCtxPtr := func(idx int, val string) {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, ctx, idx))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+	}
+	storeCtxPtr(0, rs)
+	storeCtxPtr(1, ws)
+	// slot 2 — the transform callback. The class-form `_transform` needs no
+	// controller arg: `this.push` inside the method already reaches rs through
+	// the hidden handle, so the same `emitClassStreamWrite` thunk that drives a
+	// `_write` sink drives `_transform` here (its ABI is the TSCTX slot-2 ABI:
+	// `ptr(ptr %env, i64 %v0, i64 %v1)` returning a promise-or-null).
+	trWrap := e.emitClassStreamWrite(llvmSafeSymbol(impl+"_"+"_transform"), inTy, len(sig.ParamTypes), sig.IsAsync)
+	storeCtxPtr(2, e.buildBuiltinClosure(trWrap, dataReg))
+	// slot 3 — flush: `_flush` is out of V1 scope (TDD-00132), so no flush hook.
+	storeCtxPtr(3, "null")
+	// slots 4-6 — parked flags/words (i64 0); slots 7,8 — parked prom, spare.
+	for i := 4; i <= 6; i++ {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+	}
+	storeCtxPtr(7, "null")
+	storeCtxPtr(8, "null")
+
+	e.storeWStreamField(ws, 9, e.buildBuiltinClosure("@__kml_ts_sink_write", ctx))
+	e.storeWStreamField(ws, 10, e.buildBuiltinClosure("@__kml_ts_sink_close", ctx))
+	e.storeWStreamField(ws, 11, e.buildBuiltinClosure("@__kml_ts_sink_abort", ctx))
+	e.storeStreamField(rs, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctx))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
+
+	inv := e.emitNodeInvokeDataThunk(outTy)
+	dec := e.emitStreamDecodeThunk(outTy)
+	nsReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ns_alloc(ptr %s, ptr %s, ptr %s, ptr %s)", nsReg, rs, ws, inv, dec))
+	e.emitInstr(fmt.Sprintf("call void @__kml_ns_arm_writable(ptr %s)", nsReg))
+
+	classTy := info.Ty
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, classTy.StructIR(), dataReg, classNodeStreamFieldIndex(classTy)))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nsReg, gep))
+	return nil
 }
 
 // ensureNoopCallback emits (once) a void(ptr) function usable as the fn of a

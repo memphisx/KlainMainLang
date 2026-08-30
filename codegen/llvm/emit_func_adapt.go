@@ -203,18 +203,22 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		case tp.IsDynamic: // dynamic argument → concrete parameter: unbox
 			v := e.emitUnboxBoxToType(refs[0], sp)
 			if sp.IsArray {
-				pReg, lReg := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", pReg, v.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lReg, v.Ref))
-				argParts = append(argParts, "ptr "+pReg, "i64 "+lReg)
+				// The unboxed array is a {ptr,i64} aggregate; the target's array
+				// param expects a header pointer (TDD-00127).
+				header, lReg := e.arrayArgFromAggregate(v)
+				argParts = append(argParts, "ptr "+header, "i64 "+lReg)
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", storageIR(sp), v.Ref))
 			}
 		default: // concrete argument → dynamic parameter: box
 			var concrete Value
 			if tp.IsArray {
-				agg0, agg1 := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, refs[0]))
+				// refs[0] is the incoming header pointer; a boxed array carries
+				// the {data,len} aggregate, so read data out of the header first
+				// (TDD-00127).
+				dataR, agg0, agg1 := e.freshReg(), e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataR, refs[0]))
+				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, dataR))
 				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, refs[1]))
 				concrete = Value{Ref: agg1, Ty: tp}
 			} else {
@@ -236,7 +240,7 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 		}
 		// else: target rest tail dropped.
 	} else if sRest != nil {
-		argParts = append(argParts, "ptr null", "i64 0")
+		argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 	}
 
 	// Indirect call typed by the source signature.

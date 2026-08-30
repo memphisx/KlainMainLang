@@ -43,7 +43,9 @@ func (e *Emitter) emitStreamWriteWrap(userTy, chunkTy Type) string {
 		if chunkTy.IsArray {
 			cp := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", cp))
-			args += fmt.Sprintf(", ptr %s, i64 %%v1", cp)
+			// The user callback's array param expects a header (TDD-00127).
+			hdr := e.newArrayHeader(cp, "%v1")
+			args += fmt.Sprintf(", ptr %s, i64 %%v1", hdr)
 			sig += ", ptr, i64"
 		} else {
 			chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)

@@ -552,3 +552,11 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00507](ADR-00507.md) | process.memoryUsage() | |
 | [00508](ADR-00508.md) | globalThis as an alias-peeling desugar | |
 | [00509](ADR-00509.md) | Generate the ADR & TDD index READMEs and the status backlog from the record files | Implements [TDD-00149](../tdd/TDD-00149.md) |
+| [00510](ADR-00510.md) | `class X extends Duplex` (Node stream subclassing, Stage C1) | `Implements [TDD-00132](../tdd/TDD-00132.md)` |
+| [00511](ADR-00511.md) | `class X extends Transform` (Node stream subclassing, Stage C2) | `Implements [TDD-00132](../tdd/TDD-00132.md)`, `Extends [ADR-00510](ADR-00510.md)` |
+| [00512](ADR-00512.md) | TypedArray construction as a general expression | `Implements [TDD-00018](../tdd/TDD-00018.md)`, `Extends [ADR-00104](ADR-00104.md)` |
+| [00513](ADR-00513.md) | `res.statusCode` getter/setter on Node's `ServerResponse` | `Implements [TDD-00131](../tdd/TDD-00131.md)` |
+| [00514](ADR-00514.md) | Non-blocking `server.listen` + the buffered-sink Writable surface on `res` | `Implements [TDD-00131](../tdd/TDD-00131.md)`, `Extends [ADR-00513](ADR-00513.md)`, `[ADR-00391](ADR-00391.md)` |
+| [00515](ADR-00515.md) | Lazy dynamic `import()` via `dlopen`'d shared-library islands | `Implements [TDD-00056](../tdd/TDD-00056.md)` |
+| [00516](ADR-00516.md) | `/** @pure */` — compile-time purity enforcement | `Implements [TDD-00128](../tdd/TDD-00128.md)` |
+| [00517](ADR-00517.md) | Object-reference array representation (shared headers) | `Implements [TDD-00127](../tdd/TDD-00127.md)` |

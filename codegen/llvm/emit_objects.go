@@ -581,10 +581,15 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			lenValReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtrReg, aggReg))
 			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenValReg, aggReg))
-			ptrAlloca := e.freshReg()
+			// Object-reference model (TDD-00127): a header whose data/len fields
+			// the branches below fill, referenced from a stable slot.
+			header := e.newArrayHeader("null", "0")
+			hdrSlot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hdrSlot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, hdrSlot))
+			ptrAlloca := header
 			lenAlloca := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenAlloca, arrayHeaderTy, header))
 
 			if prop.Default != nil {
 				isNullReg := e.freshReg()
@@ -617,7 +622,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataPtrReg, ptrAlloca))
 				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
 			}
-			e.define(prop.Local, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: fieldTy})
+			e.define(prop.Local, Symbol{Ptr: hdrSlot, Ty: fieldTy})
 			continue
 		}
 		valReg := e.freshReg()

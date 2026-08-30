@@ -239,10 +239,11 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			if !sym.Ty.IsArray {
 				return fmt.Errorf("%d:%d: '%s' is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col, id.Name)
 			}
+			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 			ptrReg := e.freshReg()
 			lenReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, sym.LenPtr))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
+			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 			r0 := e.freshReg()
 			r1 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
@@ -727,8 +728,13 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		switch {
 		case found && iterSym.Ty.IsArray:
 			iterTaTy = iterSym.Ty
-			dataPtrAlloca = iterSym.Ptr
-			lenAlloca = iterSym.LenPtr
+			// Object-reference model (TDD-00127): the data/len field addresses of
+			// the array's current header. Caching them here (rather than the
+			// header pointer) is deliberate — an in-place mutation mid-loop
+			// (push growing/moving the buffer) writes the new data ptr/len back
+			// into these same header fields, so each iteration's reload observes
+			// it, exactly as the old two-alloca form did.
+			dataPtrAlloca, lenAlloca = e.arrayDataLenSlots(iterSym)
 			elemTy = *iterSym.Ty.ElemType
 		case found && (iterSym.Ty.IsMap || iterSym.Ty.IsSet):
 			// A Set iterates its elements; a Map iterates its values (not
@@ -790,14 +796,13 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		bindTy = BigIntType()
 	}
 	varPtr := e.freshReg()
-	var varLenPtr string
 	if isPattern {
 		// no pre-loop binding
 	} else if elemTy.IsArray {
-		varLenPtr = e.freshReg()
+		// Object-reference model (TDD-00127): a stable slot holding a pointer to
+		// the current element's {data, len} header, rebuilt each iteration.
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
-		e.define(s.VarName, Symbol{Ptr: varPtr, LenPtr: varLenPtr, Ty: elemTy})
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
 	} else {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
@@ -852,9 +857,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			return err
 		}
 	case elemTy.IsArray:
-		if err := e.storeArrayAggregateInto(elemVal, varPtr, varLenPtr); err != nil {
-			return err
-		}
+		// Point the loop variable's slot at a fresh header wrapping this
+		// element's aggregate (object-reference model, TDD-00127).
+		elemHeader := e.boxArrayValue(elemVal)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemHeader, varPtr))
 	default:
 		if iterTaTy.BigIntElem {
 			elemVal = e.wrapTypedArrayLoad(elemVal, iterTaTy)

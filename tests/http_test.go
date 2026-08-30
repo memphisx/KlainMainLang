@@ -203,6 +203,86 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	}
 }
 
+func TestE2EHTTPCreateServerStatusCodeSetter(t *testing.T) {
+	// TDD-00131 / ADR-00513: the imperative `res.statusCode = N` setter (Node's
+	// alternative to writeHead(status)) drives the response status, and reading
+	// `res.statusCode` back returns what was set — used here to echo it in the body.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.statusCode = 404
+  res.setHeader("Content-Type", "text/plain")
+  const code = res.statusCode
+  res.end("code=" + code)
+}).listen(8957)
+`
+	startHTTPServer(t, src, 8957)
+	resp, err := http.Get("http://127.0.0.1:8957/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status: got %d, want 404", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "code=404" {
+		t.Errorf("body: got %q, want %q", string(body), "code=404")
+	}
+}
+
+func TestE2EHTTPCreateServerNonBlockingListen(t *testing.T) {
+	// TDD-00131 / ADR-00514: `server.listen(...)` is non-blocking — top-level
+	// code after it runs before the event loop drives requests (Node's
+	// listen-then-continue). Proven through the response: `phase` is mutated
+	// *after* listen(); a blocking listen would never run that mutation, so the
+	// handler would serve "before". Non-blocking → the handler serves "after".
+	src := `
+import http from 'http'
+let phase = "before"
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200)
+  res.end(phase)
+}).listen(8959)
+phase = "after"
+`
+	startHTTPServer(t, src, 8959)
+	resp, err := http.Get("http://127.0.0.1:8959/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "after" {
+		t.Errorf("body: got %q, want %q (non-blocking listen should run the post-listen mutation)", string(body), "after")
+	}
+}
+
+func TestE2EHTTPCreateServerWriteBoolAndCork(t *testing.T) {
+	// TDD-00131 / ADR-00514: the buffered-sink Writable surface — res.write
+	// returns Node's boolean (always true here, no backpressure), and
+	// res.cork()/uncork() are accepted no-op hints.
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.cork()
+  const ok = res.write("a;")
+  res.uncork()
+  res.end(ok ? "wrote" : "full")
+}).listen(8961)
+`
+	startHTTPServer(t, src, 8961)
+	resp, err := http.Get("http://127.0.0.1:8961/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "a;wrote" {
+		t.Errorf("body: got %q, want %q", string(body), "a;wrote")
+	}
+}
+
 func TestE2EHTTPCreateServerBoundHandle(t *testing.T) {
 	// Variable-bound http.createServer handle (the standard Node idiom, as
 	// opposed to the chained createServer(cb).listen(port) expression): the

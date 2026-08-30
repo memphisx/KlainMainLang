@@ -18,7 +18,7 @@
       "exampleKey": "http/node_createserver",
       "snippet": "http.createServer((req: IncomingMessage, res: ServerResponse) => {\n  res.setHeader(\"X-Powered-By\", \"KlainMainLang\")\n  res.writeHead(200, { \"Content-Type\": \"text/plain\" })\n  res.end(\"Hello, world\")\n}).listen(8080)",
       "differences": [
-        "V1 `res` subset: `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end` and `req.method`/`url`/`headers` — no `res.statusCode =` setter or streaming backpressure.",
+        "V1 `res` subset: `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter, `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints, and `req.method`/`url`/`headers`. The response is buffered (flushed after the handler returns), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` fires — a large streamed response uses a `ReadableStream` `body` field instead.",
         "The status reason phrase is hardcoded `OK` (`writeHead(201)` → `201 OK`, not `201 Created`).",
         "One server per program, shared with the bespoke `http.listen`."
       ],
@@ -35,7 +35,7 @@
       "exampleKey": "http/create_server_handle",
       "snippet": "const server = http.createServer((req, res) => {\n  res.writeHead(200); res.end(\"hi\")\n})\nserver.listen(0, () => {\n  const port: number = server.address().port\n  setTimeout(() => server.close(), 100)\n})",
       "differences": [
-        "`server.listen` **blocks** until the loop stops (`server.close()` + drain) — Node's non-blocking listen-then-continue top-level flow is not modeled.",
+        "`server.listen` is **non-blocking** — it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback fires synchronously at `listen()` time rather than on a later tick. (The bespoke `http.listen` below stays blocking.)",
         "`.on` supports only the `'request'` event (one listener); no `'close'`/`'error'`/`'connection'`/`'listening'` events."
       ],
       "seeAlso": ["http.createServer", "http.close"],

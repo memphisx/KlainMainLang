@@ -550,6 +550,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypePtr
 			}
 		}
+		// res.statusCode (ServerResponse, TDD-00131) — the response status,
+		// stored as the object's i64 `status` field.
+		if ex.Property == "statusCode" {
+			if e.inferExprType(ex.Object).IsServerResponse {
+				return TypeI64
+			}
+		}
 		// http2.constants members (TDD-00139 Stage 4).
 		if e.isH2ConstantsExpr(ex.Object) {
 			if c, ok := h2Constants[ex.Property]; ok && c.isStr {
@@ -1556,6 +1563,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if e.inferExprType(mem.Object).IsH2ClientSession && mem.Property == "request" {
 				return Http2ClientStreamType()
 			}
+			// res.write(chunk) on a ServerResponse returns Node's boolean
+			// backpressure signal (TDD-00131) — always true here, since the
+			// buffered response sink never fills. Other res methods are void.
+			if mem.Property == "write" && e.inferExprType(mem.Object).IsServerResponse {
+				return TypeBool
+			}
 			// res.on(...)/setEncoding(...) on an http IncomingMessage chain back
 			// to the same object (TDD-00138).
 			if e.inferExprType(mem.Object).IsIncomingMessage {
@@ -2318,6 +2331,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return URLSearchParamsType()
 	case *ast.NewURLPatternExpression:
 		return URLPatternType()
+	case *ast.ImportCallExpression:
+		// A dynamic import yields Promise<{ ...exports }> (TDD-00056 lazy).
+		return PromiseOf(e.importCallResultObjectType(ex))
 	case *ast.NewArrayBufferExpression:
 		ty := ArrayBufferType()
 		if ex.Shared {
@@ -2325,6 +2341,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		ty.BufferGrowable = ex.MaxByteLength != nil
 		return ty
+	case *ast.NewTypedArrayExpression:
+		return TypedArrayType(ex.ElemKind)
 	case *ast.NewBroadcastChannelExpression:
 		return BroadcastChannelType(ex.Name)
 	case *ast.NewMessageChannelExpression:

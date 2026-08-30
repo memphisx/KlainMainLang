@@ -155,10 +155,18 @@
           },
           {
             "feature": "Dynamic `import(...)`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "Opt-in via `-dynamic-import=lazy` ([ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); the default `-dynamic-import=eager` (TDD-00055's compile-time-merge backend) is not yet built and is a clean codegen error pointing at the flag",
+              "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
+              "Result object exposes the target's **annotated scalar/string exports** only (via dlsym'd accessors); `function`/`class`/array/object exports are omitted in V1, and an un-annotated export has no field",
+              "Incompatible with `--static` (a static binary can't `dlopen`) — a clean mutual-exclusion rejection; the lazy build emits a sibling `<binary>.d/` island directory that must ship with the binary",
+              "A nested dynamic `import()` inside an island compiles eagerly (islands don't recursively partition in V1)"
+            ],
             "notes": [
-              "Parses cleanly (recognized in expression position) and is explicitly rejected with a \"not yet supported\" error, rather than a generic parse failure",
-              "Real support is staged separately: [TDD-00055](../tdd/TDD-00055.md) (eager, literal-specifier-only, wrapped in a resolved `Promise` — this compiler's whole-program AOT model means the target's top-level code would still run at startup regardless of whether the call site executes) or [TDD-00056](../tdd/TDD-00056.md) (V2 — real laziness via a `dlopen`'d shared library per target, incompatible with `--static`)"
+              "Under `-dynamic-import=lazy` each target is compiled to its own shared-library island (`.so`/`.dylib`) beside the binary and `dlopen`'d on first `import()`, running its top-level exactly once — **real laziness**: the target's code runs only when the call site executes, not at startup. Verified on darwin/arm64 and Linux (glibc/arm64, Docker)",
+              "The executable self-locates via `_NSGetExecutablePath`/`/proc/self/exe`, so the binary + its `.d/` directory relocate together; island export symbols are hashed from the target's absolute path, computed identically both sides",
+              "See [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md); [TDD-00055](../tdd/TDD-00055.md) is the alternative eager backend"
             ]
           },
           {

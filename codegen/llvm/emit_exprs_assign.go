@@ -205,6 +205,31 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return val, nil
 		}
 	}
+	// res.statusCode = N → store into the ServerResponse's `status` field
+	// (Node names the property `statusCode`; the object field is `status`).
+	// TDD-00131: the imperative alternative to writeHead(status).
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "statusCode" {
+		if objTy := e.inferExprType(memEx.Object); objTy.IsServerResponse {
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment to res.statusCode is not supported — assign a status code directly", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			resVal, err := e.emitExpr(memEx.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			val, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			val = e.coerce(val, TypeI64)
+			ty := ServerResponseType()
+			idx, _, _ := ty.FieldIndex("status")
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), resVal.Ref, idx))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val.Ref, gep))
+			return val, nil
+		}
+	}
 	// process.env.KEY = val / process.env["KEY"] = val → setenv (ADR-00333).
 	// Checked before the generic member/index assignment paths, since
 	// `process.env` is a pseudo-namespace, not a real object. Only plain `=`
@@ -372,9 +397,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if !val.Ty.IsArray {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
-			if err := e.storeArrayAggregateInto(val, sym.Ptr, sym.LenPtr); err != nil {
-				return Value{}, err
-			}
+			// Object-reference model (TDD-00127): rebind the variable's slot to a
+			// fresh header holding the new value. This is a *local* rebind — for
+			// a parameter, `a = a.filter(...)` gives this frame a new array
+			// without clobbering the caller's (whereas an in-place `a.push(...)`
+			// still writes through to the caller). Whole-variable reassignment
+			// does not alias, matching the pre-header behaviour.
+			newHeader := e.boxArrayValue(val)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newHeader, sym.Ptr))
 			return val, nil
 		}
 	}
@@ -534,8 +564,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				srcGep := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
 				e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, sym.Ptr))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", restLen, sym.LenPtr))
+				// Rebind the rest target's slot to a fresh header (TDD-00127).
+				restHeader := e.newArrayHeader(newPtr, restLen)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", restHeader, sym.Ptr))
 				break
 			}
 			id, ok := elemExpr.(*ast.Identifier)

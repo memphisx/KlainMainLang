@@ -227,7 +227,10 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 	if chunkTy.IsArray {
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", p))
-		args = fmt.Sprintf("ptr %s, ptr %s, i64 %%v1", ep, p)
+		// The user listener's array parameter expects a header pointer, not the
+		// raw chunk buffer (object-reference model, TDD-00127).
+		hdr := e.newArrayHeader(p, "%v1")
+		args = fmt.Sprintf("ptr %s, ptr %s, i64 %%v1", ep, hdr)
 		sig = "ptr, ptr, i64"
 	} else {
 		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
@@ -737,15 +740,12 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	varPtr := e.freshReg()
-	var varLenPtr string
 	if !isPattern {
 		if chunkTy.IsArray {
-			// An array-shaped chunk variable uses the two-alloca Symbol
-			// shape (ptr + len) every array consumer expects.
+			// An array-shaped chunk variable is a stable slot holding a pointer
+			// to the current chunk's header (object-reference model, TDD-00127).
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-			varLenPtr = e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varLenPtr))
-			e.define(s.VarName, Symbol{Ptr: varPtr, LenPtr: varLenPtr, Ty: chunkTy})
+			e.define(s.VarName, Symbol{Ptr: varPtr, Ty: chunkTy})
 		} else {
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, StructFieldIR(chunkTy), chunkTy.Align()))
 			e.define(s.VarName, Symbol{Ptr: varPtr, Ty: chunkTy})
@@ -794,12 +794,9 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		}
 	default:
 		if chunkTy.IsArray {
-			cp := e.freshReg()
-			cl := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", cp, loaded))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", cl, loaded))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, varPtr))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cl, varLenPtr))
+			// Point the chunk variable's slot at a fresh header for this chunk.
+			chunkHeader := e.boxArrayValue(Value{Ref: loaded, Ty: chunkTy})
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", chunkHeader, varPtr))
 		} else {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(chunkTy), loaded, varPtr, chunkTy.Align()))
 		}

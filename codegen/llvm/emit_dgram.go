@@ -55,9 +55,16 @@ func (e *Emitter) dgramStoreMessageListener(sk string, arg ast.Expression, pos a
 	if cb.kind != cbClosure {
 		return fmt.Errorf("%d:%d: a dgram 'message' listener must be an arrow function literal", pos.Line, pos.Col)
 	}
+	// A Uint8Array message param is an object-reference array expecting a header
+	// (TDD-00127); wrap the listener so the runtime's raw (ptr,len) message is
+	// boxed before it is forwarded (rinfo passes through).
+	listener := cb.hdrPtr
+	if len(cb.ty.FuncParams) > 0 && cb.ty.FuncParams[0].IsArray {
+		listener = e.dgramMsgHeaderAdapterClosure(cb.hdrPtr)
+	}
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", slot, dgramSocketIR, sk))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", listener, slot))
 	return nil
 }
 

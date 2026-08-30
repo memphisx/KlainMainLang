@@ -24,32 +24,31 @@ func (e *Emitter) bindTaskParamsFromBundle(decl *ast.FunctionDeclaration, sig Fu
 		// binds through the IsArray case below like any other array param.
 		switch {
 		case pty.IsArray:
-			ptrAlloca := "%v_" + p.Name + "_ptr"
-			lenAlloca := "%v_" + p.Name + "_len"
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrAlloca))
-			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
+			// Read the (data, len) the caller packed into the bundle and wrap
+			// them in a fresh header referenced from a stable slot
+			// (object-reference model, TDD-00127). As before the header change, a
+			// suspending function's array parameter is an independent copy — an
+			// in-place mutation does not propagate back to the caller across the
+			// async boundary (the bundle carries the aggregate, not the header).
 			fp := e.freshReg()
 			pv := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%__taskargs, i32 0, i32 %d", fp, bundleIR, fi))
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pv, fp))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pv, ptrAlloca))
 			fl := e.freshReg()
 			lv := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%__taskargs, i32 0, i32 %d", fl, bundleIR, fi+1))
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lv, fl))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lv, lenAlloca))
 			// A destructured array parameter unpacks straight from the (ptr, len)
 			// pair, mirroring the non-suspending binding (emit_func.go). lv is the
 			// i64 length value unpackArrayPatternInto wants (not the alloca ptr).
 			if p.ArrayPattern != nil {
-				dataPtr := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, ptrAlloca))
-				if err := e.unpackArrayPatternInto(dataPtr, lv, *pty.ElemType, p.ArrayPattern); err != nil {
+				if err := e.unpackArrayPatternInto(pv, lv, *pty.ElemType, p.ArrayPattern); err != nil {
 					return err
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrAlloca, LenPtr: lenAlloca, Ty: pty})
+			slot := e.newArrayHeaderSlot(pv, lv)
+			e.define(p.Name, Symbol{Ptr: slot, Ty: pty})
 		case isNullableScalar(pty):
 			// Reassemble the { i1, T } aggregate from the presence + payload slots
 			// (TDD-00084 Part C), then bind it exactly like a non-suspending

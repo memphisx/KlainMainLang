@@ -154,9 +154,9 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		// more realistically as part of a larger expression statement) —
 		// neither is a real import *declaration*, so route to ordinary
 		// expression parsing instead, where parseImportExpr gives each its
-		// own clear handling (or rejection, for the not-yet-implemented
-		// dynamic-call form) rather than parseImportDeclaration's
-		// specifier-list parsing producing a confusing error.
+		// own clear handling (dynamic `import(...)` → ImportCallExpression)
+		// rather than parseImportDeclaration's specifier-list parsing
+		// producing a confusing error.
 		if p.peekNth(1).Type == lexer.DOT || p.peekNth(1).Type == lexer.LPAREN {
 			return p.parseExpressionStatement()
 		}
@@ -565,6 +565,26 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 		if err != nil {
 			return nil, err
 		}
+		// TDD-00128: `/** @pure */ const f = (x) => …` / `= function (x) {…}`
+		// marks the bound arrow / function expression pure (async is never
+		// pure). A @pure on a non-function binding is a clean error. The tag is
+		// enforcement-only (checkPurity); it does not affect codegen.
+		if doc != nil && doc.HasTag("pure") {
+			switch fn := init.(type) {
+			case *ast.ArrowFunction:
+				if fn.IsAsync {
+					return nil, fmt.Errorf("%d:%d: @pure cannot be applied to an async arrow function ('%s')", nameTok.Line, nameTok.Col, nameTok.Literal)
+				}
+				fn.Pure = true
+			case *ast.FunctionExpression:
+				if fn.IsAsync || fn.IsGenerator {
+					return nil, fmt.Errorf("%d:%d: @pure cannot be applied to an async or generator function expression ('%s')", nameTok.Line, nameTok.Col, nameTok.Literal)
+				}
+				fn.Pure = true
+			default:
+				return nil, fmt.Errorf("%d:%d: @pure applies only to a function — '%s' is not a function binding", nameTok.Line, nameTok.Col, nameTok.Literal)
+			}
+		}
 	} else if kind == "const" {
 		// A `const` with no initializer is an early SyntaxError in JS
 		// (strict or sloppy alike). The for-of/for-in loop-variable forms
@@ -649,6 +669,16 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 			return nil, fmt.Errorf("%d:%d: @erased requires '%s' to declare a type parameter, e.g. 'function %s<T>(...)' (see docs/tdd/TDD-00010.md)", fd.GetPos().Line, fd.GetPos().Col, fd.Name, fd.Name)
 		}
 		fd.Erased = true
+	}
+	// TDD-00128: `/** @pure */` marks the function for the front-end purity
+	// enforcement pass (checkPurity) — zero codegen effect, the emitted IR is
+	// byte-identical to the untagged form. Rejected here on `async`/generator (a
+	// suspending function is never pure) before the pass ever runs.
+	if doc != nil && doc.HasTag("pure") {
+		if fd.IsAsync || fd.IsGenerator {
+			return nil, fmt.Errorf("%d:%d: @pure cannot be applied to an async or generator function ('%s') — it isn't side-effect-free", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
+		}
+		fd.Pure = true
 	}
 	return fd, nil
 }

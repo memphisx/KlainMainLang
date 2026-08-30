@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "MODULES.md",
   "coversRows": "all",
-  "coverage": { "loose": "15/16", "loosePct": 94, "strict": "8/16", "strictPct": 50 },
-  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, an import cycle is restricted to declarations, and dynamic import() is the one unimplemented row.",
+  "coverage": { "loose": "16/16", "loosePct": 100, "strict": "8/16", "strictPct": 50 },
+  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, and an import cycle is restricted to declarations. Dynamic import() breaks the whole-program mold opt-in: under -dynamic-import=lazy each literal-specifier target compiles to a dlopen'd shared-library island loaded on first use — real laziness.",
   "entries": [
     {
       "id": "modules.exportDeclarations",
@@ -184,10 +184,17 @@
       "id": "modules.dynamicImport",
       "name": "Dynamic import(...)",
       "statusRow": "Dynamic import(...)",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Parses cleanly (recognized in expression position) and is explicitly rejected with a \"not yet supported\" error, rather than a generic parse failure. Real support is staged separately as a later capability — the whole-program AOT model means a target's top-level code would still run at startup regardless of whether the call site executes.",
-      "seeAlso": ["modules.require", "modules.namedImport"],
+      "signature": "const m = await import('./mod')",
+      "badge": "caveats",
+      "description": "Opt-in via -dynamic-import=lazy: each literal-specifier target is compiled to its own shared-library island (.so/.dylib) beside the binary in a <binary>.d/ directory, dlopen'd on first import() and run exactly once — real laziness, so the target's top-level runs only when the call site executes, not at startup. The result object exposes the target's annotated scalar/string exports, read back through dlsym'd accessors. The executable self-locates (_NSGetExecutablePath / /proc/self/exe) so it and its .d/ directory relocate together.",
+      "snippet": "const m = await import('./mod')\nconsole.log(m.greeting, m.answer)",
+      "differences": [
+        "Opt-in via -dynamic-import=lazy; the default -dynamic-import=eager (compile-time-merge) backend is not yet built and is a clean codegen error pointing at the flag",
+        "String-literal specifier only — a runtime-computed import(expr) is a clean compile error",
+        "The result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted in V1",
+        "Incompatible with --static (a static binary can't dlopen); ship the sibling <binary>.d/ island directory with the binary"
+      ],
+      "seeAlso": ["modules.require", "modules.namedImport", "modules.importMetaUrl"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/import" }
     },
     {

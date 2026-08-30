@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "ARRAY-METHODS.md",
   "coverage": { "loose": "35/35", "loosePct": 100, "strict": "22/35", "strictPct": 63 },
-  "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee isn't visible to the caller because arrays cross a call boundary as a flat (ptr, len) copy, and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element. reduceRight is the one method not implemented at all.",
+  "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element. reduceRight is the one method not implemented at all.",
   "entries": [
     {
       "id": "array.literal",
@@ -51,7 +51,7 @@
       "exampleKey": "arrays/array_methods",
       "snippet": "let arr = new Array<number>(0)\narr.push(10)\nlet len: number = arr.push(20)   // 2",
       "differences": [
-        "A length change to an array that is a **function parameter** is not visible to the caller — arrays cross a call boundary as a flat `(ptr, len)` copy, so the callee's grown length (and reallocated buffer) stays local; element writes (`arr[i] = v`) still propagate."
+        "A length change inside a callee now grows the caller's array when it is passed as a plain **variable** (full JS reference semantics); an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`) still crosses as a copy, so a length change through those is not seen."
       ],
       "seeAlso": ["array.pop", "array.unshift"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/push" }
@@ -67,7 +67,7 @@
       "snippet": "let stack = [10, 20, 30]\nlet a = stack.pop()   // 30",
       "differences": [
         "On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type.",
-        "A length change to an array that is a **function parameter** is not visible to the caller."
+        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": ["array.push", "array.shift"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/pop" }
@@ -83,7 +83,7 @@
       "snippet": "const done = list.titles.shift()",
       "differences": [
         "Same empty-array zero-value-instead-of-`undefined` convention as `.pop()`.",
-        "A length change to an array that is a **function parameter** is not visible to the caller."
+        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": ["array.unshift", "array.pop"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/shift" }
@@ -98,7 +98,7 @@
       "exampleKey": "arrays/mutators_everywhere",
       "snippet": "list.titles.unshift(\"wake up\", \"coffee in Thessaloniki\")",
       "differences": [
-        "A length change to an array that is a **function parameter** is not visible to the caller."
+        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": ["array.shift", "array.push"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/unshift" }
@@ -112,7 +112,7 @@
       "returns": { "type": "T[]", "desc": "The removed elements." },
       "exampleKey": "arrays/array_methods",
       "differences": [
-        "A length change to an array that is a **function parameter** is not visible to the caller."
+        "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": ["array.slice", "array.toSorted"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/splice" }

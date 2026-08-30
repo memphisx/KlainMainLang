@@ -101,3 +101,24 @@ const rz = new ArrayBuffer(4, { maxByteLength: 8 })
 console.log(rz.resizable)        // true
 rz.resize(8)
 console.log(rz.byteLength)       // 8
+
+// ── TypedArray construction as a general expression ─────────────────────────
+// A TypedArray constructor is no longer confined to a variable declaration's
+// initializer — it can appear as a function argument, a return value, an
+// object field, or the head of a method chain (TDD-00018 Stage 5).
+function sum8(a: Uint8Array): number {
+  let s = 0
+  for (const x of a) { s = s + x }
+  return s
+}
+console.log(sum8(new Uint8Array([10, 20, 30])))          // 60 (inline argument)
+
+function makeSeq(n: number): Uint8Array {
+  return new Uint8Array([n, n + 1, n + 2])               // returned directly
+}
+console.log(makeSeq(5).length, makeSeq(5)[2])            // 3 7
+
+const packet: { id: number, body: Uint8Array } = { id: 1, body: new Uint8Array([0xff, 0x00]) }
+console.log(packet.body.length)                          // 2 (object field)
+
+console.log(new Int32Array([1, 2, 3]).map((x) => x * 2).join(",")) // 2,4,6

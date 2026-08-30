@@ -31,7 +31,7 @@
             "feature": "`http.createServer((req, res) => …).listen(port[, cb])` — real Node shape",
             "status": "implemented",
             "caveats": [
-              "V1 subset ([TDD-00131](../tdd/TDD-00131.md) Stage 1): `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end` and `req.method`/`url`/`headers`; no `res.statusCode =` setter or streaming backpressure",
+              "V1 subset ([TDD-00131](../tdd/TDD-00131.md) Stage 1): `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter ([ADR-00513](../adr/ADR-00513.md)), `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints ([ADR-00514](../adr/ADR-00514.md)), and `req.method`/`url`/`headers`. The response is **buffered** (flushed after the handler returns, [ADR-00300](../adr/ADR-00300.md)), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` is ever emitted (a large streamed response uses a `ReadableStream` `body` field instead)",
               "One server per program, shared with the bespoke `http.listen`"
             ],
             "notes": [
@@ -43,7 +43,7 @@
             "feature": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request', cb)`",
             "status": "implemented",
             "caveats": [
-              "`server.listen` **blocks** until the loop stops (`server.close()` + drain) — Node's non-blocking listen-then-continue top-level flow is not modeled",
+              "`server.listen` is **non-blocking** ([ADR-00514](../adr/ADR-00514.md)): it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback still fires synchronously at `listen()` time rather than on a later tick, so a `close()` before that tick doesn't cancel it (edge divergence). The bespoke `http.listen` stays blocking (its `{workers}` cluster fork depends on it)",
               "`.on` supports `'request'` (one listener), `'stream'`, and `'listening'` ([ADR-00502](../adr/ADR-00502.md)); no `'close'`/`'error'`/`'connection'`/`'clientError'`/`'upgrade'` events",
               "A handler wrapped in a `test` counting wrapper (`createServer(mustCall(fn))`) *is* contextually typed ([ADR-00412](../adr/ADR-00412.md)); other wrapper calls are not",
               "`createServer`'s options argument accepts only `{}` or `{requireHostHeader: false}` (stating existing no-Host-check behavior); timeouts and other options are clean rejections ([ADR-00503](../adr/ADR-00503.md))"
