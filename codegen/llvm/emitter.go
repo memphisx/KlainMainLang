@@ -203,6 +203,7 @@ type Emitter struct {
 	usedTermiosRaw       bool // TDD-00031: process.stdin.setRawMode termios machinery
 	usedWinSize          bool // TDD-00031: process.stdout.columns/.rows ioctl(TIOCGWINSZ)
 	usedTtyRead          bool // TDD-00031: klain:tty readByte/readKey blocking fd-0 reads
+	usedTui              bool // TDD-00150: klain:tui — Yoga layout + ANSI diff painter
 	usedSignalSigwinch   bool // TDD-00031: process.on('SIGWINCH') registration
 	usedMemcpy           bool
 	usedMemset           bool

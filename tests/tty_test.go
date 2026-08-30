@@ -99,3 +99,19 @@ func TestE2EProcessOnUnknownSignalRejected(t *testing.T) {
 		t.Fatalf("error should list the supported signals including SIGWINCH: %v", err)
 	}
 }
+
+// klain:tty.readKey(timeoutMs) polls: it returns the buffered key when one is
+// ready and an empty string once the stream is drained, without blocking
+// forever — the tick a self-refreshing TUI loop redraws on. Over a pipe the
+// bytes are ready immediately, then EOF reads back as "".
+func TestE2ETtyReadKeyTimeout(t *testing.T) {
+	got := runImportsStdin(t, `
+import { readKey } from 'klain:tty'
+const a: string = readKey(1000)
+const b: string = readKey(50)
+console.log("a=" + a.charCodeAt(0) + " blen=" + b.length)
+`, "A")
+	if got != "a=65 blen=0" {
+		t.Fatalf("got %q, want %q", got, "a=65 blen=0")
+	}
+}

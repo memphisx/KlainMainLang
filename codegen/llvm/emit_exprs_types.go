@@ -1335,6 +1335,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "performance" && !e.isShadowedByLocal(id.Name) && (mem.Property == "now" || mem.Property == "measure") {
 				return TypeF64
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "tui__kml_builtin" {
+				// TDD-00150: every builder returns an opaque node handle (a
+				// ptr); render/enter/leave return void. A node is only ever
+				// passed back into another builder or render, never
+				// method-dispatched, so a plain TypePtr suffices.
+				switch mem.Property {
+				case "Box", "Text", "List", "Spinner", "Progress", "TextInput":
+					return TypePtr
+				default:
+					return TypeVoid
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "fs__kml_builtin" {
 				switch mem.Property {
 				case "readFileSync":

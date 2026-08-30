@@ -17,6 +17,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 - [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)
 - [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.listen` server — Node-specific runtime globals with no browser equivalent
 - [Desktop (`klain:` bespoke)](#desktop-klain-bespoke) — the `klain:webview` desktop-window module, a capability with no Node/Web equivalent
+- [Terminal UI (`klain:` bespoke)](#terminal-ui-klain-bespoke) — the `klain:tui` native TUI framework (vendored Yoga flexbox + ANSI diff painter)
 - [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)
 - [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity
 - [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior
@@ -98,6 +99,16 @@ Capabilities with no Node/Web equivalent, under the [`klain:` namespace](../tdd/
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
 | Webview (desktop windows) | 20/20, 100% | 0/20, 0% | [DESKTOP-WEBVIEW.md](DESKTOP-WEBVIEW.md) | • One window per process (V1); a second `new Webview` is a clean rejection; multi-window deferred (engine run-loop/app-delegate rework)<br>• Raw `w.bind` (string-JSON-in/out, sync + `async Promise<string>`) plus **typed** bind — `bindings: {…}` / `w.bindTyped` auto-decode declared param types + JSON-encode the return, incl. async (`Promise<T>`) + nested-tuple params ([ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md)); `--emit-window-dts` writes the page-side `Window` typing; rejection carries a fixed message<br>• Timers/microtasks/async bind run on the GUI thread via a page-tick pump ([ADR-00439](../adr/ADR-00439.md)); servers/fd-loops still need a Worker<br>• `new Webview({ serve: './dist' })` / `klain:assets` `embedDir` embed a built SPA into the binary and serve it from an in-binary server — single-file apps, no external `dist/` ([ADR-00443](../adr/ADR-00443.md)); `klainmain -package` wraps it in a `.app`/`.desktop` ([ADR-00440](../adr/ADR-00440.md))<br>• Verified on macOS (M4); Linux compile-tier only, not yet run |
+
+## Terminal UI (`klain:` bespoke)
+
+A native terminal-UI framework with no Node/Web equivalent, under the [`klain:` namespace](../tdd/TDD-00131.md) — flexbox layout ([Yoga](https://github.com/facebook/yoga), vendored) plus a double-buffered ANSI diff painter.
+
+**11 / 11 features, 100% coverage.**
+
+| Category | Coverage | Strict | Page | Caveats |
+|---|---|---|---|---|
+| TUI framework (`klain:tui`) | 11/11, 100% | 5/11, ~45% | [TERMINAL-UI.md](TERMINAL-UI.md) | • Flexbox is a pragmatic Yoga-style subset (no percentage units / `position:absolute` / `aspectRatio` yet)<br>• Text is code-point- but not width-aware — wide (CJK/emoji) and combining chars occupy one cell, so alignment drifts for such content<br>• Immediate-mode: the tree is re-laid-out every frame (the cell diff keeps output minimal); a retained node tree is deferred<br>• The `state → view → update` loop is userland TS over `klain:tty` + `SIGWINCH` — no built-in app-runner / callback-driven loop until the FFI trampoline ([TDD-00150](../tdd/TDD-00150.md) Stage 2)<br>• Verified on macOS (M4); Linux compile-tier, not yet run |
 
 ## Cross-Cutting
 
@@ -193,7 +204,7 @@ Listed below is **every not-yet-done TDD** (Not Started, In Progress, or Partial
 | [00145](../tdd/TDD-00145.md) Status tracking as JSON source-of-truth (Markdown generated) | Partially Implemented | Phases 1–5 shipped — `docs/status/data/*.json` is canonical, these pages are generated, numbers derive, CI guards the sync, the importer stays as on-demand `export`/`roundtrip` tooling ([ADR-00444](../adr/ADR-00444.md), [ADR-00445](../adr/ADR-00445.md)); remaining: the website reference projection deriving badges/differences from the status source |
 | [00146](../tdd/TDD-00146.md) Sailfish OS target — cross-compiled CLI + Gecko webview backend | Not Started | Sailfish is glibc/aarch64 Linux: CLI needs only a `--target`/`--sysroot` mode + RPM packaging; UI rides `sailfish-components-webview` (Gecko) as a `-webview=sailfish` backend under [00144](../tdd/TDD-00144.md)'s flag |
 | [00147](../tdd/TDD-00147.md) Android target — NDK backend port + WebView apps via a thin Java shim | Not Started | bionic port (fibers without ucontext, vendored curl/pcre2/gc), JNI library entry, then WebView apps with a Gradle-free `-package apk`; shares the cross-target flag with [00146](../tdd/TDD-00146.md) |
-| [00150](../tdd/TDD-00150.md) TUI framework roadmap — native klain:tui → FFI-unlocked opentui/GUI → Vue/React compat | Not Started | Staged on [00031](../tdd/TDD-00031.md)'s shipped primitives, ordered by ease×value under native>Vue>else: Stage 1 native `klain:tui` (vendors Yoga, owns the diff painter + `state→view` loop, no FFI); Stage 2 general C FFI (the [00032](../tdd/TDD-00032.md) foundation — unlocks opentui's native backend, GTK/Qt/SDL/imgui GUI, ncurses, DB clients); Stage 3 opentui; Stage 4 vue-termui; Stage 5 ink/React (lowest). Supports all options, none rejected |
+| [00150](../tdd/TDD-00150.md) TUI framework roadmap — native klain:tui → FFI-unlocked opentui/GUI → Vue/React compat | Partially Implemented | Staged on [00031](../tdd/TDD-00031.md)'s shipped primitives, ordered by ease×value under native>Vue>else: Stage 1 native `klain:tui` (vendors Yoga, owns the diff painter + `state→view` loop, no FFI); Stage 2 general C FFI (the [00032](../tdd/TDD-00032.md) foundation — unlocks opentui's native backend, GTK/Qt/SDL/imgui GUI, ncurses, DB clients); Stage 3 opentui; Stage 4 vue-termui; Stage 5 ink/React (lowest). Supports all options, none rejected |
 
 ---
 

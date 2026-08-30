@@ -561,3 +561,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00516](ADR-00516.md) | `/** @pure */` — compile-time purity enforcement | `Implements [TDD-00128](../tdd/TDD-00128.md)` |
 | [00517](ADR-00517.md) | Object-reference array representation (shared headers) | `Implements [TDD-00127](../tdd/TDD-00127.md)` |
 | [00518](ADR-00518.md) | Terminal-control primitives (raw mode, tty size, SIGWINCH, raw reads) | `Implements [TDD-00031](../tdd/TDD-00031.md)`. `Extends [ADR-00079](ADR-00079.md)` (signal allowlist), `[ADR-00424](ADR-00424.md)` (isTTY). |
+| [00519](ADR-00519.md) | Native `klain:tui` — vendored Yoga flexbox + double-buffered ANSI diff painter | `Implements [TDD-00150](../tdd/TDD-00150.md)` (Stage 1). `Extends [ADR-00518](ADR-00518.md)` (terminal primitives), `[ADR-00131](ADR-00131.md)`/`klain:` namespace, `[ADR-00020](ADR-00020.md)` (conditional linking). |
+| [00520](ADR-00520.md) | `klain:tty` `readKey(timeoutMs)` — a polling raw-key read | `Extends [ADR-00518](ADR-00518.md)` (terminal primitives). Enables `klain:tui` live-refresh loops ([ADR-00519](ADR-00519.md)/[TDD-00150](../tdd/TDD-00150.md)). |

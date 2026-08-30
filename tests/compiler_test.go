@@ -70,6 +70,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -304,6 +305,28 @@ func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) [
 	return append(clangArgs, ttyFile)
 }
 
+// appendTui mirrors main.go's EmbeddedCSources loop for the klain:tui painter +
+// vendored Yoga link inputs (TDD-00150): each member's Content is written and
+// its CFlags/Libs appended, so the test build path links Yoga's prebuilt
+// objects exactly as the CLI does.
+func appendTui(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	srcs, err := em.TuiCSources()
+	if err != nil {
+		t.Fatalf("tui sources: %v", err)
+	}
+	for _, cs := range srcs {
+		p := filepath.Join(dir, cs.Name+"."+cs.SrcExt())
+		if err := os.WriteFile(p, []byte(cs.Content), 0644); err != nil {
+			t.Fatalf("write %s: %v", cs.Name, err)
+		}
+		clangArgs = append(clangArgs, p)
+		clangArgs = append(clangArgs, cs.CFlags...)
+		clangArgs = append(clangArgs, cs.Libs...)
+	}
+	return clangArgs
+}
+
 func buildBinaryGC(t *testing.T, src string) string {
 	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -418,6 +441,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
 	if wverr != nil {
 		t.Skipf("webview: %v", wverr)
@@ -669,6 +693,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -844,6 +869,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -906,6 +932,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -998,6 +1025,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1053,6 +1081,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1123,6 +1152,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
+	clangArgs = appendTui(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {

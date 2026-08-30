@@ -53,7 +53,7 @@ func (e *Emitter) ensureTtyRead() {
 	}
 	e.usedTtyRead = true
 	e.emitGlobal("declare i32 @__kml_tty_read_byte()")
-	e.emitGlobal("declare ptr @__kml_tty_read_key()")
+	e.emitGlobal("declare ptr @__kml_tty_read_key(i32)")
 }
 
 // emitProcessSetRawMode implements process.stdin.setRawMode(enabled): the
@@ -111,12 +111,26 @@ func (e *Emitter) emitTtyModuleCall(member string, args []ast.Expression, pos as
 		e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", b, r))
 		return Value{Ref: b, Ty: TypeI64}, nil
 	case "readKey":
-		if len(args) != 0 {
-			return Value{}, fmt.Errorf("%d:%d: klain:tty readKey() takes no arguments", pos.Line, pos.Col)
+		// readKey(): blocks for one keystroke. readKey(timeoutMs): waits up to
+		// timeoutMs for a keystroke, returning "" if none arrives — the poll a
+		// self-refreshing TUI loop needs (redraw on a tick as well as on input).
+		if len(args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: klain:tty readKey(timeoutMs?) takes at most 1 argument", pos.Line, pos.Col)
 		}
 		e.ensureTtyRead()
+		ms := "-1"
+		if len(args) == 1 {
+			v, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			iv := e.coerce(v, TypeI64)
+			t := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", t, iv.Ref))
+			ms = t
+		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tty_read_key()", r))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tty_read_key(i32 %s)", r, ms))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: klain:tty has no member '%s'", pos.Line, pos.Col, member)
@@ -131,6 +145,7 @@ func TTYShimSource() string {
 	return `#include <termios.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -189,8 +204,17 @@ int __kml_tty_read_byte(void) {
 
 /* One keystroke off fd 0 as a string: a single read() returns the whole
    burst of an escape sequence (arrow keys are ESC '[' 'A', 3 bytes) in raw
-   mode, so a caller sees a multi-byte key as one string. Empty string at EOF. */
-char *__kml_tty_read_key(void) {
+   mode, so a caller sees a multi-byte key as one string. Empty string at EOF.
+
+   timeout_ms < 0 blocks until a key arrives (readKey()); timeout_ms >= 0 waits
+   at most that long via poll() and returns "" if nothing arrived in time
+   (readKey(ms)) — the tick a self-refreshing TUI loop redraws on. */
+char *__kml_tty_read_key(int timeout_ms) {
+  if (timeout_ms >= 0) {
+    struct pollfd pfd; pfd.fd = 0; pfd.events = POLLIN;
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr <= 0) return kmltty_str("", 0); /* timed out (0) or error (-1) */
+  }
   char buf[32];
   ssize_t n = read(0, buf, sizeof(buf) - 1);
   if (n <= 0) return kmltty_str("", 0);

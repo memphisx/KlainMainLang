@@ -145,7 +145,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 48 | REJECTED: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… |
 | 47 | REJECTED: expected :, got ( |
 | 42 | REJECTED: '%s' is only valid inside a method or constructor body |
-| 39 | REJECTED: '%s' is not an array |
+| 38 | REJECTED: '%s' is not an array |
 | 36 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 35 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
 | 34 | REJECTED: expected IDENT, got STRING |
@@ -194,7 +194,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 15 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 15 | REJECTED: constructor of class '%s' calls super(...) but base class '%s' has no constructor |
 | 15 | REJECTED: expected (, got ) |
-| … | +293 more distinct reasons |
+| … | +294 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -214,13 +214,13 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 27 | `C__kml_mod0` |
 | 20 | `array` |
 | 20 | `b` |
-| 17 | `c` |
+| 16 | `c` |
 | 16 | `export` |
 | 15 | `B__kml_mod0` |
+| 15 | `a` |
 | 15 | `f__kml_mod0` |
 | 15 | `which` |
 | 14 | `C` |
-| 14 | `a` |
 | 14 | `foo__kml_mod0` |
 | 13 | `new` |
 | 12 | `D__kml_mod0` |

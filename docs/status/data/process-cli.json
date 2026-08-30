@@ -185,7 +185,8 @@
               "Blocking reads on fd 0; do not mix with `process.stdin.on('data')` in the same run, which puts fd 0 in non-blocking mode (a synchronous read would then see EOF-on-EAGAIN)"
             ],
             "notes": [
-              "`readByte()` returns one byte (or -1 at EOF); `readKey()` returns one `read()`'s whole burst as a string, so an escape sequence like an arrow key (ESC `[` A) is a single key ([ADR-00518](../adr/ADR-00518.md))"
+              "`readByte()` returns one byte (or -1 at EOF); `readKey()` returns one `read()`'s whole burst as a string, so an escape sequence like an arrow key (ESC `[` A) is a single key ([ADR-00518](../adr/ADR-00518.md))",
+              "`readKey(timeoutMs)` polls: it waits at most `timeoutMs` and returns `\"\"` if no key arrived — the tick a self-refreshing `klain:tui` loop redraws on ([ADR-00520](../adr/ADR-00520.md))"
             ]
           },
           {

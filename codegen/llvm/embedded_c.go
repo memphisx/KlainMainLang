@@ -110,6 +110,16 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// ioctl live in libc on both platforms.
 		out = append(out, CSource{"tty", TTYShimSource(), nil, nil, ""})
 	}
+	if e.UsesTui() {
+		// TDD-00150 Stage 1: the klain:tui painter runtime (tui.c) plus the
+		// vendored Yoga flexbox engine, which is pre-compiled to objects and
+		// linked in — see yogaCSources for why (C++20 can't share the C line).
+		tui, err := yogaCSources()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tui...)
+	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.

@@ -39,7 +39,8 @@ const LABELS = {
   net: 'net', nullable_scalars: 'Nullable scalars', nullish: 'Nullish', objects: 'Objects',
   os: 'os', path: 'path', process: 'Process / CLI', process_stdin: 'Process stdin',
   querystring: 'querystring', readline: 'readline', regexp: 'RegExp', set: 'Set',
-  streams: 'Streams', strings: 'Strings', tls: 'tls', typed_arrays: 'Typed Arrays',
+  streams: 'Streams', strings: 'Strings', tls: 'tls', tui: 'Terminal UI (klain:tui)',
+  typed_arrays: 'Typed Arrays',
   url: 'URL', util: 'util', webview: 'Webview (Desktop)', websocket: 'WebSocket',
   workers: 'Workers', zlib: 'zlib'
 }

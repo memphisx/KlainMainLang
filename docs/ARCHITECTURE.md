@@ -41,6 +41,9 @@ the same number of files.
 | `emit_timers.go` | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`, plus their `ensureTimerRuntime` C-runtime backing store (kept together, not under `runtime_*.go`, since this domain's runtime queue has only ever had one caller) |
 | `emit_http.go` | `http.listen`, request/response handling — the server-side request-object type annotation is `HttpRequest` (not `Request`, which is the client-side `fetch` class, see `emit_fetch_request.go`) |
 | `emit_os.go` | `os.platform`/`.homedir`/`.tmpdir`/`.hostname`/`.totalmem`/`.freemem`/`.cpus`/`.EOL` — platform selection (Linux vs. Darwin) is a Go-side `runtime.GOOS` branch, not runtime IR |
+| `emit_tui.go` (builders/render dispatch) + `emit_tui_props.go` (style-prop object-literal lowering) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave`. Builders map onto Yoga layout nodes carrying paint attributes; nodes are opaque `ptr` handles |
+| `tui.go` | The `tui.c` painter runtime string: Yoga bridge + per-node paint model + double-buffered ANSI diff painter (UTF-8-decoded text). Plain C over Yoga's extern-"C" ABI |
+| `yoga.go` / `yogasrc/` | Vendored Yoga flexbox engine (`//go:embed`, pinned): extracted per-version and compiled per-`.cpp` to objects (C++20), linked only when a program uses `klain:tui` — see [ADR-00519](adr/ADR-00519.md) for why prebuilt objects rather than a shared-line `.cc` |
 | `gclocate.go` / `gcshim.go` | Locating and shimming the Boehm GC library for `-mm=gc` |
 | `runtime_core.go` | Universal libc primitives (malloc/free/memcpy/strlen/…), math/random/qsort, errno/strerror |
 | `runtime_strings.go` | String C-runtime helpers (trim/case/replace/split) |

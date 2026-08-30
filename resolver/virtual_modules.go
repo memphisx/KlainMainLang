@@ -73,6 +73,11 @@ var virtualBuiltinMarkers = map[string]string{
 	// Node-faithful surface (setRawMode/columns/rows/SIGWINCH) stays on
 	// `process`; only these non-Node reads live under the explicit klain: name.
 	"klain:tty": "tty__kml_builtin",
+	// TDD-00150 Stage 1: native TUI framework — Yoga flexbox layout + a
+	// double-buffered ANSI diff painter. Builder functions (Box/Text/List/
+	// Spinner/Progress/TextInput) plus render/enter/leave; the state->view->
+	// update loop is written in userland TS over klain:tty + SIGWINCH.
+	"klain:tui": "tui__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -109,6 +114,11 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"mkdirSync": true, "rmdirSync": true, "renameSync": true,
 		"copyFileSync": true, "readdirSync": true,
 		"createReadStream": true, "createWriteStream": true,
+		// Stat/handle family — implemented in codegen (inferExprType) and long
+		// usable via the `fs.` namespace form; also valid as named imports.
+		"statSync": true, "lstatSync": true, "fstatSync": true,
+		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true,
+		"openSync": true, "writeSync": true, "readSync": true,
 		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
 		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
 		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,
@@ -156,6 +166,11 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"klain:webview": {"Webview": true},
 	"klain:assets":  {"embedDir": true},
 	"klain:tty":     {"readByte": true, "readKey": true},
+	"klain:tui": {
+		"Box": true, "Text": true, "List": true, "Spinner": true,
+		"Progress": true, "TextInput": true,
+		"render": true, "enter": true, "leave": true,
+	},
 	"cluster":    {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {

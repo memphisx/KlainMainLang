@@ -53,6 +53,8 @@ const routes = [
       { path: 'klain/sync', name: 'klain-sync', component: () => import('pages/docs/KlainSync.vue') },
       { path: 'cli', name: 'cli', component: () => import('pages/docs/Cli.vue') },
       { path: 'coverage', name: 'coverage', component: () => import('pages/docs/Coverage.vue') },
+      { path: 'guides', name: 'guides', component: () => import('pages/docs/guides/GuidesIndex.vue') },
+      { path: 'guides/tui-app', name: 'guides-tui-app', component: () => import('pages/docs/guides/BuildTuiApp.vue') },
       { path: 'examples', name: 'examples', component: () => import('pages/docs/Examples.vue') },
       ...referenceRoutes,
       ...exampleRoutes
