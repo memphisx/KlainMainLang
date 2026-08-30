@@ -560,3 +560,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00515](ADR-00515.md) | Lazy dynamic `import()` via `dlopen`'d shared-library islands | `Implements [TDD-00056](../tdd/TDD-00056.md)` |
 | [00516](ADR-00516.md) | `/** @pure */` — compile-time purity enforcement | `Implements [TDD-00128](../tdd/TDD-00128.md)` |
 | [00517](ADR-00517.md) | Object-reference array representation (shared headers) | `Implements [TDD-00127](../tdd/TDD-00127.md)` |
+| [00518](ADR-00518.md) | Terminal-control primitives (raw mode, tty size, SIGWINCH, raw reads) | `Implements [TDD-00031](../tdd/TDD-00031.md)`. `Extends [ADR-00079](ADR-00079.md)` (signal allowlist), `[ADR-00424](ADR-00424.md)` (isTTY). |

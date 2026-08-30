@@ -67,6 +67,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// TDD-00142 Stage 7: compile-time asset embedding (`embedDir`). Function
 	// member → marker-dispatch (not identity).
 	"klain:assets": "assets__kml_builtin",
+	// TDD-00031: bespoke terminal-input primitives with no Node counterpart —
+	// synchronous single-keystroke reads off fd 0 (Node does raw input via
+	// process.stdin.on('data') events, never a sync byte read). The
+	// Node-faithful surface (setRawMode/columns/rows/SIGWINCH) stays on
+	// `process`; only these non-Node reads live under the explicit klain: name.
+	"klain:tty": "tty__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -149,6 +155,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"klain:http":    {"listen": true, "close": true, "closeAllConnections": true},
 	"klain:webview": {"Webview": true},
 	"klain:assets":  {"embedDir": true},
+	"klain:tty":     {"readByte": true, "readKey": true},
 	"cluster":    {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {

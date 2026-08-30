@@ -415,10 +415,6 @@
           "title": "Best-effort vanilla-JS compatibility (opt-in)",
           "notes": "See [What Is NOT Implemented](#what-is-not-implemented) → High complexity"
         },
-        "31": {
-          "title": "Terminal UI primitives (raw mode, tty size, key reads)",
-          "notes": "Scoped and ready — see the Process / CLI I/O row"
-        },
         "33": {
           "title": "Direct hardware / framebuffer access",
           "notes": "Same FFI-adjacent gap as 00032; Linux-only by nature"
@@ -558,6 +554,10 @@
         "32": {
           "title": "Native library bindings / GUI",
           "notes": "Placeholder, not a committed design — general FFI is the real prerequisite; the GUI route is met instead by the system webview ([TDD-00142](../tdd/TDD-00142.md))"
+        },
+        "150": {
+          "title": "TUI framework roadmap — native klain:tui → FFI-unlocked opentui/GUI → Vue/React compat",
+          "notes": "Staged on [00031](../tdd/TDD-00031.md)'s shipped primitives, ordered by ease×value under native>Vue>else: Stage 1 native `klain:tui` (vendors Yoga, owns the diff painter + `state→view` loop, no FFI); Stage 2 general C FFI (the [00032](../tdd/TDD-00032.md) foundation — unlocks opentui's native backend, GTK/Qt/SDL/imgui GUI, ncurses, DB clients); Stage 3 opentui; Stage 4 vue-termui; Stage 5 ink/React (lowest). Supports all options, none rejected"
         }
       }
     },

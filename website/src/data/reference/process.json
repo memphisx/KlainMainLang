@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "PROCESS-CLI.md",
   "coversRows": "all",
-  "coverage": { "loose": "29/29", "loosePct": 100, "strict": "13/29", "strictPct": 45 },
+  "coverage": { "loose": "32/32", "loosePct": 100, "strict": "13/32", "strictPct": 41 },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
     {
@@ -197,10 +197,62 @@
       "snippet": "process.stdout.write(chunk.toUpperCase())",
       "differences": [
         "Text-only (byte-string, not binary-safe past an embedded null — the same scope narrowing `console.log` has).",
-        "Beyond `.write` and `.isTTY` (a real `isatty(fd)` probe), `process.stdout`/`stderr` expose no other stream surface (no `.columns`/`.rows`, no `'drain'`)."
+        "Beyond `.write`, `.isTTY` (a real `isatty(fd)` probe), and `.columns`/`.rows` (a live `ioctl(TIOCGWINSZ)` read), `process.stdout`/`stderr` expose no other stream surface (no `'drain'`)."
       ],
-      "seeAlso": ["process.stdin"],
+      "seeAlso": ["process.stdout.size", "process.stdin.setRawMode", "process.stdin"],
       "spec": { "mdn": "https://nodejs.org/api/process.html#processstdout" }
+    },
+    {
+      "id": "process.stdout.size",
+      "name": "process.stdout.columns / .rows",
+      "statusRow": "process.stdout.columns / .rows (terminal size)",
+      "signature": "process.stdout.columns: number; process.stdout.rows: number",
+      "badge": "caveats",
+      "description": "The terminal's current width and height, read live via ioctl(TIOCGWINSZ) on each access (never cached, matching Node). Available on process.stdout and process.stderr. Pair with process.on('SIGWINCH') to repaint on a window resize.",
+      "returns": { "type": "number", "desc": "Columns or rows." },
+      "exampleKey": "tty/keys",
+      "snippet": "console.log(process.stdout.columns + \"x\" + process.stdout.rows)",
+      "differences": [
+        "Off a non-TTY (piped/redirected) returns an 80x24 fallback rather than Node's `undefined` — there is no clean undefined-number here."
+      ],
+      "seeAlso": ["process.stdin.setRawMode", "process.signals"],
+      "spec": { "mdn": "https://nodejs.org/api/process.html#processstdoutcolumns" }
+    },
+    {
+      "id": "process.stdin.setRawMode",
+      "name": "process.stdin.setRawMode / klain:tty",
+      "statusRow": "process.stdin.setRawMode(enabled) (raw terminal input)",
+      "signature": "process.stdin.setRawMode(enabled: boolean): void",
+      "badge": "caveats",
+      "description": "Puts the terminal into raw mode (the libuv UV_TTY_MODE_RAW transform on fd 0): canonical mode, echo, and signal generation are disabled, so keystrokes arrive one at a time and Ctrl-C comes through as the raw byte 3 instead of delivering SIGINT. Read those keystrokes either event-driven via process.stdin.on('data') (the Node-idiomatic path) or synchronously via klain:tty's readByte()/readKey(). Guard on process.stdin.isTTY first.",
+      "returns": { "type": "void", "desc": "Nothing." },
+      "exampleKey": "tty/keys",
+      "snippet": "import { readKey } from 'klain:tty'\nprocess.stdin.setRawMode(true)\nconst k = readKey()",
+      "differences": [
+        "A no-op when fd 0 is not a terminal (`tcgetattr` fails); `setRawMode(false)` restores the state captured on the first enable.",
+        "Auto-restore on a crash is the application's responsibility (same footgun as Node).",
+        "`readByte()`/`readKey()` are a bespoke, non-Node `klain:` surface — Node has no synchronous single-key read. Don't mix them with `process.stdin.on('data')` in the same run (that puts fd 0 in non-blocking mode)."
+      ],
+      "seeAlso": ["process.stdout.size", "process.signals", "process.stdin", "klain.tty"],
+      "spec": { "mdn": "https://nodejs.org/api/tty.html#readstreamsetrawmodemode" }
+    },
+    {
+      "id": "klain.tty",
+      "name": "klain:tty readByte / readKey",
+      "statusRow": "klain:tty readByte() / readKey() (synchronous raw reads)",
+      "signature": "import { readByte, readKey } from 'klain:tty'; readByte(): number; readKey(): string",
+      "badge": "caveats",
+      "description": "Synchronous single-keystroke reads off fd 0, for a blocking raw-input loop. readByte() returns one byte (or -1 at EOF); readKey() returns one read()'s whole burst as a string, so an escape sequence like an arrow key (ESC [ A) is a single key. A bespoke klain: primitive because Node has no synchronous single-key read — it uses process.stdin.on('data') events.",
+      "returns": { "type": "number | string", "desc": "The byte (-1 at EOF) or the keystroke string." },
+      "exampleKey": "tty/keys",
+      "snippet": "import { readKey } from 'klain:tty'\nconst k = readKey()",
+      "differences": [
+        "Non-Node surface under the explicit `klain:` specifier.",
+        "Blocking reads on fd 0; don't mix with `process.stdin.on('data')` in the same run (which puts fd 0 in non-blocking mode, so a synchronous read would see EOF-on-EAGAIN).",
+        "Pair with `process.stdin.setRawMode(true)` so keystrokes arrive un-echoed, one at a time."
+      ],
+      "seeAlso": ["process.stdin.setRawMode", "process.stdout.size"],
+      "spec": { "mdn": "https://nodejs.org/api/tty.html" }
     },
     {
       "id": "process.env.write",
@@ -221,15 +273,15 @@
     },
     {
       "id": "process.signals",
-      "name": "process.on('SIGINT'/'SIGTERM', handler)",
-      "statusRow": "process.on('SIGINT'/'SIGTERM', handler) (signal handlers)",
-      "signature": "process.on('SIGINT' | 'SIGTERM', handler: () => void)",
+      "name": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler)",
+      "statusRow": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler) (signal handlers)",
+      "signature": "process.on('SIGINT' | 'SIGTERM' | 'SIGWINCH', handler: () => void)",
       "badge": "caveats",
-      "description": "Lets a running program (e.g. an http.listen server) intercept a signal and shut down gracefully instead of dying immediately.",
+      "description": "Lets a running program intercept a signal — SIGINT/SIGTERM to shut down gracefully instead of dying immediately, or SIGWINCH (terminal resize) to re-read process.stdout.columns/.rows and repaint a TUI.",
       "returns": { "type": "void", "desc": "Registers the handler." },
       "differences": [
         "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context.",
-        "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`.",
+        "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`.",
         "Handler must be a zero-argument `() => void` closure; one handler slot per signal (re-registering overwrites).",
         "Only fires while a `http.listen`- or timer-driven event loop is actively iterating; a plain synchronous script has no loop to check from."
       ],

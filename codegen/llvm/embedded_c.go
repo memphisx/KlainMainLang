@@ -105,6 +105,11 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 		out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
 	}
+	if e.UsesTtyShim() {
+		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
+		// ioctl live in libc on both platforms.
+		out = append(out, CSource{"tty", TTYShimSource(), nil, nil, ""})
+	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.

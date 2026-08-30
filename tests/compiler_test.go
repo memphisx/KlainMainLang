@@ -69,6 +69,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -287,6 +288,22 @@ func appendWebview(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 	return clangArgs, true, nil
 }
 
+// appendTty compiles+links the klain:tty / terminal-control C shim (TDD-00031)
+// when the program used any terminal primitive, mirroring EmbeddedCSources so
+// the test build path can't drift from the CLI's. No extra libs (termios/ioctl
+// are in libc on both platforms).
+func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesTtyShim() {
+		return clangArgs
+	}
+	ttyFile := filepath.Join(dir, "tty.c")
+	if err := os.WriteFile(ttyFile, []byte(llvm.TTYShimSource()), 0644); err != nil {
+		t.Fatalf("write tty shim: %v", err)
+	}
+	return append(clangArgs, ttyFile)
+}
+
 func buildBinaryGC(t *testing.T, src string) string {
 	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
@@ -332,6 +349,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
@@ -399,6 +417,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
 	if wverr != nil {
 		t.Skipf("webview: %v", wverr)
@@ -507,6 +526,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
@@ -648,6 +668,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -725,6 +746,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
@@ -821,6 +843,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -882,6 +905,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -973,6 +997,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1027,6 +1052,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1096,6 +1122,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendTty(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {

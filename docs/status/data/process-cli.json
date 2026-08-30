@@ -146,11 +146,46 @@
             "status": "implemented",
             "caveats": [
               "Text-only (byte-string, not binary-safe past an embedded null — same scope narrowing `console.log`'s own string formatting already has)",
-              "Beyond `.write` and `.isTTY` (a real `isatty(fd)` probe on all three stdio handles — [ADR-00424](../adr/ADR-00424.md)), `process.stdout`/`stderr` expose no other stream surface (no `.columns`/`.rows`, no `'drain'`)"
+              "Beyond `.write`, `.isTTY` (a real `isatty(fd)` probe on all three stdio handles — [ADR-00424](../adr/ADR-00424.md)), and `.columns`/`.rows` (a live `ioctl(TIOCGWINSZ)` read — [ADR-00518](../adr/ADR-00518.md)), `process.stdout`/`stderr` expose no other stream surface (no `'drain'`)"
             ],
             "notes": [
               "Unlike `console.log`/`.error` (always a trailing newline), a plain write of exactly `s` with nothing appended — useful for a progress indicator or assembling one line from several pieces",
               "`stdout` goes through buffered `printf` (matching `console.log`'s own fd=1 convention, so output ordering against `console.log` calls elsewhere in the same program stays correct); `stderr` goes through unbuffered `dprintf` (matching `console.error`'s own fd=2 convention)"
+            ]
+          },
+          {
+            "feature": "`process.stdout.columns` / `.rows` (terminal size)",
+            "status": "implemented",
+            "caveats": [
+              "Off a non-TTY (piped/redirected) returns an 80x24 fallback rather than Node's `undefined` — this compiler has no clean undefined-number ([ADR-00518](../adr/ADR-00518.md))"
+            ],
+            "notes": [
+              "A live `ioctl(TIOCGWINSZ)` read on each access (never cached, matching Node); pair with `process.on('SIGWINCH')` to repaint on resize",
+              "Available on both `process.stdout` and `process.stderr`"
+            ]
+          },
+          {
+            "feature": "`process.stdin.setRawMode(enabled)` (raw terminal input)",
+            "status": "implemented",
+            "caveats": [
+              "A no-op when fd 0 is not a terminal (`tcgetattr` fails) — guard on `process.stdin.isTTY` first, as every TUI does",
+              "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
+              "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable"
+            ],
+            "notes": [
+              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md))",
+              "Pair with `process.stdin.on('data')` (event-driven, the Node-idiomatic raw loop) or with `klain:tty` `readByte`/`readKey` (synchronous)"
+            ]
+          },
+          {
+            "feature": "`klain:tty` `readByte()` / `readKey()` (synchronous raw reads)",
+            "status": "implemented",
+            "caveats": [
+              "Bespoke, non-Node surface under the explicit `klain:` specifier — Node has no synchronous single-key read (it uses `process.stdin.on('data')` events)",
+              "Blocking reads on fd 0; do not mix with `process.stdin.on('data')` in the same run, which puts fd 0 in non-blocking mode (a synchronous read would then see EOF-on-EAGAIN)"
+            ],
+            "notes": [
+              "`readByte()` returns one byte (or -1 at EOF); `readKey()` returns one `read()`'s whole burst as a string, so an escape sequence like an arrow key (ESC `[` A) is a single key ([ADR-00518](../adr/ADR-00518.md))"
             ]
           },
           {
@@ -165,17 +200,18 @@
             ]
           },
           {
-            "feature": "`process.on('SIGINT'/'SIGTERM', handler)` (signal handlers)",
+            "feature": "`process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler)` (signal handlers)",
             "status": "implemented",
             "caveats": [
               "The handler runs from ordinary control flow at the top of the event loop's own iteration, never from real async signal context",
-              "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'` (dynamic event names are a clean compile error, matching `Object.hasOwn`'s dynamic-key rejection)",
+              "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'` (dynamic event names are a clean compile error, matching `Object.hasOwn`'s dynamic-key rejection)",
               "Handler must be a zero-argument `() => void` closure, same shape `setTimeout`'s own callback requires",
               "One handler slot per signal — registering the same signal twice overwrites the previous handler",
               "Only fires while a `http.listen`-driven or timer-driven event loop is actively iterating; a plain synchronous script with neither has no loop to check from"
             ],
             "notes": [
-              "Lets a running program (e.g. an `http.listen` server) intercept a signal and shut down gracefully instead of dying immediately. See [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md), [HTTP-SERVER.md](HTTP-SERVER.md)."
+              "Lets a running program (e.g. an `http.listen` server) intercept a signal and shut down gracefully instead of dying immediately. See [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md), [HTTP-SERVER.md](HTTP-SERVER.md).",
+              "`'SIGWINCH'` (terminal resize) lets a TUI re-read `process.stdout.columns`/`.rows` and repaint on a window resize ([ADR-00518](../adr/ADR-00518.md))"
             ]
           },
           {

@@ -676,6 +676,20 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			}
 		}
 	}
+	// process.stdout/.stderr `.columns` / `.rows` — TDD-00031, a live
+	// ioctl(TIOCGWINSZ) read, same nested pseudo-namespace shape as isTTY.
+	if ex.Property == "columns" || ex.Property == "rows" {
+		if inner, ok := ex.Object.(*ast.MemberExpression); ok {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+				switch inner.Property {
+				case "stdout":
+					return e.emitProcessWinSize(1, ex.Property), nil
+				case "stderr":
+					return e.emitProcessWinSize(2, ex.Property), nil
+				}
+			}
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
 		switch ex.Property {
 		case "argv":

@@ -200,6 +200,10 @@ type Emitter struct {
 	enclosingCapturables []map[string]bool
 	usedStrlen           bool
 	usedIsatty           bool
+	usedTermiosRaw       bool // TDD-00031: process.stdin.setRawMode termios machinery
+	usedWinSize          bool // TDD-00031: process.stdout.columns/.rows ioctl(TIOCGWINSZ)
+	usedTtyRead          bool // TDD-00031: klain:tty readByte/readKey blocking fd-0 reads
+	usedSignalSigwinch   bool // TDD-00031: process.on('SIGWINCH') registration
 	usedMemcpy           bool
 	usedMemset           bool
 	usedStrcmp           bool

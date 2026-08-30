@@ -689,8 +689,12 @@ func (e *Emitter) ensureSignalHandlerRuntime() {
 	e.emitGlobal("declare ptr @signal(i32 noundef, ptr noundef)")
 	e.emitGlobal("@__kml_sigint_pending = internal thread_local global i8 0")
 	e.emitGlobal("@__kml_sigterm_pending = internal thread_local global i8 0")
+	// TDD-00031: SIGWINCH (terminal resize) is a third literal on the same
+	// flag/closure machinery — SIGWINCH is signal 28 on both Linux and Darwin.
+	e.emitGlobal("@__kml_sigwinch_pending = internal thread_local global i8 0")
 	e.emitGlobal("@__kml_sigint_closure = internal thread_local global ptr null")
 	e.emitGlobal("@__kml_sigterm_closure = internal thread_local global ptr null")
+	e.emitGlobal("@__kml_sigwinch_closure = internal thread_local global ptr null")
 	e.emitGlobal(`
 define void @__kml_sig_handler(i32 %signum) {
 entry:
@@ -703,10 +707,18 @@ setint:
 
 checkterm:
   %isterm = icmp eq i32 %signum, 15
-  br i1 %isterm, label %setterm, label %done
+  br i1 %isterm, label %setterm, label %checkwinch
 
 setterm:
   store volatile i8 1, ptr @__kml_sigterm_pending
+  ret void
+
+checkwinch:
+  %iswinch = icmp eq i32 %signum, 28
+  br i1 %iswinch, label %setwinch, label %done
+
+setwinch:
+  store volatile i8 1, ptr @__kml_sigwinch_pending
   ret void
 
 done:
@@ -739,4 +751,16 @@ func (e *Emitter) ensureSignalRegisteredSigterm() {
 	e.usedSignalSigterm = true
 	e.ensureSignalHandlerRuntime()
 	e.emitInstr("call ptr @signal(i32 15, ptr @__kml_sig_handler)")
+}
+
+// ensureSignalRegisteredSigwinch installs __kml_sig_handler for SIGWINCH
+// (terminal resize, signal 28 on both Linux and Darwin) — TDD-00031. Same
+// idempotent, register-only-if-used posture as the SIGINT/SIGTERM helpers.
+func (e *Emitter) ensureSignalRegisteredSigwinch() {
+	if e.usedSignalSigwinch {
+		return
+	}
+	e.usedSignalSigwinch = true
+	e.ensureSignalHandlerRuntime()
+	e.emitInstr("call ptr @signal(i32 28, ptr @__kml_sig_handler)")
 }

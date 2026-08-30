@@ -465,6 +465,16 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		}
 		e.ensureSignalRegisteredSigterm()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigterm_closure", closurePtr))
+	case "SIGWINCH":
+		// TDD-00031: terminal-resize handler. Same zero-arg void closure shape
+		// and same event-loop-drained delivery as SIGINT/SIGTERM — the handler
+		// re-reads process.stdout.columns/.rows itself.
+		closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureSignalRegisteredSigwinch()
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigwinch_closure", closurePtr))
 	case "exit":
 		// The 'exit' listener receives the exit code: (code: number) => void.
 		// The param is a `number` (float64, TDD-00123) — the runtime's
@@ -520,7 +530,7 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.ensureProcessWarningHandler()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_process_warning_handler, align 8", cb.hdrPtr))
 	default:
-		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'exit'/'uncaughtException'/'warning' (got %q)", pos.Line, pos.Col, eventLit.Value)
+		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'SIGWINCH'/'exit'/'uncaughtException'/'warning' (got %q)", pos.Line, pos.Col, eventLit.Value)
 	}
 	return Value{Ty: TypeVoid}, nil
 }

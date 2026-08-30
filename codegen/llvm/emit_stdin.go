@@ -14,6 +14,21 @@ import (
 
 // emitStdinMethodCall dispatches process.stdin.on('data'|'end', listener).
 func (e *Emitter) emitStdinMethodCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// setRawMode is handled before the streaming runtime is touched: evaluating
+	// process.stdin calls __kml_stdin_create(), which flips fd 0 to O_NONBLOCK
+	// for the event-driven .on('data') reader — the wrong mode for the
+	// synchronous klain:tty readByte/readKey a raw-mode program pairs with. The
+	// termios toggle needs neither the handle nor the non-blocking flip, so it
+	// stays clear of both (TDD-00031).
+	if method == "setRawMode" {
+		if _, err := e.emitProcessSetRawMode(args, pos); err != nil {
+			return Value{}, err
+		}
+		// Node returns the stream for chaining; nothing downstream depends on the
+		// handle's identity, so a void result is the faithful-enough answer that
+		// avoids forcing the O_NONBLOCK flip.
+		return Value{Ty: TypeVoid}, nil
+	}
 	e.ensureStdinRuntime()
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
@@ -48,7 +63,7 @@ func (e *Emitter) emitStdinMethodCall(objExpr ast.Expression, method string, arg
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: process.stdin has no method '%s' (supported: on)", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: process.stdin has no method '%s' (supported: on, setRawMode)", pos.Line, pos.Col, method)
 }
 
 // stdinStoreField GEPs the handle's field idx and stores a ptr into it.
