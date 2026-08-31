@@ -197,6 +197,16 @@ type Type struct {
 
 	// IsIncomingMessage marks Node's http client response object (TDD-00138).
 	IsIncomingMessage bool
+	// IsSQLiteDatabase marks node:sqlite's `new DatabaseSync(...)` result
+	// (ADR-00540): a heap object holding the raw `sqlite3*` handle (__kml_handle)
+	// plus an `isOpen` bool field (a plain field read via the object machinery);
+	// exec/prepare/close dispatch on this flag in emit_call.go. See emit_sqlite.go.
+	IsSQLiteDatabase bool
+	// IsSQLiteStatement marks a StatementSync returned by db.prepare() (ADR-00540):
+	// a heap object holding the `sqlite3_stmt*` handle, a back-pointer to the
+	// owning database (for changes()/last_insert_rowid()), and a `sourceSQL`
+	// field. get/all/run dispatch on this flag.
+	IsSQLiteStatement bool
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -745,6 +755,64 @@ func URLType() Type {
 	})
 	ty.IsURL = true
 	return ty
+}
+
+// SQLiteDatabaseType returns node:sqlite's `new DatabaseSync(...)` result type
+// (ADR-00540): the raw sqlite3* handle in a hidden __kml_handle field plus a
+// plain `isOpen` bool read through the ordinary object machinery. exec/prepare/
+// close dispatch on IsSQLiteDatabase in emit_call.go.
+func SQLiteDatabaseType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_handle", Ty: TypePtr},
+		{Name: "isOpen", Ty: TypeBool},
+		{Name: "__kml_path", Ty: TypePtr},
+		{Name: "__kml_flags", Ty: TypeI32},
+	})
+	ty.IsSQLiteDatabase = true
+	return ty
+}
+
+// SQLiteStatementType returns a StatementSync's type (ADR-00540): the
+// sqlite3_stmt* handle, a back-pointer to the owning database's sqlite3* (for
+// changes()/last_insert_rowid() after run()), and the source SQL string as a
+// plain field. get/all/run dispatch on IsSQLiteStatement.
+func SQLiteStatementType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_handle", Ty: TypePtr},
+		{Name: "__kml_db", Ty: TypePtr},
+		{Name: "sourceSQL", Ty: TypePtr},
+	})
+	ty.IsSQLiteStatement = true
+	return ty
+}
+
+// SQLiteColumnMetaType is one entry of stmt.columns() (ADR-00540): the
+// column/table/database origin plus declared type and result name. Absent
+// origins (an expression column) read back as null, matching node:sqlite.
+func SQLiteColumnMetaType() Type {
+	return ObjectType([]Field{
+		{Name: "column", Ty: nullablePtr()},
+		{Name: "database", Ty: nullablePtr()},
+		{Name: "table", Ty: nullablePtr()},
+		{Name: "type", Ty: nullablePtr()},
+		{Name: "name", Ty: TypePtr},
+	})
+}
+
+func nullablePtr() Type {
+	t := TypePtr
+	t.Nullable = true
+	return t
+}
+
+// SQLiteRunResultType is the `{ changes, lastInsertRowid }` object stmt.run()
+// returns (ADR-00540). Both are `number` (TDD-00123 f64); real Node returns
+// bigint-or-number, narrowed to number for V1 with the >2^53 caveat documented.
+func SQLiteRunResultType() Type {
+	return ObjectType([]Field{
+		{Name: "changes", Ty: TypeF64},
+		{Name: "lastInsertRowid", Ty: TypeF64},
+	})
 }
 
 // URLPatternType returns `new URLPattern(...)`'s result type (TDD-00100): the

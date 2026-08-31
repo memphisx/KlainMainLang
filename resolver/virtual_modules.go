@@ -97,6 +97,11 @@ var virtualBuiltinMarkers = map[string]string{
 	// ADR-00434: the Node crypto *module* (generateKeyPair etc.), distinct
 	// from (and re-exporting parts of) the ambient WebCrypto global.
 	"crypto": "nodecrypto__kml_builtin",
+	// ADR-00540: Node's built-in SQLite module. DatabaseSync/StatementSync
+	// bind as identity (parse-time constructors, like stream's class names);
+	// registered only under the real `node:sqlite` specifier — there is no
+	// bare Node `sqlite` module, so the init() auto-prefixer leaves it alone.
+	"node:sqlite": "sqlite__kml_builtin",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -216,6 +221,10 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"isWindows": true, "isLinux": true, "isMacOS": true, "hasCrypto": true,
 		"hasIntl": true, "isMainThread": true,
 	},
+	// ADR-00540: node:sqlite. Both are parse-time constructors bound as
+	// identity (StatementSync is only ever returned from db.prepare(), never
+	// user-constructed, but it is a valid named import).
+	"node:sqlite": {"DatabaseSync": true, "StatementSync": true},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds

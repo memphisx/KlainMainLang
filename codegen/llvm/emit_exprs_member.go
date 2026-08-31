@@ -800,6 +800,42 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return e.loadFieldValue(objVal, idx, fieldTy), nil
 		}
 	}
+	// node:sqlite computed properties (ADR-00540): db.isTransaction reads the
+	// live autocommit state; stmt.expandedSQL renders the SQL with bound values.
+	if ex.Property == "isTransaction" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsSQLiteDatabase {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureSQLite3()
+			h := e.loadFieldValue(objVal, e.sqliteFieldIdx(objVal.Ty, "__kml_handle"), TypePtr).Ref
+			ac := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @sqlite3_get_autocommit(ptr %s)", ac, h))
+			// autocommit == 0 means a transaction is open.
+			b := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", b, ac))
+			return Value{Ref: b, Ty: TypeBool}, nil
+		}
+	}
+	if ex.Property == "expandedSQL" {
+		if objTy := e.inferExprType(ex.Object); objTy.IsSQLiteStatement {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			e.ensureSQLite3()
+			h := e.loadFieldValue(objVal, e.sqliteFieldIdx(objVal.Ty, "__kml_handle"), TypePtr).Ref
+			raw := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @sqlite3_expanded_sql(ptr %s)", raw, h))
+			s := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", s, raw))
+			// sqlite3_expanded_sql returns a sqlite3_malloc'd buffer; free it now
+			// that we've copied into a KML string.
+			e.emitInstr(fmt.Sprintf("call void @sqlite3_free(ptr %s)", raw))
+			return Value{Ref: s, Ty: TypePtr}, nil
+		}
+	}
 	// res.statusCode (ServerResponse, TDD-00131) reads the `status` field —
 	// Node names the property `statusCode`, the object field is `status`.
 	if ex.Property == "statusCode" {

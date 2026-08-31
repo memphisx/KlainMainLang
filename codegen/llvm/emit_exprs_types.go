@@ -563,6 +563,13 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypePtr
 			}
 		}
+		// node:sqlite computed properties (ADR-00540).
+		if ex.Property == "isTransaction" && e.inferExprType(ex.Object).IsSQLiteDatabase {
+			return TypeBool
+		}
+		if ex.Property == "expandedSQL" && e.inferExprType(ex.Object).IsSQLiteStatement {
+			return TypePtr
+		}
 		// res.statusCode (ServerResponse, TDD-00131) — the response status,
 		// stored as the object's i64 `status` field.
 		if ex.Property == "statusCode" {
@@ -863,6 +870,46 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if mem.Property == "get" && e.inferExprType(mem.Object).IsEmbeddedAssets {
 				return ArrayBufferType()
+			}
+			// node:sqlite (ADR-00540): db.prepare() → StatementSync; the
+			// StatementSync reads take their row shape from an explicit call-site
+			// type argument (`stmt.all<Row>()` / `stmt.get<Row>()`), matching the
+			// Node .d.ts get<T>()/all<T>() signatures.
+			if e.inferExprType(mem.Object).IsSQLiteDatabase {
+				switch mem.Property {
+				case "prepare":
+					return SQLiteStatementType()
+				case "location":
+					nt := TypePtr
+					nt.Nullable = true
+					return nt
+				case "exec", "close", "open", "function", "aggregate":
+					return TypeVoid
+				}
+			}
+			if e.inferExprType(mem.Object).IsSQLiteStatement {
+				switch mem.Property {
+				case "all", "iterate":
+					if len(ex.TypeArgs) == 1 {
+						return ArrayOf(e.resolveType(ex.TypeArgs[0]))
+					}
+					return ArrayOf(TypePtr)
+				case "get":
+					if len(ex.TypeArgs) == 1 {
+						rt := e.resolveType(ex.TypeArgs[0])
+						rt.Nullable = true
+						return rt
+					}
+					nt := TypePtr
+					nt.Nullable = true
+					return nt
+				case "run":
+					return SQLiteRunResultType()
+				case "columns":
+					return ArrayOf(SQLiteColumnMetaType())
+				case "setReadBigInts", "setAllowBareNamedParameters":
+					return TypeVoid
+				}
 			}
 		}
 		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
@@ -2356,6 +2403,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		return errorObjType
 	case *ast.NewDateExpression:
 		return TypeDate
+	case *ast.NewDatabaseSyncExpression:
+		return SQLiteDatabaseType()
 	case *ast.NewURLExpression:
 		return URLType()
 	case *ast.NewURLSearchParamsExpression:

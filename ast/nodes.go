@@ -1320,6 +1320,24 @@ func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
 	return &NewURLExpression{URL: url, pos: pos}
 }
 
+// NewDatabaseSyncExpression is `new DatabaseSync(path, options?)` from
+// node:sqlite (ADR-00540). Path is a required string; Options is an optional
+// `{ readOnly, open, enableForeignKeyConstraints, timeout }` object literal,
+// validated in codegen.
+type NewDatabaseSyncExpression struct {
+	Path    Expression
+	Options Expression // nil when omitted
+	pos     Pos
+}
+
+func (*NewDatabaseSyncExpression) nodeMarker()   {}
+func (*NewDatabaseSyncExpression) exprMarker()   {}
+func (n *NewDatabaseSyncExpression) GetPos() Pos { return n.pos }
+
+func NewNewDatabaseSyncExpression(path, options Expression, pos Pos) *NewDatabaseSyncExpression {
+	return &NewDatabaseSyncExpression{Path: path, Options: options, pos: pos}
+}
+
 // NewURLPatternExpression is `new URLPattern()` / `new URLPattern(init)` —
 // init, when present, must be an object literal with any subset of the six
 // supported component patterns (protocol/hostname/port/pathname/search/hash);

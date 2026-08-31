@@ -26,11 +26,12 @@ import s23 from './reference/events.json'
 import s24 from './reference/fs.json'
 import s25 from './reference/http.json'
 import s26 from './reference/memory.json'
-import s27 from './reference/os.json'
-import s28 from './reference/nodecore.json'
-import s29 from './reference/path.json'
-import s30 from './reference/process.json'
-import s31 from './reference/streams.json'
+import s27 from './reference/sqlite.json'
+import s28 from './reference/os.json'
+import s29 from './reference/nodecore.json'
+import s30 from './reference/path.json'
+import s31 from './reference/process.json'
+import s32 from './reference/streams.json'
 
 export const surfaces = {
   "array": s0,
@@ -60,11 +61,12 @@ export const surfaces = {
   "fs": s24,
   "http": s25,
   "memory": s26,
-  "os": s27,
-  "nodecore": s28,
-  "path": s29,
-  "process": s30,
-  "streams": s31
+  "sqlite": s27,
+  "os": s28,
+  "nodecore": s29,
+  "path": s30,
+  "process": s31,
+  "streams": s32
 }
 
 export const index = [
@@ -95,6 +97,7 @@ export const index = [
   { surface: "fs", title: "File system (fs)", kind: "node" },
   { surface: "http", title: "HTTP server", kind: "node" },
   { surface: "memory", title: "Memory management", kind: "node" },
+  { surface: "sqlite", title: "node:sqlite", kind: "node" },
   { surface: "os", title: "os", kind: "node" },
   { surface: "nodecore", title: "Other Node core modules", kind: "node" },
   { surface: "path", title: "path", kind: "node" },

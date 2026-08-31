@@ -582,3 +582,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00537](ADR-00537.md) | string concat renders a `number \| null` operand's null as "null" | Extends [ADR-00165](ADR-00165.md) |
 | [00538](ADR-00538.md) | `cond ? scalar : null` produces a nullable-scalar aggregate | Extends [ADR-00537](ADR-00537.md); Implements [TDD-00064](../tdd/TDD-00064.md) |
 | [00539](ADR-00539.md) | optional chaining `arr?.prop` on an array no longer miscompiles | Extends [ADR-00061](ADR-00061.md) |
+| [00540](ADR-00540.md) | `node:sqlite` V1 — synchronous DatabaseSync/StatementSync over libsqlite3 | Implements [TDD-00151](../tdd/TDD-00151.md) (V1 — Layers 1–3, row-shape Option A) |

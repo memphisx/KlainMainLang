@@ -56,11 +56,21 @@ var errorKindIDs = func() map[string]int64 {
 // classes — see VisibleFields), then message, then name. All kinds share
 // this one Type; only the stored kind tag and message/name contents differ
 // between e.g. a TypeError and a RangeError instance.
+// Fields 0–2 (kind/message/name) keep byte-identical offsets so the
+// AggregateError prefix (aggregateErrorStructIR) and every .message/.name read
+// stay valid. Fields 3–5 (code/errcode/errstr) carry the Node error-code trio
+// (ERR_* strings + numeric SQLite result code); they default to null/0 for
+// ordinary errors and are set for node:sqlite failures (ADR-00540). Reading
+// them on an AggregateError object is not meaningful (that struct's trailing
+// slots mean something else) but is bounds-safe.
 var errorObjType = func() Type {
 	ty := ObjectType([]Field{
 		{Name: "kind", Ty: TypeI64},
 		{Name: "message", Ty: TypePtr},
 		{Name: "name", Ty: TypePtr},
+		{Name: "code", Ty: TypePtr},
+		{Name: "errcode", Ty: TypeF64},
+		{Name: "errstr", Ty: TypePtr},
 	})
 	ty.IsError = true
 	return ty
@@ -96,6 +106,35 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", namePtr, nameGep))
 
+	// Default the Node error-code trio (code/errcode/errstr) — set only for
+	// errors that carry one (node:sqlite). buildErrorObjWithCode overwrites them.
+	codeGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", codeGep))
+	ecGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", ecGep))
+	esGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", esGep))
+
+	return dataReg
+}
+
+// buildErrorObjWithCode builds an errorObjType instance carrying the Node
+// error-code trio (code string, numeric errcode, errstr string) — used by
+// node:sqlite failures so `err.code === 'ERR_SQLITE_ERROR'` matches Node.
+func (e *Emitter) buildErrorObjWithCode(kindID int64, msgPtr, namePtr, codePtr, errcodeD, errstrPtr string) string {
+	dataReg := e.buildErrorObj(kindID, msgPtr, namePtr)
+	codeGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", codePtr, codeGep))
+	ecGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", errcodeD, ecGep))
+	esGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", errstrPtr, esGep))
 	return dataReg
 }
 

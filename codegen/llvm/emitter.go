@@ -347,6 +347,8 @@ type Emitter struct {
 	usedFetchAwaitSettled    bool
 	usedCurlSlist            bool
 	usedCurlURL              bool
+	usedSQLite3              bool
+	sqliteUDFCtr             int
 	usedFopen                bool
 	usedFclose               bool
 	usedFwrite               bool

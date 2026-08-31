@@ -225,6 +225,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewAgentBody(pos)
 	case "Webview":
 		return p.parseNewWebviewBody(pos)
+	case "DatabaseSync":
+		return p.parseNewDatabaseSyncBody(pos)
 	case "CompressionStream":
 		return p.parseNewCompressionStreamBody(pos, false)
 	case "DecompressionStream":
@@ -492,6 +494,32 @@ func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
 		return nil, err
 	}
 	return ast.NewNewURLExpression(url, pos), nil
+}
+
+// parseNewDatabaseSyncBody parses `new DatabaseSync(path, options?)` from
+// node:sqlite (ADR-00540): a required path expression and an optional
+// options-object literal, validated in codegen.
+func (p *Parser) parseNewDatabaseSyncBody(pos ast.Pos) (*ast.NewDatabaseSyncExpression, error) {
+	p.advance() // consume 'DatabaseSync'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	path, err := p.parseAssignment()
+	if err != nil {
+		return nil, err
+	}
+	var options ast.Expression
+	if p.check(lexer.COMMA) {
+		p.advance()
+		options, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewDatabaseSyncExpression(path, options, pos), nil
 }
 
 // parseNewAbortControllerBody parses `new AbortController()` (TDD-00081 Stage 3).

@@ -174,6 +174,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewHTTPAgent(ex)
 	case *ast.NewWebviewExpression:
 		return e.emitNewWebview(ex)
+	case *ast.NewDatabaseSyncExpression:
+		return e.emitNewDatabaseSync(ex)
 	case *ast.NewAbortControllerExpression:
 		return e.emitNewAbortControllerExpression()
 	case *ast.NewEventExpression:

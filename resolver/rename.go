@@ -543,6 +543,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "webview__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// node:sqlite's DatabaseSync/StatementSync are parse-time
+				// constructors — identity (ADR-00540), same as stream's.
+				if ref.Marker == "sqlite__kml_builtin" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
@@ -574,6 +579,13 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		e.Right = rewriteExpr(e.Right, sc, lu)
 	case *ast.CallExpression:
 		e.Callee = rewriteExpr(e.Callee, sc, lu)
+		// Call-site type arguments (`foo<Row>()`, `stmt.all<Row>()`) reference
+		// user types the same way `new C<Row>()`'s do — rewrite them to their
+		// mangled names too, else a generic call carrying a user-type argument
+		// keeps the un-mangled name and fails to resolve at codegen.
+		for _, ta := range e.TypeArgs {
+			rewriteType(ta, sc, lu)
+		}
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}

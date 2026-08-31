@@ -74,6 +74,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitIncomingMessageCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
 	}
+	// node:sqlite (ADR-00540): db.exec/prepare/close and stmt.get/all/run.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if e.inferExprType(mem.Object).IsSQLiteDatabase {
+			return e.emitSQLiteDatabaseMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsSQLiteStatement {
+			return e.emitSQLiteStatementMethod(mem.Object, mem.Property, ex.TypeArgs, ex.Args, ex.GetPos())
+		}
+	}
 	// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
 	// 4). Checked before every mem.Property-name-based/inferExprType-based
 	// dispatch below, for the same reason super's own checks above are: a

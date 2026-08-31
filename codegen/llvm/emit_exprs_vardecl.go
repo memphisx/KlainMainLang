@@ -377,7 +377,8 @@ func isHandleNewExpr(init ast.Expression) bool {
 		*ast.NewCustomEventExpression,
 		*ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression,
 		*ast.NewTransformStreamExpression, *ast.NewCompressionStreamExpression,
-		*ast.NewNodeStreamExpression, *ast.NewEventEmitterExpression:
+		*ast.NewNodeStreamExpression, *ast.NewEventEmitterExpression,
+		*ast.NewDatabaseSyncExpression:
 		return true
 	}
 	return false
@@ -592,6 +593,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = errorObjType
 		case *ast.NewDateExpression:
 			ty = TypeDate
+		case *ast.NewDatabaseSyncExpression:
+			ty = SQLiteDatabaseType()
 		case *ast.NewURLExpression:
 			ty = URLType()
 		case *ast.NewURLSearchParamsExpression:

@@ -82,6 +82,27 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// `string + bigint` / `bigint + string` is concatenation (the bigint
 	// stringifies to its digits), handled by the string-concat path below — not
 	// bigint arithmetic. Everything else with a bigint operand is.
+	// A *nullable* bigint compared against null/undefined is a null-pointer check
+	// (a bigint value is a heap pointer, null when the T|null slot is empty) —
+	// not the constant-false the general bigint-vs-non-bigint rule below would
+	// give. Without this a `bigint | null` that actually holds null never tests
+	// `=== null` true. Same shape as the array-vs-null case below.
+	if ((left.Ty.IsBigInt && left.Ty.Nullable && right.Ty.IsNull) ||
+		(right.Ty.IsBigInt && right.Ty.Nullable && left.Ty.IsNull)) &&
+		(ex.Op == "==" || ex.Op == "===" || ex.Op == "!=" || ex.Op == "!==") {
+		biVal := left
+		if left.Ty.IsNull {
+			biVal = right
+		}
+		cmpOp := "eq"
+		if ex.Op == "!=" || ex.Op == "!==" {
+			cmpOp = "ne"
+		}
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, null", reg, cmpOp, biVal.Ref))
+		return Value{Ref: reg, Ty: TypeBool}, nil
+	}
+
 	bigintConcat := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
 	if (left.Ty.IsBigInt || right.Ty.IsBigInt) && !bigintConcat {
 		if left.Ty.IsBigInt != right.Ty.IsBigInt {
@@ -1077,6 +1098,26 @@ func ternaryNullableScalarType(a, b Type) (Type, bool) {
 	return Type{}, false
 }
 
+// ternaryTypeName is a short human label for a branch type, used only in the
+// incompatible-ternary diagnostic.
+func ternaryTypeName(t Type) string {
+	switch {
+	case isStringTy(t):
+		return "string"
+	case t.IsBigInt:
+		return "bigint"
+	case t.Float:
+		return "number"
+	case t.IR == "i1":
+		return "boolean"
+	case t.IsObject:
+		return "object"
+	case t.IR == "ptr":
+		return "pointer"
+	}
+	return t.IR
+}
+
 func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) {
 	// A `cond ? scalar : null` (or `cond ? null : scalar`) is `T | null` — emit
 	// the presence-flagged { i1, T } aggregate so the null survives downstream
@@ -1088,6 +1129,17 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	ty := e.inferExprType(ex.Consequent)
 	if ty.IsArray {
 		return Value{}, fmt.Errorf("%d:%d: ternary operator is not supported for array types", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	// A ternary whose branches mix a string with a non-string (or a pointer with
+	// a scalar) has a genuine union result type this typed-subset compiler can't
+	// represent in the single result slot below — previously this coerced the
+	// alternate to the consequent's type and emitted invalid IR (a double stored
+	// through a ptr slot, a clang-stage failure). Reject cleanly instead; assign
+	// each branch to its own binding, or convert both to a common type. (The
+	// `cond ? scalar : null` nullable case is handled above.)
+	altTy := e.inferExprType(ex.Alternate)
+	if isStringTy(ty) != isStringTy(altTy) {
+		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (%s vs %s) — a union-typed ternary (e.g. string | number) is not supported; assign each branch separately or convert both to one type", ex.GetPos().Line, ex.GetPos().Col, ternaryTypeName(ty), ternaryTypeName(altTy))
 	}
 
 	thenL := e.freshLabel("ternary.then")
