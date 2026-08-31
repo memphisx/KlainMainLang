@@ -51,13 +51,14 @@
     },
     {
       "id": "lang.forof",
-      "name": "for…of over arrays, Map, Set, and a class implementing next(): T | null",
-      "statusRow": "for…of over arrays, Map, Set, and a class implementing next(): T | null",
+      "name": "for…of over arrays, strings, Map, Set, and a class implementing next(): T | null",
+      "statusRow": "for…of over arrays, strings, Map, Set, and a class implementing next(): T | null",
       "signature": "for (const x of iterable) { … }",
       "badge": "caveats",
-      "description": "Iterates arrays, Map (values), Set (elements), generators, and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
+      "description": "Iterates arrays, a string (its characters), Map (values), Set (elements), generators, and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
       "differences": [
-        "A `Map` iterates values, not `[key, value]` entries, so `for (const [k, v] of map)` does not decompose entries — use `.keys()` for keys."
+        "A bare `for (const v of map)` iterates values (use `.keys()` for keys); the two-name pattern `for (const [k, v] of map)` decomposes entries.",
+        "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1."
       ],
       "seeAlso": ["lang.forawaitof", "lang.arraydestructure"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/for...of" }

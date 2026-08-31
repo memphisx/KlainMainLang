@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 2/14 (~14%).
+**Coverage**: 13/14 (~93%) · **Strict Coverage**: 4/14 (~29%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -18,8 +18,8 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 | Literal syntax: `/pattern/flags` | ✅ | • `x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap | • Desugars to the same construction at parse time — see [ADR-00114](../adr/ADR-00114.md) |
 | `.source` / `.flags` | ✅ | | • Plain field reads, original constructor arguments verbatim |
 | `.global` / `.ignoreCase` / `.multiline` / `.dotAll` | ✅ | | • Decomposed from the flags string once at construction — no method needs to re-parse it |
-| `.lastIndex` | ✅ | • Untouched by `.test()` — real JS's `.test()` reads/advances `.lastIndex` under the `g` flag (see the `.test()` row) | • Mutated by `.exec()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)<br>• Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all) |
-| `.test(str)` | ✅ | • Always matches from offset 0 and never reads/writes `.lastIndex`, even for a `g`-flagged RegExp — real JS's `.test()` shares `.exec()`'s stateful `lastIndex` iteration | • See [ADR-00115](../adr/ADR-00115.md) |
+| `.lastIndex` | ✅ | | • Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)/[ADR-00526](../adr/ADR-00526.md)<br>• Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all) |
+| `.test(str)` | ✅ | | • A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md) |
 | `.exec(str)` | ✅ | • An unmatched optional capture group becomes `""` rather than a true per-element `null` (no per-element-nullable-string array exists)<br>• Real JS's `index`/`input`/`groups` extra properties on the result aren't built | • Returns `string[] \| null` — real, working `m !== null`/`if (m)` checks against the result. See [ADR-00116](../adr/ADR-00116.md)<br>• All matching methods route through the one compiled PCRE2 handle, so the `-regex` dialect mode and its Known-limitations dialect caveats apply uniformly here and to `.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search` |
 | `str.match(regexp)` | ✅ | • Shares `.exec()`'s result-array narrowing (an unmatched optional capture group becomes `""`, not per-element `null`; no `index`/`input`/`groups`) | • Without `g`: identical to `regexp.exec(str)`. With `g`: full-match-only strings, `null` (not `[]`) on zero matches — matches real JS exactly. See [ADR-00117](../adr/ADR-00117.md) |
 | `str.matchAll(regexp)` | ✅ | • Returns an eager `string[][]`, not a real lazy iterator (no lazy-iteration infrastructure exists anywhere in this compiler) | • One `.exec()`-shaped match array per match; throws `TypeError` without `g`. See [ADR-00117](../adr/ADR-00117.md) |

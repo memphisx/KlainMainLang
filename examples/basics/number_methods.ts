@@ -66,3 +66,16 @@ console.log((255).toString(16))         // ff
 console.log((255).toString(2))          // 11111111
 console.log((-255).toString(16))        // -ff
 console.log((42).toString())            // 42 (radix defaults to 10)
+
+// ── exponent (scientific) notation in number literals ─────────────────────────
+console.log(1e3)          // 1000
+console.log(1.5e3)        // 1500
+console.log(2e-2)         // 0.02
+console.log(6.022e23)     // 6.022e+23
+const avogadro = 6.022e23
+console.log(avogadro > 1e23)  // true
+
+// ── Number.isInteger is false for any non-finite value ────────────────────────
+console.log(Number.isInteger(Infinity))   // false
+console.log(Number.isInteger(-Infinity))  // false
+console.log(Number.isInteger(NaN))        // false

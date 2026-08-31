@@ -129,6 +129,15 @@ for (const w of words) console.log(w)
 // world
 // TypeGo
 
+// for…of over a string iterates its characters (one per byte)
+let vowels = 0
+for (const ch of 'education') {
+    if (ch === 'a' || ch === 'e' || ch === 'i' || ch === 'o' || ch === 'u') {
+        vowels = vowels + 1
+    }
+}
+console.log(vowels)   // 5
+
 // ── Multi-declarator let/const/var ──────────────────────────────────────────
 // `let i = 0, j = 10;` — comma-separated declarators sharing one
 // let/const/var, each an entirely independent binding.

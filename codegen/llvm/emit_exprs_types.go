@@ -60,6 +60,19 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	if v.Ty.IsTuple {
 		return e.emitTupleToString(v)
 	}
+	// An array stringifies to its elements joined by commas (real JS's
+	// Array.prototype.toString / String([a,b]) / `${arr}`) — the same routine
+	// arr.join() uses, with the default "," separator. A nested-array element
+	// recurses through the join core's per-element emitValueToString, so
+	// `String([[1,2],[3]])` renders "1,2,3". v.Ref is the {ptr,i64} aggregate.
+	if v.Ty.IsArray && v.Ty.ElemType != nil {
+		ptrReg := e.freshReg()
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
+		sepVal := Value{Ref: e.internString(","), Ty: TypePtr}
+		return e.emitArrayJoinCore(ptrReg, lenReg, *v.Ty.ElemType, sepVal)
+	}
 	// A nullable-scalar aggregate (a T|null field/return value, TDD-00064 Stage
 	// 3) stringifies to its value's rendering when present, the literal "null"
 	// when absent.
@@ -2095,7 +2108,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return *objTy.ElemType
 				}
 				return TypePtr // string.at returns a char string
-			case "concat", "reverse", "fill", "toReversed", "toSorted", "toSpliced", "with", "copyWithin", "values":
+			case "sort", "concat", "reverse", "fill", "toReversed", "toSorted", "toSpliced", "with", "copyWithin", "values":
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray {
 					return objTy
@@ -2245,6 +2258,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeI64
 		}
 	case *ast.ConditionalExpression:
+		// `cond ? scalar : null` is `T | null` (ADR-00538) — mirror
+		// emitConditional so an unannotated `const x = b ? 3 : null` gets
+		// nullable-scalar storage rather than a collapsed bare scalar.
+		if nty, ok := ternaryNullableScalarType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
+			return nty
+		}
 		return e.inferExprType(ex.Consequent)
 	case *ast.SequenceExpression:
 		// The comma operator's value (and type) is its last operand's.

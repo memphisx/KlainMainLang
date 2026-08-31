@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "GLOBAL-FUNCTIONS.md",
   "coversRows": "all",
-  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "8/21", "strictPct": 38 },
-  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. The recurring divergence elsewhere is strtod/strerror permissiveness — the string forms of Number/parseFloat accept C spellings like \"inf\", and decodeURI/atob pass malformed input through as best-effort rather than throwing.",
+  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "10/21", "strictPct": 48 },
+  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. The recurring divergence elsewhere is strtod/strerror permissiveness — parseFloat's string form still accepts C hex-float syntax like \"0x10\", and decodeURI/atob pass malformed input through as best-effort rather than throwing.",
   "entries": [
     {
       "id": "globals.isNaN",
@@ -54,14 +54,11 @@
       "name": "Number(x)",
       "statusRow": "Number(x)",
       "signature": "Number(x: any): number",
-      "badge": "caveats",
-      "description": "Coerces a value to a number using JS ToNumber semantics: a whole-string parse (\"12px\" is NaN, unlike parseFloat), \"\"/whitespace is 0, \"0x10\" is 16, boolean is 0/1, null is 0; a numeric input passes through unchanged (an exact i64 stays i64).",
+      "badge": "exact",
+      "description": "Coerces a value to a number using JS ToNumber semantics: a whole-string parse (\"12px\" is NaN, unlike parseFloat), \"\"/whitespace is 0, \"0x10\" is 16, boolean is 0/1, null is 0; a numeric input passes through unchanged (an exact i64 stays i64). Only the exact word \"Infinity\" (optionally signed) is Infinity — C's \"inf\"/case variants are NaN, matching real JS.",
       "returns": { "type": "number", "desc": "The numeric value, or NaN." },
       "exampleKey": "basics/namespaces",
       "snippet": "const n = Number(s);\nif (Number.isNaN(n)) { throw new TypeError(\"not a number: \" + s); }",
-      "differences": [
-        "Inherits `strtod`'s `\"inf\"` acceptance for the string form (JS accepts only the full word `Infinity`) — same family as `parseFloat`'s."
-      ],
       "seeAlso": ["globals.parseFloat", "globals.String"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/Number" }
     },
@@ -83,18 +80,15 @@
       "name": "parseInt(s, radix?)",
       "statusRow": "parseInt(s, radix?)",
       "signature": "parseInt(s: string, radix?: number): number",
-      "badge": "caveats",
-      "description": "Parses a leading integer out of a string, stopping at the first non-digit. A no-digits input returns a real NaN (endptr-checked, double result).",
+      "badge": "exact",
+      "description": "Parses a leading integer out of a string, stopping at the first non-digit. A no-digits input returns a real NaN (endptr-checked, double result). With radix omitted, auto-detects base 16 for a \"0x\"/\"0X\" prefix (parseInt(\"0xFF\") is 255) and base 10 otherwise — no octal auto-detect, so \"077\" is 77.",
       "params": [
         { "name": "s", "type": "string", "desc": "String to parse." },
-        { "name": "radix", "type": "number", "desc": "Base 2–36; defaults to 10." }
+        { "name": "radix", "type": "number", "desc": "Base 2–36; defaults to 10, or 16 for a \"0x\" prefix." }
       ],
       "returns": { "type": "number", "desc": "The parsed integer, or NaN." },
       "exampleKey": "basics/parse_functions",
-      "snippet": "console.log(parseInt('3abc'))      // 3   (stops at first non-digit)\nconsole.log(parseInt('FF', 16))    // 255",
-      "differences": [
-        "No hex auto-detect when `radix` is omitted (`\"0x1F\"` parses as `0`, not `31`)."
-      ],
+      "snippet": "console.log(parseInt('3abc'))      // 3   (stops at first non-digit)\nconsole.log(parseInt('0xFF'))      // 255 (auto-detected hex)\nconsole.log(parseInt('FF', 16))    // 255",
       "seeAlso": ["globals.parseFloat", "globals.Number"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt" }
     },
@@ -110,7 +104,7 @@
       "exampleKey": "basics/parse_functions",
       "snippet": "console.log(parseFloat('3.14'))    // 3.14\nconsole.log(parseFloat('1e3'))     // 1000",
       "differences": [
-        "Inherits `strtod` extras — `\"inf\"` parses to `Infinity`, C hex-float syntax parses."
+        "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` is `16` and `\"0x1.8p3\"` is `12`, where real JS's `parseFloat` reads only the leading `0`. (The infinity-word divergence is fixed: only the exact word `\"Infinity\"` parses to `Infinity`, `\"inf\"` is `NaN`.)"
       ],
       "seeAlso": ["globals.parseInt", "globals.Number"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }

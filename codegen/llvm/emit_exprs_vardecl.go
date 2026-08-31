@@ -662,6 +662,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			ty = e.inferExprType(init)
 		case *ast.MemberExpression:
 			ty = e.inferExprType(init)
+		case *ast.ConditionalExpression:
+			// A ternary's inferred type (its consequent's, or a nullable scalar
+			// for `cond ? scalar : null` — ADR-00538). Without this case an
+			// unannotated `const y = cond ? 5 : null` fell through to the blind
+			// i64 default, dropping both the null-ness and a non-i64 branch type.
+			ty = e.inferExprType(init)
 		case *ast.TaggedTemplateExpression:
 			ty = e.inferExprType(init)
 		case *ast.CallExpression:
@@ -719,14 +725,18 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					// function too) found while wiring TDD-00010 V1's
 					// generic-function call support, whose most natural usage
 					// (`const y = identity("hi")`) hit this exact gap.
-					if _, sig, found := e.resolveFuncRef(callee.Name); found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || sig.RetType.IsDynamic || isStringTy(sig.RetType)) {
+					if _, sig, found := e.resolveFuncRef(callee.Name); found && (sig.RetType.IsArray || sig.RetType.IsObject || sig.RetType.IsFunc || sig.RetType.IsDate || sig.RetType.IsMap || sig.RetType.IsSet || sig.RetType.IsDynamic || isNullableScalar(sig.RetType) || isStringTy(sig.RetType)) {
+						// isNullableScalar preserved too (ADR-00538): a
+						// `T | null`-returning function assigned to an
+						// unannotated const/let must keep the { i1, T } aggregate
+						// storage, or its null collapses to a present zero.
 						ty = sig.RetType
 					} else if sym, found := e.lookup(callee.Name); found && sym.Ty.IsFunc && sym.Ty.FuncRetType != nil {
 						// Calling a closure-typed variable (e.g. a const-bound
 						// arrow function) rather than a named declaration —
 						// same fallback as inferExprType's CallExpression case.
 						retTy := *sym.Ty.FuncRetType
-						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate || retTy.IsMap || retTy.IsSet || isStringTy(retTy) {
+						if retTy.IsArray || retTy.IsObject || retTy.IsFunc || retTy.IsDate || retTy.IsMap || retTy.IsSet || isNullableScalar(retTy) || isStringTy(retTy) {
 							ty = retTy
 						}
 					} else if genDecl, found := e.genericFuncs[callee.Name]; found {

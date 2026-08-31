@@ -13,6 +13,18 @@ func isStringTy(ty Type) bool {
 	return ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !ty.IsBigInt
 }
 
+// isForOfStringTy is the strict "this is really a plain string" test, for
+// contexts (like for-of dispatch) where the loose isStringTy — which matches
+// any bare `ptr` — would wrongly grab a Map/Set/RegExp/Promise/etc., all of
+// which are also `ptr`-typed. It excludes every ptr-typed special type this
+// type system carries a flag for, so only a genuine string survives.
+func isForOfStringTy(ty Type) bool {
+	return isStringTy(ty) && !ty.IsMap && !ty.IsSet && !ty.IsRegExp && !ty.IsPromise &&
+		!ty.IsDate && !ty.IsURL && !ty.IsURLPattern && !ty.IsSymbol && !ty.IsBlob &&
+		!ty.IsTypedArray && !ty.IsArrayBuffer && !ty.IsReadableStream && !ty.IsStreamReader &&
+		!ty.IsNodeReadable && !ty.IsGenerator && !ty.IsDynamic && !ty.Nullable
+}
+
 // isNumberTy returns true for a plain numeric scalar (any int/float width,
 // or bool) — used to gate Number.prototype method dispatch (toString(radix)
 // etc.) to a receiver that's actually a number, not e.g. a string (also
@@ -1062,8 +1074,8 @@ func (e *Emitter) emitStringPadEnd(mem *ast.MemberExpression, args []ast.Express
 // emitNumberToFixed implements n.toFixed(digits): formats the number with
 // exactly digits decimal places and returns a string.
 func (e *Emitter) emitNumberToFixed(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: toFixed takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: toFixed takes 0 or 1 arguments", pos.Line, pos.Col)
 	}
 	numVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -1077,13 +1089,19 @@ func (e *Emitter) emitNumberToFixed(mem *ast.MemberExpression, args []ast.Expres
 		dblReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sitofp %s %s to double", dblReg, numVal.Ty.IR, numVal.Ref))
 	}
-	digitsVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	// The digits argument is optional and defaults to 0 (real JS: `(3.7).toFixed()`
+	// is `"4"`).
+	digitsI32 := "0"
+	if len(args) == 1 {
+		digitsVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		digitsI64 := e.coerce(digitsVal, TypeI64).Ref
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", reg, digitsI64))
+		digitsI32 = reg
 	}
-	digitsI64 := e.coerce(digitsVal, TypeI64).Ref
-	digitsI32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", digitsI32, digitsI64))
 	e.ensureSprintf()
 	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%.*f")
@@ -1146,8 +1164,17 @@ func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.
 // differ from JS's spec algorithm (glibc uses round-half-to-even; JS does
 // not) — both cosmetic/rare-edge-case, not silent data corruption.
 func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: toPrecision takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: toPrecision takes 0 or 1 arguments", pos.Line, pos.Col)
+	}
+	// With no precision argument, `x.toPrecision()` is exactly `String(x)` (real
+	// JS) — route through the number's default toString rendering.
+	if len(args) == 0 {
+		numVal, err := e.emitExpr(mem.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitValueToString(numVal)
 	}
 	dblReg, err := e.numberToDouble(mem)
 	if err != nil {

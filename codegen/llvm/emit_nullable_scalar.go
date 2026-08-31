@@ -110,6 +110,28 @@ func (e *Emitter) nullableScalarLValue(expr ast.Expression) (sym Symbol, ok bool
 // aggregate; coerce() demotes one to its bare payload wherever a plain scalar
 // is wanted, so most consumers never need to know the aggregate shape exists.
 
+// emitConcatOperandString stringifies a string-concatenation operand (the
+// non-string side of `"x" + y`), rendering a nullable-scalar `null` as "null"
+// rather than its payload zero (ADR-00537). `origExpr` is the operand's source
+// expression and `cur` its already-evaluated value. A nullable-scalar *local*
+// identifier reaches this as a bare payload (emitIdent auto-unwraps it), so its
+// aggregate is reloaded from storage — a side-effect-free re-load, since it is
+// an lvalue. A nullable-scalar field/return value already arrives as the full
+// aggregate (the collapse in emitBinary is skipped for string concat), so it
+// stringifies directly. Every other operand stringifies as-is.
+func (e *Emitter) emitConcatOperandString(origExpr ast.Expression, cur Value) (Value, error) {
+	if !isStringTy(cur.Ty) {
+		if sym, ok := e.nullableScalarLValue(origExpr); ok {
+			agg, err := e.emitNullableScalarBoxedValue(origExpr, sym.Ty)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitValueToString(Value{Ref: agg, Ty: sym.Ty})
+		}
+	}
+	return e.emitValueToString(cur)
+}
+
 // makeNullableScalarAgg builds a { i1, T } aggregate register from a presence
 // bit and a payload.
 func (e *Emitter) makeNullableScalarAgg(ty Type, presentRef, payloadRef string) string {

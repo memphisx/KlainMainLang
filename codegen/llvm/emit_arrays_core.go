@@ -842,6 +842,23 @@ func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i i
 // `icmp` unpackArrayPatternInto's own out-of-bounds check needs. Handles
 // identifiers, function calls, and array literals.
 func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr, lenVal string, elemTy Type, err error) {
+	// A string source destructures its characters (`const [a, b] = "xy"` →
+	// a="x", b="y"), one 1-byte character string per element — the same
+	// byte-string model for-of and Array.from use (ADR-00536). Checked before
+	// the node-kind switch so a string identifier or literal is handled here
+	// rather than falling through to the "not an array" errors below.
+	if isForOfStringTy(e.inferExprType(init)) {
+		sv, sErr := e.emitExpr(init)
+		if sErr != nil {
+			return "", "", Type{}, sErr
+		}
+		charArr := e.emitStringToCharArray(sv)
+		ptrReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, charArr.Ref))
+		lenReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, charArr.Ref))
+		return ptrReg, lenReg, TypePtr, nil
+	}
 	switch src := init.(type) {
 	case *ast.Identifier:
 		sym, found := e.lookup(src.Name)

@@ -12,6 +12,11 @@ console.log(parseInt('FF', 16))    // 255
 console.log(parseInt('1010', 2))   // 10
 console.log(parseInt('17', 8))     // 15
 
+// No radix: a "0x"/"0X" prefix auto-detects base 16, everything else base 10
+// (no octal auto-detect for a leading 0)
+console.log(parseInt('0xFF'))      // 255
+console.log(parseInt('077'))       // 77  (not octal)
+
 // Round-trip with JSON
 const n: number = 123
 const s: string = JSON.stringify(n)

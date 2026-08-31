@@ -3,7 +3,7 @@
   "title": "Array methods",
   "kind": "language",
   "statusPage": "ARRAY-METHODS.md",
-  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "22/35", "strictPct": 63 },
+  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "23/35", "strictPct": 66 },
   "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element. reduceRight is the one method not implemented at all.",
   "entries": [
     {
@@ -273,14 +273,11 @@
       "id": "array.join",
       "name": ".join(sep?)",
       "signature": "join(sep?: string): string",
-      "badge": "caveats",
-      "description": "Joins the elements into a string, separated by sep (default \",\").",
+      "badge": "exact",
+      "description": "Joins the elements into a string, separated by sep (default \",\"). A nested-array element is rendered as its own comma-joined string (real JS's recursive toString), so [[1,2],[3,4]].join(\"-\") is \"1,2-3,4\". Shares the array→string coercion path used by String(arr) and `${arr}`.",
       "returns": { "type": "string", "desc": "The joined string." },
       "exampleKey": "arrays/higher_order",
       "snippet": "console.log(['hello','world'].join(', '))   // hello, world",
-      "differences": [
-        "Rejects a nested-array element (`number[][]`) — stringifies a bare register, no callback."
-      ],
       "seeAlso": ["array.map"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/join" }
     },
@@ -295,7 +292,6 @@
       "snippet": "const desc: number[] = [3, 1, 4, 1, 5]\ndesc.sort((a: number, b: number) => b - a)   // [5,4,3,1,1]",
       "differences": [
         "The no-comparator default sort is numeric, not real JS's actual default — real JS stringifies every element and compares lexicographically even for numbers, e.g. `[10,1,21,2].sort()` is `[1,10,2,21]` in real JS, `[1,2,10,21]` here.",
-        "`const sorted = arr.sort()` with no type annotation fails to typecheck as an array — works with an explicit `: number[]` annotation.",
         "Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI qsort() trampoline with one fixed variant per element kind."
       ],
       "seeAlso": ["array.toSorted", "array.reverse"],

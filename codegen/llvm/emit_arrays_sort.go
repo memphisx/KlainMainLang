@@ -13,9 +13,6 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "join", pos); err != nil {
-		return Value{}, err
-	}
 
 	var sepVal Value
 	if len(args) == 0 {
@@ -26,7 +23,17 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 			return Value{}, err
 		}
 	}
+	return e.emitArrayJoinCore(ptrReg, lenReg, elemTy, sepVal)
+}
 
+// emitArrayJoinCore is the shared join loop: stringify each element (via
+// emitValueToString, which handles nested-array elements by recursing through
+// this same routine) and concatenate them separated by sepVal. Shared by
+// arr.join(sep) and array-to-string coercion (String(arr) / `${arr}` /
+// emitValueToString's IsArray branch, which passes the default "," separator).
+// Elements are loaded via loadArrayElem so a nested-array element's box pointer
+// is transparently unboxed to a real array aggregate before stringification.
+func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal Value) (Value, error) {
 	emptyStr := e.internString("")
 	accAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
@@ -53,10 +60,9 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	inElem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", inElem, elemTy.IR, inGep, elemTy.Align()))
-	elemStrVal, err := e.emitValueToString(Value{Ref: inElem, Ty: elemTy})
+	elemVal := e.loadArrayElem(inGep, elemTy)
+	elemStrVal, err := e.emitValueToString(elemVal)
 	if err != nil {
 		return Value{}, err
 	}

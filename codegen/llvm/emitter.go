@@ -557,7 +557,9 @@ type Emitter struct {
 	usedCtlz32              bool
 	usedArc4Random          bool
 	usedStrtoll             bool
+	usedParseIntBase        bool
 	usedStrtod              bool
+	usedStrtodJS            bool
 	usedGroupMapHelpers     bool
 	usedQsort               bool
 	usedSortCmpI64          bool

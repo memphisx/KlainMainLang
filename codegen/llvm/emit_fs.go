@@ -246,11 +246,13 @@ func (e *Emitter) emitFsRenameSync(args []ast.Expression, pos ast.Pos) (Value, e
 }
 
 // emitFsCopyFileSync implements fs.copyFileSync(src, dest): reads src fully
-// (via the existing readFileSync runtime helper) then writes it to dest (via
-// the existing writeFileSync one) — no new C-level I/O code needed, since
-// both halves of "copy a file" already exist as their own fs.* builtins.
-// Inherits readFileSync's text-only limitation (a src file with embedded
-// null bytes copies back shorter than its real size).
+// then writes it to dest — no new C-level I/O code needed, since both halves
+// of "copy a file" already exist as their own fs.* runtime helpers. Goes
+// through the binary-safe pair (__kml_fs_read_file_raw, which returns the
+// buffer plus its true byte count, and __kml_fs_write_file_bytes, which
+// writes that exact length — ADR-00094) rather than the strlen-based text
+// helpers, so a src file with an embedded null byte copies back at its real
+// size instead of truncated at the first null.
 func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: fs.copyFileSync takes exactly 2 arguments (src, dest)", pos.Line, pos.Col)
@@ -266,11 +268,15 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	}
 	destVal = e.coerce(destVal, TypePtr)
 
-	e.ensureFsReadFile()
-	e.ensureFsWriteFile()
-	contentReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_read_file(ptr %s)", contentReg, srcVal.Ref))
-	e.emitInstr(fmt.Sprintf("call void @__kml_fs_write_file(ptr %s, ptr %s)", destVal.Ref, contentReg))
+	e.ensureFsReadFileRaw()
+	e.ensureFsWriteFileBytes()
+	rawReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %s)", rawReg, srcVal.Ref))
+	bufReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", bufReg, rawReg))
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", lenReg, rawReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_write_file_bytes(ptr %s, ptr %s, i64 %s)", destVal.Ref, bufReg, lenReg))
 	return Value{Ty: TypeVoid}, nil
 }
 

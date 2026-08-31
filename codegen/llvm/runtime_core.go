@@ -495,11 +495,125 @@ func (e *Emitter) ensureStrtoll() {
 	}
 }
 
+// ensureParseIntBase defines @__kml_parseint_base(ptr s) -> i32, the radix
+// `parseInt` uses when its 2nd argument is omitted: real JS auto-detects base
+// 16 only for a `"0x"`/`"0X"` prefix (past leading whitespace and an optional
+// sign) and otherwise base 10 — it does NOT auto-detect octal from a leading
+// `0` (that ES3 behavior was dropped in ES5), so `"077"` is 77 and `"08"` is
+// 8, matching this returning 10 for both. strtoll accepts the `0x` prefix when
+// handed base 16, so the caller just passes this result straight through.
+func (e *Emitter) ensureParseIntBase() {
+	if e.usedParseIntBase {
+		return
+	}
+	e.usedParseIntBase = true
+	e.emitGlobal(`
+define i32 @__kml_parseint_base(ptr %s) {
+entry:
+  br label %wsloop
+wsloop:
+  %p = phi ptr [ %s, %entry ], [ %pnext, %wsadv ]
+  %c = load i8, ptr %p, align 1
+  %c_sp = icmp eq i8 %c, 32
+  %c_ge9 = icmp uge i8 %c, 9
+  %c_le13 = icmp ule i8 %c, 13
+  %c_ctl = and i1 %c_ge9, %c_le13
+  %c_ws = or i1 %c_sp, %c_ctl
+  br i1 %c_ws, label %wsadv, label %afterws
+wsadv:
+  %pnext = getelementptr i8, ptr %p, i64 1
+  br label %wsloop
+afterws:
+  %is_plus = icmp eq i8 %c, 43
+  %is_minus = icmp eq i8 %c, 45
+  %issign = or i1 %is_plus, %is_minus
+  %psign = getelementptr i8, ptr %p, i64 1
+  %p0 = select i1 %issign, ptr %psign, ptr %p
+  %c0 = load i8, ptr %p0, align 1
+  %is0 = icmp eq i8 %c0, 48
+  br i1 %is0, label %checkx, label %ret10
+checkx:
+  %p1 = getelementptr i8, ptr %p0, i64 1
+  %c1 = load i8, ptr %p1, align 1
+  %is_x = icmp eq i8 %c1, 120
+  %is_X = icmp eq i8 %c1, 88
+  %ishex = or i1 %is_x, %is_X
+  br i1 %ishex, label %ret16, label %ret10
+ret16:
+  ret i32 16
+ret10:
+  ret i32 10
+}`)
+}
+
 func (e *Emitter) ensureStrtod() {
 	if !e.usedStrtod {
 		e.emitGlobal("declare double @strtod(ptr noundef, ptr noundef)")
 		e.usedStrtod = true
 	}
+}
+
+// ensureStrtodJS defines @__kml_strtod_js, a strtod wrapper enforcing JS's
+// ToNumber/parseFloat rule that the ONLY accepted string infinity spelling is
+// the exact word "Infinity" (optionally signed). C's strtod additionally
+// accepts "inf"/"infinity" and any case variant ("INF", "Infinity", …), all of
+// which JS rejects as NaN. After strtod, when the result is ±Infinity AND the
+// consumed token begins (past leading whitespace and an optional sign) with a
+// letter — i.e. it is an infinity *word*, not a digit overflow like `1e999`
+// (which JS does render Infinity) — the token must equal "Infinity" byte for
+// byte; otherwise the endptr is rewound to the start so every caller treats it
+// as "no conversion" exactly as it already does for genuine junk. strtod's
+// "nan" word needs no handling: JS renders it NaN either way.
+func (e *Emitter) ensureStrtodJS() {
+	if e.usedStrtodJS {
+		return
+	}
+	e.usedStrtodJS = true
+	e.ensureStrtod()
+	e.ensureStrncmp()
+	infPtr := e.internString("Infinity")
+	e.emitGlobal(fmt.Sprintf(`
+define double @__kml_strtod_js(ptr %%s, ptr %%endpp) {
+entry:
+  %%v = call double @strtod(ptr %%s, ptr %%endpp)
+  %%pinf = fcmp oeq double %%v, 0x7FF0000000000000
+  %%ninf = fcmp oeq double %%v, 0xFFF0000000000000
+  %%isinf = or i1 %%pinf, %%ninf
+  br i1 %%isinf, label %%wsloop, label %%keep
+wsloop:
+  %%p = phi ptr [ %%s, %%entry ], [ %%pnext, %%wsadv ]
+  %%c = load i8, ptr %%p, align 1
+  %%c_sp = icmp eq i8 %%c, 32
+  %%c_ge9 = icmp uge i8 %%c, 9
+  %%c_le13 = icmp ule i8 %%c, 13
+  %%c_ctl = and i1 %%c_ge9, %%c_le13
+  %%c_ws = or i1 %%c_sp, %%c_ctl
+  br i1 %%c_ws, label %%wsadv, label %%afterws
+wsadv:
+  %%pnext = getelementptr i8, ptr %%p, i64 1
+  br label %%wsloop
+afterws:
+  %%is_plus = icmp eq i8 %%c, 43
+  %%is_minus = icmp eq i8 %%c, 45
+  %%issign = or i1 %%is_plus, %%is_minus
+  %%psign = getelementptr i8, ptr %%p, i64 1
+  %%psig = select i1 %%issign, ptr %%psign, ptr %%p
+  %%csig = load i8, ptr %%psig, align 1
+  %%upper = and i8 %%csig, 223
+  %%ge_A = icmp uge i8 %%upper, 65
+  %%le_Z = icmp ule i8 %%upper, 90
+  %%isalpha = and i1 %%ge_A, %%le_Z
+  br i1 %%isalpha, label %%validate, label %%keep
+validate:
+  %%cmp = call i32 @strncmp(ptr %%psig, ptr %s, i64 8)
+  %%eq = icmp eq i32 %%cmp, 0
+  br i1 %%eq, label %%keep, label %%invalid
+invalid:
+  store ptr %%s, ptr %%endpp, align 8
+  br label %%keep
+keep:
+  ret double %%v
+}`, infPtr))
 }
 
 // ensureToNumber defines @__kml_to_number, JS's ToNumber for a string:
@@ -508,19 +622,20 @@ func (e *Emitter) ensureStrtod() {
 // whitespace-only for the value to count — "12px" is NaN, not strtod's 12.
 // No conversion at all distinguishes "" / whitespace-only (0, as JS) from
 // genuine junk (NaN) by scanning whether anything non-whitespace exists.
-// Known divergence, shared with parseFloat's strtod base: "inf" parses
-// (JS accepts only the full word "Infinity").
+// Goes through __kml_strtod_js, not bare strtod, so C's extra infinity
+// spellings ("inf"/"infinity"/case variants) are rejected as NaN — JS accepts
+// only the exact word "Infinity".
 func (e *Emitter) ensureToNumber() {
 	if e.usedToNumber {
 		return
 	}
 	e.usedToNumber = true
-	e.ensureStrtod()
+	e.ensureStrtodJS()
 	e.emitGlobal(`
 define double @__kml_to_number(ptr %s) {
 entry:
   %endp = alloca ptr, align 8
-  %v = call double @strtod(ptr %s, ptr %endp)
+  %v = call double @__kml_strtod_js(ptr %s, ptr %endp)
   %end = load ptr, ptr %endp, align 8
   %noconv = icmp eq ptr %end, %s
   br i1 %noconv, label %scan_all, label %scan_tail

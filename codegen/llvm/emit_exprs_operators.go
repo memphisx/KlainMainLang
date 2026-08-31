@@ -38,10 +38,15 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// reached here is not a `=== null` comparison (those returned above) — it
 	// is ordinary arithmetic/comparison, which operates on the bare payload
 	// (a null reads as its zero, the same lenient collapse a local read does).
-	if isNullableScalar(left.Ty) {
+	// The exception is string concatenation (`"x" + (n: number|null)`): the
+	// operand must reach emitValueToString as the full aggregate so a null
+	// renders "null" (real JS), not the payload's zero (ADR-00537). Keep it
+	// intact here and let the concat branch below stringify it.
+	strConcatToStr := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
+	if isNullableScalar(left.Ty) && !strConcatToStr {
 		left = e.nullableScalarPayloadOf(left)
 	}
-	if isNullableScalar(right.Ty) {
+	if isNullableScalar(right.Ty) && !strConcatToStr {
 		right = e.nullableScalarPayloadOf(right)
 	}
 
@@ -129,13 +134,13 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// fall through unchanged to the existing logic below.
 	if ex.Op == "+" && isStringTy(left.Ty) != isStringTy(right.Ty) {
 		if !isStringTy(left.Ty) {
-			left, err = e.emitValueToString(left)
+			left, err = e.emitConcatOperandString(ex.Left, left)
 			if err != nil {
 				return Value{}, err
 			}
 		}
 		if !isStringTy(right.Ty) {
-			right, err = e.emitValueToString(right)
+			right, err = e.emitConcatOperandString(ex.Right, right)
 			if err != nil {
 				return Value{}, err
 			}
@@ -1049,7 +1054,37 @@ func (e *Emitter) emitShortCircuitValue(ex *ast.BinaryExpression, ty Type) (Valu
 
 // emitConditional emits a ternary expression cond ? consequent : alternate.
 // Uses an alloca+store/load pattern so both branches can produce a single result.
+// ternaryNullableScalarType reports the nullable-scalar result type of a
+// ternary when exactly one branch is `null` and the other a non-pointer scalar
+// (`b ? 3 : null` is `number | null`). Returns ok=false otherwise — a
+// ptr-typed branch (string/object/array `| null`) keeps its existing
+// null-pointer representation, and two non-null branches unify as before.
+func ternaryNullableScalarType(a, b Type) (Type, bool) {
+	nonPtrScalar := func(t Type) bool {
+		return !t.IsNull && !t.IsDynamic && !t.IsArray && !t.IsObject &&
+			t.IR != "ptr" && t.IR != "void" && !t.Nullable
+	}
+	if a.IsNull && nonPtrScalar(b) {
+		nt := b
+		nt.Nullable = true
+		return nt, true
+	}
+	if b.IsNull && nonPtrScalar(a) {
+		nt := a
+		nt.Nullable = true
+		return nt, true
+	}
+	return Type{}, false
+}
+
 func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) {
+	// A `cond ? scalar : null` (or `cond ? null : scalar`) is `T | null` — emit
+	// the presence-flagged { i1, T } aggregate so the null survives downstream
+	// (`??`, string concat, `=== null`, assignment to a `T | null` binding),
+	// rather than coercing null to a payload zero (ADR-00538).
+	if nty, ok := ternaryNullableScalarType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
+		return e.emitConditionalNullableScalar(ex, nty)
+	}
 	ty := e.inferExprType(ex.Consequent)
 	if ty.IsArray {
 		return Value{}, fmt.Errorf("%d:%d: ternary operator is not supported for array types", ex.GetPos().Line, ex.GetPos().Col)
@@ -1091,6 +1126,51 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, resPtr, ty.Align()))
 	return Value{Ref: result, Ty: ty}, nil
+}
+
+// emitConditionalNullableScalar emits a `cond ? a : b` whose result type is a
+// nullable scalar (nty, one branch null and the other a non-pointer scalar).
+// Each branch is boxed into the { i1, T } aggregate via
+// emitNullableScalarBoxedValue (a null literal → absent, a scalar → present),
+// stored, and reloaded — the same store/load-through-an-alloca shape the plain
+// ternary uses, over the presence-flagged storage type. See ADR-00538.
+func (e *Emitter) emitConditionalNullableScalar(ex *ast.ConditionalExpression, nty Type) (Value, error) {
+	thenL := e.freshLabel("ternary.then")
+	elseL := e.freshLabel("ternary.else")
+	mergeL := e.freshLabel("ternary.merge")
+
+	storageIR := nullableScalarStorageIR(nty)
+	align := storageAlign(nty)
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, storageIR, align))
+
+	cond, err := e.emitExpr(ex.Test)
+	if err != nil {
+		return Value{}, err
+	}
+	cond = e.toBool(cond)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, thenL, elseL))
+
+	e.emitLabel(thenL)
+	thenAgg, err := e.emitNullableScalarBoxedValue(ex.Consequent, nty)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR, thenAgg, resPtr, align))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(elseL)
+	elseAgg, err := e.emitNullableScalarBoxedValue(ex.Alternate, nty)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", storageIR, elseAgg, resPtr, align))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, storageIR, resPtr, align))
+	return Value{Ref: result, Ty: nty}, nil
 }
 
 // zeroRef returns the LLVM IR zero/null constant for a type.

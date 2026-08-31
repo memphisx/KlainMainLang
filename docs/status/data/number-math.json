@@ -26,8 +26,8 @@
           {
             "feature": "`Number.isInteger(x)`",
             "status": "implemented",
-            "caveats": [
-              "`Number.isInteger(Infinity)`/`(-Infinity)` return `true` — should be `false`; `emitNumberIsInteger` checks `floor(x) == x` only, never finiteness, and `floor(Infinity) == Infinity` is trivially true ([ADR-00166](../adr/ADR-00166.md))"
+            "notes": [
+              "`false` for any non-finite value (`Infinity`/`-Infinity`/`NaN`) — the whole-number test is gated on a finiteness check ([ADR-00531](../adr/ADR-00531.md))"
             ]
           },
           {
@@ -45,21 +45,19 @@
           {
             "feature": "`Number.parseInt(s)`",
             "status": "implemented",
-            "caveats": [
-              "No hex auto-detect when radix is omitted — `\"0x1F\"` parses as `0`, not `31` ([ADR-00287](../adr/ADR-00287.md))"
-            ],
             "notes": [
-              "Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))"
+              "Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))",
+              "With radix omitted, auto-detects base 16 for a `\"0x\"`/`\"0X\"` prefix and base 10 otherwise — no octal auto-detect ([ADR-00530](../adr/ADR-00530.md))"
             ]
           },
           {
             "feature": "`Number.parseFloat(s)`",
             "status": "implemented",
             "caveats": [
-              "Inherits `strtod` extras — `\"inf\"` parses to `Infinity` (JS only accepts the full word `Infinity`) and C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md))"
+              "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` → `16`, where real JS reads only the leading `0` ([ADR-00287](../adr/ADR-00287.md))"
             ],
             "notes": [
-              "A no-conversion input returns a real `NaN` via the endptr check ([ADR-00287](../adr/ADR-00287.md))"
+              "A no-conversion input returns a real `NaN` via the endptr check; only the exact word `\"Infinity\"` parses to `Infinity` (`\"inf\"` → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
             ]
           },
           {
@@ -97,8 +95,8 @@
           {
             "feature": "`Number.prototype.toFixed(n)`",
             "status": "implemented",
-            "caveats": [
-              "The `digits` argument is required here, not optional — `(3.14159).toFixed()` hard compile-errors with \"toFixed takes exactly 1 argument\"; real JS defaults `digits` to `0` ([ADR-00166](../adr/ADR-00166.md))"
+            "notes": [
+              "The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `\"4\"`), matching real JS ([ADR-00533](../adr/ADR-00533.md))"
             ]
           },
           {
@@ -120,7 +118,8 @@
               "Exponent pads to 2 digits — `e+05` vs real JS's `e+5` ([ADR-00065](../adr/ADR-00065.md))"
             ],
             "notes": [
-              "`sprintf(\"%#.*g\", ...)`"
+              "`sprintf(\"%#.*g\", ...)`",
+              "The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md))"
             ]
           },
           {
@@ -136,21 +135,18 @@
           {
             "feature": "`parseInt(s, radix?)` (global)",
             "status": "implemented",
-            "caveats": [
-              "Same residual as `Number.parseInt(s)` above — no hex auto-detect when radix is omitted ([ADR-00287](../adr/ADR-00287.md))"
-            ],
             "notes": [
-              "No-digits input → real `NaN` ([ADR-00287](../adr/ADR-00287.md))"
+              "No-digits input → real `NaN`; with radix omitted, hex auto-detect for a `\"0x\"` prefix, base 10 otherwise — same as `Number.parseInt(s)` above ([ADR-00287](../adr/ADR-00287.md)/[ADR-00530](../adr/ADR-00530.md))"
             ]
           },
           {
             "feature": "`parseFloat(s)` (global)",
             "status": "implemented",
             "caveats": [
-              "Same `strtod` extras as `Number.parseFloat(s)` above ([ADR-00287](../adr/ADR-00287.md))"
+              "Same `strtod` C hex-float parsing as `Number.parseFloat(s)` above — `\"0x10\"` → `16` ([ADR-00287](../adr/ADR-00287.md))"
             ],
             "notes": [
-              "No-conversion input → real `NaN` ([ADR-00287](../adr/ADR-00287.md))"
+              "No-conversion input → real `NaN`; only the exact word `\"Infinity\"` parses to `Infinity` ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
             ]
           },
           {

@@ -567,3 +567,18 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00522](ADR-00522.md) | `klain:tui` List viewport — scroll-to-selected + scrollbar | Extends [ADR-00519](ADR-00519.md); Implements [TDD-00150](../tdd/TDD-00150.md) (Stage 1 polish) |
 | [00523](ADR-00523.md) | `optnone` the webview bind thunks — `-O2` miscompiles their setjmp guard | Relates to [TDD-00142](../tdd/TDD-00142.md) (klain:webview) |
 | [00524](ADR-00524.md) | Link libm for `roundeven` intrinsic and Yoga on Linux | Extends [ADR-00034](ADR-00034.md), [ADR-00313](ADR-00313.md) |
+| [00525](ADR-00525.md) | Binary-safe `fs.copyFileSync` | Extends [ADR-00027](ADR-00027.md), [ADR-00094](ADR-00094.md) |
+| [00526](ADR-00526.md) | `RegExp.prototype.test` honors `lastIndex` under the `g` flag | Extends [ADR-00115](ADR-00115.md), [ADR-00116](ADR-00116.md); Implements [TDD-00035](../tdd/TDD-00035.md) |
+| [00527](ADR-00527.md) | `arr.sort()` result infers the receiver's array type | Extends [ADR-00152](ADR-00152.md) |
+| [00528](ADR-00528.md) | Array→string coercion (`String(arr)` / `` `${arr}` `` / nested `.join()`) | Extends [ADR-00152](ADR-00152.md); Implements [TDD-00029](../tdd/TDD-00029.md) |
+| [00529](ADR-00529.md) | JS-faithful string→number infinity spelling (`Number`/`parseFloat`) | Extends [ADR-00287](ADR-00287.md), [ADR-00291](ADR-00291.md) |
+| [00530](ADR-00530.md) | `parseInt` hex auto-detect when the radix is omitted | Extends [ADR-00287](ADR-00287.md) |
+| [00531](ADR-00531.md) | `Number.isInteger` is false for non-finite values | (none) |
+| [00532](ADR-00532.md) | Exponent notation in number literals (`1e3`, `1.5e-2`) | Extends [ADR-00123](ADR-00123.md) |
+| [00533](ADR-00533.md) | `Number.prototype.toFixed` digits argument is optional | (none) |
+| [00534](ADR-00534.md) | `Number.prototype.toPrecision` precision argument is optional | (none) |
+| [00535](ADR-00535.md) | `for…of` over a string iterates its characters | Extends [ADR-00482](ADR-00482.md) |
+| [00536](ADR-00536.md) | Array destructuring of a string binds its characters | Extends [ADR-00535](ADR-00535.md) |
+| [00537](ADR-00537.md) | string concat renders a `number \| null` operand's null as "null" | Extends [ADR-00165](ADR-00165.md) |
+| [00538](ADR-00538.md) | `cond ? scalar : null` produces a nullable-scalar aggregate | Extends [ADR-00537](ADR-00537.md); Implements [TDD-00064](../tdd/TDD-00064.md) |
+| [00539](ADR-00539.md) | optional chaining `arr?.prop` on an array no longer miscompiles | Extends [ADR-00061](ADR-00061.md) |

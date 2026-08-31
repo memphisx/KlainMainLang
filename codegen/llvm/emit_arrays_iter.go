@@ -180,6 +180,50 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
+// emitStringToCharArray materializes a string Value into a `string[]` whose
+// elements are its characters — one per byte, this compiler's string model
+// (ADR-00482). Shared by Array.from(string) and `for (const ch of str)`
+// (ADR-00535). Each character is a length-prefixed 1-byte string via
+// emitStringExtract.
+func (e *Emitter) emitStringToCharArray(v Value) Value {
+	e.ensureStrlen()
+	e.ensureMalloc()
+	sLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, v.Ref))
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, sLen))
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bytes))
+	idxPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	condL := e.freshLabel("strfrom.cond")
+	bodyL := e.freshLabel("strfrom.body")
+	endL := e.freshLabel("strfrom.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i1r, c := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1r, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i1r, sLen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, endL))
+	e.emitLabel(bodyL)
+	i2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i2, idxPtr))
+	ch := e.emitStringExtract(v.Ref, i2, "1")
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, i2))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ch.Ref, slot))
+	i3 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i3, i2))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i3, idxPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	r0, r1 := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, buf))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sLen))
+	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}
+}
+
 // emitArrayFrom implements Array.from(iterable): the array-like overload
 // only (a plain array, or a class instance implementing the Stage 1a
 // iterator protocol — next(): T | null, TDD-00009/ADR-00063) — real JS's
@@ -253,42 +297,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureStrlen()
-		e.ensureMalloc()
-		sLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, v.Ref))
-		bytes := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, sLen))
-		buf := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bytes))
-		idxPtr := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
-		condL := e.freshLabel("strfrom.cond")
-		bodyL := e.freshLabel("strfrom.body")
-		endL := e.freshLabel("strfrom.end")
-		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-		e.emitLabel(condL)
-		i1r, c := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1r, idxPtr))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i1r, sLen))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, endL))
-		e.emitLabel(bodyL)
-		i2 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i2, idxPtr))
-		ch := e.emitStringExtract(v.Ref, i2, "1")
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, i2))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ch.Ref, slot))
-		i3 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i3, i2))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i3, idxPtr))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
-		e.emitLabel(endL)
-		r0, r1 := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, buf))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sLen))
-		return Value{Ref: r1, Ty: ArrayOf(TypePtr)}, nil
+		return e.emitStringToCharArray(v), nil
 	}
 
 	if srcTy.IsClass {

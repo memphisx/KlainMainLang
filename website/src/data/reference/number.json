@@ -4,19 +4,16 @@
   "kind": "language",
   "statusPage": "NUMBER-MATH.md",
   "coversRows": "all",
-  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "26/35", "strictPct": 74 },
-  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The divergences cluster in two spots: the string-rendering methods (toString/toPrecision/toExponential) pad exponents to two digits (`e+05` vs `e+5`) and truncate a fractional receiver before radix rendering, and the parse helpers inherit their C runtime's quirks — no hex auto-detect for parseInt, and strtod extras like `\"inf\"` for parseFloat. Everything else — the constants, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
+  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "30/35", "strictPct": 86 },
+  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The divergences cluster in the string-rendering methods (toString/toPrecision/toExponential) — they pad exponents to two digits (`e+05` vs `e+5`) and truncate a fractional receiver before radix rendering — and parseFloat inherits strtod's C hex-float parsing (`\"0x10\"` → `16`). Everything else — the constants, parseInt's hex auto-detect, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
   "entries": [
     {
       "id": "number.isInteger",
       "name": "Number.isInteger(x)",
       "statusRow": "Number.isInteger(x)",
       "signature": "Number.isInteger(x: number): boolean",
-      "badge": "caveats",
-      "description": "Reports whether x is a finite integer value. Checks floor(x) == x on the double.",
-      "differences": [
-        "`Number.isInteger(Infinity)`/`(-Infinity)` return `true` — should be `false`; `emitNumberIsInteger` checks `floor(x) == x` only, never finiteness, and `floor(Infinity) == Infinity` is trivially true."
-      ],
+      "badge": "exact",
+      "description": "Reports whether x is a finite integer value — floor(x) == x gated on a finiteness check, so ±Infinity and NaN are false, matching real JS.",
       "seeAlso": ["number.isFinite", "number.isSafeInteger"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isInteger" }
     },
@@ -55,11 +52,8 @@
       "name": "Number.parseInt(s)",
       "statusRow": "Number.parseInt(s)",
       "signature": "Number.parseInt(s: string, radix?: number): number",
-      "badge": "caveats",
-      "description": "Parses a leading integer out of s. Returns a double (as real JS), so a no-digits input is a real NaN via an endptr-checked strtoll.",
-      "differences": [
-        "No hex auto-detect when radix is omitted — `\"0x1F\"` parses as `0`, not `31`."
-      ],
+      "badge": "exact",
+      "description": "Parses a leading integer out of s. Returns a double (as real JS), so a no-digits input is a real NaN via an endptr-checked strtoll. With radix omitted, auto-detects base 16 for a \"0x\"/\"0X\" prefix and base 10 otherwise (no octal auto-detect).",
       "seeAlso": ["number.parseFloat", "global.parseInt"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/parseInt" }
     },
@@ -69,9 +63,9 @@
       "statusRow": "Number.parseFloat(s)",
       "signature": "Number.parseFloat(s: string): number",
       "badge": "caveats",
-      "description": "Parses a leading floating-point number out of s. A no-conversion input returns a real NaN via the endptr check.",
+      "description": "Parses a leading floating-point number out of s. A no-conversion input returns a real NaN via the endptr check. Only the exact word \"Infinity\" parses to Infinity (\"inf\" is NaN).",
       "differences": [
-        "Inherits `strtod` extras — `\"inf\"` parses to `Infinity` (JS only accepts the full word `Infinity`) and C hex-float syntax parses."
+        "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` → `16`, where real JS reads only the leading `0`."
       ],
       "seeAlso": ["number.parseInt", "global.parseFloat"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/parseFloat" }
@@ -160,12 +154,9 @@
       "id": "number.toFixed",
       "name": "Number.prototype.toFixed(n)",
       "statusRow": "Number.prototype.toFixed(n)",
-      "signature": "(x: number).toFixed(digits: number): string",
-      "badge": "caveats",
-      "description": "Formats x with a fixed number of digits after the decimal point.",
-      "differences": [
-        "The `digits` argument is required here, not optional — `(3.14159).toFixed()` hard compile-errors with \"toFixed takes exactly 1 argument\"; real JS defaults `digits` to `0`."
-      ],
+      "signature": "(x: number).toFixed(digits?: number): string",
+      "badge": "exact",
+      "description": "Formats x with a fixed number of digits after the decimal point. The digits argument is optional and defaults to 0, rounding to the nearest integer ((3.7).toFixed() is \"4\").",
       "seeAlso": ["number.toPrecision", "number.toExponential"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toFixed" }
     },
@@ -188,9 +179,9 @@
       "id": "number.toPrecision",
       "name": "Number.prototype.toPrecision(n)",
       "statusRow": "Number.prototype.toPrecision(n)",
-      "signature": "(x: number).toPrecision(precision: number): string",
+      "signature": "(x: number).toPrecision(precision?: number): string",
       "badge": "caveats",
-      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...).",
+      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...). The precision argument is optional; with it omitted, toPrecision() is exactly String(x).",
       "differences": [
         "Exponent pads to 2 digits — `e+05` vs real JS's `e+5`."
       ],
@@ -215,11 +206,8 @@
       "name": "parseInt(s, radix?) (global)",
       "statusRow": "parseInt(s, radix?) (global)",
       "signature": "parseInt(s: string, radix?: number): number",
-      "badge": "caveats",
-      "description": "The global parseInt — same runtime as Number.parseInt. A no-digits input yields a real NaN.",
-      "differences": [
-        "Same residual as `Number.parseInt(s)` above — no hex auto-detect when radix is omitted."
-      ],
+      "badge": "exact",
+      "description": "The global parseInt — same runtime as Number.parseInt. A no-digits input yields a real NaN; with radix omitted, hex auto-detect for a \"0x\" prefix, base 10 otherwise.",
       "seeAlso": ["number.parseInt", "global.parseFloat"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt" }
     },
@@ -229,9 +217,9 @@
       "statusRow": "parseFloat(s) (global)",
       "signature": "parseFloat(s: string): number",
       "badge": "caveats",
-      "description": "The global parseFloat — same runtime as Number.parseFloat. A no-conversion input yields a real NaN.",
+      "description": "The global parseFloat — same runtime as Number.parseFloat. A no-conversion input yields a real NaN; only the exact word \"Infinity\" parses to Infinity.",
       "differences": [
-        "Same `strtod` extras as `Number.parseFloat(s)` above."
+        "Same `strtod` C hex-float parsing as `Number.parseFloat(s)` above — `\"0x10\"` → `16`."
       ],
       "seeAlso": ["number.parseFloat", "global.parseInt"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }

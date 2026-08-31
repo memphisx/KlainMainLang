@@ -4,19 +4,16 @@
   "kind": "language",
   "statusPage": "STRING-METHODS.md",
   "coversRows": "all",
-  "coverage": { "loose": "28/30", "loosePct": 93, "strict": "21/30", "strictPct": 70 },
+  "coverage": { "loose": "28/30", "loosePct": 93, "strict": "22/30", "strictPct": 73 },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
     {
       "id": "string.concat",
       "name": "+ (concatenation)",
       "signature": "string + string → string",
-      "badge": "caveats",
-      "description": "Joins two strings. A null string operand stringifies as \"null\", matching JavaScript.",
+      "badge": "exact",
+      "description": "Joins two strings. A null operand stringifies as \"null\", matching JavaScript — including a `number | null` held in a parameter, a local, an object field, or returned from a function.",
       "snippet": "console.log('x' + null)   // xnull   (matches JS)",
-      "differences": [
-        "A `number | null` operand still silently prints `\"x0\"` instead of `\"xnull\"` — the numeric branch of value-to-string has no nullability check."
-      ],
       "seeAlso": ["string.length"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Addition" }
     },

@@ -36,9 +36,21 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 	}
 	e.ensureMathFuncs()
 	floored := e.freshReg()
-	r := e.freshReg()
+	isWhole := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", floored, val.Ref))
-	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", r, val.Ref, floored))
+	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", isWhole, val.Ref, floored))
+	// floor(±Infinity) == ±Infinity, so the whole-number test alone answers
+	// true for Infinity — real JS's Number.isInteger is false for any
+	// non-finite value. Gate on finiteness: (x - x) is 0 for a finite x but
+	// NaN for ±Infinity/NaN, so `fcmp oeq (x - x), 0` is the finiteness test
+	// (no extra libm decl needed). NaN already fails isWhole, but this keeps
+	// the intent explicit and covers ±Infinity.
+	sub := e.freshReg()
+	finite := e.freshReg()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", sub, val.Ref, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, 0.0", finite, sub))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, isWhole, finite))
 	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
@@ -192,7 +204,8 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
-	radixRef := "10"
+	radixRef := ""
+	autoRadixReg := "" // non-empty only in the omitted-radix (auto-detect) path
 	if len(args) == 2 {
 		rv, err := e.emitExpr(args[1])
 		if err != nil {
@@ -200,6 +213,16 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		}
 		r32 := e.coerce(rv, TypeI32)
 		radixRef = r32.Ref
+	} else {
+		// No radix argument: real JS auto-detects base 16 for a "0x"/"0X"
+		// prefix and base 10 otherwise (no octal auto-detect) — computed at
+		// runtime since the string is a runtime value. strtoll accepts the
+		// "0x" prefix under base 16, so the value flows straight through.
+		e.ensureParseIntBase()
+		rr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base(ptr %s)", rr, strVal.Ref))
+		radixRef = rr
+		autoRadixReg = rr
 	}
 	// parseInt returns a double, as real JS: values beyond 2^53 lose
 	// precision in JS too, and only a double can represent the NaN that a
@@ -214,6 +237,27 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
 	noDigits := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", noDigits, endPtr, strVal.Ref))
+	if autoRadixReg != "" {
+		// Auto-detected base 16 ("0x"/"0X" prefix) with no hex digit after the
+		// prefix ("0x", "0x ") — strtoll consumes just the leading "0" and
+		// stops on the 'x'/'X', so endptr lands on it. Real JS's parseInt("0x")
+		// is NaN, not 0; fold that into the no-digits condition.
+		endChar := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", endChar, endPtr))
+		isX := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 120", isX, endChar))
+		isBigX := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 88", isBigX, endChar))
+		stuckOnX := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", stuckOnX, isX, isBigX))
+		isHex := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 16", isHex, autoRadixReg))
+		hexStuck := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", hexStuck, isHex, stuckOnX))
+		merged := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", merged, noDigits, hexStuck))
+		noDigits = merged
+	}
 	asF := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", asF, r))
 	result := e.freshReg()
@@ -225,17 +269,20 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: parseFloat expects 1 argument", pos.Line, pos.Col)
 	}
-	e.ensureStrtod()
+	e.ensureStrtodJS()
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	// A no-conversion input must give NaN (real JS), not strtod's bare 0 —
-	// endptr stays at the start of the string exactly in that case.
+	// endptr stays at the start of the string exactly in that case. Via
+	// __kml_strtod_js so a non-JS infinity spelling ("inf"/"infinity"/case
+	// variants) is rejected to NaN, while the exact word "Infinity" and a
+	// numeric overflow like "1e999" still parse to Infinity as real JS does.
 	endSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_strtod_js(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
 	endPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
 	noDigits := e.freshReg()

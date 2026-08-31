@@ -69,22 +69,18 @@
           {
             "feature": "`.lastIndex`",
             "status": "implemented",
-            "caveats": [
-              "Untouched by `.test()` — real JS's `.test()` reads/advances `.lastIndex` under the `g` flag (see the `.test()` row)"
-            ],
+            "caveats": [],
             "notes": [
-              "Mutated by `.exec()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)",
+              "Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)/[ADR-00526](../adr/ADR-00526.md)",
               "Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all)"
             ]
           },
           {
             "feature": "`.test(str)`",
             "status": "implemented",
-            "caveats": [
-              "Always matches from offset 0 and never reads/writes `.lastIndex`, even for a `g`-flagged RegExp — real JS's `.test()` shares `.exec()`'s stateful `lastIndex` iteration"
-            ],
+            "caveats": [],
             "notes": [
-              "See [ADR-00115](../adr/ADR-00115.md)"
+              "A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md)"
             ]
           },
           {

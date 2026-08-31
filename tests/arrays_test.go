@@ -155,6 +155,44 @@ console.log(desc[4])
 `, "1\n9\n5\n1")
 }
 
+// TestE2EArraySortResultInfersArrayType confirms `arr.sort()`'s result infers
+// as the receiver's array type when captured in an unannotated `const` — sort
+// returns the same array, so the result is indexable/`.length`-able without an
+// explicit `: T[]` annotation (ADR-00527).
+func TestE2EArraySortResultInfersArrayType(t *testing.T) {
+	assertOutput(t, `
+const arr = [3, 1, 2]
+const sorted = arr.sort()
+console.log(sorted.length)
+console.log(sorted[0])
+const strs = ["b", "a", "c"]
+const ss = strs.sort()
+console.log(ss.join(","))
+`, "3\n1\na,b,c")
+}
+
+// TestE2EArrayToStringCoercion confirms an array coerces to a string as real
+// JS's Array.prototype.toString does — elements String()'d and joined by "," —
+// through String(arr), a `${arr}` template interpolation, and .join() with a
+// nested-array element (each nested element itself renders comma-joined), all
+// routing through the one emitArrayJoinCore path (ADR-00528).
+func TestE2EArrayToStringCoercion(t *testing.T) {
+	assertOutput(t, `
+const a = [1, 2, 3]
+console.log(String(a))
+console.log(` + "`x=${a}`" + `)
+const s = ["p", "q"]
+console.log(` + "`${s}`" + `)
+const n = [[1, 2], [3, 4]]
+console.log(n.join("-"))
+console.log(String(n))
+const deep = [[[1, 2], [3]], [[4]]]
+console.log(String(deep))
+const empty: number[] = []
+console.log(` + "`[${empty}]`" + `)
+`, "1,2,3\nx=1,2,3\np,q\n1,2-3,4\n1,2,3,4\n1,2,3,4\n[]")
+}
+
 func TestE2EForOf(t *testing.T) {
 	assertOutput(t, `
 const words: string[] = ['apple', 'banana', 'cherry']
@@ -164,6 +202,22 @@ for (const w of words) {
 }
 console.log(out)
 `, "abc")
+}
+
+// TestE2EForOfString confirms for-of over a string iterates its characters
+// (one 1-byte character string per element, this compiler's model), over both
+// a literal and a string variable, and handles the empty string (ADR-00535).
+func TestE2EForOfString(t *testing.T) {
+	assertOutput(t, `
+let out = ""
+for (const c of "hello") { out = out + c + "." }
+console.log(out)
+const s = "abc"
+for (const ch of s) { console.log(ch) }
+let n = 0
+for (const c of "") { n = n + 1 }
+console.log(n)
+`, "h.e.l.l.o.\na\nb\nc\n0")
 }
 
 // --- .length on non-variable array expressions ---
@@ -998,7 +1052,6 @@ func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
 		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.sort();`,
-		`const m: number[][] = [[1,2]]; m.join(",");`,
 		`const m: number[][] = [[1,2]]; Object.groupBy(m, (row) => "" + row.length);`,
 		`const m = new Array<number[]>(3);`,
 	}
@@ -1104,6 +1157,21 @@ func TestE2EArrayDestructuringBasic(t *testing.T) {
 let [a, b, c] = [10, 20, 30];
 console.log(a, b, c);
 `, "10 20 30")
+}
+
+// TestE2EStringDestructuring confirms array destructuring of a string binds its
+// characters (one per byte), over both a literal and a string variable
+// (ADR-00536).
+func TestE2EStringDestructuring(t *testing.T) {
+	assertOutput(t, `
+const [a, b] = "xy";
+console.log(a, b);
+const [f, s, t] = "cat";
+console.log(f + "-" + s + "-" + t);
+const word = "hi";
+const [h] = word;
+console.log(h);
+`, "x y\nc-a-t\nh")
 }
 
 func TestE2EArrayDestructuringOutOfBoundsReadsZero(t *testing.T) {

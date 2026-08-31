@@ -141,12 +141,10 @@
           {
             "feature": "`fs.copyFileSync(src, dest)`",
             "status": "implemented",
-            "caveats": [
-              "Still inherits `readFileSync`'s text-only limitation — a source file with embedded null bytes copies back shorter than its real size; not rewritten to use the binary-safe `readFileSyncBytes`/`writeFileSync(path, ArrayBuffer)` path ([ADR-00094](../adr/ADR-00094.md)), a real, separate follow-up if a binary-safe copy is ever needed"
-            ],
+            "caveats": [],
             "notes": [
-              "Composes the existing string-based `readFileSync`/`writeFileSync` helpers — no new C-level I/O code",
-              "See [ADR-00027](../adr/ADR-00027.md)"
+              "Binary-safe: composes the raw `__kml_fs_read_file_raw`/`__kml_fs_write_file_bytes` helpers ([ADR-00094](../adr/ADR-00094.md)), threading the source's exact byte count, so a file with an embedded null byte copies back whole — no new C-level I/O code",
+              "See [ADR-00027](../adr/ADR-00027.md)/[ADR-00525](../adr/ADR-00525.md)"
             ]
           },
           {

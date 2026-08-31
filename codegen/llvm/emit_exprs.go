@@ -217,16 +217,28 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 	// an integer/hex/bin/oct literal is converted to its float64 value (rounded
 	// past 2^53 exactly as JS does). Real integers come from the explicit
 	// `/** @type {intN/uintN} */` types, not literals.
-	if strings.ContainsRune(v, '.') {
-		return Value{Ref: v, Ty: TypeF64}, nil
-	}
-	// Hex (0x), binary (0b), octal (0o).
+	// Hex (0x), binary (0b), octal (0o). Checked before the fraction/exponent
+	// handling below, since a hex literal's digits can themselves be `e`/`E`
+	// (`0x1e`) or contain no separator the decimal path expects.
 	if len(v) >= 2 && v[0] == '0' && (v[1]|32 == 'x' || v[1]|32 == 'b' || v[1]|32 == 'o') {
 		n64, err := strconv.ParseInt(v, 0, 64)
 		if err != nil {
 			return Value{}, fmt.Errorf("invalid numeric literal %q: %v", v, err)
 		}
 		return Value{Ref: llvmDoubleLit(float64(n64)), Ty: TypeF64}, nil
+	}
+	// A decimal exponent literal (`1e3`, `1.5e-2`) is normalized to the exact
+	// double bit-pattern form — LLVM reads `e`-notation ambiguously in a double
+	// slot (see llvmDoubleLit), so it can't be passed verbatim. A plain fraction
+	// with no exponent still passes through verbatim (LLVM parses `1.5` fine).
+	if strings.ContainsAny(v, "eE") {
+		if f, ferr := strconv.ParseFloat(v, 64); ferr == nil {
+			return Value{Ref: llvmDoubleLit(f), Ty: TypeF64}, nil
+		}
+		return Value{}, fmt.Errorf("invalid numeric literal %q", v)
+	}
+	if strings.ContainsRune(v, '.') {
+		return Value{Ref: v, Ty: TypeF64}, nil
 	}
 	// Decimal integer literal.
 	if n64, err := strconv.ParseInt(v, 10, 64); err == nil {

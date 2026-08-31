@@ -356,20 +356,19 @@ func (e *Emitter) emitRegexLoadField(objVal Value, name, ir string, align int) s
 	return r
 }
 
-// emitRegexTest implements `regexp.test(str): boolean` (TDD-00035 Stage 1).
-// Always matches from offset 0, regardless of the `g`/`y` flags — real JS's
-// own `.test()` shares `.exec()`'s `lastIndex`-driven stateful iteration for
-// a global/sticky regex, but that machinery (lastIndex read-before/write-
-// after a match) is Stage 2's, not built yet; a global RegExp used with
-// `.test()` in a `while` loop the way `.exec()` normally supports will not
-// advance and is a documented V1 gap until Stage 2 lands. A single
-// match_data block is created and freed within this call (see
-// ensureRegexMatch's doc comment for why it isn't cached on the instance).
-// Any negative pcre2_match_8 return (not just PCRE2_ERROR_NOMATCH
-// specifically) is treated as "no match" — permissive, matching this
-// project's existing convention for unusual/malformed input elsewhere
-// (atob, decodeURI) rather than surfacing PCRE2's other, rarer internal
-// error codes as something more specific.
+// emitRegexTest implements `regexp.test(str): boolean` (TDD-00035). Shares
+// `.exec()`'s `lastIndex`-driven stateful iteration for a global regex (real
+// JS's `.test()` and `.exec()` run the same RegExpBuiltinExec algorithm): a
+// global RegExp reads `lastIndex` as the start offset, advances it to the
+// match end on success, and resets it to 0 on failure — so a `while
+// (re.test(s))` loop over a global pattern now terminates and steps through
+// every match, exactly as `.exec()` does. A non-global RegExp never reads or
+// touches `lastIndex`, always matching from offset 0. (This compiler has no
+// `y`/sticky flag — see TDD-00035's flag scope table — so only `global`
+// drives the iteration.) A single match_data block is created and freed
+// within this call. Any negative pcre2_match_8 return is treated as "no
+// match" — permissive, matching this project's existing convention for
+// unusual/malformed input elsewhere (atob, decodeURI).
 func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: test takes exactly 1 argument", pos.Line, pos.Col)
@@ -386,18 +385,57 @@ func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression
 
 	e.ensureRegexMatch()
 	handleReg := e.emitRegexHandleLoad(objVal)
+	globalReg := e.emitRegexLoadField(objVal, "global", "i1", 1)
+	lastIndexReg := e.emitRegexLoadField(objVal, "lastIndex", "i64", 8)
+
+	// lastIndex is stored in the mode's own index space (UTF-16 code units for
+	// es-utf16, bytes otherwise); PCRE2 wants a byte start offset — convert on
+	// the way in (identity in non-es-utf16 modes), and only honor it when
+	// `global` is set.
+	lastIndexByteReg := e.regexUTF16ToByte(strVal.Ref, lastIndexReg)
+	startOffsetReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", startOffsetReg, globalReg, lastIndexByteReg))
 
 	matchDataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
 
 	rcReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 0, i32 0, ptr %s, ptr null)",
-		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, matchDataReg))
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", matchDataReg))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr null)",
+		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg))
+	matchedReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", matchedReg, rcReg))
 
-	resultReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", resultReg, rcReg))
-	return Value{Ref: resultReg, Ty: TypeBool}, nil
+	// Advance/reset lastIndex (global only), mirroring emitRegexSingleMatchCore.
+	// On a match, read the match end (ovector[1]) and store it back in the
+	// mode's index space; on no match, reset to 0. A non-global regex keeps its
+	// original lastIndex verbatim in both branches.
+	matchedL := e.freshLabel("regex.test.matched")
+	nomatchL := e.freshLabel("regex.test.nomatch")
+	mergeL := e.freshLabel("regex.test.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", matchedReg, matchedL, nomatchL))
+
+	e.emitLabel(matchedL)
+	ovecReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_get_ovector_pointer_8(ptr %s)", ovecReg, matchDataReg))
+	endOfMatchGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 1", endOfMatchGep, ovecReg))
+	endOfMatchReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", endOfMatchReg, endOfMatchGep))
+	endStoredReg := e.regexByteToUTF16(strVal.Ref, endOfMatchReg)
+	advancedLastIndexReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", advancedLastIndexReg, globalReg, endStoredReg, lastIndexReg))
+	e.emitRegexStoreLastIndex(objVal, advancedLastIndexReg)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(nomatchL)
+	resetLastIndexReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", resetLastIndexReg, globalReg, lastIndexReg))
+	e.emitRegexStoreLastIndex(objVal, resetLastIndexReg)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", matchDataReg))
+	return Value{Ref: matchedReg, Ty: TypeBool}, nil
 }
 
 // regExpExecResultType returns `.exec(str)`'s return type: `string[] | null`

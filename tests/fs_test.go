@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -399,6 +400,35 @@ console.log(fs.readFileSync(%q))
 console.log(fs.readFileSync(%q))
 `, src, src, dest, src, src, dest)
 	assertOutputImports(t, code, "true\ncopy me\ncopy me")
+}
+
+// TestE2EFsCopyFileSyncPreservesEmbeddedNullByte confirms copyFileSync now
+// routes through the binary-safe read_raw/write_bytes pair (ADR-00094), so a
+// source file with an embedded null byte copies whole rather than truncated
+// at the first null. The fixture is written via real Go os.WriteFile (a null
+// can't survive the strlen-based string write path), and the destination is
+// verified via real Go os.ReadFile, not this compiler's own readers.
+func TestE2EFsCopyFileSyncPreservesEmbeddedNullByte(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	dest := filepath.Join(dir, "dest.bin")
+	want := []byte{'h', 'i', 0, 'b', 'y', 'e'}
+	if err := os.WriteFile(src, want, 0o644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	code := fmt.Sprintf(`
+import fs from 'fs'
+fs.copyFileSync(%q, %q)
+`, src, dest)
+	assertOutputImports(t, code, "")
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("os.ReadFile: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("copied bytes = %v, want %v", got, want)
+	}
 }
 
 func TestE2EFsCopyFileSyncWrongArgCountRejected(t *testing.T) {

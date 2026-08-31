@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
-  "coverage": { "loose": "16/17", "loosePct": 94, "strict": "7/17", "strictPct": 41 },
+  "coverage": { "loose": "16/17", "loosePct": 94, "strict": "8/17", "strictPct": 47 },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
   "entries": [
     {
@@ -153,12 +153,9 @@
       "name": "fs.copyFileSync(src, dest)",
       "statusRow": "fs.copyFileSync(src, dest)",
       "signature": "copyFileSync(src: string, dest: string): void",
-      "badge": "caveats",
-      "description": "Copies a file by composing the existing string-based readFileSync/writeFileSync helpers — no new C-level I/O code.",
+      "badge": "exact",
+      "description": "Copies a file by composing the raw byte-count-aware read/write helpers — binary-safe, so a source file with an embedded null byte copies back whole. No new C-level I/O code.",
       "returns": { "type": "void", "desc": "Nothing." },
-      "differences": [
-        "Still inherits `readFileSync`'s text-only limitation — a source file with embedded null bytes copies back shorter than its real size; not rewritten to use the binary-safe path."
-      ],
       "seeAlso": ["fs.renameSync", "fs.readFileSyncBytes"],
       "spec": { "mdn": "https://nodejs.org/api/fs.html#fscopyfilesyncsrc-dest-mode" }
     },

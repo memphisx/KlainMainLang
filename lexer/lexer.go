@@ -452,9 +452,45 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			break
 		}
 	}
+	// Optional exponent part (ES DecimalLiteral): `e`/`E`, an optional sign,
+	// then one or more digits (numeric separators allowed between them) —
+	// `1e3`, `1.5E-2`, `2e+10`. Only an `e`/`E` immediately followed by a digit
+	// (optionally after a sign) starts an exponent; otherwise the `e` belongs to
+	// a following identifier/token, so `x in y` and a member like `1 .toFixed`
+	// are unaffected.
+	hasExp := false
+	if c := l.peek(); c == 'e' || c == 'E' {
+		n1 := l.peekAt(1)
+		if unicode.IsDigit(n1) || ((n1 == '+' || n1 == '-') && unicode.IsDigit(l.peekAt(2))) {
+			hasExp = true
+			buf.WriteRune(l.advance()) // 'e' / 'E'
+			if l.peek() == '+' || l.peek() == '-' {
+				buf.WriteRune(l.advance())
+			}
+			lastWasDigit = false
+			for l.pos < len(l.src) {
+				c := l.peek()
+				if unicode.IsDigit(c) {
+					buf.WriteRune(l.advance())
+					lastWasDigit = true
+				} else if c == '_' {
+					if !lastWasDigit || !unicode.IsDigit(l.peekAt(1)) {
+						return Token{}, fmt.Errorf("%d:%d: numeric separator '_' must be between two digits", line, col)
+					}
+					l.advance()
+					lastWasDigit = false
+				} else {
+					break
+				}
+			}
+		}
+	}
 	if l.peek() == 'n' {
 		if hasDot {
 			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot contain a decimal point", line, col)
+		}
+		if hasExp {
+			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot contain an exponent", line, col)
 		}
 		if legacyLeadingZero {
 			return Token{}, fmt.Errorf("%d:%d: a BigInt literal cannot use a legacy-octal / non-octal-decimal form", line, col)

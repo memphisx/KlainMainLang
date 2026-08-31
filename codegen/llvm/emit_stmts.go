@@ -723,7 +723,20 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// but binds the loop variable as a bigint handle (wrapped per element).
 	var iterTaTy Type
 
-	if id, ok := s.Iterable.(*ast.Identifier); ok {
+	if strTy := e.inferExprType(s.Iterable); isForOfStringTy(strTy) {
+		// A string iterates its characters — one 1-byte character string per
+		// element, this compiler's byte-string model (ADR-00535). Materialize a
+		// char array and drive the shared array-iteration loop below. Faithful
+		// for ASCII/Latin-1; real JS iterates by code point, the same documented
+		// Unicode narrowing the rest of the string layer carries.
+		sv, err := e.emitExpr(s.Iterable)
+		if err != nil {
+			return err
+		}
+		charArr := e.emitStringToCharArray(sv)
+		elemTy = TypePtr
+		dataPtrAlloca, lenAlloca = e.splitArrayAggregate(charArr)
+	} else if id, ok := s.Iterable.(*ast.Identifier); ok {
 		iterSym, found := e.lookup(id.Name)
 		switch {
 		case found && iterSym.Ty.IsArray:

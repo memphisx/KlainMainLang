@@ -4,13 +4,13 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 28/30 (~93%) · **Strict Coverage**: 21/30 (70%).
+**Coverage**: 28/30 (~93%) · **Strict Coverage**: 22/30 (~73%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `+` (concatenation) | ✅ | • A `number \| null` operand still silently prints `"x0"` instead of `"xnull"` — the numeric branch of value-to-string has no nullability check ([ADR-00166](../adr/ADR-00166.md)) | • A null *string* operand stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS ([ADR-00165](../adr/ADR-00165.md)) |
+| `+` (concatenation) | ✅ | | • A null operand stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS ([ADR-00165](../adr/ADR-00165.md))<br>• A `number \| null` operand renders `"null"` for the null case (`"x" + n`) — as a parameter, local, object field, or a `T | null`-returning call — not its payload zero ([ADR-00537](../adr/ADR-00537.md)/[ADR-00538](../adr/ADR-00538.md)) |
 | `.length` | ✅ | | |
 | `.slice(start, end?)` | ✅ | | |
 | `.substring(start, end?)` | ✅ | | |

@@ -80,6 +80,29 @@ console.log(s + ', world')
 `, "Hi, null\nnull, world")
 }
 
+// TestE2EStringConcatNullableScalar confirms a `number | null` operand renders
+// its null as "null" (not the payload zero) in string concatenation, across a
+// parameter, a local (null and value), and an object field — matching real JS
+// (ADR-00537). Arithmetic on such an operand still collapses null to zero.
+func TestE2EStringConcatNullableScalar(t *testing.T) {
+	assertOutput(t, `
+function p(x: number | null): string { return "p" + x }
+console.log(p(5))
+console.log(p(null))
+const litN: number | null = null
+const litV: number | null = 9
+console.log("l" + litN)
+console.log("l" + litV)
+interface B { n: number | null }
+const bn: B = { n: null }
+const bv: B = { n: 4 }
+console.log("f" + bn.n)
+console.log("f" + bv.n)
+function arith(x: number | null): number { return (x ?? 0) + 10 }
+console.log(arith(null))
+`, "p5\npnull\nlnull\nl9\nfnull\nf4\n10")
+}
+
 func TestE2EStringPlusBooleanConcat(t *testing.T) {
 	assertOutput(t, `
 let flag: boolean = true

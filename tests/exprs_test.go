@@ -649,6 +649,20 @@ console.log(n)
 `, "5")
 }
 
+// TestE2EOptionalChainingArray confirms `arr?.length` and `arr?.method()` on an
+// array receiver work — an array is a {ptr, i64} aggregate, not a bare pointer,
+// so the previous unconditional `icmp eq ptr` null check produced invalid IR;
+// it now falls back to plain access (ADR-00539).
+func TestE2EOptionalChainingArray(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [1, 2, 3]
+console.log(a?.length)
+const empty: number[] = []
+console.log(empty?.length)
+console.log(a?.map((x: number) => x * 2).join(","))
+`, "3\n0\n2,4,6")
+}
+
 func TestE2EOptionalChainingCombined(t *testing.T) {
 	assertOutput(t, `
 const greeting: string = 'world'
@@ -947,6 +961,80 @@ const s = "abc";
 console.log(s.charCodeAt(0), s.charCodeAt(2), s.charCodeAt(3), s.charCodeAt(-1), s.charCodeAt(100));
 console.log(String.fromCharCode("A".charCodeAt(0) + 1));
 `, "NaN NaN NaN NaN\n12 3.5 42 0.5\ntrue true\n43\n97 99 NaN NaN NaN\nB")
+}
+
+// TestE2ETernaryNullableScalar confirms a `cond ? scalar : null` ternary is a
+// nullable scalar — the null survives into ??, string concat, === null, and an
+// annotated or unannotated binding, whether returned from a function or written
+// inline (ADR-00538). A string-valued ternary infers correctly too.
+func TestE2ETernaryNullableScalar(t *testing.T) {
+	assertOutput(t, `
+function get(b: boolean): number | null { return b ? 3 : null }
+console.log(get(false) ?? -1)
+console.log(get(true) ?? -1)
+console.log("c" + get(false))
+console.log("c" + get(true))
+console.log(get(false) === null)
+const a = get(false)
+console.log(a ?? -1)
+const cond: boolean = get(true) === 3
+const y = cond ? 5 : null
+const y2 = cond ? null : 9
+console.log(y ?? -1, y2 ?? -1)
+const s = cond ? "hi" : "bye"
+console.log(s)
+`, "-1\n3\ncnull\nc3\ntrue\n-1\n5 -1\nhi")
+}
+
+// TestE2EExponentNumberLiterals confirms ES exponent notation in number
+// literals (e/E, optional sign, digits, numeric separators) lexes and evaluates
+// to the right doubles, cross-checked against real Node (ADR-00532).
+func TestE2EExponentNumberLiterals(t *testing.T) {
+	assertOutput(t, `
+console.log(1e3, 1.5e3, 1E3, 2e-2, 6.022e23);
+console.log(1e21, 1_000e1, 5e2 + 1);
+const x: number = 5e2;
+console.log(x * 2);
+`, "1000 1500 1000 0.02 6.022e+23\n1e+21 10000 501\n1000")
+}
+
+// TestE2ENumberIsIntegerNonFinite confirms Number.isInteger is false for any
+// non-finite value (±Infinity, NaN), matching real JS — floor(Infinity) equals
+// Infinity, so the whole-number test alone wrongly answered true (ADR-00531).
+func TestE2ENumberIsIntegerNonFinite(t *testing.T) {
+	assertOutput(t, `
+console.log(Number.isInteger(Infinity), Number.isInteger(-Infinity), Number.isInteger(NaN));
+console.log(Number.isInteger(5), Number.isInteger(5.2), Number.isInteger(0), Number.isInteger(-3));
+`, "false false false\ntrue false true true")
+}
+
+// TestE2EParseIntHexAutoDetect confirms parseInt with no radix argument
+// auto-detects base 16 for a "0x"/"0X" prefix (past whitespace and an optional
+// sign) and base 10 otherwise — no octal auto-detect ("077" is 77) — and that
+// a "0x" with no trailing hex digit is NaN, all matching real Node (ADR-00530).
+func TestE2EParseIntHexAutoDetect(t *testing.T) {
+	assertOutput(t, `
+console.log(parseInt("0xFF"), parseInt("0x1F"), parseInt("-0x10"), parseInt("  0X1A"), parseInt("+0xA"));
+console.log(parseInt("077"), parseInt("08"), parseInt("10"), parseInt("5x"), parseInt("0x0"));
+console.log(parseInt("0x"), parseInt("0X"), parseInt("0xG"), parseInt("0xff", 16), parseInt("12", 8));
+`, "255 31 -16 26 10\n77 8 10 5 0\nNaN NaN NaN 255 10")
+}
+
+// TestE2ENumberParseFloatInfinitySpelling confirms JS's rule that the only
+// accepted string infinity spelling is the exact word "Infinity" (optionally
+// signed) — C strtod's extra spellings ("inf"/"infinity"/case variants) are
+// NaN, while "Infinity" itself and a numeric overflow like "1e999" are
+// Infinity (ADR-00529). Number() requires the whole string to be numeric, so
+// "Infinityx" is NaN; parseFloat() takes the numeric prefix, so "Infinityx"
+// is Infinity — both cross-checked against real Node.
+func TestE2ENumberParseFloatInfinitySpelling(t *testing.T) {
+	assertOutput(t, `
+console.log(Number("inf"), Number("Infinity"), Number("-Infinity"), Number("+Infinity"));
+console.log(Number("infinity"), Number("INFINITY"), Number("1e999"), Number("  Infinity  "));
+console.log(Number("Infinityx"));
+console.log(parseFloat("Infinity"), parseFloat("inf"), parseFloat("infinityXYZ"));
+console.log(parseFloat("Infinityx"), parseFloat("-Infinity"));
+`, "NaN Infinity -Infinity Infinity\nNaN NaN Infinity Infinity\nNaN\nInfinity NaN NaN\nInfinity -Infinity")
 }
 
 // Multi-argument console.log joins with single spaces on one line, a no-arg

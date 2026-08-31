@@ -294,6 +294,16 @@ console.log((1.5).toFixed(3))
 `, "3.14\n42\n1.500")
 }
 
+// TestE2ENumberToFixedDefaultDigits confirms the digits argument is optional
+// and defaults to 0, rounding to the nearest integer as real JS does (ADR-00533).
+func TestE2ENumberToFixedDefaultDigits(t *testing.T) {
+	assertOutput(t, `
+console.log((3.14159).toFixed())
+console.log((3.7).toFixed())
+console.log((2).toFixed())
+`, "3\n4\n2")
+}
+
 // --- Math trig/hyperbolic/misc additions ---
 
 func TestE2EMathTrigInverse(t *testing.T) {
@@ -362,6 +372,17 @@ console.log((1).toPrecision(4))
 console.log((0.0012345).toPrecision(2))
 console.log((5).toPrecision(1))
 `, "1.000\n0.0012\n5")
+}
+
+// TestE2ENumberToPrecisionNoArg confirms toPrecision() with no argument is
+// exactly String(x) — the number's default toString — matching real JS
+// (ADR-00534).
+func TestE2ENumberToPrecisionNoArg(t *testing.T) {
+	assertOutput(t, `
+console.log((123.456).toPrecision())
+console.log((1000).toPrecision())
+console.log((0).toPrecision())
+`, "123.456\n1000\n0")
 }
 
 func TestE2ENumberToExponential(t *testing.T) {

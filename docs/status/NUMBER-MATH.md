@@ -4,18 +4,18 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 35/35 (100%) · **Strict Coverage**: 26/35 (~74%).
+**Coverage**: 35/35 (100%) · **Strict Coverage**: 30/35 (~86%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `Number.isInteger(x)` | ✅ | • `Number.isInteger(Infinity)`/`(-Infinity)` return `true` — should be `false`; `emitNumberIsInteger` checks `floor(x) == x` only, never finiteness, and `floor(Infinity) == Infinity` is trivially true ([ADR-00166](../adr/ADR-00166.md)) | |
+| `Number.isInteger(x)` | ✅ | | • `false` for any non-finite value (`Infinity`/`-Infinity`/`NaN`) — the whole-number test is gated on a finiteness check ([ADR-00531](../adr/ADR-00531.md)) |
 | `Number.isFinite(x)` | ✅ | | |
 | `Number.isNaN(x)` | ✅ | | |
 | `Number.isSafeInteger(x)` | ✅ | | |
-| `Number.parseInt(s)` | ✅ | • No hex auto-detect when radix is omitted — `"0x1F"` parses as `0`, not `31` ([ADR-00287](../adr/ADR-00287.md)) | • Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md)) |
-| `Number.parseFloat(s)` | ✅ | • Inherits `strtod` extras — `"inf"` parses to `Infinity` (JS only accepts the full word `Infinity`) and C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` via the endptr check ([ADR-00287](../adr/ADR-00287.md)) |
+| `Number.parseInt(s)` | ✅ | | • Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))<br>• With radix omitted, auto-detects base 16 for a `"0x"`/`"0X"` prefix and base 10 otherwise — no octal auto-detect ([ADR-00530](../adr/ADR-00530.md)) |
+| `Number.parseFloat(s)` | ✅ | • Inherits `strtod`'s C hex-float parsing — `"0x10"` → `16`, where real JS reads only the leading `0` ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` via the endptr check; only the exact word `"Infinity"` parses to `Infinity` (`"inf"` → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |
 | `Number.MAX_SAFE_INTEGER` | ✅ | | |
 | `Number.MIN_SAFE_INTEGER` | ✅ | | |
 | `Number.EPSILON` | ✅ | | |
@@ -24,12 +24,12 @@ Format: [Status page format](README.md#status-page-format).
 | `Number.POSITIVE_INFINITY` | ✅ | | |
 | `Number.NEGATIVE_INFINITY` | ✅ | | |
 | `Number.NaN` | ✅ | | |
-| `Number.prototype.toFixed(n)` | ✅ | • The `digits` argument is required here, not optional — `(3.14159).toFixed()` hard compile-errors with "toFixed takes exactly 1 argument"; real JS defaults `digits` to `0` ([ADR-00166](../adr/ADR-00166.md)) | |
+| `Number.prototype.toFixed(n)` | ✅ | | • The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `"4"`), matching real JS ([ADR-00533](../adr/ADR-00533.md)) |
 | `Number.prototype.toString(radix?)` | ✅ | • Truncates a non-integer receiver to its integer part first (real JS renders fractional digits)<br>• Radix trusted, not validated (real JS throws a `RangeError` for an out-of-range radix)<br>• Minor cosmetic deviations from real JS, the same `sprintf`-based exponent padding as the two rows below ([ADR-00065](../adr/ADR-00065.md)) | • Hand-rolled digit loop |
-| `Number.prototype.toPrecision(n)` | ✅ | • Exponent pads to 2 digits — `e+05` vs real JS's `e+5` ([ADR-00065](../adr/ADR-00065.md)) | • `sprintf("%#.*g", ...)` |
+| `Number.prototype.toPrecision(n)` | ✅ | • Exponent pads to 2 digits — `e+05` vs real JS's `e+5` ([ADR-00065](../adr/ADR-00065.md)) | • `sprintf("%#.*g", ...)`<br>• The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md)) |
 | `Number.prototype.toExponential(n)` | ✅ | • Same exponent-padding deviation — `e+05` vs `e+5` ([ADR-00065](../adr/ADR-00065.md)) | • `sprintf("%.*e", ...)` |
-| `parseInt(s, radix?)` (global) | ✅ | • Same residual as `Number.parseInt(s)` above — no hex auto-detect when radix is omitted ([ADR-00287](../adr/ADR-00287.md)) | • No-digits input → real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
-| `parseFloat(s)` (global) | ✅ | • Same `strtod` extras as `Number.parseFloat(s)` above ([ADR-00287](../adr/ADR-00287.md)) | • No-conversion input → real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
+| `parseInt(s, radix?)` (global) | ✅ | | • No-digits input → real `NaN`; with radix omitted, hex auto-detect for a `"0x"` prefix, base 10 otherwise — same as `Number.parseInt(s)` above ([ADR-00287](../adr/ADR-00287.md)/[ADR-00530](../adr/ADR-00530.md)) |
+| `parseFloat(s)` (global) | ✅ | • Same `strtod` C hex-float parsing as `Number.parseFloat(s)` above — `"0x10"` → `16` ([ADR-00287](../adr/ADR-00287.md)) | • No-conversion input → real `NaN`; only the exact word `"Infinity"` parses to `Infinity` ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |
 | `isNaN(x)` (global) | ✅ | | |
 | `isFinite(x)` (global) | ✅ | | |
 | `Math.floor/ceil/round/trunc` | ✅ | | • A float input stays a double end-to-end, so `NaN`/`±Infinity` pass through unchanged; `Math.round` uses JS's tie-toward-`+Infinity` (`Math.round(-4.5) === -4`) incl. the `-0` result for `Math.round(-0.5)` ([ADR-00286](../adr/ADR-00286.md)); integer input keeps the exact-i64 path |

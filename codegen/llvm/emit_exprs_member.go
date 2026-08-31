@@ -16,8 +16,13 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		return Value{}, err
 	}
 
-	// Non-ptr types cannot be null; fall back to a regular (non-optional) access.
-	if objVal.Ty.IR != "ptr" {
+	// Non-ptr types cannot be a null pointer; fall back to a regular
+	// (non-optional) access. Arrays report IR "ptr" but are actually {ptr, i64}
+	// aggregate values, not bare pointers — an `icmp eq ptr` null check against
+	// one is invalid IR (ADR-00539). A non-nullable array is never null; a
+	// nullable array uses the {null, 0} value sentinel whose own `.length` is 0,
+	// so plain access is the right behavior either way.
+	if objVal.Ty.IR != "ptr" || objVal.Ty.IsArray {
 		plain := &ast.MemberExpression{Object: ex.Object, Property: ex.Property}
 		return e.emitMember(plain)
 	}

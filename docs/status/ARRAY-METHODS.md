@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 35/35 (100%) · **Strict Coverage**: 22/35 (~63%).
+**Coverage**: 35/35 (100%) · **Strict Coverage**: 23/35 (~66%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -30,8 +30,8 @@ Format: [Status page format](README.md#status-page-format).
 | `.filter(fn)` | ✅ | | |
 | `.reduce(fn, init?)` | ✅ | | |
 | `.forEach(fn)` | ✅ | | |
-| `.join(sep?)` | ✅ | • Rejects a nested-array element (`number[][]`) — stringifies a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
-| `.sort(fn?)` | ✅ | • The no-comparator default sort is numeric, not real JS's actual default — real JS stringifies every element and compares lexicographically even for numbers, e.g. `[10,1,21,2].sort()` is `[1,10,2,21]` in real JS, `[1,2,10,21]` here<br>• `const sorted = arr.sort()` with no type annotation fails to typecheck as an array — `"sort"` is missing from the array-type-preserving method list `emit_exprs_types.go` uses; works with an explicit `: number[]` annotation ([ADR-00166](../adr/ADR-00166.md))<br>• Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI `qsort()` trampoline with one fixed variant per element kind ([ADR-00152](../adr/ADR-00152.md)) | |
+| `.join(sep?)` | ✅ | | • A nested-array element is unboxed and rendered as its own comma-joined string (real JS's recursive `Array.prototype.toString`), so `[[1,2],[3,4]].join("-")` is `"1,2-3,4"` — shares the array→string coercion path (`String(arr)`/`` `${arr}` ``) added in [ADR-00528](../adr/ADR-00528.md) |
+| `.sort(fn?)` | ✅ | • The no-comparator default sort is numeric, not real JS's actual default — real JS stringifies every element and compares lexicographically even for numbers, e.g. `[10,1,21,2].sort()` is `[1,10,2,21]` in real JS, `[1,2,10,21]` here<br>• Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI `qsort()` trampoline with one fixed variant per element kind ([ADR-00152](../adr/ADR-00152.md)) | |
 | `.reverse()` | ✅ | | |
 | `.fill(val, start?, end?)` | ✅ | | |
 | `.concat(...arrays)` | ✅ | | • Any number of arguments — arrays flatten one level, plain values append; zero arguments copy the receiver ([ADR-00463](../adr/ADR-00463.md)) |

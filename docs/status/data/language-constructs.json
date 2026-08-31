@@ -41,14 +41,15 @@
             "status": "implemented"
           },
           {
-            "feature": "`for…of` over arrays, `Map`, `Set`, and a class implementing `next(): T \\| null`",
+            "feature": "`for…of` over arrays, strings, `Map`, `Set`, and a class implementing `next(): T \\| null`",
             "status": "implemented",
             "caveats": [
-              "A bare `for (const v of map)` iterates values (use `.keys()` for keys — [ADR-00011](../adr/ADR-00011.md)); the two-name pattern `for (const [k, v] of map)` decomposes entries ([ADR-00481](../adr/ADR-00481.md))"
+              "A bare `for (const v of map)` iterates values (use `.keys()` for keys — [ADR-00011](../adr/ADR-00011.md)); the two-name pattern `for (const [k, v] of map)` decomposes entries ([ADR-00481](../adr/ADR-00481.md))",
+              "A string iterates per byte, not per Unicode code point — correct for ASCII/Latin-1, the same byte-string narrowing the rest of the string layer carries ([ADR-00535](../adr/ADR-00535.md))"
             ],
             "notes": [
               "The loop variable may be a destructuring pattern (`for (const [a, b] of pairs)` over an array-of-arrays, `for (const { x, y } of points)`), including nested patterns (`for (const [[a, b], c] of …)`) — see [ADR-00192](../adr/ADR-00192.md)/[ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stages 1–2",
-              "Iterates arrays, `Map` (values), `Set` (elements), generators, a class implementing `next(): T \\| null` ([TDD-00009](../tdd/TDD-00009.md) Stage 1a, a compile-time structural check), **and the spec's real protocol**: a class or object literal with a `[Symbol.iterator]()` returning an iterator whose `next()` yields `{value, done}` — dispatched ahead of the structural shape when both exist ([ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md))",
+              "Iterates arrays, a string (its characters, one per byte — [ADR-00535](../adr/ADR-00535.md)), `Map` (values), `Set` (elements), generators, a class implementing `next(): T \\| null` ([TDD-00009](../tdd/TDD-00009.md) Stage 1a, a compile-time structural check), **and the spec's real protocol**: a class or object literal with a `[Symbol.iterator]()` returning an iterator whose `next()` yields `{value, done}` — dispatched ahead of the structural shape when both exist ([ADR-00278](../adr/ADR-00278.md)/[ADR-00279](../adr/ADR-00279.md))",
               "A `next(): T \\| null` with a non-pointer scalar `T` returns a presence-flagged aggregate ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md)), so a legitimately-yielded `0`/`false` does not end iteration; a pointer `T` keeps its null-pointer sentinel — see [ADR-00063](../adr/ADR-00063.md)"
             ]
           },
@@ -232,7 +233,10 @@
           },
           {
             "feature": "Ternary `cond ? a : b`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "A `cond ? scalar : null` (or `cond ? null : scalar`) branch mix is a `T | null` value — the null survives into `??`/concat/`=== null`/an unannotated binding, not collapsed to a payload zero ([ADR-00538](../adr/ADR-00538.md))"
+            ]
           },
           {
             "feature": "Comma / sequence operator `(a, b, c)`",
@@ -257,7 +261,8 @@
             "feature": "Optional chaining `?.`",
             "status": "implemented",
             "notes": [
-              "Null-guards ptr fields; returns null on null receiver"
+              "Null-guards ptr fields; returns null on null receiver",
+              "An array receiver (`arr?.length`, `arr?.map(...)`) uses plain access — an array is a value aggregate, never a null pointer ([ADR-00539](../adr/ADR-00539.md))"
             ]
           },
           {
@@ -321,6 +326,7 @@
             ],
             "notes": [
               "Holes are supported (`const [, b] = arr` skips index 0)",
+              "The source may be a string — `const [a, b] = \"xy\"` binds its characters (`a`=`\"x\"`, `b`=`\"y\"`), one per byte, in both the declaration and assignment forms ([ADR-00536](../adr/ADR-00536.md))",
               "Default values (`[a = 1]`) fire exactly when that position is past the source array's actual length — see [ADR-00157](../adr/ADR-00157.md)/[ADR-00158](../adr/ADR-00158.md)",
               "A rest element (`[a, ...rest]`) works in the declaration form, a destructured parameter, and the assignment form alike — a real, independent copy of every remaining position, empty (not an error) when the source is shorter than the pattern — see [ADR-00161](../adr/ADR-00161.md)",
               "Usable as a for-of loop variable (`for (const [a, b] of pairs)`, over an array-of-arrays), reusing the same unpack core — see [ADR-00192](../adr/ADR-00192.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 1",
@@ -705,7 +711,7 @@
               "A computed/dynamic member name (identifier, call, or interpolation) is a clean rejection; the recognized well-known-symbol keys are `[Symbol.asyncIterator]` and `[Symbol.iterator]`, desugared to the async-/sync-iteration methods ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/ADR-00278.md))",
               "A class expression used as a runtime value (argument, return, nested binding) or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope",
               "Class early-error gaps (deferred, no valid program miscompiles): a field initializer containing `arguments` or a `super()` call, a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`",
-              "The **`readonly` field modifier** is not parsed (`readonly x: number` reads `readonly` as the field name); drop it — there's no mutation checking anyway",
+              "The **`readonly` field modifier** is parsed and erased (contextual, like the ctor-param form) but not enforced as immutability — a later write isn't rejected ([ADR-00480](../adr/ADR-00480.md); enforcement is [TDD-00126](../tdd/TDD-00126.md))",
               "A bare field (`x;`) defaults to `number` (the unannotated-parameter convention; JSDoc `@type` overrides) — TS infers implicit `any`, so a non-numeric use is a shifted typed error ([ADR-00474](../adr/ADR-00474.md))"
             ],
             "notes": [

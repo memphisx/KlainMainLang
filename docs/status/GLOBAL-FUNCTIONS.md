@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 20/21 (~95%) · **Strict Coverage**: 8/21 (~38%).
+**Coverage**: 20/21 (~95%) · **Strict Coverage**: 10/21 (~48%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -13,10 +13,10 @@ Format: [Status page format](README.md#status-page-format).
 | `isNaN(x)` | ✅ | | |
 | `isFinite(x)` | ✅ | | |
 | `String(x)` | ✅ | • `String()` with no argument is `""`, not real JS's `"undefined"` (a genuinely absent value doesn't arise in typed code — [ADR-00291](../adr/ADR-00291.md)) | • Routes through the template-literal renderer; an `any` input dispatches on its runtime tag |
-| `Number(x)` | ✅ | • Inherits `strtod`'s `"inf"` acceptance for the string form (JS accepts only the full word `Infinity`) — same family as `parseFloat`'s ([ADR-00291](../adr/ADR-00291.md)) | • JS ToNumber: whole-string parse (`"12px"` → `NaN`, unlike `parseFloat`), `""`/whitespace → 0, `"0x10"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64) |
+| `Number(x)` | ✅ | | • JS ToNumber: whole-string parse (`"12px"` → `NaN`, unlike `parseFloat`), `""`/whitespace → 0, `"0x10"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64)<br>• Only the exact word `"Infinity"` (optionally signed) is `Infinity`; C's `"inf"`/`"infinity"`/case variants are `NaN`, matching real JS ([ADR-00291](../adr/ADR-00291.md)/[ADR-00529](../adr/ADR-00529.md)) |
 | `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |
-| `parseInt(s, radix?)` | ✅ | • No hex auto-detect when `radix` is omitted (`"0x1F"` parses as `0`, not `31`) | • A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/ADR-00287.md)) |
-| `parseFloat(s)` | ✅ | • Inherits `strtod` extras — `"inf"` parses to `Infinity`, C hex-float syntax parses ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN` ([ADR-00287](../adr/ADR-00287.md)) |
+| `parseInt(s, radix?)` | ✅ | | • A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/ADR-00287.md))<br>• With `radix` omitted, auto-detects base 16 for a `"0x"`/`"0X"` prefix (`"0xFF"` → `255`) and base 10 otherwise — no octal auto-detect (`"077"` → `77`), and `"0x"` with no trailing hex digit is `NaN`, matching real JS ([ADR-00530](../adr/ADR-00530.md)) |
+| `parseFloat(s)` | ✅ | • Inherits `strtod`'s C hex-float parsing — `"0x10"` → `16` and `"0x1.8p3"` → `12`, where real JS's `parseFloat` reads only the leading `0` (`0`) ([ADR-00287](../adr/ADR-00287.md)) | • A no-conversion input returns a real `NaN`; the only accepted infinity spelling is the exact word `"Infinity"` (`"inf"`/case variants → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |
 | `NaN` (global constant) | ✅ | • `let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits | • `NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md) |
 | `Infinity` (global constant) | ✅ | • Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional | • See [ADR-00166](../adr/ADR-00166.md). |
 | `undefined` (global constant) | ✅ | | • As a literal value |

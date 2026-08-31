@@ -48,6 +48,20 @@ func TestNumbers(t *testing.T) {
 	assertTokens(t, "0", []tok{{lexer.NUMBER, "0"}})
 }
 
+// TestExponentNumbers covers ES DecimalLiteral exponent notation (e/E, optional
+// sign, digits, with numeric separators) — the whole literal is one NUMBER
+// token, and a bare `e` at a non-exponent position stays an identifier.
+func TestExponentNumbers(t *testing.T) {
+	assertTokens(t, "1e3", []tok{{lexer.NUMBER, "1e3"}})
+	assertTokens(t, "1.5e3", []tok{{lexer.NUMBER, "1.5e3"}})
+	assertTokens(t, "1E3", []tok{{lexer.NUMBER, "1E3"}})
+	assertTokens(t, "2e-2", []tok{{lexer.NUMBER, "2e-2"}})
+	assertTokens(t, "6.022e+23", []tok{{lexer.NUMBER, "6.022e+23"}})
+	assertTokens(t, "1_000e1", []tok{{lexer.NUMBER, "1000e1"}}) // separators stripped in the token literal
+	// A trailing `e` with no following digit is not an exponent: `1` then `e`.
+	assertTokens(t, "1 + e", []tok{{lexer.NUMBER, "1"}, {lexer.PLUS, "+"}, {lexer.IDENT, "e"}})
+}
+
 func TestStrings(t *testing.T) {
 	assertTokens(t, `"hello"`, []tok{{lexer.STRING, "hello"}})
 	assertTokens(t, `'world'`, []tok{{lexer.STRING, "world"}})

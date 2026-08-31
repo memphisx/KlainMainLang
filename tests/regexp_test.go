@@ -162,6 +162,39 @@ console.log(count)
 `, "3")
 }
 
+// TestE2ERegExpTestGlobalAdvancesLastIndex confirms a global regex's
+// .test() shares .exec()'s lastIndex-driven iteration — a `while (re.test(s))`
+// loop steps through every match and terminates, advancing lastIndex to each
+// match's end, and resetting to 0 on the final no-match.
+func TestE2ERegExpTestGlobalAdvancesLastIndex(t *testing.T) {
+	assertOutput(t, `
+const re = /\d+/g
+const s = "a12b345c"
+let count = 0
+const ends: number[] = []
+while (re.test(s)) {
+  count = count + 1
+  ends.push(re.lastIndex)
+}
+console.log(count)
+console.log(ends.join(","))
+console.log(re.lastIndex)
+`, "2\n3,7\n0")
+}
+
+// TestE2ERegExpTestNonGlobalIgnoresLastIndex confirms a non-global regex's
+// .test() never reads or writes lastIndex — it always matches from offset 0
+// and returns the same result every call.
+func TestE2ERegExpTestNonGlobalIgnoresLastIndex(t *testing.T) {
+	assertOutput(t, `
+const re = /\d+/
+const s = "a12b345c"
+console.log(re.test(s))
+console.log(re.test(s))
+console.log(re.lastIndex)
+`, "true\ntrue\n0")
+}
+
 // --- Stage 2: .exec(str): string[] | null, and the general array-vs-null
 // / array-truthiness fixes it needed (see ADR-00116). ---
 
