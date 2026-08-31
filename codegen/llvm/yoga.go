@@ -148,7 +148,10 @@ func yogaCSources() ([]CSource, error) {
 	if runtime.GOOS == "darwin" {
 		cxxRuntime = "-lc++"
 	}
-	libs := append(objs, cxxRuntime)
+	// Yoga's pixel-grid rounding pulls in libm (`round`); glibc keeps libm as a
+	// separate DSO the default link step won't add, so name it explicitly. No-op
+	// on macOS where libSystem already folds in libm (ADR-00034).
+	libs := append(objs, cxxRuntime, "-lm")
 	// The painter runtime (tui.c) is a C TU that #includes <yoga/Yoga.h>, so it
 	// needs the same include root (a language-neutral -I, safe on the shared
 	// clang line). The empty Yoga member carries the prebuilt objects + C++ rt.

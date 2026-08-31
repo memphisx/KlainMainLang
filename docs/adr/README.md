@@ -566,3 +566,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00521](ADR-00521.md) | Width-aware `klain:tui` painter — `wcwidth` + grapheme cells | Extends [ADR-00519](ADR-00519.md); Implements [TDD-00150](../tdd/TDD-00150.md) (Stage 1 polish) |
 | [00522](ADR-00522.md) | `klain:tui` List viewport — scroll-to-selected + scrollbar | Extends [ADR-00519](ADR-00519.md); Implements [TDD-00150](../tdd/TDD-00150.md) (Stage 1 polish) |
 | [00523](ADR-00523.md) | `optnone` the webview bind thunks — `-O2` miscompiles their setjmp guard | Relates to [TDD-00142](../tdd/TDD-00142.md) (klain:webview) |
+| [00524](ADR-00524.md) | Link libm for `roundeven` intrinsic and Yoga on Linux | Extends [ADR-00034](ADR-00034.md), [ADR-00313](ADR-00313.md) |

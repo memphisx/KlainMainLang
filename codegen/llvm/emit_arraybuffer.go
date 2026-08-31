@@ -101,6 +101,10 @@ func (e *Emitter) ensureRoundEven() {
 	}
 	e.usedRoundEven = true
 	e.emitGlobal("declare double @llvm.roundeven.f64(double)")
+	// On Linux (glibc) this intrinsic lowers to a libm `roundeven` call rather
+	// than being expanded inline, so libm must be on the link line. Harmless
+	// no-op on macOS, where libSystem already folds in libm (ADR-00034).
+	e.requireLink("m")
 }
 
 // coerceTypedArrayStore converts a language-level value into a TypedArray's
