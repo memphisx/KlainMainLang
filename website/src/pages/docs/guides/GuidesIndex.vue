@@ -9,27 +9,28 @@
     </p>
 
     <div class="km-guidegrid">
-      <router-link to="/docs/guides/tui-app" class="km-guidecard">
-        <span class="km-guidecard__tag">Terminal UI</span>
+      <router-link to="/docs/guides/tui/layout" class="km-guidecard">
+        <span class="km-guidecard__tag">Terminal UI · 3 parts</span>
         <h3>Build a terminal app with <code>klain:tui</code></h3>
         <p>
-          From an empty screen to a complete, keyboard-driven task manager with a flexbox
-          layout, list selection, a text input, a progress summary, and real file
-          persistence — then a live self-refreshing dashboard.
+          A three-part walkthrough: <strong>layout &amp; components</strong>, then
+          <strong>input &amp; state</strong>, then <strong>live dashboards</strong> — building a
+          keyboard-driven to-do list and a self-refreshing system monitor from an empty screen,
+          with real file I/O and OS calls.
+        </p>
+        <span class="km-guidecard__go">Start Part 1 →</span>
+      </router-link>
+
+      <router-link to="/docs/guides/webview" class="km-guidecard">
+        <span class="km-guidecard__tag">Desktop</span>
+        <h3>Build a desktop app with <code>klain:webview</code></h3>
+        <p>
+          A read-only file explorer: a Quasar single-page UI in a native window, backed by real
+          <code>fs</code> calls — directory listing, live text preview, and inline image preview —
+          compiled to one self-contained binary.
         </p>
         <span class="km-guidecard__go">Start the walkthrough →</span>
       </router-link>
-
-      <div class="km-guidecard km-guidecard--soon">
-        <span class="km-guidecard__tag">Desktop</span>
-        <h3>Ship a desktop app with <code>klain:webview</code></h3>
-        <p>
-          A single-file desktop application: an SPA frontend calling straight into typed
-          native code. (Planned — for now see the
-          <router-link to="/docs/klain/webview">klain:webview</router-link> reference.)
-        </p>
-        <span class="km-guidecard__go km-guidecard__go--soon">Coming soon</span>
-      </div>
     </div>
 
     <p class="km-note">

@@ -9,7 +9,7 @@
     },
     {
       "kind": "block",
-      "text": "Design: [TDD-00150](../tdd/TDD-00150.md) (Stage 1 of a staged roadmap). Implementation: [ADR-00519](../adr/ADR-00519.md)."
+      "text": "Design: [TDD-00150](../tdd/TDD-00150.md) (Stage 1 of a staged roadmap). Implementation: [ADR-00519](../adr/ADR-00519.md), [ADR-00521](../adr/ADR-00521.md), [ADR-00522](../adr/ADR-00522.md)."
     },
     {
       "kind": "block",
@@ -52,17 +52,17 @@
             "feature": "`Text(text, props?)` — styled, wrapped text",
             "status": "implemented",
             "caveats": [
-              "Text is UTF-8-decoded to one grid cell per code point, but not width-aware: wide (CJK/emoji) and combining characters occupy one cell, so alignment drifts for such content"
+              "Width-aware via a standard `wcwidth` table: wide (CJK/emoji) glyphs take two columns with a continuation cell, combining marks fold onto their base — but multi-code-point grapheme clusters joined by ZWJ (flag, family, and skin-tone emoji sequences) still paint as their separate wide glyphs, not one cluster"
             ],
             "notes": [
-              "Greedy word-wrap on the laid-out width (`wrap: false` clips to one line); auto-sizes via a Yoga measure func"
+              "Greedy word-wrap in columns on the laid-out width (`wrap: false` clips to one line); auto-sizes via a Yoga measure func"
             ]
           },
           {
             "feature": "`List(items, props?)`",
             "status": "implemented",
-            "caveats": [
-              "Flat single-line items with an optional `selected` highlight; no built-in scroll/viewport for lists taller than their box"
+            "notes": [
+              "Flat single-line items with an optional `selected` highlight. A list taller than its (bounded) box scrolls to keep the selected item visible and paints a scrollbar; it defaults to `flexShrink: 1` so it yields to a fixed-height container rather than overflowing"
             ]
           },
           {

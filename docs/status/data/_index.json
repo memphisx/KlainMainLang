@@ -323,7 +323,7 @@
         {
           "category": "TUI framework (`klain:tui`)",
           "pageFile": "TERMINAL-UI.md",
-          "caveats": "• Flexbox is a pragmatic Yoga-style subset (no percentage units / `position:absolute` / `aspectRatio` yet)<br>• Text is code-point- but not width-aware — wide (CJK/emoji) and combining chars occupy one cell, so alignment drifts for such content<br>• Immediate-mode: the tree is re-laid-out every frame (the cell diff keeps output minimal); a retained node tree is deferred<br>• The `state → view → update` loop is userland TS over `klain:tty` + `SIGWINCH` — no built-in app-runner / callback-driven loop until the FFI trampoline ([TDD-00150](../tdd/TDD-00150.md) Stage 2)<br>• Verified on macOS (M4); Linux compile-tier, not yet run"
+          "caveats": "• Flexbox is a pragmatic Yoga-style subset (no percentage units / `position:absolute` / `aspectRatio` yet)<br>• Text is width-aware via a standard `wcwidth` table, but ZWJ grapheme clusters (flag / family / skin-tone emoji sequences) still paint as their separate wide glyphs<br>• Immediate-mode: the tree is re-laid-out every frame (the cell diff keeps output minimal); a retained node tree is deferred<br>• The `state → view → update` loop is userland TS over `klain:tty` + `SIGWINCH` — no built-in app-runner / callback-driven loop until the FFI trampoline ([TDD-00150](../tdd/TDD-00150.md) Stage 2)<br>• Verified on macOS (M4); Linux compile-tier, not yet run"
         }
       ]
     },

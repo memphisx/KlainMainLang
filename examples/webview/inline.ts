@@ -22,8 +22,8 @@ w.bind("bump", (args: string): string => {
 // Native file browser: page calls window.listDir(JSON.stringify([path])),
 // native reads the directory and returns the entries as a JSON array.
 w.bind("listDir", (args: string): string => {
-  const parsed = JSON.parse(args)
-  const path = parsed[0] as string
+  const parsed: string[] = JSON.parse(args)
+  const path = parsed[0]
   const entries = readdirSync(path)
   return JSON.stringify(entries)
 })

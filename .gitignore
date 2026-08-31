@@ -16,9 +16,11 @@ examples/**
 !examples/**/
 !examples/**/*.ts
 !examples/**/klain.json
-# The webview SPA example ships a hand-written dist/ (its "built" SPA assets),
-# which are source for that example, not compiler output (TDD-00142).
+# The webview SPA examples ship a dist/ of static assets (a hand-written page,
+# or the file-explorer's app + vendored Quasar/Vue UMD) — source for those
+# examples, not compiler output (TDD-00142).
 !examples/webview/dist/**
+!examples/webview/file-explorer/dist/**
 
 # Emitted compiler sidecar artifacts — the .ll IR and the embedded-C helpers
 # (dtoa/JSON-tree/bigint/GC-shim) the compiler writes next to any output. These

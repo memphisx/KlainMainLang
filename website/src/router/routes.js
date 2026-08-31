@@ -54,7 +54,11 @@ const routes = [
       { path: 'cli', name: 'cli', component: () => import('pages/docs/Cli.vue') },
       { path: 'coverage', name: 'coverage', component: () => import('pages/docs/Coverage.vue') },
       { path: 'guides', name: 'guides', component: () => import('pages/docs/guides/GuidesIndex.vue') },
-      { path: 'guides/tui-app', name: 'guides-tui-app', component: () => import('pages/docs/guides/BuildTuiApp.vue') },
+      { path: 'guides/tui/layout', name: 'guides-tui-layout', component: () => import('pages/docs/guides/TuiLayout.vue') },
+      { path: 'guides/tui/input-state', name: 'guides-tui-input-state', component: () => import('pages/docs/guides/TuiInputState.vue') },
+      { path: 'guides/tui/live-dashboard', name: 'guides-tui-live-dashboard', component: () => import('pages/docs/guides/TuiLiveDashboard.vue') },
+      { path: 'guides/webview', name: 'guides-webview', component: () => import('pages/docs/guides/BuildWebviewApp.vue') },
+      { path: 'guides/tui-app', redirect: { name: 'guides-tui-layout' } },
       { path: 'examples', name: 'examples', component: () => import('pages/docs/Examples.vue') },
       ...referenceRoutes,
       ...exampleRoutes

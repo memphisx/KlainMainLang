@@ -1,18 +1,18 @@
-// A complete terminal task manager — the flagship `klain:tui` walkthrough app.
+// A complete terminal to-do list — the flagship `klain:tui` walkthrough app.
 //
-//   ./tasks              # interactive: ↑/↓ move · space toggle · a add · d delete · q quit
-//   ./tasks </dev/null   # non-TTY: paints one frame from the saved file and exits
+//   ./todo              # interactive: ↑/↓ move · space toggle · a add · d delete · q quit
+//   ./todo </dev/null   # non-TTY: paints one frame from the saved file and exits
 //
 // It shows the whole Stage 1 surface working together: a flexbox layout, a
 // selectable List, a TextInput for adding items, a Progress summary, coloured
-// styling — plus real `fs` persistence (tasks are saved to and loaded from a
+// styling — plus real `fs` persistence (items are saved to and loaded from a
 // file) and the Elm-style `state → view → update` loop over `klain:tty`.
 
 import { Box, Text, List, Progress, TextInput, render, enter, leave } from "klain:tui";
 import { readKey } from "klain:tty";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 
-const FILE = ".klain-tasks.txt";
+const FILE = ".klain-todo.txt";
 
 type Task = { text: string; done: boolean };
 
@@ -51,7 +51,7 @@ function view(tasks: Task[], cursor: number, adding: boolean, draft: string) {
   const rows = tasks.map((t) => (t.done ? "[x] " + t.text : "[ ] " + t.text));
 
   const children = [
-    Text("Tasks", { color: "green", bold: true }),
+    Text("To-do", { color: "green", bold: true }),
     Box({ height: 1 }, []),
     List(rows, { selected: adding ? -1 : cursor }),
     Box({ height: 1 }, []),

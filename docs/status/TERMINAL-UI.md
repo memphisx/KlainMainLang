@@ -4,11 +4,11 @@
 
 Native terminal-UI framework: a real flexbox layout engine (Facebook's [Yoga](https://github.com/facebook/yoga), vendored) plus a double-buffered ANSI diff painter, sitting directly on the shipped terminal primitives ([ADR-00518](../adr/ADR-00518.md)). Builder functions (`Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`) describe a component tree; `render(root)` lays it out and paints only the cells that changed.
 
-Design: [TDD-00150](../tdd/TDD-00150.md) (Stage 1 of a staged roadmap). Implementation: [ADR-00519](../adr/ADR-00519.md).
+Design: [TDD-00150](../tdd/TDD-00150.md) (Stage 1 of a staged roadmap). Implementation: [ADR-00519](../adr/ADR-00519.md), [ADR-00521](../adr/ADR-00521.md), [ADR-00522](../adr/ADR-00522.md).
 
 `import { Box, Text, List, Spinner, Progress, TextInput, render, enter, leave } from 'klain:tui'`
 
-**Coverage**: 11/11 (100%) · **Strict Coverage**: 5/11 (~45%).
+**Coverage**: 11/11 (100%) · **Strict Coverage**: 6/11 (~55%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -16,8 +16,8 @@ Format: [Status page format](README.md#status-page-format).
 |---|---|---|---|
 | Flexbox layout (vendored Yoga) | ✅ | • A pragmatic subset of Yoga's style surface is exposed: `flexDirection`/`flexGrow`/`flexShrink`/`flexBasis`, `justifyContent`/`alignItems`/`alignSelf`/`flexWrap`, `width`/`height`/`minWidth`/`minHeight`, `padding*`/`margin*`/`gap`. Percentage units, `position:absolute`, and `aspectRatio` are not yet surfaced | • Yoga compiled per-`.cpp` to objects (C++20) and linked only when a program uses `klain:tui` ([ADR-00519](../adr/ADR-00519.md)) |
 | `Box(props?, children?)` — flex container | ✅ | | • Children may be an array literal or any runtime array of nodes (e.g. `items.map(...)`); background fill, border, and padding supported |
-| `Text(text, props?)` — styled, wrapped text | ✅ | • Text is UTF-8-decoded to one grid cell per code point, but not width-aware: wide (CJK/emoji) and combining characters occupy one cell, so alignment drifts for such content | • Greedy word-wrap on the laid-out width (`wrap: false` clips to one line); auto-sizes via a Yoga measure func |
-| `List(items, props?)` | ✅ | • Flat single-line items with an optional `selected` highlight; no built-in scroll/viewport for lists taller than their box | |
+| `Text(text, props?)` — styled, wrapped text | ✅ | • Width-aware via a standard `wcwidth` table: wide (CJK/emoji) glyphs take two columns with a continuation cell, combining marks fold onto their base — but multi-code-point grapheme clusters joined by ZWJ (flag, family, and skin-tone emoji sequences) still paint as their separate wide glyphs, not one cluster | • Greedy word-wrap in columns on the laid-out width (`wrap: false` clips to one line); auto-sizes via a Yoga measure func |
+| `List(items, props?)` | ✅ | | • Flat single-line items with an optional `selected` highlight. A list taller than its (bounded) box scrolls to keep the selected item visible and paints a scrollbar; it defaults to `flexShrink: 1` so it yields to a fixed-height container rather than overflowing |
 | `Progress(value, props?)` | ✅ | | • `value` 0..1; fills the laid-out width with block glyphs (`█`/`░`) |
 | `Spinner(frame, props?)` | ✅ | | • Braille frame glyph at `frame % 10`, optional `label`; the caller advances `frame` each tick |
 | `TextInput(value, props?)` | ✅ | • Renders the value plus a cursor block; editing/key handling is userland (read keys via `klain:tty`, mutate state, re-render) | |

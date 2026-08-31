@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Klain Files</title>
+  <!-- Vendored locally so the app is fully offline — no CDN. -->
+  <link rel="stylesheet" href="quasar.prod.css" />
+  <style>
+    html, body, #q-app { height: 100%; margin: 0; }
+    .col-scroll { height: 100%; }
+    .preview-text {
+      margin: 0; padding: 16px; white-space: pre; tab-size: 4;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px; line-height: 1.5;
+    }
+    .entry--active { background: rgba(120, 160, 255, 0.18); }
+    .preview-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .muted { opacity: 0.6; }
+  </style>
+</head>
+<body>
+  <div id="q-app"></div>
+
+  <script src="vue.global.prod.js"></script>
+  <script src="quasar.umd.prod.js"></script>
+  <script>
+    const { createApp, ref, onMounted } = Vue
+
+    // Native bridge helper. klain:webview passes the JS call arguments to the
+    // bound native function as a JSON array string (so we call with raw args,
+    // and the native side does JSON.parse(args)[i]); the return value comes
+    // back already parsed.
+    const native = async (fn, ...args) => {
+      const r = await window[fn](...args)
+      return typeof r === 'string' ? JSON.parse(r) : r
+    }
+
+    const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico']
+
+    const App = {
+      setup() {
+        const cwd = ref('')
+        const entries = ref([])
+        const selected = ref('')
+        const preview = ref({ kind: 'empty' })
+        const loading = ref(false)
+
+        function fmtSize(n) {
+          if (n < 1024) return n + ' B'
+          if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+          return (n / 1048576).toFixed(1) + ' MB'
+        }
+
+        async function load(dir) {
+          loading.value = true
+          try {
+            const list = await native('listDir', dir)
+            // Directories first, then case-insensitive by name.
+            list.sort((a, b) =>
+              a.isDir !== b.isDir ? (a.isDir ? -1 : 1)
+                : a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+            cwd.value = dir
+            entries.value = list
+            selected.value = ''
+            preview.value = { kind: 'empty' }
+          } finally {
+            loading.value = false
+          }
+        }
+
+        function goUp() {
+          const p = cwd.value.replace(/\/+$/, '')
+          const parent = p.slice(0, p.lastIndexOf('/'))
+          load(parent === '' ? '/' : parent)
+        }
+
+        async function openEntry(e) {
+          if (e.isDir) { load(e.path); return }
+          selected.value = e.path
+          const ext = (e.name.split('.').pop() || '').toLowerCase()
+          if (IMAGE_EXT.indexOf(ext) !== -1) {
+            const r = await native('readImage', e.path)
+            preview.value = r.dataUrl
+              ? { kind: 'image', src: r.dataUrl, name: e.name, size: e.size }
+              : { kind: 'error', msg: r.error || 'could not read image' }
+          } else {
+            const r = await native('readText', e.path)
+            preview.value = r.text !== undefined
+              ? { kind: 'text', text: r.text, name: e.name, size: e.size }
+              : { kind: 'error', msg: r.error || 'could not read file' }
+          }
+        }
+
+        onMounted(async () => {
+          try {
+            const h = await native('home')
+            await load(h.path)
+          } catch (err) {
+            preview.value = { kind: 'error', msg: 'could not open start directory' }
+          }
+        })
+
+        return { cwd, entries, selected, preview, loading, fmtSize, load, goUp, openEntry }
+      },
+      template: `
+        <q-layout view="hHh lpR fFf">
+          <q-header elevated class="bg-dark text-white">
+            <q-toolbar>
+              <q-btn flat dense no-caps label="↑ Up" @click="goUp" />
+              <q-toolbar-title class="text-caption ellipsis" style="font-family: monospace">
+                {{ cwd }}
+              </q-toolbar-title>
+              <q-spinner v-if="loading" size="18px" />
+            </q-toolbar>
+          </q-header>
+
+          <q-page-container>
+            <q-page class="row no-wrap" style="height: calc(100vh - 50px)">
+              <!-- Left: entry list -->
+              <div class="col-4 col-scroll" style="border-right: 1px solid rgba(255,255,255,0.12)">
+                <q-scroll-area class="fit">
+                  <q-list dense>
+                    <q-item
+                      v-for="e in entries" :key="e.path"
+                      clickable v-ripple
+                      :class="{ 'entry--active': e.path === selected }"
+                      @click="openEntry(e)"
+                    >
+                      <q-item-section avatar style="min-width: 28px">
+                        <span>{{ e.isDir ? '📁' : '📄' }}</span>
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label lines="1">{{ e.name }}</q-item-label>
+                      </q-item-section>
+                      <q-item-section side v-if="!e.isDir">
+                        <span class="text-caption muted">{{ fmtSize(e.size) }}</span>
+                      </q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-scroll-area>
+              </div>
+
+              <!-- Right: preview -->
+              <div class="col col-scroll">
+                <template v-if="preview.kind === 'text'">
+                  <q-scroll-area class="fit">
+                    <pre class="preview-text">{{ preview.text }}</pre>
+                  </q-scroll-area>
+                </template>
+
+                <div v-else-if="preview.kind === 'image'" class="fit flex flex-center q-pa-md">
+                  <img class="preview-img" :src="preview.src" :alt="preview.name" />
+                </div>
+
+                <div v-else-if="preview.kind === 'error'" class="fit flex flex-center text-negative">
+                  {{ preview.msg }}
+                </div>
+
+                <div v-else class="fit flex flex-center muted">
+                  Select a file to preview
+                </div>
+              </div>
+            </q-page>
+          </q-page-container>
+        </q-layout>
+      `
+    }
+
+    const app = createApp(App)
+    app.use(Quasar, { config: {} })
+    Quasar.Dark.set(true)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

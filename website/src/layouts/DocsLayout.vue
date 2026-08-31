@@ -79,23 +79,6 @@
           </div>
 
           <div class="km-docnav__group">
-            <button type="button" class="km-docnav__treetoggle" @click="guidesOpen = !guidesOpen" :aria-expanded="guidesOpen">
-              <q-icon :name="guidesOpen ? 'expand_more' : 'chevron_right'" size="16px" />
-              <span class="km-eyebrow km-docnav__label km-docnav__label--inline">Guides</span>
-            </button>
-            <div v-show="guidesOpen" class="km-docnav__tree">
-              <router-link
-                v-for="item in guidesTree"
-                :key="item.to"
-                :to="item.to"
-                class="km-docnav__link km-docnav__link--nested"
-                active-class="km-docnav__link--active"
-                exact-active-class="km-docnav__link--active"
-              >{{ item.text }}</router-link>
-            </div>
-          </div>
-
-          <div class="km-docnav__group">
             <span class="km-eyebrow km-docnav__label">Examples</span>
             <router-link
               to="/docs/examples"
@@ -152,14 +135,6 @@ const klainOpen = ref(true)
 // Auto-expand when viewing any klain page.
 if (route.path.startsWith('/docs/klain')) klainOpen.value = true
 
-// The Guides tree — long-form walkthroughs, grows as guides land.
-const guidesTree = [
-  { to: '/docs/guides', text: 'Overview' },
-  { to: '/docs/guides/tui-app', text: 'Build a TUI app' }
-]
-const guidesOpen = ref(true)
-if (route.path.startsWith('/docs/guides')) guidesOpen.value = true
-
 // The per-API reference tree — from the generated index (ordered by kind, then
 // title), grouped under kind sub-headers so a 32-surface list stays scannable.
 // A new surface JSON appears here automatically.
@@ -187,6 +162,16 @@ const nav = [
       { to: '/docs/language', text: 'Language guide' },
       { to: '/docs/stdlib', text: 'Standard library' },
       { to: '/docs/cli', text: 'CLI & flags' }
+    ]
+  },
+  {
+    label: 'Guides',
+    items: [
+      { to: '/docs/guides', text: 'Overview' },
+      { to: '/docs/guides/tui/layout', text: 'TUI · Layout & components' },
+      { to: '/docs/guides/tui/input-state', text: 'TUI · Input & state' },
+      { to: '/docs/guides/tui/live-dashboard', text: 'TUI · Live dashboards' },
+      { to: '/docs/guides/webview', text: 'Desktop · File explorer' }
     ]
   },
   {

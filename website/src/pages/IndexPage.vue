@@ -130,11 +130,37 @@
       </div>
     </section>
 
+    <!-- ===== GALLERY ===== -->
+    <section class="km-section km-on-stone">
+      <div class="km-wrap">
+        <header class="km-secthead">
+          <span class="km-kicker-num km-display">04</span>
+          <h2 class="km-display km-secthead__title">Not just hello-world</h2>
+        </header>
+        <p class="km-gallery__lede">
+          Complete little apps, each a single compiled binary — a native terminal-UI framework and a
+          real desktop window, both shipped in the examples. Every screenshot is the actual program
+          running.
+        </p>
+        <div class="km-gallery">
+          <router-link v-for="g in gallery" :key="g.to" :to="g.to" class="km-gallery__card">
+            <span class="km-gallery__shot"><img :src="g.img" :alt="g.alt" loading="lazy" /></span>
+            <span class="km-gallery__meta">
+              <span class="km-gallery__tag">{{ g.tag }}</span>
+              <h3 class="km-gallery__title">{{ g.title }}</h3>
+              <p class="km-gallery__body">{{ g.body }}</p>
+              <span class="km-gallery__go">{{ g.cta }} →</span>
+            </span>
+          </router-link>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== COVERAGE ===== -->
     <section class="km-section km-on-white">
       <div class="km-wrap">
         <header class="km-secthead">
-          <span class="km-kicker-num km-display">04</span>
+          <span class="km-kicker-num km-display">05</span>
           <h2 class="km-display km-secthead__title">What actually works</h2>
         </header>
         <div class="km-cov__legend">
@@ -214,9 +240,45 @@ import MedallionKM from 'components/brand/MedallionKM.vue'
 import FoilSun from 'components/brand/FoilSun.vue'
 import PipelineFlow from 'components/PipelineFlow.vue'
 import { samples, terminal, coverage, headline, conformance, GITHUB_URL } from 'src/lib/content.js'
+import klaintopImg from 'src/assets/tui/klaintop.png'
+import explorerImg from 'src/assets/webview/listing.png'
+import todoImg from 'src/assets/tui/todo.png'
+import filesImg from 'src/assets/tui/files.png'
 
 const gh = GITHUB_URL
 const tab = ref('server')
+
+// Showcase gallery — real example apps, each linking to its walkthrough.
+const gallery = [
+  {
+    to: '/docs/guides/tui/live-dashboard', img: klaintopImg, tag: 'Terminal UI',
+    alt: 'A terminal process manager with CPU/memory bars and a process table',
+    title: 'A live process manager',
+    body: 'CPU / memory bars over a sortable, scrollable process table you can kill from — an htop-lite, redrawn on a timer.',
+    cta: 'Read the guide'
+  },
+  {
+    to: '/docs/guides/webview', img: explorerImg, tag: 'Desktop',
+    alt: 'A native desktop window listing a directory with file icons',
+    title: 'A native desktop file explorer',
+    body: 'A Quasar single-page UI in a real OS window, backed by native fs — directory listing with live text and image previews.',
+    cta: 'Read the guide'
+  },
+  {
+    to: '/docs/guides/tui/layout', img: todoImg, tag: 'Terminal UI',
+    alt: 'A bordered to-do list in the terminal with a progress bar',
+    title: 'A keyboard-driven to-do list',
+    body: 'Flexbox layout, a selectable list, a text input, and real file persistence — the flagship klain:tui walkthrough.',
+    cta: 'Read the guide'
+  },
+  {
+    to: '/docs/examples/tui/files', img: filesImg, tag: 'Terminal UI',
+    alt: 'A two-pane terminal file browser with a preview pane',
+    title: 'A two-pane file browser',
+    body: 'A nested layout with a live preview pane, driven by fs and path — the same immediate-mode loop, a richer view.',
+    cta: 'See the example'
+  }
+]
 
 const tabs = [
   { key: 'server', file: 'http_server.ts', blurb: 'An HTTP/1.1 + HTTP/2 server' },
@@ -327,6 +389,34 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-showtab--active span { color: #fff; }
 .km-showtab--active small { color: var(--km-gold); }
 .km-showcase__code { background: #0e0e0e; }
+
+/* ---- GALLERY (on stone / light) ---- */
+.km-gallery__lede { max-width: 42rem; color: #4a4a44; margin-bottom: 34px; }
+.km-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: clamp(16px, 2.4vw, 28px);
+}
+.km-gallery__card {
+  display: flex; flex-direction: column;
+  text-decoration: none; color: inherit;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 14px; overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.km-gallery__card:hover {
+  border-color: var(--km-gold);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.10);
+}
+.km-gallery__shot { display: block; background: #0c0c0c; border-bottom: 1px solid rgba(0, 0, 0, 0.08); }
+.km-gallery__shot img { display: block; width: 100%; height: 190px; object-fit: cover; object-position: top left; }
+.km-gallery__meta { display: flex; flex-direction: column; flex: 1; padding: 18px; }
+.km-gallery__tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: #9a7b1e; }
+.km-gallery__title { margin: 0.4rem 0 0.5rem; font-size: 1.05rem; color: #1b1b18; }
+.km-gallery__body { margin: 0 0 1rem; font-size: 0.9rem; color: #5a5a52; flex: 1; }
+.km-gallery__go { font-weight: 600; color: #9a7b1e; font-size: 0.9rem; }
 .km-showcase__code :deep(.km-codeblock) { border: 0; height: 100%; }
 @media (max-width: 720px) {
   .km-showcase { grid-template-columns: 1fr; }

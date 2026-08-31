@@ -715,7 +715,14 @@ func (e *Emitter) emitWebviewBindThunk(cbTy Type, typed bool, pos ast.Pos) strin
 	}
 	e.emitInstr("ret void")
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%id, ptr %%req, ptr %%env) {\nentry:\n", fn))
+	// noinline optnone: this thunk calls setjmp (the fs-guard) and is re-entered
+	// via longjmp when the user closure — or a nested fs-guard inside it — throws.
+	// Under clang -O2 that setjmp handling is miscompiled once the module also
+	// contains a bind whose closure calls an fs op (its own nested setjmp),
+	// corrupting *every* bind's dispatch (a spurious longjmp makes an ordinary
+	// call reject as "native handler threw"). Excluding the cold per-invocation
+	// thunk from optimization sidesteps the miscompile (ADR-00523).
+	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%id, ptr %%req, ptr %%env) noinline optnone {\nentry:\n", fn))
 	e.functions.WriteString(e.allocas.String())
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")

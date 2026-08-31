@@ -96,3 +96,56 @@ render(Box({ flexDirection: 'row', justifyContent: 'space-between', width: 20 },
 		t.Errorf("expected L and R justified apart (gap>=15), got gap=%d in %q", gap, out)
 	}
 }
+
+// Width-aware painting: a wide (CJK) glyph occupies two columns, so in a
+// space-between row of fixed width the trailing marker is pushed by the wide
+// glyph's real display width, not one column. Here a 6-wide row holds '世'
+// (width 2) and 'X' (width 1); flex leaves exactly 6-2-1 = 3 columns of gap.
+// A painter that mis-counted the wide glyph as one column would emit 4 spaces.
+func TestE2ETuiWideCharWidth(t *testing.T) {
+	out := runTui(t, `
+import { Box, Text, render } from 'klain:tui'
+render(Box({ flexDirection: 'row', justifyContent: 'space-between', width: 6 }, [
+  Text('世'),
+  Text('X'),
+]))
+`)
+	wi := strings.Index(out, "世")
+	if wi < 0 {
+		t.Fatalf("missing wide glyph in %q", out)
+	}
+	rest := out[wi+len("世"):]
+	xi := strings.IndexByte(rest, 'X')
+	if xi < 0 {
+		t.Fatalf("missing marker after wide glyph in %q", out)
+	}
+	gap := rest[:xi]
+	if gap != "   " { // exactly 3 spaces
+		t.Errorf("expected 3-space gap after width-2 glyph, got %d bytes %q", len(gap), gap)
+	}
+}
+
+// List viewport: a list taller than its bounded box scrolls to keep the
+// selected item visible and paints a scrollbar, instead of overflowing. Here
+// 12 items live in a height-5 box (3 content rows) with item 8 selected — only
+// a window around 8 shows, item 0 is scrolled off, and a scrollbar thumb (█)
+// paints on the right.
+func TestE2ETuiListViewport(t *testing.T) {
+	out := runTui(t, `
+import { Box, List, render } from 'klain:tui'
+const items: string[] = []
+for (let i = 0; i < 12; i++) items.push('item-' + i)
+render(Box({ border: 'single', width: 16, height: 5 }, [
+  List(items, { selected: 8 }),
+]))
+`)
+	if !strings.Contains(out, "item-8") {
+		t.Errorf("selected item not visible in %q", out)
+	}
+	if strings.Contains(out, "item-0") {
+		t.Errorf("off-screen item-0 should have been scrolled out of the viewport")
+	}
+	if !strings.Contains(out, "█") { // scrollbar thumb
+		t.Errorf("expected a scrollbar thumb for an overflowing list")
+	}
+}

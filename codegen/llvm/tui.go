@@ -16,6 +16,13 @@ package llvm
 // builder functions (which map 1:1 onto YGNodeNew + style setters here) to build
 // a fresh tree each frame and then render(root). render() frees the tree after
 // painting so a long-running loop doesn't grow without bound.
+//
+// Text is width-aware: each grid cell holds a whole grapheme (a base code point
+// plus any trailing zero-width combining marks) and its display width from a
+// standard wcwidth table, so wide (CJK/emoji) glyphs occupy two columns with a
+// continuation cell and combining marks fold onto their base rather than
+// stealing a column. Layout, wrapping, and the diff painter all reason in
+// columns, so alignment holds for such content.
 
 // UsesTui reports whether the program used klain:tui, gating both this painter
 // runtime and the vendored Yoga engine in EmbeddedCSources.
@@ -62,13 +69,11 @@ static char *kmltui_dup(const char *s) {
   return o;
 }
 
-/* ---- UTF-8 decoding + text wrapping (shared by measure + paint) -------- */
+/* ---- Unicode: decode, wcwidth, encode --------------------------------- */
 
-/* Decode s into an array of Unicode code points (one grid cell each — so a
-   multibyte glyph is one column, not one-per-byte). Returns the code-point
-   count; out must hold at least strlen(s) entries. Malformed bytes pass through
-   as Latin-1. Wide (CJK/emoji) cells are still counted as one column — a
-   documented Stage 1 limitation. */
+/* Decode s into an array of Unicode code points. Returns the code-point count;
+   out must hold at least strlen(s) entries. Malformed bytes pass through as
+   Latin-1. Full 4-byte (astral/emoji) sequences decode to a single cp. */
 static int kmltui_decode(const char *s, unsigned int *out, int max) {
   int n = 0; const unsigned char *p = (const unsigned char *)s;
   while (*p && n < max) {
@@ -87,17 +92,101 @@ static int kmltui_decode(const char *s, unsigned int *out, int max) {
   return n;
 }
 
+/* Encode one code point as UTF-8 into b (up to 4 bytes); returns byte count. */
+static int kmltui_enc(unsigned int cp, char *b) {
+  if (cp < 0x80) { b[0]=(char)cp; return 1; }
+  if (cp < 0x800) { b[0]=(char)(0xC0|(cp>>6)); b[1]=(char)(0x80|(cp&0x3F)); return 2; }
+  if (cp < 0x10000) { b[0]=(char)(0xE0|(cp>>12)); b[1]=(char)(0x80|((cp>>6)&0x3F)); b[2]=(char)(0x80|(cp&0x3F)); return 3; }
+  b[0]=(char)(0xF0|(cp>>18)); b[1]=(char)(0x80|((cp>>12)&0x3F)); b[2]=(char)(0x80|((cp>>6)&0x3F)); b[3]=(char)(0x80|(cp&0x3F)); return 4;
+}
+
+/* Standard wcwidth (Markus Kuhn's table): 0 for combining/zero-width marks and
+   control chars, 2 for East-Asian-wide and emoji, 1 otherwise. */
+struct kmltui_iv { unsigned int first, last; };
+static int kmltui_intable(unsigned int c, const struct kmltui_iv *t, int max) {
+  int lo=0, hi=max-1;
+  if (c < t[0].first || c > t[max-1].last) return 0;
+  while (lo <= hi) {
+    int mid = (lo+hi)/2;
+    if (c > t[mid].last) lo = mid+1;
+    else if (c < t[mid].first) hi = mid-1;
+    else return 1;
+  }
+  return 0;
+}
+/* Zero-width: combining marks, joiners, variation selectors, skin-tone
+   modifiers — enough to cover the common scripts and emoji sequences. */
+static const struct kmltui_iv KMLTUI_ZERO[] = {
+  {0x0300,0x036F},{0x0483,0x0489},{0x0591,0x05BD},{0x05BF,0x05BF},
+  {0x05C1,0x05C2},{0x05C4,0x05C5},{0x05C7,0x05C7},{0x0610,0x061A},
+  {0x064B,0x065F},{0x0670,0x0670},{0x06D6,0x06DC},{0x06DF,0x06E4},
+  {0x06E7,0x06E8},{0x06EA,0x06ED},{0x0711,0x0711},{0x0730,0x074A},
+  {0x07A6,0x07B0},{0x07EB,0x07F3},{0x0816,0x0819},{0x081B,0x0823},
+  {0x0825,0x0827},{0x0829,0x082D},{0x0859,0x085B},{0x08E3,0x0902},
+  {0x093A,0x093A},{0x093C,0x093C},{0x0941,0x0948},{0x094D,0x094D},
+  {0x0951,0x0957},{0x0962,0x0963},{0x0981,0x0981},{0x09BC,0x09BC},
+  {0x09C1,0x09C4},{0x09CD,0x09CD},{0x09E2,0x09E3},{0x0A01,0x0A02},
+  {0x0A3C,0x0A3C},{0x0A41,0x0A42},{0x0A47,0x0A48},{0x0A4B,0x0A4D},
+  {0x0A70,0x0A71},{0x0A81,0x0A82},{0x0ABC,0x0ABC},{0x0AC1,0x0AC5},
+  {0x0AC7,0x0AC8},{0x0ACD,0x0ACD},{0x0B01,0x0B01},{0x0B3C,0x0B3C},
+  {0x0B3F,0x0B3F},{0x0B41,0x0B44},{0x0B4D,0x0B4D},{0x0B56,0x0B56},
+  {0x0BC0,0x0BC0},{0x0BCD,0x0BCD},{0x0C3E,0x0C40},{0x0C46,0x0C48},
+  {0x0C4A,0x0C4D},{0x0CBC,0x0CBC},{0x0CBF,0x0CBF},{0x0CCC,0x0CCD},
+  {0x0D41,0x0D44},{0x0D4D,0x0D4D},{0x0DCA,0x0DCA},{0x0E31,0x0E31},
+  {0x0E34,0x0E3A},{0x0E47,0x0E4E},{0x0EB1,0x0EB1},{0x0EB4,0x0EB9},
+  {0x0F18,0x0F19},{0x0F35,0x0F35},{0x0F37,0x0F37},{0x0F39,0x0F39},
+  {0x0F71,0x0F7E},{0x0F80,0x0F84},{0x0F86,0x0F87},{0x0FC6,0x0FC6},
+  {0x1712,0x1714},{0x1732,0x1734},{0x1752,0x1753},{0x1772,0x1773},
+  {0x17B4,0x17B5},{0x17B7,0x17BD},{0x17C6,0x17C6},{0x17C9,0x17D3},
+  {0x180B,0x180D},{0x18A9,0x18A9},{0x1920,0x1922},{0x1927,0x1928},
+  {0x1932,0x1932},{0x1939,0x193B},{0x1A17,0x1A18},{0x1B00,0x1B03},
+  {0x1B34,0x1B34},{0x1B36,0x1B3A},{0x1B3C,0x1B3C},{0x1B42,0x1B42},
+  {0x1DC0,0x1DFF},{0x200B,0x200F},{0x202A,0x202E},{0x2060,0x2064},
+  {0x20D0,0x20F0},{0xFE00,0xFE0F},{0xFE20,0xFE2F},{0xFEFF,0xFEFF},
+  {0x1F3FB,0x1F3FF},{0xE0100,0xE01EF},
+};
+static int kmltui_wcwidth(unsigned int c) {
+  if (c == 0) return 0;
+  if (c < 32 || (c >= 0x7F && c < 0xA0)) return 0; /* control */
+  if (kmltui_intable(c, KMLTUI_ZERO, (int)(sizeof KMLTUI_ZERO/sizeof KMLTUI_ZERO[0]))) return 0;
+  if (c >= 0x1100 &&
+      (c <= 0x115F ||                                   /* Hangul Jamo */
+       c == 0x2329 || c == 0x232A ||
+       (c >= 0x2E80 && c <= 0xA4CF && c != 0x303F) ||   /* CJK .. Yi */
+       (c >= 0xAC00 && c <= 0xD7A3) ||                  /* Hangul syllables */
+       (c >= 0xF900 && c <= 0xFAFF) ||                  /* CJK compat */
+       (c >= 0xFE10 && c <= 0xFE19) ||
+       (c >= 0xFE30 && c <= 0xFE6F) ||
+       (c >= 0xFF00 && c <= 0xFF60) ||                  /* fullwidth forms */
+       (c >= 0xFFE0 && c <= 0xFFE6) ||
+       (c >= 0x1F300 && c <= 0x1FAFF) ||                /* emoji + symbols */
+       (c >= 0x20000 && c <= 0x3FFFD)))                 /* CJK ext */
+    return 2;
+  return 1;
+}
+/* Column width of a code-point span (combining marks contribute 0). */
+static int kmltui_colwidth(const unsigned int *cp, int start, int len) {
+  int w = 0;
+  for (int i = 0; i < len; i++) w += kmltui_wcwidth(cp[start+i]);
+  return w;
+}
+
+/* ---- text wrapping (shared by measure + paint) ------------------------ */
+
 /* Fill starts[]/lens[] with up to maxlines wrapped line spans (in code-point
    indices) of the decoded string cp[0..n); returns line count. Greedy
-   word-wrap, hard breaks for words longer than width. width<=0 => one line. */
+   word-wrap in *columns* (wide glyphs count 2), hard breaks for words longer
+   than width. width<=0 => one line. */
 static int kmltui_wrap(const unsigned int *cp, int n, int width, int *starts, int *lens, int maxlines) {
   int i = 0, lc = 0;
   if (width <= 0) { if (maxlines>0){starts[0]=0;lens[0]=n;} return 1; }
   while (i < n && lc < maxlines) {
     int lineStart = i, lastSpace = -1, col = 0;
-    while (i < n && cp[i] != '\n' && col < width) {
+    while (i < n && cp[i] != '\n') {
+      int cw = kmltui_wcwidth(cp[i]);
+      if (cw > 0 && col + cw > width) break;
       if (cp[i] == ' ') lastSpace = i;
-      i++; col++;
+      i++; col += cw;
     }
     int lineEnd;
     if (i < n && cp[i] == '\n') { lineEnd = i; i++; }
@@ -121,11 +210,11 @@ static YGSize kmltui_measure(YGNodeConstRef node, float w, YGMeasureMode wm,
     int slen = (int)strlen(s) + 1;
     unsigned int *cp = (unsigned int*)malloc(sizeof(unsigned int)*slen);
     int n = kmltui_decode(s, cp, slen);
-    if (!t->wrap) { free(cp); sz.width = (float)n; sz.height = 1; return sz; }
-    int avail = (wm == YGMeasureModeUndefined) ? n : (int)w;
+    if (!t->wrap) { int cw = kmltui_colwidth(cp,0,n); free(cp); sz.width = (float)cw; sz.height = 1; return sz; }
+    int avail = (wm == YGMeasureModeUndefined) ? kmltui_colwidth(cp,0,n) : (int)w;
     int *st = (int*)malloc(sizeof(int)*(n+1)), *ln = (int*)malloc(sizeof(int)*(n+1));
     int lc = kmltui_wrap(cp, n, avail, st, ln, n+1);
-    int maxw = 0; for (int k=0;k<lc;k++) if (ln[k]>maxw) maxw=ln[k];
+    int maxw = 0; for (int k=0;k<lc;k++){ int cw=kmltui_colwidth(cp,st[k],ln[k]); if (cw>maxw) maxw=cw; }
     free(st); free(ln); free(cp);
     sz.width = (float)maxw; sz.height = (float)lc; return sz;
   }
@@ -134,8 +223,8 @@ static YGSize kmltui_measure(YGNodeConstRef node, float w, YGMeasureMode wm,
     for (int k=0;k<t->nitems;k++){
       int sl=(int)strlen(t->items[k])+1;
       unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*sl);
-      int l=kmltui_decode(t->items[k],cp,sl); free(cp);
-      if(l>maxw)maxw=l;
+      int l=kmltui_decode(t->items[k],cp,sl); int cw=kmltui_colwidth(cp,0,l); free(cp);
+      if(cw>maxw)maxw=cw;
     }
     sz.width = (float)maxw; sz.height = (float)(t->nitems>0?t->nitems:1); return sz;
   }
@@ -143,11 +232,13 @@ static YGSize kmltui_measure(YGNodeConstRef node, float w, YGMeasureMode wm,
     sz.width = (wm == YGMeasureModeUndefined) ? 20.f : w; sz.height = 1; return sz;
   }
   if (t->kind == K_SPINNER) {
-    int lbl = t->text ? (int)strlen(t->text) : 0;
+    int lbl = 0;
+    if (t->text) { int sl=(int)strlen(t->text)+1; unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*sl); int l=kmltui_decode(t->text,cp,sl); lbl=kmltui_colwidth(cp,0,l); free(cp); }
     sz.width = (float)(1 + (lbl ? lbl + 1 : 0)); sz.height = 1; return sz;
   }
   if (t->kind == K_INPUT) {
-    int len = t->text ? (int)strlen(t->text) : 0;
+    int len = 0;
+    if (t->text) { int sl=(int)strlen(t->text)+1; unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*sl); int l=kmltui_decode(t->text,cp,sl); len=kmltui_colwidth(cp,0,l); free(cp); }
     sz.width = (wm == YGMeasureModeUndefined) ? (float)(len+1) : w; sz.height = 1; return sz;
   }
   return sz;
@@ -162,6 +253,10 @@ TuiNode *__kml_tui_node(int kind) {
   t->fg = -1; t->bg = -1; t->borderColor = -1; t->selected = -1; t->wrap = 1;
   YGNodeSetContext(t->yg, t);
   if (kind != K_BOX) YGNodeSetMeasureFunc(t->yg, kmltui_measure);
+  /* A List yields to a bounded container (default Yoga flexShrink is 0), so a
+     tall list inside a fixed-height box shrinks to that box and scrolls rather
+     than overflowing it. An explicit flexShrink prop still overrides this. */
+  if (kind == K_LIST) YGNodeStyleSetFlexShrink(t->yg, 1);
   return t;
 }
 
@@ -241,9 +336,13 @@ static void kmltui_free(TuiNode *t) {
 
 /* ---- cell grid + diff painter ----------------------------------------- */
 
-typedef struct { unsigned int ch; short fg; short bg; short attr; } Cell;
+/* One grid cell holds a whole grapheme (base + trailing combining marks) as
+   UTF-8 bytes plus its display width: w==1 normal, w==2 wide (the next column
+   is a w==0 continuation), w==0 continuation (skipped by the painter). */
+typedef struct { char g[16]; unsigned char nb; unsigned char w; short fg; short bg; short attr; } Cell;
 
 static Cell *g_front = NULL;    /* last painted grid, persistent */
+static Cell *g_back = NULL;
 static int g_cols = 0, g_rows = 0;
 static char *g_out = NULL; static size_t g_outlen = 0, g_outcap = 0;
 
@@ -256,12 +355,6 @@ static void kmltui_emitf(const char *fmt, ...) {
   int n = vsnprintf(buf, sizeof buf, fmt, ap); __builtin_va_end(ap);
   if (n>0) kmltui_emit(buf, (size_t)n);
 }
-static void kmltui_putcp(unsigned int cp) {
-  char b[4];
-  if (cp < 0x80) { b[0]=(char)cp; kmltui_emit(b,1); }
-  else if (cp < 0x800) { b[0]=(char)(0xC0|(cp>>6)); b[1]=(char)(0x80|(cp&0x3F)); kmltui_emit(b,2); }
-  else { b[0]=(char)(0xE0|(cp>>12)); b[1]=(char)(0x80|((cp>>6)&0x3F)); b[2]=(char)(0x80|(cp&0x3F)); kmltui_emit(b,3); }
-}
 
 /* border glyph tables: [style][0..5] = TL TR BL BR H V */
 static const unsigned int BORDER[4][6] = {
@@ -271,14 +364,46 @@ static const unsigned int BORDER[4][6] = {
   {0x2554,0x2557,0x255A,0x255D,0x2550,0x2551}, /* double */
 };
 
-static Cell *g_back = NULL;
-static void setcell(int x, int y, unsigned int ch, int fg, int bg, int attr) {
+/* Write a laid-out grapheme (UTF-8 bytes + display width) into the back grid;
+   a w==2 glyph also stamps a w==0 continuation into the next column. */
+static void setglyph(int x, int y, const char *g, int nb, int w, int fg, int bg, int attr) {
   if (x<0||y<0||x>=g_cols||y>=g_rows) return;
   Cell *c = &g_back[y*g_cols + x];
-  c->ch = ch; c->fg = (short)fg; c->bg = (short)bg; c->attr = (short)attr;
+  if (nb > (int)sizeof c->g) nb = (int)sizeof c->g;
+  memcpy(c->g, g, nb); c->nb=(unsigned char)nb; c->w=(unsigned char)w;
+  c->fg=(short)fg; c->bg=(short)bg; c->attr=(short)attr;
+  if (w == 2 && x+1 < g_cols) {
+    Cell *k = &g_back[y*g_cols + x+1];
+    k->nb=0; k->w=0; k->fg=(short)fg; k->bg=(short)bg; k->attr=(short)attr;
+  }
 }
+/* Convenience: place a single code point (border glyphs, cursor block, …). */
+static void setcp(int x, int y, unsigned int cp, int fg, int bg, int attr) {
+  char b[4]; int nb = kmltui_enc(cp, b);
+  int w = kmltui_wcwidth(cp); if (w < 1) w = 1;
+  setglyph(x, y, b, nb, w, fg, bg, attr);
+}
+/* Paint a code-point span left-to-right from (x,y), grouping trailing
+   combining marks onto their base and advancing by column width. Returns the
+   number of columns consumed; stops at maxcol. */
+static int paint_cps(int x, int y, const unsigned int *cp, int start, int cnt, int maxcol, int fg, int bg, int attr) {
+  int col = 0, i = 0;
+  while (i < cnt && col < maxcol) {
+    unsigned int c = cp[start+i];
+    int w = kmltui_wcwidth(c);
+    if (w == 0) { i++; continue; }         /* stray combining mark: drop */
+    if (col + w > maxcol) break;            /* wide glyph won't fit the edge */
+    char g[16]; int nb = kmltui_enc(c, g); i++;
+    while (i < cnt && nb + 4 <= (int)sizeof g && kmltui_wcwidth(cp[start+i]) == 0)
+      nb += kmltui_enc(cp[start+i++], g + nb);
+    setglyph(x+col, y, g, nb, w, fg, bg, attr);
+    col += w;
+  }
+  return col;
+}
+
 static void fillbg(int x,int y,int w,int h,int bg){
-  for(int j=0;j<h;j++)for(int i=0;i<w;i++){ if(x+i<0||y+j<0||x+i>=g_cols||y+j>=g_rows)continue; Cell*c=&g_back[(y+j)*g_cols+x+i]; c->ch=' '; c->bg=(short)bg; }
+  for(int j=0;j<h;j++)for(int i=0;i<w;i++){ if(x+i<0||y+j<0||x+i>=g_cols||y+j>=g_rows)continue; Cell*c=&g_back[(y+j)*g_cols+x+i]; c->g[0]=' '; c->nb=1; c->w=1; c->bg=(short)bg; }
 }
 
 static void paint_node(TuiNode *t, int ox, int oy) {
@@ -289,10 +414,10 @@ static void paint_node(TuiNode *t, int ox, int oy) {
   if (t->border && w>=2 && h>=2) {
     const unsigned int *b = BORDER[t->border];
     int bc = t->borderColor, bg = t->bg;
-    setcell(x,y,b[0],bc,bg,0); setcell(x+w-1,y,b[1],bc,bg,0);
-    setcell(x,y+h-1,b[2],bc,bg,0); setcell(x+w-1,y+h-1,b[3],bc,bg,0);
-    for(int i=1;i<w-1;i++){ setcell(x+i,y,b[4],bc,bg,0); setcell(x+i,y+h-1,b[4],bc,bg,0); }
-    for(int j=1;j<h-1;j++){ setcell(x,y+j,b[5],bc,bg,0); setcell(x+w-1,y+j,b[5],bc,bg,0); }
+    setcp(x,y,b[0],bc,bg,0); setcp(x+w-1,y,b[1],bc,bg,0);
+    setcp(x,y+h-1,b[2],bc,bg,0); setcp(x+w-1,y+h-1,b[3],bc,bg,0);
+    for(int i=1;i<w-1;i++){ setcp(x+i,y,b[4],bc,bg,0); setcp(x+i,y+h-1,b[4],bc,bg,0); }
+    for(int j=1;j<h-1;j++){ setcp(x,y+j,b[5],bc,bg,0); setcp(x+w-1,y+j,b[5],bc,bg,0); }
   }
   switch (t->kind) {
     case K_TEXT: {
@@ -302,37 +427,61 @@ static void paint_node(TuiNode *t, int ox, int oy) {
       int n=kmltui_decode(s,cp,slen);
       int *st=(int*)malloc(sizeof(int)*(n+1)), *ln=(int*)malloc(sizeof(int)*(n+1));
       int lc = t->wrap ? kmltui_wrap(cp, n, w>0?w:n, st, ln, n+1) : (st[0]=0,ln[0]=n,1);
-      for(int r=0;r<lc && r<h;r++){
-        for(int i=0;i<ln[r] && i<w;i++) setcell(x+i,y+r,cp[st[r]+i],t->fg,t->bg,t->attr);
-      }
+      for(int r=0;r<lc && r<h;r++) paint_cps(x, y+r, cp, st[r], ln[r], w>0?w:n, t->fg, t->bg, t->attr);
       free(st); free(ln); free(cp);
       break;
     }
     case K_LIST: {
-      for(int r=0;r<t->nitems && r<h;r++){
-        const char *s = t->items[r];
+      int n = t->nitems;
+      /* Scroll so the selected item stays visible when the list is taller than
+         its laid-out height; a 1-column scrollbar tracks position on the right.
+         The offset is derived from the selected index each frame — no retained
+         state, matching the immediate-mode model. */
+      int bar = (n > h && w >= 2);
+      int cw = bar ? w-1 : w;           /* content width, leaving room for the bar */
+      int off = 0;
+      if (n > h) {
+        int sel = t->selected < 0 ? 0 : t->selected;
+        off = sel - h/2;
+        if (off > n - h) off = n - h;
+        if (off < 0) off = 0;
+      }
+      for(int r=0; r<h && off+r<n; r++){
+        int idx = off + r;
+        const char *s = t->items[idx];
         int slen=(int)strlen(s)+1;
         unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*slen);
-        int n=kmltui_decode(s,cp,slen);
-        int sel = (r==t->selected);
+        int cn=kmltui_decode(s,cp,slen);
+        int sel = (idx==t->selected);
         int attr = t->attr | (sel?8:0);
-        for(int i=0;i<w;i++){
-          unsigned int ch = (i < n) ? cp[i] : ' ';
-          if (i<n || sel) setcell(x+i,y+r,ch,t->fg,t->bg,attr);
-        }
+        if (sel) for(int i=0;i<cw;i++) setglyph(x+i,y+r," ",1,1,t->fg,t->bg,attr);
+        paint_cps(x, y+r, cp, 0, cn, cw, t->fg, t->bg, attr);
         free(cp);
+      }
+      if (bar) {
+        int th = h*h/n; if (th < 1) th = 1;
+        int maxoff = n - h;
+        int ty = maxoff>0 ? off*(h-th)/maxoff : 0;
+        for(int r=0;r<h;r++)
+          setcp(x+w-1, y+r, (r>=ty && r<ty+th)?0x2588:0x2591, t->fg, t->bg, t->attr);
       }
       break;
     }
     case K_PROGRESS: {
       int filled = (int)(t->progress * w + 0.5);
-      for(int i=0;i<w;i++) setcell(x+i,y, i<filled?0x2588:0x2591, t->fg, t->bg, t->attr);
+      for(int i=0;i<w;i++) setcp(x+i,y, i<filled?0x2588:0x2591, t->fg, t->bg, t->attr);
       break;
     }
     case K_SPINNER: {
       static const unsigned int FR[] = {0x280B,0x2819,0x2839,0x2838,0x283C,0x2834,0x2826,0x2827,0x2807,0x280F};
-      setcell(x,y,FR[t->spinnerFrame % 10],t->fg,t->bg,t->attr);
-      if (t->text && *t->text) { const char*s=t->text; for(int i=0;s[i]&&2+i<w;i++) setcell(x+2+i,y,(unsigned char)s[i],t->fg,t->bg,t->attr); }
+      setcp(x,y,FR[t->spinnerFrame % 10],t->fg,t->bg,t->attr);
+      if (t->text && *t->text) {
+        int slen=(int)strlen(t->text)+1;
+        unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*slen);
+        int n=kmltui_decode(t->text,cp,slen);
+        paint_cps(x+2, y, cp, 0, n, w>2?w-2:0, t->fg, t->bg, t->attr);
+        free(cp);
+      }
       break;
     }
     case K_INPUT: {
@@ -340,8 +489,8 @@ static void paint_node(TuiNode *t, int ox, int oy) {
       int slen=(int)strlen(s)+1;
       unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*slen);
       int n=kmltui_decode(s,cp,slen);
-      for(int i=0;i<n && i<w;i++) setcell(x+i,y,cp[i],t->fg,t->bg,t->attr);
-      if (n<w) setcell(x+n,y,' ',t->fg,t->bg,t->attr|8); /* cursor block */
+      int used = paint_cps(x, y, cp, 0, n, w, t->fg, t->bg, t->attr);
+      if (used < w) setglyph(x+used,y," ",1,1,t->fg,t->bg,t->attr|8); /* cursor block */
       free(cp);
       break;
     }
@@ -368,11 +517,16 @@ static void sgr_for(Cell *c, short *cfg, short *cbg, short *cattr) {
   *cfg=c->fg; *cbg=c->bg; *cattr=c->attr;
 }
 
+static void cell_default(Cell *c) { c->g[0]=' '; c->nb=1; c->w=1; c->fg=-1; c->bg=-1; c->attr=0; }
+static int cell_eq(const Cell *a, const Cell *b) {
+  return a->nb==b->nb && a->w==b->w && a->fg==b->fg && a->bg==b->bg && a->attr==b->attr && memcmp(a->g,b->g,a->nb)==0;
+}
+
 void __kml_tui_render(TuiNode *root) {
   int cols = termcols(), rows = termrows();
   int resized = (cols != g_cols || rows != g_rows);
   g_back = (Cell*)malloc(sizeof(Cell)*cols*rows);
-  for (int i=0;i<cols*rows;i++){ g_back[i].ch=' '; g_back[i].fg=-1; g_back[i].bg=-1; g_back[i].attr=0; }
+  for (int i=0;i<cols*rows;i++) cell_default(&g_back[i]);
   int oldc=g_cols, oldr=g_rows; g_cols=cols; g_rows=rows;
 
   /* Fill the screen only where the root left its size unset — an explicit
@@ -390,12 +544,13 @@ void __kml_tui_render(TuiNode *root) {
   for (int y=0;y<rows;y++){
     for (int x=0;x<cols;x++){
       Cell *bc = &g_back[y*cols+x];
+      if (bc->w == 0) continue;   /* continuation of a wide glyph to the left */
       Cell *fc = (g_front && !resized && y<oldr && x<oldc) ? &g_front[y*oldc+x] : NULL;
-      if (fc && fc->ch==bc->ch && fc->fg==bc->fg && fc->bg==bc->bg && fc->attr==bc->attr) continue;
+      if (fc && cell_eq(fc, bc)) continue;
       if (y!=lastRow || x!=lastCol) kmltui_emitf("\x1b[%d;%dH", y+1, x+1);
       sgr_for(bc, &cfg, &cbg, &cattr);
-      kmltui_putcp(bc->ch);
-      lastRow=y; lastCol=x+1;
+      kmltui_emit(bc->g, bc->nb);
+      lastRow=y; lastCol=x + (bc->w?bc->w:1);
     }
   }
   kmltui_emit("\x1b[0m", 4);
