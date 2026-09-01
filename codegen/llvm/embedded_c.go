@@ -120,6 +120,18 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 		out = append(out, tui...)
 	}
+	if e.UsesSync() {
+		// TDD-00143: the klain:sync GMP goroutine runtime. Needs pthread; the
+		// macOS ucontext calls are deprecated-but-functional (silence the
+		// warning). Under -mm=gc the runtime registers each M thread and each
+		// goroutine stack with Boehm — gated by KLAINSYNC_GC; the -lgc link is
+		// already added globally in gc mode (LocateGC).
+		cflags := []string{"-pthread", "-Wno-deprecated-declarations"}
+		if e.isGCMode() {
+			cflags = append(cflags, "-DKLAINSYNC_GC=1")
+		}
+		out = append(out, CSource{"klainsync", SyncSource(), cflags, nil, ""})
+	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.

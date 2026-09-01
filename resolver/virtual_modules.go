@@ -78,6 +78,10 @@ var virtualBuiltinMarkers = map[string]string{
 	// Spinner/Progress/TextInput) plus render/enter/leave; the state->view->
 	// update loop is written in userland TS over klain:tty + SIGWINCH.
 	"klain:tui": "tui__kml_builtin",
+	// TDD-00143: Go-fidelity goroutine runtime. `go` is a function-member
+	// (marker-dispatched); `Channel` binds as identity (a parse-time
+	// constructor, like Webview / stream class names).
+	"klain:sync": "sync__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -171,6 +175,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"klain:webview": {"Webview": true},
 	"klain:assets":  {"embedDir": true},
 	"klain:tty":     {"readByte": true, "readKey": true},
+	"klain:sync":    {"go": true, "Channel": true, "select": true, "defaultCase": true},
 	"klain:tui": {
 		"Box": true, "Text": true, "List": true, "Spinner": true,
 		"Progress": true, "TextInput": true,

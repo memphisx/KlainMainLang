@@ -2430,6 +2430,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return MessageChannelType(e.resolveType(ex.TypeArg))
 		}
 		return MessageChannelType(TypeI64)
+	case *ast.NewChannelExpression:
+		if ex.TypeArg != nil {
+			return ChannelType(e.resolveType(ex.TypeArg))
+		}
+		return ChannelType(TypeI64)
 	case *ast.NewDataViewExpression:
 		return DataViewType()
 	case *ast.NewBlobExpression:

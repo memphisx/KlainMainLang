@@ -71,6 +71,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -293,6 +294,21 @@ func appendWebview(t *testing.T, em *llvm.Emitter, dir string, clangArgs []strin
 // when the program used any terminal primitive, mirroring EmbeddedCSources so
 // the test build path can't drift from the CLI's. No extra libs (termios/ioctl
 // are in libc on both platforms).
+// appendSync links the klain:sync goroutine runtime (TDD-00143) into the test
+// build, mirroring main.go's EmbeddedCSources entry: -pthread and the
+// deprecated-ucontext warning silence on macOS.
+func appendSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesSync() {
+		return clangArgs
+	}
+	syncFile := filepath.Join(dir, "klainsync.c")
+	if err := os.WriteFile(syncFile, []byte(llvm.SyncSource()), 0644); err != nil {
+		t.Fatalf("write klainsync runtime: %v", err)
+	}
+	return append(clangArgs, "-pthread", "-Wno-deprecated-declarations", syncFile)
+}
+
 func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
 	if !em.UsesTtyShim() {
@@ -447,6 +463,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 		t.Skipf("webview: %v", wverr)
 	}
 	clangArgs = appendEmbedBlobs(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -694,6 +711,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -870,6 +888,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -933,6 +952,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1026,6 +1046,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1082,6 +1103,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
@@ -1153,6 +1175,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
+	clangArgs = appendSync(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {

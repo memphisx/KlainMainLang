@@ -283,6 +283,8 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 		return p.parseNewBroadcastChannelBody(pos)
 	case "MessageChannel":
 		return p.parseNewMessageChannelBody(pos)
+	case "Channel":
+		return p.parseNewChannelBody(pos)
 	case "DataView":
 		return p.parseNewDataViewBody(pos)
 	case "TextEncoder":
@@ -963,6 +965,40 @@ func (p *Parser) parseNewBroadcastChannelBody(pos ast.Pos) (*ast.NewBroadcastCha
 		return nil, err
 	}
 	return ast.NewNewBroadcastChannelExpression(nameTok.Literal, pos), nil
+}
+
+// parseNewChannelBody parses `new Channel<T>(capacity?)` (TDD-00143) — a
+// klain:sync CSP channel. The optional <T> gives the element type; the
+// optional capacity argument gives the buffer size (0/unbuffered by default).
+func (p *Parser) parseNewChannelBody(pos ast.Pos) (*ast.NewChannelExpression, error) {
+	p.advance() // consume 'Channel'
+	var typeArg *ast.TypeAnnotation
+	if p.check(lexer.LT) {
+		p.advance() // consume '<'
+		arg, err := p.parseTypeAnnotation("ts")
+		if err != nil {
+			return nil, err
+		}
+		typeArg = arg
+		if err := p.expectGT("Channel<T>"); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	var capacity ast.Expression
+	if !p.check(lexer.RPAREN) {
+		cap, err := p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		capacity = cap
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	return ast.NewNewChannelExpression(typeArg, capacity, pos), nil
 }
 
 // parseNewMessageChannelBody parses `new MessageChannel<T>()` (TDD-00099).

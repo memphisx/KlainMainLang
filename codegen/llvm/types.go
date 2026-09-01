@@ -516,6 +516,11 @@ type Type struct {
 	IsMessageChannel   bool
 	IsMessagePort      bool
 	BCName             string
+	// IsChannel marks a klain:sync `new Channel<T>(cap)` handle (TDD-00143):
+	// a ptr to the C runtime's hchan. The element type T lives in ElemType
+	// (like MessagePort/Set<T>); channel elements are a fixed 8-byte slot, so
+	// send/receive bitcast T through i64.
+	IsChannel bool
 	// Inferred marks a parameter type that defaulted to TypeI64 because no
 	// explicit annotation was given, as opposed to a real `number`/`int32`/
 	// etc. annotation that happens to also resolve to i64. Call sites use
@@ -1041,6 +1046,13 @@ func MessagePortType(msg Type) Type {
 func MessageChannelType(msg Type) Type {
 	m := msg
 	return Type{IR: "ptr", IsMessageChannel: true, ElemType: &m}
+}
+
+// ChannelType returns `new Channel<T>(cap)`'s result type (TDD-00143); the
+// element type T lives in ElemType.
+func ChannelType(elem Type) Type {
+	m := elem
+	return Type{IR: "ptr", IsChannel: true, ElemType: &m}
 }
 
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —

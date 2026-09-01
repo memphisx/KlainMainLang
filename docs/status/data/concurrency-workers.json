@@ -76,6 +76,26 @@
               "`postMessage` into a closed peer silently discards, matching spec",
               "Verified same-thread, port-as-`workerData`, and port-as-`postMessage`-payload round trips (darwin/arm64 and Linux glibc/arm64, Docker)"
             ]
+          },
+          {
+            "feature": "`klain:sync` goroutines, channels, `select` (`go`, `Channel<T>`, `select`)",
+            "status": "implemented",
+            "caveats": [
+              "Channel ops are synchronous blocking (`ch.send(v)`/`ch.receive()`), not `await`; element is a fixed 8-byte slot (number/string/object/boolean)",
+              "`select` cases are `ch.recvCase(v => …)` / `ch.sendCase(x, () => …)` / `defaultCase(() => …)`; a recv handler receives the value but not the closed flag (use `for (const v of ch)` range, which ends on close, to detect it)",
+              "Fixed goroutine stacks (default 256 KiB, tunable via `KLAINSYNC_STACK_KB`), no overflow guard — deep recursion is UB; true growable/moving stacks are gated on precise stack maps ([TDD-00135](../tdd/TDD-00135.md))",
+              "Blocking-syscall P-handoff is a bounded sysmon-driven rescue-M approximation, not full `entersyscall`/`exitsyscall`; a nil (never-constructed) channel isn't expressible — channels are always `new Channel`",
+              "Per-iteration capture of a loop `let` directly in a goroutine closure is a pre-existing general closure limitation — pass the value as a function parameter (a `spawn(work)` helper) instead; a top-level channel is a module global, so a helper function sees it with its type intact",
+              "`send` after `close` and `close` of a closed channel abort the process (Go-panic parity); native-only (compile error under plain `tsc`/Node)"
+            ],
+            "notes": [
+              "A Go-style GMP work-stealing scheduler in the embedded C runtime `klainsyncsrc/klainsync.c`: one P + pinned M (pthread) per `GOMAXPROCS`, a global run-queue backstop, half-queue stealing, periodic global-queue poll; blocking channel send/receive parks the *goroutine*, not the OS thread ([TDD-00143](../tdd/TDD-00143.md), [ADR-00541](../adr/ADR-00541.md))",
+              "`go(() => void)` spawns; `new Channel<T>(cap)` is an unbuffered rendezvous or buffered ring with `.send`/`.receive`/`.close` and `for (const v of ch)` range; `select(...)` is Go's random-fair select over recv/send cases (`sudog` groups with an atomic winner claim) ([ADR-00543](../adr/ADR-00543.md))",
+              "Complete tier-1 cooperative preemption ([ADR-00542](../adr/ADR-00542.md)): a `sysmon` thread flags an over-budget goroutine; the compiler emits `klainsync_safepoint()` at function entry and every loop back-edge (for/while/do-while/for-of/for-in), gated on the resolver's `UsesKlainSync` flag so a program that never imports the module emits and links nothing. Signal-based async preemption is unnecessary given full loop instrumentation",
+              "Blocking-call resilience: work-stealing drains a blocked M's goroutines; when all Ms block at once, a bounded rescue M is spawned so the program doesn't deadlock",
+              "Links only when `klain:sync` is imported; `-mm=gc` registers each M and each goroutine stack with Boehm",
+              "Validated standalone (rendezvous, 100-goroutine fan-in, close-drain, select, `GOMAXPROCS=1` preemption, all-Ms-blocked rescue) clean under ThreadSanitizer; E2E on darwin/arm64"
+            ]
           }
         ]
       }

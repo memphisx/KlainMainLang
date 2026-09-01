@@ -244,12 +244,20 @@ import klaintopImg from 'src/assets/tui/klaintop.png'
 import explorerImg from 'src/assets/webview/listing.png'
 import todoImg from 'src/assets/tui/todo.png'
 import filesImg from 'src/assets/tui/files.png'
+import loadtestImg from 'src/assets/tui/loadtest.png'
 
 const gh = GITHUB_URL
-const tab = ref('server')
+const tab = ref('concurrency')
 
 // Showcase gallery — real example apps, each linking to its walkthrough.
 const gallery = [
+  {
+    to: '/docs/guides/concurrent-load-tester', img: loadtestImg, tag: 'Concurrency',
+    alt: 'A terminal load-test dashboard with a progress bar, requests-per-second, latency percentiles, and a histogram',
+    title: 'A concurrent load tester',
+    body: 'Goroutines drive requests through a service in parallel while a live dashboard shows throughput, latency percentiles, and a histogram — Go-style channels and select in one binary.',
+    cta: 'Read the guide'
+  },
   {
     to: '/docs/guides/tui/live-dashboard', img: klaintopImg, tag: 'Terminal UI',
     alt: 'A terminal process manager with CPU/memory bars and a process table',
@@ -281,6 +289,7 @@ const gallery = [
 ]
 
 const tabs = [
+  { key: 'concurrency', file: 'parallel_primes.ts', blurb: 'Go-style goroutines & channels' },
   { key: 'server', file: 'http_server.ts', blurb: 'An HTTP/1.1 + HTTP/2 server' },
   { key: 'desktop', file: 'embedded.ts', blurb: 'A single-file desktop app' },
   { key: 'fetch', file: 'fetch.ts', blurb: 'async / await + typed JSON' },

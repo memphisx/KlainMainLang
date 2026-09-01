@@ -1,82 +1,165 @@
 {
-  "surface": "workers",
-  "title": "Concurrency & workers",
-  "kind": "node",
-  "statusPage": "CONCURRENCY-WORKERS.md",
-  "coversRows": "all",
-  "coverage": { "loose": "3/3", "loosePct": 100, "strict": "0/3", "strictPct": 0 },
-  "lede": "Real OS threads with cross-thread messaging, offered under two surfaces at once: Node's worker_threads and the browser Worker/onmessage shape. The pervasive divergence is rigidity: messaging is statically typed and monomorphic — one message type per direction, one listener per event, arrow-function literals only — and worker paths must be string literals because each worker file compiles into the same binary as its own entry function. Payloads are structured-clone-safe values (no arrays through onmessage), with SharedArrayBuffer/Atomics and MessagePort crossing by reference for shared-memory work.",
-  "entries": [
+ "surface": "workers",
+ "title": "Concurrency & workers",
+ "kind": "node",
+ "statusPage": "CONCURRENCY-WORKERS.md",
+ "coversRows": "all",
+ "coverage": {
+  "loose": "4/4",
+  "loosePct": 100,
+  "strict": "0/4",
+  "strictPct": 0
+ },
+ "lede": "Real OS threads with cross-thread messaging, offered under two surfaces at once: Node's worker_threads and the browser Worker/onmessage shape. The pervasive divergence is rigidity: messaging is statically typed and monomorphic — one message type per direction, one listener per event, arrow-function literals only — and worker paths must be string literals because each worker file compiles into the same binary as its own entry function. Payloads are structured-clone-safe values (no arrays through onmessage), with SharedArrayBuffer/Atomics and MessagePort crossing by reference for shared-memory work.",
+ "entries": [
+  {
+   "id": "workers.worker",
+   "name": "Worker",
+   "statusRow": "Worker",
+   "signature": "new Worker(path: string, opts?: { workerData?: T }): Worker",
+   "badge": "caveats",
+   "description": "Spawns a real OS thread running a worker module, exposing both the Node worker_threads API (w.on('message', ...), import { Worker } from 'worker_threads') and the ambient browser shape (new Worker, w.onmessage, e.data). The worker file compiles into the same binary as its own entry function; each thread runs its own event loop with thread-local runtime singletons, and messages travel over pipes as pointer envelopes deep-copied at the boundary. SharedArrayBuffer + Atomics (add/load/wait/notify/isLockFree) give lock-free shared-memory counters without messages carrying the value.",
+   "params": [
     {
-      "id": "workers.worker",
-      "name": "Worker",
-      "statusRow": "Worker",
-      "signature": "new Worker(path: string, opts?: { workerData?: T }): Worker",
-      "badge": "caveats",
-      "description": "Spawns a real OS thread running a worker module, exposing both the Node worker_threads API (w.on('message', ...), import { Worker } from 'worker_threads') and the ambient browser shape (new Worker, w.onmessage, e.data). The worker file compiles into the same binary as its own entry function; each thread runs its own event loop with thread-local runtime singletons, and messages travel over pipes as pointer envelopes deep-copied at the boundary. SharedArrayBuffer + Atomics (add/load/wait/notify/isLockFree) give lock-free shared-memory counters without messages carrying the value.",
-      "params": [
-        { "name": "path", "type": "string", "desc": "String literal path to the worker module." },
-        { "name": "opts", "type": "{ workerData?: T }", "desc": "Optional initial data (structured-clone-safe, or a SharedArrayBuffer/MessagePort by reference)." }
-      ],
-      "returns": { "type": "Worker", "desc": "A handle exposing postMessage, on/onmessage, and terminate." },
-      "exampleKey": "workers/parallel_sum",
-      "snippet": "const a = new Worker('./sum_worker.ts', { workerData: \"left\" });\na.on('message', (partial: number) => { total += partial; a.terminate(); });\na.postMessage(left);",
-      "differences": [
-        "One listener per event, arrow-function literals only",
-        "One message type per direction, declared by annotation",
-        "Payloads: structured-clone-safe values only (plus `SharedArrayBuffer`/`MessagePort`, which cross by reference); strings share their buffer across threads; no arrays through `onmessage`/`e.data`",
-        "`'error'` carries the message string, not an Error object; no `self.onerror`",
-        "`terminate()` is cooperative, keeps queued messages, always exits 1",
-        "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
-        "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"
-      ],
-      "seeAlso": ["workers.broadcastchannel", "workers.messageport"],
-      "spec": { "mdn": "https://nodejs.org/api/worker_threads.html#class-worker" }
+     "name": "path",
+     "type": "string",
+     "desc": "String literal path to the worker module."
     },
     {
-      "id": "workers.broadcastchannel",
-      "name": "BroadcastChannel",
-      "statusRow": "BroadcastChannel",
-      "signature": "new BroadcastChannel(name: string): BroadcastChannel",
-      "badge": "caveats",
-      "description": "Name-keyed pub/sub across threads via a process-wide registry: every subscriber to a channel name gets its own deep copy of each posted message (a synthesized clone thunk, called once per subscriber). Delivery rides each thread's select() loop over per-endpoint pipes, works same-thread and across workers, and a registered onmessage holds its thread's loop alive until close() (Node ref semantics).",
-      "params": [
-        { "name": "name", "type": "string", "desc": "String literal channel name; fixes one message type program-wide." }
-      ],
-      "returns": { "type": "BroadcastChannel", "desc": "An endpoint with postMessage, onmessage, and close." },
-      "exampleKey": "workers/broadcast",
-      "snippet": "const bc = new BroadcastChannel('news');\nsetTimeout(() => { bc.postMessage(\"markets up in Thessaloniki\"); }, 100);",
-      "differences": [
-        "Channel name must be a string literal; one message type per channel name, program-wide (first `postMessage` or annotated `onmessage` fixes it)",
-        "`onmessage` property only (arrow-function literal, `(e: { data: T })`); no `addEventListener`, no `'messageerror'`",
-        "Array payloads not supported through `onmessage`",
-        "`close()` leaks the endpoint's two pipe fds by design (closes a race against an in-flight post)",
-        "`-mm=manual` leaks per delivery (payload ownership passes to the listener)"
-      ],
-      "seeAlso": ["workers.worker", "workers.messageport"],
-      "spec": { "mdn": "https://nodejs.org/api/worker_threads.html#class-broadcastchannel-extends-eventtarget" }
-    },
-    {
-      "id": "workers.messageport",
-      "name": "MessageChannel / MessagePort",
-      "statusRow": "MessageChannel / MessagePort",
-      "signature": "new MessageChannel<T = number>(): { port1: MessagePort<T>, port2: MessagePort<T> }",
-      "badge": "caveats",
-      "description": "A typed port pair whose two ports talk directly over one shared endpoint runtime (a pipe per endpoint, peer-linked halves). A port crosses a worker boundary whole — as workerData or as an entire postMessage payload — and is shared, not neutered: the sender must stop using a sent port. Whichever thread registers a port's onmessage drains it, so no adoption protocol is needed when a port moves to a worker. Importable under Node's module name (import { MessageChannel, MessagePort, BroadcastChannel } from 'worker_threads').",
-      "params": [
-        { "name": "T", "type": "type param", "desc": "Message type fixed at construction (default number), symmetric for both ports." }
-      ],
-      "returns": { "type": "{ port1, port2 }", "desc": "A pair of peer-linked MessagePorts." },
-      "exampleKey": "workers/port_pair",
-      "snippet": "const ch = new MessageChannel<string>();\nconst w = new Worker('./port_worker.ts', { workerData: ch.port2 });\nch.port1.onmessage = (e: { data: string }) => { console.log(\"shouted back: \" + e.data); };",
-      "differences": [
-        "Message type fixed at construction (`new MessageChannel<T>()`, default `number`), symmetric for both ports",
-        "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload — and is **shared, not neutered**: the sender must stop using a sent port (unsynchronized use from two threads is memory-safe but unordered); the `MessageChannel` pair box itself never crosses",
-        "`onmessage` property only (arrow literal); no `on('message')`, no `start()`/`'close'` event, no array payloads via `onmessage`",
-        "`close()` leaks two pipe fds; `-mm=manual` leaks per message"
-      ],
-      "seeAlso": ["workers.worker", "workers.broadcastchannel"],
-      "spec": { "mdn": "https://nodejs.org/api/worker_threads.html#class-messageport-extends-eventtarget" }
+     "name": "opts",
+     "type": "{ workerData?: T }",
+     "desc": "Optional initial data (structured-clone-safe, or a SharedArrayBuffer/MessagePort by reference)."
     }
-  ]
+   ],
+   "returns": {
+    "type": "Worker",
+    "desc": "A handle exposing postMessage, on/onmessage, and terminate."
+   },
+   "exampleKey": "workers/parallel_sum",
+   "snippet": "const a = new Worker('./sum_worker.ts', { workerData: \"left\" });\na.on('message', (partial: number) => { total += partial; a.terminate(); });\na.postMessage(left);",
+   "differences": [
+    "One listener per event, arrow-function literals only",
+    "One message type per direction, declared by annotation",
+    "Payloads: structured-clone-safe values only (plus `SharedArrayBuffer`/`MessagePort`, which cross by reference); strings share their buffer across threads; no arrays through `onmessage`/`e.data`",
+    "`'error'` carries the message string, not an Error object; no `self.onerror`",
+    "`terminate()` is cooperative, keeps queued messages, always exits 1",
+    "Worker path must be a string literal; a worker module can't also be imported, can't spawn workers, and its named functions can't read its own top-level bindings",
+    "`-mm=manual` leaks per message; no combining with `http.listen({workers:N})`"
+   ],
+   "seeAlso": [
+    "workers.broadcastchannel",
+    "workers.messageport"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/worker_threads.html#class-worker"
+   }
+  },
+  {
+   "id": "workers.broadcastchannel",
+   "name": "BroadcastChannel",
+   "statusRow": "BroadcastChannel",
+   "signature": "new BroadcastChannel(name: string): BroadcastChannel",
+   "badge": "caveats",
+   "description": "Name-keyed pub/sub across threads via a process-wide registry: every subscriber to a channel name gets its own deep copy of each posted message (a synthesized clone thunk, called once per subscriber). Delivery rides each thread's select() loop over per-endpoint pipes, works same-thread and across workers, and a registered onmessage holds its thread's loop alive until close() (Node ref semantics).",
+   "params": [
+    {
+     "name": "name",
+     "type": "string",
+     "desc": "String literal channel name; fixes one message type program-wide."
+    }
+   ],
+   "returns": {
+    "type": "BroadcastChannel",
+    "desc": "An endpoint with postMessage, onmessage, and close."
+   },
+   "exampleKey": "workers/broadcast",
+   "snippet": "const bc = new BroadcastChannel('news');\nsetTimeout(() => { bc.postMessage(\"markets up in Thessaloniki\"); }, 100);",
+   "differences": [
+    "Channel name must be a string literal; one message type per channel name, program-wide (first `postMessage` or annotated `onmessage` fixes it)",
+    "`onmessage` property only (arrow-function literal, `(e: { data: T })`); no `addEventListener`, no `'messageerror'`",
+    "Array payloads not supported through `onmessage`",
+    "`close()` leaks the endpoint's two pipe fds by design (closes a race against an in-flight post)",
+    "`-mm=manual` leaks per delivery (payload ownership passes to the listener)"
+   ],
+   "seeAlso": [
+    "workers.worker",
+    "workers.messageport"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/worker_threads.html#class-broadcastchannel-extends-eventtarget"
+   }
+  },
+  {
+   "id": "workers.messageport",
+   "name": "MessageChannel / MessagePort",
+   "statusRow": "MessageChannel / MessagePort",
+   "signature": "new MessageChannel<T = number>(): { port1: MessagePort<T>, port2: MessagePort<T> }",
+   "badge": "caveats",
+   "description": "A typed port pair whose two ports talk directly over one shared endpoint runtime (a pipe per endpoint, peer-linked halves). A port crosses a worker boundary whole — as workerData or as an entire postMessage payload — and is shared, not neutered: the sender must stop using a sent port. Whichever thread registers a port's onmessage drains it, so no adoption protocol is needed when a port moves to a worker. Importable under Node's module name (import { MessageChannel, MessagePort, BroadcastChannel } from 'worker_threads').",
+   "params": [
+    {
+     "name": "T",
+     "type": "type param",
+     "desc": "Message type fixed at construction (default number), symmetric for both ports."
+    }
+   ],
+   "returns": {
+    "type": "{ port1, port2 }",
+    "desc": "A pair of peer-linked MessagePorts."
+   },
+   "exampleKey": "workers/port_pair",
+   "snippet": "const ch = new MessageChannel<string>();\nconst w = new Worker('./port_worker.ts', { workerData: ch.port2 });\nch.port1.onmessage = (e: { data: string }) => { console.log(\"shouted back: \" + e.data); };",
+   "differences": [
+    "Message type fixed at construction (`new MessageChannel<T>()`, default `number`), symmetric for both ports",
+    "A port crosses a worker boundary only whole — as `workerData` or as the entire `postMessage` payload — and is **shared, not neutered**: the sender must stop using a sent port (unsynchronized use from two threads is memory-safe but unordered); the `MessageChannel` pair box itself never crosses",
+    "`onmessage` property only (arrow literal); no `on('message')`, no `start()`/`'close'` event, no array payloads via `onmessage`",
+    "`close()` leaks two pipe fds; `-mm=manual` leaks per message"
+   ],
+   "seeAlso": [
+    "workers.worker",
+    "workers.broadcastchannel"
+   ],
+   "spec": {
+    "mdn": "https://nodejs.org/api/worker_threads.html#class-messageport-extends-eventtarget"
+   }
+  },
+  {
+   "id": "workers.klainsync",
+   "name": "klain:sync goroutines, channels, select",
+   "statusRow": "klain:sync goroutines, channels, select (go, Channel<T>, select)",
+   "signature": "import { go, Channel, select, defaultCase } from 'klain:sync'; go(fn: () => void); new Channel<T>(capacity?); select(...cases)",
+   "badge": "caveats",
+   "description": "An explicitly-non-Node opt-in: Go's concurrency model, not a JS approximation. go(fn) spawns a cheap goroutine onto a GMP work-stealing scheduler (one logical processor + pinned OS thread per GOMAXPROCS, global run-queue backstop, half-queue stealing) in an embedded C runtime linked only when klain:sync is imported. Channel<T> is a Go channel: synchronous blocking send/receive (not await) that parks the goroutine — the OS thread keeps running others — as an unbuffered rendezvous or buffered ring, with close() and `for (const v of ch)` range. select(...) is Go's random-fair select over recvCase/sendCase/defaultCase. Cooperative preemption is complete: a sysmon thread flags an over-budget goroutine and compiler-inserted safepoints at every function entry and loop back-edge yield it, so no goroutine can starve the others.",
+   "params": [
+    {
+     "name": "fn",
+     "type": "() => void",
+     "desc": "go(fn): the goroutine body; captures channels from its enclosing scope."
+    },
+    {
+     "name": "capacity",
+     "type": "number",
+     "desc": "new Channel<T>(capacity): 0/omitted is an unbuffered rendezvous; >0 is a buffered ring."
+    },
+    {
+     "name": "...cases",
+     "type": "SelectCase[]",
+     "desc": "select(...): ch.recvCase(handler) / ch.sendCase(value, handler) / defaultCase(handler); runs one ready case, or blocks until one fires (unless a defaultCase is present)."
+    }
+   ],
+   "returns": {
+    "type": "void | Channel<T>",
+    "desc": "go returns nothing; new Channel<T> returns a channel with .send(v: T)/.receive(): T/.close()."
+   },
+   "differences": [
+    "Channel ops are synchronous blocking, not await; the element is a fixed 8-byte slot (number/string/object/boolean).",
+    "select cases are ch.recvCase(v => ...) / ch.sendCase(x, () => ...) / defaultCase(() => ...); a recv handler gets the value but not the closed flag — use the for-of range (which ends on close) to detect it.",
+    "Fixed goroutine stacks (default 256 KiB, tunable via KLAINSYNC_STACK_KB); true growable/moving stacks are gated on precise stack maps. Blocking-syscall P-handoff is a bounded sysmon rescue-M approximation. send-after-close / double-close abort the process (Go-panic parity); native-only."
+   ],
+   "seeAlso": [
+    "workers.worker"
+   ],
+   "spec": "https://go.dev/ref/spec#Go_statements"
+  }
+ ]
 }

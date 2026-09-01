@@ -583,3 +583,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00538](ADR-00538.md) | `cond ? scalar : null` produces a nullable-scalar aggregate | Extends [ADR-00537](ADR-00537.md); Implements [TDD-00064](../tdd/TDD-00064.md) |
 | [00539](ADR-00539.md) | optional chaining `arr?.prop` on an array no longer miscompiles | Extends [ADR-00061](ADR-00061.md) |
 | [00540](ADR-00540.md) | `node:sqlite` V1 — synchronous DatabaseSync/StatementSync over libsqlite3 | Implements [TDD-00151](../tdd/TDD-00151.md) (V1 — Layers 1–3, row-shape Option A) |
+| [00541](ADR-00541.md) | `klain:sync` Stage 1 — GMP goroutine scheduler, `go`, and CSP channels | `Implements [TDD-00143](../tdd/TDD-00143.md)` |
+| [00542](ADR-00542.md) | `klain:sync` Stage 2 — cooperative preemption (sysmon + safepoints) | `Implements [TDD-00143](../tdd/TDD-00143.md)`, `Extends [ADR-00541](ADR-00541.md)` |
+| [00543](ADR-00543.md) | `klain:sync` Stages 3–5 — select, channel range, P-handoff, complete preemption, tunable stacks | `Implements [TDD-00143](../tdd/TDD-00143.md)`, `Extends [ADR-00542](ADR-00542.md)` |

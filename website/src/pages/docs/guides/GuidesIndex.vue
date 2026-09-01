@@ -31,6 +31,18 @@
         </p>
         <span class="km-guidecard__go">Start the walkthrough →</span>
       </router-link>
+
+      <router-link to="/docs/guides/concurrent-load-tester" class="km-guidecard">
+        <span class="km-guidecard__tag">Concurrency</span>
+        <h3>Build a load tester with <code>klain:sync</code></h3>
+        <p>
+          A closed-loop load generator: a pool of goroutines drives requests through an in-process
+          service in parallel while a live <code>klain:tui</code> dashboard shows throughput,
+          latency percentiles, and a histogram — goroutines, channels, and <code>select</code> in
+          one runnable file.
+        </p>
+        <span class="km-guidecard__go">Start the walkthrough →</span>
+      </router-link>
     </div>
 
     <p class="km-note">

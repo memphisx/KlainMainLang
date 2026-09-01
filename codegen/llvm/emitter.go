@@ -301,6 +301,12 @@ type Emitter struct {
 	usedWebview                bool
 	webviewConstructed         bool
 	webviewThunkCtr            int
+	// usedSync links the klain:sync goroutine runtime (TDD-00143).
+	usedSync bool
+	// usesSyncProgram is set from prog.UsesKlainSync before body emission: the
+	// program imports klain:sync, so the safepoint-insertion pass emits
+	// cooperative preempt checks at function entry and loop back-edges.
+	usesSyncProgram bool
 	webviewPumpEmitted         bool
 	webviewReturnRunnerEmitted bool
 	// webviewTypedRunners caches per-inner-type async-typed-bind settlement
@@ -1516,6 +1522,15 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// modules), so every gc-fiber emission site can pick the thread-aware
 	// stackbottom mechanism up front.
 	e.hasWorkers = len(prog.WorkerModules) > 0
+
+	// TDD-00143 Stage 2: if the program imports klain:sync, the safepoint pass
+	// emits cooperative preempt checks (function entry + loop back-edges). Force
+	// the runtime's extern decls + link now so those `call @klainsync_safepoint`
+	// sites resolve regardless of where the first go/channel is emitted.
+	e.usesSyncProgram = prog.UsesKlainSync
+	if e.usesSyncProgram {
+		e.ensureSyncRuntime()
+	}
 
 	// Pass -2: rewrite each top-level `const/let/var X = class {...}` binding
 	// into a nominal `class X {...}` declaration (TDD-00063 Stage 4), before

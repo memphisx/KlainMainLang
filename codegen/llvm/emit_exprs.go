@@ -156,6 +156,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitNewBroadcastChannelExpression(ex)
 	case *ast.NewMessageChannelExpression:
 		return e.emitNewMessageChannelExpression(ex)
+	case *ast.NewChannelExpression:
+		return e.emitNewChannelExpression(ex)
 	case *ast.NewTypedArrayExpression:
 		return e.emitNewTypedArrayAggregate(ex)
 	case *ast.ImportCallExpression:

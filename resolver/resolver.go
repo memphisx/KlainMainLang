@@ -657,7 +657,25 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 	}
 	merged.Body = append(merged.Body, unwrap(files[entryAbs].prog.Body)...)
 	mergeNamespaces(files[entryAbs].prog)
+	for _, f := range files {
+		if fileImportsKlainSync(f.prog) {
+			merged.UsesKlainSync = true
+			break
+		}
+	}
 	return merged, nil
+}
+
+// fileImportsKlainSync reports whether a file's top-level imports include
+// `klain:sync` (TDD-00143). Imports are top-level statements, so this is a
+// shallow scan — no full-AST walk needed.
+func fileImportsKlainSync(prog *ast.Program) bool {
+	for _, stmt := range prog.Body {
+		if imp, ok := stmt.(*ast.ImportDeclaration); ok && imp.Source == "klain:sync" {
+			return true
+		}
+	}
+	return false
 }
 
 // validateCyclicFile enforces the restriction that still applies to a

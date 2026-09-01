@@ -316,6 +316,7 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
+	e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 	if s.Test != nil {
 		cond, err := e.emitExpr(s.Test)
 		if err != nil {
@@ -357,6 +358,7 @@ func (e *Emitter) emitWhile(s *ast.WhileStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
+	e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 	cond, err := e.emitExpr(s.Test)
 	if err != nil {
 		return err
@@ -581,6 +583,14 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
 	}
 
+	// A klain:sync Channel ranges until close (TDD-00143 Stage 3): each
+	// iteration receives one value; the loop ends when the channel is closed
+	// and drained — the `for (const v of ch) {}` equivalent of Go's channel
+	// range. The channel is evaluated once.
+	if objTy := e.inferExprType(s.Iterable); objTy.IsChannel {
+		return e.emitForOfChannel(s, objTy, condL, bodyL, incL, endL)
+	}
+
 	// Stage 1a (TDD-00009): a class instance whose class declares a zero-arg
 	// `next(): T | null` method iterates via repeated next() calls rather
 	// than a pre-materialized array — a genuinely different loop shape
@@ -677,6 +687,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 			e.emitLabel(condL)
+			e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 			idxV, lenV, cond := e.freshReg(), e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxV, idxPtr))
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenV, kLen))
@@ -824,6 +835,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
+	e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 	idxVal := e.freshReg()
 	lenVal := e.freshReg()
 	condReg := e.freshReg()
@@ -1126,6 +1138,7 @@ func (e *Emitter) emitDoWhile(s *ast.DoWhileStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
+	e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 	cond, err := e.emitExpr(s.Test)
 	if err != nil {
 		return err
@@ -1194,6 +1207,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
+	e.emitSafepoint() // loop back-edge preempt check (TDD-00143 Stage 2)
 	idxVal := e.freshReg()
 	lenVal := e.freshReg()
 	condReg := e.freshReg()

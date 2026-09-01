@@ -266,6 +266,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	}
 
 	// Emit body statements.
+	e.emitSafepoint() // function-entry preempt check (TDD-00143 Stage 2)
 	for _, stmt := range decl.Body.Body {
 		if err := e.emitStmt(stmt); err != nil {
 			return err
@@ -1324,6 +1325,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	}
 
 	// Emit the body.
+	e.emitSafepoint() // function-entry preempt check (TDD-00143 Stage 2)
 	if af.Block != nil {
 		for _, stmt := range af.Block.Body {
 			if err := e.emitStmt(stmt); err != nil {
@@ -2075,6 +2077,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	}
 
 	// Emit the body.
+	e.emitSafepoint() // function-entry preempt check (TDD-00143 Stage 2)
 	for _, stmt := range fe.Body.Body {
 		if err := e.emitStmt(stmt); err != nil {
 			return Value{}, err

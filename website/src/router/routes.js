@@ -58,6 +58,7 @@ const routes = [
       { path: 'guides/tui/input-state', name: 'guides-tui-input-state', component: () => import('pages/docs/guides/TuiInputState.vue') },
       { path: 'guides/tui/live-dashboard', name: 'guides-tui-live-dashboard', component: () => import('pages/docs/guides/TuiLiveDashboard.vue') },
       { path: 'guides/webview', name: 'guides-webview', component: () => import('pages/docs/guides/BuildWebviewApp.vue') },
+      { path: 'guides/concurrent-load-tester', name: 'guides-load-tester', component: () => import('pages/docs/guides/ConcurrentLoadTester.vue') },
       { path: 'guides/tui-app', redirect: { name: 'guides-tui-layout' } },
       { path: 'examples', name: 'examples', component: () => import('pages/docs/Examples.vue') },
       ...referenceRoutes,

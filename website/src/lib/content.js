@@ -5,6 +5,42 @@
 export const GITHUB_URL = 'https://github.com/memphisx/KlainMainLang'
 
 export const samples = {
+  concurrency: {
+    filename: 'parallel_primes.ts',
+    code: `import { go, Channel, select, defaultCase } from 'klain:sync'
+
+const primes = new Channel<number>(1024)  // primes stream to the collector
+const done = new Channel<number>(0)        // a worker signals when finished
+
+// Fan out: 8 goroutines test interleaved slices, in parallel on every core.
+for (let id = 0; id < 8; id++) {
+  go(() => {
+    for (let n = 2 + id; n <= 500000; n += 8) {
+      if (isPrime(n)) primes.send(n)
+    }
+    done.send(id)
+  })
+}
+
+// Fan in: select takes whichever channel is ready — count primes as they
+// arrive, tally completions, then drain the last buffered results.
+let count = 0, finished = 0
+while (finished < 8) {
+  select(
+    primes.recvCase((p: number) => { count += 1 }),
+    done.recvCase((id: number) => { finished += 1 }),
+  )
+}
+let draining = true
+while (draining) {
+  select(
+    primes.recvCase((p: number) => { count += 1 }),
+    defaultCase(() => { draining = false }),
+  )
+}
+console.log(\`primes below 500000: \${count}\`)  // 41538`
+  },
+
   generics: {
     filename: 'generics.ts',
     code: `function identity<T>(x: T): T {

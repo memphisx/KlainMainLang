@@ -548,6 +548,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "sqlite__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// klain:sync's Channel is a parse-time constructor — identity
+				// (TDD-00143). `go` is a function member and takes the marker
+				// member-expression route below.
+				if ref.Marker == "sync__kml_builtin" && ref.Member == "Channel" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
@@ -843,6 +849,10 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 		if e.Options != nil {
 			e.Options = rewriteExpr(e.Options, sc, lu)
+		}
+	case *ast.NewChannelExpression:
+		if e.Capacity != nil {
+			e.Capacity = rewriteExpr(e.Capacity, sc, lu)
 		}
 	case *ast.NewWebviewExpression:
 		// The options object may reference bindings (a variable of functions),

@@ -116,6 +116,19 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			elemTy = e.resolveType(init.ElemType)
 		}
 		return SetType(elemTy), true
+	case *ast.NewChannelExpression:
+		// A klain:sync channel is a single ptr slot; unlike the connection
+		// handles isHandleNewExpr excludes (Worker/MessageChannel open a
+		// thread/socket at construction), klainsync_chan_new just allocates an
+		// hchan — no thread, no fd, scheduler starts lazily on first `go` — so
+		// it is safe to promote to a module global. Promoting it is what lets a
+		// named `function` reference a top-level channel with its type intact
+		// (matching the emitVarDecl case for the same node).
+		msgTy := TypeI64
+		if init.TypeArg != nil {
+			msgTy = e.resolveType(init.TypeArg)
+		}
+		return ChannelType(msgTy), true
 	case *ast.NewWeakMapExpression:
 		keyTy, valTy := TypePtr, TypeI64
 		if init.KeyType != nil {
@@ -613,6 +626,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				ty = MessageChannelType(e.resolveType(init.TypeArg))
 			} else {
 				ty = MessageChannelType(TypeI64)
+			}
+		case *ast.NewChannelExpression:
+			if init.TypeArg != nil {
+				ty = ChannelType(e.resolveType(init.TypeArg))
+			} else {
+				ty = ChannelType(TypeI64)
 			}
 		case *ast.NewDataViewExpression:
 			ty = DataViewType()

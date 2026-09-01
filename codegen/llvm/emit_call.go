@@ -320,6 +320,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "tui__kml_builtin" {
 			return e.emitTuiModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "sync__kml_builtin" {
+			return e.emitSyncModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsChannel {
+			return e.emitChannelMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
 		if e.inferExprType(mem.Object).IsReadline {
 			return e.emitReadlineMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}

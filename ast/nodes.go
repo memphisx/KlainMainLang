@@ -87,6 +87,12 @@ type Program struct {
 	// into Body like any dependency's; only its var declarations and
 	// executable statements stay here.
 	WorkerModules []WorkerModule
+	// UsesKlainSync is set by the resolver on the merged program when any file
+	// imports `klain:sync` (TDD-00143). Known before codegen so the safepoint-
+	// insertion pass can decide up front whether to emit cooperative preempt
+	// checks — and only then, so a program that never imports the module is
+	// wholly untouched and links none of the runtime.
+	UsesKlainSync bool
 }
 
 // NSAliasDecl is one `import X = Y.Z` alias declaration (ADR-00456).
@@ -1634,6 +1640,23 @@ func (n *NewMessageChannelExpression) GetPos() Pos { return n.pos }
 
 func NewNewMessageChannelExpression(typeArg *TypeAnnotation, pos Pos) *NewMessageChannelExpression {
 	return &NewMessageChannelExpression{TypeArg: typeArg, pos: pos}
+}
+
+// NewChannelExpression is `new Channel<T>(capacity)` — a klain:sync CSP channel
+// (TDD-00143). TypeArg is the element type T (nil → default i64); Capacity is
+// the buffer size (0/unbuffered when omitted).
+type NewChannelExpression struct {
+	TypeArg  *TypeAnnotation
+	Capacity Expression
+	pos      Pos
+}
+
+func (*NewChannelExpression) nodeMarker()   {}
+func (*NewChannelExpression) exprMarker()   {}
+func (n *NewChannelExpression) GetPos() Pos { return n.pos }
+
+func NewNewChannelExpression(typeArg *TypeAnnotation, capacity Expression, pos Pos) *NewChannelExpression {
+	return &NewChannelExpression{TypeArg: typeArg, Capacity: capacity, pos: pos}
 }
 
 // NewTypedArrayExpression is `new Int8Array(...)`/`new Uint8Array(...)`/.../
