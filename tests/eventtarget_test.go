@@ -55,7 +55,7 @@ func TestE2EEventTargetDispatchReturn(t *testing.T) {
 	assertOutput(t, `
 const bus = new EventTarget()
 bus.addEventListener("z", (e: Event) => { e.preventDefault() })
-const ok = bus.dispatchEvent(new Event("z"))
+const ok = bus.dispatchEvent(new Event("z", { cancelable: true }))
 console.log(ok)
 `, "false")
 }

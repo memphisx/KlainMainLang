@@ -42,6 +42,9 @@ func (e *Emitter) ensureBigInt() {
 		"declare ptr @__kml_bigint_not(ptr)",
 		"declare i32 @__kml_bigint_cmp(ptr, ptr)",
 		"declare i32 @__kml_bigint_cmp_double(ptr, double)",
+		"declare ptr @__kml_bigint_as_intn(i64, ptr)",
+		"declare ptr @__kml_bigint_as_uintn(i64, ptr)",
+		"declare double @__kml_bigint_to_double(ptr)",
 	} {
 		e.emitGlobal(d)
 	}
@@ -311,6 +314,39 @@ func (e *Emitter) emitBigIntUnary(fn string, val Value) Value {
 // emitBigIntConstructor lowers BigInt(x): from an integer number (i64) or a
 // string. A float or other type is a clean compile error (real JS RangeErrors a
 // non-integer number; we reject statically where we can).
+// emitBigIntAsN implements BigInt.asIntN(bits, x) / BigInt.asUintN(bits, x):
+// clamp a bigint to the low `bits` bits, either two's-complement signed
+// (asIntN) or non-negative (asUintN). `bits` is a non-negative integer; `x`
+// must be a bigint.
+func (e *Emitter) emitBigIntAsN(which string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: BigInt.%s takes exactly 2 arguments (bits, bigint)", pos.Line, pos.Col, which)
+	}
+	bitsVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !isIntegerNumberTy(bitsVal.Ty) && !bitsVal.Ty.Float {
+		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's first argument (bits) must be a number", pos.Line, pos.Col, which)
+	}
+	bits := e.coerce(bitsVal, TypeI64)
+	xVal, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	if !xVal.Ty.IsBigInt {
+		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's second argument must be a bigint", pos.Line, pos.Col, which)
+	}
+	e.ensureBigInt()
+	fn := "__kml_bigint_as_intn"
+	if which == "asUintN" {
+		fn = "__kml_bigint_as_uintn"
+	}
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(i64 %s, ptr %s)", reg, fn, bits.Ref, xVal.Ref))
+	return Value{Ref: reg, Ty: BigIntType()}, nil
+}
+
 func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: BigInt() takes exactly one argument", pos.Line, pos.Col)

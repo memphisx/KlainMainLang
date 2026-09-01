@@ -67,10 +67,8 @@
           {
             "feature": "`parseFloat(s)`",
             "status": "implemented",
-            "caveats": [
-              "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` → `16` and `\"0x1.8p3\"` → `12`, where real JS's `parseFloat` reads only the leading `0` (`0`) ([ADR-00287](../adr/ADR-00287.md))"
-            ],
             "notes": [
+              "A `\"0x\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))",
               "A no-conversion input returns a real `NaN`; the only accepted infinity spelling is the exact word `\"Infinity\"` (`\"inf\"`/case variants → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
             ]
           },
@@ -121,10 +119,8 @@
           {
             "feature": "`decodeURI(s)`",
             "status": "implemented",
-            "caveats": [
-              "Permissive on malformed input (passes a bad/truncated escape through as literal text) rather than throwing a `URIError`"
-            ],
             "notes": [
+              "A malformed escape (a lone/truncated `%`, or one not followed by two hex digits) throws a real `URIError` as in JS ([ADR-00556](../adr/ADR-00556.md))",
               "Does **not** decode a `%XX` escape representing a reserved character (leaves it as literal `%XX` text) — the one real behavioral difference from `decodeURIComponent`. See [ADR-00024](../adr/ADR-00024.md)."
             ]
           },
@@ -139,17 +135,16 @@
             "feature": "`decodeURIComponent(s)`",
             "status": "implemented",
             "notes": [
-              "Decodes every valid `%XX` escape unconditionally. See [ADR-00024](../adr/ADR-00024.md)."
+              "Decodes every valid `%XX` escape unconditionally; a malformed escape throws a real `URIError` as in JS ([ADR-00556](../adr/ADR-00556.md)). See [ADR-00024](../adr/ADR-00024.md)."
             ]
           },
           {
             "feature": "`atob(s)`",
             "status": "implemented",
-            "caveats": [
-              "Whitespace is rejected rather than stripped (forgiving-base64 strips it), and a length not a multiple of 4 silently drops the trailing group"
-            ],
             "notes": [
               "Base64 decode",
+              "WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing 2-/3-char group still decodes, and a remaining length ≡ 1 (mod 4) throws `InvalidCharacterError` ([ADR-00550](../adr/ADR-00550.md))",
+              "After the up-to-two trailing `=` are stripped, an interior or excess `=` in the data region throws `InvalidCharacterError` — `=` is accepted only as trailing padding, matching real atob ([ADR-00563](../adr/ADR-00563.md))",
               "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/ADR-00024.md).",
               "An input character outside the base64 alphabet throws a real `InvalidCharacterError` DOMException, matching WHATWG atob ([ADR-00458](../adr/ADR-00458.md))"
             ]
@@ -165,10 +160,10 @@
             "feature": "`structuredClone(obj)`",
             "status": "implemented",
             "caveats": [
-              "`Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased"
+              "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/ADR-00574.md)). A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/ADR-00591.md)); a cloned `AggregateError`'s `.errors` degrades to empty"
             ],
             "notes": [
-              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, and plain objects recurse; scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md)"
+              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md)"
             ]
           },
           {

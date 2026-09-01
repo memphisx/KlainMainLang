@@ -51,10 +51,18 @@ function make(): () => number {
 const closure = make();
 console.log(closure());  // 100
 
+// --- String.raw (ADR-00562): the raw, undecoded quasi text is preserved, so
+// escape sequences appear verbatim rather than being interpreted.
+console.log(String.raw`a\nb`);             // a\nb  (not a real newline)
+console.log(String.raw`C:\path\to\file`);  // C:\path\to\file
+const port = 8080;
+console.log(String.raw`http://localhost:${port}\api`);  // http://localhost:8080\api
+
 // --- V1 scope notes (see docs/tdd/TDD-00059.md):
-// - No `.raw` property on the `strings` array — this compiler's arrays are
-//   fixed-shape with no room for an extra property, and real `String.raw`
-//   was already scoped as separate, larger work (ADR-00028).
+// - A user-defined tag function still can't read a `.raw` property off the
+//   `strings` array — this compiler's arrays are fixed-shape with no room for
+//   an extra property; only the built-in `String.raw` tag exposes raw text
+//   (via a dedicated codegen path, ADR-00562).
 // - An arrow function can't be used as a tag: its first parameter (the
 //   strings array) is unavoidably array-typed, and array-typed closure
 //   parameters aren't supported at all yet — a broader, pre-existing gap,

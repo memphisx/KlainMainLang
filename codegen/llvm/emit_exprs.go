@@ -49,6 +49,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 	case *ast.CallExpression:
 		return e.emitCall(ex)
 	case *ast.TaggedTemplateExpression:
+		if e.isStringRawTag(ex.Tag) {
+			return e.emitStringRaw(ex)
+		}
 		return e.emitCall(desugarTaggedTemplate(ex))
 	case *ast.IndexExpression:
 		return e.emitIndex(ex)

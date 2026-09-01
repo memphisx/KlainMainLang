@@ -395,6 +395,23 @@ console.log(b)
 `, "default\nkeep")
 }
 
+// ADR-00600: logical assignment against a computed dynamic-object key.
+func TestE2EDynamicObjectLogicalAssign(t *testing.T) {
+	assertOutput(t, `
+const obj: { [k: string]: string } = {}
+obj["a"] = "hello"
+obj["a"] ??= "default"
+obj["b"] ??= "filled"
+console.log(obj["a"], obj["b"])
+const nums: { [k: string]: number } = {}
+nums["x"] = 0
+nums["x"] ||= 42
+nums["y"] = 5
+nums["y"] &&= 10
+console.log(nums["x"], nums["y"])
+`, "hello filled\n42 10")
+}
+
 func TestE2ELogicalAssignRHSNotEvaluatedWhenShortCircuited(t *testing.T) {
 	// The right side must never run down the short-circuited branch — not
 	// just "produce the right final value" but genuinely skip the call.
@@ -693,6 +710,23 @@ if (typeof x === 'number') { console.log('yes') } else { console.log('no') }
 `, "yes")
 }
 
+// ADR-00607: `typeof value.method` is "function" — a class method or a known
+// built-in string/array method — while a field, `length`, or an accessor still
+// answers through normal inference.
+func TestE2ETypeofValueMethodRef(t *testing.T) {
+	assertOutput(t, `
+class C { m(): number { return 1; } field: number = 5; get val(): string { return "x"; } }
+const c = new C()
+console.log(typeof c.m)
+console.log(typeof c.field)
+console.log(typeof c.val)
+console.log(typeof "hi".slice)
+console.log(typeof [1].push)
+console.log(typeof "hi".length)
+console.log(typeof [1].length)
+`, "function\nnumber\nstring\nfunction\nfunction\nnumber\nnumber")
+}
+
 func TestE2ETypeofFunction(t *testing.T) {
 	assertOutput(t, `
 function add(a: number, b: number): number { return a + b }
@@ -744,6 +778,20 @@ console.log(typeof K)
 console.log(typeof fetch)
 console.log(typeof totallyUndeclared)
 `, "function\nfunction\nfunction\nundefined\nobject\nfunction\nnumber\nfunction\nfunction\nfunction\nundefined")
+}
+
+// ADR-00596: typeof on a static method of a common namespace answers "function"
+// (was falling through to the "number" inference default).
+func TestE2ETypeofNamespaceStaticMethods(t *testing.T) {
+	assertOutput(t, `
+console.log(typeof Object.keys)
+console.log(typeof console.log)
+console.log(typeof Number.isInteger)
+console.log(typeof Date.now)
+console.log(typeof Array.isArray)
+console.log(typeof String.fromCharCode)
+console.log(typeof Number.MAX_VALUE)
+`, "function\nfunction\nfunction\nfunction\nfunction\nfunction\nnumber")
 }
 
 // --- const reassignment rejection ---
@@ -1037,6 +1085,16 @@ console.log(parseFloat("Infinityx"), parseFloat("-Infinity"));
 `, "NaN Infinity -Infinity Infinity\nNaN NaN Infinity Infinity\nNaN\nInfinity NaN NaN\nInfinity -Infinity")
 }
 
+// parseFloat does NOT accept a "0x"/"0X" hex prefix (unlike Number/ToNumber):
+// it reads the leading "0" and stops at the "x", so parseFloat("0x10") is 0,
+// while Number("0x10") stays 16 (ADR-00545).
+func TestE2EParseFloatHexPrefix(t *testing.T) {
+	assertOutput(t, `
+console.log(parseFloat("0x10"), parseFloat("0X1F"), parseFloat("0.5x"));
+console.log(parseFloat("-0x10"), Number("0x10"), Number.parseFloat("0xFF"));
+`, "0 0 0.5\n-0 16 0")
+}
+
 // Multi-argument console.log joins with single spaces on one line, a no-arg
 // call prints a bare newline, and -0 displays as "-0" (ADR-00285).
 func TestE2EConsoleLogSpacingAndNegZero(t *testing.T) {
@@ -1132,6 +1190,49 @@ o.k--;
 o.k--;
 console.log(o.k);
 `, "4")
+}
+
+// ADR-00606: a consumed postfix update on a side-effecting member receiver
+// evaluates that receiver exactly once (hoisted into a temp).
+func TestE2EPostfixSideEffectingReceiverEvaluatedOnce(t *testing.T) {
+	assertOutput(t, `
+let calls = 0;
+class Box { v: number = 0; }
+const b = new Box();
+function makeBox(): Box { calls++; return b; }
+const before = makeBox().v++;
+console.log(before);
+console.log(b.v);
+console.log(calls);
+`, "0\n1\n1")
+}
+
+// ADR-00606: a consumed postfix update hoists a side-effecting index expression
+// so it runs exactly once.
+func TestE2EPostfixSideEffectingIndexEvaluatedOnce(t *testing.T) {
+	assertOutput(t, `
+let calls = 0;
+const a = [10, 20, 30];
+function idx(): number { calls++; return 1; }
+const before = a[idx()]++;
+console.log(before);
+console.log(a[1]);
+console.log(calls);
+`, "20\n21\n1")
+}
+
+// ADR-00606: a consumed postfix update on a side-effecting array-producing
+// object evaluates that object exactly once.
+func TestE2EPostfixSideEffectingArrayObjectEvaluatedOnce(t *testing.T) {
+	assertOutput(t, `
+let calls = 0;
+const a = [10, 20, 30];
+function makeArr(): number[] { calls++; return a; }
+const before = makeArr()[1]++;
+console.log(before);
+console.log(a[1]);
+console.log(calls);
+`, "20\n21\n1")
 }
 
 func TestE2EUpdateIndexTarget(t *testing.T) {
@@ -1327,7 +1428,12 @@ console.log(firstOf([9, 8]))
 /** @param {function(number, number): number} fn */
 function run(fn) { return fn(6, 7) }
 console.log(run((a, b) => a * b))
-`, "number\nstring\n7\n9\n42")
+
+/** @type {Object.<string, number>} */
+const scores = { alice: 90 }
+scores["bob"] = 85
+console.log(scores["alice"] + scores["bob"])
+`, "number\nstring\n7\n9\n42\n175")
 }
 
 // TestE2EJSDocClassAndDocTags: the class/visibility tags (`@implements`,

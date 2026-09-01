@@ -111,7 +111,8 @@ import "fmt"
 //	  by __kml_eventsource_header_cb as headers arrive rather than queried
 //	  live at all (the only safe way to read it once a fast transfer may
 //	  already be cleaned up). A non-2xx status or a Content-Type that isn't
-//	  a text/event-stream prefix match is a *terminal* failure (permanently
+//	  a text/event-stream prefix match (case-insensitive, ADR-00555) is a
+//	  *terminal* failure (permanently
 //	  CLOSED, no reconnect, matching the real spec's "fail the connection"
 //	  step); a network-level failure before any status ever arrives
 //	  (pending->done set while status is still unavailable) is *retryable*
@@ -155,6 +156,7 @@ func (e *Emitter) ensureEventSourceRuntime() {
 	// headers already use) for building the Last-Event-ID replay header,
 	// and clock_gettime for reconnect-deadline math.
 	e.ensureStrncmp()
+	e.ensureStrncasecmp()
 	e.ensureAtoll()
 	e.ensureCurlSlist()
 	e.ensureClockGettime()
@@ -218,8 +220,8 @@ func (e *Emitter) ensureEventSourceRuntime() {
 	// caught by TestE2EEventSourceWrongContentTypeEndsClosedNoRetry hanging
 	// during development. userdata is the KML-level es_entry pointer
 	// (CURLOPT_HEADERDATA, set below) — matches on a literal
-	// "Content-Type:" prefix (case-sensitive — a documented narrowing,
-	// real servers overwhelmingly send this exact casing) and, on a match,
+	// "Content-Type:" prefix (case-insensitive via strncasecmp, matching
+	// HTTP's case-insensitive header names — ADR-00555) and, on a match,
 	// copies the trimmed value into a freshly malloc'd, null-terminated
 	// buffer stored into the entry's own contentType field (index 8) —
 	// overwriting any earlier line's copy is intentional, so a redirect
@@ -232,7 +234,7 @@ entry:
   br i1 %%longenough, label %%checkprefix, label %%skip
 
 checkprefix:
-  %%cmp = call i32 @strncmp(ptr %%buffer, ptr %[1]s, i64 13)
+  %%cmp = call i32 @strncasecmp(ptr %%buffer, ptr %[1]s, i64 13)
   %%matches = icmp eq i32 %%cmp, 0
   br i1 %%matches, label %%findvalstart, label %%skip
 
@@ -769,7 +771,7 @@ checkctprefix:
   br i1 %%ctlongenough, label %%doctcmp, label %%failterminal
 
 doctcmp:
-  %%ctcmp = call i32 @strncmp(ptr %%ctval, ptr %[5]s, i64 %[6]d)
+  %%ctcmp = call i32 @strncasecmp(ptr %%ctval, ptr %[5]s, i64 %[6]d)
   %%ctok = icmp eq i32 %%ctcmp, 0
   br i1 %%ctok, label %%doopen2, label %%failterminal
 

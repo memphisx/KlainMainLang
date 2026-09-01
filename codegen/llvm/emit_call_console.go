@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -365,14 +366,53 @@ func (e *Emitter) emitConsoleGroupEnd(args []ast.Expression, pos ast.Pos) (Value
 }
 
 // emitConsoleDir implements console.dir(obj, options?): prints obj exactly
-// like a single-argument console.log — options (real Node's depth/color
-// controls) is accepted syntactically but ignored, a documented V1 scope
-// narrowing.
+// like a single-argument console.log. The `depth` option (real Node's nesting
+// limit, `null` for unlimited) is honored by overriding the inspector's
+// recursion cap for this one call; `colors` is accepted syntactically but
+// ignored (this compiler emits no ANSI in inspected output).
 func (e *Emitter) emitConsoleDir(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: console.dir takes 1 or 2 arguments (obj, options?)", pos.Line, pos.Col)
 	}
-	return e.emitConsolePrint(args[:1], 1, "")
+	// Node's console.dir defaults to depth 2 (util.inspect's default), unlike a
+	// bare console.log; honor that here, overridable via { depth }.
+	e.inspectDepthCap = 2
+	e.inspectDepthSet = true
+	if len(args) == 2 {
+		ol, ok := args[1].(*ast.ObjectLiteral)
+		if !ok {
+			e.inspectDepthSet = false
+			return Value{}, fmt.Errorf("%d:%d: console.dir's options argument must be an object literal", pos.Line, pos.Col)
+		}
+		for _, prop := range ol.Properties {
+			switch prop.Key {
+			case "depth":
+				// A literal number caps nesting; `null` means unlimited (a large
+				// cap, since the walk is compile-time-bounded by the type anyway).
+				if _, isNull := prop.Value.(*ast.NullLiteral); isNull {
+					e.inspectDepthCap = 1 << 20
+				} else if nl, ok := prop.Value.(*ast.NumberLiteral); ok && !nl.IsBigInt {
+					n, convErr := strconv.Atoi(nl.Value)
+					if convErr != nil || n < 0 {
+						e.inspectDepthSet = false
+						return Value{}, fmt.Errorf("%d:%d: console.dir's depth option must be a non-negative integer literal or null", pos.Line, pos.Col)
+					}
+					e.inspectDepthCap = n
+				} else {
+					e.inspectDepthSet = false
+					return Value{}, fmt.Errorf("%d:%d: console.dir's depth option must be a literal number or null", pos.Line, pos.Col)
+				}
+			case "colors":
+				// Accepted, ignored — inspected output carries no ANSI here.
+			default:
+				e.inspectDepthSet = false
+				return Value{}, fmt.Errorf("%d:%d: console.dir options support only { depth, colors }", pos.Line, pos.Col)
+			}
+		}
+	}
+	res, err := e.emitConsolePrint(args[:1], 1, "")
+	e.inspectDepthSet = false // restore the default for subsequent inspects
+	return res, err
 }
 
 // consoleLabelArg resolves an optional single string-label argument (0 or 1
@@ -393,17 +433,50 @@ func (e *Emitter) consoleLabelArg(args []ast.Expression, name string, pos ast.Po
 	return val.Ref, nil
 }
 
+// emitConsoleTimeMapEnsure returns a register holding the lazily-created
+// console.time() backing map, creating it on first use — same shape as
+// emitConsoleCountMapEnsure below.
+func (e *Emitter) emitConsoleTimeMapEnsure() string {
+	e.ensureConsoleTimer()
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	cur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_console_time_map, align 8", cur))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cur, resPtr))
+
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
+	createL := e.freshLabel("consoletime.create")
+	doneL := e.freshLabel("consoletime.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, createL, doneL))
+
+	e.emitLabel(createL)
+	newMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_console_time_map, align 8", newMap))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	return result
+}
+
 // emitConsoleTime implements console.time(label?): stores the current
-// monotonic time. V1 scope: a single global slot, not a per-label map — see
-// ensureConsoleTimer.
+// monotonic time under the given label (default "default") in the per-label
+// backing map — see ensureConsoleTimer.
 func (e *Emitter) emitConsoleTime(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if _, err := e.consoleLabelArg(args, "time", pos); err != nil {
+	labelPtr, err := e.consoleLabelArg(args, "time", pos)
+	if err != nil {
 		return Value{}, err
 	}
-	e.ensureConsoleTimer()
+	mapReg := e.emitConsoleTimeMapEnsure()
 	nowReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
-	e.emitInstr(fmt.Sprintf("store double %s, ptr @__kml_console_time_start, align 8", nowReg))
+	bits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, nowReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, labelPtr, bits))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -416,16 +489,18 @@ func (e *Emitter) emitConsoleTimeEnd(args []ast.Expression, pos ast.Pos) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureConsoleTimer()
 	e.ensureSprintf()
 	e.ensureMalloc()
 	e.ensureStrlen()
 	e.ensurePrintf()
 
+	mapReg := e.emitConsoleTimeMapEnsure()
 	nowReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
+	startBits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", startBits, mapReg, labelPtr))
 	startReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load double, ptr @__kml_console_time_start, align 8", startReg))
+	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", startReg, startBits))
 	elapsed := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", elapsed, nowReg, startReg))
 

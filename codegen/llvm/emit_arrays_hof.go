@@ -111,7 +111,11 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	return Value{Ref: r1, Ty: resultTy}, nil
 }
 
-// emitArrayForEach implements arr.forEach(fn): calls fn(elem, index?) for each element, no return value.
+// emitArrayForEach implements arr.forEach(fn): calls fn(elem, index?, array?)
+// for each element, no return value. The 3rd `array` argument (ADR-00573) is
+// the source array itself — passed as a `{ptr,i64}` aggregate over the same
+// backing, so reads through it see live elements (a length-snapshot copy, the
+// same HOF-callback array narrowing the reference-semantics caveat documents).
 func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: forEach takes exactly 1 argument", pos.Line, pos.Col)
@@ -120,7 +124,8 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64})
+	arrTy := ArrayOf(elemTy)
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeI64, arrTy})
 	if err != nil {
 		return Value{}, err
 	}
@@ -149,6 +154,16 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	cbArgs := []Value{inVal}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: idxVal, Ty: TypeI64})
+	}
+	if cb.arity() >= 3 {
+		// The 3rd `array` argument is the source array as a {ptr,i64} value
+		// aggregate over the same data (the array value shape every HOF returns);
+		// element reads through it are live, the length a snapshot.
+		agg0 := e.freshReg()
+		agg1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, lenReg))
+		cbArgs = append(cbArgs, Value{Ref: agg1, Ty: arrTy})
 	}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err

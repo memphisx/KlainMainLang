@@ -290,6 +290,19 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return e.emitTupleElemAssign(idxEx, tupleTy, ex.Op, ex.Right)
 		}
 	}
+	// Fixed-object constant-key assignment: `o["a"] = v` / `o[0] = v` on a
+	// static-shape object (or class instance) is the same as `o.a = v`
+	// (ADR-00608) — rewrite to a member-target assignment so it reuses the
+	// accessor / readonly / nullable / frozen machinery unchanged.
+	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		if objTy := e.inferExprType(idxEx.Object); objTy.IsObject && !objTy.IsArray && !objTy.IsDynamicObject {
+			if key, ok := constObjectKey(idxEx.Index); ok {
+				member := ast.NewMemberExpression(idxEx.Object, key, idxEx.GetPos())
+				rewritten := ast.NewAssignmentExpression(ex.Op, member, ex.Right, ex.GetPos())
+				return e.emitAssign(rewritten)
+			}
+		}
+	}
 	// Array element assignment: arr[i] = val  or  arr[i] += val
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)
@@ -302,7 +315,35 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if taTy := e.inferExprType(idxEx.Object); taTy.IsTypedArray && (taTy.BigIntElem || taTy.Clamped) {
 			if ex.Op != "=" {
 				if taTy.BigIntElem {
-					return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') is not supported on a BigInt64Array/BigUint64Array element — load, compute, and assign instead", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+					// Load the raw i64 element, wrap it into a bigint (signed for
+					// BigInt64Array, unsigned for BigUint64Array), apply the op via
+					// the bigint runtime, then store the unwrapped result.
+					e.ensureBigInt()
+					curReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align %d", curReg, gepReg, elemTy.Align()))
+					fromFn := "__kml_bigint_from_i64"
+					if !elemTy.Signed {
+						fromFn = "__kml_bigint_from_u64" // BigUint64Array
+					}
+					curBig := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = call ptr @%s(i64 %s)", curBig, fromFn, curReg))
+					rhsVal, err := e.emitExpr(ex.Right)
+					if err != nil {
+						return Value{}, err
+					}
+					if !rhsVal.Ty.IsBigInt {
+						return Value{}, fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array element compound assignment needs a bigint right-hand side", ex.GetPos().Line, ex.GetPos().Col)
+					}
+					res, err := e.emitBigIntBinary(strings.TrimSuffix(ex.Op, "="), Value{Ref: curBig, Ty: BigIntType()}, rhsVal, ex.GetPos())
+					if err != nil {
+						return Value{}, err
+					}
+					stored, err := e.coerceTypedArrayStore(res, taTy, ex.GetPos())
+					if err != nil {
+						return Value{}, err
+					}
+					e.storeArrayElem(gepReg, elemTy, stored)
+					return res, nil
 				}
 				// Clamped compound: load the u8, apply the op as a plain
 				// number, then clamp-store the result.
@@ -390,6 +431,18 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if sym.IsConst {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
+			// `xs = JSON.parse(s)` / `xs = await res.json()` into an array-typed
+			// binding projects against the binding's declared element type — the
+			// same type-directed deserialization a typed var-decl gets, extended
+			// to a bare reassignment (ADR-00571).
+			if val, ok, err := e.emitDeclJSONProjection(ex.Right, sym.Ty); ok {
+				if err != nil {
+					return Value{}, err
+				}
+				newHeader := e.boxArrayValue(val)
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newHeader, sym.Ptr))
+				return val, nil
+			}
 			val, err := e.emitExprWithObjectHint(ex.Right, sym.Ty)
 			if err != nil {
 				return Value{}, err
@@ -422,11 +475,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("field assignment on non-object")
 		}
-		// A URL's components are derived from one parse — a bare field store
-		// (`url.href = ''`) would silently desync every other component, so
-		// component setters are a clean rejection instead (ADR-00465).
+		// A URL's components are derived from one parse, so a component setter
+		// re-parses the URL and re-derives every field (ADR-00572) rather than a
+		// bare field store that would desync them. Compound ops aren't supported.
 		if objVal.Ty.IsURL {
-			return Value{}, fmt.Errorf("%d:%d: assigning to a URL component ('%s') is not supported — URL setters would re-parse the whole URL; construct a new URL instead", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment to a URL component ('%s') is not supported", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
+			}
+			return e.emitURLComponentSet(objVal, memEx.Property, ex.Right, ex.GetPos())
 		}
 		// TDD-00030: a class accessor (getter/setter) is checked before the
 		// plain-field FieldIndex path below — an accessor-only property
@@ -446,6 +502,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		if objVal.Ty.IsClass {
 			if err := e.checkFieldVisibility(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+			if err := e.checkReadonlyWrite(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
 				return Value{}, err
 			}
 		}
@@ -527,91 +586,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		if elemTy.IsArray {
-			return Value{}, fmt.Errorf("%d:%d: destructuring assignment from an array of arrays is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
-		}
-		for i, elemExpr := range arrLit.Elements {
-			if spread, isSpread := elemExpr.(*ast.SpreadElement); isSpread {
-				if i != len(arrLit.Elements)-1 {
-					return Value{}, fmt.Errorf("%d:%d: a rest target must be the last element of a destructuring assignment", elemExpr.GetPos().Line, elemExpr.GetPos().Col)
-				}
-				id, ok := spread.Arg.(*ast.Identifier)
-				if !ok {
-					return Value{}, fmt.Errorf("%d:%d: a rest target must be a plain, already-declared array variable", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
-				}
-				sym, found := e.lookup(id.Name)
-				if !found {
-					return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
-				}
-				if sym.IsConst {
-					return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
-				}
-				if !sym.Ty.IsArray {
-					return Value{}, fmt.Errorf("%d:%d: '%s' is not an array — a rest target must already be declared as one", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
-				}
-				e.ensureMalloc()
-				e.ensureMemcpy()
-				rawLen := e.freshReg()
-				isNegLen := e.freshReg()
-				restLen := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", rawLen, lenVal, i))
-				e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNegLen, rawLen))
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", restLen, isNegLen, rawLen))
-				byteCount := e.freshReg()
-				newPtr := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, restLen, elemTy.Align()))
-				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
-				srcGep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
-				e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
-				// Rebind the rest target's slot to a fresh header (TDD-00127).
-				restHeader := e.newArrayHeader(newPtr, restLen)
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", restHeader, sym.Ptr))
-				break
-			}
-			id, ok := elemExpr.(*ast.Identifier)
-			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: a destructuring assignment target must be a plain, already-declared variable", elemExpr.GetPos().Line, elemExpr.GetPos().Col)
-			}
-			sym, found := e.lookup(id.Name)
-			if !found {
-				return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", elemExpr.GetPos().Line, elemExpr.GetPos().Col, id.Name)
-			}
-			if sym.IsConst {
-				return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", elemExpr.GetPos().Line, elemExpr.GetPos().Col, id.Name)
-			}
-			if sym.Ty.IsArray {
-				return Value{}, fmt.Errorf("%d:%d: '%s' is an array — destructuring assignment into an array-typed target is not yet supported", elemExpr.GetPos().Line, elemExpr.GetPos().Col, id.Name)
-			}
-
-			inBoundsReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBoundsReg, i, lenVal))
-			okL := e.freshLabel("destrassign.ok")
-			oobL := e.freshLabel("destrassign.oob")
-			afterL := e.freshLabel("destrassign.after")
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBoundsReg, okL, oobL))
-
-			e.emitLabel(okL)
-			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
-			val := e.loadArrayElem(gepReg, elemTy)
-			okVal := e.coerce(val, sym.Ty)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, okVal.Ref, sym.Ptr, sym.Ty.Align()))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-
-			e.emitLabel(oobL)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, sym.Ty.zeroLiteral(), sym.Ptr, sym.Ty.Align()))
-			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
-
-			e.emitLabel(afterL)
+		if err := e.emitDestructAssignArrayElems(dataPtr, lenVal, elemTy, arrLit.Elements, ex.GetPos()); err != nil {
+			return Value{}, err
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
 
-	// Object destructuring assignment: ({ x, y } = expr) / ({ x: renamed }
-	// = expr) (ADR-00160). Same V1 scope as the array form above — every
-	// target must be a plain, already-declared, non-array, non-const
-	// variable, no computed keys, no spread/rest.
+	// Object destructuring assignment: ({ x, y } = expr) etc. — see
+	// emitDestructAssignObjectProps.
 	if objLit, ok := ex.Left.(*ast.ObjectLiteral); ok {
 		if ex.Op != "=" {
 			return Value{}, fmt.Errorf("%d:%d: compound assignment is not supported in a destructuring assignment", ex.GetPos().Line, ex.GetPos().Col)
@@ -623,38 +605,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		structIR := objTy.StructIR()
-		for _, prop := range objLit.Properties {
-			if _, isSpread := prop.Value.(*ast.SpreadElement); isSpread {
-				return Value{}, fmt.Errorf("%d:%d: a rest target ('...') is not supported in a destructuring assignment", ex.GetPos().Line, ex.GetPos().Col)
-			}
-			id, ok := prop.Value.(*ast.Identifier)
-			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: a destructuring assignment target must be a plain, already-declared variable", prop.Value.GetPos().Line, prop.Value.GetPos().Col)
-			}
-			sym, found := e.lookup(id.Name)
-			if !found {
-				return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", prop.Value.GetPos().Line, prop.Value.GetPos().Col, id.Name)
-			}
-			if sym.IsConst {
-				return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", prop.Value.GetPos().Line, prop.Value.GetPos().Col, id.Name)
-			}
-			idx, fieldTy, ok := objTy.FieldIndex(prop.Key)
-			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", ex.GetPos().Line, ex.GetPos().Col, prop.Key)
-			}
-			if fieldTy.IsArray || sym.Ty.IsArray {
-				return Value{}, fmt.Errorf("%d:%d: destructuring assignment into/from an array-typed field is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
-			}
-			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
-			valReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
-			val := e.coerce(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, val.Ref, sym.Ptr, sym.Ty.Align()))
+		if err := e.emitDestructAssignObjectProps(objPtr, objTy, objLit.Properties, ex.GetPos()); err != nil {
+			return Value{}, err
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
+
 
 	// Scalar variable assignment
 	ident, ok := ex.Left.(*ast.Identifier)
@@ -689,6 +645,18 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	var rhs Value
 	if ex.Op == "=" {
 		var err error
+		// `obj = JSON.parse(s)` / `obj = await res.json()` into an object-typed
+		// binding projects against the binding's declared shape — the bare-
+		// reassignment counterpart of the typed var-decl path (ADR-00571).
+		if sym.Ty.IsObject {
+			if val, ok, perr := e.emitDeclJSONProjection(ex.Right, sym.Ty); ok {
+				if perr != nil {
+					return Value{}, perr
+				}
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, val.Ref, sym.Ptr, sym.Ty.Align()))
+				return val, nil
+			}
+		}
 		// Hint-aware (TDD-00028/TDD-00007): sym.Ty is never array-typed
 		// here (that case is handled by its own branch above), so this
 		// only matters for an object-literal-typed scalar variable, but
@@ -741,4 +709,295 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, rhs.Ref, sym.Ptr, sym.Ty.Align()))
 	return rhs, nil
+}
+
+// --- Destructuring-assignment recursion (ADR-00160 successor) ---
+//
+// The assignment form `[a, [b]] = e` / `({ x, y: { z } } = e)` reaches parity
+// with the declaration form's nesting (unpack*PatternInto): every target is an
+// already-declared variable, and a target position may itself be a nested array
+// or object pattern. The source-element load and out-of-bounds handling mirror
+// unpackNestedArrayElem exactly (OOB reads a deterministic zero / empty).
+
+// emitDestructAssignArrayElems assigns each position of `elems` (a
+// destructuring-assignment array pattern) from the source array at
+// (dataPtr, lenVal, elemTy). A trailing `...rest` collects the remainder.
+func (e *Emitter) emitDestructAssignArrayElems(dataPtr, lenVal string, elemTy Type, elems []ast.Expression, pos ast.Pos) error {
+	for i, elemExpr := range elems {
+		if spread, isSpread := elemExpr.(*ast.SpreadElement); isSpread {
+			if i != len(elems)-1 {
+				return fmt.Errorf("%d:%d: a rest target must be the last element of a destructuring assignment", spread.GetPos().Line, spread.GetPos().Col)
+			}
+			id, ok := spread.Arg.(*ast.Identifier)
+			if !ok {
+				return fmt.Errorf("%d:%d: a rest target must be a plain, already-declared array variable", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col)
+			}
+			sym, found := e.lookup(id.Name)
+			if !found {
+				return fmt.Errorf("%d:%d: undefined variable '%s'", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
+			}
+			if sym.IsConst {
+				return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
+			}
+			if !sym.Ty.IsArray {
+				return fmt.Errorf("%d:%d: '%s' is not an array — a rest target must already be declared as one", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
+			}
+			e.ensureMalloc()
+			e.ensureMemcpy()
+			rawLen, isNegLen, restLen := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", rawLen, lenVal, i))
+			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNegLen, rawLen))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", restLen, isNegLen, rawLen))
+			byteCount, newPtr := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, restLen, elemTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+			srcGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
+			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
+			restHeader := e.newArrayHeader(newPtr, restLen)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", restHeader, sym.Ptr))
+			break
+		}
+
+		target, def := unwrapDestructDefault(elemExpr)
+		switch t := target.(type) {
+		case *ast.ArrayLiteral:
+			if def != nil {
+				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", t.GetPos().Line, t.GetPos().Col)
+			}
+			if !elemTy.IsArray || elemTy.ElemType == nil {
+				return fmt.Errorf("%d:%d: cannot array-destructure a non-array element", t.GetPos().Line, t.GetPos().Col)
+			}
+			subPtr, subLen := e.destructLoadNestedArray(dataPtr, lenVal, elemTy, i)
+			if err := e.emitDestructAssignArrayElems(subPtr, subLen, *elemTy.ElemType, t.Elements, pos); err != nil {
+				return err
+			}
+		case *ast.ObjectLiteral:
+			if def != nil {
+				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", t.GetPos().Line, t.GetPos().Col)
+			}
+			if !elemTy.IsObject {
+				return fmt.Errorf("%d:%d: cannot object-destructure a non-object element", t.GetPos().Line, t.GetPos().Col)
+			}
+			subObj := e.destructLoadNestedObject(dataPtr, lenVal, elemTy, i)
+			if err := e.emitDestructAssignObjectProps(subObj, elemTy, t.Properties, pos); err != nil {
+				return err
+			}
+		case *ast.Identifier:
+			if err := e.destructAssignArrayLeaf(dataPtr, lenVal, elemTy, i, t, def); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%d:%d: a destructuring assignment target must be a plain variable or a nested pattern", elemExpr.GetPos().Line, elemExpr.GetPos().Col)
+		}
+	}
+	return nil
+}
+
+// emitDestructAssignObjectProps assigns each property of `props` (an
+// object-destructuring-assignment pattern) from the source object at objPtr.
+func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props []ast.ObjectProperty, pos ast.Pos) error {
+	structIR := objTy.StructIR()
+	for _, prop := range props {
+		if _, isSpread := prop.Value.(*ast.SpreadElement); isSpread {
+			return fmt.Errorf("%d:%d: a rest target ('...') is not supported in a destructuring assignment", pos.Line, pos.Col)
+		}
+		idx, fieldTy, ok := objTy.FieldIndex(prop.Key)
+		if !ok {
+			return fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
+		}
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
+
+		target, def := unwrapDestructDefault(prop.Value)
+		switch t := target.(type) {
+		case *ast.ArrayLiteral:
+			if def != nil {
+				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
+			}
+			if !fieldTy.IsArray || fieldTy.ElemType == nil {
+				return fmt.Errorf("%d:%d: cannot array-destructure a non-array field '%s'", pos.Line, pos.Col, prop.Key)
+			}
+			// An array-typed field is stored as the `{ptr, i64}` aggregate inline
+			// in the struct — load it directly (not via loadArrayElem, which reads
+			// an element out of an array).
+			aggReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", aggReg, gepReg))
+			subPtr, subLen := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", subPtr, aggReg))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", subLen, aggReg))
+			if err := e.emitDestructAssignArrayElems(subPtr, subLen, *fieldTy.ElemType, t.Elements, pos); err != nil {
+				return err
+			}
+		case *ast.ObjectLiteral:
+			if def != nil {
+				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
+			}
+			if !fieldTy.IsObject {
+				return fmt.Errorf("%d:%d: cannot object-destructure a non-object field '%s'", pos.Line, pos.Col, prop.Key)
+			}
+			subObj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", subObj, gepReg))
+			if err := e.emitDestructAssignObjectProps(subObj, fieldTy, t.Properties, pos); err != nil {
+				return err
+			}
+		case *ast.Identifier:
+			sym, found := e.lookup(t.Name)
+			if !found {
+				return fmt.Errorf("%d:%d: undefined variable '%s'", t.GetPos().Line, t.GetPos().Col, t.Name)
+			}
+			if sym.IsConst {
+				return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", t.GetPos().Line, t.GetPos().Col, t.Name)
+			}
+			if fieldTy.IsArray || sym.Ty.IsArray {
+				return fmt.Errorf("%d:%d: destructuring assignment into/from an array-typed field is not yet supported", pos.Line, pos.Col)
+			}
+			if def != nil {
+				// An object-field default fires when the field is null — so it
+				// needs the field to be a nullable reference (the only shape with
+				// a reliable "not provided" signal), matching the declaration form.
+				if !(fieldTy.Nullable && fieldTy.IR == "ptr") {
+					return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
+				}
+				valReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", valReg, gepReg))
+				isNull := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, valReg))
+				absentL, presentL, afterL := e.freshLabel("destro.absent"), e.freshLabel("destro.present"), e.freshLabel("destro.after")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absentL, presentL))
+				e.emitLabel(absentL)
+				defVal, err := e.emitExpr(def)
+				if err != nil {
+					return err
+				}
+				defVal = e.coerce(defVal, sym.Ty)
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, defVal.Ref, sym.Ptr, sym.Ty.Align()))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+				e.emitLabel(presentL)
+				pv := e.coerce(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
+				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, pv.Ref, sym.Ptr, sym.Ty.Align()))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+				e.emitLabel(afterL)
+				break
+			}
+			valReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
+			val := e.coerce(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, val.Ref, sym.Ptr, sym.Ty.Align()))
+		default:
+			return fmt.Errorf("%d:%d: a destructuring assignment target must be a plain variable or a nested pattern", pos.Line, pos.Col)
+		}
+	}
+	return nil
+}
+
+// destructAssignArrayLeaf assigns the source array's element i into the
+// already-declared scalar/pointer variable `id` (out-of-bounds reads a
+// deterministic zero, the same convention the declaration form uses).
+func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i int, id *ast.Identifier, def ast.Expression) error {
+	sym, found := e.lookup(id.Name)
+	if !found {
+		return fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
+	}
+	if sym.IsConst {
+		return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", id.GetPos().Line, id.GetPos().Col, id.Name)
+	}
+	if sym.Ty.IsArray {
+		return fmt.Errorf("%d:%d: '%s' is an array — destructuring assignment into an array-typed target is not yet supported", id.GetPos().Line, id.GetPos().Col, id.Name)
+	}
+	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBounds, i, lenVal))
+	okL, oobL, afterL := e.freshLabel("destrassign.ok"), e.freshLabel("destrassign.oob"), e.freshLabel("destrassign.after")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+	e.emitLabel(okL)
+	gepReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
+	okVal := e.coerce(e.loadArrayElem(gepReg, elemTy), sym.Ty)
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, okVal.Ref, sym.Ptr, sym.Ty.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	// Out of bounds: the array-pattern default fires here (the length is the
+	// presence signal, so no nullable-reference requirement — unlike an object
+	// field), else a deterministic zero.
+	e.emitLabel(oobL)
+	if def != nil {
+		defVal, err := e.emitExpr(def)
+		if err != nil {
+			return err
+		}
+		defVal = e.coerce(defVal, sym.Ty)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, defVal.Ref, sym.Ptr, sym.Ty.Align()))
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, sym.Ty.zeroLiteral(), sym.Ptr, sym.Ty.Align()))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(afterL)
+	return nil
+}
+
+// destructLoadNestedArray loads source element i as a nested array's (ptr, len),
+// OOB → (null, 0). Mirrors unpackNestedArrayElem's SubArray branch.
+func (e *Emitter) destructLoadNestedArray(dataPtr, lenVal string, elemTy Type, i int) (string, string) {
+	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBounds, i, lenVal))
+	okL, oobL, afterL := e.freshLabel("destrn.ok"), e.freshLabel("destrn.oob"), e.freshLabel("destrn.after")
+	subPtrA, subLenA := e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", subPtrA))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", subLenA))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+	e.emitLabel(okL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
+	val := e.loadArrayElem(gep, elemTy)
+	p, l := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", p, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", l, val.Ref))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, subPtrA))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, subLenA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(oobL)
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", subPtrA))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", subLenA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(afterL)
+	subPtr, subLen := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", subPtr, subPtrA))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", subLen, subLenA))
+	return subPtr, subLen
+}
+
+// destructLoadNestedObject loads source element i as a nested object pointer,
+// OOB → a zeroed stand-in object (so the recursive unpack never derefs null).
+func (e *Emitter) destructLoadNestedObject(dataPtr, lenVal string, elemTy Type, i int) string {
+	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBounds, i, lenVal))
+	okL, oobL, afterL := e.freshLabel("destrno.ok"), e.freshLabel("destrno.oob"), e.freshLabel("destrno.after")
+	subObjA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", subObjA))
+	zeroObj := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", zeroObj, elemTy.StructIR()))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+	e.emitLabel(okL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
+	objp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objp, gep))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objp, subObjA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(oobL)
+	e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", elemTy.StructIR(), zeroObj))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", zeroObj, subObjA))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+	e.emitLabel(afterL)
+	subObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", subObj, subObjA))
+	return subObj
+}
+
+// unwrapDestructDefault splits a `target = default` assignment-pattern element
+// into (target, default); a plain target returns (target, nil).
+func unwrapDestructDefault(elem ast.Expression) (ast.Expression, ast.Expression) {
+	if ae, ok := elem.(*ast.AssignmentExpression); ok && ae.Op == "=" {
+		return ae.Left, ae.Right
+	}
+	return elem, nil
 }

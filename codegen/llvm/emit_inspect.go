@@ -18,6 +18,15 @@ import (
 // beyond its own depth limit.
 const maxInspectDepth = 4
 
+// effectiveInspectDepth returns the recursion cap in force: the per-call
+// override console.dir({ depth }) installs, or the default maxInspectDepth.
+func (e *Emitter) effectiveInspectDepth() int {
+	if e.inspectDepthSet {
+		return e.inspectDepthCap
+	}
+	return maxInspectDepth
+}
+
 // inspectClassName strips the resolver's per-file `__kml_mod<N>` mangling suffix
 // (resolver.go) so an inspected instance shows `Point`, not `Point__kml_mod0`.
 func inspectClassName(mangled string) string {
@@ -53,7 +62,10 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 	// their fields, not an empty `Point {}`.
 	val.Ty = e.canonicalizeClassTy(val.Ty)
 	name := ""
-	if val.Ty.IsClass && val.Ty.ClassName != "" {
+	if val.Ty.IsClass && val.Ty.ClassName != "" && !isSyntheticObjLitClass(val.Ty) {
+		// A synthetic object-literal accessor class (TDD-00153) is an anonymous
+		// object literal to the user — print it as `{ ... }`, never leaking its
+		// internal `__kml_objlit_N` name.
 		name = inspectClassName(val.Ty.ClassName) + " "
 	}
 	fields := val.Ty.VisibleFields()
@@ -130,7 +142,20 @@ func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
-	elemStr, err := e.emitInspectField(e.loadArrayElem(inGep, elemTy), depth+1)
+	elem := e.loadArrayElem(inGep, elemTy)
+	// A BigInt64Array/BigUint64Array element is stored raw (i64/u64) but is
+	// semantically a bigint — wrap it so it inspects with the `n` suffix.
+	if val.Ty.BigIntElem {
+		e.ensureBigInt()
+		fromFn := "__kml_bigint_from_i64"
+		if !elemTy.Signed {
+			fromFn = "__kml_bigint_from_u64"
+		}
+		big := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @%s(i64 %s)", big, fromFn, elem.Ref))
+		elem = Value{Ref: big, Ty: BigIntType()}
+	}
+	elemStr, err := e.emitInspectField(elem, depth+1)
 	if err != nil {
 		return Value{}, err
 	}
@@ -200,7 +225,69 @@ func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
 	e.emitLabel(closeL)
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resAlloca))
-	return Value{Ref: res, Ty: TypePtr}, nil
+	final := Value{Ref: res, Ty: TypePtr}
+	// A TypedArray prints with Node's `TypeName(len) ` prefix (a Node Buffer has
+	// its own `<Buffer ..>` rendering elsewhere, so it is excluded here).
+	if val.Ty.IsTypedArray && !val.Ty.IsBuffer {
+		if name := typedArrayConstructorName(val.Ty); name != "" {
+			lenStr, err := e.emitValueToString(Value{Ref: lenReg, Ty: TypeI64})
+			if err != nil {
+				return Value{}, err
+			}
+			p1, err := e.emitStringConcat(Value{Ref: e.internString(name + "("), Ty: TypePtr}, lenStr)
+			if err != nil {
+				return Value{}, err
+			}
+			p2, err := e.emitStringConcat(p1, Value{Ref: e.internString(") "), Ty: TypePtr})
+			if err != nil {
+				return Value{}, err
+			}
+			final, err = e.emitStringConcat(p2, final)
+			if err != nil {
+				return Value{}, err
+			}
+		}
+	}
+	return final, nil
+}
+
+// typedArrayConstructorName returns the JS constructor name for a TypedArray
+// type (for util.inspect's `Name(len)` prefix), or "" if unrecognized.
+func typedArrayConstructorName(ty Type) string {
+	if ty.ElemType == nil {
+		return ""
+	}
+	el := *ty.ElemType
+	switch {
+	case ty.BigIntElem && el.Signed:
+		return "BigInt64Array"
+	case ty.BigIntElem:
+		return "BigUint64Array"
+	case ty.Clamped:
+		return "Uint8ClampedArray"
+	case el.Float && el.IR == "float":
+		return "Float32Array"
+	case el.Float:
+		return "Float64Array"
+	}
+	switch el.IR {
+	case "i8":
+		if el.Signed {
+			return "Int8Array"
+		}
+		return "Uint8Array"
+	case "i16":
+		if el.Signed {
+			return "Int16Array"
+		}
+		return "Uint16Array"
+	case "i32":
+		if el.Signed {
+			return "Int32Array"
+		}
+		return "Uint32Array"
+	}
+	return ""
 }
 
 // emitInspectField formats a value as it appears *inside* an inspected object —
@@ -211,7 +298,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 	case v.Ty.IsBigInt:
 		return e.emitBigIntToString(v, true) // `10n`, like Node inspect
 	case isInspectableObject(v.Ty):
-		if depth > maxInspectDepth {
+		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Object]"), Ty: TypePtr}, nil
 		}
 		return e.emitInspectObject(v, depth)
@@ -220,7 +307,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		// rather than exposing its internal struct.
 		return Value{Ref: e.internString("[Object]"), Ty: TypePtr}, nil
 	case v.Ty.IsArray:
-		if depth > maxInspectDepth {
+		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Array]"), Ty: TypePtr}, nil
 		}
 		return e.emitInspectArray(v, depth)

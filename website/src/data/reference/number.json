@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "NUMBER-MATH.md",
   "coversRows": "all",
-  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "30/35", "strictPct": 86 },
-  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The divergences cluster in the string-rendering methods (toString/toPrecision/toExponential) — they pad exponents to two digits (`e+05` vs `e+5`) and truncate a fractional receiver before radix rendering — and parseFloat inherits strtod's C hex-float parsing (`\"0x10\"` → `16`). Everything else — the constants, parseInt's hex auto-detect, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
+  "coverage": { "loose": "35/35", "loosePct": 100, "strict": "33/35", "strictPct": 94 },
+  "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The remaining divergences are narrow: toString's fractional expansion in a non-power-of-two base can differ from V8 in the trailing digits (base 10 and power-of-two bases are exact), and toPrecision picks exponential-vs-fixed notation at C `%g`'s threshold rather than JS's. Everything else — exponent formatting (now min-digit, `e+5`), the constants, parseFloat's `\"0x10\"` → `0` hex-prefix rule, parseInt's hex auto-detect, the trig/log/hyperbolic family, and the bit ops — matches real JS.",
   "entries": [
     {
       "id": "number.isInteger",
@@ -62,11 +62,8 @@
       "name": "Number.parseFloat(s)",
       "statusRow": "Number.parseFloat(s)",
       "signature": "Number.parseFloat(s: string): number",
-      "badge": "caveats",
-      "description": "Parses a leading floating-point number out of s. A no-conversion input returns a real NaN via the endptr check. Only the exact word \"Infinity\" parses to Infinity (\"inf\" is NaN).",
-      "differences": [
-        "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` → `16`, where real JS reads only the leading `0`."
-      ],
+      "badge": "supported",
+      "description": "Parses a leading floating-point number out of s. A \"0x10\" hex prefix reads only its leading 0 → 0 (real parseFloat, unlike Number(\"0x10\") → 16). A no-conversion input returns a real NaN via the endptr check. Only the exact word \"Infinity\" parses to Infinity (\"inf\" is NaN).",
       "seeAlso": ["number.parseInt", "global.parseFloat"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/parseFloat" }
     },
@@ -166,11 +163,9 @@
       "statusRow": "Number.prototype.toString(radix?)",
       "signature": "(x: number).toString(radix?: number): string",
       "badge": "caveats",
-      "description": "Renders x as a string, optionally in a given radix via a hand-rolled digit loop.",
+      "description": "Renders x as a string. The default (and radix 10) is exactly String(x) — the shortest round-trip decimal, fractional part included; any other base runs a hand-rolled integer-digit loop plus a repeated-multiply fractional expansion. A radix outside 2..36 throws a RangeError, as in real JS.",
       "differences": [
-        "Truncates a non-integer receiver to its integer part first (real JS renders fractional digits).",
-        "Radix trusted, not validated (real JS throws a `RangeError` for an out-of-range radix).",
-        "Minor cosmetic deviations from real JS, the same `sprintf`-based exponent padding as the two rows below."
+        "For a non-power-of-two base, a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits; base 10 and power-of-two bases are exact."
       ],
       "seeAlso": ["number.toPrecision", "number.toExponential"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toString" }
@@ -181,9 +176,9 @@
       "statusRow": "Number.prototype.toPrecision(n)",
       "signature": "(x: number).toPrecision(precision?: number): string",
       "badge": "caveats",
-      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...). The precision argument is optional; with it omitted, toPrecision() is exactly String(x).",
+      "description": "Formats x to the given number of significant digits via sprintf(\"%#.*g\", ...); the exponent is normalized to JS's minimum-digit form (e+5, not e+05). The precision argument is optional; with it omitted, toPrecision() is exactly String(x).",
       "differences": [
-        "Exponent pads to 2 digits — `e+05` vs real JS's `e+5`."
+        "Chooses exponential vs fixed notation at C `%g`'s threshold (exponent < -4) rather than JS's (exponent < -6), so `0.0000123` renders `1.23e-5` where real JS gives `0.0000123`."
       ],
       "seeAlso": ["number.toExponential", "number.toFixed"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toPrecision" }
@@ -193,11 +188,8 @@
       "name": "Number.prototype.toExponential(n)",
       "statusRow": "Number.prototype.toExponential(n)",
       "signature": "(x: number).toExponential(fractionDigits: number): string",
-      "badge": "caveats",
-      "description": "Formats x in exponential notation with the given fraction digits via sprintf(\"%.*e\", ...).",
-      "differences": [
-        "Same exponent-padding deviation — `e+05` vs `e+5`."
-      ],
+      "badge": "supported",
+      "description": "Formats x in exponential notation with the given fraction digits via sprintf(\"%.*e\", ...); the exponent is normalized to JS's minimum-digit form (1.23e+4, not 1.23e+04).",
       "seeAlso": ["number.toPrecision", "number.toFixed"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/toExponential" }
     },
@@ -216,11 +208,8 @@
       "name": "parseFloat(s) (global)",
       "statusRow": "parseFloat(s) (global)",
       "signature": "parseFloat(s: string): number",
-      "badge": "caveats",
-      "description": "The global parseFloat — same runtime as Number.parseFloat. A no-conversion input yields a real NaN; only the exact word \"Infinity\" parses to Infinity.",
-      "differences": [
-        "Same `strtod` C hex-float parsing as `Number.parseFloat(s)` above — `\"0x10\"` → `16`."
-      ],
+      "badge": "supported",
+      "description": "The global parseFloat — same runtime as Number.parseFloat, including the \"0x10\" → 0 hex-prefix rule. A no-conversion input yields a real NaN; only the exact word \"Infinity\" parses to Infinity.",
       "seeAlso": ["number.parseFloat", "global.parseInt"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }
     },

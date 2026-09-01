@@ -411,7 +411,8 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 	// .end() (state 0), matching Node's "nothing is sent until end()".
 	e.ensureHTTPClientBegin()
 	req := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 40)", req))
+	// 6 pointer-width slots: url, cb, state(i64), method, headers, body (ADR-00575).
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 48)", req))
 	g0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 0", g0, req))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", urlVal.Ref, g0))
@@ -430,7 +431,9 @@ func (e *Emitter) emitHTTPClientGetScheme(args []ast.Expression, pos ast.Pos, sc
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", g2))
 	} else {
 		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", g2))
-		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_begin(ptr %s, ptr %s, ptr %s, ptr %s)", urlVal.Ref, userCb, methodRef, headersRef))
+		// Immediate fire (http.get / an eager request): no body — a body is sent
+		// only through req.write()/req.end(body), which take the deferred path.
+		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_begin(ptr %s, ptr %s, ptr %s, ptr %s, ptr null)", urlVal.Ref, userCb, methodRef, headersRef))
 	}
 	return Value{Ref: req, Ty: ClientRequestType()}, nil
 }
@@ -445,14 +448,14 @@ func (e *Emitter) ensureHTTPClientBegin() {
 	}
 	e.usedHTTPCBegin = true
 	thunk := e.emitHTTPCompletionThunk()
-	e.emitStandaloneFunc("void @__kml_httpc_begin(ptr %url, ptr %usercb, ptr %method, ptr %headers)", func() string {
+	e.emitStandaloneFunc("void @__kml_httpc_begin(ptr %url, ptr %usercb, ptr %method, ptr %headers, ptr %body)", func() string {
 		defMethod := e.internString("GET")
 		mNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %%method, null", mNull))
 		method := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %%method", method, mNull, defMethod))
 		pending := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %%url, ptr %s, ptr %%headers, ptr null, ptr null)", pending, method))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %%url, ptr %s, ptr %%headers, ptr %%body, ptr null)", pending, method))
 		env := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
 		e0 := e.freshReg()
@@ -497,7 +500,9 @@ fire:
   %m = load ptr, ptr %m_p, align 8
   %h_p = getelementptr ptr, ptr %req, i64 4
   %h = load ptr, ptr %h_p, align 8
-  call void @__kml_httpc_begin(ptr %url, ptr %cb, ptr %m, ptr %h)
+  %b_p = getelementptr ptr, ptr %req, i64 5
+  %b = load ptr, ptr %b_p, align 8
+  call void @__kml_httpc_begin(ptr %url, ptr %cb, ptr %m, ptr %h, ptr %b)
   br label %ret
 ret:
   ret void
@@ -680,10 +685,60 @@ func (e *Emitter) emitClientRequestMethod(objExpr ast.Expression, method string,
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, i64 }, ptr %s, i32 0, i32 2", g, objVal.Ref))
 		return g
 	}
+	// bodySlot GEPs the ClientRequest's body pointer (slot 5, ADR-00575).
+	bodySlot := func() string {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 5", g, objVal.Ref))
+		return g
+	}
+	// appendBody stores chunk into the body slot, concatenating with any bytes a
+	// prior write() already staged (Node's req.write appends).
+	appendBody := func(chunkExpr ast.Expression) error {
+		cv, err := e.emitExpr(chunkExpr)
+		if err != nil {
+			return err
+		}
+		if !isStringTy(cv.Ty) {
+			return fmt.Errorf("%d:%d: req.write()/req.end() body must be a string", pos.Line, pos.Col)
+		}
+		cv = e.coerce(cv, TypePtr)
+		slot := bodySlot()
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, slot))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
+		merged, err := e.emitStrBranch(isNull,
+			func() (string, error) { return cv.Ref, nil },
+			func() (string, error) {
+				c, cerr := e.emitStringConcat(Value{Ref: cur, Ty: TypePtr}, cv)
+				if cerr != nil {
+					return "", cerr
+				}
+				return c.Ref, nil
+			})
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", merged, slot))
+		return nil
+	}
 	switch method {
+	case "write":
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: req.write(chunk) takes exactly 1 argument", pos.Line, pos.Col)
+		}
+		if err := appendBody(args[0]); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: "1", Ty: TypeBool}, nil
 	case "end":
-		if len(args) != 0 {
-			return Value{}, fmt.Errorf("%d:%d: req.end() with a body is not supported (this client sends GET requests only — TDD-00138 Stage 2)", pos.Line, pos.Col)
+		if len(args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: req.end([body]) takes at most 1 argument", pos.Line, pos.Col)
+		}
+		if len(args) == 1 {
+			if err := appendBody(args[0]); err != nil {
+				return Value{}, err
+			}
 		}
 		e.ensureHTTPClientBegin()
 		e.emitInstr(fmt.Sprintf("call void @__kml_httpc_req_end(ptr %s)", objVal.Ref))
@@ -736,7 +791,7 @@ func (e *Emitter) emitClientRequestMethod(objExpr ast.Expression, method string,
 		}
 		return Value{}, fmt.Errorf("%d:%d: req.on supports 'response' and 'error' (got '%s')", pos.Line, pos.Col, evt)
 	}
-	return Value{}, fmt.Errorf("%d:%d: a ClientRequest supports .end(), .abort()/.destroy(), and .on('response'|'error') (got '%s')", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: a ClientRequest supports .write(body), .end([body]), .abort()/.destroy(), and .on('response'|'error') (got '%s')", pos.Line, pos.Col, method)
 }
 
 // emitNewHTTPAgent implements `new http.Agent(options?)` (ADR-00432): an

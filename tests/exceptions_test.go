@@ -244,6 +244,57 @@ console.log(f())
 `, "9")
 }
 
+// ADR-00612: a `finally` runs on an early `return` inside an async function
+// (previously the async return path skipped pending finallys).
+func TestE2EAsyncFinallyRunsOnReturn(t *testing.T) {
+	assertOutput(t, `
+async function f(): Promise<number> {
+  try {
+    return 1
+  } finally {
+    console.log("finally ran")
+  }
+}
+f().then((v) => { console.log("got", v) })
+`, "finally ran\ngot 1")
+}
+
+// The finally in an async function may itself await, and a finally return
+// overrides the try's.
+func TestE2EAsyncFinallyAwaitAndOverride(t *testing.T) {
+	assertOutput(t, `
+async function g(): Promise<number> { return 42 }
+async function f(): Promise<number> {
+  try {
+    return 1
+  } finally {
+    const x = await g()
+    console.log("cleanup", x)
+    return 2
+  }
+}
+f().then((v) => { console.log("got", v) })
+`, "cleanup 42\ngot 2")
+}
+
+// A nested try/finally in an async function runs innermost-first on return.
+func TestE2EAsyncNestedFinallyOnReturn(t *testing.T) {
+	assertOutput(t, `
+async function f(): Promise<number> {
+  try {
+    try {
+      return 1
+    } finally {
+      console.log("inner")
+    }
+  } finally {
+    console.log("outer")
+  }
+}
+f().then((v) => { console.log("got", v) })
+`, "inner\nouter\ngot 1")
+}
+
 // TestE2ENestedFinallyRunInnermostFirstOnReturn: a return from an inner try
 // runs the inner finally, then the outer.
 func TestE2ENestedFinallyRunInnermostFirstOnReturn(t *testing.T) {

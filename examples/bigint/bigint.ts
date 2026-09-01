@@ -74,3 +74,13 @@ try {
 // bigint and number deliberately don't mix: `a + 1` would be a compile error,
 // exactly as `10n + 1` is a TypeError in real JS. Convert explicitly instead.
 console.log(a + BigInt(1)); // 11n
+
+// BigInt.asIntN / asUintN clamp to the low N bits (two's-complement signed /
+// non-negative) — the standard fixed-width-integer emulation on top of bigint.
+console.log(BigInt.asIntN(8, 255n)); // -1n
+console.log(BigInt.asUintN(8, 255n)); // 255n
+console.log(BigInt.asUintN(8, -1n)); // 255n (wraps to unsigned)
+
+// Number(bigint) converts back to a double (Infinity if out of range).
+console.log(Number(42n)); // 42
+console.log(Number(9007199254740993n)); // 9007199254740992 (nearest double)

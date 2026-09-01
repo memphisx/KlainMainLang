@@ -64,10 +64,10 @@
             "caveats": []
           },
           {
-            "feature": "`process.execFileSync(file, args?)`",
+            "feature": "`process.execFileSync(file, args?, options?)`",
             "status": "implemented",
             "caveats": [
-              "No options object (no `cwd`/`env`/`timeout`/`stdio` overrides yet)",
+              "Options support only `{ cwd, encoding: 'utf8' }` ([ADR-00589](../adr/ADR-00589.md)) — `cwd` chdir's the child before exec; `env`/`timeout`/`stdio` overrides are still deferred",
               "stderr is inherited (visible on the terminal live), not captured"
             ],
             "notes": [
@@ -124,13 +124,14 @@
             "caveats": []
           },
           {
-            "feature": "`process.emitWarning(message, type?)`",
+            "feature": "`process.emitWarning(message, type?\\|options?)`",
             "status": "implemented",
             "caveats": [
-              "No options-object form (`{ code, detail }`) and no first-warning `--trace-warnings` hint line"
+              "The one-shot `--trace-warnings` hint line Node prints is deliberately omitted, and the `'warning'`-event `Error` carries only `name`/`message` (not `code`/`detail`) — the fixed error-object shape ([ADR-00580](../adr/ADR-00580.md))"
             ],
             "notes": [
-              "Writes `(node:<pid>) <type>: <message>` to stderr, `type` defaulting to `\"Warning\"`, and (like Node's always-on default printer) additionally invokes any `process.on('warning', …)` listener with the warning as an `Error` ([ADR-00395](../adr/ADR-00395.md)/[ADR-00401](../adr/ADR-00401.md))"
+              "Writes `(node:<pid>) [<code>] <type>: <message>` to stderr (the `[code]` only when a `code` is given), `type` defaulting to `\"Warning\"`, then a `<detail>` line when a `detail` is given; the options-object form is `{ type?, code?, detail? }` ([ADR-00580](../adr/ADR-00580.md))",
+              "Like Node's always-on default printer, additionally invokes any `process.on('warning', …)` listener with the warning as an `Error` ([ADR-00395](../adr/ADR-00395.md)/[ADR-00401](../adr/ADR-00401.md))"
             ]
           },
           {
@@ -229,13 +230,11 @@
             ]
           },
           {
-            "feature": "`process.hrtime()` / `process.hrtime.bigint()`",
+            "feature": "`process.hrtime([prev])` / `process.hrtime.bigint()`",
             "status": "implemented",
-            "caveats": [
-              "`hrtime()` takes no argument — the legacy diff-from-a-previous-reading form isn't supported (use `.bigint()` and subtract)"
-            ],
             "notes": [
-              "`CLOCK_MONOTONIC` via the same layer as `performance.now()` ([ADR-00332](../adr/ADR-00332.md)); `hrtime()` → a `[seconds, nanoseconds]` tuple, `.bigint()` → total-nanoseconds bigint"
+              "`CLOCK_MONOTONIC` via the same layer as `performance.now()` ([ADR-00332](../adr/ADR-00332.md)); `hrtime()` → a `[seconds, nanoseconds]` tuple, `.bigint()` → total-nanoseconds bigint",
+              "`hrtime(prev)` returns the elapsed diff from a prior `[seconds, nanoseconds]` reading, applying Node's borrow when the nanosecond field would go negative ([ADR-00582](../adr/ADR-00582.md))"
             ]
           },
           {
@@ -250,11 +249,10 @@
             "feature": "`process.memoryUsage()`",
             "status": "implemented",
             "notes": [
-              "`rss` is the process's peak resident set size, read from `getrusage(2)`'s `ru_maxrss` (bytes on macOS, kilobytes scaled on Linux) ([ADR-00507](../adr/ADR-00507.md))"
+              "`rss` is the process's **instantaneous** resident set size in bytes — Darwin via `task_info(MACH_TASK_BASIC_INFO)`, Linux via `/proc/self/statm` — matching real Node's `rss` (which is also the live value, not a peak) ([ADR-00570](../adr/ADR-00570.md)/[ADR-00507](../adr/ADR-00507.md))"
             ],
             "caveats": [
-              "Only `rss` carries a real value; `heapTotal`/`heapUsed`/`external`/`arrayBuffers` report 0 — there is no managed V8 heap to measure in a native build, so they are returned zeroed rather than fabricated",
-              "`rss` reports *peak* resident set (`ru_maxrss`), not the instantaneous value Node returns"
+              "Only `rss` carries a real value; `heapTotal`/`heapUsed`/`external`/`arrayBuffers` report 0 — there is no managed V8 heap to measure in a native build, so they are returned zeroed rather than fabricated"
             ]
           },
           {

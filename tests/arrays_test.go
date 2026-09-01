@@ -33,6 +33,17 @@ nums.forEach((n: number, i: number) => {
 `, "6\n1\n102\n203")
 }
 
+func TestE2EArrayForEachThirdArrayArg(t *testing.T) {
+	// The 3rd `array` callback argument is the source array (ADR-00573) — reads
+	// through it are live over the same backing.
+	assertOutput(t, `
+const nums: number[] = [10, 20, 30]
+nums.forEach((n: number, i: number, a: number[]) => {
+    console.log(n, i, a.length, a[i])
+})
+`, "10 0 3 10\n20 1 3 20\n30 2 3 30")
+}
+
 func TestE2EArrayForEachConsoleLogCallback(t *testing.T) {
 	assertOutput(t, `
 const names: string[] = ["a", "b", "c"]
@@ -153,6 +164,24 @@ desc.sort((a: number, b: number) => b - a)
 console.log(desc[0])
 console.log(desc[4])
 `, "1\n9\n5\n1")
+}
+
+// TestE2EArraySortDefaultLexicographic: the no-comparator default sort matches
+// real JS — elements are stringified and compared lexicographically, so
+// multi-digit numbers do NOT sort numerically ([10,1,21,2] → [1,10,2,21]), and
+// floats compare by their string form too (ADR-00546).
+func TestE2EArraySortDefaultLexicographic(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [10, 1, 21, 2]
+a.sort()
+console.log(a.join(","))
+const f: number[] = [1.5, 10.5, 2.25]
+f.sort()
+console.log(f.join(","))
+const n: number[] = [-1, -10, -2, 5]
+n.sort()
+console.log(n.join(","))
+`, "1,10,2,21\n1.5,10.5,2.25\n-1,-10,-2,5")
 }
 
 // TestE2EArraySortResultInfersArrayType confirms `arr.sort()`'s result infers
@@ -1266,11 +1295,13 @@ f([1, 2]);
 `, "1 20\n1 2")
 }
 
-// --- Array destructuring assignment (`[a, b] = expr`, ADR-00160) ---
+// --- Array destructuring assignment (`[a, b] = expr`, ADR-00160/ADR-00595) ---
 //
-// V1 scope, narrower than the declaration form: every target must be a
-// plain, already-declared, non-array, non-const variable — no nested
-// patterns, no rest, no per-element default.
+// Now at declaration-form parity for nesting: targets may be plain
+// already-declared variables, a trailing `...rest`, a per-element `= default`
+// (array position uses out-of-bounds as the presence signal), or a nested
+// array/object pattern. Object-property `{ x = default }` defaults still need
+// parser support; compound ops stay rejected.
 
 func TestE2EArrayDestructuringAssignmentBasic(t *testing.T) {
 	assertOutput(t, `
@@ -1304,6 +1335,61 @@ let a: number = 9, b: number = 9;
 [a, b] = [1];
 console.log(a, b);
 `, "1 0")
+}
+
+// ADR-00595: nested patterns in the assignment form (declaration-form parity).
+func TestE2EArrayDestructuringAssignmentNested(t *testing.T) {
+	assertOutput(t, `
+let a = 0, b = 0, c = 0, d = 0;
+const grid: number[][] = [[1, 2], [3, 4]];
+[[a, b], [c, d]] = grid;
+console.log(a, b, c, d);
+`, "1 2 3 4")
+}
+
+func TestE2EObjectDestructuringAssignmentNested(t *testing.T) {
+	assertOutput(t, `
+let p = 0, r = 0, s = 0;
+const obj = { p: 10, q: { r: 20, s: 30 } };
+({ p, q: { r, s } } = obj);
+console.log(p, r, s);
+`, "10 20 30")
+}
+
+func TestE2EObjectDestructuringAssignmentNestedArrayField(t *testing.T) {
+	assertOutput(t, `
+let x = 0, y = 0, z = 0;
+const mixed = { arr: [7, 8] as number[], n: 9 };
+({ arr: [x, y], n: z } = mixed);
+console.log(x, y, z);
+`, "7 8 9")
+}
+
+// ADR-00595: a per-element default in the assignment form fires out of bounds.
+func TestE2EArrayDestructuringAssignmentDefault(t *testing.T) {
+	assertOutput(t, `
+let d = 0, e = 0;
+[d = 5, e = 6] = [99];
+console.log(d, e);
+`, "99 6")
+}
+
+// ADR-00595 + ADR-00597: object-property defaults in the assignment form
+// (shorthand `{ x = d }` and keyed `{ k: x = d }`), fired on a null field.
+func TestE2EObjectDestructuringAssignmentDefault(t *testing.T) {
+	assertOutput(t, `
+let name = "orig";
+const obj: { name: string | null } = { name: null };
+({ name = "fallback" } = obj);
+console.log(name);
+const obj2: { name: string | null } = { name: "real" };
+({ name = "fallback" } = obj2);
+console.log(name);
+let v = "x";
+const rec: { field: string | null } = { field: null };
+({ field: v = "keyed" } = rec);
+console.log(v);
+`, "fallback\nreal\nkeyed")
 }
 
 func TestE2EArrayDestructuringAssignmentAtTopLevel(t *testing.T) {

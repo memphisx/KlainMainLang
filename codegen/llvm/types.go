@@ -756,6 +756,8 @@ func URLType() Type {
 		{Name: "search", Ty: TypePtr},
 		{Name: "hash", Ty: TypePtr},
 		{Name: "origin", Ty: TypePtr},
+		{Name: "username", Ty: TypePtr},
+		{Name: "password", Ty: TypePtr},
 		{Name: "searchParams", Ty: URLSearchParamsType()},
 	})
 	ty.IsURL = true
@@ -833,6 +835,8 @@ func URLPatternType() Type {
 		{Name: "pathname", Ty: TypePtr},
 		{Name: "search", Ty: TypePtr},
 		{Name: "hash", Ty: TypePtr},
+		{Name: "username", Ty: TypePtr},
+		{Name: "password", Ty: TypePtr},
 		{Name: "__kml_handle", Ty: TypePtr},
 	})
 	ty.IsURLPattern = true
@@ -1057,18 +1061,37 @@ func ChannelType(elem Type) Type {
 
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
 // the ArrayBuffer representation plus the shared-across-workers flag.
-// StatsType returns fs.statSync's result type (ADR-00495): visible
-// size/mtimeMs fields over a hidden leading st_mode word (the
-// isFile()/isDirectory() backing, never exposed via Object.keys/JSON).
+// StatsType returns fs.statSync's result type (ADR-00495/ADR-00565): the full
+// Stats numeric surface, in Node's own-property order (dev, mode, nlink, uid,
+// gid, rdev, blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs,
+// birthtimeMs). `mode` doubles as the isFile()/isDirectory()/isSymbolicLink()
+// backing (masked with S_IFMT). All fields are integer milliseconds/counts —
+// the Date-valued `atime`/`mtime`/`ctime`/`birthtime` accessors are a disclosed
+// gap. birthtimeMs is 0 on Linux (no birthtime in struct stat without statx).
 func StatsType() Type {
 	ty := ObjectType([]Field{
-		{Name: "__kml_mode", Ty: TypeI64},
+		{Name: "dev", Ty: TypeI64},
+		{Name: "mode", Ty: TypeI64},
+		{Name: "nlink", Ty: TypeI64},
+		{Name: "uid", Ty: TypeI64},
+		{Name: "gid", Ty: TypeI64},
+		{Name: "rdev", Ty: TypeI64},
+		{Name: "blksize", Ty: TypeI64},
+		{Name: "ino", Ty: TypeI64},
 		{Name: "size", Ty: TypeI64},
+		{Name: "blocks", Ty: TypeI64},
+		{Name: "atimeMs", Ty: TypeI64},
 		{Name: "mtimeMs", Ty: TypeI64},
+		{Name: "ctimeMs", Ty: TypeI64},
+		{Name: "birthtimeMs", Ty: TypeI64},
 	})
 	ty.IsStats = true
 	return ty
 }
+
+// statFieldOrder is the field order StatsType/__kml_fs_stat share, used to fill
+// the object from the runtime's 14-i64 result.
+var statFieldOrder = []string{"dev", "mode", "nlink", "uid", "gid", "rdev", "blksize", "ino", "size", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthtimeMs"}
 
 func SharedArrayBufferType() Type {
 	return Type{IR: "ptr", IsArrayBuffer: true, IsSharedArrayBuffer: true}
@@ -1201,6 +1224,7 @@ func EventType() Type {
 		{Name: "type", Ty: TypePtr},
 		{Name: "defaultPrevented", Ty: TypeBool},
 		{Name: "stopImmediate", Ty: TypeBool},
+		{Name: "cancelable", Ty: TypeBool},
 	})
 	t.IsEvent = true
 	return t
@@ -1245,6 +1269,7 @@ func CustomEventType(detailTy Type) Type {
 		{Name: "detail", Ty: detailTy},
 		{Name: "defaultPrevented", Ty: TypeBool},
 		{Name: "stopImmediate", Ty: TypeBool},
+		{Name: "cancelable", Ty: TypeBool},
 	})
 	t.IsEvent = true
 	return t
@@ -1679,8 +1704,9 @@ func (t Type) VisibleFields() []Field {
 		fields = fields[1:]
 	case t.IsXHR && len(fields) > 3:
 		fields = fields[4:]
-	case t.IsStats && len(fields) > 0:
-		fields = fields[1:]
+	case t.IsStats:
+		// Every Stats field (mode included) is a real Node own-enumerable
+		// property, so nothing is stripped (ADR-00565).
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
 		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are

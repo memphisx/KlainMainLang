@@ -185,6 +185,18 @@ func coercionIsSound(coerced, target Type) bool {
 // composite/dynamic/nullable/union/void target (own path), a null/undefined/
 // never/dynamic/nullable source coerce specially rewrites, or numeric↔numeric.
 func coerciblePure(src, target Type) bool {
+	// TDD-00153 V1 boundary: a synthetic object-literal accessor class is a
+	// nominal type whose accessor properties are methods, not fields — it can't
+	// be structurally coerced to a *different* object/class type that names
+	// those properties as fields (which would read a non-existent field). Reject
+	// so the assignment is a clean error, not a silent wrong value. `any`/union/
+	// same-class targets are unaffected (they don't name fields to mis-read).
+	if isSyntheticObjLitClass(src) {
+		if (target.IsObject && !target.IsClass) ||
+			(target.IsClass && target.ClassName != src.ClassName) {
+			return false
+		}
+	}
 	if src.IR == target.IR {
 		return true
 	}

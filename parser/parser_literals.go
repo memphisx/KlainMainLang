@@ -123,6 +123,27 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 			continue
 		}
+		// Accessor property `{ get x() {...} }` / `{ set x(v) {...} }`
+		// (TDD-00153). Contextual, exactly like the class-member accessor
+		// grammar: a bare `get`/`set` followed by another member name commits to
+		// accessor parsing; `get: 1`, `get() {}`, `get` (shorthand) keep working
+		// because the 2-token lookahead requires an IDENT name to follow.
+		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
+			p.peekNth(1).Type == lexer.IDENT {
+			accessorKind := p.advance().Literal
+			nameTok := p.advance()
+			fnPos := posOf(p.peek())
+			fd, err := p.parseFunctionRest("", false, false, false)
+			if err != nil {
+				return nil, err
+			}
+			fnVal := ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, false, fnPos)
+			props = append(props, ast.ObjectProperty{Key: nameTok.Literal, Value: fnVal, AccessorKind: accessorKind})
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
 		// PropertyName: IDENT, or a STRING/NUMBER literal used as the key
 		// text (`{ "foo": 1 }`, `{ 0: 'a' }`) — real JS/TS allow both,
 		// only the identifier form supports shorthand.
@@ -154,6 +175,19 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			}
 		} else if keyTok.Type != lexer.IDENT {
 			return nil, fmt.Errorf("%d:%d: expected :, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+		} else if p.check(lexer.ASSIGN) {
+			// Shorthand-with-default `{ x = default }` — valid only as a
+			// destructuring-assignment target (a cover-grammar production; the
+			// codegen for an object *value* rejects it, while the destructuring
+			// path uses the default). Represented as `x = default`, an
+			// AssignmentExpression the destructuring codegen already unwraps.
+			p.advance() // '='
+			def, err := p.parseAssignment()
+			if err != nil {
+				return nil, err
+			}
+			ident := ast.NewIdentifier(keyTok.Literal, posOf(keyTok))
+			val = ast.NewAssignmentExpression("=", ident, def, posOf(keyTok))
 		} else {
 			// Shorthand property `{ x }` — sugar for `{ x: x }`, referencing
 			// the in-scope variable/binding of the same name.
@@ -492,8 +526,19 @@ func (p *Parser) parseNewURLBody(pos ast.Pos) (*ast.NewURLExpression, error) {
 	if err != nil {
 		return nil, err
 	}
+	var base ast.Expression
+	if p.peek().Type == lexer.COMMA {
+		p.advance() // consume ','
+		base, err = p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
+	}
+	if base != nil {
+		return ast.NewNewURLExpressionWithBase(url, base, pos), nil
 	}
 	return ast.NewNewURLExpression(url, pos), nil
 }
@@ -601,13 +646,25 @@ func (p *Parser) parseNewEventBody(pos ast.Pos) (*ast.NewEventExpression, error)
 	if err != nil {
 		return nil, err
 	}
-	for p.match(lexer.COMMA) {
-		if _, err := p.parseAssignment(); err != nil {
+	var cancelable ast.Expression
+	if p.match(lexer.COMMA) {
+		initExpr, err := p.parseAssignment()
+		if err != nil {
 			return nil, err
+		}
+		if obj, ok := initExpr.(*ast.ObjectLiteral); ok {
+			for _, prop := range obj.Properties {
+				if prop.Key == "cancelable" {
+					cancelable = prop.Value
+				}
+			}
 		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
+	}
+	if cancelable != nil {
+		return ast.NewNewEventExpressionWithInit(typeArg, cancelable, pos), nil
 	}
 	return ast.NewNewEventExpression(typeArg, pos), nil
 }
@@ -624,7 +681,7 @@ func (p *Parser) parseNewCustomEventBody(pos ast.Pos) (*ast.NewCustomEventExpres
 	if err != nil {
 		return nil, err
 	}
-	var detail ast.Expression
+	var detail, cancelable ast.Expression
 	if p.match(lexer.COMMA) {
 		initExpr, err := p.parseAssignment()
 		if err != nil {
@@ -635,11 +692,17 @@ func (p *Parser) parseNewCustomEventBody(pos ast.Pos) (*ast.NewCustomEventExpres
 				if prop.Key == "detail" {
 					detail = prop.Value
 				}
+				if prop.Key == "cancelable" {
+					cancelable = prop.Value
+				}
 			}
 		}
 	}
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
+	}
+	if cancelable != nil {
+		return ast.NewNewCustomEventExpressionWithInit(typeArg, detail, cancelable, pos), nil
 	}
 	return ast.NewNewCustomEventExpression(typeArg, detail, pos), nil
 }
@@ -1656,13 +1719,22 @@ func (p *Parser) parseTemplateLiteral() (ast.Expression, error) {
 // (TDD-00059), so the interleaved quasi/expression scan exists in one
 // place rather than twice.
 func (p *Parser) parseTemplateRest(headQuasi string) ([]string, []ast.Expression, error) {
+	quasis, _, exprs, err := p.parseTemplateRestRaw(headQuasi, "")
+	return quasis, exprs, err
+}
+
+// parseTemplateRestRaw is parseTemplateRest that also returns the raw
+// (undecoded) source of each quasi, parallel to the cooked ones — used by the
+// tagged-template path so String.raw can see the verbatim text (ADR-00562).
+func (p *Parser) parseTemplateRestRaw(headQuasi, headRaw string) ([]string, []string, []ast.Expression, error) {
 	quasis := []string{headQuasi}
+	rawQuasis := []string{headRaw}
 	var exprs []ast.Expression
 
 	for {
 		expr, err := p.parseAssignment()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		exprs = append(exprs, expr)
 
@@ -1670,13 +1742,15 @@ func (p *Parser) parseTemplateRest(headQuasi string) ([]string, []ast.Expression
 		switch next.Type {
 		case lexer.TEMPLATE_MIDDLE:
 			quasis = append(quasis, next.Literal)
+			rawQuasis = append(rawQuasis, next.Raw)
 			p.advance()
 		case lexer.TEMPLATE_TAIL:
 			quasis = append(quasis, next.Literal)
+			rawQuasis = append(rawQuasis, next.Raw)
 			p.advance()
-			return quasis, exprs, nil
+			return quasis, rawQuasis, exprs, nil
 		default:
-			return nil, nil, fmt.Errorf("%d:%d: expected template continuation, got %s", next.Line, next.Col, next.Type)
+			return nil, nil, nil, fmt.Errorf("%d:%d: expected template continuation, got %s", next.Line, next.Col, next.Type)
 		}
 	}
 }

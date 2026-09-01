@@ -54,12 +54,10 @@
           {
             "feature": "`os.cpus()`",
             "status": "implemented",
-            "caveats": [
-              "Darwin `speed` is 0 on Apple Silicon — `sysctlbyname(\"hw.cpufrequency\")` has no answer on M-series (Apple removed the fixed-clock model from M1 on); matches real Node's documented M-series behavior, not a defect",
-              "Darwin `times.irq` is always 0 — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice)"
-            ],
             "notes": [
               "Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `\"Apple M4 Pro\"`, live tick counters)",
+              "Darwin `speed`: `hw.cpufrequency` is unavailable on Apple Silicon (M-series removed the fixed-clock model), so a fixed `2400` MHz nominal is reported there — byte-for-byte what real Node/libuv reports on the same hardware; an Intel Mac's real value flows through unchanged ([ADR-00569](../adr/ADR-00569.md))",
+              "Darwin `times.irq` is always `0` — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice); real Node reports `irq: 0` on Darwin too, so this is parity, not a gap",
               "Linux `speed` reflects the CPU's current/scaled frequency (from `/proc/cpuinfo`'s `cpu MHz`), not a rated base/max clock — matches what libuv/real Node reports on Linux"
             ]
           },

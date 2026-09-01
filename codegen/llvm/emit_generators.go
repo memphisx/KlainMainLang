@@ -2647,6 +2647,19 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
+	// TDD-00061 follow-up (ADR-00613): a `break` out of the loop leaves the
+	// generator *suspended*, so — matching JS's iterator-close protocol — drive
+	// its `.return()` here to run any enclosing `finally` in the generator body.
+	// On normal completion the generator is already done, where
+	// emitGeneratorReturnByValue is a no-op (it neither resumes the body nor
+	// re-runs a finally), so this is safe to emit unconditionally at the single
+	// shared loop-exit label. Async generators are consumed by the for-await
+	// path, not here.
+	if !genTy.GeneratorIsAsync {
+		if _, err := e.emitGeneratorReturnByValue(genVal.Ref, genTy, e.emitScalarZero(elemTy), s.GetPos()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

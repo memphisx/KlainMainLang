@@ -4,13 +4,13 @@
 
 > Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too.
 
-**Coverage**: 9/9 (100%) · **Strict Coverage**: 1/9 (~11%).
+**Coverage**: 9/9 (100%) · **Strict Coverage**: 2/9 (~22%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `performance.now()` | ✅ | • No fixed "time origin" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time | • `CLOCK_MONOTONIC`-based milliseconds, as a `double` (sub-millisecond precision) — unlike `Date.now()`, not tied to wall-clock time<br>• See [ADR-00024](../adr/ADR-00024.md) |
+| `performance.now()` | ✅ | | • Milliseconds since the program's **time origin** (process start), as a `double` (sub-millisecond precision) — the origin is captured once at process start by an `llvm.global_ctors` constructor, matching the spec's origin-relative reading ([ADR-00568](../adr/ADR-00568.md))<br>• `CLOCK_MONOTONIC`-based — unlike `Date.now()`, not tied to wall-clock time<br>• See [ADR-00024](../adr/ADR-00024.md) |
 | `performance.mark(name)` / `performance.measure(name, start, end?)` | ✅ | • Re-marking a name overwrites its timestamp — last-write-wins, not a full ordered entries list<br>• `measure()` returns the elapsed milliseconds directly as a plain number rather than a `PerformanceMeasure` object, and its own `name` argument is evaluated but not stored anywhere | • Named timing marks backed by a `Map<string, number>`; no `getEntriesByName`/`PerformanceObserver` machinery exists for a `PerformanceMeasure` to belong to<br>• `endMark` defaults to the current `performance.now()` reading when omitted<br>• Measuring against a name that was never marked throws, matching real `performance.measure()`'s own behavior<br>• See [ADR-00111](../adr/ADR-00111.md) |
 | `Date` | ✅ | • UTC-only everywhere (construction, getters, formatting) — a deliberate deviation from real JS's local-time default, for deterministic output regardless of the machine/CI timezone; the multi-argument constructor form is a special case of this: real JS treats its fields as *local* time, this compiler always treats them as UTC | • `new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))<br>• `getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds`, `getTime`/`valueOf`, `toISOString`<br>• See [ADR-00014](../adr/ADR-00014.md) |
 | `Date.now()` | ✅ | | • Milliseconds since epoch, via `clock_gettime(CLOCK_REALTIME, ...)` |

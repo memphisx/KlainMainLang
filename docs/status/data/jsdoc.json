@@ -338,9 +338,9 @@
           },
           {
             "feature": "`Object.<K, V>` (index map)",
-            "status": "missing",
-            "caveats": [
-              "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would — [TYPE-SYSTEM.md](TYPE-SYSTEM.md)"
+            "status": "implemented",
+            "notes": [
+              "Normalized to `Record<K, V>`, now backed by real index-signature support — per-key read/write (`d[key]`) works ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00557](../adr/ADR-00557.md))"
             ]
           },
           {

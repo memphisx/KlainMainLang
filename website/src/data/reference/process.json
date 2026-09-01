@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "PROCESS-CLI.md",
   "coversRows": "all",
-  "coverage": { "loose": "32/32", "loosePct": 100, "strict": "13/32", "strictPct": 41 },
+  "coverage": { "loose": "32/32", "loosePct": 100, "strict": "14/32", "strictPct": 44 },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
     {
@@ -74,13 +74,13 @@
     {
       "id": "process.execFileSync",
       "name": "process.execFileSync(file, args?)",
-      "statusRow": "process.execFileSync(file, args?)",
-      "signature": "process.execFileSync(file: string, args?: string[]): string",
+      "statusRow": "process.execFileSync(file, args?, options?)",
+      "signature": "process.execFileSync(file: string, args?: string[], options?: { cwd?: string; encoding?: 'utf8' }): string",
       "badge": "caveats",
-      "description": "Node's child_process.execFileSync (not execSync): fork()+execvp()s file directly with no shell, so shell metacharacters in args are never interpreted. Returns captured stdout as a string; throws a catchable Error on a non-zero exit status or a signal death.",
+      "description": "Node's child_process.execFileSync (not execSync): fork()+execvp()s file directly with no shell, so shell metacharacters in args are never interpreted. Returns captured stdout as a string; throws a catchable Error on a non-zero exit status or a signal death. The { cwd } option runs the child in a different working directory.",
       "returns": { "type": "string", "desc": "Captured stdout." },
       "differences": [
-        "No options object (no `cwd`/`env`/`timeout`/`stdio` overrides yet).",
+        "Options support only `{ cwd, encoding: 'utf8' }` — `env`/`timeout`/`stdio` overrides are still deferred.",
         "stderr is inherited (visible on the terminal live), not captured."
       ],
       "seeAlso": ["process.spawnSync", "process.spawn"],
@@ -161,15 +161,15 @@
     {
       "id": "process.emitWarning",
       "name": "process.emitWarning(message, type?)",
-      "statusRow": "process.emitWarning(message, type?)",
-      "signature": "process.emitWarning(message: string, type?: string): void",
+      "statusRow": "process.emitWarning(message, type?|options?)",
+      "signature": "process.emitWarning(message: string, type?: string | { type?: string; code?: string; detail?: string }): void",
       "badge": "caveats",
-      "description": "Writes (node:<pid>) <type>: <message> to stderr, type defaulting to \"Warning\", and (like Node's always-on default printer) additionally invokes any process.on('warning', …) listener with the warning as an Error.",
+      "description": "Writes (node:<pid>) [<code>] <type>: <message> to stderr (the [code] only when a code is given), type defaulting to \"Warning\", then a <detail> line when a detail is given; the options-object form is { type?, code?, detail? }. Like Node's always-on default printer, additionally invokes any process.on('warning', …) listener with the warning as an Error.",
       "returns": { "type": "void", "desc": "Nothing." },
       "exampleKey": "process/process_info",
-      "snippet": "process.emitWarning(\"legacy call site\", \"DeprecationWarning\")",
+      "snippet": "process.emitWarning(\"legacy call site\", { type: \"DeprecationWarning\", code: \"DEP001\" })",
       "differences": [
-        "No options-object form (`{ code, detail }`) and no first-warning `--trace-warnings` hint line."
+        "The one-shot `--trace-warnings` hint line Node prints is omitted, and the 'warning'-event Error carries only name/message (not code/detail)."
       ],
       "seeAlso": ["process.exit-events"],
       "spec": { "mdn": "https://nodejs.org/api/process.html#processemitwarningwarning-options" }
@@ -309,16 +309,14 @@
     {
       "id": "process.hrtime",
       "name": "process.hrtime() / .bigint()",
-      "statusRow": "process.hrtime() / process.hrtime.bigint()",
-      "signature": "process.hrtime(): [number, number]; process.hrtime.bigint(): bigint",
-      "badge": "caveats",
-      "description": "CLOCK_MONOTONIC high-resolution timing. hrtime() returns a [seconds, nanoseconds] tuple, .bigint() total-nanoseconds as a bigint.",
-      "returns": { "type": "[number, number] | bigint", "desc": "The timestamp." },
+      "statusRow": "process.hrtime([prev]) / process.hrtime.bigint()",
+      "signature": "process.hrtime(prev?: [number, number]): [number, number]; process.hrtime.bigint(): bigint",
+      "badge": "exact",
+      "description": "CLOCK_MONOTONIC high-resolution timing. hrtime() returns a [seconds, nanoseconds] tuple; hrtime(prev) returns the elapsed diff from a prior reading (with Node's borrow); .bigint() returns total-nanoseconds as a bigint.",
+      "returns": { "type": "[number, number] | bigint", "desc": "The timestamp or elapsed diff." },
       "exampleKey": "process/process_info",
-      "snippet": "const start = process.hrtime.bigint()\nconst elapsed = process.hrtime.bigint() - start",
-      "differences": [
-        "`hrtime()` takes no argument — the legacy diff-from-a-previous-reading form isn't supported (use `.bigint()` and subtract)."
-      ],
+      "snippet": "const start = process.hrtime()\n// ...work...\nconst [s, ns] = process.hrtime(start)",
+      "differences": [],
       "seeAlso": ["process.uptime"],
       "spec": { "mdn": "https://nodejs.org/api/process.html#processhrtimetime" }
     },
@@ -339,9 +337,9 @@
       "statusRow": "process.memoryUsage()",
       "signature": "process.memoryUsage(): { rss: number; heapTotal: number; heapUsed: number; external: number; arrayBuffers: number }",
       "badge": "caveats",
-      "description": "Returns Node's object shape. Only rss carries a real value — the process's peak resident set size, read from getrusage(2)'s ru_maxrss (bytes on macOS, kilobytes scaled on Linux). There is no managed V8 heap to measure in a native build, so heapTotal/heapUsed/external/arrayBuffers are returned as 0 rather than fabricated, and rss is peak rather than the instantaneous value Node reports.",
+      "description": "Returns Node's object shape. Only rss carries a real value — the process's instantaneous resident set size (Darwin task_info, Linux /proc/self/statm), matching Node's live rss. There is no managed V8 heap to measure in a native build, so heapTotal/heapUsed/external/arrayBuffers are returned as 0 rather than fabricated.",
       "returns": { "type": "object", "desc": "Memory-usage byte counts; only rss is populated." },
-      "caveats": ["heapTotal/heapUsed/external/arrayBuffers are always 0 (no managed heap)", "rss is peak resident set (ru_maxrss), not the live value"],
+      "caveats": ["heapTotal/heapUsed/external/arrayBuffers are always 0 (no managed heap)"],
       "exampleKey": "process/process_info",
       "snippet": "const m = process.memoryUsage(); console.log(m.rss > 0)",
       "seeAlso": ["process.uptime"],

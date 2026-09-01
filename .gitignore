@@ -7,6 +7,12 @@
 
 # make examples' local httpbin-lite fixture server binary
 /.httpbin-lite
+# The httpbin-lite fixture is now compiled from tools/httpbin-lite/httpbin.ts
+# by this project's own compiler; that leaves the usual sidecar artifacts +
+# the local binary next to the source. Keep the source, ignore the rest.
+/tools/httpbin-lite/httpbin
+/tools/httpbin-lite/httpbin.*
+!/tools/httpbin-lite/httpbin.ts
 
 # Compiled example artifacts — keep only source (.ts), klain.json package
 # manifests (needed by the klmpm-package examples, TDD-00054), and

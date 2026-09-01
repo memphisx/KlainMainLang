@@ -20,6 +20,10 @@ console.log(out)   // hello from execFileSync
 const bare: string = process.execFileSync('/bin/echo')
 console.log(bare.length > 0)   // true — just the newline echo prints alone
 
+// ── the { cwd } option runs the child in a different working directory ───────
+const where: string = process.execFileSync('pwd', [], { cwd: '/tmp' })
+console.log(where.trim())      // /tmp
+
 // ── no shell: metacharacters come back out verbatim ─────────────────────────
 const literalArgs: string[] = ['$(whoami); rm -rf /tmp/nothing']
 console.log(process.execFileSync('/bin/echo', literalArgs))

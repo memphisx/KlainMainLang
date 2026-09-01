@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 4/14 (~29%).
+**Coverage**: 13/14 (~93%) · **Strict Coverage**: 6/14 (~43%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,7 +14,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| Construction: `new RegExp(pattern, flags?)` | ✅ | • Does not validate the *flags* string at all — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) is silently accepted instead of throwing `SyntaxError` like real JS ([ADR-00166](../adr/ADR-00166.md)) | • Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
+| Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`y`/`d` are accepted but their behavior isn't implemented — see the `u`/`y`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
 | Literal syntax: `/pattern/flags` | ✅ | • `x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap | • Desugars to the same construction at parse time — see [ADR-00114](../adr/ADR-00114.md) |
 | `.source` / `.flags` | ✅ | | • Plain field reads, original constructor arguments verbatim |
 | `.global` / `.ignoreCase` / `.multiline` / `.dotAll` | ✅ | | • Decomposed from the flags string once at construction — no method needs to re-parse it |
@@ -26,7 +26,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 | `str.replace(regexp, replacement)` (string or callback) | ✅ | • Replacement template supports `$1`-`$9`/`$&`/`$$` only (`` $` ``/`$'` — pre-/post-match text — are out of scope)<br>• The callback form is invoked with a fixed `(match, offset, string)` — real JS's variadic `...capturedGroups` in the middle isn't supported (a callback's arity is fixed at compile time but a pattern's capture count is only known at runtime; a callback declaring more than 3 parameters is a compile-time error) | • Replaces the first match without `g`, every match with `g`; the callback runs exactly once per match. See [ADR-00118](../adr/ADR-00118.md) |
 | `str.replaceAll(regexp, replacement)` (string or callback) | ✅ | • Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback) | • Same replacement rules as `.replace()`; requires the `g` flag, throwing `TypeError` otherwise. See [ADR-00118](../adr/ADR-00118.md) |
 | `str.split(regexp)` | ✅ | • Only splits on a non-zero-length match — real JS's more intricate zero-length-match handling isn't replicated (see [ADR-00119](../adr/ADR-00119.md))<br>• Captured groups in the split pattern are never spliced into the result (out of scope from the start) | • Finds every match regardless of `g` (its own local search loop, like real JS) |
-| `str.search(regexp)` | ✅ | • A plain-string argument falls back to the pre-`RegExp` `.indexOf()`-shaped behavior rather than coercing the string to a RegExp | • Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/ADR-00119.md) |
+| `str.search(regexp)` | ✅ | | • A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/ADR-00548.md))<br>• Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/ADR-00119.md) |
 | `u` / `y` / `d` flags | ❌ | | • Deferred for the whole feature's V1, not just Stage 0 — see the TDD's flag scope table; `\u{…}` code-point escapes, surrogate handling, Unicode `\p{…}`/class semantics, and strict-syntax validation are Option C |
 
 ## Known limitations

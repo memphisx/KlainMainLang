@@ -58,21 +58,24 @@ entry:
 }`)
 }
 
-// ensurePerformanceNow declares __kml_performance_now: a CLOCK_MONOTONIC
-// timestamp in milliseconds, as a double with sub-millisecond precision
-// (real performance.now() is spec'd relative to a "time origin," typically
-// process/page start — this compiler has no such fixed origin concept, so
-// it returns the raw monotonic clock reading instead; fine for the common
-// use of subtracting two calls to measure elapsed time, a documented
-// simplification for anything expecting an absolute origin-relative value).
+// ensurePerformanceNow declares __kml_performance_now: milliseconds since the
+// program's time origin, as a double with sub-millisecond precision. The time
+// origin is captured once at process start by an @llvm.global_ctors constructor
+// (`__kml_perf_init`), so performance.now() returns elapsed-since-process-start
+// exactly as real performance.now()'s spec requires (ADR-00568), not the raw
+// CLOCK_MONOTONIC reading (which counts from an arbitrary point like boot).
+// __kml_perf_raw_ms is the shared CLOCK_MONOTONIC→ms read both the constructor
+// and every now() call use.
 func (e *Emitter) ensurePerformanceNow() {
 	if e.usedPerformanceNow {
 		return
 	}
 	e.usedPerformanceNow = true
 	e.ensureClockGettime()
+	e.emitGlobal("@__kml_perf_origin = internal global double 0.0, align 8")
+	e.emitGlobal(`@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @__kml_perf_init, ptr null }]`)
 	e.emitGlobal(fmt.Sprintf(`
-define double @__kml_performance_now() {
+define double @__kml_perf_raw_ms() {
 entry:
   %%ts = alloca { i64, i64 }, align 8
   %%r = call i32 @clock_gettime(i32 %s, ptr %%ts)
@@ -86,6 +89,21 @@ entry:
   %%nsec_ms = fdiv double %%nsec_f, 1000000.0
   %%total = fadd double %%sec_ms, %%nsec_ms
   ret double %%total
+}
+
+define void @__kml_perf_init() {
+entry:
+  %%o = call double @__kml_perf_raw_ms()
+  store double %%o, ptr @__kml_perf_origin, align 8
+  ret void
+}
+
+define double @__kml_performance_now() {
+entry:
+  %%now = call double @__kml_perf_raw_ms()
+  %%origin = load double, ptr @__kml_perf_origin, align 8
+  %%elapsed = fsub double %%now, %%origin
+  ret double %%elapsed
 }`, monotonicClockID()))
 }
 

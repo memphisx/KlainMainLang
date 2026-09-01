@@ -103,6 +103,7 @@ console.log(xhr.readyState)
 func TestE2EXHRWrongArgCountsRejected(t *testing.T) {
 	cases := []string{
 		`const xhr = new XMLHttpRequest(); xhr.open("GET")`,
+		`const xhr = new XMLHttpRequest(); xhr.open("GET", "http://x", false, "u", "p", "extra")`,
 		`const xhr = new XMLHttpRequest(); xhr.setRequestHeader("X")`,
 		`const xhr = new XMLHttpRequest(); xhr.send("a", "b")`,
 		`const xhr = new XMLHttpRequest(); xhr.abort(1)`,
@@ -113,6 +114,24 @@ func TestE2EXHRWrongArgCountsRejected(t *testing.T) {
 			t.Fatalf("expected a compile error for %q, got none", src)
 		}
 	}
+}
+
+// The optional 3rd `async` argument (ADR-00615): send() is already
+// synchronous underneath, so open(method, url, false) is a genuine blocking
+// request — the primitive a closed-loop load generator needs. The flag's
+// value does not change behavior (async: true also blocks — a documented
+// narrowing), so this asserts the 3-arg form compiles and runs identically
+// to the 2-arg form.
+func TestE2EXHRSyncOpenThreeArgs(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+const xhr = new XMLHttpRequest()
+xhr.open("GET", "%s/flat", false)
+xhr.send()
+console.log(xhr.status)
+console.log(xhr.responseText.indexOf('"title":"hello"') > -1)
+`, srv.URL)
+	assertOutput(t, src, "200\ntrue")
 }
 
 // getResponseHeader/getAllResponseHeaders (ADR-00490): case-insensitive

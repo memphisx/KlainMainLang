@@ -382,7 +382,12 @@ func (e *Emitter) ensureOSCpusDarwin() {
 	fmt.Fprintf(&b, "  store i64 8, ptr %%freqsize_p, align 8\n")
 	fmt.Fprintf(&b, "  %%frc = call i32 @sysctlbyname(ptr %s, ptr %%freq_p, ptr %%freqsize_p, ptr null, i64 0)\n", freqKeyPtr)
 	fmt.Fprintf(&b, "  %%freqhz = load i64, ptr %%freq_p, align 8\n")
-	fmt.Fprintf(&b, "  %%freqmhz = sdiv i64 %%freqhz, 1000000\n")
+	fmt.Fprintf(&b, "  %%freqmhz_raw = sdiv i64 %%freqhz, 1000000\n")
+	// hw.cpufrequency is unavailable on Apple Silicon (returns 0), so real
+	// Node/libuv reports a fixed 2400 MHz nominal there (ADR-00569). Match that
+	// fallback when the sysctl gives 0; a real value (Intel Macs) flows through.
+	fmt.Fprintf(&b, "  %%freq_iszero = icmp eq i64 %%freqmhz_raw, 0\n")
+	fmt.Fprintf(&b, "  %%freqmhz = select i1 %%freq_iszero, i64 2400, i64 %%freqmhz_raw\n")
 
 	fmt.Fprintf(&b, "  %%host = call i32 @mach_host_self()\n")
 	fmt.Fprintf(&b, "  %%count_out = alloca i32, align 4\n")

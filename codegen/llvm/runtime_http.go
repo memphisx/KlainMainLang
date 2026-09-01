@@ -644,6 +644,31 @@ func (e *Emitter) ensureHTTPRuntime() {
 		return
 	}
 	e.usedHTTP = true
+
+	// The Node event loop / reactor is thread-affine: its ucontext connection
+	// fibers cannot legally swapcontext across OS threads, and its per-loop
+	// state lives in thread-local storage. When the loop runs inside a
+	// klain:sync goroutine (e.g. `go(() => http.listen(...))`), a migrating
+	// goroutine would resume on a different M — reading a *different* thread's
+	// (default) reactor state and, e.g., seeing @__kml_listen_fd == -1 — so the
+	// keep-alive check fails and http.listen returns out from under a live
+	// server. Lock the goroutine to its M (Go's runtime.LockOSThread) at loop
+	// entry to make it non-migrating (it still preempts, just on the same M).
+	// __kml_reactor_thread_lock is a no-op unless klain:sync is linked and we're
+	// actually on a goroutine.
+	if e.usesSyncProgram {
+		e.emitGlobal("declare void @klainsync_lock_os_thread()")
+		e.emitGlobal(`
+define void @__kml_reactor_thread_lock() {
+  call void @klainsync_lock_os_thread()
+  ret void
+}`)
+	} else {
+		e.emitGlobal(`
+define void @__kml_reactor_thread_lock() {
+  ret void
+}`)
+	}
 	e.ensureTimerRuntime()
 	e.ensureFiberRuntime()
 	e.ensureHTTPClientReactions() // defines __kml_httpc_fire_ready, called by the loop below
@@ -1152,6 +1177,10 @@ entry:
   %hasactivetasks_slot = alloca i1, align 1
   %cmtoslot = alloca i64, align 8
   %cmdlabs = alloca i64, align 8
+  ; Pin this goroutine to its M for the reactor's lifetime (no-op off a
+  ; goroutine / without klain:sync): the loop's fibers + thread-local state are
+  ; thread-bound and must not migrate. See ensureHTTPRuntime's comment.
+  call void @__kml_reactor_thread_lock()
   br label %outerloop
 
 outerloop:

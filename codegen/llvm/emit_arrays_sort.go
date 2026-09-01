@@ -138,17 +138,20 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 	var cmpFnRef string
 
 	if len(args) == 0 {
-		// Default comparators based on element type
+		// Default (no-comparator) sort is JS-faithful: every element is
+		// converted to a string and compared lexicographically, even numbers
+		// — [10,1,21,2].sort() is [1,10,2,21], not the numeric [1,2,10,21]
+		// (ADR-00546). A string element is already a lexicographic strcmp.
 		switch {
 		case elemTy.Float:
-			e.ensureSortCmpF64()
-			cmpFnRef = "@__kml_cmp_f64"
+			e.ensureSortCmpF64Lex()
+			cmpFnRef = "@__kml_cmp_f64_lex"
 		case isStringTy(elemTy):
 			e.ensureSortCmpStr()
 			cmpFnRef = "@__kml_cmp_str"
 		default:
-			e.ensureSortCmpI64()
-			cmpFnRef = "@__kml_cmp_i64"
+			e.ensureSortCmpI64Lex()
+			cmpFnRef = "@__kml_cmp_i64_lex"
 		}
 	} else {
 		// Custom comparator: resolve closure and store in global, use trampoline

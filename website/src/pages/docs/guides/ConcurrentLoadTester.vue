@@ -3,96 +3,114 @@
     <span class="km-eyebrow km-doc__eyebrow">Guides · Concurrency</span>
     <h1>Build a concurrent load tester</h1>
     <p class="km-doc__lede">
-      A load tester is the perfect shape for <code>klain:sync</code>: many workers hammering a
-      service in parallel, a live view of throughput and latency. We'll build a closed-loop load
-      generator — a pool of goroutines driving a stream of requests as fast as they can — with a
-      self-refreshing <code>klain:tui</code> dashboard. The whole design is channels, and it
-      compiles to one native binary with no runtime and no event loop.
+      A load tester is the perfect shape for <code>klain:sync</code>: a pool of goroutine "agents"
+      hammering a real endpoint in parallel, a live view of throughput and latency, and a report you
+      keep. We'll build <code>klainload</code> — point it at any URL, set how many agents and for how
+      long (or run until you stop it), watch a <code>klain:tui</code> dashboard, and get a summary
+      that stays on screen. One native binary, no runtime, no event loop.
     </p>
 
     <Shot :src="loadImg"
-      alt="A terminal dashboard: a progress bar, throughput in requests per second, p50/p90/p99 latency, an RPS sparkline, and a colored latency-distribution histogram"
-      caption="load_test.ts — a live load-test dashboard: throughput, latency percentiles, an RPS sparkline, and a latency histogram, redrawn as eight worker goroutines drive 450k requests through the service in parallel." />
+      alt="A terminal dashboard: throughput in requests per second, success/failure counts, p50/p90/p99 latency, a status-code breakdown, and an RPS sparkline"
+      caption="klainload's live dashboard — throughput, success rate, latency percentiles, a status-code breakdown, and an RPS sparkline, redrawn as the agents drive requests at the target. Press s at any time to stop." />
 
-    <h2>1 · The architecture is channels</h2>
+    <h2>1 · The agents</h2>
     <p>
-      Three channels wire the whole thing together, exactly as you'd sketch it in Go — a work
-      queue in, a results stream out, and a completion signal:
+      Each agent is a goroutine running a closed loop: check a shared <code>stop</code> channel
+      (without blocking), fire one <strong>synchronous</strong> request at the target, and stream a
+      <code>Result</code> out. There's no fixed request count and no work queue — a load tester runs
+      for a duration or until stopped, as fast as the target answers:
     </p>
-    <CodeBlock filename="load_test.ts" :code="chans" />
+    <CodeBlock filename="engine.ts" :code="engine" />
     <p>
-      The <code>requests</code> channel is buffered, so it doubles as a backpressure valve: the
-      generator blocks when the buffer is full and resumes as workers drain it. Declaring the
-      channels at the top level makes them module globals every goroutine can see with their full
-      type intact — the idiomatic way to share a channel with a worker function.
-    </p>
-
-    <h2>2 · The service under test</h2>
-    <p>
-      A real request handler does a variable amount of work, and every so often a slow one drags
-      the tail. We model that with a deterministic per-request cost plus an occasional heavy
-      request, so the run is reproducible <em>and</em> its latency distribution has a genuine
-      <code>p99 ≫ p50</code> tail — the thing a load test exists to reveal:
-    </p>
-    <CodeBlock filename="load_test.ts" :code="handle" />
-
-    <h2>3 · Fan out: the worker pool</h2>
-    <p>
-      A generator goroutine fills the queue and <code>close()</code>s it; that close is the
-      workers' stop signal. Each worker <strong>ranges</strong> the queue — <code>for (const id of
-      requests)</code> receives until the channel is closed and drained — times each request, and
-      streams the latency out over <code>results</code>:
-    </p>
-    <CodeBlock filename="load_test.ts" :code="workers" />
-    <p>
-      <code>go(fn)</code> puts each worker on the M:N scheduler, so with
-      <code>GOMAXPROCS</code> defaulting to your core count they run genuinely in parallel. Because
-      the scheduler is preemptive — the compiler plants a yield check at every function entry and
-      loop back-edge — no worker can monopolise a core and starve the dashboard.
+      <code>xhr.open(method, url, false)</code> is a real blocking HTTP request; on a goroutine it
+      parks that agent while the transfer is in flight, so all the agents' requests genuinely
+      overlap. <code>go(fn)</code> puts each agent on the M:N scheduler — with
+      <code>GOMAXPROCS</code> defaulting to your core count they run in parallel across cores.
     </p>
 
-    <h2>4 · Fan in: <code>select</code> and a live histogram</h2>
+    <h2>2 · Stopping: a broadcast close</h2>
     <p>
-      The collector runs on the main thread. <code>select</code> folds the two live channels —
-      per-request latencies and worker completions — into a running histogram, taking whichever is
-      ready so it never blocks on one while the other has data:
+      This is the Go idiom that makes "stop at any time" trivial. Closing a channel wakes every
+      receiver, and in a <code>select</code> a <code>recvCase</code> on a closed channel fires
+      immediately — so a single <code>stop.close()</code> halts <em>all</em> the agents at once.
+      Never send on it; only close it:
+    </p>
+    <CodeBlock filename="load_test.ts" :code="stopcode" />
+    <p>
+      The same close ends a fixed-duration run (fired at a <code>performance.now()</code> deadline)
+      and an infinite one (fired by a keypress). Workers never touch <code>results</code> after
+      stopping; the collector drains what's left with a non-blocking <code>select</code>.
+    </p>
+
+    <h2>3 · Fan in: fold results into stats</h2>
+    <p>
+      The collector runs on the main thread. Each pass drains every result currently available
+      (non-blocking <code>select</code> with a <code>defaultCase</code>), then — in the live UI —
+      polls the keyboard for the stop key and repaints. <code>readKey(60)</code> both paces the loop
+      and reads a keystroke if one is waiting:
     </p>
     <CodeBlock filename="load_test.ts" :code="collector" />
     <p>
-      Latencies land in a log-bucketed histogram, which is all you need to read percentiles off the
-      cumulative counts — no need to store every sample:
+      A <code>Channel&lt;Result&gt;</code> carries the whole per-request object by pointer, so one
+      pass folds latency, HTTP status class, and byte count together. Latencies land in a
+      log-bucketed histogram — all you need to read percentiles off the cumulative counts without
+      storing every sample:
     </p>
-    <CodeBlock filename="load_test.ts" :code="pct" />
-    <p>
-      When the last worker signals done there may still be latencies buffered in
-      <code>results</code>; a non-blocking <code>select</code> with a <code>defaultCase</code>
-      drains them and stops:
-    </p>
-    <CodeBlock filename="load_test.ts" :code="drain" />
+    <CodeBlock filename="stats.ts" :code="pct" />
 
-    <h2>5 · The dashboard</h2>
+    <h2>4 · Configuring the run</h2>
     <p>
-      Repaint every few hundred requests and the same <code>Box</code> / <code>Text</code> /
-      <code>Progress</code> components from the <code>klain:tui</code> guides give you throughput,
-      the percentile row, an RPS sparkline, and the latency histogram — a live view of a native,
-      multi-core workload:
+      The target and parameters come from the command line <em>or</em> the first TUI screen. With no
+      URL, a config form opens (edit the URL, method, agent count, duration or infinite, headers,
+      body, then Start); a URL pre-fills it, and <code>--run</code> skips it:
     </p>
-    <CodeBlock filename="load_test.ts" :code="view" />
+    <CodeBlock filename="terminal" :code="cli" />
+    <p>
+      The config screen is a small component built the same way as the <code>klain:tui</code> form
+      guide — you own the field values and route each keystroke; <code>TextInput</code> just draws
+      the text and a cursor.
+    </p>
+
+    <h2>5 · The results that stay</h2>
+    <p>
+      When the run ends, the results screen shows the success rate and latency summary, and the same
+      report is printed to stdout after the TUI exits — so it survives in your scrollback instead of
+      vanishing with the alt-screen. Non-interactive runs (piped, or in CI) skip the TUI entirely
+      and just print it:
+    </p>
+    <CodeBlock filename="report (stdout)" :code="report" />
+
+    <h2>Split by concern</h2>
+    <p>
+      The tool is a handful of small modules, each a real concern — a working demonstration of the
+      module system:
+    </p>
+    <ul>
+      <li><code>config.ts</code> — the <code>Config</code> shape and CLI parsing.</li>
+      <li><code>engine.ts</code> — the agent goroutines and the stop wiring.</li>
+      <li><code>stats.ts</code> — the per-request <code>Result</code> and the aggregation.</li>
+      <li><code>report.ts</code> — the persistent text summary.</li>
+      <li><code>screens.ts</code> — the live dashboard and results screen.</li>
+      <li><code>configform.ts</code> — the interactive config screen.</li>
+      <li><code>load_test.ts</code> — the orchestrator that wires them together.</li>
+    </ul>
 
     <h2>Good to know</h2>
     <ul>
-      <li><strong><code>klain:sync</code> and <code>klain:tui</code> compose cleanly.</strong> The
-        worker goroutines run on the scheduler's threads while the render loop runs on the main
-        thread; they only ever meet over channels, so there's no shared mutable state to guard.</li>
-      <li><strong>Goroutines are a separate world from <code>async</code>.</strong> A goroutine body
-        is synchronous — channel sends and receives block the goroutine (not the thread), and there
-        is no <code>await</code>. That's why this is a closed-loop generator against an in-process
-        service rather than something built on Promises.</li>
-      <li><strong>It's all tunable.</strong> <code>GOMAXPROCS</code> sets the parallelism and
-        <code>KLAINSYNC_STACK_KB</code> the per-goroutine stack size — dial the worker count and
-        watch the throughput and the tail move.</li>
+      <li><strong>Goroutines are a separate world from <code>async</code>.</strong> An agent body is
+        synchronous — channel ops and the blocking request park the goroutine, not the thread, and
+        there is no <code>await</code>. Stopping is a channel <code>close()</code>, not a cancelled
+        Promise.</li>
+      <li><strong>A synchronous request is what a closed-loop generator wants.</strong>
+        <code>XMLHttpRequest</code> with <code>async: false</code> (a real, faithful web API) blocks
+        the agent until the response is in, and yields cooperatively on a goroutine so the agents
+        overlap.</li>
+      <li><strong>It's all tunable.</strong> Agent count and duration are parameters;
+        <code>GOMAXPROCS</code> sets the parallelism and <code>KLAINSYNC_STACK_KB</code> the
+        per-goroutine stack — dial the load and watch the throughput and the tail move.</li>
       <li><strong>Colours are compile-time literals</strong> in <code>klain:tui</code>, so the
-        helpers here branch on a colour key rather than passing one through a variable.</li>
+        helpers branch on a colour key rather than passing one through a variable.</li>
     </ul>
 
     <div class="km-doc__nextrow">
@@ -107,71 +125,78 @@ import CodeBlock from 'components/CodeBlock.vue'
 import Shot from 'components/docs/Shot.vue'
 import loadImg from 'src/assets/tui/loadtest.png'
 
-const chans = `const requests = new Channel<number>(2048)  // the work queue
-const results  = new Channel<number>(4096)  // per-request latency, in microseconds
-const done     = new Channel<number>(0)      // one signal per finished worker`
+const engine = `go(() => {
+  for (;;) {
+    // Non-blocking stop check: once stop is closed, its recvCase fires
+    // for every agent, so they all halt together.
+    let stopped = false
+    select(
+      stop.recvCase((_: number) => { stopped = true }),
+      defaultCase(() => {}),
+    )
+    if (stopped) break
 
-const handle = `function handle(id: number): number {
-  const h = hash(id)
-  let iters = 6000 + (h % 6000)       // base cost
-  if (h % 101 === 0) iters += 90000   // ~1% slow requests → the p99 tail
-  let acc = 0
-  for (let i = 0; i < iters; i++) acc = (acc + hash(i ^ h)) >>> 0
-  return acc
-}`
+    const t0 = performance.now()
+    const xhr = new XMLHttpRequest()
+    xhr.open(method, url, false)   // async: false — a real blocking request
+    xhr.send()
+    const latencyUs = Math.round((performance.now() - t0) * 1000)
+    // status is 0 on a connection failure; send() never throws.
+    results.send({ latencyUs, status: xhr.status, bytes: xhr.responseText.length })
+  }
+  done.send(1)
+})`
 
-const workers = `// Generator: fill the queue, then close it — the close is the stop signal.
-go(() => {
-  for (let i = 0; i < TOTAL; i++) requests.send(i)
-  requests.close()
-})
+const stopcode = `const stop = new Channel<number>(0)
 
-// Workers: range the queue, time each request, stream the latency out.
-function spawnWorker(): void {
-  go(() => {
-    for (const id of requests) {
-      const t0 = performance.now()
-      handle(id)
-      results.send(Math.round((performance.now() - t0) * 1000))
-    }
-    done.send(1)
-  })
-}
-for (let w = 0; w < CONCURRENCY; w++) spawnWorker()`
+// From the collector: close once — every agent's recvCase fires.
+if (!cfg.infinite && now >= deadline) stop.close()   // duration reached
+if (key === 's' || key === 'q') stop.close()          // manual stop`
 
-const collector = `let finished = 0
-while (finished < CONCURRENCY) {
-  select(
-    results.recvCase((micros: number) => {
-      record(micros)
-      if (completed % FRAME === 0) render(view())
-    }),
-    done.recvCase((_: number) => { finished += 1 }),
-  )
+const collector = `while (finished < cfg.concurrency) {
+  // Drain every result currently available, without blocking.
+  let draining = true
+  while (draining) {
+    select(
+      results.recvCase((r: Result) => { record(stats, r) }),
+      done.recvCase((_: number) => { finished += 1 }),
+      defaultCase(() => { draining = false }),
+    )
+  }
+  const key: string = readKey(60)        // pace ~60ms AND poll for a stop key
+  if (key === 's' || key === 'q') { stop.close() }
+  if (now - lastRender > 100) render(renderRunning(cfg, stats, now - start))
 }`
 
 const pct = `// The pth-percentile latency, read off the cumulative histogram.
-function pct(p: number): number {
-  const target = p * completed
+export function pct(s: Stats, p: number): number {
+  const target = p * s.completed
   let cum = 0
   for (let b = 0; b < NBUCKETS; b++) {
-    cum += hist[b]
-    if (cum >= target) return 1 << b   // 2^b µs — the bucket's lower edge
+    cum += s.hist[b]
+    if (cum >= target) return 1 << b     // 2^b µs — the bucket's lower edge
   }
-  return maxMicros
+  return s.maxUs
 }`
 
-const drain = `let draining = true
-while (draining) {
-  select(
-    results.recvCase((micros: number) => { record(micros) }),
-    defaultCase(() => { draining = false }),
-  )
-}`
+const cli = `klainload                                 # opens the config screen
+klainload http://host/path                # pre-fills the config screen
+klainload http://host/path --run -c 32 -d 30   # skip it: 30s, 32 agents
+klainload http://host/path -d inf         # run until you press s`
 
-const view = `Box({ flexDirection: 'row', gap: 2 }, [
-  stat('p50', fmtMicros(pct(0.5)), 'green'),
-  stat('p90', fmtMicros(pct(0.9)), 'yellow'),
-  stat('p99', fmtMicros(pct(0.99)), 'red'),
-])`
+const report = `klainload — GET http://127.0.0.1:8080/
+  16 agents · 30s
+
+Summary
+  requests    482913
+  throughput  16097 req/s
+  success     482910 (100.0%)
+  failed      3 (0.0%)
+
+Latency
+  mean    980µs   min 210µs   max 44.1ms
+  p50     0.8ms   p90 1.6ms   p99 4.1ms
+
+Status codes
+  2xx 482910   3xx 0   4xx 0   5xx 0   errors 3`
 </script>

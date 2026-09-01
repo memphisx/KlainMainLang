@@ -10,9 +10,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **43 passed**, 2408 failed, 1027 skipped (out of scope).
+3478 files total: **45 passed**, 2406 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **43 passed (1.8%)**.
+Of the 2451 files that compiled far enough to run, **45 passed (1.8%)**.
 
 ## By module (top 40 by file count)
 
@@ -33,7 +33,7 @@ Of the 2451 files that compiled far enough to run, **43 passed (1.8%)**.
 | repl | 0 | 37 | 39 | 76 |
 | dgram | 1 | 57 | 16 | 74 |
 | https | 0 | 51 | 11 | 62 |
-| whatwg | 0 | 23 | 39 | 62 |
+| whatwg | 2 | 21 | 39 | 62 |
 | buffer | 2 | 44 | 15 | 61 |
 | inspector | 0 | 2 | 58 | 60 |
 | timers | 3 | 40 | 13 | 56 |
@@ -65,7 +65,7 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 273 | COMPILE_ERROR: a number has no method '%s' |
+| 277 | COMPILE_ERROR: a number has no method '%s' |
 | 116 | COMPILE_ERROR: undefined variable '%s' |
 | 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
@@ -76,18 +76,18 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 52 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 48 | COMPILE_ERROR: undefined function or closure '%s' |
+| 43 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 39 | COMPILE_ERROR: fs has no method '%s' |
-| 38 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 27 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
 | 26 | COMPILE_ERROR: process has no method '%s' |
 | 25 | COMPILE_ERROR: expected ), got => |
 | 24 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
 | 23 | COMPILE_ERROR: a Request has no method '%s' |
+| 23 | COMPILE_ERROR: field assignment on non-object |
 | 22 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 22 | RUN_TIMEOUT |
 | 21 | COMPILE_ERROR: '%s' is not an array |
-| 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
@@ -99,10 +99,10 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 15 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
 | 15 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
+| 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | MODULE_NOT_IMPLEMENTED: module |
 | 14 | RUNTIME_NONZERO_EXIT:  |
-| 13 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |
 | 13 | COMPILE_ERROR: expected }, got : |
 
@@ -138,7 +138,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (43)
+## Passing files (45)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -186,4 +186,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-utf8-scripts.js` | utf8 |  |
 | `test-v8-flag-pool-size-0.js` | v8 |  |
 | `test-websocket.js` | websocket |  |
+| `test-whatwg-url-custom-deepequal.js` | whatwg |  |
+| `test-whatwg-url-custom-href-side-effect.js` | whatwg |  |
 | `test-zlib-no-stream.js` | zlib |  |

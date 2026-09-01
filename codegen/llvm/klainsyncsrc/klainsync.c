@@ -92,6 +92,13 @@ typedef struct ks_g {
     _Atomic int preempt; /* set by sysmon to request a yield at the next
                             cooperative safepoint; read+cleared by the G */
     struct ks_g *qnext;  /* intrusive link for run queues */
+    /* LockOSThread (Go's runtime.LockOSThread): when non-NULL, this G is bound
+     * to exactly one M and never migrates — it always resumes on locked_m,
+     * even across preemption. Used by the Node event-loop/reactor goroutine,
+     * whose ucontext connection fibers are thread-bound and cannot legally
+     * swapcontext across OS threads. The G still preempts at safepoints; it
+     * just re-runs on the same M. */
+    struct ks_m *locked_m;
 } ks_g;
 
 /* ------------------------------------------------------------------ *
@@ -129,6 +136,12 @@ typedef struct ks_m {
      * scheduler re-enqueues it AFTER the switch-out, closing the same
      * double-run hazard the park path avoids. */
     ks_g *ready_after;
+    /* LockOSThread: the G exclusively bound to this M (NULL when unlocked). A
+     * locked M runs ONLY this G — it never pops its P, steals, or runs the
+     * global queue — and parks on lcv when the locked G is not runnable. */
+    _Atomic(ks_g *) locked_g;
+    pthread_mutex_t lmu;
+    pthread_cond_t lcv;
 } ks_m;
 
 /* ------------------------------------------------------------------ *
@@ -230,6 +243,17 @@ static ks_g *ks_p_steal(ks_p *thief, ks_p *victim) {
  * rescue M (m->p == NULL) has no local queue, so it readies onto the global
  * queue. */
 static void ks_ready(ks_g *g) {
+    /* A LockOSThread'd G never enters a shared queue: wake its owning M, which
+     * is the only M that will ever run it. Set status + signal together under
+     * the M's lock so its findrunnable park cannot miss the wakeup. */
+    ks_m *lm = g->locked_m;
+    if (lm) {
+        pthread_mutex_lock(&lm->lmu);
+        g->status = KS_RUNNABLE;
+        pthread_cond_signal(&lm->lcv);
+        pthread_mutex_unlock(&lm->lmu);
+        return;
+    }
     g->status = KS_RUNNABLE;
     ks_m *m = ks_curm;
     if (m && m->p && ks_p_push(m->p, g))
@@ -241,6 +265,17 @@ static void ks_ready(ks_g *g) {
  *  Scheduler loop (runs on each M's own thread/stack)                  *
  * ------------------------------------------------------------------ */
 static ks_g *ks_findrunnable(ks_m *m) {
+    /* A locked M runs ONLY its bound G: it never touches the shared queues, so
+     * it can neither steal nor be stolen from. Wait until that G is runnable
+     * (it parks here while the G is blocked on a channel/fetch), then run it. */
+    ks_g *lg = atomic_load_explicit(&m->locked_g, memory_order_relaxed);
+    if (lg) {
+        pthread_mutex_lock(&m->lmu);
+        while (lg->status != KS_RUNNABLE)
+            pthread_cond_wait(&m->lcv, &m->lmu);
+        pthread_mutex_unlock(&m->lmu);
+        return lg;
+    }
     for (;;) {
         /* Periodically poll the global queue first (Go's every-61 heuristic) so
          * a P with a steady stream of local work can't starve the global run
@@ -331,8 +366,14 @@ static void ks_execute(ks_m *m, ks_g *g) {
      * global queue (fatal with GOMAXPROCS=1: the preempted spinner would just
      * resume). This gives fair round-robin. */
     if (m->ready_after) {
-        m->ready_after->status = KS_RUNNABLE;
-        ks_global_push(m->ready_after);
+        /* A locked G yielding stays on its own M — it must not enter the global
+         * queue (no other M may run it). This M's next findrunnable returns it. */
+        if (m->ready_after->locked_m == m) {
+            m->ready_after->status = KS_RUNNABLE;
+        } else {
+            m->ready_after->status = KS_RUNNABLE;
+            ks_global_push(m->ready_after);
+        }
         m->ready_after = NULL;
     }
     /* reclaim a finished goroutine's stack (manual mode) / roots (gc mode). */
@@ -1045,6 +1086,12 @@ static void *ks_sysmon_main(void *arg) {
             ks_g *g = atomic_load_explicit(&ks_machines[i].cur, memory_order_relaxed);
             if (!g)
                 continue;
+            /* A LockOSThread'd G owns its M exclusively — preempting it buys no
+             * fairness (its M runs nothing else) and its long select()/blocking
+             * calls are legitimate, not a starving spinner. Leave it alone, and
+             * never treat it as "stuck" work needing a rescue M. */
+            if (g->locked_m)
+                continue;
             long long start = atomic_load_explicit(&ks_machines[i].cur_start_ns, memory_order_relaxed);
             long long elapsed = now - start;
             if (elapsed > KS_PREEMPT_NS)
@@ -1063,6 +1110,8 @@ static void *ks_sysmon_main(void *arg) {
             atomic_load(&ks_rescue_count) < ks_rescue_cap) {
             ks_m *rm = (ks_m *)calloc(1, sizeof(ks_m));
             rm->p = NULL;
+            pthread_mutex_init(&rm->lmu, NULL);
+            pthread_cond_init(&rm->lcv, NULL);
             pthread_t t;
             if (pthread_create(&t, NULL, ks_rescue_main, rm) == 0) {
                 pthread_detach(t);
@@ -1110,6 +1159,8 @@ static void ks_init(void) {
         pthread_mutex_init(&ks_procs[i].mu, NULL);
     for (int i = 0; i < ks_nprocs; i++) {
         ks_machines[i].p = &ks_procs[i];
+        pthread_mutex_init(&ks_machines[i].lmu, NULL);
+        pthread_cond_init(&ks_machines[i].lcv, NULL);
         pthread_create(&ks_machines[i].thread, NULL, ks_m_main, &ks_machines[i]);
     }
     /* sysmon needs no P and never runs managed code, so it is not an M and is
@@ -1127,6 +1178,46 @@ void klainsync_go(void *fn, void *env) {
     atomic_fetch_add(&ks_live, 1);
     ks_g *g = ks_g_new((void (*)(void *))fn, env);
     ks_global_push(g);
+}
+
+/* Go's runtime.LockOSThread: bind the current goroutine to its current M so it
+ * never migrates. Used by the Node event-loop/reactor goroutine, whose
+ * ucontext connection fibers are thread-bound (a fiber created on thread A
+ * cannot be swapcontext'd on thread B) and whose reactor state lives in
+ * thread-local storage — both of which a migrating goroutine would corrupt.
+ * The locked M then runs ONLY this G. Any other Gs already sitting in this M's
+ * local run queue are flushed to the global queue so a peer M can run them
+ * (this M no longer will). A no-op off a goroutine (main/non-M thread already
+ * never migrates). Idempotent. */
+void klainsync_lock_os_thread(void) {
+    ks_g *g = ks_curg;
+    ks_m *m = ks_curm;
+    if (!g || !m)
+        return;
+    g->locked_m = m;
+    atomic_store_explicit(&m->locked_g, g, memory_order_release);
+    /* Drain this M's local queue to the global queue: the locked M's
+     * findrunnable will never pop its P again, so anything left there would be
+     * stranded. */
+    if (m->p) {
+        for (;;) {
+            ks_g *other = ks_p_pop(m->p);
+            if (!other)
+                break;
+            ks_global_push(other);
+        }
+    }
+}
+
+/* Undo klainsync_lock_os_thread. Not called by the reactor (it owns its M for
+ * the process lifetime) but provided for completeness / future callers. */
+void klainsync_unlock_os_thread(void) {
+    ks_g *g = ks_curg;
+    ks_m *m = ks_curm;
+    if (!g || !m || g->locked_m != m)
+        return;
+    g->locked_m = NULL;
+    atomic_store_explicit(&m->locked_g, NULL, memory_order_release);
 }
 
 /* Yield the current goroutine, returning it to the run queue so its P can run

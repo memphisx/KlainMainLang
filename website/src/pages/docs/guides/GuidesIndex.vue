@@ -36,10 +36,10 @@
         <span class="km-guidecard__tag">Concurrency</span>
         <h3>Build a load tester with <code>klain:sync</code></h3>
         <p>
-          A closed-loop load generator: a pool of goroutines drives requests through an in-process
-          service in parallel while a live <code>klain:tui</code> dashboard shows throughput,
-          latency percentiles, and a histogram — goroutines, channels, and <code>select</code> in
-          one runnable file.
+          Point <code>klainload</code> at any URL: a pool of goroutine agents hammer it in parallel
+          while a live <code>klain:tui</code> dashboard shows throughput, success rate, and latency
+          percentiles — stop it any time with a keypress and keep the report. Goroutines, channels,
+          <code>select</code>, and a synchronous request client, split across a few modules.
         </p>
         <span class="km-guidecard__go">Start the walkthrough →</span>
       </router-link>

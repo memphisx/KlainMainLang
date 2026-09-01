@@ -168,3 +168,20 @@ function makeCounter(): void {
     console.log("final total " + total);       // 6 (shared with the generator)
 }
 makeCounter();
+
+// Breaking out of a for...of over a generator closes the iterator, so an
+// enclosing `finally` in the generator body runs — the idiomatic cleanup for a
+// bounded or infinite generator (ADR-00613). Runs identically under Node.js.
+function* naturals() {
+    let n = 0;
+    try {
+        while (true) { yield n++; }
+    } finally {
+        console.log("generator cleaned up");
+    }
+}
+for (const x of naturals()) {
+    console.log(x);            // 0, 1, 2, 3
+    if (x >= 3) break;         // triggers the finally
+}
+console.log("consumer done");

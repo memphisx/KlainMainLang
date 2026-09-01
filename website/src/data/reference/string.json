@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "STRING-METHODS.md",
   "coversRows": "all",
-  "coverage": { "loose": "28/30", "loosePct": 93, "strict": "22/30", "strictPct": 73 },
+  "coverage": { "loose": "29/30", "loosePct": 97, "strict": "25/30", "strictPct": 83 },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
     {
@@ -304,14 +304,11 @@
       "id": "string.search",
       "name": ".search(pattern)",
       "signature": "search(pattern: string | RegExp): number",
-      "badge": "caveats",
-      "description": "Searches for a pattern and returns its index, or -1. A RegExp pattern runs a real PCRE2 search.",
+      "badge": "supported",
+      "description": "Searches for a pattern and returns its index, or -1. A plain-string pattern is coerced to a RegExp exactly as in real JS (metacharacters are interpreted — `'a.b'.search('.')` is 0), and a RegExp pattern runs a real PCRE2 search.",
       "returns": { "type": "number", "desc": "First match index, or -1." },
       "exampleKey": "strings/search_compare",
       "snippet": "console.log('the quick brown fox'.search('brown'))   // 10",
-      "differences": [
-        "A plain-string `pattern` isn't coerced to a `RegExp` as in real JS — it falls back to the pre-`RegExp` `.indexOf()`-shaped behavior."
-      ],
       "seeAlso": ["string.indexOf", "string.match"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/search" }
     },
@@ -319,14 +316,11 @@
       "id": "string.replaceAll",
       "name": ".replaceAll(from, to)",
       "signature": "replaceAll(from: string, to: string): string",
-      "badge": "caveats",
-      "description": "Replaces every non-overlapping occurrence of `from` with `to`.",
+      "badge": "supported",
+      "description": "Replaces every non-overlapping occurrence of `from` with `to`. An empty search is JS-faithful — `'abc'.replaceAll('', '-')` is `'-a-b-c-'`.",
       "returns": { "type": "string", "desc": "A new string with all matches replaced." },
       "exampleKey": "strings/string_methods",
       "snippet": "console.log('a-b-a-b'.replaceAll('-', ' '))   // a b a b",
-      "differences": [
-        "An empty search is a no-op, not JS's insert-between-chars behavior."
-      ],
       "seeAlso": ["string.replace"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replaceAll" }
     },
@@ -373,9 +367,10 @@
       "id": "string.raw",
       "name": "String.raw tag",
       "signature": "String.raw`template`",
-      "badge": "missing",
-      "description": "The String.raw tagged-template helper is not implemented.",
-      "seeAlso": [],
+      "badge": "supported",
+      "description": "The String.raw tag interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (String.raw`a\\nb` is a\\nb), byte-for-byte the same as Node.",
+      "snippet": "console.log(String.raw`C:\\path\\to\\file`)  // C:\\path\\to\\file",
+      "seeAlso": ["string.replace"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/raw" }
     }
   ]

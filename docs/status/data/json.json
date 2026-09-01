@@ -73,7 +73,8 @@
             "feature": "`JSON.stringify(mixedTypeArray)`",
             "status": "missing",
             "notes": [
-              "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against"
+              "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against",
+              "A fixed-length mixed sequence expressed as a **tuple** (`[number, string, boolean]`) does stringify correctly (`JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`) — the tuple, not a heterogeneous array, is how such a value is represented here"
             ]
           },
           {
@@ -94,10 +95,11 @@
             "feature": "`JSON.parse(s)` → top-level `T[]` (incl. object & nested arrays)",
             "status": "implemented",
             "caveats": [
-              "Only in a type-annotated position (`const xs: T[] = …`, or a field) — a bare reassignment `xs = JSON.parse(...)` has no target type to project against and isn't supported"
+              "A bare reassignment into a **member or element** target (`obj.items = JSON.parse(...)`, `grid[i] = JSON.parse(...)`) isn't projected — assign into a declared variable or object field first; a typed var-decl and a declared-variable reassignment (`let xs: T[] = …; xs = JSON.parse(...)`) both project ([ADR-00571](../adr/ADR-00571.md))"
             ],
             "notes": [
-              "Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md))"
+              "Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md))",
+              "A reassignment `xs = JSON.parse(s)` / `obj = await res.json()` into an array- or object-typed **variable** projects against the binding's declared type, the same as a typed var-decl ([ADR-00571](../adr/ADR-00571.md))"
             ]
           },
           {

@@ -13,13 +13,13 @@
       "statusRow": "crypto.getRandomValues(view)",
       "signature": "getRandomValues<T extends TypedArray>(view: T): T",
       "badge": "caveats",
-      "description": "Fills a TypedArray's (or whole ArrayBuffer's) bytes in place from the in-house CSPRNG — arc4random_buf on macOS/BSD, getrandom() on Linux — and returns the same view. The legacy plain number[] form still works, writing one random byte value (0–255) per element.",
+      "description": "Fills an integer TypedArray's (or whole ArrayBuffer's) bytes in place from the in-house CSPRNG — arc4random_buf on macOS/BSD, getrandom() on Linux — and returns the same view. The spec's 65,536-byte quota is enforced (an oversize view throws QuotaExceededError), and a float TypedArray is a compile-time rejection matching the spec's TypeMismatchError. The legacy plain number[] form still works, writing one random byte value (0–255) per element.",
       "params": [{ "name": "view", "type": "TypedArray | ArrayBuffer", "desc": "The buffer to fill in place." }],
       "returns": { "type": "TypedArray", "desc": "The same view, now filled." },
       "exampleKey": "crypto/crypto",
       "snippet": "const bytes = new Uint8Array(16)\ncrypto.getRandomValues(bytes)",
       "differences": [
-        "The spec's 65536-byte quota and integer-TypedArray-only restriction aren't enforced (float TypedArrays and whole `ArrayBuffer`s are accepted, oversize fills succeed)"
+        "A whole `ArrayBuffer` is accepted as a deliberate extension (real JS throws `TypeMismatchError` — only integer TypedArrays are spec-legal)."
       ],
       "seeAlso": ["crypto.randomUUID"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues" }
@@ -168,7 +168,7 @@
       "differences": [
         "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
         "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
-        "`randomBytes`'s callback form is a clean rejection (use the returned Buffer)",
+        "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails)",
         "A namespace import's binding covers these five members only — `crypto.subtle` is reached via the ambient global, not the module"
       ],
       "seeAlso": ["crypto.subtle.generateKey", "crypto.getRandomValues"],

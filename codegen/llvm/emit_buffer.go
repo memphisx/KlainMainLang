@@ -225,14 +225,23 @@ func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos
 				if err != nil {
 					return Value{}, err
 				}
-				if !isNumberTy(fv.Ty) {
-					return Value{}, fmt.Errorf("%d:%d: Buffer.alloc's fill must be a number (string fills are not supported)", pos.Line, pos.Col)
+				switch {
+				case isNumberTy(fv.Ty):
+					b := e.coerce(fv, TypeU8)
+					wide := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i32", wide, b.Ref))
+					e.ensureMemset()
+					e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 %s, i64 %s)", data, wide, nRef))
+				case isStringTy(fv.Ty):
+					// String fill (ADR-00576): repeat the fill string's UTF-8 bytes
+					// across the whole buffer, matching Node's Buffer.alloc(n, str).
+					fv = e.coerce(fv, TypePtr)
+					e.ensureStrHeaderRuntime()
+					needleLen := e.emitStrLenHeader(fv.Ref)
+					e.emitBufferRepeatFill(data, fv.Ref, needleLen, "0", nRef)
+				default:
+					return Value{}, fmt.Errorf("%d:%d: Buffer.alloc's fill must be a number or a string", pos.Line, pos.Col)
 				}
-				b := e.coerce(fv, TypeU8)
-				wide := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i32", wide, b.Ref))
-				e.ensureMemset()
-				e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 %s, i64 %s)", data, wide, nRef))
 			}
 		}
 		return e.bufferAggregate(data, nRef), nil
@@ -625,6 +634,199 @@ func isBufferMethodName(name string) bool {
 	}
 	_, ok := bufferAccessorKindFor(name)
 	return ok
+}
+
+// emitBufferStringSearch implements the string-argument forms of
+// buf.indexOf/includes/lastIndexOf (TDD-00103 follow-up): the needle string's
+// UTF-8 bytes are searched over the buffer's raw bytes. `kind` is "indexOf",
+// "includes", or "lastIndexOf". Only the single-argument form is supported (no
+// byteOffset/encoding). An empty needle matches Node: indexOf → 0,
+// lastIndexOf → buffer length, includes → true.
+func (e *Emitter) emitBufferStringSearch(mem *ast.MemberExpression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.%s(string) takes exactly 1 argument (byteOffset/encoding not supported)", pos.Line, pos.Col, method)
+	}
+	bufPtr, bufLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	needleVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	needleVal = e.coerce(needleVal, TypePtr)
+	e.ensureStrHeaderRuntime() // memmem + __kml_str_len
+	needleLen := e.emitStrLenHeader(needleVal.Ref)
+
+	if method == "lastIndexOf" {
+		e.ensureMemcmp()
+		resAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", resAlloca))
+		// Empty needle → buffer length (Node).
+		isEmpty := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, needleLen))
+		emptyL := e.freshLabel("buflast.empty")
+		scanL := e.freshLabel("buflast.scan")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, emptyL, scanL))
+		e.emitLabel(emptyL)
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bufLen, resAlloca))
+		doneL := e.freshLabel("buflast.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(scanL)
+		// start = bufLen - needleLen; if < 0 the loop never runs.
+		start := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", start, bufLen, needleLen))
+		idxAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", start, idxAlloca))
+		condL := e.freshLabel("buflast.cond")
+		bodyL := e.freshLabel("buflast.body")
+		matchL := e.freshLabel("buflast.match")
+		nextL := e.freshLabel("buflast.next")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		i := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idxAlloca))
+		neg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, i))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", neg, doneL, bodyL))
+		e.emitLabel(bodyL)
+		hayAt := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", hayAt, bufPtr, i))
+		cmp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @memcmp(ptr %s, ptr %s, i64 %s)", cmp, hayAt, needleVal.Ref, needleLen))
+		iseq := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", iseq, cmp))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", iseq, matchL, nextL))
+		e.emitLabel(matchL)
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i, resAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(nextL)
+		iDec := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", iDec, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", iDec, idxAlloca))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resAlloca))
+		return e.countToNumber(Value{Ref: res, Ty: TypeI64}), nil
+	}
+
+	// Forward search (indexOf/includes) via memmem.
+	found := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @memmem(ptr %s, i64 %s, ptr %s, i64 %s)", found, bufPtr, bufLen, needleVal.Ref, needleLen))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, found))
+	foundInt := e.freshReg()
+	bufInt := e.freshReg()
+	diff := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", foundInt, found))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bufInt, bufPtr))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", diff, foundInt, bufInt))
+	notFoundIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 -1, i64 %s", notFoundIdx, isNull, diff))
+	// An empty needle is index 0 (Node) regardless of what memmem returns for a
+	// zero length (macOS returns NULL, glibc returns the haystack).
+	isEmptyN := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmptyN, needleLen))
+	idx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", idx, isEmptyN, notFoundIdx))
+	if method == "includes" {
+		ge0 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", ge0, idx))
+		return Value{Ref: ge0, Ty: TypeBool}, nil
+	}
+	return e.countToNumber(Value{Ref: idx, Ty: TypeI64}), nil
+}
+
+// emitBufferStringFill implements buf.fill(string[, offset[, end]]): the range
+// [offset, end) is filled by repeating the string's UTF-8 bytes, aligned to the
+// fill offset (Node: `Buffer.alloc(5).fill("ab", 1)` → `00 61 62 61 62`). An
+// empty string is a no-op. (ADR-00559.)
+func (e *Emitter) emitBufferStringFill(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.fill(string) takes 1–3 arguments (value, offset?, end?; encoding not supported)", pos.Line, pos.Col)
+	}
+	bufPtr, bufLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	needleVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	needleVal = e.coerce(needleVal, TypePtr)
+	e.ensureStrHeaderRuntime()
+	needleLen := e.emitStrLenHeader(needleVal.Ref)
+
+	startN := "0"
+	if len(args) >= 2 {
+		sr, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(e.coerce(sr, TypeI64).Ref, bufLen)
+	}
+	endN := bufLen
+	if len(args) >= 3 {
+		er, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(e.coerce(er, TypeI64).Ref, bufLen)
+	}
+
+	e.emitBufferRepeatFill(bufPtr, needleVal.Ref, needleLen, startN, endN)
+	// Return the same buffer aggregate.
+	r0 := e.freshReg()
+	r1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, bufPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, bufLen))
+	return Value{Ref: r1, Ty: e.inferExprType(mem.Object)}, nil
+}
+
+// emitBufferRepeatFill fills bufPtr[startN, endN) by repeating needlePtr's
+// needleLen bytes, aligned to startN (`Buffer.alloc(5).fill("ab", 1)` →
+// `00 61 62 61 62`). An empty needle (needleLen == 0) is a no-op. Shared by
+// buf.fill(string) and Buffer.alloc(size, stringFill) (ADR-00559/ADR-00576).
+func (e *Emitter) emitBufferRepeatFill(bufPtr, needlePtr, needleLen, startN, endN string) {
+	nonEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", nonEmpty, needleLen))
+	fillL := e.freshLabel("buffill.start")
+	doneL := e.freshLabel("buffill.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nonEmpty, fillL, doneL))
+
+	e.emitLabel(fillL)
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startN, idxAlloca))
+	condL := e.freshLabel("buffill.cond")
+	bodyL := e.freshLabel("buffill.body")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idxAlloca))
+	atEnd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", atEnd, i, endN))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", atEnd, doneL, bodyL))
+	e.emitLabel(bodyL)
+	rel := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rel, i, startN))
+	cyc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = urem i64 %s, %s", cyc, rel, needleLen))
+	srcGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcGep, needlePtr, cyc))
+	byteVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", byteVal, srcGep))
+	dstGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dstGep, bufPtr, i))
+	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", byteVal, dstGep))
+	iNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", iNext, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", iNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(doneL)
 }
 
 // emitBufferInstanceCall dispatches buffer.<method>(...) for the names the

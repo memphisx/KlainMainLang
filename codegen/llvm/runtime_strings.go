@@ -354,9 +354,11 @@ do_replace:
 // occurrence of %search in %s with %rep, in a single left-to-right pass over the
 // ORIGINAL string (never re-scanning already-written replacement text, so a %rep
 // that itself contains %search is handled correctly, unlike a naive "call
-// __kml_replace in a loop until no match remains" approach). An empty %search is
-// treated as "no matches" (returns a copy of %s unchanged) to avoid a zero-length
-// match making no forward progress.
+// __kml_replace in a loop until no match remains" approach). An empty %search
+// matches JS's insert-between-every-char behavior: "abc".replaceAll("", "-") is
+// "-a-b-c-" (a leading %rep, then each char followed by %rep) — handled by a
+// dedicated branch since a zero-length match makes no forward progress in the
+// generic memmem loop.
 func (e *Emitter) ensureStringReplaceAll() {
 	if e.usedStringReplaceAll {
 		return
@@ -369,13 +371,32 @@ func (e *Emitter) ensureStringReplaceAll() {
 define ptr @__kml_replace_all(ptr %s, i64 %slen, ptr %search, i64 %search_len, ptr %rep, i64 %rep_len) {
 entry:
   %is_empty_search = icmp eq i64 %search_len, 0
-  br i1 %is_empty_search, label %copy_unchanged, label %count_setup
-copy_unchanged:
-  %sbuf_u = call ptr @__kml_str_alloc(i64 %slen)
-  call ptr @memcpy(ptr %sbuf_u, ptr %s, i64 %slen)
-  %nu = getelementptr i8, ptr %sbuf_u, i64 %slen
-  store i8 0, ptr %nu, align 1
-  ret ptr %sbuf_u
+  br i1 %is_empty_search, label %empty_search, label %count_setup
+empty_search:
+  %np1 = add i64 %slen, 1
+  %addede = mul i64 %rep_len, %np1
+  %totale = add i64 %slen, %addede
+  %bufe = call ptr @__kml_str_alloc(i64 %totale)
+  call ptr @memcpy(ptr %bufe, ptr %rep, i64 %rep_len)
+  %oute0 = getelementptr i8, ptr %bufe, i64 %rep_len
+  br label %eloop
+eloop:
+  %ei = phi i64 [ 0, %empty_search ], [ %ei1, %ebody ]
+  %oute = phi ptr [ %oute0, %empty_search ], [ %oute_nxt, %ebody ]
+  %edone = icmp eq i64 %ei, %slen
+  br i1 %edone, label %edone_l, label %ebody
+ebody:
+  %esrc = getelementptr i8, ptr %s, i64 %ei
+  %echar = load i8, ptr %esrc, align 1
+  store i8 %echar, ptr %oute, align 1
+  %oute_after = getelementptr i8, ptr %oute, i64 1
+  call ptr @memcpy(ptr %oute_after, ptr %rep, i64 %rep_len)
+  %oute_nxt = getelementptr i8, ptr %oute_after, i64 %rep_len
+  %ei1 = add i64 %ei, 1
+  br label %eloop
+edone_l:
+  store i8 0, ptr %oute, align 1
+  ret ptr %bufe
 count_setup:
   br label %cnt_loop
 cnt_loop:

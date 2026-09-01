@@ -29,3 +29,11 @@ interface Sparse { [i: number]: string; }
 const sparse: Sparse = {};
 sparse[7] = "seven";
 console.log(sparse[7]);
+
+// Logical assignment works against a computed key (ADR-00600): ??= fills a key
+// only when it's absent/null, ||= when the current value is falsy.
+const cache: { [k: string]: string } = {};
+cache["a"] = "hit";
+cache["a"] ??= "miss";   // present → stays "hit"
+cache["b"] ??= "miss";   // absent → "miss"
+console.log(cache["a"], cache["b"]);

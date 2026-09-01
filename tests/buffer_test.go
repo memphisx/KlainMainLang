@@ -41,6 +41,17 @@ console.log(u8.toString("hex"));
 `, "7 7 4\n44\n8 48656c6c6f01022c\n48656c6c6f01\n0 -1\ntrue false\n-1\ntrue false\n0102")
 }
 
+func TestE2EBufferAllocStringFill(t *testing.T) {
+	// Buffer.alloc(size, stringFill) repeats the fill string's bytes (ADR-00576),
+	// matching Node; a numeric fill still memsets.
+	assertOutput(t, `
+console.log(Buffer.alloc(5, "ab").toString());
+console.log(Buffer.alloc(4, "x").toString());
+console.log(Buffer.alloc(6, "abc").toString());
+console.log(Buffer.alloc(3, 65).toString());
+`, "ababa\nxxxx\nabcabc\nAAA")
+}
+
 func TestE2EBufferAccessorsAndWrite(t *testing.T) {
 	assertOutput(t, `
 const w = Buffer.alloc(8);
@@ -78,6 +89,33 @@ console.log(sum, a.byteLength);
 const doubled = a.map((x: number) => x * 2);
 console.log(doubled[1]);
 `, "2 false\n0a140000\n30 4\n40")
+}
+
+// Buffer.indexOf/includes/lastIndexOf with a STRING needle search the needle's
+// bytes over the buffer (ADR-00558). Number forms still work (above).
+func TestE2EBufferStringSearch(t *testing.T) {
+	assertOutput(t, `
+const b = Buffer.from("hello world hello");
+console.log(b.indexOf("world"), b.indexOf("hello"), b.lastIndexOf("hello"));
+console.log(b.indexOf("xyz"), b.includes("wor"), b.includes("nope"));
+console.log(b.lastIndexOf("l"), b.indexOf(""), b.lastIndexOf(""));
+`, "6 0 12\n-1 true false\n15 0 17")
+}
+
+// Buffer.fill(string, offset?, end?) repeats the needle's bytes aligned to the
+// fill offset; an empty string is a no-op (ADR-00559).
+func TestE2EBufferStringFill(t *testing.T) {
+	assertOutput(t, `
+const a = Buffer.alloc(5);
+a.fill("ab", 1);
+console.log(a.toString("hex"));
+const b = Buffer.alloc(6);
+b.fill("xyz");
+console.log(b.toString());
+const d = Buffer.from([1, 2, 3]);
+d.fill("");
+console.log(d[0], d[1], d[2]);
+`, "0061626162\nxyzxyz\n1 2 3")
 }
 
 func TestE2EBufferRejections(t *testing.T) {

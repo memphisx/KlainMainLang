@@ -42,3 +42,19 @@ const gridClone = structuredClone(grid)
 gridClone[0][0] = 999
 console.log(grid[0][0])      // 1
 console.log(gridClone[0][0]) // 999
+
+// A plain ArrayBuffer is byte-copied (a SharedArrayBuffer would pass by
+// reference instead).
+const ab = new ArrayBuffer(3)
+const abView = new Uint8Array(ab)
+abView[0] = 10
+const abClone = structuredClone(ab)
+const abCloneView = new Uint8Array(abClone)
+abCloneView[0] = 200
+console.log(abView[0])       // 10 — the source is untouched
+console.log(abCloneView[0])  // 200
+
+// An Error (or subtype) clones its message/name and keeps its type.
+const errClone = structuredClone(new TypeError("bad input"))
+console.log(errClone.message)              // bad input
+console.log(errClone instanceof TypeError) // true

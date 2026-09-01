@@ -67,6 +67,18 @@ m.forEach((v, k) => {
 `, "a=1\nb=2\nc=3")
 }
 
+func TestE2EMapForEachThirdMapArg(t *testing.T) {
+	// The 3rd `map` callback argument is the map being iterated (ADR-00573).
+	assertOutput(t, `
+const m = new Map<string, number>()
+m.set('a', 1)
+m.set('b', 2)
+m.forEach((v, k, mm) => {
+    console.log(k + '=' + v + ' size=' + mm.size + ' get=' + mm.get(k))
+})
+`, "a=1 size=2 get=1\nb=2 size=2 get=2")
+}
+
 func TestE2EMapForEachSingleArg(t *testing.T) {
 	assertOutput(t, `
 const m = new Map<string, number>()

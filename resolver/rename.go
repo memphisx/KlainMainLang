@@ -662,6 +662,14 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		// rewritten against the lookup table so they match mangled names
 		// registered in the emitter's scope stack.
 		sc.push()
+		// Bind the function expression's own name in its scope *before* the body
+		// is rewritten, so self-references stay unmangled even when a top-level
+		// function of the same name exists. Without this, the body's `N` would be
+		// rewritten to the outer function's mangled name and the recursion would
+		// call the outer function instead of the expression itself. Binding it
+		// here shields those references, letting codegen's self-capture
+		// (CapturedVar{IsSelf}) reclaim them (see emit_func.go).
+		sc.bind(e.Name)
 		bindParams(e.Params, sc, lu, e.GetPos())
 		rewritePatternDefaults(e.Params, sc, lu)
 		for i := range e.Params {
@@ -794,6 +802,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.NewURLExpression:
 		e.URL = rewriteExpr(e.URL, sc, lu)
+		if e.Base != nil {
+			e.Base = rewriteExpr(e.Base, sc, lu)
+		}
 	case *ast.NewEventSourceExpression:
 		e.URL = rewriteExpr(e.URL, sc, lu)
 	case *ast.NewWebSocketExpression:

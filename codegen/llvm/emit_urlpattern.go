@@ -25,14 +25,15 @@ func URLPatternSource() string { return urlPatternSource }
 func (e *Emitter) UsesURLPattern() bool { return e.usesURLPattern }
 
 // urlPatternComponents maps init-object keys to the component indices the C
-// runtime uses (KML_UP_NCOMP order). username/password/baseURL are
-// deliberately absent — see TDD-00100's scope.
+// runtime uses (KML_UP_NCOMP order). baseURL is deliberately absent —
+// see TDD-00100's scope; username/password are supported (ADR-00585).
 var urlPatternComponents = []struct {
 	name string
 	idx  int
 }{
 	{"protocol", 0}, {"hostname", 1}, {"port", 2},
 	{"pathname", 3}, {"search", 4}, {"hash", 5},
+	{"username", 6}, {"password", 7},
 }
 
 // ensureURLPattern declares the __kml_urlpattern_* ABI once and marks the
@@ -84,7 +85,7 @@ func (e *Emitter) emitNewURLPatternExpression(ex *ast.NewURLPatternExpression) (
 				}
 			}
 			if !supported {
-				return Value{}, fmt.Errorf("%d:%d: new URLPattern: unsupported component %q (supported: protocol, hostname, port, pathname, search, hash)", pos.Line, pos.Col, prop.Key)
+				return Value{}, fmt.Errorf("%d:%d: new URLPattern: unsupported component %q (supported: protocol, hostname, port, pathname, search, hash, username, password)", pos.Line, pos.Col, prop.Key)
 			}
 			componentExprs[prop.Key] = prop.Value
 		}

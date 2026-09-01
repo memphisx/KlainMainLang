@@ -373,6 +373,33 @@ console.log(buf.byteLength);
 	compareLines(t, got, "32 32 filled\n8 filled\n16")
 }
 
+// TestE2EGetRandomValuesQuota: a view larger than 65,536 bytes throws a
+// QuotaExceededError, matching the WebCrypto spec (ADR-00554).
+func TestE2EGetRandomValuesQuota(t *testing.T) {
+	got := compileAndRun(t, `
+try {
+  const big = new Uint8Array(70000);
+  crypto.getRandomValues(big);
+  console.log("no throw");
+} catch (e) {
+  console.log((e as Error).name);
+}
+const ok = new Uint8Array(65536);
+crypto.getRandomValues(ok);
+console.log("ok");
+`)
+	compareLines(t, got, "QuotaExceededError\nok")
+}
+
+// TestE2EGetRandomValuesFloatRejected: a float TypedArray is a compile error
+// (real JS throws a TypeMismatchError) — ADR-00554.
+func TestE2EGetRandomValuesFloatRejected(t *testing.T) {
+	_, err := parseAndCompile(`const f = new Float32Array(4); crypto.getRandomValues(f);`)
+	if err == nil {
+		t.Fatal("expected a compile error for getRandomValues on a Float32Array, got none")
+	}
+}
+
 func TestE2ENodeCryptoGenerateKeyPair(t *testing.T) {
 	// The Node crypto *module* (ADR-00434): generateKeyPair(Sync) with PEM
 	// encodings over the existing keygen ABI, the async (err, pub, priv)
@@ -403,6 +430,18 @@ generateKeyPair('ec', {
 }))
 console.log("randomBytes:", randomBytes(16).length)
 `, "sync pub: true\nsync priv: true\nasync: true true true\nmustSucceed: true\nrandomBytes: 16")
+}
+
+// ADR-00590: crypto.randomBytes(size, cb) fires cb(null, buf) synchronously.
+func TestE2ECryptoRandomBytesCallback(t *testing.T) {
+	assertOutputImports(t, `
+import { randomBytes } from 'crypto'
+randomBytes(16, (err: Error, buf: Uint8Array) => {
+  console.log("err null:", err === null)
+  console.log("len:", buf.length)
+})
+console.log("sync:", randomBytes(8).length)
+`, "err null: true\nlen: 16\nsync: 8")
 }
 
 func TestE2ECryptoSubtleDestructuredAlias(t *testing.T) {

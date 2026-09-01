@@ -2034,6 +2034,32 @@ const server = http.createServer(mustCall((req, res) => {
 	}
 }
 
+func TestE2EHTTPClientRequestBody(t *testing.T) {
+	// A ClientRequest can carry a request body (ADR-00575): req.write(chunk)
+	// stages bytes (appending across calls), req.end([body]) appends a final
+	// chunk and fires. The server echoes method + body.
+	src := `
+import http from 'http'
+import { mustCall } from 'test'
+const server = http.createServer(mustCall((req, res) => {
+  res.end(req.method + ":" + req.body)
+  server.close()
+})).listen(0, mustCall(() => {
+  const req = http.request({ port: server.address().port, method: "POST" }, mustCall((res) => {
+    let data = ''
+    res.on('data', (chunk: string) => { data = data + chunk })
+    res.on('end', mustCall(() => { console.log("got: " + data) }))
+  }))
+  req.write("hello ")
+  req.end("world")
+}))
+`
+	out := compileAndRunImports(t, src)
+	if !strings.Contains(out, "got: POST:hello world") {
+		t.Errorf("request body roundtrip failed: %q", out)
+	}
+}
+
 func TestE2EHTTPClientRequestAbort(t *testing.T) {
 	src := `
 import http from 'http'

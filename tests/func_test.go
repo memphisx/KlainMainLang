@@ -203,6 +203,94 @@ console.log(box(2, 3, 4))
 `, "1\n2\n6\n24")
 }
 
+// ADR-00598: a default may reference an earlier scalar/string parameter (and
+// earlier defaults chain), while an argument still sees the caller's scope.
+// ADR-00610: a default may reference an earlier *array* parameter (its length,
+// elements, etc.), for a free function and a class method.
+func TestE2EDefaultParamReferencesEarlierArrayParam(t *testing.T) {
+	assertOutput(t, `
+function f(a: number[], b: number = a.length): number { return b }
+console.log(f([1, 2, 3]))
+console.log(f([1, 2, 3], 10))
+function g(xs: number[], first: number = xs[0], total: number = xs.length + first): number { return total }
+console.log(g([5, 6, 7]))
+class C { m(a: string[], n: number = a.length): number { return n } }
+console.log(new C().m(["x", "y"]))
+`, "3\n10\n8\n2")
+}
+
+// ADR-00611: a default may reference an earlier *nullable-scalar* parameter,
+// for a free function and a class method.
+func TestE2EDefaultParamReferencesEarlierNullableParam(t *testing.T) {
+	assertOutput(t, `
+function h(a: number | null, b: number = (a ?? 0) + 1): number { return b }
+console.log(h(5))
+console.log(h(null))
+console.log(h(5, 100))
+class C { m(a: number | null, b: number = (a ?? 0) + 1): number { return b } }
+const c = new C()
+console.log(c.m(5))
+console.log(c.m(null))
+`, "6\n1\n100\n6\n1")
+}
+
+func TestE2EDefaultParamReferencesEarlierParam(t *testing.T) {
+	assertOutput(t, `
+function f(a: number, b: number = a * 2): number { return a + b }
+console.log(f(5))
+console.log(f(5, 100))
+function greet(name: string, msg: string = "Hi " + name): string { return msg }
+console.log(greet("Kyriakos"))
+console.log(greet("X", "Yo"))
+function g(a: number, b: number = a + 1, c: number = b + 1): number { return a * 100 + b * 10 + c }
+console.log(g(1))
+let a: number = 99
+function h(a: number, b: number = 7): number { return a + b }
+console.log(h(1, a))
+`, "15\n105\nHi Kyriakos\nYo\n123\n100")
+}
+
+// ADR-00598: instance- and static-method defaults may reference an earlier param.
+func TestE2EDefaultParamEarlierParamClassMethods(t *testing.T) {
+	assertOutput(t, `
+class C {
+  compute(a: number, b: number = a * 3): number { return a + b }
+  greet(name: string, msg: string = "Hi " + name): string { return msg }
+  static scale(a: number, b: number = a * 4): number { return a + b }
+}
+const c = new C()
+console.log(c.compute(2))
+console.log(c.compute(2, 100))
+console.log(c.greet("K"))
+console.log(C.scale(3))
+console.log(C.scale(3, 1))
+`, "8\n102\nHi K\n15\n4")
+}
+
+// ADR-00599: constructor default parameters (incl. earlier-param references and
+// parameter properties).
+func TestE2EConstructorDefaultParams(t *testing.T) {
+	assertOutput(t, `
+class P {
+  sum: number
+  constructor(a: number, b: number = a * 5) { this.sum = a + b }
+}
+console.log(new P(2).sum)
+console.log(new P(2, 3).sum)
+class Q {
+  v: number
+  constructor(a: number = 7) { this.v = a }
+}
+console.log(new Q().v)
+console.log(new Q(3).v)
+class Point {
+  constructor(public x: number = 1, public y: number = x) {}
+}
+const pt = new Point(3)
+console.log(pt.x, pt.y)
+`, "12\n5\n7\n3\n3 3")
+}
+
 func TestE2EDefaultParamArray(t *testing.T) {
 	assertOutput(t, `
 function sum(nums: number[] = [1, 2, 3]): number {
@@ -833,10 +921,10 @@ console.log(outer([9, 8, 7]));
 	}
 }
 
-func TestE2ENestedFunctionInsideIfBlockRejected(t *testing.T) {
-	// V1 scope: only supported directly in the enclosing body's own
-	// immediate statement list, not one block deeper.
-	_, err := parseAndCompile(`
+// TDD-00152: a nested function declared inside a lexical block (one or more
+// blocks deeper than the enclosing body) is callable within that block.
+func TestE2ENestedFunctionInsideIfBlock(t *testing.T) {
+	assertOutput(t, `
 function outer(cond: boolean): number {
     if (cond) {
         function inner(): number { return 1; }
@@ -845,12 +933,62 @@ function outer(cond: boolean): number {
     return 0;
 }
 console.log(outer(true));
+`, "1")
+}
+
+// A block-nested function may capture an enclosing parameter and a block-local.
+func TestE2ENestedFunctionInsideBlockCaptures(t *testing.T) {
+	assertOutput(t, `
+function outer(base: number): number {
+    if (base > 0) {
+        const bonus = 100;
+        function withBonus(): number { return base + bonus; }
+        return withBonus();
+    }
+    return 0;
+}
+console.log(outer(1));
+`, "101")
+}
+
+// A function declared in a bare `switch` case is registered for the whole
+// switch block (TDD-00152).
+func TestE2ENestedFunctionInsideSwitchCase(t *testing.T) {
+	assertOutput(t, `
+function classify(n: number): string {
+    switch (n) {
+        case 1:
+            function one(): string { return "one"; }
+            return one();
+        default:
+            function other(): string { return "other"; }
+            return other();
+    }
+}
+console.log(classify(1));
+console.log(classify(5));
+`, "one\nother")
+}
+
+// A block-nested function capturing a C-style for-loop variable is rejected
+// cleanly — the loop variable is a single per-iteration cell.
+func TestE2ENestedFunctionCapturingForLoopVarRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function outer(): number {
+    let t = 0;
+    for (let i = 0; i < 3; i++) {
+        function useI(): number { return i; }
+        t += useI();
+    }
+    return t;
+}
+console.log(outer());
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a nested function declared inside an if block, got none")
+		t.Fatal("expected a compile error for a nested function capturing a for-loop variable, got none")
 	}
-	if !strings.Contains(err.Error(), "only supported directly") {
-		t.Fatalf("expected the error to explain the scoping restriction, got: %v", err)
+	if !strings.Contains(err.Error(), "capturing a for-loop variable") {
+		t.Fatalf("expected the for-loop-variable-capture error, got: %v", err)
 	}
 }
 
@@ -997,21 +1135,18 @@ console.log(sum(3));
 `, "16")
 }
 
-// A name that shadows a top-level function of the same name is rejected
-// cleanly (the resolver has already mangled the self-reference to the outer
-// function; see ADR-00178) rather than silently calling the outer function.
-func TestE2ENamedFunctionExpressionShadowingTopLevelRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function rec(n: number): number { return n; }
-const f = function rec(n: number): number { if (n <= 0) { return 0; } return n + rec(n - 1); };
-console.log(f(3));
-`)
-	if err == nil {
-		t.Fatal("expected a clean error for a named FE shadowing a top-level function, got none")
-	}
-	if !strings.Contains(err.Error(), "shadows a top-level function") {
-		t.Fatalf("expected 'shadows a top-level function', got: %v", err)
-	}
+// A named function expression whose name shadows a top-level function of the
+// same name self-references the *expression* inside its own body, while calls
+// to the name at the outer scope still reach the top-level function (ADR-00601).
+func TestE2ENamedFunctionExpressionShadowingTopLevel(t *testing.T) {
+	// Uses the resolver-backed harness: the shielding of the self-reference
+	// happens in the rename pass, which the bare parser.Parse path skips.
+	assertOutputImports(t, `
+function fac(n: number): number { return 0; }
+const g = function fac(n: number): number { return n <= 1 ? 1 : n * fac(n - 1); };
+console.log(g(5));
+console.log(fac(5));
+`, "120\n0")
 }
 
 func TestE2EDuplicateParamNameRejected(t *testing.T) {
@@ -1159,6 +1294,13 @@ func TestE2EFunctionExpressionIIFE(t *testing.T) {
 	assertOutput(t, `
 console.log((function(x: number): number { return x + 1; })(5));
 `, "6")
+}
+
+// A named recursive IIFE calls the expression itself, inline.
+func TestE2EFunctionExpressionNamedRecursiveIIFE(t *testing.T) {
+	assertOutput(t, `
+console.log((function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1); })(5));
+`, "120")
 }
 
 func TestE2EDuplicateDestructuredParamNameRejected(t *testing.T) {

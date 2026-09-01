@@ -34,10 +34,8 @@
           {
             "feature": "Construction: `new RegExp(pattern, flags?)`",
             "status": "implemented",
-            "caveats": [
-              "Does not validate the *flags* string at all — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) is silently accepted instead of throwing `SyntaxError` like real JS ([ADR-00166](../adr/ADR-00166.md))"
-            ],
             "notes": [
+              "Validates the *flags* string as real JS does — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`y`/`d` are accepted but their behavior isn't implemented — see the `u`/`y`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))",
               "Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*",
               "A `\\uXXXX`/`\\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md)"
             ]
@@ -150,10 +148,8 @@
           {
             "feature": "`str.search(regexp)`",
             "status": "implemented",
-            "caveats": [
-              "A plain-string argument falls back to the pre-`RegExp` `.indexOf()`-shaped behavior rather than coercing the string to a RegExp"
-            ],
             "notes": [
+              "A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/ADR-00548.md))",
               "Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/ADR-00119.md)"
             ]
           },

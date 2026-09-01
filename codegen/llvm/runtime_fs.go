@@ -3,6 +3,7 @@ package llvm
 import (
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // ensureFsThrow declares __kml_fs_throw: builds "<opDesc> '<path>': <reason>"
@@ -577,26 +578,152 @@ done:
 }
 
 
-// statLayout returns the host libc's struct stat field offsets (mode/size/
-// st_mtim seconds+nanoseconds) plus the mode field's load width in bits —
-// struct stat has no portable layout, so these are per-OS/arch constants,
-// the same approach direntNameOffset takes. Darwin (64-bit-inode default):
-// st_mode u16 @4, mtimespec @48, st_size @96. glibc x86-64: st_mode u32
-// @24, st_size @48, st_mtim @88. glibc aarch64: st_mode u32 @16, st_size
-// @48, st_mtim @88.
-func statLayout() (modeOff, modeBits, sizeOff, mtimeSecOff, mtimeNsecOff int) {
-	if runtime.GOOS == "darwin" {
-		return 4, 16, 96, 48, 56
-	}
-	if runtime.GOARCH == "arm64" {
-		return 16, 32, 48, 88, 96
-	}
-	return 24, 32, 48, 88, 96
+// statLayout returns the host libc's struct stat field offsets and load widths
+// for the full Stats surface (ADR-00565). struct stat has no portable layout,
+// so these are per-OS/arch constants — the same approach direntNameOffset
+// takes. The three supported hosts:
+//
+//	Darwin (64-bit-inode default): st_dev i32 @0, st_mode u16 @4, st_nlink u16
+//	  @6, st_ino u64 @8, st_uid u32 @16, st_gid u32 @20, st_rdev i32 @24,
+//	  atimespec @32, mtimespec @48, ctimespec @64, birthtimespec @80, st_size
+//	  i64 @96, st_blocks i64 @104, st_blksize i32 @112.
+//	glibc x86-64: st_dev u64 @0, st_ino u64 @8, st_nlink u64 @16, st_mode u32
+//	  @24, st_uid u32 @28, st_gid u32 @32, st_rdev u64 @40, st_size i64 @48,
+//	  st_blksize i64 @56, st_blocks i64 @64, st_atim @72, st_mtim @88, st_ctim
+//	  @104. No birthtime in struct stat (needs statx) → reported 0.
+//	glibc aarch64: st_dev u64 @0, st_ino u64 @8, st_mode u32 @16, st_nlink u32
+//	  @20, st_uid u32 @24, st_gid u32 @28, st_rdev u64 @32, st_size i64 @48,
+//	  st_blksize i32 @56, st_blocks i64 @64, st_atim @72, st_mtim @88, st_ctim
+//	  @104. No birthtime → 0.
+//
+// A time field is (secOff, nsecOff); a birthtime secOff of -1 means "not in
+// this struct, report 0". A scalar field is (off, bits).
+type statFieldLayout struct {
+	devOff, devBits         int
+	modeOff, modeBits       int
+	nlinkOff, nlinkBits     int
+	inoOff, inoBits         int
+	uidOff, gidOff          int // both u32
+	rdevOff, rdevBits       int
+	sizeOff                 int // i64
+	blocksOff               int // i64
+	blksizeOff, blksizeBits int
+	atimeSec, atimeNsec     int
+	mtimeSec, mtimeNsec     int
+	ctimeSec, ctimeNsec     int
+	birthSec, birthNsec     int // birthSec < 0 → report 0
 }
 
-// ensureFsStat declares __kml_fs_stat (ADR-00495): stat(2) into a 256-byte
-// scratch buffer, extracting {mode, size, mtimeMs} at statLayout()'s host
-// offsets. Throws the shared fs error on failure (ENOENT and friends).
+func statLayout() statFieldLayout {
+	if runtime.GOOS == "darwin" {
+		return statFieldLayout{
+			devOff: 0, devBits: 32,
+			modeOff: 4, modeBits: 16,
+			nlinkOff: 6, nlinkBits: 16,
+			inoOff: 8, inoBits: 64,
+			uidOff: 16, gidOff: 20,
+			rdevOff: 24, rdevBits: 32,
+			sizeOff: 96, blocksOff: 104,
+			blksizeOff: 112, blksizeBits: 32,
+			atimeSec: 32, atimeNsec: 40,
+			mtimeSec: 48, mtimeNsec: 56,
+			ctimeSec: 64, ctimeNsec: 72,
+			birthSec: 80, birthNsec: 88,
+		}
+	}
+	if runtime.GOARCH == "arm64" {
+		return statFieldLayout{
+			devOff: 0, devBits: 64,
+			inoOff: 8, inoBits: 64,
+			modeOff: 16, modeBits: 32,
+			nlinkOff: 20, nlinkBits: 32,
+			uidOff: 24, gidOff: 28,
+			rdevOff: 32, rdevBits: 64,
+			sizeOff: 48, blocksOff: 64,
+			blksizeOff: 56, blksizeBits: 32,
+			atimeSec: 72, atimeNsec: 80,
+			mtimeSec: 88, mtimeNsec: 96,
+			ctimeSec: 104, ctimeNsec: 112,
+			birthSec: -1, birthNsec: -1,
+		}
+	}
+	return statFieldLayout{
+		devOff: 0, devBits: 64,
+		inoOff: 8, inoBits: 64,
+		nlinkOff: 16, nlinkBits: 64,
+		modeOff: 24, modeBits: 32,
+		uidOff: 28, gidOff: 32,
+		rdevOff: 40, rdevBits: 64,
+		sizeOff: 48, blocksOff: 64,
+		blksizeOff: 56, blksizeBits: 64,
+		atimeSec: 72, atimeNsec: 80,
+		mtimeSec: 88, mtimeNsec: 96,
+		ctimeSec: 104, ctimeNsec: 112,
+		birthSec: -1, birthNsec: -1,
+	}
+}
+
+// statResultIR is the LLVM return type of __kml_fs_stat/__kml_fs_lstat: 14
+// i64s in the order buildStatsObject/StatsType expect — dev, mode, nlink, uid,
+// gid, rdev, blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs,
+// birthtimeMs (mirroring Node's Stats own-property order).
+const statResultIR = "{ i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64 }"
+
+// statBodyLL renders the shared ok-path of __kml_fs_stat/__kml_fs_lstat: read
+// every field at its host offset, convert timespecs to integer milliseconds,
+// and pack the 14-i64 result.
+func statBodyLL(L statFieldLayout) string {
+	var b strings.Builder
+	scalar := func(name string, off, bits int) {
+		fmt.Fprintf(&b, "  %%%sp = getelementptr i8, ptr %%buf, i64 %d\n", name, off)
+		if bits == 64 {
+			fmt.Fprintf(&b, "  %%%s = load i64, ptr %%%sp, align 1\n", name, name)
+		} else {
+			fmt.Fprintf(&b, "  %%%sw = load i%d, ptr %%%sp, align 1\n", name, bits, name)
+			fmt.Fprintf(&b, "  %%%s = zext i%d %%%sw to i64\n", name, bits, name)
+		}
+	}
+	timeMs := func(name string, secOff, nsecOff int) {
+		if secOff < 0 {
+			fmt.Fprintf(&b, "  %%%s = add i64 0, 0\n", name)
+			return
+		}
+		fmt.Fprintf(&b, "  %%%s_sp = getelementptr i8, ptr %%buf, i64 %d\n", name, secOff)
+		fmt.Fprintf(&b, "  %%%s_sec = load i64, ptr %%%s_sp, align 1\n", name, name)
+		fmt.Fprintf(&b, "  %%%s_np = getelementptr i8, ptr %%buf, i64 %d\n", name, nsecOff)
+		fmt.Fprintf(&b, "  %%%s_ns = load i64, ptr %%%s_np, align 1\n", name, name)
+		fmt.Fprintf(&b, "  %%%s_a = mul i64 %%%s_sec, 1000\n", name, name)
+		fmt.Fprintf(&b, "  %%%s_b = sdiv i64 %%%s_ns, 1000000\n", name, name)
+		fmt.Fprintf(&b, "  %%%s = add i64 %%%s_a, %%%s_b\n", name, name, name)
+	}
+	scalar("dev", L.devOff, L.devBits)
+	scalar("mode", L.modeOff, L.modeBits)
+	scalar("nlink", L.nlinkOff, L.nlinkBits)
+	scalar("uid", L.uidOff, 32)
+	scalar("gid", L.gidOff, 32)
+	scalar("rdev", L.rdevOff, L.rdevBits)
+	scalar("blksize", L.blksizeOff, L.blksizeBits)
+	scalar("ino", L.inoOff, L.inoBits)
+	scalar("size", L.sizeOff, 64)
+	scalar("blocks", L.blocksOff, 64)
+	timeMs("atimeMs", L.atimeSec, L.atimeNsec)
+	timeMs("mtimeMs", L.mtimeSec, L.mtimeNsec)
+	timeMs("ctimeMs", L.ctimeSec, L.ctimeNsec)
+	timeMs("birthMs", L.birthSec, L.birthNsec)
+	order := []string{"dev", "mode", "nlink", "uid", "gid", "rdev", "blksize", "ino", "size", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthMs"}
+	prev := "undef"
+	for i, name := range order {
+		reg := fmt.Sprintf("%%pack%d", i)
+		fmt.Fprintf(&b, "  %s = insertvalue %s %s, i64 %%%s, %d\n", reg, statResultIR, prev, name, i)
+		prev = reg
+	}
+	fmt.Fprintf(&b, "  ret %s %s\n", statResultIR, prev)
+	return b.String()
+}
+
+// ensureFsStat declares __kml_fs_stat (ADR-00495/ADR-00565): stat(2) into a
+// 256-byte scratch buffer, extracting the full Stats surface at statLayout()'s
+// host offsets. Throws the shared fs error on failure (ENOENT and friends).
 func (e *Emitter) ensureFsStat() {
 	if e.usedFsStat {
 		return
@@ -605,10 +732,9 @@ func (e *Emitter) ensureFsStat() {
 	e.ensureFsThrow()
 	e.ensureMalloc()
 	e.emitGlobal("declare i32 @stat(ptr noundef, ptr noundef)")
-	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
 	opDescPtr := e.internString("cannot stat path")
 	e.emitGlobal(fmt.Sprintf(`
-define { i64, i64, i64 } @__kml_fs_stat(ptr %%path) {
+define %s @__kml_fs_stat(ptr %%path) {
 entry:
   %%buf = alloca [256 x i8], align 8
   %%r = call i32 @stat(ptr %%path, ptr %%buf)
@@ -620,25 +746,8 @@ fail:
   unreachable
 
 ok:
-  %%modep = getelementptr i8, ptr %%buf, i64 %d
-  %%modew = load i%d, ptr %%modep, align 2
-  %%mode = zext i%d %%modew to i64
-  %%sizep = getelementptr i8, ptr %%buf, i64 %d
-  %%size = load i64, ptr %%sizep, align 8
-  %%secp = getelementptr i8, ptr %%buf, i64 %d
-  %%sec = load i64, ptr %%secp, align 8
-  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
-  %%nsec = load i64, ptr %%nsecp, align 8
-  %%ms1 = mul i64 %%sec, 1000
-  %%ms2 = sdiv i64 %%nsec, 1000000
-  %%ms = add i64 %%ms1, %%ms2
-  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
-  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
-  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
-  ret { i64, i64, i64 } %%r2
-}`, opDescPtr, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
+%s}`, statResultIR, opDescPtr, statBodyLL(statLayout())))
 }
-
 
 // ensureFsLstat declares __kml_fs_lstat — statSync's twin over lstat(2)
 // (does not follow symlinks), sharing statLayout()'s offsets (ADR-00497).
@@ -649,10 +758,9 @@ func (e *Emitter) ensureFsLstat() {
 	e.usedFsLstat = true
 	e.ensureFsThrow()
 	e.emitGlobal("declare i32 @lstat(ptr noundef, ptr noundef)")
-	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
 	opDescPtr := e.internString("cannot lstat path")
 	e.emitGlobal(fmt.Sprintf(`
-define { i64, i64, i64 } @__kml_fs_lstat(ptr %%path) {
+define %s @__kml_fs_lstat(ptr %%path) {
 entry:
   %%buf = alloca [256 x i8], align 8
   %%r = call i32 @lstat(ptr %%path, ptr %%buf)
@@ -664,23 +772,7 @@ fail:
   unreachable
 
 ok:
-  %%modep = getelementptr i8, ptr %%buf, i64 %d
-  %%modew = load i%d, ptr %%modep, align 2
-  %%mode = zext i%d %%modew to i64
-  %%sizep = getelementptr i8, ptr %%buf, i64 %d
-  %%size = load i64, ptr %%sizep, align 8
-  %%secp = getelementptr i8, ptr %%buf, i64 %d
-  %%sec = load i64, ptr %%secp, align 8
-  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
-  %%nsec = load i64, ptr %%nsecp, align 8
-  %%ms1 = mul i64 %%sec, 1000
-  %%ms2 = sdiv i64 %%nsec, 1000000
-  %%ms = add i64 %%ms1, %%ms2
-  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
-  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
-  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
-  ret { i64, i64, i64 } %%r2
-}`, opDescPtr, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
+%s}`, statResultIR, opDescPtr, statBodyLL(statLayout())))
 }
 
 // ensureFsPathOps declares the one-shot path-based helpers (ADR-00497):
@@ -942,7 +1034,6 @@ func (e *Emitter) ensureFsFdOps() {
 	e.emitGlobal("declare i32 @fstat(i32 noundef, ptr noundef)")
 	openDesc := e.internString("cannot open path")
 	fdDesc := e.internString("fd operation failed")
-	modeOff, modeBits, sizeOff, secOff, nsecOff := statLayout()
 	e.emitGlobal(fmt.Sprintf(`
 define i64 @__kml_fs_open(ptr %%path, i64 %%flags, i64 %%mode) {
 entry:
@@ -986,7 +1077,7 @@ ok:
   ret i64 %%n
 }
 
-define { i64, i64, i64 } @__kml_fs_fstat(i64 %%fd) {
+define %s @__kml_fs_fstat(i64 %%fd) {
 entry:
   %%f32 = trunc i64 %%fd to i32
   %%buf = alloca [256 x i8], align 8
@@ -997,21 +1088,5 @@ fail:
   call void @__kml_fs_throw(ptr %s, ptr null)
   unreachable
 ok:
-  %%modep = getelementptr i8, ptr %%buf, i64 %d
-  %%modew = load i%d, ptr %%modep, align 2
-  %%mode = zext i%d %%modew to i64
-  %%sizep = getelementptr i8, ptr %%buf, i64 %d
-  %%size = load i64, ptr %%sizep, align 8
-  %%secp = getelementptr i8, ptr %%buf, i64 %d
-  %%sec = load i64, ptr %%secp, align 8
-  %%nsecp = getelementptr i8, ptr %%buf, i64 %d
-  %%nsec = load i64, ptr %%nsecp, align 8
-  %%ms1 = mul i64 %%sec, 1000
-  %%ms2 = sdiv i64 %%nsec, 1000000
-  %%ms = add i64 %%ms1, %%ms2
-  %%r0 = insertvalue { i64, i64, i64 } undef, i64 %%mode, 0
-  %%r1 = insertvalue { i64, i64, i64 } %%r0, i64 %%size, 1
-  %%r2 = insertvalue { i64, i64, i64 } %%r1, i64 %%ms, 2
-  ret { i64, i64, i64 } %%r2
-}`, openDesc, fdDesc, fdDesc, modeOff, modeBits, modeBits, sizeOff, secOff, nsecOff))
+%s}`, openDesc, fdDesc, statResultIR, fdDesc, statBodyLL(statLayout())))
 }

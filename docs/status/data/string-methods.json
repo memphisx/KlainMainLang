@@ -166,18 +166,16 @@
           {
             "feature": "`.search(pattern)`",
             "status": "implemented",
-            "caveats": [
-              "A plain-string `pattern` isn't coerced to a `RegExp` as in real JS — it falls back to the pre-`RegExp` `.indexOf()`-shaped behavior ([ADR-00028](../adr/ADR-00028.md)/[REGEXP.md](REGEXP.md))"
-            ],
             "notes": [
+              "A plain-string `pattern` is coerced to a `RegExp` as in real JS — metacharacters are interpreted (`\"a.b\".search(\".\")` is `0`) ([ADR-00548](../adr/ADR-00548.md))",
               "A `RegExp` `pattern` runs a real PCRE2 search"
             ]
           },
           {
             "feature": "`.replaceAll()`",
             "status": "implemented",
-            "caveats": [
-              "An empty search is a no-op, not JS's insert-between-chars behavior ([ADR-00003](../adr/ADR-00003.md))"
+            "notes": [
+              "An empty search matches JS's insert-between-every-char behavior — `\"abc\".replaceAll(\"\", \"-\")` is `\"-a-b-c-\"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md))"
             ]
           },
           {
@@ -197,7 +195,10 @@
           },
           {
             "feature": "`String.raw` tag",
-            "status": "missing"
+            "status": "implemented",
+            "notes": [
+              "Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\\nb` `` is `a\\nb`), byte-for-byte the same as Node. The raw quasis are threaded from the lexer through the `TaggedTemplateExpression` ([ADR-00562](../adr/ADR-00562.md))"
+            ]
           }
         ]
       }

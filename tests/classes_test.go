@@ -399,17 +399,34 @@ console.log(makeArr() instanceof Array);
 `, "called\ntrue")
 }
 
-func TestE2EInstanceOfBuiltinObjectStillRejected(t *testing.T) {
-	// Deliberately not supported — see builtinInstanceofTypes' own doc
-	// comment (codegen/llvm/emit_classes.go) for why: real JS's "true for
-	// anything non-primitive" semantics would need an exhaustive, easy-to
-	// -drift enumeration of every object-shaped Type flag this compiler
-	// has.
+// ADR-00605: `x instanceof Object` is true for any non-primitive, false for a
+// primitive — decided at compile time by negating the closed primitive set.
+func TestE2EInstanceOfObject(t *testing.T) {
+	assertOutput(t, `
+class C {}
+console.log(new C() instanceof Object);
+console.log([1, 2] instanceof Object);
+console.log(({ a: 1 }) instanceof Object);
+console.log(new Date() instanceof Object);
+console.log("hi" instanceof Object);
+console.log(42 instanceof Object);
+console.log(true instanceof Object);
+console.log(10n instanceof Object);
+`, "true\ntrue\ntrue\ntrue\nfalse\nfalse\nfalse\nfalse")
+}
+
+// A value whose static type can't be decided (any/union/nullable) keeps a
+// clean rejection rather than a wrong constant.
+func TestE2EInstanceOfObjectUndecidableRejected(t *testing.T) {
 	_, err := parseAndCompile(`
-console.log((5) instanceof Object);
+function f(x: any): boolean { return x instanceof Object; }
+console.log(f(5));
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for instanceof Object, got none")
+		t.Fatal("expected a compile error for instanceof Object on an any-typed value, got none")
+	}
+	if !strings.Contains(err.Error(), "undecidable") {
+		t.Fatalf("expected 'undecidable', got: %v", err)
 	}
 }
 
@@ -2291,4 +2308,79 @@ class C {
 const c = new C();
 console.log(c.id, C.tag, c.readonly);
 `, "7 C 5")
+}
+
+// TDD-00154: the `readonly` field modifier is enforced as a compile-time
+// immutability check — a write is allowed only in the declaring class's
+// constructor (and field initializers, spliced into it).
+func TestE2EReadonlyFieldConstructorWriteOK(t *testing.T) {
+	assertOutput(t, `
+class Point {
+  readonly x: number;
+  y: number;
+  constructor(x: number, y: number) { this.x = x; this.y = y; }
+  move(dy: number) { this.y += dy; }
+}
+const p = new Point(1, 2);
+console.log(p.x, p.y);
+p.move(3);
+console.log(p.y);
+`, "1 2\n5")
+}
+
+func TestE2EReadonlyFieldOutsideWriteRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class Point { readonly x: number; constructor(x: number) { this.x = x; } }
+const p = new Point(1);
+p.x = 5;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error writing a readonly field outside the constructor, got none")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected 'read-only', got: %v", err)
+	}
+}
+
+func TestE2EReadonlyFieldMethodWriteRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class Point { readonly x: number; constructor(x: number) { this.x = x; } bad() { this.x = 9; } }
+console.log(new Point(1).x);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error writing a readonly field in a method, got none")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected 'read-only', got: %v", err)
+	}
+}
+
+// A `readonly` constructor parameter property is enforced the same way.
+func TestE2EReadonlyParameterPropertyWriteRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class User { constructor(readonly name: string) {} rename(n: string) { this.name = n; } }
+console.log(new User("Ada").name);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error writing a readonly parameter property, got none")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected 'read-only', got: %v", err)
+	}
+}
+
+// A subclass constructor cannot write a base class's readonly field (only the
+// declaring class's constructor may).
+func TestE2EReadonlyInheritedFieldSubclassWriteRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+class Base { readonly id: number; constructor(id: number) { this.id = id; } }
+class Derived extends Base { constructor(id: number) { super(id); this.id = id + 1; } }
+console.log(new Derived(5).id);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error writing an inherited readonly field in a subclass, got none")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("expected 'read-only', got: %v", err)
+	}
 }

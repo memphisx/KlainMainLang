@@ -563,15 +563,15 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			// `` tag`plain text, no ${} `` — a tagged template with a
 			// single quasi and no interpolated expressions.
 			tok := p.advance()
-			expr = ast.NewTaggedTemplateExpression(expr, []string{tok.Literal}, nil, posOf(tok))
+			expr = ast.NewTaggedTemplateExpression(expr, []string{tok.Literal}, []string{tok.Raw}, nil, posOf(tok))
 		case lexer.TEMPLATE_HEAD:
 			tok := p.advance()
 			pos := posOf(tok)
-			quasis, exprs, err := p.parseTemplateRest(tok.Literal)
+			quasis, rawQuasis, exprs, err := p.parseTemplateRestRaw(tok.Literal, tok.Raw)
 			if err != nil {
 				return nil, err
 			}
-			expr = ast.NewTaggedTemplateExpression(expr, quasis, exprs, pos)
+			expr = ast.NewTaggedTemplateExpression(expr, quasis, rawQuasis, exprs, pos)
 		default:
 			return expr, nil
 		}

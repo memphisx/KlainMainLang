@@ -219,3 +219,27 @@ func TestE2EBigIntUnsignedShiftIsError(t *testing.T) {
 func TestE2EBigIntJSONIsError(t *testing.T) {
 	mustCompileError(t, `console.log(JSON.stringify(5n))`, "BigInt")
 }
+
+// ADR-00586: Number(bigint) converts to the nearest double.
+func TestE2ENumberOfBigInt(t *testing.T) {
+	assertOutput(t, `
+console.log(Number(10n))
+console.log(Number(-42n))
+console.log(Number(9007199254740993n))
+console.log(Number(123456789012345678901234567890n))
+console.log(Number(0n))
+`, "10\n-42\n9007199254740992\n1.2345678901234568e+29\n0")
+}
+
+// ADR-00584: BigInt.asIntN / asUintN clamp to the low `bits` bits.
+func TestE2EBigIntAsIntN(t *testing.T) {
+	assertOutput(t, `
+console.log(BigInt.asIntN(8, 256n))
+console.log(BigInt.asIntN(8, 255n))
+console.log(BigInt.asIntN(8, 128n))
+console.log(BigInt.asUintN(8, 255n))
+console.log(BigInt.asUintN(8, -1n))
+console.log(BigInt.asIntN(64, 12345678901234567890n))
+console.log(BigInt.asUintN(4, 31n) + 1n)
+`, "0n\n-1n\n-128n\n255n\n255n\n-6101065172474983726n\n16n")
+}

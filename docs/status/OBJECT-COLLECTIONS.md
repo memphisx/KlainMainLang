@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 28/29 (~97%) · **Strict Coverage**: 16/29 (~55%).
+**Coverage**: 28/29 (~97%) · **Strict Coverage**: 17/29 (~59%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -30,13 +30,13 @@ Format: [Status page format](README.md#status-page-format).
 | `Map.set/get/has/delete/keys/values` | ✅ | • A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `"null"` stand-in on a miss ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md)) | • `.get()` on a scalar-valued map returns `V \| null` — a missing key is distinguishable from a stored `0`/`false` via the presence-flagged nullable-scalar representation |
 | `Map.size` | ✅ | | |
 | `Map.entries()` | ✅ | | • Returns a real `[K, V][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)); iterate with `for (const [k, v] of m.entries())`; replaced the earlier object-shaped stand-in ([ADR-00053](../adr/ADR-00053.md)) |
-| `Map.forEach()` | ✅ | • The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes) ([ADR-00053](../adr/ADR-00053.md)) | • Calls `fn(value, key)`, matching real JS's argument order |
+| `Map.forEach()` | ✅ | | • Calls `fn(value, key, map)`, matching real JS's full callback signature — the 3rd `map` argument is the map being iterated ([ADR-00573](../adr/ADR-00573.md)); a callback declaring fewer parameters just receives the leading ones ([ADR-00053](../adr/ADR-00053.md)) |
 | `Map.clear()` | ✅ | | • Resets size to 0 in place — doesn't free/reallocate the backing arrays ("leak by design" memory model); immediately reusable afterward ([ADR-00053](../adr/ADR-00053.md)) |
 | `new Map(entries)` | ✅ | • Accepts only a `[K, V][]` array of 2-tuples, narrowed from the spec's `Iterable<[K, V]>` — the only iterable/pair concept a general expression has here ([ADR-00347](../adr/ADR-00347.md)) | • K/V are inferred from the entries when no `<K, V>` is given; duplicate keys resolve last-wins; the entries source may be a bare literal or an already-declared `[K, V][]` variable ([TDD-00066](../tdd/TDD-00066.md)) |
 | `new Set(iterable)` | ✅ | • Accepts only an array expression, narrowed from the spec's `Iterable<T>` — the only iterable concept a general expression has here ([ADR-00159](../adr/ADR-00159.md)) | |
 | `Set.add/has/delete/values` | ✅ | | |
 | `Set.size` | ✅ | | |
-| `Set.forEach()` | ✅ | | • Calls `fn(element[, element])` — real JS's `Set.prototype.forEach` passes the value twice (`(value, value, set)`) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter ([ADR-00053](../adr/ADR-00053.md)) |
+| `Set.forEach()` | ✅ | | • Calls `fn(value, value, set)` — real JS's `Set.prototype.forEach` passes the value twice (Map/Set callback-shape parity) then the set itself; each argument is supplied per the callback's declared arity ([ADR-00053](../adr/ADR-00053.md)/[ADR-00573](../adr/ADR-00573.md)) |
 | `Set.clear()` | ✅ | | • Same in-place reset as `Map.clear()` ([ADR-00053](../adr/ADR-00053.md)) |
 | `WeakMap` / `WeakSet` / `WeakRef` | ✅ | • Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)<br>• Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never nulls and keys persist ("leak by design"). Real weak semantics require `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md)/[ADR-00349](../adr/ADR-00349.md)) | • `-mm=gc`: genuinely weak via Boehm disappearing links (the referent word is `GC_malloc_atomic`/unscanned so it isn't traced); a collected referent's `.deref()`/`WeakMap.has` observably drops. `gc()` (Node `--expose-gc` idiom) forces a full collection under gc, a no-op under manual<br>• A `new WeakMap()` initial-entries argument is out of V1 scope |
 

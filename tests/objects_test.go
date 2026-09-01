@@ -1389,3 +1389,143 @@ for (const [k, v] of Object.entries(s)) {
 }
 `, "172\nmath:91\nphysics:83")
 }
+
+// TDD-00153: object-literal getters/setters are lowered to a synthetic
+// anonymous class, so `this` in the accessor body reads/writes the object and
+// `o.x` / `o.x = v` dispatch through the getter/setter.
+func TestE2EObjectLiteralGetterSetter(t *testing.T) {
+	assertOutput(t, `
+const o = {
+  _x: 10,
+  get x(): number { return this._x; },
+  set x(v: number) { this._x = v; }
+};
+console.log(o.x);
+o.x = 20;
+console.log(o.x);
+`, "10\n20")
+}
+
+// A getter may compute over multiple fields; a data initializer may reference
+// an enclosing local; compound assignment through a setter works.
+func TestE2EObjectLiteralAccessorsMixed(t *testing.T) {
+	assertOutput(t, `
+const base = 5;
+const o = {
+  _first: "Ada",
+  _last: "Lovelace",
+  scale: base,
+  get fullName(): string { return this._first + " " + this._last; },
+  set fullName(v: string) { this._first = v; },
+  get scaled(): number { return this.scale * 2; }
+};
+console.log(o.fullName);
+o.fullName = "Grace";
+console.log(o.fullName);
+console.log(o.scaled);
+`, "Ada Lovelace\nGrace Lovelace\n10")
+}
+
+// An unannotated getter infers its return type from the field it reads.
+func TestE2EObjectLiteralUnannotatedGetter(t *testing.T) {
+	assertOutput(t, `
+const o = { _n: 42, get n() { return this._n; } };
+console.log(o.n);
+`, "42")
+}
+
+// Assigning to a property that has no setter is a clean compile error.
+func TestE2EObjectLiteralGetterNoSetterRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const o = { _n: 1, get n(): number { return this._n; } };
+o.n = 5;
+`)
+	if err == nil {
+		t.Fatal("expected a compile error assigning a getter-only property, got none")
+	}
+	if !strings.Contains(err.Error(), "no setter") {
+		t.Fatalf("expected 'no setter', got: %v", err)
+	}
+}
+
+// V1 boundary: an accessor-bearing literal can't be assigned to a differently
+// shaped structural object type (its accessors are methods, not fields).
+func TestE2EObjectLiteralAccessorStructuralAssignRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const o = { _n: 1, get n(): number { return this._n; } };
+const p: { n: number } = o;
+console.log(p.n);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for the structural assignment, got none")
+	}
+	if !strings.Contains(err.Error(), "getter/setter") {
+		t.Fatalf("expected the accessor-shape error, got: %v", err)
+	}
+}
+
+// ADR-00608: constant-key bracket access reads/writes a fixed object's field.
+func TestE2EObjectConstantKeyBracketAccess(t *testing.T) {
+	assertOutput(t, `
+const o = { a: 1, b: 2 };
+console.log(o["a"]);
+o["a"] = 10;
+o["b"] += 5;
+console.log(o["a"], o["b"]);
+const n = { 0: "x", 1: "y" };
+console.log(n[0], n[1]);
+`, "1\n10 7\nx y")
+}
+
+// A class instance's field is reachable by a constant string key too.
+func TestE2EClassConstantKeyBracketAccess(t *testing.T) {
+	assertOutput(t, `
+class Box { v: number = 3; }
+const b = new Box();
+console.log(b["v"]);
+b["v"] = 8;
+console.log(b["v"]);
+`, "3\n8")
+}
+
+// ADR-00608: a string-literal or numeric field name is declarable in an
+// interface / object type annotation and read back via constant-key access.
+func TestE2EObjectTypeQuotedFieldName(t *testing.T) {
+	assertOutput(t, `
+interface Person { "first-name": string; age: number }
+const p: Person = { "first-name": "Ada", age: 36 };
+console.log(p["first-name"], p.age);
+type Pair = { 0: string; 1: number };
+const pr: Pair = { 0: "x", 1: 2 };
+console.log(pr[0], pr[1]);
+`, "Ada 36\nx 2")
+}
+
+// ADR-00609: a constant computed key in object destructuring resolves to the
+// matching field, the same as a plain `{ key: local }`.
+func TestE2EObjectDestructuringComputedConstKey(t *testing.T) {
+	assertOutput(t, `
+const obj = { a: 1, b: "two" };
+const { ["a"]: x, ["b"]: y } = obj;
+console.log(x, y);
+const n = { 0: "zero", 1: "one" };
+const { [0]: first } = n;
+console.log(first);
+`, "1 two\nzero")
+}
+
+// A runtime-valued computed key has no static field to bind — a clean rejection.
+func TestE2EObjectDestructuringComputedRuntimeKeyRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const key = "a";
+const obj = { a: 1 };
+const { [key]: x } = obj;
+console.log(x);
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for a runtime computed destructuring key, got none")
+	}
+	if !strings.Contains(err.Error(), "constant string or number") {
+		t.Fatalf("expected the constant-key error, got: %v", err)
+	}
+}

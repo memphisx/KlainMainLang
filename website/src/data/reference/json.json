@@ -175,7 +175,7 @@
       "exampleKey": "json/json_methods",
       "snippet": "const members: Member[] = JSON.parse('[{\"name\":\"A\",\"addr\":{\"city\":\"X\",\"zip\":1},\"tags\":[]},{\"name\":\"B\",\"addr\":{\"city\":\"Y\",\"zip\":2},\"tags\":[\"x\"]}]')\nconsole.log(members.length)         // 2",
       "differences": [
-        "Only in a type-annotated position (`const xs: T[] = …`, or a field) — a bare reassignment `xs = JSON.parse(...)` has no target type to project against and isn't supported"
+        "A typed var-decl, an object field, and a declared-variable reassignment (`let xs: T[] = …; xs = JSON.parse(...)`) all project; a member or element target (`obj.items = JSON.parse(...)`, `grid[i] = …`) does not — assign into a variable first."
       ],
       "seeAlso": ["json.parse.object", "json.parse.dynamic"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }

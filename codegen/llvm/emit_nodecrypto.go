@@ -53,8 +53,8 @@ func (e *Emitter) emitNodeCryptoModuleCall(method string, args []ast.Expression,
 // as a Buffer (Uint8Array). The callback form is not provided (Node's is
 // async-shaped only; use the return value).
 func (e *Emitter) emitNodeCryptoRandomBytes(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: crypto.randomBytes takes (size) — the callback form is not supported, use the returned Buffer", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: crypto.randomBytes takes (size[, callback])", pos.Line, pos.Col)
 	}
 	nv, err := e.emitExpr(args[0])
 	if err != nil {
@@ -68,9 +68,24 @@ func (e *Emitter) emitNodeCryptoRandomBytes(args []ast.Expression, pos ast.Pos) 
 	e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes(ptr %s, i64 %s)", buf, n.Ref))
 	r0 := e.freshReg()
 	r1 := e.freshReg()
+	bufTy := TypedArrayType("uint8")
 	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", r0, buf))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", r1, r0, n.Ref))
-	return Value{Ref: r1, Ty: TypedArrayType("uint8")}, nil
+	bufVal := Value{Ref: r1, Ty: bufTy}
+
+	// Callback form: fire cb(null, buf) synchronously (generation never fails).
+	// Async-shaped like the fs callbacks, not offloaded.
+	if len(args) == 2 {
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{errorObjType, bufTy})
+		if err != nil {
+			return Value{}, err
+		}
+		if _, err := e.emitCBCall(cb, []Value{{Ref: "null", Ty: errorObjType}, bufVal}); err != nil {
+			return Value{}, err
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
+	return bufVal, nil
 }
 
 // nodeCryptoEncodingOK validates a publicKeyEncoding/privateKeyEncoding

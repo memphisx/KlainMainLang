@@ -40,6 +40,8 @@ extern void  curl_free(void *);
 
 #define KML_CURLUPART_URL      0
 #define KML_CURLUPART_SCHEME   1
+#define KML_CURLUPART_USER     2
+#define KML_CURLUPART_PASSWORD 3
 #define KML_CURLUPART_HOST     5
 #define KML_CURLUPART_PORT     6
 #define KML_CURLUPART_PATH     7
@@ -51,7 +53,7 @@ extern void *__kml_map_str_create(void);
 extern void  __kml_map_str_set(void *, char *, long long);
 
 /* Component indices — must match emit_urlpattern.go's componentOrder. */
-#define KML_UP_NCOMP 6 /* 0 protocol, 1 hostname, 2 port, 3 pathname, 4 search, 5 hash */
+#define KML_UP_NCOMP 8 /* 0 protocol, 1 hostname, 2 port, 3 pathname, 4 search, 5 hash, 6 username, 7 password */
 
 typedef struct {
 	void  *re[KML_UP_NCOMP];      /* compiled pcre2 code, always non-NULL after construction */
@@ -211,7 +213,8 @@ static int parse_input(const char *url, char *parts[KML_UP_NCOMP]) {
 	}
 	static const int partIDs[KML_UP_NCOMP] = {
 	    KML_CURLUPART_SCHEME, KML_CURLUPART_HOST, KML_CURLUPART_PORT,
-	    KML_CURLUPART_PATH, KML_CURLUPART_QUERY, KML_CURLUPART_FRAGMENT};
+	    KML_CURLUPART_PATH, KML_CURLUPART_QUERY, KML_CURLUPART_FRAGMENT,
+	    KML_CURLUPART_USER, KML_CURLUPART_PASSWORD};
 	for (int i = 0; i < KML_UP_NCOMP; i++) {
 		char *raw = NULL;
 		if (curl_url_get(h, partIDs[i], &raw, 0) == 0 && raw) {

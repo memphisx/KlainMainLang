@@ -160,8 +160,10 @@
             "feature": "`.sort(fn?)`",
             "status": "implemented",
             "caveats": [
-              "The no-comparator default sort is numeric, not real JS's actual default — real JS stringifies every element and compares lexicographically even for numbers, e.g. `[10,1,21,2].sort()` is `[1,10,2,21]` in real JS, `[1,2,10,21]` here",
               "Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI `qsort()` trampoline with one fixed variant per element kind ([ADR-00152](../adr/ADR-00152.md))"
+            ],
+            "notes": [
+              "The no-comparator default sort is JS-faithful: elements are stringified and compared lexicographically even for numbers, so `[10,1,21,2].sort()` is `[1,10,2,21]` ([ADR-00546](../adr/ADR-00546.md))"
             ]
           },
           {

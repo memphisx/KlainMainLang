@@ -51,6 +51,16 @@ func newEventSourceTestServer(t *testing.T) *httptest.Server {
 		fl.Flush()
 		<-r.Context().Done()
 	})
+	// /mixedcase sends a mixed-case Content-Type ("Text/Event-Stream") with a
+	// charset parameter — the case-insensitive prefix match (ADR-00555) must
+	// still accept it, so onmessage fires rather than the connection failing.
+	mux.HandleFunc("/mixedcase", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "Text/Event-Stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: hello\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
 	// /crlf and /barecr exercise Stage 3's CRLF-tolerant record-boundary
 	// detection: a record terminated by "\r\n\r\n" or bare "\r\r" instead of
 	// the plain "\n\n" every other route here uses.
@@ -211,6 +221,22 @@ es.onmessage = (ev) => {
 setTimeout(() => {}, 300);
 `, srv.URL)
 	assertOutput(t, src, "hello\nmessage")
+}
+
+// A mixed-case Content-Type ("Text/Event-Stream; charset=utf-8") is accepted —
+// the prefix match is case-insensitive, matching HTTP's case-insensitive header
+// semantics (ADR-00555).
+func TestE2EEventSourceMixedCaseContentTypeAccepted(t *testing.T) {
+	srv := newEventSourceTestServer(t)
+	src := fmt.Sprintf(`
+const es = new EventSource("%s/mixedcase");
+es.onmessage = (ev) => {
+  console.log(ev.data);
+  es.close();
+};
+setTimeout(() => {}, 300);
+`, srv.URL)
+	assertOutput(t, src, "hello")
 }
 
 // Real spec appends every data: line's value plus a trailing LF to a

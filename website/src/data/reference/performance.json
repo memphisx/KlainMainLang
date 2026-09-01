@@ -4,22 +4,20 @@
   "kind": "web",
   "statusPage": "PERFORMANCE-TIMING.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
-  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. The recurring divergence is UTC-everywhere Date: construction, getters, and formatting all ignore local time for deterministic output regardless of machine/CI timezone, and the plain-number Date representation means `-1` stands in for an unparseable date (no NaN) and arithmetic does numeric durations rather than string coercion. performance.now() is a raw CLOCK_MONOTONIC reading with no fixed time origin, and performance.mark/measure are a Map-backed last-write-wins pair with no PerformanceObserver/getEntriesByName machinery behind them.",
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "2/9", "strictPct": 22 },
+  "lede": "Wall-clock and monotonic timing grouped together, the way real JS/Node group them. The recurring divergence is UTC-everywhere Date: construction, getters, and formatting all ignore local time for deterministic output regardless of machine/CI timezone, and the plain-number Date representation means `-1` stands in for an unparseable date (no NaN) and arithmetic does numeric durations rather than string coercion. performance.now() is a CLOCK_MONOTONIC reading relative to a process-start time origin, and performance.mark/measure are a Map-backed last-write-wins pair with no PerformanceObserver/getEntriesByName machinery behind them.",
   "entries": [
     {
       "id": "performance.now",
       "name": "performance.now()",
       "statusRow": "performance.now()",
       "signature": "performance.now(): number",
-      "badge": "caveats",
-      "description": "A CLOCK_MONOTONIC-based timestamp in milliseconds, as a double (sub-millisecond precision). Unlike Date.now(), it is not tied to wall-clock time, so it is the right choice for measuring elapsed time by subtracting two readings.",
-      "returns": { "type": "number", "desc": "Monotonic milliseconds as a double." },
+      "badge": "exact",
+      "description": "Milliseconds since the program's time origin (process start), as a double (sub-millisecond precision). The origin is captured once at process start (an llvm.global_ctors constructor), matching the spec's origin-relative reading. Unlike Date.now(), it is not tied to wall-clock time.",
+      "returns": { "type": "number", "desc": "Milliseconds since process start, as a double." },
       "exampleKey": "globals/globals",
       "snippet": "const t1: number = performance.now()\nfor (let i = 0; i < 200000; i++) { arr.push(i) }\nconst t2: number = performance.now()\nconsole.log(t2 >= t1)      // true",
-      "differences": [
-        "No fixed \"time origin\" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time"
-      ],
+      "differences": [],
       "seeAlso": ["performance.mark", "Date.now"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Performance/now" }
     },

@@ -549,6 +549,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 
 	ty := e.resolveType(v.TypeAnnot)
 
+	// TDD-00153 V1 boundary: a synthetic object-literal accessor class can't be
+	// assigned to a *different* structural object/class type — its accessor
+	// properties are methods, not fields, so a structural read would silently
+	// return a non-existent field. Reject cleanly rather than miscompile. (Same
+	// literal's own inferred binding keeps the synthetic class type and works.)
+	if v.TypeAnnot != nil && ty.IsObject && !coerciblePure(e.inferExprType(v.Init), ty) &&
+		isSyntheticObjLitClass(e.inferExprType(v.Init)) {
+		return fmt.Errorf("%d:%d: an object literal with a getter/setter can't be assigned to a differently-shaped object type (its accessors are not plain fields) — use it directly, or give the target the same shape", v.GetPos().Line, v.GetPos().Col)
+	}
+
 	// Infer type from init when no annotation.
 	if !ty.IsArray && !ty.IsObject && v.TypeAnnot == nil {
 		switch init := v.Init.(type) {
@@ -883,6 +893,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	var ptrName string
 	if e.promotedGlobalDecls[v] {
 		ptrName = e.moduleGlobals[v.Name].Ptr
+	} else if e.hoistedCaptures[v.Name] {
+		// Captured by a nested closure: heap-box eagerly here at the declaration
+		// point (which dominates the whole lexical scope) rather than lazily at the
+		// capturing closure's construction site — that site may sit inside a
+		// conditional block that doesn't dominate a later read of the box, which
+		// clang rejects as "instruction does not dominate all uses" (see
+		// hoistedCaptures / boxHoistedCapture). Seed with the type default; the
+		// initializer's own store below re-resolves through the symbol to this box.
+		// This is exactly the set promoteCaptureToCell would have boxed, only earlier.
+		ptrName = e.boxHoistedCapture(v.Name, ty, "", v.Kind == "const", v.Kind == "var")
 	}
 	if ptrName == "" {
 		ptrName = e.freshReg()

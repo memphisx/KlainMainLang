@@ -68,7 +68,7 @@ test-par: build
 ## real external host, so the suite stays deterministic and offline-capable
 ## instead of depending on some third-party website's uptime.
 examples: build
-	@$(GO) build -o $(HTTPBIN_LITE) ./tools/httpbin-lite
+	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
 	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
 	fixture_pid=$$!; \
 	trap "kill $$fixture_pid 2>/dev/null" EXIT INT TERM; \

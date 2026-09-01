@@ -7,6 +7,7 @@ package llvm
 
 import (
 	"fmt"
+	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -125,8 +126,47 @@ func (e *Emitter) emitDgramMethod(objExpr ast.Expression, method string, args []
 		}
 		e.ensureNetRuntime()
 		return e.emitNetAddressObject(e.netFieldFd32(objVal.Ref, dgramSocketIR)), nil
+	case "setBroadcast":
+		return e.emitDgramSetBroadcast(objVal, args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: a dgram socket has no method '%s'", pos.Line, pos.Col, method)
+}
+
+// emitDgramSetBroadcast implements socket.setBroadcast(flag) via a real
+// setsockopt(SOL_SOCKET, SO_BROADCAST) on the socket fd — required before a
+// UDP datagram can be sent to a broadcast address. The flag defaults to true
+// (Node accepts any truthy value; here it's a boolean).
+func (e *Emitter) emitDgramSetBroadcast(objVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: socket.setBroadcast takes exactly 1 argument (flag)", pos.Line, pos.Col)
+	}
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if v.Ty.IR != "i1" {
+		return Value{}, fmt.Errorf("%d:%d: socket.setBroadcast's argument must be a boolean", pos.Line, pos.Col)
+	}
+	e.ensureNetRuntime() // setsockopt decl
+	enable := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i32", enable, v.Ref))
+	valp := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", valp))
+	e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", enable, valp))
+	level, optname := dgramBroadcastConst()
+	fd32 := e.netFieldFd32(objVal.Ref, dgramSocketIR)
+	e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, level, optname, valp))
+	return objVal, nil
+}
+
+// dgramBroadcastConst returns the platform's (SOL_SOCKET, SO_BROADCAST) pair for
+// setsockopt (macOS 0xffff/0x0020, Linux 1/6) — host-only, no cross-compile.
+func dgramBroadcastConst() (solSocket, soBroadcast int) {
+	sol, _ := httpSockConstants()
+	if runtime.GOOS == "darwin" {
+		return sol, 0x0020
+	}
+	return sol, 6
 }
 
 // emitDgramSend implements socket.send(msg, port, host).

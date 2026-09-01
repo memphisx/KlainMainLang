@@ -114,6 +114,14 @@ console.log(out.length)
 `, "1")
 }
 
+// ADR-00589: the { cwd } option runs the child in a different directory.
+func TestE2EExecFileSyncCwd(t *testing.T) {
+	assertOutput(t, `
+const out: string = process.execFileSync("pwd", [], { cwd: "/" })
+console.log(out.trim())
+`, "/")
+}
+
 func TestE2EExecFileSyncResolvesViaPath(t *testing.T) {
 	assertOutput(t, `
 const args: string[] = ["via", "path"]
@@ -235,14 +243,19 @@ func TestE2EProcessPidIsPositive(t *testing.T) {
 }
 
 func TestE2EProcessMemoryUsageRssPositive(t *testing.T) {
-	// rss is a real value (getrusage ru_maxrss); the V8-heap fields have no
-	// native analogue and report 0.
+	// rss is the real instantaneous resident set (ADR-00570: Darwin task_info /
+	// Linux /proc/self/statm), so it grows as memory is allocated; the V8-heap
+	// fields have no native analogue and report 0.
 	assertOutput(t, `
+const before = process.memoryUsage().rss;
+let arr: number[] = [];
+for (let i = 0; i < 1000000; i++) { arr.push(i); }
 const m = process.memoryUsage();
 console.log(m.rss > 0);
+console.log(m.rss >= before);
 console.log(m.heapUsed);
 console.log(m.external);
-console.log(m.arrayBuffers);`, "true\n0\n0\n0")
+console.log(m.arrayBuffers);`, "true\ntrue\n0\n0\n0")
 }
 
 func TestE2EProcessMemoryUsageWrongArgCountRejected(t *testing.T) {
@@ -387,6 +400,20 @@ console.log(hr[0] >= 0 && hr[1] >= 0)
 `, "2\ntrue")
 }
 
+// ADR-00582: process.hrtime(prev) returns the elapsed diff, nsec in [0, 1e9).
+func TestE2EProcessHrtimeDiff(t *testing.T) {
+	assertOutput(t, `
+const start = process.hrtime()
+let sum = 0
+for (let i = 0; i < 100000; i++) { sum += i }
+const diff = process.hrtime(start)
+console.log(diff.length)
+console.log(diff[0] >= 0)
+console.log(diff[1] >= 0 && diff[1] < 1000000000)
+console.log(sum > 0)
+`, "2\ntrue\ntrue\ntrue")
+}
+
 func TestE2EProcessHrtimeBigintMonotonic(t *testing.T) {
 	assertOutput(t, `
 const a = process.hrtime.bigint()
@@ -496,6 +523,24 @@ process.emitWarning("old api", "DeprecationWarning");
 	}
 	if !strings.Contains(stderr, "DeprecationWarning: old api\n") {
 		t.Errorf("stderr missing typed warning: %q", stderr)
+	}
+}
+
+// ADR-00580: process.emitWarning's options-object form { type, code, detail }
+// prints `(node:<pid>) [<code>] <type>: <message>` plus a detail line.
+func TestE2EProcessEmitWarningOptions(t *testing.T) {
+	_, stderr := compileAndRunCaptureStderr(t, `
+process.emitWarning("msg here", { type: "DeprecationWarning", code: "MY001", detail: "extra detail" });
+process.emitWarning("m3", { code: "C1" });
+`)
+	if !strings.Contains(stderr, "[MY001] DeprecationWarning: msg here\n") {
+		t.Errorf("stderr missing code+type warning: %q", stderr)
+	}
+	if !strings.Contains(stderr, "extra detail\n") {
+		t.Errorf("stderr missing detail line: %q", stderr)
+	}
+	if !strings.Contains(stderr, "[C1] Warning: m3\n") {
+		t.Errorf("stderr missing code-only warning: %q", stderr)
 	}
 }
 

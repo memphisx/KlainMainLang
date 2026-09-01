@@ -86,12 +86,11 @@
             "feature": "`EventSource`",
             "status": "implemented",
             "caveats": [
-              "The `Content-Type` check on connect is a case-sensitive `\"text/event-stream\"` prefix match",
               "A `retry:`-driven reconnect replays the *full* stored `Last-Event-ID`, not a per-listener value"
             ],
             "notes": [
               "Server-sent events (SSE) over HTTP — connection plumbing (`readyState`/`close()`), `onmessage`/`onopen`/`onerror`, `addEventListener`/`removeEventListener` for named (`event: name`) records (`data`/`event`/`id`/`retry` field parsing, multi-line `data:` concatenation), `\\n\\n`/`\\r\\n\\r\\n`/bare-`\\r\\r` record boundaries, and auto-reconnect (retries after a dropped connection or network-level connect failure, honoring a server-sent `retry:` delay — default 3000ms — and replaying `Last-Event-ID` as a request header) all work",
-              "A response that *arrives* with the wrong shape (non-2xx status, or a 2xx with a `Content-Type` that isn't `text/event-stream`) fails permanently instead of retrying, matching the real spec's distinction between a network failure (retryable) and a malformed response (terminal)",
+              "A response that *arrives* with the wrong shape (non-2xx status, or a 2xx with a `Content-Type` that isn't `text/event-stream`) fails permanently instead of retrying, matching the real spec's distinction between a network failure (retryable) and a malformed response (terminal); the `Content-Type` prefix match is case-insensitive, matching HTTP's case-insensitive header semantics ([ADR-00555](../adr/ADR-00555.md))",
               "See [TDD-00038](../tdd/TDD-00038.md)"
             ]
           },
@@ -100,6 +99,8 @@
             "status": "implemented",
             "caveats": [
               "Modeled as the real spec's legacy *synchronous* mode: `.send()`/`.send(body)` runs the request to completion before returning, then fires every registered callback once, synchronously — there's no default-async, callback-interleaved mode (this compiler has no re-entrant-into-already-returned-caller callback machinery to support one)",
+              "`.open(method, url, async?, user?, password?)` accepts the optional `async` flag: `async === false` is exact (the request is already synchronous); `async === true` also blocks, since there's no main-thread event loop to defer `.onload` onto — a documented narrowing, not a fake async ([ADR-00615](../adr/ADR-00615.md))",
+              "The optional `user`/`password` arguments to `.open()` are accepted (and evaluated) but not yet wired to HTTP auth",
               "`.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing",
               "`.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call",
               "`.responseText`/`.response` are identical values — only a text `responseType` is supported; no `responseType` other than the default",
@@ -109,7 +110,8 @@
             ],
             "notes": [
               "Not a blocking implementation: `.send()` is built on the exact same non-blocking `__kml_fetch_async` primitive `fetch()` itself uses, so it still yields the current fiber (rather than blocking every other connection) when called from inside an `http.listen` connection handler",
-              "Supports `.open(method, url)`, `.setRequestHeader(name, value)`, `.send()`/`.send(body)`, `.abort()`, `.readyState`, `.status`, `.responseText`/`.response`, and the zero-argument callbacks",
+              "A synchronous `.open(method, url, false)` from inside `klain:sync` worker goroutines yields cooperatively per request (via the shared fetch await path), so pooled workers issue genuinely overlapping requests — the primitive behind the `load_test` load-generator example",
+              "Supports `.open(method, url, async?, user?, password?)`, `.setRequestHeader(name, value)`, `.send()`/`.send(body)`, `.abort()`, `.readyState`, `.status`, `.responseText`/`.response`, and the zero-argument callbacks",
               "A network-level failure fires `.onerror` (never throws), matching real `XMLHttpRequest`",
               "See [ADR-00131](../adr/ADR-00131.md)"
             ]

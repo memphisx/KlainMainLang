@@ -47,6 +47,11 @@ long long __kml_bigint_to_i64(void *a) {
 	return (long long)mp_get_i64((const mp_int *)a);
 }
 
+/* Number(bigint): the nearest double (Infinity when out of range), like JS. */
+double __kml_bigint_to_double(void *a) {
+	return mp_get_double((const mp_int *)a);
+}
+
 void *__kml_bigint_from_u64(unsigned long long v) {
 	char buf[32];
 	snprintf(buf, sizeof(buf), "%llu", v);
@@ -156,6 +161,38 @@ void *__kml_bigint_shr(void *a, void *b) {
 	long long n = (long long)mp_get_i64((const mp_int *)b);
 	mp_int *r = bi_new();
 	mp_signed_rsh((const mp_int *)a, (int)n, r);
+	return r;
+}
+
+/* BigInt.asUintN(bits, x): x modulo 2^bits taken non-negative (the low `bits`
+ * bits). mp_mod_2d truncates (keeps the dividend's sign) for a negative x, so
+ * add 2^bits back to land in [0, 2^bits). */
+void *__kml_bigint_as_uintn(long long bits, void *x) {
+	mp_int *r = bi_new();
+	if (bits <= 0) { mp_zero(r); return r; }
+	mp_mod_2d((const mp_int *)x, (int)bits, r);
+	if (mp_isneg(r)) {
+		mp_int full;
+		mp_init(&full);
+		mp_2expt(&full, (int)bits); /* 2^bits */
+		mp_add(r, &full, r);
+		mp_clear(&full);
+	}
+	return r;
+}
+
+/* BigInt.asIntN(bits, x): the low `bits` bits interpreted as two's complement.
+ * Reduce to non-negative [0, 2^bits) (via asUintN), then subtract 2^bits when
+ * r >= 2^(bits-1) (the sign bit is set). */
+void *__kml_bigint_as_intn(long long bits, void *x) {
+	if (bits <= 0) { mp_int *z = bi_new(); mp_zero(z); return z; }
+	mp_int *r = (mp_int *)__kml_bigint_as_uintn(bits, x); /* r in [0, 2^bits) */
+	mp_int half, full;
+	mp_init_multi(&half, &full, NULL);
+	mp_2expt(&half, (int)bits - 1); /* 2^(bits-1) */
+	mp_2expt(&full, (int)bits);     /* 2^bits */
+	if (mp_cmp(r, &half) != MP_LT) mp_sub(r, &full, r);
+	mp_clear_multi(&half, &full, NULL);
 	return r;
 }
 

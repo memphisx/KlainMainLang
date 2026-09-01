@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strings"
 )
 
 // emitOptionalMember emits `obj?.property`. For ptr-typed objects it emits a
@@ -291,6 +292,24 @@ func (e *Emitter) emitTupleElemAssign(ex *ast.IndexExpression, tupleTy Type, op 
 	return e.loadScalarOrNullableField(gepReg, fieldTy), nil
 }
 
+// constObjectKey returns the field name a compile-time-constant bracket key
+// denotes for a fixed-shape object (`o["a"]` → "a", `o[0]` → "0"), and whether
+// the index is such a constant (ADR-00608). An integer numeric literal matches
+// the field-name text the object literal stored for a numeric key; a bigint or
+// non-integer literal is not a valid object key here.
+func constObjectKey(index ast.Expression) (string, bool) {
+	switch k := index.(type) {
+	case *ast.StringLiteral:
+		return k.Value, true
+	case *ast.NumberLiteral:
+		if k.IsBigInt || strings.ContainsAny(k.Value, ".eExX") {
+			return "", false
+		}
+		return k.Value, true
+	}
+	return "", false
+}
+
 func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	// Enum bracket access (ADR-00480): `E["B"]` with a literal string key is
 	// the member's value; `E[0]` / `E[expr]` with a numeric key is the
@@ -474,6 +493,37 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 	// Ty is ptr-shaped and would otherwise fall into emitIndexPtr.
 	if objTy := e.inferExprType(ex.Object); objTy.IsTuple {
 		return e.emitTupleIndex(ex, objTy)
+	}
+	// Fixed-object constant-key access: `o["a"]` / `o[0]` on a static-shape
+	// object (or class instance) maps a compile-time-constant key to the matching
+	// field, exactly like `o.a` (ADR-00608). A dynamic (map-backed) object was
+	// already handled above; arrays/tuples/strings are not IsObject here.
+	if objTy := e.inferExprType(ex.Object); objTy.IsObject && !objTy.IsArray {
+		if key, ok := constObjectKey(ex.Index); ok {
+			objVal, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			if objVal.Ty.IsClass {
+				if getter, _, ok := e.classAccessorSigs(objVal.Ty.ClassName, key); ok && getter != nil {
+					return e.emitClassCall(objVal.Ty, objVal, accessorMethodName("get", key), nil, ex.GetPos(), false)
+				}
+			}
+			idx, fieldTy, found := objVal.Ty.FieldIndex(key)
+			if !found {
+				return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", ex.GetPos().Line, ex.GetPos().Col, key)
+			}
+			if objVal.Ty.IsClass {
+				if err := e.checkFieldVisibility(objVal.Ty.ClassName, key, ex.GetPos()); err != nil {
+					return Value{}, err
+				}
+			}
+			gepReg := e.freshReg()
+			loadReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+			return Value{Ref: loadReg, Ty: e.canonicalizeClassTy(fieldTy)}, nil
+		}
 	}
 	// Array indexing.
 	gepReg, elemTy, err := e.emitIndexPtr(ex)

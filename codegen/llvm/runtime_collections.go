@@ -1,6 +1,6 @@
 package llvm
 
-import ()
+import "fmt"
 
 // ensureGroupMapHelpers backs Object.groupBy's runtime map (emit_objects.go).
 // Unrelated to the "group" tracking used by the Promise combinators
@@ -219,6 +219,54 @@ func (e *Emitter) ensureSortCmpI64() {
   %r0 = select i1 %lt, i32 -1, i32 0
   %r1 = select i1 %gt, i32 1, i32 %r0
   ret i32 %r1
+}`)
+}
+
+// ensureSortCmpI64Lex is the JS-faithful DEFAULT (no-comparator) integer sort:
+// real Array.prototype.sort with no comparator converts every element to a
+// string and compares lexicographically — even for numbers — so [10,1,21,2]
+// sorts to [1,10,2,21], NOT the numeric [1,2,10,21]. Each i64 element is
+// rendered with %lld into a stack buffer and strcmp'd. (A custom comparator
+// still routes through the numeric trampoline; only the default changes.)
+func (e *Emitter) ensureSortCmpI64Lex() {
+	if e.usedSortCmpI64Lex {
+		return
+	}
+	e.usedSortCmpI64Lex = true
+	e.ensureSprintf()
+	e.ensureStrcmp()
+	fmtPtr := e.internString("%lld")
+	e.emitGlobal(fmt.Sprintf(`define i32 @__kml_cmp_i64_lex(ptr %%pa, ptr %%pb) {
+  %%a = load i64, ptr %%pa, align 8
+  %%b = load i64, ptr %%pb, align 8
+  %%ba = alloca [32 x i8], align 1
+  %%bb = alloca [32 x i8], align 1
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%ba, ptr %s, i64 %%a)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%bb, ptr %s, i64 %%b)
+  %%r = call i32 @strcmp(ptr %%ba, ptr %%bb)
+  ret i32 %%r
+}`, fmtPtr, fmtPtr))
+}
+
+// ensureSortCmpF64Lex is the float counterpart of ensureSortCmpI64Lex — the
+// default no-comparator sort renders each double via the JS-faithful
+// shortest-round-trip formatter (__kml_dtoa) and strcmp's the results.
+func (e *Emitter) ensureSortCmpF64Lex() {
+	if e.usedSortCmpF64Lex {
+		return
+	}
+	e.usedSortCmpF64Lex = true
+	e.ensureDtoa()
+	e.ensureStrcmp()
+	e.emitGlobal(`define i32 @__kml_cmp_f64_lex(ptr %pa, ptr %pb) {
+  %a = load double, ptr %pa, align 8
+  %b = load double, ptr %pb, align 8
+  %ba = alloca [32 x i8], align 1
+  %bb = alloca [32 x i8], align 1
+  call void @__kml_dtoa(ptr %ba, double %a)
+  call void @__kml_dtoa(ptr %bb, double %b)
+  %r = call i32 @strcmp(ptr %ba, ptr %bb)
+  ret i32 %r
 }`)
 }
 

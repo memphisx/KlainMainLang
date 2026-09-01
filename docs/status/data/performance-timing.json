@@ -26,11 +26,9 @@
           {
             "feature": "`performance.now()`",
             "status": "implemented",
-            "caveats": [
-              "No fixed \"time origin\" like the browser spec (process/page start); returns the raw monotonic reading instead, which is exactly as valid for subtracting two calls to measure elapsed time"
-            ],
             "notes": [
-              "`CLOCK_MONOTONIC`-based milliseconds, as a `double` (sub-millisecond precision) — unlike `Date.now()`, not tied to wall-clock time",
+              "Milliseconds since the program's **time origin** (process start), as a `double` (sub-millisecond precision) — the origin is captured once at process start by an `llvm.global_ctors` constructor, matching the spec's origin-relative reading ([ADR-00568](../adr/ADR-00568.md))",
+              "`CLOCK_MONOTONIC`-based — unlike `Date.now()`, not tied to wall-clock time",
               "See [ADR-00024](../adr/ADR-00024.md)"
             ]
           },

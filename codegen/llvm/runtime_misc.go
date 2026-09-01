@@ -15,19 +15,19 @@ func (e *Emitter) ensureConsoleGroupDepth() {
 }
 
 // ensureConsoleTimer declares the hidden global backing console.time()/
-// .timeEnd() — a single global monotonic-time slot. V1 scope: only one
-// timer can be "running" at a time, regardless of how many distinct labels
-// are passed to time()/timeEnd() — real Node tracks each label
-// independently. A later pass could switch this to the same Map<string,
-// number> shape console.count() already uses below, if that scope ever
-// actually gets felt as too narrow in practice.
+// .timeEnd() — a lazily-created Map<string, number> keyed by label, reusing
+// the same __kml_map_str_* helpers console.count() uses below. The stored
+// value is the monotonic start time (a double) bit-cast into the map's i64
+// slot and cast back out on timeEnd. Matches real Node's per-label
+// semantics: distinct labels track independent timers.
 func (e *Emitter) ensureConsoleTimer() {
 	if e.usedConsoleTimer {
 		return
 	}
 	e.usedConsoleTimer = true
 	e.ensurePerformanceNow()
-	e.emitGlobal("@__kml_console_time_start = internal thread_local global double 0.0, align 8")
+	e.ensureMapStrHelpers()
+	e.emitGlobal("@__kml_console_time_map = internal thread_local global ptr null, align 8")
 }
 
 // ensureConsoleCountMap declares the hidden global backing console.count()/

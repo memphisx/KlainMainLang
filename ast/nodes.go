@@ -867,6 +867,12 @@ type ObjectProperty struct {
 	// or, when Key == "" and Value is a *SpreadElement, an object spread.
 	KeyExpr Expression
 	Value   Expression
+	// AccessorKind is "get" / "set" / "" (a plain property, the default) — an
+	// object-literal getter/setter (TDD-00153). Value holds the accessor's
+	// FunctionExpression (zero-arg for "get", one-arg for "set"), mirroring the
+	// class-member AccessorKind. A desugar pass lowers an accessor-bearing
+	// literal to a synthetic class instance.
+	AccessorKind string
 }
 
 type ObjectLiteral struct {
@@ -886,6 +892,19 @@ func NewObjectLiteral(props []ObjectProperty, pos Pos) *ObjectLiteral {
 func (o *ObjectLiteral) HasComputedKey() bool {
 	for _, p := range o.Properties {
 		if p.KeyExpr != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAccessors reports whether this literal declares at least one getter or
+// setter (`{ get x() {...} }` / `{ set x(v) {...} }`) — TDD-00153. Such a
+// literal is lowered to a synthetic anonymous-class instance so the accessor
+// bodies get a real `this` and read/write dispatch through the getter/setter.
+func (o *ObjectLiteral) HasAccessors() bool {
+	for _, p := range o.Properties {
+		if p.AccessorKind != "" {
 			return true
 		}
 	}
@@ -995,18 +1014,19 @@ func NewTemplateLiteral(quasis []string, exprs []Expression, pos Pos) *TemplateL
 // written as a tagged template" stays recoverable (codegen desugars it on
 // demand instead — see desugarTaggedTemplate in codegen/llvm).
 type TaggedTemplateExpression struct {
-	Tag    Expression
-	Quasis []string
-	Exprs  []Expression
-	pos    Pos
+	Tag       Expression
+	Quasis    []string
+	RawQuasis []string // undecoded source of each quasi (parallel to Quasis); backs String.raw
+	Exprs     []Expression
+	pos       Pos
 }
 
 func (*TaggedTemplateExpression) nodeMarker()   {}
 func (*TaggedTemplateExpression) exprMarker()   {}
 func (t *TaggedTemplateExpression) GetPos() Pos { return t.pos }
 
-func NewTaggedTemplateExpression(tag Expression, quasis []string, exprs []Expression, pos Pos) *TaggedTemplateExpression {
-	return &TaggedTemplateExpression{Tag: tag, Quasis: quasis, Exprs: exprs, pos: pos}
+func NewTaggedTemplateExpression(tag Expression, quasis, rawQuasis []string, exprs []Expression, pos Pos) *TaggedTemplateExpression {
+	return &TaggedTemplateExpression{Tag: tag, Quasis: quasis, RawQuasis: rawQuasis, Exprs: exprs, pos: pos}
 }
 
 // NewMapExpression — new Map<K, V>() or new Map<K, V>(entries) where entries
@@ -1309,13 +1329,13 @@ func NewNewDateExpressionMulti(args []Expression, pos Pos) *NewDateExpression {
 	return &NewDateExpression{Args: args, pos: pos}
 }
 
-// NewURLExpression is `new URL(url)` — a single required string argument.
-// No base-URL second argument (V1 scope — out of scope independent of
-// Request/Headers, which now exist for real, see NewRequestExpression/
-// NewHeadersExpression below, TDD-00040).
+// NewURLExpression is `new URL(url)` or `new URL(url, base)` — a required URL
+// argument plus an optional base against which a relative URL is resolved
+// (ADR-00579). Base is nil for the single-argument form.
 type NewURLExpression struct {
-	URL Expression
-	pos Pos
+	URL  Expression
+	Base Expression // optional base-URL argument; nil for the one-arg form
+	pos  Pos
 }
 
 func (*NewURLExpression) nodeMarker()   {}
@@ -1324,6 +1344,10 @@ func (n *NewURLExpression) GetPos() Pos { return n.pos }
 
 func NewNewURLExpression(url Expression, pos Pos) *NewURLExpression {
 	return &NewURLExpression{URL: url, pos: pos}
+}
+
+func NewNewURLExpressionWithBase(url, base Expression, pos Pos) *NewURLExpression {
+	return &NewURLExpression{URL: url, Base: base, pos: pos}
 }
 
 // NewDatabaseSyncExpression is `new DatabaseSync(path, options?)` from
@@ -1485,8 +1509,9 @@ func NewNewEventTargetExpression(pos Pos) *NewEventTargetExpression {
 
 // NewEventExpression is `new Event(type)` (WHATWG Event, TDD-00081 Stage 1).
 type NewEventExpression struct {
-	TypeArg Expression // the event type string
-	pos     Pos
+	TypeArg    Expression // the event type string
+	Cancelable Expression // the init object's `cancelable` value; nil if absent (defaults false)
+	pos        Pos
 }
 
 func (*NewEventExpression) nodeMarker()   {}
@@ -1497,13 +1522,18 @@ func NewNewEventExpression(typeArg Expression, pos Pos) *NewEventExpression {
 	return &NewEventExpression{TypeArg: typeArg, pos: pos}
 }
 
+func NewNewEventExpressionWithInit(typeArg, cancelable Expression, pos Pos) *NewEventExpression {
+	return &NewEventExpression{TypeArg: typeArg, Cancelable: cancelable, pos: pos}
+}
+
 // NewCustomEventExpression is `new CustomEvent(type, { detail })` (TDD-00081
 // Stage 1). Detail is the value of the init object's `detail` property (nil if
 // absent), extracted at parse time so codegen doesn't re-inspect the literal.
 type NewCustomEventExpression struct {
-	TypeArg Expression
-	Detail  Expression // nil if the init object omitted `detail`
-	pos     Pos
+	TypeArg    Expression
+	Detail     Expression // nil if the init object omitted `detail`
+	Cancelable Expression // the init object's `cancelable` value; nil if absent (defaults false)
+	pos        Pos
 }
 
 func (*NewCustomEventExpression) nodeMarker()   {}
@@ -1512,6 +1542,10 @@ func (n *NewCustomEventExpression) GetPos() Pos { return n.pos }
 
 func NewNewCustomEventExpression(typeArg, detail Expression, pos Pos) *NewCustomEventExpression {
 	return &NewCustomEventExpression{TypeArg: typeArg, Detail: detail, pos: pos}
+}
+
+func NewNewCustomEventExpressionWithInit(typeArg, detail, cancelable Expression, pos Pos) *NewCustomEventExpression {
+	return &NewCustomEventExpression{TypeArg: typeArg, Detail: detail, Cancelable: cancelable, pos: pos}
 }
 
 // NewRequestExpression is `new Request(url)` or `new Request(url, init)`
@@ -2029,6 +2063,11 @@ type AnnotField struct {
 	// already established.
 	Static     bool
 	Visibility string // "private" / "protected" / "" (public, default)
+	// Readonly is the TS `readonly` field modifier (TDD-00154) — enforced as a
+	// compile-time immutability check (a write outside the declaring class's
+	// constructor is rejected). Meaningful only for a ClassDeclaration's Fields;
+	// always false for interface/object-type reuse of this shared type.
+	Readonly bool
 	// Initializer is a class field's `= expr` default (TDD-00063 Stage 1) —
 	// nil when the field has none (a bare `x: T;`) and always nil for every
 	// non-class reuse of this shared type (interface/object-type fields,

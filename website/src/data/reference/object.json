@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "OBJECT-COLLECTIONS.md",
   "coversRows": "all",
-  "coverage": { "loose": "28/29", "loosePct": 97, "strict": "16/29", "strictPct": 55 },
+  "coverage": { "loose": "28/29", "loosePct": 97, "strict": "17/29", "strictPct": 59 },
   "lede": "Objects are fixed-shape heap structs, not dynamic bags — the recurring divergence throughout: no prototype chain, no runtime property add/delete, and shapes resolved at compile time. That model gives Object.freeze real per-heap-identity enforcement and turns Object.hasOwn into a compile-time field lookup, but rules out Object.create. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as the null stand-in.",
   "entries": [
     {
@@ -275,14 +275,12 @@
       "id": "map.foreach",
       "name": "Map.forEach()",
       "statusRow": "Map.forEach()",
-      "signature": "m.forEach(fn: (value, key) => void): void",
-      "badge": "caveats",
-      "description": "Calls fn(value, key), matching real JS's argument order.",
+      "signature": "m.forEach(fn: (value, key, map) => void): void",
+      "badge": "exact",
+      "description": "Calls fn(value, key, map), matching real JS's full callback signature; the 3rd argument is the map being iterated. A callback declaring fewer parameters receives only the leading ones.",
       "exampleKey": "map/map",
       "snippet": "scores.forEach((v, k) => {\n  console.log(k + \" -> \" + v);\n});",
-      "differences": [
-        "The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes)"
-      ],
+      "differences": [],
       "seeAlso": ["map.entries", "set.foreach"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/forEach" }
     },
@@ -357,9 +355,9 @@
       "id": "set.foreach",
       "name": "Set.forEach()",
       "statusRow": "Set.forEach()",
-      "signature": "s.forEach(fn: (element[, element]) => void): void",
+      "signature": "s.forEach(fn: (value, value2, set) => void): void",
       "badge": "exact",
-      "description": "Calls fn(element[, element]) — real JS's Set.prototype.forEach passes the value twice ((value, value, set)) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter.",
+      "description": "Calls fn(value, value, set) — real JS's Set.prototype.forEach passes the value twice (Map/Set callback-shape parity) then the set itself; each argument is supplied per the callback's declared arity.",
       "exampleKey": "set/set",
       "snippet": "ids.forEach((id) => {\n  console.log(\"id \" + id);\n});",
       "seeAlso": ["set.core", "map.foreach"],

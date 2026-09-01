@@ -25,6 +25,48 @@ import (
 // remaining arguments. See TDD-00059: this is the only new logic tagged
 // templates need — every existing call-dispatch/coercion/rest-param-
 // packing path handles the result exactly like a hand-written call.
+// isStringRawTag reports whether a tagged-template tag is the built-in
+// `String.raw` (and not a user binding shadowing `String`).
+func (e *Emitter) isStringRawTag(tag ast.Expression) bool {
+	mem, ok := tag.(*ast.MemberExpression)
+	if !ok || mem.Property != "raw" {
+		return false
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	return ok && id.Name == "String" && !e.isShadowedByLocal("String")
+}
+
+// emitStringRaw implements the `String.raw` tag: it interleaves the RAW
+// (undecoded) quasi text with the string-coerced interpolations, so escape
+// sequences appear verbatim (`String.raw`\n`` is the two characters `\` and
+// `n`). ADR-00562.
+func (e *Emitter) emitStringRaw(tt *ast.TaggedTemplateExpression) (Value, error) {
+	raw := tt.RawQuasis
+	if len(raw) != len(tt.Quasis) {
+		// Defensive: fall back to cooked if raw wasn't threaded (never expected).
+		raw = tt.Quasis
+	}
+	acc := Value{Ref: e.internString(raw[0]), Ty: TypePtr}
+	for i, expr := range tt.Exprs {
+		val, err := e.emitExpr(expr)
+		if err != nil {
+			return Value{}, err
+		}
+		strVal, err := e.emitValueToString(val)
+		if err != nil {
+			return Value{}, fmt.Errorf("%d:%d: %w", tt.GetPos().Line, tt.GetPos().Col, err)
+		}
+		if acc, err = e.emitStringConcat(acc, strVal); err != nil {
+			return Value{}, err
+		}
+		tail := Value{Ref: e.internString(raw[i+1]), Ty: TypePtr}
+		if acc, err = e.emitStringConcat(acc, tail); err != nil {
+			return Value{}, err
+		}
+	}
+	return acc, nil
+}
+
 func desugarTaggedTemplate(tt *ast.TaggedTemplateExpression) *ast.CallExpression {
 	quasiExprs := make([]ast.Expression, len(tt.Quasis))
 	for i, q := range tt.Quasis {
@@ -145,6 +187,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 			return e.emitMathCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "BigInt" && !e.isShadowedByLocal(id.Name) &&
+			(mem.Property == "asIntN" || mem.Property == "asUintN") {
+			return e.emitBigIntAsN(mem.Property, ex.Args, ex.GetPos())
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Buffer" && !e.isShadowedByLocal(id.Name) {
 			return e.emitBufferStaticCall(mem.Property, ex.Args, ex.GetPos())
@@ -849,6 +895,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitConsoleGroup(ex.Args, ex.GetPos())
 			case "groupEnd":
 				return e.emitConsoleGroupEnd(ex.Args, ex.GetPos())
+			case "table":
+				return e.emitConsoleTable(ex.Args, ex.GetPos())
 			}
 		}
 		// TDD-00101: a BigInt64Array/BigUint64Array supports only an explicit
@@ -888,7 +936,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				if err != nil {
 					return Value{}, err
 				}
-				return e.emitBufferGrow(objVal, ex.Args, ex.GetPos())
+				return e.emitBufferGrow(objVal, ex.Args, ex.GetPos(), mem.Property == "resize")
 			}
 		}
 		if mem.Property == "slice" {
@@ -906,6 +954,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "substring" {
 			return e.emitStringSubstring(mem, ex.Args, ex.GetPos())
+		}
+		// Buffer.indexOf/includes/lastIndexOf with a STRING argument searches the
+		// needle's bytes over the buffer (number args stay on the shared array
+		// path). Checked before the generic array dispatch below (ADR-00558).
+		if mem.Property == "indexOf" || mem.Property == "includes" || mem.Property == "lastIndexOf" {
+			if objTy := e.inferExprType(mem.Object); objTy.IsBuffer && len(ex.Args) >= 1 && isStringTy(e.inferExprType(ex.Args[0])) {
+				return e.emitBufferStringSearch(mem, mem.Property, ex.Args, ex.GetPos())
+			}
 		}
 		if mem.Property == "indexOf" {
 			if e.inferExprType(mem.Object).IsArray {
@@ -958,6 +1014,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitArrayCopyWithin(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "fill" {
+			// Buffer.fill(string, ...) repeats the needle's bytes (ADR-00559);
+			// number fills stay on the shared array path.
+			if objTy := e.inferExprType(mem.Object); objTy.IsBuffer && len(ex.Args) >= 1 && isStringTy(e.inferExprType(ex.Args[0])) {
+				return e.emitBufferStringFill(mem, ex.Args, ex.GetPos())
+			}
 			return e.emitArrayFill(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "toFixed" {
@@ -1286,11 +1347,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		case "encodeURIComponent":
 			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "encodeURIComponent", "@__kml_encode_uri_component", e.ensureEncodeURIComponent)
 		case "decodeURIComponent":
-			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "decodeURIComponent", "@__kml_decode_uri_component", e.ensureDecodeURIComponent)
+			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "decodeURIComponent", "@__kml_decode_uri_component_strict", e.ensureDecodeURIComponentStrict)
 		case "encodeURI":
 			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "encodeURI", "@__kml_encode_uri", e.ensureEncodeURI)
 		case "decodeURI":
-			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "decodeURI", "@__kml_decode_uri", e.ensureDecodeURI)
+			return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), "decodeURI", "@__kml_decode_uri_strict", e.ensureDecodeURIStrict)
 		case "queueMicrotask":
 			return e.emitQueueMicrotask(ex.Args, ex.GetPos())
 		case "setTimeout":
@@ -1691,7 +1752,31 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
 		return Value{}, err
 	}
+	// A parameter default may reference an earlier parameter
+	// (`function f(a, b = a * 2)`). Defaults are evaluated at the call site, so
+	// each earlier *scalar* parameter's final value (whether the passed argument
+	// or its own default) is materialized into a scratch symbol keyed by name;
+	// scratchSyms is made visible only while a default is emitted (arguments are
+	// still evaluated in the caller's scope, seeing no sibling parameters).
+	scratchSyms := map[string]Symbol{}
+	pushScratch := func() {
+		if len(scratchSyms) == 0 {
+			return
+		}
+		e.pushScope()
+		for n, s := range scratchSyms {
+			e.define(n, s)
+		}
+	}
+	popScratch := func() {
+		if len(scratchSyms) > 0 {
+			e.popScope()
+		}
+	}
 	for i := 0; i < regularCount; i++ {
+		var paramScalar *Value // set for a scalar/pointer param, to bind for later defaults
+		var paramArrayHeader string // set for an array param (its header ptr), to bind for later defaults (ADR-00610)
+		var paramNullableAgg string // set for a nullable-scalar param (its {i1,T} agg), to bind for later defaults (ADR-00611)
 		var paramTy Type
 		if i < len(sig.ParamTypes) {
 			paramTy = sig.ParamTypes[i]
@@ -1716,6 +1801,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					lenReg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
 					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+					paramArrayHeader = header
 				} else {
 					// Hint-aware (TDD-00028): an array-literal argument
 					// (or `new Array<T>(n)` with no explicit `<T>`) is
@@ -1740,15 +1826,17 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					lenReg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
 					argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+					paramArrayHeader = header
 				}
 			} else if isNullableScalar(paramTy) {
 				// A nullable-scalar parameter takes its boxed { i1, T }
 				// aggregate (TDD-00064 Stage 3).
-				argStr, err := e.emitNullableScalarArg(arg, paramTy)
+				agg, err := e.emitNullableScalarBoxedValue(arg, paramTy)
 				if err != nil {
 					return Value{}, err
 				}
-				argParts = append(argParts, argStr)
+				argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+				paramNullableAgg = agg
 			} else {
 				val, err := e.emitExprWithObjectHint(arg, paramTy)
 				if err != nil {
@@ -1783,6 +1871,8 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					val = e.coerce(val, paramTy)
 				}
 				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+				pv := val
+				paramScalar = &pv
 			}
 		} else if i < len(sig.Defaults) && sig.Defaults[i] != nil {
 			// Evaluate default expression at call site. Array-typed
@@ -1792,6 +1882,8 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			// (`a: number[] = [1,2,3]`) was passing the whole aggregate
 			// struct where the callee's LLVM signature expects two scalar
 			// params, a hard clang-stage type mismatch, not a silent bug.
+			// Earlier scalar parameters are in scope for this default.
+			pushScratch()
 			if paramTy.IsArray {
 				val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
 				if err != nil {
@@ -1802,12 +1894,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				}
 				header, lenReg := e.arrayArgFromAggregate(val)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+				paramArrayHeader = header
 			} else if isNullableScalar(paramTy) {
-				argStr, err := e.emitNullableScalarArg(sig.Defaults[i], paramTy)
+				agg, err := e.emitNullableScalarBoxedValue(sig.Defaults[i], paramTy)
 				if err != nil {
 					return Value{}, fmt.Errorf("default value for param %d: %w", i, err)
 				}
-				argParts = append(argParts, argStr)
+				argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+				paramNullableAgg = agg
 			} else {
 				val, err := e.emitExprWithObjectHint(sig.Defaults[i], paramTy)
 				if err != nil {
@@ -1821,7 +1915,10 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 					val = e.coerce(val, paramTy)
 				}
 				argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+				pv := val
+				paramScalar = &pv
 			}
+			popScratch()
 		} else if i < len(sig.Optional) && sig.Optional[i] {
 			// ADR-00164: an omitted `param?: T` argument gets T's zero
 			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
@@ -1834,11 +1931,39 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
+				paramNullableAgg = "zeroinitializer"
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+				pv := Value{Ref: paramTy.zeroLiteral(), Ty: paramTy}
+				paramScalar = &pv
 			}
 		} else {
 			return Value{}, fmt.Errorf("%d:%d: missing argument %d with no default", pos.Line, pos.Col, i+1)
+		}
+		// Materialize this parameter's final value into a scratch symbol so a
+		// *later* parameter's default can reference it by name.
+		if paramScalar != nil && i < len(sig.ParamNames) {
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, paramScalar.Ty.IR, paramScalar.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", paramScalar.Ty.IR, paramScalar.Ref, slot, paramScalar.Ty.Align()))
+			scratchSyms[sig.ParamNames[i]] = Symbol{Ptr: slot, Ty: paramScalar.Ty}
+		}
+		// An array parameter binds via a slot holding its header pointer
+		// (arrayDataLenSlots derives data/len from it) — so a later default can
+		// read `a.length`, `a[i]`, etc. (ADR-00610).
+		if paramArrayHeader != "" && i < len(sig.ParamNames) {
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", paramArrayHeader, slot))
+			scratchSyms[sig.ParamNames[i]] = Symbol{Ptr: slot, Ty: paramTy}
+		}
+		// A nullable-scalar parameter binds via its { i1, T } aggregate slot, so a
+		// later default can `?? `/`=== null`/narrow it (ADR-00611).
+		if paramNullableAgg != "" && i < len(sig.ParamNames) {
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, nullableScalarStorageIR(paramTy), storageAlign(paramTy)))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(paramTy), paramNullableAgg, slot, storageAlign(paramTy)))
+			scratchSyms[sig.ParamNames[i]] = Symbol{Ptr: slot, Ty: paramTy, NullableBoxed: true}
 		}
 	}
 	// Pack rest args into a temporary heap array.

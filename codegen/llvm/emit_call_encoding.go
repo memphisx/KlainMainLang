@@ -44,6 +44,7 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 		e.ensureCryptoRandomBytes()
 		byteLenReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", byteLenReg, bufVal.Ref))
+		e.emitCryptoQuotaCheck(byteLenReg)
 		dataSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
 		dataReg := e.freshReg()
@@ -53,6 +54,12 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 	}
 	if argTy.IsArray && argTy.ElemType != nil &&
 		(argTy.IsTypedArray || (argTy.ElemType.IR == "i8" && !argTy.ElemType.Signed)) {
+		// Real getRandomValues rejects a float TypedArray (Float32/Float64) with
+		// a TypeMismatchError — it fills only integer views. Enforced at compile
+		// time here (ADR-00554).
+		if argTy.ElemType.Float {
+			return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues requires an integer TypedArray — a Float32Array/Float64Array is a TypeMismatchError in real JS", pos.Line, pos.Col)
+		}
 		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 		if err != nil {
 			return Value{}, err
@@ -63,6 +70,7 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 			byteLenReg = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLenReg, lenReg, elemTy.Align()))
 		}
+		e.emitCryptoQuotaCheck(byteLenReg)
 		e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes(ptr %s, i64 %s)", ptrReg, byteLenReg))
 		r0 := e.freshReg()
 		r1 := e.freshReg()
@@ -98,20 +106,53 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 	return Value{Ref: r1, Ty: sym.Ty}, nil
 }
 
-// emitNewTextDecoderExpression implements `new TextDecoder(label?)`. label,
-// if given, is evaluated for its side effects and then discarded — V1 scope
-// is UTF-8 only (this compiler's strings are already raw UTF-8 byte
-// sequences, so decoding is a direct byte copy with no real transcoding),
-// so there's nothing to validate or remember it against. Real TextDecoder
-// throws a RangeError for an unrecognized label; this compiler is
-// permissive instead, the same documented V1 simplification atob/
-// decodeURI already establish for malformed input. See
+// emitCryptoQuotaCheck throws a QuotaExceededError DOMException when the
+// byte length exceeds the spec's 65,536-byte getRandomValues limit (ADR-00554).
+func (e *Emitter) emitCryptoQuotaCheck(byteLenReg string) {
+	e.ensureExceptionHelpers()
+	e.ensureStrHeaderRuntime()
+	over := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 65536", over, byteLenReg))
+	badL := e.freshLabel("grv.quota")
+	okL := e.freshLabel("grv.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", over, badL, okL))
+	e.emitLabel(badL)
+	msg := e.internString("The requested length exceeds 65,536 bytes")
+	errObj := e.buildErrorObj(errorKindIDs["DOMException"], msg, e.internString("QuotaExceededError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
+}
+
+// emitNewTextDecoderExpression implements `new TextDecoder(label?)`. V1 scope
+// is UTF-8 only (this compiler's strings are already raw UTF-8 byte sequences,
+// so decoding is a direct byte copy with no real transcoding). The label is
+// WHATWG-normalized (trim + ASCII-lowercase) and validated against the six
+// UTF-8 aliases (ADR-00567): a label that isn't a UTF-8 alias throws a
+// catchable `RangeError` — matching real TextDecoder for an unrecognized
+// label, and the honest response for a *recognized but non-UTF-8* label
+// (latin1/utf-16/…) this compiler can't transcode. See
 // docs/status/ENCODING-TEXT.md.
 func (e *Emitter) emitNewTextDecoderExpression(ex *ast.NewTextDecoderExpression) (Value, error) {
 	if ex.Label != nil {
-		if _, err := e.emitExpr(ex.Label); err != nil {
+		labelVal, err := e.emitExpr(ex.Label)
+		if err != nil {
 			return Value{}, err
 		}
+		labelVal = e.coerce(labelVal, TypePtr)
+		e.ensureUtf8LabelCheck()
+		e.ensureExceptionHelpers()
+		ok := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_is_utf8_label(ptr %s)", ok, labelVal.Ref))
+		badL := e.freshLabel("td.badlabel")
+		okL := e.freshLabel("td.oklabel")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
+		e.emitLabel(badL)
+		msg := e.internString("The encoding label provided is not a supported UTF-8 label.")
+		errObj := e.buildErrorObj(errorKindIDs["RangeError"], msg, e.internString("RangeError"))
+		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.emitTerminator("unreachable")
+		e.emitLabel(okL)
 	}
 	return Value{Ref: "null", Ty: TextDecoderType()}, nil
 }

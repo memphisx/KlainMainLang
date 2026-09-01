@@ -4,8 +4,8 @@
   "kind": "node",
   "statusPage": "OS.md",
   "coversRows": "all",
-  "coverage": { "loose": "7/7", "loosePct": 100, "strict": "6/7", "strictPct": 86 },
-  "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. Two divergences are inherent to the host, not defects: os.cpus() speed is 0 on Apple Silicon (Apple dropped the fixed-clock model) and its Darwin times.irq is always 0, while os.EOL is always \"\\n\" because this compiler is POSIX-only with no Windows target.",
+  "coverage": { "loose": "7/7", "loosePct": 100, "strict": "7/7", "strictPct": 100 },
+  "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable) and Darwin times.irq is 0 — both exactly what real Node reports on that hardware; os.EOL is always \"\\n\" because this compiler is POSIX-only with no Windows target.",
   "entries": [
     {
       "id": "os.platform",
@@ -64,15 +64,12 @@
       "name": "os.cpus()",
       "statusRow": "os.cpus()",
       "signature": "cpus(): { model: string; speed: number; times: { user: number; nice: number; sys: number; idle: number; irq: number } }[]",
-      "badge": "caveats",
-      "description": "Returns real per-core {model, speed, times: {user, nice, sys, idle, irq}} objects — Linux via /proc/cpuinfo and /proc/stat parsing, Darwin via sysctlbyname and Mach host_processor_info — both verified (on Apple Silicon M4 Pro, model = \"Apple M4 Pro\" with live tick counters). On Linux, speed reflects the CPU's current/scaled frequency (from /proc/cpuinfo's cpu MHz), not a rated base/max clock, matching what libuv/real Node reports on Linux.",
+      "badge": "exact",
+      "description": "Returns real per-core {model, speed, times: {user, nice, sys, idle, irq}} objects — Linux via /proc/cpuinfo and /proc/stat parsing, Darwin via sysctlbyname and Mach host_processor_info — both verified (on Apple Silicon M4 Pro, model = \"Apple M4 Pro\" with live tick counters). On Apple Silicon, where hw.cpufrequency is unavailable, speed reports the fixed 2400 MHz nominal that real Node/libuv reports there; on Linux it reflects /proc/cpuinfo's current/scaled cpu MHz, matching real Node. Darwin times.irq is 0, exactly as real Node reports on Darwin.",
       "returns": { "type": "object[]", "desc": "One entry per logical core." },
       "exampleKey": "os/os",
       "snippet": "const cpus = os.cpus();\nconsole.log(cpus.length > 0); // true\nconsole.log(cpus[0].model.length > 0); // true",
-      "differences": [
-        "Darwin `speed` is 0 on Apple Silicon — `sysctlbyname(\"hw.cpufrequency\")` has no answer on M-series (Apple removed the fixed-clock model from M1 on); matches real Node's documented M-series behavior, not a defect.",
-        "Darwin `times.irq` is always 0 — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice)."
-      ],
+      "differences": [],
       "seeAlso": ["os.totalmem"],
       "spec": { "mdn": "https://nodejs.org/api/os.html#oscpus" }
     },

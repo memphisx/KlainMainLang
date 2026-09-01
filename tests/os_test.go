@@ -77,7 +77,9 @@ const cpus = os.cpus()
 let allOk = true
 for (let i = 0; i < cpus.length; i = i + 1) {
   if (cpus[i].model.length === 0) { allOk = false }
-  if (cpus[i].speed < 0) { allOk = false }
+  // speed is always a positive nominal (ADR-00569): real value on Intel, the
+  // 2400 MHz libuv fallback on Apple Silicon — never 0, matching real Node.
+  if (cpus[i].speed <= 0) { allOk = false }
   if (cpus[i].times.user < 0) { allOk = false }
   if (cpus[i].times.nice < 0) { allOk = false }
   if (cpus[i].times.sys < 0) { allOk = false }

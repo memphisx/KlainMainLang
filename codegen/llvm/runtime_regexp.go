@@ -376,6 +376,63 @@ func (e *Emitter) ensureRegexMatch() {
 // @__kml_-prefixed function sidesteps that entirely. Unrecognized flag
 // letters are silently ignored (permissive, matching atob/decodeURI's
 // existing "malformed input" convention) rather than rejected.
+// ensureRegexValidateFlags declares __kml_regex_validate_flags: returns 0 for a
+// valid flags string and 1 otherwise. Real JS throws a SyntaxError when a flag
+// character is not one of the eight valid letters (d,g,i,m,s,u,v,y) or when any
+// flag is repeated ("gg"). (u/v/y/d are recognized as VALID here even though
+// their behavior isn't implemented — that unimplemented-behavior gap is a
+// separate status row; this validation is only about the throw-vs-silent-accept
+// distinction.) The caller throws the SyntaxError on a nonzero return.
+func (e *Emitter) ensureRegexValidateFlags() {
+	if e.usedRegexValidateFlags {
+		return
+	}
+	e.usedRegexValidateFlags = true
+	e.emitGlobal(`
+define i32 @__kml_regex_validate_flags(ptr %flags) {
+entry:
+  br label %loop
+loop:
+  %idx = phi i64 [ 0, %entry ], [ %idxn, %cont ]
+  %seen = phi i32 [ 0, %entry ], [ %seenn, %cont ]
+  %p = getelementptr i8, ptr %flags, i64 %idx
+  %ch = load i8, ptr %p, align 1
+  %end = icmp eq i8 %ch, 0
+  br i1 %end, label %ok, label %map
+map:
+  %b_d = icmp eq i8 %ch, 100
+  %b_g = icmp eq i8 %ch, 103
+  %b_i = icmp eq i8 %ch, 105
+  %b_m = icmp eq i8 %ch, 109
+  %b_s = icmp eq i8 %ch, 115
+  %b_u = icmp eq i8 %ch, 117
+  %b_v = icmp eq i8 %ch, 118
+  %b_y = icmp eq i8 %ch, 121
+  %m0 = select i1 %b_d, i32 1, i32 0
+  %m1 = select i1 %b_g, i32 2, i32 %m0
+  %m2 = select i1 %b_i, i32 4, i32 %m1
+  %m3 = select i1 %b_m, i32 8, i32 %m2
+  %m4 = select i1 %b_s, i32 16, i32 %m3
+  %m5 = select i1 %b_u, i32 32, i32 %m4
+  %m6 = select i1 %b_v, i32 64, i32 %m5
+  %bit = select i1 %b_y, i32 128, i32 %m6
+  %validchar = icmp ne i32 %bit, 0
+  br i1 %validchar, label %dupcheck, label %fail
+dupcheck:
+  %and = and i32 %seen, %bit
+  %dup = icmp ne i32 %and, 0
+  br i1 %dup, label %fail, label %cont
+cont:
+  %seenn = or i32 %seen, %bit
+  %idxn = add i64 %idx, 1
+  br label %loop
+fail:
+  ret i32 1
+ok:
+  ret i32 0
+}`)
+}
+
 func (e *Emitter) ensureRegexParseFlags() {
 	if e.usedRegexParseFlags {
 		return

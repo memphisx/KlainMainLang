@@ -6,19 +6,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**5293 / 9256 agree with TypeScript (57.2%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
+**5308 / 9256 agree with TypeScript (57.3%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
 
-- **1866** match-accept (both compile clean)
-- **3427** match-reject (both reject)
-- **3011** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **952** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **1886** match-accept (both compile clean)
+- **3422** match-reject (both reject)
+- **2991** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **957** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 2657 | 4833 | 55.0% | 591 | 1430 |
-| conformance | 2636 | 4423 | 59.6% | 361 | 1148 |
+| compiler | 2663 | 4833 | 55.1% | 592 | 1430 |
+| conformance | 2645 | 4423 | 59.8% | 365 | 1148 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -126,7 +126,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `chainedCallsWithTypeParameterConstrainedToOtherTypeParameter2` | compiler |
 | `checkSuperCallBeforeThisAccessing5` | compiler |
 | `checkTypePredicateForRedundantProperties` | compiler |
-| … | +852 more |
+| … | +857 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -135,7 +135,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | Count | Reason |
 |---|---|
 | 181 | REJECTED: unexpected character '%s' |
-| 156 | REJECTED: undefined variable '%s' |
+| 150 | REJECTED: undefined variable '%s' |
 | 74 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
 | 71 | REJECTED: '%s' is declared more than once in <path> |
 | 54 | REJECTED: unknown class '%s' |
@@ -146,25 +146,25 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 47 | REJECTED: expected :, got ( |
 | 42 | REJECTED: '%s' is only valid inside a method or constructor body |
 | 38 | REJECTED: '%s' is not an array |
-| 36 | REJECTED: initializer'%s's type — this compiler is a typed subset |
-| 35 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
+| 36 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
 | 34 | REJECTED: expected IDENT, got STRING |
 | 33 | REJECTED: expected IDENT, got < |
 | 31 | REJECTED: expected :, got IDENT |
 | 31 | REJECTED: expected type name, got this |
+| 30 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
 | 30 | REJECTED: expected IDENT, got NUMBER |
-| 30 | REJECTED: expected }, got IDENT |
 | 29 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
 | 29 | REJECTED: at most one call signature is supported per object type |
 | 29 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
-| 28 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
+| 28 | REJECTED: expected '%s' after export specifier list, got ; |
 | 28 | REJECTED: unexpected token , in expression |
 | 27 | REJECTED: any/unknown is not yet supported as an array element or object field type |
-| 27 | REJECTED: expected '%s' after export specifier list, got ; |
+| 27 | REJECTED: expected }, got IDENT |
 | 26 | REJECTED: a destructured parameter requires an explicit type annotation |
 | 26 | REJECTED: an object has no method '%s' |
 | 26 | REJECTED: expected ), got => |
 | 26 | REJECTED: expected IDENT, got new |
+| 26 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 24 | REJECTED: expected ;, got IDENT |
 | 24 | REJECTED: expected IDENT, got ( |
 | 24 | REJECTED: unexpected token + in expression |
@@ -176,25 +176,25 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 20 | REJECTED: expected type name, got \| |
 | 20 | REJECTED: operator '%s' on any/unknown is not yet supported |
 | 20 | REJECTED: unexpected token = in expression |
+| 19 | REJECTED: <path>: expected ] in array type annotation |
 | 19 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
-| 18 | REJECTED: <path>: expected ] in array type annotation |
 | 18 | REJECTED: an array element type is not yet supported on a generator function |
 | 18 | REJECTED: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends |
 | 18 | REJECTED: expected IDENT, got ! |
 | 17 | REJECTED: expected (, got ; |
 | 17 | REJECTED: expected :, got } |
 | 17 | REJECTED: expected IDENT, got await |
+| 17 | REJECTED: expected type name, got ... |
 | 17 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
 | 17 | REJECTED: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if<pa… |
 | 17 | REJECTED: object has no field '%s' |
 | 16 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
 | 16 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
-| 16 | REJECTED: expected type name, got ... |
+| 16 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 16 | REJECTED: no field '%s' |
-| 15 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 15 | REJECTED: constructor of class '%s' calls super(...) but base class '%s' has no constructor |
 | 15 | REJECTED: expected (, got ) |
-| … | +294 more distinct reasons |
+| … | +298 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -208,18 +208,18 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 48 | `>` |
 | 43 | `members` |
 | 42 | `this` |
-| 36 | `s type is incompatible with the variable` |
-| 35 | `from` |
+| 36 | `from` |
 | 28 | `foo` |
 | 27 | `C__kml_mod0` |
+| 26 | `s type is incompatible with the variable` |
 | 20 | `array` |
 | 20 | `b` |
 | 16 | `c` |
 | 16 | `export` |
+| 16 | `which` |
 | 15 | `B__kml_mod0` |
 | 15 | `a` |
 | 15 | `f__kml_mod0` |
-| 15 | `which` |
 | 14 | `C` |
 | 14 | `foo__kml_mod0` |
 | 13 | `new` |
@@ -238,6 +238,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 8 | `Point` |
 | 8 | `U` |
 | 8 | `get x` |
+| 8 | `number)` |
 | 8 | `of` |
 | 7 | `A__kml_mod0` |
 | 7 | `Symbol` |
@@ -254,12 +255,11 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 6 | `then` |
 | 6 | `value` |
 | 5 | `E` |
+| 5 | `[]` |
 | 5 | `baz` |
 | 5 | `const` |
 | 5 | `d__kml_mod0` |
 | 5 | `m1` |
 | 5 | `obj__kml_mod0` |
 | 5 | `�` |
-| 4 | `Bar__kml_mod0` |
-| 4 | `I` |
-| … | +332 more distinct blockers |
+| … | +330 more distinct blockers |

@@ -107,6 +107,9 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	if lit.HasComputedKey() {
 		return e.emitDynamicObjectLiteral(lit)
 	}
+	if lit.HasAccessors() {
+		return e.emitObjectLiteralWithAccessors(lit)
+	}
 	// A plain object literal assigned to a string index-signature target
 	// (TDD-00130) is built as a map, not a fixed struct, so `d[key]` access
 	// works — the same map-backed representation a computed-key literal uses.
@@ -264,6 +267,50 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 		return Value{}, err
 	}
 	kRef := e.valueToMapKey(keyVal, TypePtr)
+
+	// Logical assignment (&&=/||=/??=) against a computed dynamic-object key
+	// (ADR-00600): read the current value, and only store the RHS down the
+	// branch the operator's short-circuit rule requires — mirroring
+	// emitLogicalCompoundAssign, but through the map's get/set rather than a
+	// fixed ptr. The final value is re-read from the map at the merge point.
+	if isLogicalAssignOp(op) {
+		e.ensureMapStrHelpers()
+		rawReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", rawReg, mapPtr, kRef))
+		cur := e.mapValFromI64(rawReg, valTy)
+		// `??=` on a non-ptr value type can never trigger (no null to coalesce).
+		if op == "??=" && valTy.IR != "ptr" {
+			return cur, nil
+		}
+		var cond Value
+		switch op {
+		case "&&=":
+			cond = e.toBool(cur)
+		case "||=":
+			notReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notReg, e.toBool(cur).Ref))
+			cond = Value{Ref: notReg, Ty: TypeBool}
+		case "??=":
+			nullReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", nullReg, cur.Ref))
+			cond = Value{Ref: nullReg, Ty: TypeBool}
+		}
+		storeL := e.freshLabel("dynlogassign.store")
+		mergeL := e.freshLabel("dynlogassign.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, storeL, mergeL))
+		e.emitLabel(storeL)
+		rhsVal, err := e.emitExpr(rhsExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		rhsVal = e.coerce(rhsVal, valTy)
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, e.valueToMapVal(rhsVal, valTy)))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		e.emitLabel(mergeL)
+		finalRaw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", finalRaw, mapPtr, kRef))
+		return e.mapValFromI64(finalRaw, valTy), nil
+	}
 
 	var rhs Value
 	if op == "=" {

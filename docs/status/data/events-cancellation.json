@@ -40,8 +40,8 @@
             "feature": "`Event` / `CustomEvent`",
             "status": "implemented",
             "caveats": [
-              "V1 surface is `type`, `defaultPrevented`, and `CustomEvent.detail` (type inferred from the value); the fuller WHATWG properties (`target`/`currentTarget`/`bubbles`/`cancelable`/`composed`/`timeStamp`/`eventPhase`/`isTrusted`) are absent",
-              "`new Event(type, { cancelable, bubbles })` init options are accepted but ignored; `preventDefault()` sets `defaultPrevented` unconditionally (no `cancelable` gate)",
+              "V1 surface is `type`, `defaultPrevented`, `cancelable`, and `CustomEvent.detail` (type inferred from the value); the fuller WHATWG properties (`target`/`currentTarget`/`bubbles`/`composed`/`timeStamp`/`eventPhase`/`isTrusted`) are absent",
+              "`bubbles` in the `new Event(type, { … })` init is accepted but ignored (single-target dispatch); `cancelable` **is** honored — `preventDefault()` sets `defaultPrevented` only on a cancelable event, a no-op otherwise ([ADR-00587](../adr/ADR-00587.md))",
               "`stopPropagation()` is a no-op (single-target dispatch, no capture/bubble tree)"
             ],
             "notes": [

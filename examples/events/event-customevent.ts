@@ -3,12 +3,17 @@
 // (addEventListener/dispatchEvent) is a later stage. See
 // docs/status/EVENTS-CANCELLATION.md.
 
-// A plain Event carries its type and a cancellation flag.
-const clicked = new Event("click")
+// A plain Event carries its type and a cancellation flag. preventDefault only
+// takes effect on a cancelable event (WHATWG) — a non-cancelable one is a no-op.
+const clicked = new Event("click", { cancelable: true })
 console.log(clicked.type)                 // click
 console.log(clicked.defaultPrevented)     // false
 clicked.preventDefault()
 console.log(clicked.defaultPrevented)     // true
+
+const scroll = new Event("scroll")        // not cancelable
+scroll.preventDefault()
+console.log(scroll.defaultPrevented)      // false (no-op)
 
 // CustomEvent adds a `detail` payload of any type.
 const greeting = new CustomEvent("greet", { detail: "hello" })
@@ -27,6 +32,6 @@ console.log(moved.detail.x + moved.detail.y)  // 7
 function cancel(e: Event): void {
 	e.preventDefault()
 }
-const submit = new Event("submit")
+const submit = new Event("submit", { cancelable: true })
 cancel(submit)
 console.log(submit.defaultPrevented)      // true

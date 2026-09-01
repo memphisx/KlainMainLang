@@ -1689,6 +1689,41 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 			}
 			break
 		}
+		// Computed key `{ [constExpr]: local }` (ADR-00609): only a
+		// compile-time-constant string/number literal key is supported — it
+		// resolves to the same field name a plain `{ key: local }` would, so
+		// codegen (which keys off DestructProp.Key) is unchanged. A runtime-valued
+		// computed key on a fixed object has no static field to bind and is a
+		// clean rejection.
+		if p.check(lexer.LBRACKET) {
+			p.advance() // '['
+			if !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+				return nil, fmt.Errorf("%d:%d: a computed destructuring key must be a constant string or number literal, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
+			}
+			ckTok := p.advance()
+			if _, err := p.expect(lexer.RBRACKET); err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.COLON); err != nil {
+				return nil, fmt.Errorf("%d:%d: a computed destructuring key must bind through `: name`", p.peek().Line, p.peek().Col)
+			}
+			aliasTok, err := p.expect(lexer.IDENT)
+			if err != nil {
+				return nil, err
+			}
+			var dflt ast.Expression
+			if p.match(lexer.ASSIGN) {
+				dflt, err = p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+			}
+			props = append(props, ast.DestructProp{Key: ckTok.Literal, Local: aliasTok.Literal, Default: dflt})
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
+		}
 		// PropertyName: IDENT, or a STRING/NUMBER literal used as the key text
 		// (`{ "k": v }`, `{ 0: v }`, TDD-00065 Stage 3a) — matching the
 		// object-literal key grammar (parseObjectLiteral). Only the identifier

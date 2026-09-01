@@ -33,7 +33,8 @@ bus.addEventListener("boot", (e: Event) => console.log("boot once"), { once: tru
 bus.dispatchEvent(new Event("boot"))    // boot once
 bus.dispatchEvent(new Event("boot"))    // (nothing)
 
-// dispatchEvent returns false when a listener calls preventDefault().
+// dispatchEvent returns false when a listener calls preventDefault() on a
+// cancelable event (a non-cancelable event's preventDefault is a no-op).
 bus.addEventListener("save", (e: Event) => e.preventDefault())
-const proceeded = bus.dispatchEvent(new Event("save"))
+const proceeded = bus.dispatchEvent(new Event("save", { cancelable: true }))
 console.log("proceeded: " + proceeded)  // proceeded: false

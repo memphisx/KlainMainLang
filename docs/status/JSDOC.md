@@ -4,9 +4,9 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: JSDoc tags 20/22 (~91%) · JSDoc type expressions 14/15 (~93%).
+**Coverage**: JSDoc tags 20/22 (~91%) · JSDoc type expressions 15/15 (100%).
 
-**Strict Coverage**: JSDoc tags 3/22 (~14%) · JSDoc type expressions 5/15 (~33%). A row counts toward Strict only when its **Caveats** column is empty.
+**Strict Coverage**: JSDoc tags 3/22 (~14%) · JSDoc type expressions 6/15 (40%). A row counts toward Strict only when its **Caveats** column is empty.
 
 > **On the low Strict figure — expected, not a backlog.** Most tags that stay
 > out of Strict do so because their Caveats read "accepted and erased, not
@@ -74,7 +74,7 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 | Non-null (`!T`) | ✅ | • The marker is stripped (`!number` → `number`) — TS treats non-null as no semantic change | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | Object shape (`{ a: string, b: number }`) | ✅ | • Nested braces are supported (`@param {{x: number}}`) via balanced-brace scanning | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | `Array.<T>` / `Array<T>` (generic array form) | ✅ | | • [TDD-00125](../tdd/TDD-00125.md) Stage 4; the Closure dot (`Array.<T>`) is normalized to `Array<T>` |
-| `Object.<K, V>` (index map) | ❌ | • Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would — [TYPE-SYSTEM.md](TYPE-SYSTEM.md) | |
+| `Object.<K, V>` (index map) | ✅ | | • Normalized to `Record<K, V>`, now backed by real index-signature support — per-key read/write (`d[key]`) works ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00557](../adr/ADR-00557.md)) |
 | Function type (`function(A): B`) | ✅ | • Rewritten to the arrow form `(arg0: A) => B`; a nested `function(...)` inside another type is not rewritten (rare) | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |
 | `*` / `?` (Closure any/unknown) | ✅ | | • Both normalized to `any` ([TDD-00125](../tdd/TDD-00125.md) Stage 4) |
 | `import("./m").T` type | ✅ | • The `import("./m").Name` qualifier is dropped to the bare `Name`, which resolves under whole-program compilation when that module is part of the build (typically because the file also imports from it) — a `Name` not otherwise pulled in won't resolve; the `typeof import(...)` value form is out of scope | • [TDD-00125](../tdd/TDD-00125.md) Stage 6 |

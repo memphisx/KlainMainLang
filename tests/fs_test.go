@@ -319,6 +319,25 @@ console.log(fs.existsSync(%q))
 	assertOutputImports(t, src, "true\nfalse")
 }
 
+func TestE2EFsRmdirSyncRecursive(t *testing.T) {
+	// ADR-00578: fs.rmdirSync(path, { recursive: true }) removes the whole tree.
+	dir := t.TempDir()
+	root := filepath.Join(dir, "tree")
+	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o755); err != nil {
+		t.Fatalf("os.MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "b", "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	src := fmt.Sprintf(`
+import fs from 'fs'
+console.log(fs.existsSync(%q))
+fs.rmdirSync(%q, { recursive: true })
+console.log(fs.existsSync(%q))
+`, root, root, root)
+	assertOutputImports(t, src, "true\nfalse")
+}
+
 func TestE2EFsRmdirSyncNonEmptyThrows(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "nonempty")
@@ -507,6 +526,29 @@ console.log(fs.statSync("%s").isDirectory())
 try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.indexOf("cannot stat") > -1) }
 `, file, file, dir, dir)
 	assertOutputImports(t, src, "6\ntrue\nfalse\ntrue\ntrue\ncaught: true")
+}
+
+// fs.statSync full Stats surface (ADR-00565): mode/uid/gid/nlink/ino/blksize/
+// dev + atimeMs/ctimeMs beyond the original size/mtimeMs. Verified on Mac
+// (Linux offsets differ and are encoded per-platform in statLayout).
+func TestE2EFsStatFullSurface(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/probe.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+fs.writeFileSync("%s", "abcdef")
+const st = fs.statSync("%s")
+console.log((st.mode & 0o777) > 0)
+console.log(st.uid >= 0)
+console.log(st.gid >= 0)
+console.log(st.nlink >= 1)
+console.log(st.ino > 0)
+console.log(st.blksize > 0)
+console.log(st.atimeMs >= st.mtimeMs - 1000000000)
+console.log(st.ctimeMs > 1500000000000)
+console.log(st.size)
+`, file, file)
+	assertOutputImports(t, src, "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n6")
 }
 
 // Path-based fs sync ops (ADR-00497): mkdtempSync/symlinkSync/readlinkSync/

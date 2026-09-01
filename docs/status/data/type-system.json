@@ -122,12 +122,14 @@
             "feature": "`bigint`",
             "status": "implemented",
             "caveats": [
-              "No `.toLocaleString()`, `BigInt.asIntN`/`asUintN`; bare `Number(bigint)` conversion unsupported (part of a general `Number()`/`String()` gap)"
+              "No `.toLocaleString()` (an `Intl`-shaped gap)"
             ],
             "notes": [
               "Backend-agnostic `__kml_bigint_*` ABI over an opaque `ptr` handle, selectable via `-bigint=libtommath\\|gmp` (default `libtommath`, public domain; `gmp` LGPL) — each an embedded C file compiled+linked only when a program uses bigint ([TDD-00074](../tdd/TDD-00074.md)/[ADR-00216](../adr/ADR-00216.md))",
               "`123n`/hex/bin/oct/`_`-separator literals, `+ - * / % ** & \\| ^ ~ << >>`, same-type comparisons **and cross-type comparison with an integer `number`** (`10n < 5`, `10n == 10`, exact), unary `-`/`~`, truthiness (`0n` falsy), `typeof`, `++`/`--`, compound assignment, `.toString([radix])`, params/returns/fields/arrays, `BigInt(int\\|string)`, and the console-`n`-suffix vs `String()`-bare print split all work",
               "Division/modulo by zero throws a catchable `Error` (the same path as the i64 operators)",
+              "`BigInt.asIntN(bits, x)` / `BigInt.asUintN(bits, x)` clamp to the low `bits` bits (two's-complement signed / non-negative), implemented in both bigint backends ([ADR-00584](../adr/ADR-00584.md))",
+              "`Number(bigint)` converts to the nearest `double` (Infinity when out of range), matching JS ([ADR-00586](../adr/ADR-00586.md))",
               "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
               "`>>>`, unary `+`, and `JSON.stringify` on a bigint are clean compile errors (all TypeErrors in JS)",
               "libbf (MIT) backend deferred to a follow-on stage"
@@ -321,9 +323,9 @@
           },
           {
             "feature": "Template literal types (`` `a-${T}` ``)",
-            "status": "missing",
+            "status": "implemented",
             "caveats": [
-              "Not parsed in a type position (`expected type name, got TEMPLATE_HEAD`). Distinct from template literal *values*, which work"
+              "**Erased to `string`** — the literal pattern is parsed (no-substitution, multi-substitution, and `[]`-suffixed forms) but resolves to `string`, not narrowed/enforced; the same simplification string-literal types use ([ADR-00561](../adr/ADR-00561.md))"
             ]
           },
           {

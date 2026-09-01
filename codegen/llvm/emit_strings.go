@@ -494,7 +494,13 @@ func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Express
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: search takes exactly 1 argument", pos.Line, pos.Col)
 	}
-	if e.inferExprType(args[0]).IsRegExp {
+	// Real JS coerces a non-RegExp argument to a RegExp (`str.search(".")`
+	// treats "." as the any-char pattern, not a literal dot), so a plain-string
+	// pattern is compiled into a RegExp exactly as `new RegExp(pattern)` would
+	// — special characters are interpreted (ADR-00548). Only genuinely
+	// non-stringy arguments fall back to nothing.
+	argTy := e.inferExprType(args[0])
+	if argTy.IsRegExp || isStringTy(argTy) {
 		strVal, err := e.emitExpr(mem.Object)
 		if err != nil {
 			return Value{}, err
@@ -503,7 +509,12 @@ func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Express
 			return Value{}, fmt.Errorf("%d:%d: search is only supported on strings", pos.Line, pos.Col)
 		}
 		strVal = e.coerce(strVal, TypePtr)
-		regexVal, err := e.emitExpr(args[0])
+		var regexVal Value
+		if argTy.IsRegExp {
+			regexVal, err = e.emitExpr(args[0])
+		} else {
+			regexVal, err = e.emitNewRegExpExpression(&ast.NewRegExpExpression{Pattern: args[0]})
+		}
 		if err != nil {
 			return Value{}, err
 		}
@@ -1148,6 +1159,9 @@ func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.
 	buf := e.emitStringScratch(64) // TDD-00120: length-prefixed, finalized below
 	fmtPtr := e.internString("%.*e")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", buf, fmtPtr, digitsI32, dblReg))
+	// Normalize the exponent to JS's minimum-digit form ("1.23e+03" -> "1.23e+3").
+	e.ensureStripExpZeros()
+	e.emitInstr(fmt.Sprintf("call i64 @__kml_strip_exp_zeros(ptr %s)", buf))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
@@ -1192,10 +1206,14 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s, double %s)", lenReg, buf, fmtPtr, digitsI32, dblReg))
 
+	// Normalize the exponent to JS's minimum-digit form ("1.2e+05" -> "1.2e+5");
+	// returns the post-strip length used for the trailing-'.' trim below.
+	e.ensureStripExpZeros()
+	lenI64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_strip_exp_zeros(ptr %s)", lenI64, buf))
+
 	// Trim a bare trailing '.' left by the '#' flag when no fractional
 	// digits remain (e.g. "1235." -> "1235").
-	lenI64 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", lenI64, lenReg))
 	lastIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, lenI64))
 	lastPtr := e.freshReg()
@@ -1216,22 +1234,24 @@ func (e *Emitter) emitNumberToPrecision(mem *ast.MemberExpression, args []ast.Ex
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
-// emitNumberToStringRadix implements Number.prototype.toString(radix?) —
-// converts an integer to its digit-string representation in the given base
-// (default 10, matching this compiler's ordinary number->string conversion
-// for that case). Unlike the sprintf-based Number formatters above, no C
-// library conversion exists for an arbitrary base, so this hand-rolls the
-// classic repeated-urem/udiv digit loop, writing digits into a 70-byte
-// buffer from the end backward (enough for a sign + 64 base-2 digits + a
-// null terminator) so the final result can be returned as buf+startIdx with
-// no memmove needed — the pre-set null terminator at the buffer's last byte
-// is already in the right place regardless of how many digits end up
-// written. A non-integer receiver is truncated to its integer part first —
-// real JS's toString(radix) can expand fractional digits in the target
-// base too, which this doesn't attempt (documented in docs/status/NUMBER-MATH.md); radix is
-// trusted, not validated (must be 2-36 per spec — an out-of-range radix is
-// undefined behavior here, same trust-the-caller stance other built-ins in
-// this compiler already take for arguments there's no runtime check for).
+// emitNumberToStringRadix implements Number.prototype.toString(radix?).
+//
+// The default-radix (and explicit radix 10) case is exactly `String(x)` — the
+// faithful shortest-round-trip decimal, fractional part included — so it is
+// delegated straight to emitValueToString (fixing the prior bug where a
+// fractional receiver was truncated to its integer part, e.g. `(255.5)
+// .toString()` returned `"255"`).
+//
+// For any other base there is no C library conversion, so the integer part is
+// hand-rolled (the classic repeated-urem/udiv digit loop, see
+// emitNumberRadixIntPart) and — new in ADR-00566 — the fractional part is
+// expanded by the repeated-multiply-by-radix algorithm (emitNumberRadixFrac).
+// For a power-of-two base the double multiply is exact, so the expansion is
+// bit-exact to V8; for other bases the double arithmetic can differ from V8's
+// exact-bignum result in the trailing digits and a non-terminating fraction is
+// capped at 1100 digits (both disclosed in docs/status/NUMBER-MATH.md).
+//
+// The radix is validated to 2..36 (a RangeError otherwise — ADR-00552).
 func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
 		return Value{}, fmt.Errorf("%d:%d: toString takes at most 1 argument", pos.Line, pos.Col)
@@ -1240,17 +1260,160 @@ func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
-	nVal := e.coerce(numVal, TypeI64)
-
-	radixRef := "10"
-	if len(args) == 1 {
-		radixVal, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		radixRef = e.coerce(radixVal, TypeI64).Ref
+	// No radix argument: identical to String(x) — the shortest decimal.
+	if len(args) == 0 {
+		return e.emitValueToString(numVal)
 	}
+	radixVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	radixRef := e.coerce(radixVal, TypeI64).Ref
+	// Real JS throws a RangeError for a radix outside 2..36 (ADR-00552).
+	e.ensureExceptionHelpers()
+	e.ensureStrHeaderRuntime()
+	lo := e.freshReg()
+	hi := e.freshReg()
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 2", lo, radixRef))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 36", hi, radixRef))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, lo, hi))
+	badL := e.freshLabel("tostr.badradix")
+	okL := e.freshLabel("tostr.okradix")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	msg := e.internString("toString() radix must be between 2 and 36")
+	errObj := e.buildErrorObj(errorKindIDs["RangeError"], msg, e.internString("RangeError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
 
+	// Radix 10 at runtime is still just String(x) (shortest decimal); any other
+	// base runs the hand-rolled int+frac expansion.
+	dbl := e.coerce(numVal, TypeF64).Ref
+	isTen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 10", isTen, radixRef))
+	resPtr, err := e.emitStrBranch(isTen,
+		func() (string, error) {
+			v, err := e.emitValueToString(numVal)
+			return v.Ref, err
+		},
+		func() (string, error) {
+			v, err := e.emitNumberRadixIntFrac(dbl, radixRef)
+			return v.Ref, err
+		})
+	if err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: resPtr, Ty: TypePtr}, nil
+}
+
+// emitNumberRadixIntFrac renders `dbl` in base `radixRef` (2..36, never 10 —
+// the caller delegates that) as an integer-part string plus, when the receiver
+// has a fractional part, a "."-prefixed fractional expansion (ADR-00566).
+func (e *Emitter) emitNumberRadixIntFrac(dbl, radixRef string) (Value, error) {
+	e.ensureMathFuncs()
+	// Integer part (truncated toward zero, keeping the sign) via the digit loop.
+	intI := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", intI, dbl))
+	intStr := e.emitNumberRadixIntPart(intI, radixRef)
+	// Fractional part in [0,1): abs(dbl) - trunc(abs(dbl)).
+	absD := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @fabs(double %s)", absD, dbl))
+	intF := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @trunc(double %s)", intF, absD))
+	frac := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", frac, absD, intF))
+	hasFrac := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 0.0", hasFrac, frac))
+	fracStr := e.emitNumberRadixFrac(frac, radixRef)
+	// Append the fractional string only when there is a fractional part.
+	res, err := e.emitStrBranch(hasFrac,
+		func() (string, error) {
+			c, err := e.emitStringConcat(Value{Ref: intStr, Ty: TypePtr}, Value{Ref: fracStr, Ty: TypePtr})
+			return c.Ref, err
+		},
+		func() (string, error) { return intStr, nil })
+	if err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: res, Ty: TypePtr}, nil
+}
+
+// emitNumberRadixFrac expands a fractional value in [0,1) to a "."-prefixed
+// digit string in base `radixRef` by the repeated-multiply-by-radix algorithm,
+// capped at 1100 digits for a non-terminating expansion (ADR-00566).
+func (e *Emitter) emitNumberRadixFrac(frac, radixRef string) string {
+	radixF := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", radixF, radixRef))
+	// 1 for '.', 1100 fractional digits, 1 for the NUL.
+	buf := e.emitStringScratch(1102)
+	e.emitInstr(fmt.Sprintf("store i8 46, ptr %s, align 1", buf)) // '.'
+	fidx := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", fidx))
+	e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", fidx))
+	fAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca double, align 8", fAlloca))
+	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", frac, fAlloca))
+
+	condL := e.freshLabel("frac.cond")
+	bodyL := e.freshLabel("frac.body")
+	doneL := e.freshLabel("frac.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	fCur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", fCur, fAlloca))
+	idxCur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxCur, fidx))
+	moreFrac := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 0.0", moreFrac, fCur))
+	underCap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 1101", underCap, idxCur)) // 1 ('.') + 1100 digits
+	keepGoing := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", keepGoing, moreFrac, underCap))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", keepGoing, bodyL, doneL))
+
+	e.emitLabel(bodyL)
+	scaled := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fmul double %s, %s", scaled, fCur, radixF))
+	digitF := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @trunc(double %s)", digitF, scaled))
+	digitI := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptoui double %s to i64", digitI, digitF))
+	newFrac := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", newFrac, scaled, digitF))
+	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", newFrac, fAlloca))
+	isDecDigit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, 10", isDecDigit, digitI))
+	decChar := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", decChar, digitI))
+	alphaChar := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 87", alphaChar, digitI))
+	charVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", charVal, isDecDigit, decChar, alphaChar))
+	char8 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", char8, charVal))
+	slot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", slot, buf, idxCur))
+	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", char8, slot))
+	nextIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxCur))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, fidx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	finalLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLen, fidx))
+	nul := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nul, buf, finalLen))
+	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nul))
+	e.emitStringSetLen(buf, finalLen)
+	return buf
+}
+
+// (integer digit loop, extracted from the original emitNumberToStringRadix)
+func (e *Emitter) emitNumberRadixIntPart(nValRef, radixRef string) string {
 	e.ensureMalloc()
 	buf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 70)", buf))
@@ -1259,11 +1422,11 @@ func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", nullPtr))
 
 	isNeg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, nVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, nValRef))
 	negN := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", negN, nVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", negN, nValRef))
 	uVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", uVal, isNeg, negN, nVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", uVal, isNeg, negN, nValRef))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -1342,7 +1505,7 @@ func (e *Emitter) emitNumberToStringRadix(mem *ast.MemberExpression, args []ast.
 	dnull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dnull, dst, rlen))
 	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", dnull))
-	return Value{Ref: dst, Ty: TypePtr}, nil
+	return dst
 }
 
 // writeDigitAndDecrement stores an i64-valued byte (truncated to i8) at

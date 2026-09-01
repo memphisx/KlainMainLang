@@ -586,3 +586,80 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00541](ADR-00541.md) | `klain:sync` Stage 1 — GMP goroutine scheduler, `go`, and CSP channels | `Implements [TDD-00143](../tdd/TDD-00143.md)` |
 | [00542](ADR-00542.md) | `klain:sync` Stage 2 — cooperative preemption (sysmon + safepoints) | `Implements [TDD-00143](../tdd/TDD-00143.md)`, `Extends [ADR-00541](ADR-00541.md)` |
 | [00543](ADR-00543.md) | `klain:sync` Stages 3–5 — select, channel range, P-handoff, complete preemption, tunable stacks | `Implements [TDD-00143](../tdd/TDD-00143.md)`, `Extends [ADR-00542](ADR-00542.md)` |
+| [00544](ADR-00544.md) | console.time()/timeEnd() per-label backing map | Extends [ADR-00029](ADR-00029.md) |
+| [00545](ADR-00545.md) | parseFloat rejects a "0x" hex prefix (not ToNumber) | Extends [ADR-00287](ADR-00287.md), [ADR-00529](ADR-00529.md) |
+| [00546](ADR-00546.md) | Array.sort default is lexicographic (JS-faithful) | Extends [ADR-00152](ADR-00152.md) |
+| [00547](ADR-00547.md) | replaceAll("") inserts between every character | Extends [ADR-00003](ADR-00003.md) |
+| [00548](ADR-00548.md) | String.search coerces a plain-string argument to RegExp | Extends [ADR-00028](ADR-00028.md) |
+| [00549](ADR-00549.md) | RegExp flags string validation (SyntaxError on invalid/duplicate) | Extends [ADR-00166](ADR-00166.md) |
+| [00550](ADR-00550.md) | atob() implements WHATWG forgiving-base64 | Extends [ADR-00458](ADR-00458.md) |
+| [00551](ADR-00551.md) | JS minimum-digit exponent for toExponential/toPrecision | Extends [ADR-00065](ADR-00065.md) |
+| [00552](ADR-00552.md) | Number.toString(radix) validates its radix (RangeError) | Extends [ADR-00065](ADR-00065.md) |
+| [00553](ADR-00553.md) | DataView getFloat16/setFloat16 | Extends [ADR-00294](ADR-00294.md) |
+| [00554](ADR-00554.md) | getRandomValues enforces the 65,536-byte quota and integer-view rule | Extends [ADR-00317](ADR-00317.md) |
+| [00555](ADR-00555.md) | EventSource Content-Type match is case-insensitive | Extends [TDD-00038](../tdd/TDD-00038.md) |
+| [00556](ADR-00556.md) | decodeURI/decodeURIComponent throw URIError on malformed input | Extends [ADR-00024](ADR-00024.md) |
+| [00557](ADR-00557.md) | JSDoc Object.<K,V> index map now works (status was stale) | Implements [TDD-00130](../tdd/TDD-00130.md), Extends [TDD-00125](../tdd/TDD-00125.md) |
+| [00558](ADR-00558.md) | Buffer string-form indexOf/includes/lastIndexOf | Extends [TDD-00103](../tdd/TDD-00103.md) |
+| [00559](ADR-00559.md) | Buffer string-form fill | Extends [TDD-00103](../tdd/TDD-00103.md), [ADR-00558](ADR-00558.md) |
+| [00560](ADR-00560.md) | console.table() | Extends [ADR-00029](ADR-00029.md), [TDD-00075](../tdd/TDD-00075.md) |
+| [00561](ADR-00561.md) | Template literal types parse and resolve to string | Extends [TDD-00079](../tdd/TDD-00079.md) |
+| [00562](ADR-00562.md) | String.raw (raw template quasis) | Extends [TDD-00059](../tdd/TDD-00059.md) |
+| [00563](ADR-00563.md) | atob() rejects interior/excess `=` padding | Extends [ADR-00550](ADR-00550.md), [ADR-00458](ADR-00458.md) |
+| [00564](ADR-00564.md) | ArrayBuffer.resize() supports shrinking | Extends [ADR-00494](ADR-00494.md) |
+| [00565](ADR-00565.md) | fs Stats exposes the full numeric surface | Extends [ADR-00495](ADR-00495.md), [ADR-00497](ADR-00497.md) |
+| [00566](ADR-00566.md) | Number.prototype.toString(radix) renders fractional digits | Extends [ADR-00552](ADR-00552.md) |
+| [00567](ADR-00567.md) | TextDecoder validates its encoding label | Extends [ADR-00112](ADR-00112.md) |
+| [00568](ADR-00568.md) | performance.now() has a process-start time origin | Extends [ADR-00024](ADR-00024.md) |
+| [00569](ADR-00569.md) | os.cpus() reports the libuv speed fallback on Apple Silicon | Extends [ADR-00024](ADR-00024.md) |
+| [00570](ADR-00570.md) | process.memoryUsage().rss is the instantaneous RSS | Extends [ADR-00507](ADR-00507.md) |
+| [00571](ADR-00571.md) | JSON.parse projects into a declared-variable reassignment | Extends [ADR-00224](ADR-00224.md) |
+| [00572](ADR-00572.md) | URL component setters | Supersedes the setter-rejection half of [ADR-00465](ADR-00465.md) |
+| [00573](ADR-00573.md) | forEach passes the collection as the callback's 3rd argument | Extends [ADR-00053](ADR-00053.md) |
+| [00574](ADR-00574.md) | structuredClone deep-copies Map and Set | Extends [ADR-00113](ADR-00113.md) |
+| [00575](ADR-00575.md) | http client request bodies (req.write / req.end(body)) | Extends [ADR-00430](ADR-00430.md), [TDD-00138](../tdd/TDD-00138.md) |
+| [00576](ADR-00576.md) | Buffer.alloc accepts a string fill | Extends [ADR-00559](ADR-00559.md) |
+| [00577](ADR-00577.md) | URL `host`/`username`/`password` setters | Completes the setter scope opened by [ADR-00572](ADR-00572.md) |
+| [00578](ADR-00578.md) | fs.rmdirSync recursive option | Extends [ADR-00027](ADR-00027.md), reuses [ADR-00497](ADR-00497.md) |
+| [00579](ADR-00579.md) | URL base resolution — `new URL(url, base)` | Extends [ADR-00076](ADR-00076.md), completes the last `URL` caveat |
+| [00580](ADR-00580.md) | process.emitWarning options-object form | Extends [ADR-00395](ADR-00395.md), [ADR-00401](ADR-00401.md) |
+| [00581](ADR-00581.md) | dgram socket.setBroadcast | Extends [ADR-00327](ADR-00327.md) |
+| [00582](ADR-00582.md) | process.hrtime diff-from-previous form | Extends [ADR-00332](ADR-00332.md) |
+| [00583](ADR-00583.md) | console.dir depth option | Extends [ADR-00029](ADR-00029.md), [ADR-00218](ADR-00218.md) |
+| [00584](ADR-00584.md) | BigInt.asIntN / asUintN | Extends [ADR-00216](ADR-00216.md), [TDD-00074](../tdd/TDD-00074.md) |
+| [00585](ADR-00585.md) | URLPattern username/password components | Extends [ADR-00311](ADR-00311.md), [TDD-00100](../tdd/TDD-00100.md) |
+| [00586](ADR-00586.md) | Number(bigint) conversion | Extends [ADR-00216](ADR-00216.md), follows [ADR-00584](ADR-00584.md) |
+| [00587](ADR-00587.md) | Event cancelable honored by preventDefault | Extends [ADR-00234](ADR-00234.md), [TDD-00081](../tdd/TDD-00081.md) |
+| [00588](ADR-00588.md) | net.connect IPC (Unix-domain socket) form | Extends [ADR-00328](ADR-00328.md), [ADR-00413](ADR-00413.md) |
+| [00589](ADR-00589.md) | process.execFileSync cwd option | Extends [ADR-00025](ADR-00025.md) |
+| [00590](ADR-00590.md) | crypto.randomBytes callback form | Extends [ADR-00340](ADR-00340.md) (the fs async-shape posture) |
+| [00591](ADR-00591.md) | structuredClone copies ArrayBuffer and Error | Extends [ADR-00574](ADR-00574.md), [TDD-00099](../tdd/TDD-00099.md) |
+| [00592](ADR-00592.md) | BigInt64Array compound element assignment | Extends [ADR-00313](ADR-00313.md), [TDD-00101](../tdd/TDD-00101.md) |
+| [00593](ADR-00593.md) | TypedArray console.log TypeName(len) prefix | Extends [ADR-00218](ADR-00218.md), follows [ADR-00592](ADR-00592.md) |
+| [00594](ADR-00594.md) | Deterministic conformance runs (worker headroom) | Extends [TDD-00008](../tdd/TDD-00008.md), [TDD-00121](../tdd/TDD-00121.md) |
+| [00595](ADR-00595.md) | Nested patterns and defaults in destructuring assignment | Extends [ADR-00160](ADR-00160.md), [ADR-00161](ADR-00161.md); brings the assignment form to [ADR-00193](ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) declaration-form parity |
+| [00596](ADR-00596.md) | typeof on namespace static methods | Extends [ADR-00282](ADR-00282.md) |
+| [00597](ADR-00597.md) | Parser support for object shorthand-default in destructuring | Completes [ADR-00595](ADR-00595.md) |
+| [00598](ADR-00598.md) | Default parameter may reference an earlier parameter | Supersedes the earlier-param half of [ADR-00166](ADR-00166.md) |
+| [00599](ADR-00599.md) | Constructor default parameters | Completes [ADR-00598](ADR-00598.md); extends [ADR-00164](ADR-00164.md) |
+| [00600](ADR-00600.md) | Logical assignment on a computed dynamic-object key | Extends [ADR-00390](ADR-00390.md) (dynamic object model), [ADR-00461](ADR-00461.md) |
+| [00601](ADR-00601.md) | Named function expression shadowing a top-level function | Extends [ADR-00178](ADR-00178.md) (named function expression self-capture), supersedes its shadowing rejection |
+| [00602](ADR-00602.md) | Nested function declarations inside a lexical block | Implements [TDD-00152](../tdd/TDD-00152.md); lifts [TDD-00057](../tdd/TDD-00057.md)'s one-block-deeper restriction; composes with [ADR-00386](ADR-00386.md) (capturing nested declarations) |
+| [00603](ADR-00603.md) | Object-literal getters/setters via a synthetic accessor class | Implements [TDD-00153](../tdd/TDD-00153.md); reuses [TDD-00030](../tdd/TDD-00030.md)'s class accessor dispatch and [ADR-00386](ADR-00386.md)-era `this`-binding |
+| [00604](ADR-00604.md) | Enforce the `readonly` class-field modifier | Implements [TDD-00154](../tdd/TDD-00154.md); supersedes the "parsed but not enforced" stance of [ADR-00447](ADR-00447.md) (parameter properties) and [ADR-00480](ADR-00480.md) (plain fields) |
+| [00605](ADR-00605.md) | `instanceof Object` by negating the primitive set | Extends [ADR-00162](ADR-00162.md) (built-in `instanceof` as a static constant) |
+| [00606](ADR-00606.md) | Hoist a side-effecting receiver in a consumed postfix `++`/`--` | Refines [ADR-00376](ADR-00376.md) (`++`/`--` on member/index targets) |
+| [00607](ADR-00607.md) | `typeof` of a value-receiver method reference | Extends [ADR-00282](ADR-00282.md)/[ADR-00596](ADR-00596.md) (`typeof` of a namespace method); reuses [TDD-00030](../tdd/TDD-00030.md) accessor dispatch |
+| [00608](ADR-00608.md) | Constant-key bracket access on a fixed-shape object | Complements the tuple constant-index path ([TDD-00066](../tdd/TDD-00066.md)) and dynamic-object `obj[key]` ([TDD-00012](../tdd/TDD-00012.md)) |
+| [00609](ADR-00609.md) | Constant computed key in object destructuring | Complements [ADR-00608](ADR-00608.md) (constant-key bracket access); reuses the [TDD-00065](../tdd/TDD-00065.md) object-pattern codegen |
+| [00610](ADR-00610.md) | Default parameter referencing an earlier array parameter | Extends [ADR-00598](ADR-00598.md)/[ADR-00599](ADR-00599.md) (default referencing an earlier scalar/string param) |
+| [00611](ADR-00611.md) | Default parameter referencing an earlier nullable-scalar parameter | Extends [ADR-00598](ADR-00598.md) (scalar/string) and [ADR-00610](ADR-00610.md) (array) — completes the earlier-parameter default set |
+| [00612](ADR-00612.md) | Run pending `finally` blocks on an async `return` | Completes the abrupt-completion `finally` handling of [ADR-00172](ADR-00172.md) (generator return) for async functions |
+| [00613](ADR-00613.md) | Close the iterator on `break` out of a `for…of` over a generator | Builds on [TDD-00086](../tdd/TDD-00086.md)/[ADR-00259](ADR-00259.md) (`.return()` runs enclosing finallys); completes [TDD-00061](../tdd/TDD-00061.md) |
+| [00614](ADR-00614.md) | Close the generator iterator on `return`/labeled-exit from a `for…of` body | Extends [ADR-00613](ADR-00613.md) (iterator-close on `break`); builds on the pending-`finally` mechanism ([ADR-00191](ADR-00191.md)) |
+| [00615](ADR-00615.md) | XMLHttpRequest.open() async argument (synchronous XHR) | `Extends [ADR-00490](ADR-00490.md)`, `Implements [TDD-00040](../tdd/TDD-00040.md)` |
+| [00616](ADR-00616.md) | LockOSThread — the Node reactor is thread-affine under klain:sync | `Extends [ADR-00615](ADR-00615.md)`, `Implements [TDD-00143](../tdd/TDD-00143.md)` |
+| [00617](ADR-00617.md) | `Channel<T>` parameter types + the load tester split by concern | `Extends [ADR-00616](ADR-00616.md)`, `Implements [TDD-00143](../tdd/TDD-00143.md)` |
+| [00618](ADR-00618.md) | httpbin-lite fixture rewritten in KlainMainLang | `Extends [ADR-00096](ADR-00096.md)`, `Implements [TDD-00026](../tdd/TDD-00026.md)` |
+| [00619](ADR-00619.md) | Eager-box captured locals so their heap cell dominates all uses | |
+| [00620](ADR-00620.md) | klainload — a real interactive HTTP load tester | `Supersedes [ADR-00616](ADR-00616.md), [ADR-00617](ADR-00617.md)` (the load-tester example), `Extends [ADR-00615](ADR-00615.md), [ADR-00619](ADR-00619.md)` |

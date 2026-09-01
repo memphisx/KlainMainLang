@@ -72,8 +72,8 @@
             "feature": "`fs.statSync(path)` / `fs.lstatSync(path)`",
             "status": "implemented",
             "caveats": [
-              "Only `size`, `mtimeMs`, `isFile()`, `isDirectory()`, `isSymbolicLink()` — no `mode`/`uid`/`atimeMs`/other Stats surface ([ADR-00495](../adr/ADR-00495.md)/[ADR-00497](../adr/ADR-00497.md))",
-              "Linux struct-stat offsets are encoded but verified on Mac only so far"
+              "The full numeric Stats surface is exposed — `dev`/`mode`/`nlink`/`uid`/`gid`/`rdev`/`blksize`/`ino`/`size`/`blocks`/`atimeMs`/`mtimeMs`/`ctimeMs`/`birthtimeMs` plus `isFile()`/`isDirectory()`/`isSymbolicLink()` ([ADR-00565](../adr/ADR-00565.md)) — but not the Date-valued `atime`/`mtime`/`ctime`/`birthtime` accessors; times are integer milliseconds only ([ADR-00495](../adr/ADR-00495.md)/[ADR-00497](../adr/ADR-00497.md))",
+              "`birthtimeMs` is `0` on Linux — glibc's `struct stat` carries no creation time (it needs `statx`); Darwin reports the real `st_birthtimespec`"
             ]
           },
           {
@@ -111,13 +111,11 @@
             ]
           },
           {
-            "feature": "`fs.rmdirSync(path)`",
+            "feature": "`fs.rmdirSync(path[, { recursive: true }])`",
             "status": "implemented",
-            "caveats": [
-              "No recursive-delete option, matching `mkdirSync`'s lack of one"
-            ],
             "notes": [
               "Removes an *empty* directory via POSIX `rmdir()` — deliberately directory-only (fails on a plain file, unlike `remove()`/`unlinkSync`)",
+              "`{ recursive: true }` removes the whole tree by routing to `rmSync`'s recursive removal ([ADR-00578](../adr/ADR-00578.md)); Node deprecated the option on `rmdirSync` in favor of `rmSync` but still honors it, and a missing path still throws (no `force`)",
               "See [ADR-00027](../adr/ADR-00027.md)"
             ]
           },

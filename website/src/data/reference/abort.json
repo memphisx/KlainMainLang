@@ -40,14 +40,14 @@
       "description": "The base event objects, distinct from Node's EventEmitter. A plain Event carries its type and a defaultPrevented cancellation flag; CustomEvent adds a detail payload of any type (inferred from the value). Construction, field reads, and preventDefault/stop* work standalone; dispatching them is EventTarget's job. Modeled as plain fixed-shape objects tagged IsEvent.",
       "params": [
         { "name": "type", "type": "string", "desc": "The event type name." },
-        { "name": "init", "type": "{ detail?, cancelable?, bubbles? }", "desc": "CustomEvent.detail is read; cancelable/bubbles are accepted but ignored." }
+        { "name": "init", "type": "{ detail?, cancelable?, bubbles? }", "desc": "CustomEvent.detail and cancelable are read; bubbles is accepted but ignored." }
       ],
       "returns": { "type": "Event | CustomEvent", "desc": "The constructed event object." },
       "exampleKey": "events/event-customevent",
-      "snippet": "const clicked = new Event(\"click\")\nclicked.preventDefault()\nconsole.log(clicked.defaultPrevented)     // true\nconst greeting = new CustomEvent(\"greet\", { detail: \"hello\" })\nconsole.log(greeting.detail)              // hello",
+      "snippet": "const clicked = new Event(\"click\", { cancelable: true })\nclicked.preventDefault()\nconsole.log(clicked.defaultPrevented)     // true\nconst greeting = new CustomEvent(\"greet\", { detail: \"hello\" })\nconsole.log(greeting.detail)              // hello",
       "differences": [
-        "V1 surface is `type`, `defaultPrevented`, and `CustomEvent.detail` (type inferred from the value); the fuller WHATWG properties (`target`/`currentTarget`/`bubbles`/`cancelable`/`composed`/`timeStamp`/`eventPhase`/`isTrusted`) are absent",
-        "`new Event(type, { cancelable, bubbles })` init options are accepted but ignored; `preventDefault()` sets `defaultPrevented` unconditionally (no `cancelable` gate)",
+        "V1 surface is `type`, `defaultPrevented`, `cancelable`, and `CustomEvent.detail` (type inferred from the value); the fuller WHATWG properties (`target`/`currentTarget`/`bubbles`/`composed`/`timeStamp`/`eventPhase`/`isTrusted`) are absent",
+        "`bubbles` in the init is accepted but ignored; `cancelable` is honored — `preventDefault()` sets `defaultPrevented` only on a cancelable event",
         "`stopPropagation()` is a no-op (single-target dispatch, no capture/bubble tree)"
       ],
       "seeAlso": ["abort.eventtarget", "abort.abortcontroller"],

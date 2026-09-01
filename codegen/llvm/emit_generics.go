@@ -575,7 +575,10 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, info ClassInfo) error {
 	if info.Constructor != nil {
 		ctorName := llvmName + "_constructor"
-		if err := e.emitClassMember(ctorName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false); err != nil {
+		e.currentCtorClass = llvmName
+		err := e.emitClassMember(ctorName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false)
+		e.currentCtorClass = ""
+		if err != nil {
 			return err
 		}
 	}

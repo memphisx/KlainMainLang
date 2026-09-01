@@ -40,11 +40,11 @@
             "feature": "`TextDecoder`",
             "status": "implemented",
             "caveats": [
-              "UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on in [TDD-00034](../tdd/TDD-00034.md), not started",
-              "The optional `label` argument is evaluated (for side effects) and then ignored, not validated — always decodes as UTF-8, permissive rather than throwing a `RangeError` for an unrecognized label"
+              "UTF-8 only (V1 scope) — non-UTF-8 support (Latin-1/windows-1252, UTF-16, Greek, the rest of the WHATWG label list) is a staged, low-priority follow-on in [TDD-00034](../tdd/TDD-00034.md), not started; a recognized non-UTF-8 label (`latin1`/`utf-16`/…) therefore throws a `RangeError` at construction rather than decoding ([ADR-00567](../adr/ADR-00567.md))"
             ],
             "notes": [
               "`new TextDecoder(label?).decode(bytes): string` — accepts a `Uint8Array` or `ArrayBuffer`",
+              "The `label` argument is WHATWG-normalized (trim + ASCII-lowercase) and validated against the six UTF-8 aliases; a UTF-8 alias (`utf-8`/`utf8`/`unicode-1-1-utf-8`/…) is accepted and anything else throws a catchable `RangeError`, matching real `TextDecoder` for an unrecognized label ([ADR-00567](../adr/ADR-00567.md))",
               "See [ADR-00112](../adr/ADR-00112.md)"
             ]
           }

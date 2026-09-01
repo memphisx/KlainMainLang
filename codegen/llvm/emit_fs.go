@@ -211,8 +211,23 @@ func (e *Emitter) emitFsMkdirSync(args []ast.Expression, pos ast.Pos) (Value, er
 }
 
 func (e *Emitter) emitFsRmdirSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.rmdirSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.rmdirSync takes (path[, { recursive: true }])", pos.Line, pos.Col)
+	}
+	// `{ recursive: true }` removes the directory tree — Node deprecated the
+	// option on rmdirSync in favor of rmSync but still honors it. Only the
+	// literal `recursive: true` form is accepted (like mkdirSync's).
+	recursive := false
+	if len(args) == 2 {
+		ol, ok := args[1].(*ast.ObjectLiteral)
+		if !ok || len(ol.Properties) != 1 || ol.Properties[0].Key != "recursive" {
+			return Value{}, fmt.Errorf("%d:%d: fs.rmdirSync options support only `{ recursive: true }`", pos.Line, pos.Col)
+		}
+		bl, ok := ol.Properties[0].Value.(*ast.BooleanLiteral)
+		if !ok || !bl.Value {
+			return Value{}, fmt.Errorf("%d:%d: fs.rmdirSync options support only `{ recursive: true }`", pos.Line, pos.Col)
+		}
+		recursive = true
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -220,6 +235,13 @@ func (e *Emitter) emitFsRmdirSync(args []ast.Expression, pos ast.Pos) (Value, er
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
 
+	if recursive {
+		// Reuse rmSync's recursive tree-removal; force=false so a missing path
+		// still throws, matching rmdirSync's own posture.
+		e.ensureFsRm()
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_rm(ptr %s, i1 true, i1 false)", pathVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+	}
 	e.ensureFsRmdir()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_rmdir(ptr %s)", pathVal.Ref))
 	return Value{Ty: TypeVoid}, nil
@@ -315,19 +337,8 @@ func (e *Emitter) emitFsStatSync(args []ast.Expression, pos ast.Pos) (Value, err
 	e.ensureFsStat()
 	e.ensureMalloc()
 	trip := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_stat(ptr %s)", trip, pathVal.Ref))
-	ty := StatsType()
-	obj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, ty.StructSize()))
-	for i, name := range []string{"__kml_mode", "size", "mtimeMs"} {
-		v := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, %d", v, trip, i))
-		idx, _, _ := ty.FieldIndex(name)
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), obj, idx))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, gep))
-	}
-	return Value{Ref: obj, Ty: ty}, nil
+	e.emitInstr(fmt.Sprintf("%s = call %s @__kml_fs_stat(ptr %s)", trip, statResultIR, pathVal.Ref))
+	return e.buildStatsObject(trip), nil
 }
 
 // emitStatsKindCall implements stats.isFile()/isDirectory(): mask the hidden
@@ -341,7 +352,7 @@ func (e *Emitter) emitStatsKindCall(objExpr ast.Expression, method string, args 
 	if err != nil {
 		return Value{}, err
 	}
-	idx, fieldTy, _ := objVal.Ty.FieldIndex("__kml_mode")
+	idx, fieldTy, _ := objVal.Ty.FieldIndex("mode")
 	mode := e.loadFieldValue(objVal, idx, fieldTy)
 	masked := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 61440", masked, mode.Ref))
@@ -370,19 +381,21 @@ func (e *Emitter) emitFsLstatSync(args []ast.Expression, pos ast.Pos) (Value, er
 	e.ensureFsLstat()
 	e.ensureMalloc()
 	trip := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_lstat(ptr %s)", trip, pathVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call %s @__kml_fs_lstat(ptr %s)", trip, statResultIR, pathVal.Ref))
 	return e.buildStatsObject(trip), nil
 }
 
-// buildStatsObject fills a fresh Stats heap object from a {mode,size,mtimeMs}
-// runtime triple — shared by statSync and lstatSync.
+// buildStatsObject fills a fresh Stats heap object from the runtime's 14-i64
+// stat result (ADR-00565) — shared by statSync, lstatSync, and fstatSync. The
+// result's element order matches statFieldOrder / StatsType exactly.
 func (e *Emitter) buildStatsObject(trip string) Value {
 	ty := StatsType()
+	e.ensureMalloc()
 	obj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, ty.StructSize()))
-	for i, name := range []string{"__kml_mode", "size", "mtimeMs"} {
+	for i, name := range statFieldOrder {
 		v := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, %d", v, trip, i))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, %d", v, statResultIR, trip, i))
 		idx, _, _ := ty.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), obj, idx))
@@ -643,6 +656,6 @@ func (e *Emitter) emitFsFstatSync(args []ast.Expression, pos ast.Pos) (Value, er
 	e.ensureFsFdOps()
 	e.ensureMalloc()
 	trip := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } @__kml_fs_fstat(i64 %s)", trip, fd.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call %s @__kml_fs_fstat(i64 %s)", trip, statResultIR, fd.Ref))
 	return e.buildStatsObject(trip), nil
 }

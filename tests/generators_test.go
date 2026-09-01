@@ -845,6 +845,105 @@ console.log(it.next().value)
 `, "1\nfinally ran\n2")
 }
 
+// ADR-00613: `break`ing out of a `for...of` over a generator closes the iterator
+// (drives its `.return()`), so an enclosing `finally` in the generator runs.
+func TestE2EForOfGeneratorBreakRunsFinally(t *testing.T) {
+	assertOutput(t, `
+function* gen() {
+  try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
+}
+for (const v of gen()) {
+  console.log("got", v)
+  if (v === 2) break
+}
+console.log("after")
+`, "got 1\ngot 2\ncleanup\nafter")
+}
+
+// Normal (unbroken) consumption still runs the finally exactly once, not twice.
+func TestE2EForOfGeneratorNormalCompletionFinallyOnce(t *testing.T) {
+	assertOutput(t, `
+function* gen() {
+  try { yield 1; yield 2 } finally { console.log("cleanup") }
+}
+for (const v of gen()) { console.log("got", v) }
+console.log("after")
+`, "got 1\ngot 2\ncleanup\nafter")
+}
+
+// ADR-00614: a `return` from a `for...of` body over a generator closes the
+// iterator (runs its finally), interleaved with any enclosing body finally.
+func TestE2EForOfGeneratorReturnFromBodyRunsFinally(t *testing.T) {
+	assertOutput(t, `
+function* gen() {
+  try { yield 1; yield 2; yield 3 } finally { console.log("gen cleanup") }
+}
+function find(): number {
+  for (const v of gen()) {
+    console.log("got", v)
+    if (v === 2) return v * 10
+  }
+  return -1
+}
+const r = find()
+console.log("result", r)
+`, "got 1\ngot 2\ngen cleanup\nresult 20")
+}
+
+// A body `try/finally` around the return runs innermost-first: the body finally,
+// then the generator's iterator-close finally.
+func TestE2EForOfGeneratorReturnNestedFinallyOrder(t *testing.T) {
+	assertOutput(t, `
+function* gen() {
+  try { yield 1; yield 2 } finally { console.log("gen cleanup") }
+}
+function f(): number {
+  for (const v of gen()) {
+    try {
+      if (v === 1) return 99
+    } finally {
+      console.log("body finally", v)
+    }
+  }
+  return 0
+}
+const r = f()
+console.log("r", r)
+`, "body finally 1\ngen cleanup\nr 99")
+}
+
+// A labeled `break` to an outer loop closes the generator; a `continue` does not.
+func TestE2EForOfGeneratorLabeledBreakAndContinue(t *testing.T) {
+	assertOutput(t, `
+function* gen() {
+  try { yield 1; yield 2; yield 3 } finally { console.log("cleanup") }
+}
+outer: for (let i = 0; i < 2; i++) {
+  for (const v of gen()) {
+    if (v === 1) continue
+    console.log(i, v)
+    if (v === 2) break outer
+  }
+}
+console.log("done")
+`, "0 2\ncleanup\ndone")
+}
+
+// The classic infinite generator: break triggers the finally.
+func TestE2EForOfInfiniteGeneratorBreakRunsFinally(t *testing.T) {
+	assertOutput(t, `
+function* naturals() {
+  let n = 0
+  try { while (true) { yield n++ } } finally { console.log("cleanup") }
+}
+for (const x of naturals()) {
+  console.log(x)
+  if (x >= 2) break
+}
+console.log("after")
+`, "0\n1\n2\ncleanup\nafter")
+}
+
 // .return(v) completes the generator, running enclosing finally blocks, and
 // yields {value: v, done: true}.
 func TestE2EGeneratorReturnMethodRunsFinally(t *testing.T) {

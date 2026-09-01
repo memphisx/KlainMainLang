@@ -69,6 +69,8 @@ func (e *Emitter) ensureNetRuntime() {
 	e.ensureHTTPRuntime()    // socket/setsockopt/bind/listen/accept/htons decls + the event loop
 	e.ensureWorkerFdSetbit() // shared @__kml_worker_fd_setbit
 	e.ensureDNSRuntime()     // @__kml_dns_lookup, for net.connect's host resolution
+	e.ensureStrlen()         // for __kml_net_connect_unix's sun_path length
+	e.ensureMemcpy()         // for __kml_net_connect_unix's sun_path copy
 	// @connect / @inet_pton are declared by the WebSocket-client runtime, which
 	// ensureHTTPRuntime always pulls in — reused by __kml_net_connect below.
 
@@ -227,6 +229,59 @@ failfd:
 failnull:
   ret ptr null
 }`, fam0, fam1, nonblock, sock))
+
+	// __kml_net_connect_unix(path): AF_UNIX (Unix-domain socket) blocking connect
+	// — Node's IPC `net.connect({ path })`. sockaddr_un's sun_path starts at
+	// offset 2 on both Linux and macOS; the two bytes before it differ (Linux: a
+	// 2-byte sa_family_t; macOS/BSD: a 1-byte sun_len + 1-byte sun_family), so the
+	// family bytes are stamped per-platform. On success the fd is switched to
+	// non-blocking and registered as an ordinary connection socket, so the whole
+	// read/'data'/'end'/write/close surface applies unchanged.
+	// NB: famStore is spliced in via %s below, so its LLVM locals use a single
+	// `%` (they are not run back through Sprintf's %%-reduction).
+	famStore := "  store i16 1, ptr %addr, align 2\n" // Linux: sa_family_t = AF_UNIX(1)
+	if runtime.GOOS == "darwin" {
+		// macOS: sun_len (offset 0) = the address length, sun_family (offset 1) = AF_UNIX.
+		famStore = "  %lenb = trunc i64 %alen64 to i8\n" +
+			"  store i8 %lenb, ptr %addr, align 1\n" +
+			"  %famp = getelementptr i8, ptr %addr, i64 1\n" +
+			"  store i8 1, ptr %famp, align 1\n"
+	}
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_net_connect_unix(ptr %%path) {
+entry:
+  %%len = call i64 @strlen(ptr %%path)
+  %%fd = call i32 @socket(i32 1, i32 1, i32 0)
+  %%fdok = icmp sge i32 %%fd, 0
+  br i1 %%fdok, label %%build, label %%failnull
+build:
+  %%addr = alloca [110 x i8], align 2
+  call ptr @memset(ptr %%addr, i32 0, i64 110)
+  %%cap = icmp ult i64 %%len, 104
+  %%cplen = select i1 %%cap, i64 %%len, i64 104
+  %%pathdst = getelementptr i8, ptr %%addr, i64 2
+  call ptr @memcpy(ptr %%pathdst, ptr %%path, i64 %%cplen)
+  %%alen64 = add i64 %%cplen, 3
+%s  %%alen = trunc i64 %%alen64 to i32
+  %%connrc = call i32 @connect(i32 %%fd, ptr %%addr, i32 %%alen)
+  %%connok = icmp eq i32 %%connrc, 0
+  br i1 %%connok, label %%connected, label %%failfd
+connected:
+  %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 3)
+  %%fln = or i32 %%fl, %d
+  call i32 (i32, i32, ...) @fcntl(i32 %%fd, i32 4, i32 %%fln)
+  %%sk = call ptr @calloc(i64 1, i64 64)
+  %%fd_p = getelementptr %s, ptr %%sk, i32 0, i32 0
+  %%fd64 = sext i32 %%fd to i64
+  store i64 %%fd64, ptr %%fd_p, align 8
+  call void @__kml_net_conn_register(ptr %%sk)
+  ret ptr %%sk
+failfd:
+  call i32 @close(i32 %%fd)
+  ret ptr null
+failnull:
+  ret ptr null
+}`, famStore, nonblock, sock))
 
 	// __kml_net_sock_write(sock, data, n): write n bytes to the connection fd
 	// (no-op once closed).

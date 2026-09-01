@@ -36,6 +36,12 @@ if (g !== null) {
   console.log(g.get("id"))                                     // 42
 }
 
+// ── username/password components match a URL's userinfo ──────────────────────
+const authP = new URLPattern({ username: "admin", pathname: "/books/:id" })
+console.log(authP.test("http://admin@example.com/books/5"))   // true
+console.log(authP.test("http://guest@example.com/books/5"))   // false
+console.log(new URLPattern({ password: "secret" }).test("http://u:secret@x.com/")) // true
+
 // ── empty pattern means "must be empty"; no init matches everything ──────────
 console.log(new URLPattern({ search: "" }).test("https://e.com/a?q=1")) // false
 console.log(new URLPattern({ search: "" }).test("https://e.com/a"))     // true

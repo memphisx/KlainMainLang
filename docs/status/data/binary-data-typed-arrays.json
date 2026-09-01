@@ -30,7 +30,8 @@
               "`new ArrayBuffer(byteLength, {maxByteLength}?)` — a fixed-length (or resizable — `.resizable`/`.maxByteLength`/`.resize(n)`, [ADR-00494](../adr/ADR-00494.md)), zero-initialized (`calloc`'d) raw byte buffer, plus `.byteLength` and `.slice(start?, end?)` (a copy, with array-slice negative-index/clamping rules — [ADR-00312](../adr/ADR-00312.md)). A general expression (works anywhere), like the TypedArrays below. See [ADR-00078](../adr/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
             ],
             "caveats": [
-              "`resize(n)` can only extend, never shrink (spec allows shrinking); it requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/ADR-00494.md))"
+              "`resize(n)` now grows **or shrinks** within `[0, maxByteLength]` ([ADR-00564](../adr/ADR-00564.md)); it still requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/ADR-00494.md))",
+              "A TypedArray view captures its length at construction and does not length-track a later `resize` — re-`new` the view after resizing (spec auto-tracks a no-explicit-length view)"
             ]
           },
           {
@@ -52,11 +53,11 @@
             "caveats": [
               "The missing `.buffer` property above applies here too",
               "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
-              "Compound element assignment (`a[0] += 1n`) is rejected — load, compute, assign",
-              "`console.log` of a *whole* array prints raw element values without the `n` suffix (single-element reads print correctly)",
               "`Atomics.wait`/`notify` stay `Int32Array`-only"
             ],
             "notes": [
+              "Compound element assignment (`a[0] += 1n`) is supported — the raw element is wrapped to a bigint, the op runs through the bigint runtime, and the result is stored back ([ADR-00592](../adr/ADR-00592.md))",
+              "`console.log` of a whole array matches Node — the `TypeName(len)` prefix and (for bigint arrays) the per-element `n` suffix ([ADR-00593](../adr/ADR-00593.md))",
               "Elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision `bigint` handles — writes require a bigint (compile error for a plain number, the spec's TypeError), reads (indexing, `.at`, for-of, `Atomics.*` results) wrap losslessly, so > 2^53 values round-trip exactly ([TDD-00101](../tdd/TDD-00101.md)/[ADR-00313](../adr/ADR-00313.md))",
               "`Atomics` load/store/RMW/compareExchange work on them (spec), lowered to the same seq_cst i64 atomics"
             ]
@@ -75,11 +76,8 @@
           {
             "feature": "`DataView`",
             "status": "implemented",
-            "caveats": [
-              "No `getFloat16`"
-            ],
             "notes": [
-              "`new DataView(buffer, byteOffset?, byteLength?)`, full `get/set` × `Int8..Uint32/Float32/Float64` **and `BigInt64`/`BigUint64`** (real bigint values, unsigned > 2^63 correct — [ADR-00312](../adr/ADR-00312.md)) with the spec's per-call `littleEndian` flag (default big-endian, via `llvm.bswap`), `.byteLength`/`.byteOffset`/`.buffer` (aliasing-identical ArrayBuffer), RangeError on out-of-bounds access *and* construction ([ADR-00294](../adr/ADR-00294.md))"
+              "`new DataView(buffer, byteOffset?, byteLength?)`, full `get/set` × `Int8..Uint32/Float16/Float32/Float64` **and `BigInt64`/`BigUint64`** (real bigint values, unsigned > 2^63 correct — [ADR-00312](../adr/ADR-00312.md)) with the spec's per-call `littleEndian` flag (default big-endian, via `llvm.bswap`), `.byteLength`/`.byteOffset`/`.buffer` (aliasing-identical ArrayBuffer), RangeError on out-of-bounds access *and* construction ([ADR-00294](../adr/ADR-00294.md)/[ADR-00553](../adr/ADR-00553.md))"
             ]
           },
           {
@@ -131,13 +129,13 @@
               "No `utf16le`/`ucs2` encodings (the compiler's strings are UTF-8-native)",
               "Encoding arguments must be compile-time string literals",
               "`Buffer.from(arrayBuffer)` **copies** (Node views); `Buffer.concat`'s list must be an inline array literal",
-              "String-valued `.fill`/`.indexOf`/`.includes`/`.lastIndexOf` unsupported (number forms work); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
+              "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes ([ADR-00558](../adr/ADR-00558.md)), and `.fill(string, offset?, end?)` repeats the needle's bytes ([ADR-00559](../adr/ADR-00559.md)) — all single-argument-plus-range forms (no `byteOffset`/`encoding`); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
               "`.toString()` (utf8/latin1) truncates at an embedded null byte"
             ],
             "notes": [
               "A Buffer IS a `Uint8Array` — indexing, `.length`, `.slice`/`.subarray`, numeric `.fill`/`.indexOf`/`.includes`, HOFs, for-of, `.set`, `.byteLength`, and `fs.writeFileSync(buffer)` all shared with the TypedArray machinery; `Buffer.from(...)`/`.alloc(...)` are **general expressions** (call syntax, no vardecl restriction) ([TDD-00103](../tdd/TDD-00103.md)/[ADR-00315](../adr/ADR-00315.md), superseding [ADR-00094](../adr/ADR-00094.md)'s \"no Buffer class\" half — fetch/fs still return WHATWG types)",
               "Codecs both directions: utf8, hex, base64, base64url (unpadded, per Node), latin1/binary/ascii — via an embedded libc-only C runtime, compiled in only when used",
-              "`alloc(n, byteFill?)`/`allocUnsafe`/`concat(list, totalLength?)`/`compare`/`isBuffer`/`byteLength(string, enc?)`; instance `.toString(enc?, start?, end?)`/`.write(string, offset?, enc?)`/`.copy`/`.equals`/`.compare`; full `read/write{U}Int{8,16,32}{LE,BE}` + `Float`/`Double` + `BigInt64`/`BigUInt64` accessors with catchable RangeError bounds checks",
+              "`alloc(n, fill?)` — the fill is a numeric byte (memset) or a **string** whose UTF-8 bytes are repeated across the buffer ([ADR-00576](../adr/ADR-00576.md)) — `/allocUnsafe`/`concat(list, totalLength?)`/`compare`/`isBuffer`/`byteLength(string, enc?)`; instance `.toString(enc?, start?, end?)`/`.write(string, offset?, enc?)`/`.copy`/`.equals`/`.compare`; full `read/write{U}Int{8,16,32}{LE,BE}` + `Float`/`Double` + `BigInt64`/`BigUInt64` accessors with catchable RangeError bounds checks",
               "Test expectations diff-verified byte-identical against real Node v26 (darwin/arm64)"
             ]
           }

@@ -5,7 +5,7 @@
   "statusPage": "TYPE-SYSTEM.md",
   "coversRows": "all",
   "coverageScope": "subset",
-  "coverage": { "loose": "30/31", "strict": "14/31" },
+  "coverage": { "loose": "31/31", "strict": "14/31" },
   "lede": "TypeScript's type surface reinterpreted for whole-program AOT compilation, so the divergences are about what a static native target can and can't model. Advanced type-level machinery — mapped/utility/conditional types, generics, intersections, typeof queries — is evaluated at compile time via monomorphization, then erased, and assertions (`as T`, `as const`, `satisfies`) and modifiers (`readonly`) are likewise erased rather than enforcing. The primitives are JS-faithful (`number` is an IEEE-754 double; `bigint` is arbitrary-precision), with the extended integer/float JSDoc types as the escape hatch for real fixed-width integer semantics.",
   "entries": [
     {
@@ -144,10 +144,10 @@
       "statusRow": "bigint",
       "signature": "const n = 10n",
       "badge": "caveats",
-      "description": "Arbitrary-precision integers over a backend-agnostic ABI, selectable via -bigint=libtommath|gmp (default libtommath, public domain). Literals, the full arithmetic/bitwise operator set, same-type and cross-type-with-integer comparisons, typeof, ++/--, .toString([radix]), params/returns/fields/arrays, and BigInt(int|string) all work. Division/modulo by zero throws a catchable Error.",
-      "snippet": "const a = 10n\nconst b = 20n\nconsole.log(a + b)      // 30n\nconsole.log(typeof a)   // \"bigint\"",
+      "description": "Arbitrary-precision integers over a backend-agnostic ABI, selectable via -bigint=libtommath|gmp (default libtommath, public domain). Literals, the full arithmetic/bitwise operator set, same-type and cross-type-with-integer comparisons, typeof, ++/--, .toString([radix]), BigInt.asIntN/asUintN, Number(bigint), params/returns/fields/arrays, and BigInt(int|string) all work. Division/modulo by zero throws a catchable Error.",
+      "snippet": "const a = 10n\nconsole.log(a + 20n)              // 30n\nconsole.log(BigInt.asIntN(8, 255n))  // -1n\nconsole.log(Number(a))            // 10",
       "differences": [
-        "No `.toLocaleString()`, `BigInt.asIntN`/`asUintN`; bare `Number(bigint)` conversion unsupported (part of a general `Number()`/`String()` gap)"
+        "No `.toLocaleString()` (an `Intl`-shaped gap)"
       ],
       "seeAlso": ["types.number"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt" }
@@ -371,11 +371,11 @@
       "id": "types.templateliteral",
       "name": "Template literal types ( a-${T} )",
       "statusRow": "Template literal types ( a-${T} )",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Template literal types in a type position are not parsed. This is distinct from template literal values, which work.",
+      "signature": "type Id = `user-${number}`",
+      "badge": "caveats",
+      "description": "Template literal types parse in a type position (no-substitution, multi-substitution, and []-suffixed forms) and resolve to `string` — the literal pattern isn't narrowed or enforced, the same simplification string-literal types use.",
       "differences": [
-        "Not parsed in a type position (`expected type name, got TEMPLATE_HEAD`). Distinct from template literal *values*, which work"
+        "Erased to `string` — the literal pattern is not narrowed/enforced."
       ],
       "seeAlso": [],
       "spec": { "mdn": "https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html" }

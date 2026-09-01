@@ -71,19 +71,19 @@
           },
           {
             "feature": "`console.table()`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "An array of objects (columns = the shared fields) or an array of primitives (a single `Values` column) is tabulated; a `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated (they fall back to `console.log`, as a non-tabular value does)"
+            ],
             "notes": [
-              "Deliberately deferred, not attempted — needs a genuinely new algorithm (dynamic per-column width computation, box-drawing header/index rows over arbitrarily-shaped input), not a quick extension of existing print machinery like the other rows below"
+              "Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/ADR-00560.md))"
             ]
           },
           {
             "feature": "`console.time()` / `.timeEnd()`",
             "status": "implemented",
-            "caveats": [
-              "V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label"
-            ],
             "notes": [
-              "See [ADR-00029](../adr/ADR-00029.md)."
+              "Per-label backing `Map<string, number>` — distinct labels track independent timers, matching real Node. See [ADR-00029](../adr/ADR-00029.md), [ADR-00544](../adr/ADR-00544.md)."
             ]
           },
           {
@@ -101,13 +101,14 @@
             ]
           },
           {
-            "feature": "`console.dir()`",
+            "feature": "`console.dir(obj, { depth?, colors? })`",
             "status": "implemented",
             "caveats": [
-              "The real API's second `options` argument — depth/color controls — is accepted syntactically but ignored"
+              "The `colors` option is accepted but ignored — inspected output carries no ANSI here"
             ],
             "notes": [
-              "Prints a single value exactly like a single-argument `console.log`. See [ADR-00029](../adr/ADR-00029.md)."
+              "Prints a single value like a single-argument `console.log`, but with Node's `util.inspect` default nesting depth of **2** (a bare `console.log` uses this compiler's deeper default); the `depth` option overrides it — a literal number caps nesting, `null` is unlimited, and beyond the cap a nested value shows as `[Object]`/`[Array]`, matching Node ([ADR-00583](../adr/ADR-00583.md))",
+              "See [ADR-00029](../adr/ADR-00029.md)."
             ]
           }
         ]

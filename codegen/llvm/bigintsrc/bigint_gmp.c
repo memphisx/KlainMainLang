@@ -40,6 +40,11 @@ long long __kml_bigint_to_i64(void *a) {
 	return (long long)mpz_get_si((mpz_srcptr)a);
 }
 
+/* Number(bigint): the nearest double (Infinity when out of range), like JS. */
+double __kml_bigint_to_double(void *a) {
+	return mpz_get_d((mpz_srcptr)a);
+}
+
 void *__kml_bigint_from_u64(unsigned long long v) {
 	mpz_ptr r = bi_new();
 	mpz_set_ui(r, (unsigned long)v);
@@ -122,6 +127,31 @@ void *__kml_bigint_shr(void *a, void *b) {
 	unsigned long n = (unsigned long)mpz_get_si((mpz_srcptr)b);
 	mpz_ptr r = bi_new();
 	mpz_fdiv_q_2exp(r, (mpz_srcptr)a, n);
+	return r;
+}
+
+/* BigInt.asUintN(bits, x): x modulo 2^bits, taken non-negative (the low `bits`
+ * bits). mpz_fdiv_r_2exp yields a non-negative remainder. */
+void *__kml_bigint_as_uintn(long long bits, void *x) {
+	mpz_ptr r = bi_new();
+	if (bits <= 0) return r; /* bi_new is 0 */
+	mpz_fdiv_r_2exp(r, (mpz_srcptr)x, (mp_bitcnt_t)bits);
+	return r;
+}
+
+/* BigInt.asIntN(bits, x): the low `bits` bits interpreted as two's complement.
+ * Reduce mod 2^bits, then subtract 2^bits when the sign bit (bit bits-1) is set. */
+void *__kml_bigint_as_intn(long long bits, void *x) {
+	mpz_ptr r = bi_new();
+	if (bits <= 0) return r;
+	mpz_fdiv_r_2exp(r, (mpz_srcptr)x, (mp_bitcnt_t)bits);
+	if (mpz_tstbit(r, (mp_bitcnt_t)(bits - 1))) {
+		mpz_t full;
+		mpz_init(full);
+		mpz_setbit(full, (mp_bitcnt_t)bits); /* full = 2^bits */
+		mpz_sub(r, r, full);
+		mpz_clear(full);
+	}
 	return r;
 }
 

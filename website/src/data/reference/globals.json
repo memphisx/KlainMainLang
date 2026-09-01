@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "GLOBAL-FUNCTIONS.md",
   "coversRows": "all",
-  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "10/21", "strictPct": 48 },
-  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. The recurring divergence elsewhere is strtod/strerror permissiveness — parseFloat's string form still accepts C hex-float syntax like \"0x10\", and decodeURI/atob pass malformed input through as best-effort rather than throwing.",
+  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "13/21", "strictPct": 62 },
+  "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
   "entries": [
     {
       "id": "globals.isNaN",
@@ -97,15 +97,12 @@
       "name": "parseFloat(s)",
       "statusRow": "parseFloat(s)",
       "signature": "parseFloat(s: string): number",
-      "badge": "caveats",
-      "description": "Parses a leading floating-point number out of a string. A no-conversion input returns a real NaN.",
+      "badge": "supported",
+      "description": "Parses a leading floating-point number out of a string. A \"0x\" hex prefix reads only its leading 0 → 0 (real parseFloat, unlike Number(\"0x10\") → 16). A no-conversion input returns a real NaN; only the exact word \"Infinity\" parses to Infinity (\"inf\" is NaN).",
       "params": [{ "name": "s", "type": "string", "desc": "String to parse." }],
       "returns": { "type": "number", "desc": "The parsed float, or NaN." },
       "exampleKey": "basics/parse_functions",
       "snippet": "console.log(parseFloat('3.14'))    // 3.14\nconsole.log(parseFloat('1e3'))     // 1000",
-      "differences": [
-        "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` is `16` and `\"0x1.8p3\"` is `12`, where real JS's `parseFloat` reads only the leading `0`. (The infinity-word divergence is fixed: only the exact word `\"Infinity\"` parses to `Infinity`, `\"inf\"` is `NaN`.)"
-      ],
       "seeAlso": ["globals.parseInt", "globals.Number"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }
     },
@@ -183,15 +180,12 @@
       "name": "decodeURI(s)",
       "statusRow": "decodeURI(s)",
       "signature": "decodeURI(s: string): string",
-      "badge": "caveats",
-      "description": "Decodes a whole URI. Does not decode a %XX escape representing a reserved character (leaves it as literal %XX text) — the one real behavioral difference from decodeURIComponent.",
+      "badge": "supported",
+      "description": "Decodes a whole URI; a malformed escape throws a URIError as in JS. Does not decode a %XX escape representing a reserved character (leaves it as literal %XX text) — the one real behavioral difference from decodeURIComponent.",
       "params": [{ "name": "s", "type": "string", "desc": "The URI to decode." }],
       "returns": { "type": "string", "desc": "The decoded URI." },
       "exampleKey": "globals/globals",
       "snippet": "console.log(decodeURI(\"http://example.com/path%3Fa=1&b=2%20space\"))\n// http://example.com/path%3Fa=1&b=2 space (%3F stays literal — it's '?', reserved)",
-      "differences": [
-        "Permissive on malformed input (passes a bad/truncated escape through as literal text) rather than throwing a `URIError`."
-      ],
       "seeAlso": ["globals.encodeURI", "globals.decodeURIComponent"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURI" }
     },
@@ -228,15 +222,12 @@
       "name": "atob(s)",
       "statusRow": "atob(s)",
       "signature": "atob(s: string): string",
-      "badge": "caveats",
-      "description": "Base64 decode. Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed).",
+      "badge": "exact",
+      "description": "Base64 decode implementing WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing group still decodes, a remaining length ≡ 1 (mod 4) throws InvalidCharacterError, and an interior or excess `=` (accepted only as trailing padding) throws too. Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed).",
       "params": [{ "name": "s", "type": "string", "desc": "Base64 text to decode." }],
       "returns": { "type": "string", "desc": "The decoded bytes as a string." },
       "exampleKey": "globals/globals",
       "snippet": "console.log(atob(\"aGVsbG8=\"))                   // hello\nconsole.log(atob(btoa(\"round trip 123!@#\")))    // round trip 123!@#",
-      "differences": [
-        "Permissive: malformed length/characters decode as best-effort rather than throwing."
-      ],
       "seeAlso": ["globals.btoa"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/atob" }
     },
@@ -260,13 +251,13 @@
       "statusRow": "structuredClone(obj)",
       "signature": "structuredClone<T>(obj: T): T",
       "badge": "caveats",
-      "description": "A real recursive deep copy, dispatched entirely on the argument's static type: arrays (incl. nested and TypedArrays) and plain objects recurse into freshly allocated storage; scalars pass through as value types. The result is fully independent of the original.",
+      "description": "A real recursive deep copy, dispatched entirely on the argument's static type: arrays (incl. nested and TypedArrays), plain objects, and Maps/Sets recurse into freshly allocated storage, cloning every entry deeply; scalars pass through as value types. The result is fully independent of the original.",
       "params": [{ "name": "obj", "type": "T", "desc": "The value to deep-copy." }],
       "returns": { "type": "T", "desc": "An independent deep copy." },
       "exampleKey": "structured_clone/structured_clone",
       "snippet": "const clone = structuredClone(original)\nclone.points[0].x = 500\nconsole.log(original.points[0].x) // 0",
       "differences": [
-        "`Map`/`Set`/`EventEmitter`/`URL`/`URLSearchParams`/`ArrayBuffer`/functions/class instances/`Error`/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased."
+        "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError`); a `Map`/`Set` with an array/Map/Set key or value element type is also rejected (only scalar/string/object elements clone). A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name."
       ],
       "seeAlso": [],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/structuredClone" }

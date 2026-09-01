@@ -4,8 +4,8 @@
   "kind": "node",
   "statusPage": "CONSOLE.md",
   "coversRows": "all",
-  "coverage": { "loose": "11/12", "loosePct": 92, "strict": "7/12", "strictPct": 58 },
-  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works, but two divergences stand out: console.trace prints only its message with no stack walk, and console.time is a single global timer slot rather than a per-label map (unlike console.count, which is a real per-label Map). console.table is the one unimplemented method — it needs genuinely new column-layout machinery, not an extension of the existing print path.",
+  "coverage": { "loose": "12/12", "loosePct": 100, "strict": "8/12", "strictPct": 67 },
+  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works; the one remaining print-path divergence is console.trace, which prints only its message with no stack walk. console.time tracks each label independently via a per-label backing map, matching console.count. console.table renders Node's exact Unicode box-drawing table for arrays of objects or primitives (other shapes fall back to console.log).",
   "entries": [
     {
       "id": "console.log",
@@ -98,9 +98,12 @@
       "id": "console.table",
       "name": "console.table()",
       "statusRow": "console.table()",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "Not implemented. It needs a genuinely new algorithm — dynamic per-column width computation and box-drawing header/index rows over arbitrarily-shaped input — rather than a quick extension of the existing print machinery, so it is deliberately deferred rather than attempted.",
+      "signature": "table(data: object[] | primitive[]): void",
+      "badge": "caveats",
+      "description": "Renders an array of objects (one column per shared field) or an array of primitives (a single Values column) as Node's Unicode box-drawing table — byte-for-byte the same layout Node v26 produces, with dynamic per-column widths, left-aligned cells, and quoted string cells.",
+      "differences": [
+        "A `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated — they fall back to `console.log`, as a non-tabular value does."
+      ],
       "seeAlso": ["console.log", "console.dir"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consoletabletabulardata-properties" }
     },
@@ -109,14 +112,11 @@
       "name": "console.time() / .timeEnd()",
       "statusRow": "console.time() / .timeEnd()",
       "signature": "time(label?: string): void; timeEnd(label?: string): void",
-      "badge": "caveats",
-      "description": "Starts a monotonic timer with time() and prints the elapsed \"label: <N>ms\" with timeEnd(). An omitted label is exactly \"default\", matching real Node.",
+      "badge": "supported",
+      "description": "Starts a monotonic timer with time() and prints the elapsed \"label: <N>ms\" with timeEnd(). An omitted label is exactly \"default\", matching real Node. Distinct labels track independent timers via a per-label backing map.",
       "returns": { "type": "void", "desc": "Nothing." },
       "exampleKey": "console/console",
       "snippet": "console.time('work')\n// ... work ...\nconsole.timeEnd('work')   // work: <N>ms",
-      "differences": [
-        "V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label"
-      ],
       "seeAlso": ["console.count"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consoletimelabel" }
     },
@@ -149,15 +149,15 @@
     {
       "id": "console.dir",
       "name": "console.dir()",
-      "statusRow": "console.dir()",
-      "signature": "dir(value: any, options?: object): void",
+      "statusRow": "console.dir(obj, { depth?, colors? })",
+      "signature": "dir(value: any, options?: { depth?: number | null; colors?: boolean }): void",
       "badge": "caveats",
-      "description": "Prints a single value exactly like a single-argument console.log.",
+      "description": "Prints a single value like a single-argument console.log, at Node's util.inspect default nesting depth of 2. The depth option overrides it (a number caps nesting, null is unlimited); beyond the cap a nested value shows as [Object]/[Array].",
       "returns": { "type": "void", "desc": "Nothing." },
       "exampleKey": "console/console",
-      "snippet": "console.dir('hello')   // hello\nconsole.dir(42)        // 42",
+      "snippet": "console.dir(obj, { depth: 0 })  // nested values as [Object]",
       "differences": [
-        "The real API's second `options` argument — depth/color controls — is accepted syntactically but ignored"
+        "The `colors` option is accepted but ignored — inspected output carries no ANSI here."
       ],
       "seeAlso": ["console.log"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consoledirobj-options" }

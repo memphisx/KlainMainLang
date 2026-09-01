@@ -167,11 +167,8 @@
           {
             "feature": "`Map.forEach()`",
             "status": "implemented",
-            "caveats": [
-              "The 3rd `map` argument real JS also passes to the callback is dropped (the same simplification `Array.forEach`'s `(elem, index)` makes) ([ADR-00053](../adr/ADR-00053.md))"
-            ],
             "notes": [
-              "Calls `fn(value, key)`, matching real JS's argument order"
+              "Calls `fn(value, key, map)`, matching real JS's full callback signature — the 3rd `map` argument is the map being iterated ([ADR-00573](../adr/ADR-00573.md)); a callback declaring fewer parameters just receives the leading ones ([ADR-00053](../adr/ADR-00053.md))"
             ]
           },
           {
@@ -210,7 +207,7 @@
             "feature": "`Set.forEach()`",
             "status": "implemented",
             "notes": [
-              "Calls `fn(element[, element])` — real JS's `Set.prototype.forEach` passes the value twice (`(value, value, set)`) for Map/Set callback-shape parity; mirrored here when the callback declares a 2nd parameter ([ADR-00053](../adr/ADR-00053.md))"
+              "Calls `fn(value, value, set)` — real JS's `Set.prototype.forEach` passes the value twice (Map/Set callback-shape parity) then the set itself; each argument is supplied per the callback's declared arity ([ADR-00053](../adr/ADR-00053.md)/[ADR-00573](../adr/ADR-00573.md))"
             ]
           },
           {

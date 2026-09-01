@@ -226,8 +226,24 @@ func main() {
 	corpus := flag.String("corpus", ".test262", "path to a test262 checkout (see fetch.sh)")
 	out := flag.String("out", "docs/testing/CONFORMANCE-RESULTS.md", "report output path")
 	category := flag.String("category", "", "only run files under test/<category> (default: everything, unfiltered)")
-	workers := flag.Int("workers", runtime.NumCPU(), "parallel workers")
+	// Leave two cores free by default: with every worker running a CPU-bound
+	// `clang -O2`, a fully-saturated machine starves the *run* phase of a
+	// trivial test binary of CPU, so its wall-clock timeout can expire even
+	// though it needs milliseconds of actual CPU — the sole cause of run-to-run
+	// result flapping ("flaky" conformance). Headroom keeps the run phase fair.
+	defaultWorkers := runtime.NumCPU() - 2
+	if defaultWorkers < 1 {
+		defaultWorkers = 1
+	}
+	workers := flag.Int("workers", defaultWorkers, "parallel workers")
 	limit := flag.Int("limit", 0, "stop after N files (0 = no limit) — for smoke-testing the harness itself")
+	// The flakiness is fixed by the worker headroom above, not by the timeout —
+	// so this stays 5s, the value the whole Test262 baseline was measured at (a
+	// much larger budget peak-OOMs 53k concurrent `clang -O2` runs, and an
+	// intermediate value like 10s lands right on a couple of pathological
+	// 10–30s-runtime Node tests and re-introduces flapping). A genuine hang is
+	// still caught at 5s; the rare slow-but-terminating test that wants more can
+	// pass `-timeout`.
 	perFileTimeout := flag.Duration("timeout", 5*time.Second, "timeout for clang and for running each compiled test binary")
 	workDir := flag.String("workdir", ".conformance-out", "scratch directory for generated .ll/binaries")
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
@@ -245,7 +261,7 @@ func main() {
 	case "test262":
 		// fall through to the Test262 runner below
 	case "node":
-		runNodeSuite(*workDir, *perFileTimeout)
+		runNodeSuite(*workDir, *perFileTimeout, *workers)
 		return
 	case "ts":
 		runTSSuite(*workDir, *perFileTimeout)

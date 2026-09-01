@@ -102,11 +102,30 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// a normal `ret`.
 	savedCurrentGenerator := e.currentGenerator
 	e.currentGenerator = nil
+	// A nested function/closure body is not the constructor, even when lexically
+	// inside one — a `readonly` write here is an error (TDD-00154), so clear the
+	// ctor context for the duration of this body's emission.
+	savedCurrentCtorClass := e.currentCtorClass
+	e.currentCtorClass = ""
+	// Eager-boxing capture set for this body (see hoistedCaptures): its own
+	// locals/params captured by some nested closure, boxed at declaration.
+	savedHoistedCaptures := e.hoistedCaptures
+	if decl.Body != nil {
+		paramNames := make([]string, len(decl.Params))
+		for i, p := range decl.Params {
+			paramNames[i] = p.Name
+		}
+		e.hoistedCaptures = capturedLocalNames(decl.Body.Body, paramNames)
+	} else {
+		e.hoistedCaptures = nil
+	}
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
+		e.currentCtorClass = savedCurrentCtorClass
+		e.hoistedCaptures = savedHoistedCaptures
 	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -252,7 +271,13 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 				}
 				continue
 			}
-			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+			if e.hoistedCaptures[p.Name] {
+				// Captured by a nested closure: box eagerly at entry (which
+				// dominates the whole body) instead of at the capture site.
+				e.boxHoistedCapture(p.Name, pty, "%p_"+p.Name, false, true)
+			} else {
+				e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+			}
 		}
 	}
 
@@ -505,6 +530,15 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 		// byName/byDecl. Keeping it out of resolveFuncRef is what makes a call
 		// fall through to the closure-value lookup, and makes a call before the
 		// declaration a clean "undefined function or closure" error.
+		// A for-loop variable capture is rejected before the ordinary
+		// capturing/non-capturing split — the loop variable isn't an
+		// enclosingCapturables binding (it's declared in the for-init, not a
+		// body statement), so nestedDeclCaptures would misclassify it as
+		// non-capturing and emit a broken direct call.
+		if v, ok := e.nestedDeclCapturesForLoopVar(fd); ok {
+			popFrames()
+			return fmt.Errorf("%d:%d: a nested function declaration capturing a for-loop variable ('%s') is not supported — the loop variable is a single per-loop cell, so a closure over it would corrupt the loop; copy it to a `const` inside the loop body and capture that instead", fd.GetPos().Line, fd.GetPos().Col, v)
+		}
 		if e.nestedDeclCaptures(fd) {
 			scope.capturing[fd] = true
 			continue
@@ -617,6 +651,29 @@ func (e *Emitter) nestedDeclCaptures(fd *ast.FunctionDeclaration) bool {
 		}
 	}
 	return false
+}
+
+// nestedDeclCapturesForLoopVar reports whether nested declaration fd closes over
+// a C-style for-loop variable whose body is currently being emitted (TDD-00152).
+// Such a capture is rejected: the loop variable lives in one alloca reused every
+// iteration, so a closure over it would share the counter cell and corrupt the
+// loop (the same per-iteration-binding limitation arrows hit).
+func (e *Emitter) nestedDeclCapturesForLoopVar(fd *ast.FunctionDeclaration) (string, bool) {
+	if fd.Body == nil || len(e.activeForLoopVars) == 0 {
+		return "", false
+	}
+	bound := map[string]bool{fd.Name: true}
+	addParamBoundNames(bound, fd.Params)
+	refs := map[string]bool{}
+	scanStmtsFV(fd.Body.Body, bound, refs)
+	for name := range refs {
+		for _, frame := range e.activeForLoopVars {
+			if frame[name] {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // resolveFuncRef resolves a bare identifier used as a callee/callback name:
@@ -1065,6 +1122,334 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 	}
 }
 
+// --- captured-local pre-scan (eager boxing) ---
+//
+// capScanExpr / capScanStmts mirror scanExprFV / scanStmtsFV EXACTLY, with one
+// deliberate difference: at each closure boundary (an ArrowFunction or
+// FunctionExpression) the bound set is RESET to that closure's own params only,
+// instead of being inherited from the enclosing bound set. With the reset, a
+// closure's reference to an enclosing-function local surfaces in `result` as a
+// free variable — precisely the set of variables some nested closure captures.
+// Non-closure code still binds locals as it walks (so a plain, non-closure use
+// of a local is NOT collected). Used by capturedLocalNames to decide which of a
+// function's own locals/params to heap-box eagerly at their declaration.
+//
+// The original scanExprFV/scanStmtsFV must keep their accumulate-bound behavior
+// (gatherCaptures depends on it), so these are separate copies rather than a
+// shared, parameterized traversal.
+func capScanExpr(expr ast.Expression, bound map[string]bool, result map[string]bool) {
+	if expr == nil {
+		return
+	}
+	switch x := expr.(type) {
+	case *ast.Identifier:
+		if !bound[x.Name] {
+			result[x.Name] = true
+		}
+	case *ast.BinaryExpression:
+		capScanExpr(x.Left, bound, result)
+		capScanExpr(x.Right, bound, result)
+	case *ast.UnaryExpression:
+		capScanExpr(x.Arg, bound, result)
+	case *ast.YieldExpression:
+		capScanExpr(x.Argument, bound, result)
+	case *ast.AwaitExpression:
+		capScanExpr(x.Argument, bound, result)
+	case *ast.UpdateExpression:
+		capScanExpr(x.Arg, bound, result)
+	case *ast.AssignmentExpression:
+		capScanExpr(x.Left, bound, result)
+		capScanExpr(x.Right, bound, result)
+	case *ast.CallExpression:
+		capScanExpr(x.Callee, bound, result)
+		for _, a := range x.Args {
+			capScanExpr(a, bound, result)
+		}
+	case *ast.MemberExpression:
+		capScanExpr(x.Object, bound, result)
+	case *ast.IndexExpression:
+		capScanExpr(x.Object, bound, result)
+		capScanExpr(x.Index, bound, result)
+	case *ast.ArrayLiteral:
+		for _, el := range x.Elements {
+			capScanExpr(el, bound, result)
+		}
+	case *ast.ObjectLiteral:
+		for _, p := range x.Properties {
+			capScanExpr(p.Value, bound, result)
+		}
+	case *ast.SpreadElement:
+		capScanExpr(x.Arg, bound, result)
+	case *ast.NewArrayExpression:
+		capScanExpr(x.Size, bound, result)
+	case *ast.NewSetExpression:
+		capScanExpr(x.Init, bound, result)
+	case *ast.NewMapExpression:
+		capScanExpr(x.Init, bound, result)
+	case *ast.NewWeakRefExpression:
+		capScanExpr(x.Init, bound, result)
+	case *ast.TemplateLiteral:
+		for _, ex := range x.Exprs {
+			capScanExpr(ex, bound, result)
+		}
+	case *ast.TaggedTemplateExpression:
+		capScanExpr(x.Tag, bound, result)
+		for _, ex := range x.Exprs {
+			capScanExpr(ex, bound, result)
+		}
+	case *ast.ConditionalExpression:
+		capScanExpr(x.Test, bound, result)
+		capScanExpr(x.Consequent, bound, result)
+		capScanExpr(x.Alternate, bound, result)
+	case *ast.SequenceExpression:
+		for _, sub := range x.Exprs {
+			capScanExpr(sub, bound, result)
+		}
+	case *ast.NewTypedArrayExpression:
+		capScanExpr(x.Arg, bound, result)
+		if x.ByteOffset != nil {
+			capScanExpr(x.ByteOffset, bound, result)
+		}
+		if x.Length != nil {
+			capScanExpr(x.Length, bound, result)
+		}
+	case *ast.NewArrayBufferExpression:
+		capScanExpr(x.ByteLength, bound, result)
+	case *ast.NewBlobExpression:
+		if x.Parts != nil {
+			capScanExpr(x.Parts, bound, result)
+		}
+		if x.Options != nil {
+			capScanExpr(x.Options, bound, result)
+		}
+	case *ast.NewDataViewExpression:
+		capScanExpr(x.Buffer, bound, result)
+		capScanExpr(x.ByteOffset, bound, result)
+		capScanExpr(x.ByteLength, bound, result)
+	case *ast.NewNodeStreamExpression:
+		if x.Options != nil {
+			capScanExpr(x.Options, bound, result)
+		}
+	case *ast.NewCompressionStreamExpression:
+		if x.Format != nil {
+			capScanExpr(x.Format, bound, result)
+		}
+	case *ast.NewTransformStreamExpression:
+		if x.Transformer != nil {
+			capScanExpr(x.Transformer, bound, result)
+		}
+		if x.WritableStrategy != nil {
+			capScanExpr(x.WritableStrategy, bound, result)
+		}
+		if x.ReadableStrategy != nil {
+			capScanExpr(x.ReadableStrategy, bound, result)
+		}
+	case *ast.NewWritableStreamExpression:
+		if x.Sink != nil {
+			capScanExpr(x.Sink, bound, result)
+		}
+		if x.Strategy != nil {
+			capScanExpr(x.Strategy, bound, result)
+		}
+	case *ast.NewReadableStreamExpression:
+		if x.Source != nil {
+			capScanExpr(x.Source, bound, result)
+		}
+		if x.Strategy != nil {
+			capScanExpr(x.Strategy, bound, result)
+		}
+	case *ast.ArrowFunction:
+		// Closure boundary: RESET bound to this closure's own params only.
+		innerBound := make(map[string]bool, len(x.Params))
+		addParamBoundNames(innerBound, x.Params)
+		if x.Body != nil {
+			capScanExpr(x.Body, innerBound, result)
+		}
+		if x.Block != nil {
+			capScanStmts(x.Block.Body, innerBound, result)
+		}
+	case *ast.FunctionExpression:
+		// Closure boundary: RESET bound to this closure's own params only.
+		innerBound := make(map[string]bool, len(x.Params))
+		addParamBoundNames(innerBound, x.Params)
+		capScanStmts(x.Body.Body, innerBound, result)
+	}
+}
+
+func capScanStmts(stmts []ast.Statement, bound map[string]bool, result map[string]bool) {
+	local := make(map[string]bool, len(bound))
+	for k, v := range bound {
+		local[k] = v
+	}
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.VarDeclaration:
+			if s.Init != nil {
+				capScanExpr(s.Init, local, result)
+			}
+			local[s.Name] = true
+		case *ast.VarDeclarationList:
+			for _, d := range s.Decls {
+				if d.Init != nil {
+					capScanExpr(d.Init, local, result)
+				}
+				local[d.Name] = true
+			}
+		case *ast.ExpressionStatement:
+			capScanExpr(s.Expr, local, result)
+		case *ast.ReturnStatement:
+			if s.Value != nil {
+				capScanExpr(s.Value, local, result)
+			}
+		case *ast.IfStatement:
+			capScanExpr(s.Test, local, result)
+			if s.Consequent != nil {
+				capScanStmts(s.Consequent.Body, local, result)
+			}
+			if s.Alternate != nil {
+				capScanStmts([]ast.Statement{s.Alternate}, local, result)
+			}
+		case *ast.ForStatement:
+			inner := make(map[string]bool, len(local))
+			for k, v := range local {
+				inner[k] = v
+			}
+			if s.Init != nil {
+				if vd, ok := s.Init.(*ast.VarDeclaration); ok {
+					if vd.Init != nil {
+						capScanExpr(vd.Init, inner, result)
+					}
+					inner[vd.Name] = true
+				} else if vdl, ok := s.Init.(*ast.VarDeclarationList); ok {
+					for _, d := range vdl.Decls {
+						if d.Init != nil {
+							capScanExpr(d.Init, inner, result)
+						}
+						inner[d.Name] = true
+					}
+				} else if es, ok := s.Init.(*ast.ExpressionStatement); ok {
+					capScanExpr(es.Expr, inner, result)
+				}
+			}
+			if s.Test != nil {
+				capScanExpr(s.Test, inner, result)
+			}
+			for _, upd := range s.Update {
+				capScanExpr(upd, inner, result)
+			}
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, inner, result)
+			}
+		case *ast.WhileStatement:
+			capScanExpr(s.Test, local, result)
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, local, result)
+			}
+		case *ast.BlockStatement:
+			capScanStmts(s.Body, local, result)
+		case *ast.ForOfStatement:
+			capScanExpr(s.Iterable, local, result)
+			inner := make(map[string]bool, len(local)+1)
+			for k, v := range local {
+				inner[k] = v
+			}
+			if s.ArrayPattern != nil {
+				collectArrayPatternNames(s.ArrayPattern, inner)
+			} else if s.ObjectPattern != nil {
+				collectObjectPatternNames(s.ObjectPattern, inner)
+			} else {
+				inner[s.VarName] = true
+			}
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, inner, result)
+			}
+		case *ast.SwitchStatement:
+			capScanExpr(s.Discriminant, local, result)
+			for _, c := range s.Cases {
+				if c.Test != nil {
+					capScanExpr(c.Test, local, result)
+				}
+				capScanStmts(c.Body, local, result)
+			}
+		case *ast.ArrayDestructuring:
+			capScanExpr(s.Init, local, result)
+			for _, elem := range s.Elems {
+				if elem.Default != nil {
+					capScanExpr(elem.Default, local, result)
+				}
+				if elem.Name != "" {
+					local[elem.Name] = true
+				}
+			}
+		case *ast.ObjectDestructuring:
+			capScanExpr(s.Init, local, result)
+			for _, prop := range s.Props {
+				if prop.Default != nil {
+					capScanExpr(prop.Default, local, result)
+				}
+				local[prop.Local] = true
+			}
+		}
+	}
+}
+
+// capturedLocalNames returns every name that some nested closure inside body
+// captures free from the enclosing (this) function's scope — the set of this
+// function's own locals/params that must be heap-boxed eagerly at their
+// declaration point (see hoistedCaptures / boxHoistedCapture). paramNames seed
+// the bound set so a non-closure reference to a param is not itself collected;
+// a name is intersected with what's actually declared here implicitly, at the
+// declaration/param site (only a name being declared here is boxed).
+func capturedLocalNames(body []ast.Statement, paramNames []string) map[string]bool {
+	bound := make(map[string]bool, len(paramNames))
+	for _, p := range paramNames {
+		bound[p] = true
+	}
+	result := make(map[string]bool)
+	capScanStmts(body, bound, result)
+	return result
+}
+
+// boxHoistedCapture allocates a heap cell for a captured local/param at its
+// dominating declaration point, seeds it (with the given already-materialized
+// initReg IR value of type ty, or the type's deterministic default when initReg
+// is ""), registers name as a boxed Symbol sharing that cell by pointer, and
+// returns the cell pointer. This is promoteCaptureToCell's work done eagerly at
+// declaration rather than lazily at the capturing closure's construction site,
+// so the cell dominates every later read regardless of which conditional block
+// the closure literal is emitted into.
+// atEntry selects the entry (allocas) block for the cell allocation and seed,
+// rather than the current body block. Use it for a function-scoped `var`
+// (promoteVarToFuncScope) — which can be declared inside a conditional yet read
+// after it, so its cell must dominate unconditionally, exactly why its slot has
+// always lived in the entry block (emitVarSlotDefault) — and for a captured
+// param (bound once, at entry). A `let`/`const` instead boxes at its declaration
+// point in the body: that dominates its whole (block-scoped) legal reach, and,
+// crucially, a per-iteration declaration inside a loop re-runs the malloc each
+// iteration, giving each iteration's closure its own fresh cell (matching JS
+// per-iteration `let` binding semantics), which a single entry-block cell would
+// not.
+func (e *Emitter) boxHoistedCapture(name string, ty Type, initReg string, isConst, atEntry bool) string {
+	e.ensureMalloc()
+	box := e.freshReg()
+	emit := e.emitInstr
+	if atEntry {
+		emit = e.emitAlloca
+	}
+	emit(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", box, ty.Align()))
+	if initReg == "" {
+		if ty.IsDynamic {
+			emit(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, box, ty.Align()))
+		} else {
+			emit(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), box, ty.Align()))
+		}
+	} else {
+		emit(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, initReg, box, ty.Align()))
+	}
+	e.define(name, Symbol{Ptr: box, Ty: ty, Boxed: true, IsConst: isConst})
+	return box
+}
+
 // gatherCaptures returns the variables from the enclosing scope that the arrow
 // function's body references (sorted for deterministic output). Array variables
 // cannot be captured yet (would require two env slots).
@@ -1205,11 +1590,33 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// machinery).
 	savedCurrentGenerator := e.currentGenerator
 	e.currentGenerator = nil
+	// A nested function/closure body is not the constructor, even when lexically
+	// inside one — a `readonly` write here is an error (TDD-00154), so clear the
+	// ctor context for the duration of this body's emission.
+	savedCurrentCtorClass := e.currentCtorClass
+	e.currentCtorClass = ""
+	// Eager-boxing capture set for this closure body (see hoistedCaptures).
+	savedHoistedCaptures := e.hoistedCaptures
+	{
+		paramNames := make([]string, len(af.Params))
+		for i, p := range af.Params {
+			paramNames[i] = p.Name
+		}
+		if af.Block != nil {
+			e.hoistedCaptures = capturedLocalNames(af.Block.Body, paramNames)
+		} else if af.Body != nil {
+			e.hoistedCaptures = capturedLocalNames([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}}, paramNames)
+		} else {
+			e.hoistedCaptures = nil
+		}
+	}
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
+		e.currentCtorClass = savedCurrentCtorClass
+		e.hoistedCaptures = savedHoistedCaptures
 	}()
 
 	e.allocas = strings.Builder{}
@@ -1306,7 +1713,11 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			}
 			continue
 		}
-		e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+		if e.hoistedCaptures[p.Name] {
+			e.boxHoistedCapture(p.Name, pty, "%p_"+p.Name, false, true)
+		} else {
+			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+		}
 	}
 
 	// Set up captured-variable access: each env slot holds a pointer to a heap
@@ -1908,37 +2319,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	}
 	if fe.Name != "" {
 		// A named function expression whose name shadows a top-level function of
-		// the same name is not yet supported: inside the expression body, JS
-		// scoping makes the name refer to the expression itself, but this
-		// compiler resolves top-level function references *before* codegen sees
-		// this self-scope, so the self-binding below can't reclaim them and the
-		// recursion would silently call the outer function instead. Reject the
-		// collision cleanly rather than miscompile it — the plain
-		// (non-shadowing) recursive case is unaffected.
-		//
-		// Detected two ways because the full pipeline runs the resolver's rename
-		// pass (TDD-00041) but the direct parse→emit test path does not:
-		//   (1) resolver present: the body's `N` was rewritten to the outer
-		//       function's mangled `N__kml_mod<N>`, and the outer decl renamed,
-		//       so resolveFuncRef(fe.Name) misses — catch the mangled reference.
-		//   (2) resolver absent: the name is still `N` and the outer function is
-		//       still registered under it — catch via resolveFuncRef.
-		mangledSelfPrefix := fe.Name + "__kml_mod"
-		collides := false
-		for ref := range refs {
-			if strings.HasPrefix(ref, mangledSelfPrefix) {
-				collides = true
-				break
-			}
-		}
-		if refs[fe.Name] {
-			if _, _, topLevelExists := e.resolveFuncRef(fe.Name); topLevelExists {
-				collides = true
-			}
-		}
-		if collides {
-			return Value{}, fmt.Errorf("%d:%d: a named function expression whose name '%s' shadows a top-level function of the same name is not yet supported — rename one of them", fe.GetPos().Line, fe.GetPos().Col, fe.Name)
-		}
+		// the same name: inside the expression body, JS scoping makes the name
+		// refer to the expression itself. The resolver's rename pass (TDD-00041)
+		// binds fe.Name in the expression's own scope *before* rewriting the
+		// body, so a self-reference stays unmangled (`N`, not the outer
+		// function's `N__kml_mod<N>`) and the self-capture below reclaims it —
+		// the recursion calls the expression, not the shadowed outer function.
 		if refs[fe.Name] {
 			caps = append(caps, CapturedVar{Name: fe.Name, Ty: selfTy, IsSelf: true})
 		}
@@ -1983,11 +2369,31 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// machinery).
 	savedCurrentGenerator := e.currentGenerator
 	e.currentGenerator = nil
+	// A nested function/closure body is not the constructor, even when lexically
+	// inside one — a `readonly` write here is an error (TDD-00154), so clear the
+	// ctor context for the duration of this body's emission.
+	savedCurrentCtorClass := e.currentCtorClass
+	e.currentCtorClass = ""
+	// Eager-boxing capture set for this function-expression body.
+	savedHoistedCaptures := e.hoistedCaptures
+	{
+		paramNames := make([]string, len(fe.Params))
+		for i, p := range fe.Params {
+			paramNames[i] = p.Name
+		}
+		if fe.Body != nil {
+			e.hoistedCaptures = capturedLocalNames(fe.Body.Body, paramNames)
+		} else {
+			e.hoistedCaptures = nil
+		}
+	}
 	defer func() {
 		e.breakStack = savedBreakStack
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
+		e.currentCtorClass = savedCurrentCtorClass
+		e.hoistedCaptures = savedHoistedCaptures
 	}()
 
 	e.allocas = strings.Builder{}
@@ -2061,7 +2467,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			}
 			continue
 		}
-		e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+		if e.hoistedCaptures[p.Name] {
+			e.boxHoistedCapture(p.Name, pty, "%p_"+p.Name, false, true)
+		} else {
+			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
+		}
 	}
 
 	// Set up captured-variable access — same pattern emitClosureFunc uses.

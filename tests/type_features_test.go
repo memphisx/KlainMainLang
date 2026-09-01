@@ -252,3 +252,20 @@ console.log(Symbol.keyFor(a));
 console.log(Symbol.keyFor(c) === null);
 `, "true\nfalse\napp.key\ntrue")
 }
+
+// Template literal types (`` `a-${T}` ``) parse and resolve to `string` — the
+// literal pattern isn't narrowed/enforced, the same simplification
+// string-literal types use (ADR-00561). No-substitution, multi-substitution,
+// and array-of forms all work.
+func TestE2ETemplateLiteralType(t *testing.T) {
+	assertOutput(t, `
+type Id = `+"`"+`user-${number}`+"`"+`;
+const a: Id = "user-42";
+type Plain = `+"`"+`hello`+"`"+`;
+const b: Plain = "hello";
+type Multi = `+"`"+`${string}-${number}`+"`"+`;
+const c: Multi = "x-1";
+const d: `+"`"+`a-${string}`+"`"+`[] = ["a-b", "a-c"];
+console.log(a, b, c, d.length);
+`, "user-42 hello x-1 2")
+}

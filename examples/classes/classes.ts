@@ -637,3 +637,18 @@ class Sum {
     }
 }
 console.log(new Sum().add(1, 2, 3));
+
+// A `readonly` field can be set in the constructor (or a parameter property)
+// but never afterward — the compiler rejects a later write (TDD-00154).
+class Endpoint {
+    readonly host: string;
+    readonly port: number;
+    constructor(host: string, port: number) {
+        this.host = host;
+        this.port = port;
+    }
+    url(): string { return this.host + ":" + this.port; }
+}
+const endpoint = new Endpoint("localhost", 8080);
+console.log(endpoint.url());
+// endpoint.host = "other";  // compile error: cannot assign to a read-only property

@@ -4,7 +4,7 @@
   "kind": "web",
   "statusPage": "BINARY-DATA-TYPED-ARRAYS.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "0/9", "strictPct": 0 },
+  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
   "lede": "Raw byte buffers and the typed views over them, the layer every networking, crypto, and file-I/O path is built on. The recurring divergence is construction: a TypedArray can only be built in a variable declaration's initializer, never as a general expression, and none carry a `.buffer` back-reference (ArrayBuffer, Blob, and Node Buffer are the exceptions — they're general expressions). ArrayBuffer, DataView, SharedArrayBuffer, Atomics, and a real bigint-backed BigInt64Array/DataView 64-bit path are all here, so binary layouts round-trip byte-exactly; the text-shaped readers (Blob.text, Buffer.toString) still truncate at an embedded null byte.",
   "entries": [
     {
@@ -50,8 +50,6 @@
       "differences": [
         "The vardecl-only construction restriction and missing `.buffer` above apply here too",
         "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
-        "Compound element assignment (`a[0] += 1n`) is rejected — load, compute, assign",
-        "`console.log` of a *whole* array prints raw element values without the `n` suffix (single-element reads print correctly)",
         "`Atomics.wait`/`notify` stay `Int32Array`-only"
       ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.atomics", "typedarray.dataview"],
@@ -78,8 +76,8 @@
       "name": "DataView",
       "statusRow": "DataView",
       "signature": "new DataView(buffer: ArrayBuffer, byteOffset?, byteLength?)",
-      "badge": "caveats",
-      "description": "Endian-controlled binary access over an ArrayBuffer: full get/set × Int8..Uint32/Float32/Float64 and BigInt64/BigUint64 (real bigint values, unsigned above 2^63 correct) with the spec's per-call littleEndian flag (default big-endian, via llvm.bswap), plus .byteLength/.byteOffset/.buffer (an aliasing-identical ArrayBuffer). RangeError on out-of-bounds access and construction.",
+      "badge": "supported",
+      "description": "Endian-controlled binary access over an ArrayBuffer: full get/set × Int8..Uint32/Float16/Float32/Float64 and BigInt64/BigUint64 (real bigint values, unsigned above 2^63 correct) with the spec's per-call littleEndian flag (default big-endian, via llvm.bswap), plus .byteLength/.byteOffset/.buffer (an aliasing-identical ArrayBuffer). RangeError on out-of-bounds access and construction.",
       "params": [
         { "name": "buffer", "type": "ArrayBuffer", "desc": "The backing buffer." },
         { "name": "byteOffset", "type": "number", "desc": "Optional start offset." },
@@ -88,9 +86,6 @@
       "returns": { "type": "DataView", "desc": "A view for scalar reads/writes." },
       "exampleKey": "basics/dataview",
       "snippet": "const buf = new ArrayBuffer(12);\nconst view = new DataView(buf);\nview.setUint16(0, 0xCAFE);         // big-endian by default\nview.setUint32(2, 123456789, true); // explicit little-endian\nconsole.log(view.getUint32(2, true));",
-      "differences": [
-        "No `getFloat16`"
-      ],
       "seeAlso": ["typedarray.arraybuffer", "typedarray.bigint64arraybiguint64ar"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView" }
     },
@@ -163,7 +158,7 @@
         "No `utf16le`/`ucs2` encodings (the compiler's strings are UTF-8-native)",
         "Encoding arguments must be compile-time string literals",
         "`Buffer.from(arrayBuffer)` **copies** (Node views); `Buffer.concat`'s list must be an inline array literal",
-        "String-valued `.fill`/`.indexOf`/`.includes`/`.lastIndexOf` unsupported (number forms work); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
+        "String-valued `.indexOf`/`.includes`/`.lastIndexOf` search the needle's UTF-8 bytes, and `.fill(string, offset?, end?)` repeats the needle's bytes (all no byteOffset/encoding); no 4-arg `.write(string, offset, length, encoding)` form; no `.swap16/32/64`, `.toJSON`, `Buffer.of`, `Buffer.isAscii`/`Buffer.isUtf8`, arbitrary-width `readIntLE(offset, byteLength)`, `poolSize`/`allocUnsafeSlow`",
         "`.toString()` (utf8/latin1) truncates at an embedded null byte"
       ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.blob"],

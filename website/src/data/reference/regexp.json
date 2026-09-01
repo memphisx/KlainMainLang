@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "4/14", "strictPct": 29 },
+  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "6/14", "strictPct": 43 },
   "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`y`/`d` flags are out of scope for V1.",
   "entries": [
     {
@@ -12,8 +12,8 @@
       "name": "Construction: new RegExp(pattern, flags?)",
       "statusRow": "Construction: `new RegExp(pattern, flags?)`",
       "signature": "new RegExp(pattern: string, flags?: string): RegExp",
-      "badge": "caveats",
-      "description": "Compiles the pattern once via PCRE2 and throws a real, catchable SyntaxError on an invalid pattern. A \\uXXXX/\\xXX escape compiles as an ECMAScript escape in the default and es-ascii modes.",
+      "badge": "supported",
+      "description": "Compiles the pattern once via PCRE2 and throws a real, catchable SyntaxError on an invalid pattern. The flags string is validated as in real JS — a duplicate flag (\"gg\") or an unrecognized flag character (\"z\") throws a SyntaxError. A \\uXXXX/\\xXX escape compiles as an ECMAScript escape in the default and es-ascii modes.",
       "params": [
         { "name": "pattern", "type": "string", "desc": "The pattern source." },
         { "name": "flags", "type": "string", "desc": "Optional flag string (e.g. \"gi\")." }
@@ -21,9 +21,6 @@
       "returns": { "type": "RegExp", "desc": "A compiled RegExp." },
       "exampleKey": "regexp/regexp",
       "snippet": "const fromCtor = new RegExp(\"[a-z]+@[a-z]+\\\\.[a-z]+\", \"i\")\nconsole.log(fromCtor.source)",
-      "differences": [
-        "Does not validate the *flags* string at all — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) is silently accepted instead of throwing `SyntaxError` like real JS"
-      ],
       "seeAlso": ["regexp.literal", "regexp.sourceFlags", "regexp.uyd"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/RegExp" }
     },
@@ -210,16 +207,13 @@
       "id": "regexp.search",
       "name": "str.search(regexp)",
       "statusRow": "str.search(regexp)",
-      "signature": "str.search(regexp: RegExp): number",
-      "badge": "caveats",
-      "description": "Always searches from offset 0, restores .lastIndex afterward — invisible to later .exec()/.test() iteration, matching real JS exactly. Returns -1 on no match.",
+      "signature": "str.search(regexp: string | RegExp): number",
+      "badge": "supported",
+      "description": "Always searches from offset 0, restores .lastIndex afterward — invisible to later .exec()/.test() iteration, matching real JS exactly. A plain-string argument is coerced to a RegExp as in real JS (metacharacters interpreted). Returns -1 on no match.",
       "params": [{ "name": "regexp", "type": "RegExp", "desc": "The pattern to search for." }],
       "returns": { "type": "number", "desc": "Match offset, or -1." },
       "exampleKey": "regexp/regexp",
       "snippet": "console.log(\"hello world\".search(/world/)) // 6\nconsole.log(\"hello world\".search(/xyz/))   // -1",
-      "differences": [
-        "A plain-string argument falls back to the pre-`RegExp` `.indexOf()`-shaped behavior rather than coercing the string to a RegExp"
-      ],
       "seeAlso": ["regexp.split", "regexp.lastIndex"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/search" }
     },

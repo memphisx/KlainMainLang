@@ -216,6 +216,7 @@ type Token struct {
 	Type    TokenType
 	Literal string
 	Flags   string // regex literal flags only (Type == REGEX); empty for every other token
+	Raw     string // undecoded source text of a template segment (template tokens only); backs String.raw
 	Line    int
 	Col     int
 }

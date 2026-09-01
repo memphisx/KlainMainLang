@@ -511,10 +511,14 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 				p.match(lexer.SEMICOLON, lexer.COMMA)
 				continue
 			}
-			nameTok, err := p.expect(lexer.IDENT)
-			if err != nil {
-				return nil, err
+			// A property name is an IDENT or, mirroring the object-literal key
+			// grammar, a string/numeric literal (`{ "first-name": string }`,
+			// `{ 0: string }` — TDD-00154 follow-up); the field name is the
+			// token's literal text, matching what the object-literal side stores.
+			if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+				return nil, fmt.Errorf("%d:%d: expected property name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 			}
+			nameTok := p.advance()
 			// Method signature member `name(params): R` (optionally `name?`,
 			// optionally generic `name<T>(…)` with T erased — ADR-00469),
 			// TS shorthand for a function-typed property — desugared to
@@ -614,6 +618,32 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			ta.TypeofPath = append(ta.TypeofPath, seg.Literal)
 		}
 		return parseTrailingArrayBrackets(p, source, ta)
+	}
+
+	// Template literal type (`` `a-${T}` ``): parsed and resolved to `string`.
+	// The literal pattern isn't narrowed or enforced — the same simplification
+	// string-literal types already use (ADR-00561). A no-substitution
+	// `` `plain` `` is a bare string type; a `` `a-${T}-b` `` consumes each
+	// interpolated type and the surrounding TEMPLATE_MIDDLE/TAIL segments.
+	if tok.Type == lexer.TEMPLATE_NO_SUB {
+		p.advance()
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{Name: "string", Source: source})
+	}
+	if tok.Type == lexer.TEMPLATE_HEAD {
+		p.advance() // TEMPLATE_HEAD
+		for {
+			if _, err := p.parseTypeAnnotation(source); err != nil {
+				return nil, err
+			}
+			nxt := p.advance()
+			if nxt.Type == lexer.TEMPLATE_TAIL {
+				break
+			}
+			if nxt.Type != lexer.TEMPLATE_MIDDLE {
+				return nil, fmt.Errorf("%d:%d: malformed template literal type (expected `${...}` continuation, got %s)", nxt.Line, nxt.Col, nxt.Type)
+			}
+		}
+		return parseTrailingArrayBrackets(p, source, &ast.TypeAnnotation{Name: "string", Source: source})
 	}
 
 	// Accept identifier OR keyword-as-type (void, null, undefined, …)
@@ -838,10 +868,13 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 			continue
 		}
 
-		fieldTok, err := p.expect(lexer.IDENT)
-		if err != nil {
-			return nil, err
+		// A member name is an IDENT or a string/numeric literal (`"first-name":
+		// T`, `0: T`), mirroring the object-literal key grammar — TDD-00154
+		// follow-up.
+		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+			return nil, fmt.Errorf("%d:%d: expected member name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 		}
+		fieldTok := p.advance()
 
 		// Method signature (TDD-00009 Stage 4, for `implements` conformance
 		// checking): `name(...): T;` — no body, ever. A generic signature

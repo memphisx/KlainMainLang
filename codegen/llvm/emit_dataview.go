@@ -135,6 +135,7 @@ var dataViewAccessKinds = map[string]struct {
 	"Int8": {1, true, false, false}, "Uint8": {1, false, false, false},
 	"Int16": {2, true, false, false}, "Uint16": {2, false, false, false},
 	"Int32": {4, true, false, false}, "Uint32": {4, false, false, false},
+	"Float16": {2, true, true, false},
 	"Float32": {4, true, true, false}, "Float64": {8, true, true, false},
 	"BigInt64": {8, true, false, true}, "BigUint64": {8, false, false, true},
 }
@@ -272,6 +273,13 @@ func (e *Emitter) emitDataViewGet(mem *ast.MemberExpression, kind string, args [
 	e.emitInstr(fmt.Sprintf("%s = load i%d, ptr %s, align 1", raw, bits, elemPtr))
 	val := e.emitDataViewMaybeSwap(raw, spec.width, little)
 	if spec.float {
+		if spec.width == 2 {
+			h := e.freshReg()
+			f64 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = bitcast i16 %s to half", h, val))
+			e.emitInstr(fmt.Sprintf("%s = fpext half %s to double", f64, h))
+			return Value{Ref: f64, Ty: TypeF64}, nil
+		}
 		if spec.width == 4 {
 			f32 := e.freshReg()
 			f64 := e.freshReg()
@@ -344,7 +352,12 @@ func (e *Emitter) emitDataViewSet(mem *ast.MemberExpression, kind string, args [
 		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", narrow, unwrap, rawVal.Ref))
 	} else if spec.float {
 		f := e.coerce(rawVal, TypeF64)
-		if spec.width == 4 {
+		if spec.width == 2 {
+			h := e.freshReg()
+			narrow = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fptrunc double %s to half", h, f.Ref))
+			e.emitInstr(fmt.Sprintf("%s = bitcast half %s to i16", narrow, h))
+		} else if spec.width == 4 {
 			f32 := e.freshReg()
 			narrow = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fptrunc double %s to float", f32, f.Ref))

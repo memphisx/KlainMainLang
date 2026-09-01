@@ -35,10 +35,11 @@
             "feature": "`crypto.getRandomValues(view)`",
             "status": "implemented",
             "caveats": [
-              "The spec's 65536-byte quota and integer-TypedArray-only restriction aren't enforced (float TypedArrays and whole `ArrayBuffer`s are accepted, oversize fills succeed)"
+              "A whole `ArrayBuffer` is accepted as a deliberate extension (real JS throws `TypeMismatchError` — only integer TypedArrays are spec-legal) ([ADR-00554](../adr/ADR-00554.md))"
             ],
             "notes": [
-              "Fills any TypedArray/`ArrayBuffer` in place and returns it ([ADR-00317](../adr/ADR-00317.md)); the legacy plain-`number[]` form (one random byte value per element) still works",
+              "The spec's 65,536-byte quota is enforced — an oversize view throws `QuotaExceededError`; a float TypedArray (`Float32Array`/`Float64Array`) is a compile-time rejection, matching the spec's `TypeMismatchError` ([ADR-00554](../adr/ADR-00554.md))",
+              "Fills any integer TypedArray/`ArrayBuffer` in place and returns it ([ADR-00317](../adr/ADR-00317.md)); the legacy plain-`number[]` form (one random byte value per element) still works",
               "See [ADR-00024](../adr/ADR-00024.md)"
             ]
           },
@@ -117,7 +118,7 @@
             "caveats": [
               "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
               "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
-              "`randomBytes`'s callback form is a clean rejection (use the returned Buffer)",
+              "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails) ([ADR-00590](../adr/ADR-00590.md))",
               "A namespace import's binding covers these five members only — `crypto.subtle` is reached via the ambient global, not the module"
             ],
             "notes": [

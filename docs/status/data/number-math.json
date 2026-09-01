@@ -53,10 +53,8 @@
           {
             "feature": "`Number.parseFloat(s)`",
             "status": "implemented",
-            "caveats": [
-              "Inherits `strtod`'s C hex-float parsing — `\"0x10\"` → `16`, where real JS reads only the leading `0` ([ADR-00287](../adr/ADR-00287.md))"
-            ],
             "notes": [
+              "A `\"0x10\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))",
               "A no-conversion input returns a real `NaN` via the endptr check; only the exact word `\"Infinity\"` parses to `Infinity` (`\"inf\"` → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
             ]
           },
@@ -103,33 +101,29 @@
             "feature": "`Number.prototype.toString(radix?)`",
             "status": "implemented",
             "caveats": [
-              "Truncates a non-integer receiver to its integer part first (real JS renders fractional digits)",
-              "Radix trusted, not validated (real JS throws a `RangeError` for an out-of-range radix)",
-              "Minor cosmetic deviations from real JS, the same `sprintf`-based exponent padding as the two rows below ([ADR-00065](../adr/ADR-00065.md))"
+              "For a **non-power-of-two** base a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits; base 10 (and any power-of-two base) are exact ([ADR-00566](../adr/ADR-00566.md))"
             ],
             "notes": [
-              "Hand-rolled digit loop"
+              "A fractional receiver now renders fractional digits: the default/`radix 10` form delegates to `String(x)` (shortest round-trip decimal), and any other base runs a hand-rolled integer-part digit loop plus a repeated-multiply fractional expansion — bit-exact to V8 for a power-of-two base ([ADR-00566](../adr/ADR-00566.md))",
+              "A radix outside 2..36 throws a `RangeError` as in real JS ([ADR-00552](../adr/ADR-00552.md))"
             ]
           },
           {
             "feature": "`Number.prototype.toPrecision(n)`",
             "status": "implemented",
             "caveats": [
-              "Exponent pads to 2 digits — `e+05` vs real JS's `e+5` ([ADR-00065](../adr/ADR-00065.md))"
+              "Chooses exponential vs fixed notation at C `%g`'s threshold (exponent < -4) rather than JS's (exponent < -6), so a small magnitude like `0.0000123` renders `\"1.23e-5\"` where real JS gives `\"0.0000123\"` ([ADR-00065](../adr/ADR-00065.md))"
             ],
             "notes": [
-              "`sprintf(\"%#.*g\", ...)`",
+              "`sprintf(\"%#.*g\", ...)`; the exponent is normalized to JS's minimum-digit form (`e+5`, not `e+05`), and exact halfway-tie rounding may differ from JS (glibc round-half-to-even) ([ADR-00551](../adr/ADR-00551.md)/[ADR-00065](../adr/ADR-00065.md))",
               "The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md))"
             ]
           },
           {
             "feature": "`Number.prototype.toExponential(n)`",
             "status": "implemented",
-            "caveats": [
-              "Same exponent-padding deviation — `e+05` vs `e+5` ([ADR-00065](../adr/ADR-00065.md))"
-            ],
             "notes": [
-              "`sprintf(\"%.*e\", ...)`"
+              "`sprintf(\"%.*e\", ...)`; the exponent is normalized to JS's minimum-digit form (`1.23e+4`, not `1.23e+04`) ([ADR-00551](../adr/ADR-00551.md))"
             ]
           },
           {
@@ -142,10 +136,8 @@
           {
             "feature": "`parseFloat(s)` (global)",
             "status": "implemented",
-            "caveats": [
-              "Same `strtod` C hex-float parsing as `Number.parseFloat(s)` above — `\"0x10\"` → `16` ([ADR-00287](../adr/ADR-00287.md))"
-            ],
             "notes": [
+              "Same `__kml_strtod_parsefloat` wrapper as `Number.parseFloat(s)` above — a `\"0x10\"` hex prefix reads only its leading `0` → `0` ([ADR-00545](../adr/ADR-00545.md))",
               "No-conversion input → real `NaN`; only the exact word `\"Infinity\"` parses to `Infinity` ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
             ]
           },

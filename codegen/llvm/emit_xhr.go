@@ -97,13 +97,24 @@ func (e *Emitter) xhrStoreField(objVal Value, fieldName string, val Value) {
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, val.Ref, gep, fieldTy.Align()))
 }
 
-// emitXHROpen implements xhr.open(method, url): records method/url into the
-// hidden fields send() reads later, resets the accumulated headers map (a
-// fresh open() call starts clean, matching the real spec), and transitions
-// readyState 0 (UNSENT) -> 1 (OPENED), firing onreadystatechange.
+// emitXHROpen implements xhr.open(method, url, async?, user?, password?):
+// records method/url into the hidden fields send() reads later, resets the
+// accumulated headers map (a fresh open() call starts clean, matching the
+// real spec), and transitions readyState 0 (UNSENT) -> 1 (OPENED), firing
+// onreadystatechange.
+//
+// The optional 3rd argument is `async`. send() is already synchronous
+// underneath (fetch_async + await_fetch_settled — see this file's header),
+// so `async === false` maps exactly onto that behavior: a genuine blocking
+// request, the primitive a closed-loop load generator needs. `async === true`
+// currently also blocks in send() — there is no main-thread event loop to
+// dispatch a deferred onload off — so it is a documented narrowing rather
+// than a fake async. The optional 4th/5th `user`/`password` args are
+// evaluated (for their side effects) but not yet wired to curl auth, also a
+// documented narrowing (see docs/status/NETWORKING.md and ADR-00615).
 func (e *Emitter) emitXHROpen(objExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: xhr.open() requires 2 arguments (method, url)", pos.Line, pos.Col)
+	if len(args) < 2 || len(args) > 5 {
+		return Value{}, fmt.Errorf("%d:%d: xhr.open() takes 2 to 5 arguments (method, url, async?, user?, password?)", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
@@ -119,6 +130,14 @@ func (e *Emitter) emitXHROpen(objExpr ast.Expression, args []ast.Expression, pos
 		return Value{}, err
 	}
 	urlVal = e.coerce(urlVal, TypePtr)
+
+	// Evaluate any async/user/password arguments so their side effects occur,
+	// even though behavior is synchronous regardless (see the doc comment).
+	for i := 2; i < len(args); i++ {
+		if _, err := e.emitExpr(args[i]); err != nil {
+			return Value{}, err
+		}
+	}
 
 	e.xhrStoreField(objVal, XHRMethodField, methodVal)
 	e.xhrStoreField(objVal, XHRURLField, urlVal)

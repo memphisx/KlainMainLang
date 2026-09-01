@@ -17,6 +17,21 @@ console.log(pattern.test("not a url"))
 `, "/books/:id\n*\ntrue\nfalse\nfalse")
 }
 
+// ADR-00585: URLPattern matches username/password components.
+func TestE2EURLPatternUserPass(t *testing.T) {
+	assertOutput(t, `
+const p = new URLPattern({ username: "admin", pathname: "/books/:id" })
+console.log(p.username)
+console.log(p.test("http://admin@example.com/books/5"))
+console.log(p.test("http://guest@example.com/books/5"))
+const m = p.exec("http://admin@example.com/books/42")
+if (m !== null) { console.log(m.get("id")) }
+const p2 = new URLPattern({ password: "secret" })
+console.log(p2.test("http://u:secret@x.com/"))
+console.log(p2.test("http://u:wrong@x.com/"))
+`, "admin\ntrue\nfalse\n42\ntrue\nfalse")
+}
+
 func TestE2EURLPatternExecGroups(t *testing.T) {
 	assertOutput(t, `
 const pattern = new URLPattern({ pathname: "/books/:id" })

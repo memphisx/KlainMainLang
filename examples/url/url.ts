@@ -26,12 +26,37 @@ console.log(bare.port)    // (empty)
 console.log(bare.search)  // (empty)
 console.log(bare.hash)    // (empty)
 
+// A second argument is a base against which a relative URL is resolved
+// (curl's own relative resolution) — an absolute first argument overwrites
+// the base, an invalid base throws.
+console.log(new URL("/p?x=1", "http://host.com/a/b").href)  // http://host.com/p?x=1
+console.log(new URL("page", "http://host.com/dir/").href)   // http://host.com/dir/page
+console.log(new URL("../up", "http://host.com/a/b/c").pathname)  // /a/up
+
 // A malformed URL throws a catchable Error rather than crashing.
 try {
   new URL("not a url")
 } catch (e) {
   console.log(e.message)  // Invalid URL
 }
+
+// ── component setters: re-parse and re-derive every field ───────────────────
+// Every settable component (href/protocol/host/hostname/port/pathname/search/
+// hash/username/password) re-parses the URL under the hood, so the derived
+// fields — and href/origin — never desync.
+const w = new URL("http://example.com/path")
+w.username = "alice"
+w.password = "secret"
+console.log(w.username)  // alice
+console.log(w.href)      // http://alice:secret@example.com/path
+
+// The combined `host` splits on the first ':' into hostname + port; a value
+// with no port keeps the existing one (matching Node).
+w.host = "api.example.com:9090"
+console.log(w.hostname)  // api.example.com
+console.log(w.port)      // 9090
+w.host = "cdn.example.com"
+console.log(w.host)      // cdn.example.com:9090 (port preserved)
 
 // ── searchParams: URL's own query string as a live URLSearchParams ──────────
 console.log(u.searchParams.get("x"))       // 1

@@ -26,13 +26,12 @@
           {
             "feature": "`URL`",
             "status": "implemented",
-            "caveats": [
-              "`new URL(url)` — single-argument form only, no base-URL resolution",
-              "Component *setters* (`url.href = …`, `url.hash = …`) are clean rejections — a bare field store would desync the derived components; construct a new URL ([ADR-00465](../adr/ADR-00465.md))"
-            ],
             "notes": [
               "Parses via libcurl's URL API (`curl_url`/`curl_url_set`/`curl_url_get`) rather than a hand-rolled parser — the same \"reuse the already-linked C library\" approach `fetch` established",
-              "Fields: `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams` — all plain reads via the ordinary object field-access path, no dispatched methods",
+              "`new URL(url, base)` resolves a relative `url` against `base` ([ADR-00579](../adr/ADR-00579.md)) — curl's own relative resolution: an absolute `url` overwrites `base`, and an invalid `base` throws (\"Invalid URL\"), matching Node",
+              "Component **setters** (`url.hash = …`, `url.protocol = …`, etc.) re-parse the URL and re-derive every field so the components never desync ([ADR-00572](../adr/ADR-00572.md)): marker normalization matches Node (`#`/`?` on hash/search, a trailing `:` on protocol are tolerated); an invalid `href` assignment throws, the other setters silently ignore an invalid value (Node's own behavior); `searchParams` re-populates from the new query",
+              "Setters cover `href`/`protocol`/`host`/`hostname`/`port`/`pathname`/`search`/`hash`/`username`/`password` ([ADR-00577](../adr/ADR-00577.md)); `host` splits on the first `:` into hostname + port, and a value with no port keeps the existing port (Node's own behavior)",
+              "Fields: `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `username`, `password`, `searchParams` — all plain reads via the ordinary object field-access path, no dispatched methods",
               "A part absent from the URL (no port/query/fragment) reads as `\"\"`, matching real `URL`'s own default",
               "Throws a catchable Error (\"Invalid URL\") on a malformed URL",
               "See [ADR-00076](../adr/ADR-00076.md)"
@@ -55,7 +54,7 @@
             "feature": "`URLPattern`",
             "status": "implemented",
             "caveats": [
-              "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash` — no constructor-string form, no `baseURL`, no `username`/`password` components",
+              "Object-literal init only, over `protocol`/`hostname`/`port`/`pathname`/`search`/`hash`/`username`/`password` ([ADR-00585](../adr/ADR-00585.md)) — no constructor-string form, no `baseURL`",
               "Pattern grammar is literals, `\\` escapes, `*`, `:name`, and `:name?` — `{}` groups, `+` modifiers, and inline `(regex)` groups throw a `TypeError` at construction",
               "`.exec()` returns a merged `Map<string, string> \\| null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model ([TDD-00068](../tdd/TDD-00068.md))",
               "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"

@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
-  "coverage": { "loose": "16/17", "loosePct": 94, "strict": "8/17", "strictPct": 47 },
+  "coverage": { "loose": "16/17", "loosePct": 94, "strict": "9/17", "strictPct": 53 },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
   "entries": [
     {
@@ -111,13 +111,13 @@
     {
       "id": "fs.rmdirSync",
       "name": "fs.rmdirSync(path)",
-      "statusRow": "fs.rmdirSync(path)",
-      "signature": "rmdirSync(path: string): void",
-      "badge": "caveats",
-      "description": "Removes an empty directory via POSIX rmdir() — deliberately directory-only (fails on a plain file, unlike unlinkSync).",
+      "statusRow": "fs.rmdirSync(path[, { recursive: true }])",
+      "signature": "rmdirSync(path: string, options?: { recursive: true }): void",
+      "badge": "exact",
+      "description": "Removes an empty directory via POSIX rmdir() — deliberately directory-only (fails on a plain file, unlike unlinkSync). With { recursive: true } it removes the whole tree (routing to rmSync's recursive removal); Node deprecated the option here in favor of rmSync but still honors it.",
       "returns": { "type": "void", "desc": "Nothing." },
       "differences": [
-        "No recursive-delete option, matching `mkdirSync`'s lack of one."
+        "Options are the literal `{ recursive: true }` only; a missing path still throws (no `force`)."
       ],
       "seeAlso": ["fs.mkdirSync", "fs.unlinkSync"],
       "spec": { "mdn": "https://nodejs.org/api/fs.html#fsrmdirsyncpath-options" }
@@ -201,12 +201,12 @@
       "statusRow": "fs.statSync(path) / fs.lstatSync(path)",
       "signature": "statSync(path: string): Stats",
       "badge": "caveats",
-      "description": "Reads file metadata into a Stats object. lstatSync does not follow a final symlink. The Stats value carries size and modified-time plus the type predicates.",
+      "description": "Reads file metadata into a Stats object. lstatSync does not follow a final symlink. The Stats value carries the full numeric surface — dev, mode, nlink, uid, gid, rdev, blksize, ino, size, blocks, atimeMs, mtimeMs, ctimeMs, birthtimeMs — plus the isFile()/isDirectory()/isSymbolicLink() predicates.",
       "params": [{ "name": "path", "type": "string", "desc": "Path to stat." }],
-      "returns": { "type": "Stats", "desc": "A Stats with size, mtimeMs, and isFile()/isDirectory()/isSymbolicLink()." },
+      "returns": { "type": "Stats", "desc": "A Stats with the numeric metadata fields and isFile()/isDirectory()/isSymbolicLink()." },
       "differences": [
-        "Only `size`, `mtimeMs`, and `isFile()`/`isDirectory()`/`isSymbolicLink()` are exposed — `mode`/`uid`/`atimeMs` and the rest of the Node Stats surface are not.",
-        "The Linux struct-stat field offsets are encoded but verified on macOS only so far."
+        "The Date-valued `atime`/`mtime`/`ctime`/`birthtime` accessors are not exposed — timestamps are integer-millisecond fields (`atimeMs` etc.) only.",
+        "`birthtimeMs` is 0 on Linux (glibc's struct stat has no creation time without statx); macOS reports the real value."
       ],
       "seeAlso": ["fs.existsSync"],
       "spec": { "mdn": "https://nodejs.org/api/fs.html#fsstatsyncpath-options" }

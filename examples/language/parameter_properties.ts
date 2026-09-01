@@ -15,3 +15,12 @@ const c = new City("Thessaloniki", 1030000, "GR", -315);
 console.log(c.describe());
 console.log(c.name);
 console.log(c.founded);
+
+// Parameter properties may carry defaults, and a default may reference an
+// earlier parameter (ADR-00599) — here countryCode defaults to "GR" and a
+// second constructor param can build on an earlier one.
+class Town {
+    constructor(public name: string, public countryCode: string = "GR") {}
+}
+const t = new Town("Katerini");
+console.log(t.name, t.countryCode);  // Katerini GR

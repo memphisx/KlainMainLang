@@ -87,6 +87,32 @@ try {
 `, "SyntaxError")
 }
 
+// TestE2ERegExpInvalidFlagsThrow: a duplicate flag ("gg") or an unrecognized
+// flag character ("z") throws a SyntaxError as in real JS, for both the
+// constructor and literal forms; a valid JS flag ("y") is accepted even though
+// its behavior isn't implemented here (ADR-00549).
+func TestE2ERegExpInvalidFlagsThrow(t *testing.T) {
+	assertOutput(t, `
+function tryFlags(f: string): void {
+  try {
+    const r = new RegExp("a", f)
+    console.log("ok")
+  } catch (e) {
+    console.log((e as Error).name)
+  }
+}
+tryFlags("gg")
+tryFlags("z")
+tryFlags("gi")
+try {
+  const lit = /a/mm
+  console.log("ok")
+} catch (e) {
+  console.log((e as Error).name)
+}
+`, "SyntaxError\nSyntaxError\nok\nSyntaxError")
+}
+
 func TestE2ERegExpInvalidCharacterClassThrows(t *testing.T) {
 	assertOutput(t, `
 try {
@@ -98,15 +124,18 @@ try {
 `, "SyntaxError")
 }
 
-func TestE2ERegExpUnknownFlagLetterIsPermissive(t *testing.T) {
-	// Unrecognized flag letters are silently ignored (permissive, matching
-	// atob/decodeURI's existing "malformed input" convention) rather than
-	// rejected — 'z' isn't a real JS regex flag at all.
+func TestE2ERegExpUnknownFlagLetterThrows(t *testing.T) {
+	// An unrecognized flag letter now throws a SyntaxError, matching real JS —
+	// 'z' isn't a valid JS regex flag (ADR-00549), superseding the earlier
+	// permissive silent-accept behavior.
 	assertOutput(t, `
-const r = new RegExp("abc", "z")
-console.log(r.flags)
-console.log(r.global)
-`, "z\nfalse")
+try {
+  const r = new RegExp("abc", "z")
+  console.log(r.flags)
+} catch (e) {
+  console.log((e as Error).name)
+}
+`, "SyntaxError")
 }
 
 // --- Stage 1: .test(str): boolean ---
@@ -600,11 +629,22 @@ console.log(g.lastIndex)
 }
 
 func TestE2EStringSearchPlainStringArgumentStillWorks(t *testing.T) {
-	// No regression to the pre-existing (pre-RegExp) .indexOf()-shaped
-	// behavior for a plain-string argument.
+	// A plain-string argument with no regex metacharacters still finds the
+	// first index, same as before (now via RegExp coercion — ADR-00548).
 	assertOutput(t, `
 console.log("hello world".search("world"))
 `, "6")
+}
+
+// TestE2EStringSearchCoercesPlainStringToRegExp: a non-RegExp argument is
+// coerced to a RegExp exactly as real JS does, so metacharacters are
+// interpreted rather than matched literally (ADR-00548).
+func TestE2EStringSearchCoercesPlainStringToRegExp(t *testing.T) {
+	assertOutput(t, `
+console.log("a.b".search("."))
+console.log("2024-01".search("[0-9]+"))
+console.log("abc".search("\\d"))
+`, "0\n0\n-1")
 }
 
 // TestE2ERegExpDialectModeMatrix exercises the -regex dialect modes

@@ -262,9 +262,9 @@
     {
       "id": "array.forEach",
       "name": ".forEach(fn)",
-      "signature": "forEach(fn: (x: T) => void): void",
+      "signature": "forEach(fn: (x: T, i?: number, arr?: T[]) => void): void",
       "badge": "exact",
-      "description": "Runs the callback for each element, for its side effects.",
+      "description": "Runs the callback for each element, for its side effects. The callback receives the element and, if declared, the index and the source array (a live view over the same backing).",
       "returns": { "type": "void", "desc": "Nothing." },
       "seeAlso": ["array.map"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/forEach" }
@@ -286,12 +286,11 @@
       "name": ".sort(fn?)",
       "signature": "sort(fn?: (a: T, b: T) => number): T[]",
       "badge": "caveats",
-      "description": "Sorts the array in place. A custom comparator returns a negative, zero, or positive number.",
+      "description": "Sorts the array in place. With no comparator the default is JS-faithful — elements are stringified and compared lexicographically, so `[10,1,21,2].sort()` is `[1,10,2,21]`; pass a comparator for a numeric sort. A custom comparator returns a negative, zero, or positive number.",
       "returns": { "type": "T[]", "desc": "The array, sorted in place." },
       "exampleKey": "arrays/sort",
       "snippet": "const desc: number[] = [3, 1, 4, 1, 5]\ndesc.sort((a: number, b: number) => b - a)   // [5,4,3,1,1]",
       "differences": [
-        "The no-comparator default sort is numeric, not real JS's actual default — real JS stringifies every element and compares lexicographically even for numbers, e.g. `[10,1,21,2].sort()` is `[1,10,2,21]` in real JS, `[1,2,10,21]` here.",
         "Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI qsort() trampoline with one fixed variant per element kind."
       ],
       "seeAlso": ["array.toSorted", "array.reverse"],

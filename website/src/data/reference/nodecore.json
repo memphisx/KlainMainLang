@@ -92,7 +92,7 @@
       "differences": [
         "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout; a connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event",
         "Server binds IPv4 `0.0.0.0` only (no `host`/`path`/options object on `listen`); `.address()` reports the **real** bound address/port via `getsockname` (`{ family: \"IPv4\", address, port }`) — for a server that's `0.0.0.0`, for a connected socket its real local IP (e.g. `127.0.0.1`). Because the bind is IPv4-native, an accepted socket reports `127.0.0.1` where Node's dual-stack default reports `::ffff:127.0.0.1`, and the server reports `IPv4`/`0.0.0.0` not `IPv6`/`::`",
-        "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); the IPC `{ path }` form is TCP-only-unsupported",
+        "`net.connect` accepts every positional arity (`(port)`, `(port, cb)`, `(port, host[, cb])`) and `{ port, host }` (host defaults to `localhost`); the IPC `{ path }` form connects to a Unix-domain socket (Mac-verified; Linux path-layout unverified)",
         "`on('listening')` fires when the server binds (registered before or after `listen()`); no `'error'`/`'close'`/`'connect'` events on server or socket yet",
         "`socket.setNoDelay`/`setKeepAlive` are real `setsockopt` calls; `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` are **accepted but no-ops** (the blocking read model has no separately-schedulable flow or idle timer, and a socket's chunk type already follows the listener's declared parameter type)",
         "No back-pressure: `.write` never returns `false` and there's no `'drain'` event",
@@ -104,11 +104,11 @@
     },
     {
       "id": "nodecore.dgram",
-      "name": "dgram (UDP sockets: createSocket('udp4'), bind, address(), on('message'), send, close)",
-      "statusRow": "dgram (UDP sockets: createSocket('udp4'), bind, address(), on('message'), send, close)",
-      "signature": "dgram.createSocket('udp4'); socket.bind(port); socket.send(msg, port, host)",
+      "name": "dgram (UDP sockets: createSocket('udp4'), bind, address(), setBroadcast(), on('message'), send, close)",
+      "statusRow": "dgram (UDP sockets: createSocket('udp4'), bind, address(), setBroadcast(), on('message'), send, close)",
+      "signature": "dgram.createSocket('udp4'); socket.bind(port); socket.setBroadcast(flag); socket.send(msg, port, host)",
       "badge": "caveats",
-      "description": "UDP sockets. Each socket's fd folds into the same select() event loop as net/child_process. 'message' fires with a Buffer and an rinfo { address, port }; send(msg, port, host) resolves host (name or IP) via the dns helper. msg/send payloads take a string/Buffer/ArrayBuffer/DataView.",
+      "description": "UDP sockets. Each socket's fd folds into the same select() event loop as net/child_process. 'message' fires with a Buffer and an rinfo { address, port }; send(msg, port, host) resolves host (name or IP) via the dns helper. .address() reports the real bound { address, family, port } via getsockname; .setBroadcast(flag) is a real setsockopt(SO_BROADCAST). msg/send payloads take a string/Buffer/ArrayBuffer/DataView.",
       "returns": { "type": "dgram.Socket", "desc": "A UDP socket handle." },
       "exampleKey": "dgram/echo",
       "snippet": "const server = dgram.createSocket('udp4');\nserver.on('message', (msg: Uint8Array, rinfo) => {\n  server.send('reply:' + dec.decode(msg), rinfo.port, rinfo.address);\n});\nserver.bind(9199);",
@@ -116,7 +116,7 @@
         "`udp4` only — no `udp6`",
         "No `'listening'`/`'error'` events, options object, or multicast",
         "Message listeners must be arrow/function-expression literals",
-        "`socket.send(msg, port, host)` positional form only — no `(msg, offset, length, port, address, cb)` form; no `.address()`/`.setBroadcast()`/`.setTTL()`/membership methods"
+        "`socket.send(msg, port, host)` positional form only — no `(msg, offset, length, port, address, cb)` form; no `.setTTL()`/membership methods"
       ],
       "seeAlso": ["nodecore.net", "nodecore.dns"],
       "spec": { "mdn": "https://nodejs.org/api/dgram.html" }
@@ -209,15 +209,15 @@
       "id": "nodecore.httpclient",
       "name": "http client (http.get/http.request)",
       "statusRow": "http client (http.get/http.request)",
-      "signature": "http.get(url, res => …); const req = http.request(opts); req.end()",
+      "signature": "http.get(url, res => …); const req = http.request(opts); req.write(body); req.end()",
       "badge": "caveats",
-      "description": "A libcurl-backed HTTP client with async event-loop delivery and contextually-typed callbacks (including test wrappers). Both http.get and http.request return a ClientRequest handle.",
+      "description": "A libcurl-backed HTTP client with async event-loop delivery and contextually-typed callbacks (including test wrappers). Both http.get and http.request return a ClientRequest handle, and a request can carry a body via req.write/req.end(body).",
       "returns": { "type": "ClientRequest", "desc": "A request handle; the response arrives via callback." },
       "differences": [
-        "GET only (no request bodies/method override — `req.end(body)` is a clean rejection); response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding`",
+        "Request bodies are supported: req.write(chunk) stages a string chunk (appending across calls) and req.end([body]) appends a final chunk before firing, paired with a method: \"POST\" option; response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding`",
         "Both calls return a ClientRequest handle: `request()` sends nothing until `.end()`; `.abort()`/`.destroy()` cancel only a not-yet-fired request (an in-flight transfer isn't torn down); `.on('error')` is accepted but never fired — transport failures throw instead",
         "`new http.Agent(options)`/`new https.Agent(options)` construct an inert token: recognized pool options are validated but configure nothing (one connection per request), `.destroy()` is a no-op, and `.sockets`/`.requests` reject cleanly",
-        "Options objects (literal **or variable-bound**) support `{ port, path, host/hostname, agent }`; `headers`/`method` are clean rejections",
+        "Options objects (literal **or variable-bound**) support `{ port, path, host/hostname, method, headers, agent }`; `headers` is literal-form-only",
         "`agent` is accepted and ignored — this client opens one connection per request (Node's own `agent: false` behavior); `new http.Agent(...)` itself is not implemented, and no pooling ever happens"
       ],
       "seeAlso": ["nodecore.https"],

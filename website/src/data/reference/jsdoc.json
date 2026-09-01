@@ -6,8 +6,8 @@
   "coversRows": "all",
   "coverageScope": "subset",
   "coverage": {
-    "loose": "34/37",
-    "strict": "8/37"
+    "loose": "35/37",
+    "strict": "9/37"
   },
   "lede": "JSDoc here is a real typing surface, not decoration: the type body of a tag is parsed by the same type parser an inline annotation uses, so a comment can supply a type where nothing else does. The recurring divergence is deliberate erasure — the class/access tags (@readonly, @private, @override, @satisfies, @enum, @implements) are accepted and stripped without enforcement, matching how this compiler already erases the inline TS keywords they mirror; enforcing only the doc-comment spelling would be backwards. @param/@returns/@typedef/@template do the load-bearing work but never override an inline type, and two legacy function-as-constructor tags (@import, @constructor) are out of scope in favor of real class declarations.",
   "entries": [
@@ -554,11 +554,8 @@
       "name": "Object.<K, V> (index map)",
       "statusRow": "Object.<K, V> (index map)",
       "signature": "{Object.<K, V>}",
-      "badge": "missing",
-      "description": "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported, so it compiles only where a `Record` would.",
-      "differences": [
-        "Normalized to `Record<K, V>`, but per-key field/index access on a `Record` isn't supported (index signatures are a separate ❌), so it compiles only where a `Record` would"
-      ],
+      "badge": "supported",
+      "description": "Normalized to `Record<K, V>`, backed by real index-signature support — per-key read/write (`d[key]`) works, e.g. `@type {Object.<string, number>}` on a dictionary object.",
       "seeAlso": [
         "jsdoc.objectshape"
       ],

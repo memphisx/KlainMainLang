@@ -90,7 +90,7 @@
         {
           "category": "Number / Math",
           "pageFile": "NUMBER-MATH.md",
-          "caveats": "• `parseInt` has no hex auto-detect with an omitted radix; `parseFloat` inherits `strtod`'s `\"inf\"`/hex-float extras<br>• `Number.prototype.toString(radix?)` truncates a non-integer receiver and doesn't validate the radix"
+          "caveats": "• `Number.prototype.toString(radix?)` renders fractional digits, but a non-power-of-two repeating fraction is capped at 1100 digits and its trailing digits can differ from V8 (base 10 / power-of-two bases are exact)"
         },
         {
           "category": "Object & collections",
@@ -115,7 +115,7 @@
         {
           "category": "Type system features",
           "pageFile": "TYPE-SYSTEM.md",
-          "caveats": "• Type assertions (`as T`/`as const`/`satisfies`) and the `readonly T[]` array/tuple modifier parse and run but are **erased** — they don't re-type the expression or enforce immutability ([ADR-00371](../adr/ADR-00371.md)/[ADR-00373](../adr/ADR-00373.md))<br>• `typeof` type queries, ambient `declare` declarations, and string index signatures (`{ [k: string]: T }`) are supported ([ADR-00389](../adr/ADR-00389.md)/[ADR-00388](../adr/ADR-00388.md)/[ADR-00390](../adr/ADR-00390.md)); **template literal types** remain the last parse-level ❌ in this category<br>• Generics support object/interface/class type arguments ([TDD-00069](../tdd/TDD-00069.md)) and `<T extends X>` constraints ([TDD-00113](../tdd/TDD-00113.md)); a *function*'s type arguments are inference-only (no explicit `identity<number>(5)`), and Map/Set/Promise/closure type arguments are a clean rejection ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md))<br>• Union types (beyond `T \\| null`) allow scalar members, object members (one object member, or ≥2 as a discriminated union with a first-position string-literal tag), and a `ReadableStream` member; usable as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)) but not yet as an **array element**; flow narrowing (`typeof`/truthiness/`==null`/`tag===lit`, if-else + early-return) works for a union local or field ([TDD-00043](../tdd/TDD-00043.md)/[TDD-00114](../tdd/TDD-00114.md)/[TDD-00115](../tdd/TDD-00115.md)/[TDD-00116](../tdd/TDD-00116.md))<br>• Tuple types are fixed-shape structs ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md))<br>• Intersection types are object-members-only, with a field conflict rejected rather than the `-compat=js` `never`-field ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))<br>• Mapped & utility types are evaluated to concrete object types; `Partial`/`Required`/`Readonly` are structural no-ops, no `as` remapping ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))<br>• Conditional types + `infer` evaluate at compile time (monomorphized check type); `infer` is scoped to Array/Promise/bare forms, no function-signature inference ([ADR-00231](../adr/ADR-00231.md))"
+          "caveats": "• Type assertions (`as T`/`as const`/`satisfies`) and the `readonly T[]` array/tuple modifier parse and run but are **erased** — they don't re-type the expression or enforce immutability ([ADR-00371](../adr/ADR-00371.md)/[ADR-00373](../adr/ADR-00373.md))<br>• `typeof` type queries, ambient `declare` declarations, and string index signatures (`{ [k: string]: T }`) are supported ([ADR-00389](../adr/ADR-00389.md)/[ADR-00388](../adr/ADR-00388.md)/[ADR-00390](../adr/ADR-00390.md)); **template literal types** parse but erase to `string` ([ADR-00561](../adr/ADR-00561.md))<br>• Generics support object/interface/class type arguments ([TDD-00069](../tdd/TDD-00069.md)) and `<T extends X>` constraints ([TDD-00113](../tdd/TDD-00113.md)); a *function*'s type arguments are inference-only (no explicit `identity<number>(5)`), and Map/Set/Promise/closure type arguments are a clean rejection ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md))<br>• Union types (beyond `T \\| null`) allow scalar members, object members (one object member, or ≥2 as a discriminated union with a first-position string-literal tag), and a `ReadableStream` member; usable as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)) but not yet as an **array element**; flow narrowing (`typeof`/truthiness/`==null`/`tag===lit`, if-else + early-return) works for a union local or field ([TDD-00043](../tdd/TDD-00043.md)/[TDD-00114](../tdd/TDD-00114.md)/[TDD-00115](../tdd/TDD-00115.md)/[TDD-00116](../tdd/TDD-00116.md))<br>• Tuple types are fixed-shape structs ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md))<br>• Intersection types are object-members-only, with a field conflict rejected rather than the `-compat=js` `never`-field ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))<br>• Mapped & utility types are evaluated to concrete object types; `Partial`/`Required`/`Readonly` are structural no-ops, no `as` remapping ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))<br>• Conditional types + `infer` evaluate at compile time (monomorphized check type); `infer` is scoped to Array/Promise/bare forms, no function-signature inference ([ADR-00231](../adr/ADR-00231.md))"
         },
         {
           "category": "Classes / OOP",
@@ -130,7 +130,7 @@
         {
           "category": "JSDoc type expressions",
           "pageFile": "JSDOC.md",
-          "caveats": "• JSDoc type strings are parsed by the real type parser ([TDD-00125](../tdd/TDD-00125.md) Stage 4): union, nullable `?T`, non-null `!T`, `*`, inline object shapes, `Array.<T>`, `function(...)` types, and `import(\"./m\").T` references all resolve. Only `Object.<K,V>` stays ❌ (normalizes to `Record`, which has no per-key field access — blocked on index signatures)"
+          "caveats": "• JSDoc type strings are parsed by the real type parser ([TDD-00125](../tdd/TDD-00125.md) Stage 4): union, nullable `?T`, non-null `!T`, `*`, inline object shapes, `Array.<T>`, `function(...)` types, and `import(\"./m\").T` references all resolve. `Object.<K,V>` normalizes to `Record<K,V>` and now works end-to-end (per-key read/write) on top of index-signature support ([ADR-00557](../adr/ADR-00557.md))"
         },
         {
           "category": "Modules",
@@ -256,7 +256,7 @@
         {
           "category": "`os`",
           "pageFile": "OS.md",
-          "caveats": "• Verified on Linux and Apple Silicon (M4 Pro)<br>• Darwin `os.cpus()` reports `speed` 0 on M-series (no fixed clock — matches Node) and has no `irq` tick bucket — see [OS.md](OS.md)'s Known Limitations"
+          "caveats": "• Verified on Linux and Apple Silicon (M4 Pro)"
         },
         {
           "category": "`events` (`EventEmitter`)",

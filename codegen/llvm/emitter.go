@@ -91,6 +91,15 @@ type Emitter struct {
 	// capture cell by loading the still-uninitialized slot — see
 	// promoteCaptureToCell.
 	varsBeingInitialized  map[string]bool
+	// hoistedCaptures names the current function body's own locals/params that
+	// are captured by some nested closure. Such a variable is heap-boxed eagerly
+	// at its dominating declaration point (params: at function entry) rather than
+	// lazily at the capturing closure's construction site — which may sit inside a
+	// conditional block that doesn't dominate a later read of the box, producing
+	// invalid "instruction does not dominate all uses" IR. Installed (saved/
+	// restored) per function body, exactly like e.allocas. See capturedLocalNames
+	// and boxHoistedCapture.
+	hoistedCaptures       map[string]bool
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
@@ -121,6 +130,8 @@ type Emitter struct {
 	usedCalloc            bool
 	usedRealloc           bool
 	usedMemmove           bool
+	usedStripExpZeros     bool
+	usedTableHelpers      bool
 	funcs                 map[string]FuncSig            // registered function signatures
 	interfaces            map[string]Type               // named interface, type alias, and class registry
 	interfaceMethodSigs   map[string]map[string]FuncSig // interface name → method name → signature (TDD-00009 Stage 4, `implements` conformance only — not used for dispatch)
@@ -198,7 +209,33 @@ type Emitter struct {
 	// pushNestedFuncScope. Purely syntactic, since pre-scan runs before the
 	// enclosing scope's params/locals are define()d.
 	enclosingCapturables []map[string]bool
-	usedStrlen           bool
+	// activeForLoopVars is the set of C-style `for (let i …)` loop-variable
+	// names whose loop body is currently being emitted (TDD-00152). A
+	// block-nested `function` capturing one of these is rejected cleanly: the
+	// loop variable lives in a single alloca reused across iterations, so a
+	// closure over it would share the counter cell and corrupt the loop —
+	// the same per-iteration-binding limitation arrows hit. Pushed by emitFor
+	// around its body, so a nested declaration one or more blocks deeper sees it.
+	activeForLoopVars []map[string]bool
+	// objLitClassCtr names each synthetic anonymous class an object literal
+	// with getters/setters is lowered to (TDD-00153) — one per literal site.
+	// objLitClasses maps each such literal to its synthetic class name (so the
+	// type inferred for the variable slot matches the emitted value);
+	// objLitEmitted tracks which synthetic classes' method bodies were emitted.
+	objLitClassCtr int
+	objLitClasses  map[*ast.ObjectLiteral]string
+	objLitEmitted  map[string]bool
+	// currentCtorClass is the class whose constructor body is being emitted
+	// (TDD-00154), or "" outside any constructor — a write to a `readonly` field
+	// is allowed only when this equals the field's declaring class.
+	currentCtorClass string
+	usedStrlen     bool
+	usedStrchr           bool
+	// inspectDepthCap overrides the inspector's default recursion cap for the
+	// duration of a single console.dir call; inspectDepthSet gates it (so a valid
+	// depth of 0 is distinguishable from "no override").
+	inspectDepthCap int
+	inspectDepthSet bool
 	usedIsatty           bool
 	usedTermiosRaw       bool // TDD-00031: process.stdin.setRawMode termios machinery
 	usedWinSize          bool // TDD-00031: process.stdout.columns/.rows ioctl(TIOCGWINSZ)
@@ -211,6 +248,7 @@ type Emitter struct {
 	usedSprintf          bool
 	usedStrstr           bool
 	usedStrncmp          bool
+	usedStrncasecmp      bool
 	usedStringTrim       bool
 	usedStringTrimStart  bool
 	usedStringTrimEnd    bool
@@ -256,6 +294,7 @@ type Emitter struct {
 	usedProcessUptime      bool
 	usedProcessHrtime      bool
 	usedGetrusage          bool
+	usedCurrentRSS         bool
 	usedProcessLifecycle   bool
 	usedTestRuntime        bool // TDD-00122: the `test` module's mustCall registry + exit verifier
 	testTrampolines        map[string]bool
@@ -298,15 +337,15 @@ type Emitter struct {
 	// usedWebview links the C++ system-webview binding (TDD-00142);
 	// webviewConstructed enforces one-window-per-process; webviewThunkCtr
 	// numbers the per-bind trampolines.
-	usedWebview                bool
-	webviewConstructed         bool
-	webviewThunkCtr            int
+	usedWebview        bool
+	webviewConstructed bool
+	webviewThunkCtr    int
 	// usedSync links the klain:sync goroutine runtime (TDD-00143).
 	usedSync bool
 	// usesSyncProgram is set from prog.UsesKlainSync before body emission: the
 	// program imports klain:sync, so the safepoint-insertion pass emits
 	// cooperative preempt checks at function entry and loop back-edges.
-	usesSyncProgram bool
+	usesSyncProgram            bool
 	webviewPumpEmitted         bool
 	webviewReturnRunnerEmitted bool
 	// webviewTypedRunners caches per-inner-type async-typed-bind settlement
@@ -341,124 +380,127 @@ type Emitter struct {
 	// usedDiagChRuntime: diagnostics_channel pub/sub core.
 	usedDiagChRuntime bool
 	// nodeTestPrefix is the compile-time describe/suite name stack.
-	nodeTestPrefix           []string // the generic __kml_h2c_on_* IR callbacks http2.c references
-	usedAtomicsRuntime       bool
-	usedChanRuntime          bool
-	usedPipeDecl             bool
-	usedPthreadMutex         bool
-	usedWorkerFdSetbit       bool
-	bcChannels               map[string]*bcChannelInfo
-	usedPromiseCombinators   bool
-	usedPendingFinishSettled bool
-	usedFetchAwaitSettled    bool
-	usedCurlSlist            bool
-	usedCurlURL              bool
-	usedSQLite3              bool
-	sqliteUDFCtr             int
-	usedFopen                bool
-	usedFclose               bool
-	usedFwrite               bool
-	usedFsThrow              bool
-	usedFsReadFile           bool
-	usedFsReadFileRaw        bool
-	usedFsReadStream         bool
-	usedFread                bool
-	usedFsWriteStream        bool
-	usedTLS                  bool
-	usedTLSRuntime           bool
-	usedFsWriteFile          bool
-	usedFsAppendFile         bool
-	usedFsWriteFileBytes     bool
-	usedFsAppendFileBytes    bool
-	usedFsExists             bool
-	usedFsUnlink             bool
-	usedBase64Encode         bool
-	usedBase64Decode         bool
-	usedBase64Alphabet       bool
-	usedBase64EncodeBytes    bool
-	usedHexDigits            bool
-	usedHexDecodeTable       bool
-	usedEncodeURIComponent   bool
-	usedEncodeURI            bool
-	usedDecodeURIComponent   bool
-	usedDecodeURI            bool
-	usedCryptoRandomBytes    bool
-	usedCryptoFillNumArray   bool
-	usedCryptoRandomUUID     bool
-	usedReadLineSync         bool
-	usedExecFileSync         bool
-	usedProcessGetID         bool
-	usedChdirDecl            bool
-	usedPemFromDer           bool
-	cryptoSubtleAliases      map[string]bool
-	usedHTTPCThunk           bool
-	usedHTTPCBegin           bool
-	usedExecvDecl            bool
-	usedExecvpDecl           bool
-	usedExitRawDecl          bool
-	usedForkDecl             bool
-	usedCloseDecl            bool
-	usedWaitpidDecl          bool
-	usedMmapDecl             bool
-	usedShutdownDecl         bool
-	usedHTTPCloseAllConns    bool
-	usedStrHeaderRuntime     bool
-	usedSetenvDecl           bool
-	usedReadDecl             bool
-	usedWriteDecl            bool
-	usedFcntlDecl            bool
-	usedFflushDecl           bool
-	usedHTTPClusterFork      bool
-	usedProcessCwd           bool
-	usedProcessChdir         bool
-	usedGetpid               bool
-	usedExecPath             bool
-	usedProcessWarning       bool
-	usedHTTPClientReactions  bool
-	usedHTTPCFlushHook       bool // post-event-loop client-reaction flush hook global
-	usedNtohs                bool // shared ntohs libc declaration (net + dgram)
-	usedProcessKill          bool
-	usedSignalHandler        bool
-	usedSignalSigint         bool
-	usedSignalSigterm        bool
-	usedErrnoAccessor        bool
-	usedCryptoCheck          bool
-	usedCryptoDigest         bool
-	usedCryptoHmac           bool
-	usedCryptoMemeq          bool
-	usedCryptoAesGcm         bool
-	usedCryptoAesCbc         bool
-	usedCryptoB64url         bool
-	usedCryptoRsa            bool
-	usedCryptoEcdsa          bool
-	usedCryptoEcRaw          bool
-	usedCryptoJwkRsa         bool
-	usedCryptoJwkEc          bool
-	usedCryptoJwkMapSet      bool
-	usedCryptoDerive         bool
-	usedStrerror             bool
-	usedFsMkdir              bool
-	usedFsMkdirP             bool
-	usedUnsetenv             bool
-	usedSymbolRegistry       bool
-	usedFetchHeadersMap      bool
-	usedXHRHeadersAll        bool
-	usedFsStat               bool
-	usedFsLstat              bool
-	usedFsPathOps            bool
-	usedFsRm                 bool
-	usedFsFdOps              bool
-	usedFsRmdir              bool
-	usedFsRename             bool
-	usedFsReaddir            bool
-	usedConsoleGroupDepth    bool
-	usedConsoleTimer         bool
-	usedConsoleCountMap      bool
-	usedMapFree              bool
-	usedClosureFree          bool
-	usedTimers               bool
-	usedHTTP                 bool
-	usedHTTPClose            bool
+	nodeTestPrefix               []string // the generic __kml_h2c_on_* IR callbacks http2.c references
+	usedAtomicsRuntime           bool
+	usedChanRuntime              bool
+	usedPipeDecl                 bool
+	usedPthreadMutex             bool
+	usedWorkerFdSetbit           bool
+	bcChannels                   map[string]*bcChannelInfo
+	usedPromiseCombinators       bool
+	usedPendingFinishSettled     bool
+	usedFetchAwaitSettled        bool
+	usedCurlSlist                bool
+	usedCurlURL                  bool
+	usedSQLite3                  bool
+	sqliteUDFCtr                 int
+	usedFopen                    bool
+	usedFclose                   bool
+	usedFwrite                   bool
+	usedFsThrow                  bool
+	usedFsReadFile               bool
+	usedFsReadFileRaw            bool
+	usedFsReadStream             bool
+	usedFread                    bool
+	usedFsWriteStream            bool
+	usedTLS                      bool
+	usedTLSRuntime               bool
+	usedFsWriteFile              bool
+	usedFsAppendFile             bool
+	usedFsWriteFileBytes         bool
+	usedFsAppendFileBytes        bool
+	usedFsExists                 bool
+	usedFsUnlink                 bool
+	usedBase64Encode             bool
+	usedBase64Decode             bool
+	usedUtf8LabelCheck           bool
+	usedBase64Alphabet           bool
+	usedBase64EncodeBytes        bool
+	usedHexDigits                bool
+	usedHexDecodeTable           bool
+	usedEncodeURIComponent       bool
+	usedEncodeURI                bool
+	usedDecodeURIComponent       bool
+	usedDecodeURI                bool
+	usedDecodeURIComponentStrict bool
+	usedDecodeURIStrict          bool
+	usedCryptoRandomBytes        bool
+	usedCryptoFillNumArray       bool
+	usedCryptoRandomUUID         bool
+	usedReadLineSync             bool
+	usedExecFileSync             bool
+	usedProcessGetID             bool
+	usedChdirDecl                bool
+	usedPemFromDer               bool
+	cryptoSubtleAliases          map[string]bool
+	usedHTTPCThunk               bool
+	usedHTTPCBegin               bool
+	usedExecvDecl                bool
+	usedExecvpDecl               bool
+	usedExitRawDecl              bool
+	usedForkDecl                 bool
+	usedCloseDecl                bool
+	usedWaitpidDecl              bool
+	usedMmapDecl                 bool
+	usedShutdownDecl             bool
+	usedHTTPCloseAllConns        bool
+	usedStrHeaderRuntime         bool
+	usedSetenvDecl               bool
+	usedReadDecl                 bool
+	usedWriteDecl                bool
+	usedFcntlDecl                bool
+	usedFflushDecl               bool
+	usedHTTPClusterFork          bool
+	usedProcessCwd               bool
+	usedProcessChdir             bool
+	usedGetpid                   bool
+	usedExecPath                 bool
+	usedProcessWarning           bool
+	usedHTTPClientReactions      bool
+	usedHTTPCFlushHook           bool // post-event-loop client-reaction flush hook global
+	usedNtohs                    bool // shared ntohs libc declaration (net + dgram)
+	usedProcessKill              bool
+	usedSignalHandler            bool
+	usedSignalSigint             bool
+	usedSignalSigterm            bool
+	usedErrnoAccessor            bool
+	usedCryptoCheck              bool
+	usedCryptoDigest             bool
+	usedCryptoHmac               bool
+	usedCryptoMemeq              bool
+	usedCryptoAesGcm             bool
+	usedCryptoAesCbc             bool
+	usedCryptoB64url             bool
+	usedCryptoRsa                bool
+	usedCryptoEcdsa              bool
+	usedCryptoEcRaw              bool
+	usedCryptoJwkRsa             bool
+	usedCryptoJwkEc              bool
+	usedCryptoJwkMapSet          bool
+	usedCryptoDerive             bool
+	usedStrerror                 bool
+	usedFsMkdir                  bool
+	usedFsMkdirP                 bool
+	usedUnsetenv                 bool
+	usedSymbolRegistry           bool
+	usedFetchHeadersMap          bool
+	usedXHRHeadersAll            bool
+	usedFsStat                   bool
+	usedFsLstat                  bool
+	usedFsPathOps                bool
+	usedFsRm                     bool
+	usedFsFdOps                  bool
+	usedFsRmdir                  bool
+	usedFsRename                 bool
+	usedFsReaddir                bool
+	usedConsoleGroupDepth        bool
+	usedConsoleTimer             bool
+	usedConsoleCountMap          bool
+	usedMapFree                  bool
+	usedClosureFree              bool
+	usedTimers                   bool
+	usedHTTP                     bool
+	usedHTTPClose                bool
 	// usedHTTPListen marks the Node `http.createServer(...).listen(...)`
 	// bound-handle path (TDD-00131): unlike the bespoke `http.listen`, it does
 	// not run the event loop inline — `listen()` registers the listener and
@@ -568,9 +610,12 @@ type Emitter struct {
 	usedParseIntBase        bool
 	usedStrtod              bool
 	usedStrtodJS            bool
+	usedStrtodParseFloat    bool
 	usedGroupMapHelpers     bool
 	usedQsort               bool
 	usedSortCmpI64          bool
+	usedSortCmpI64Lex       bool
+	usedSortCmpF64Lex       bool
 	usedSortCmpF64          bool
 	usedSortCmpStr          bool
 	usedSortTrampolineI64   bool
@@ -612,6 +657,7 @@ type Emitter struct {
 	usedRegexCompile        bool
 	usedRegexCompileContext bool
 	usedRegexParseFlags     bool
+	usedRegexValidateFlags  bool
 	usedRegexMatch          bool
 	usedRegexUTF16Convert   bool
 	usedRegexUTF8Width      bool
@@ -1329,6 +1375,20 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		}
 		return MessagePortType(TypeI64)
 	}
+	// klain:sync `Channel<T>` as an annotation — so a channel passed as a
+	// function parameter or stored in a typed field still dispatches
+	// .send()/.receive()/.close() and `for..of` (all keyed on
+	// inferExprType(...).IsChannel), not just a top-level `new Channel` local
+	// (TDD-00143). Element type carried as ElemType or the generic TypeArgs.
+	if ta.Name == "Channel" {
+		if ta.ElemType != nil {
+			return ChannelType(e.resolveType(ta.ElemType))
+		}
+		if len(ta.TypeArgs) > 0 {
+			return ChannelType(e.resolveType(ta.TypeArgs[0]))
+		}
+		return ChannelType(TypeI64)
+	}
 	if ta.Name == "EventEmitter" && ta.ElemType != nil {
 		return EventEmitterType(e.resolveEventEmitterPayloadType(ta.ElemType))
 	}
@@ -1730,6 +1790,12 @@ entry:
 		e.emitInstr(fmt.Sprintf("call void @%s_staticinit()", name))
 	}
 
+	// Eager-boxing capture set for the top-level (main) body: its own locals
+	// captured by some nested closure are boxed at declaration (see
+	// hoistedCaptures). A top-level simple scalar promoted to a module global is
+	// excluded at the declaration site (emit_exprs_vardecl.go) — a global already
+	// dominates everything and is resolved directly, never captured.
+	e.hoistedCaptures = capturedLocalNames(prog.Body, nil)
 	for _, stmt := range prog.Body {
 		if _, ok := stmt.(*ast.FunctionDeclaration); ok {
 			continue

@@ -186,6 +186,12 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		return Value{Ref: r, Ty: TypeI64}, nil
 	case v.Ty.Float || v.Ty.IsInteger() || v.Ty.IR == "i64":
 		return v, nil
+	case v.Ty.IsBigInt:
+		// Number(bigint) → the nearest double (Infinity when out of range), like JS.
+		e.ensureBigInt()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_bigint_to_double(ptr %s)", r, v.Ref))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	case isStringTy(v.Ty):
 		e.ensureToNumber()
 		r := e.freshReg()
@@ -269,20 +275,22 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: parseFloat expects 1 argument", pos.Line, pos.Col)
 	}
-	e.ensureStrtodJS()
+	e.ensureStrtodParseFloat()
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	// A no-conversion input must give NaN (real JS), not strtod's bare 0 —
 	// endptr stays at the start of the string exactly in that case. Via
-	// __kml_strtod_js so a non-JS infinity spelling ("inf"/"infinity"/case
-	// variants) is rejected to NaN, while the exact word "Infinity" and a
-	// numeric overflow like "1e999" still parse to Infinity as real JS does.
+	// __kml_strtod_parsefloat so a non-JS infinity spelling ("inf"/"infinity"/
+	// case variants) is rejected to NaN and a "0x10" hex prefix reads only its
+	// leading "0" → 0 (real parseFloat, unlike Number/ToNumber), while the exact
+	// word "Infinity" and a numeric overflow like "1e999" still parse to
+	// Infinity as real JS does.
 	endSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @__kml_strtod_js(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_strtod_parsefloat(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
 	endPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
 	noDigits := e.freshReg()

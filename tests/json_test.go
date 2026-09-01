@@ -162,6 +162,20 @@ console.log(r.score)
 `, "line1\nok\n9.5")
 }
 
+// A bare reassignment `xs = JSON.parse(s)` projects against the binding's
+// declared type (array or object), not only a typed var-decl (ADR-00571).
+func TestE2EJSONParseBareReassignment(t *testing.T) {
+	assertOutput(t, `
+let xs: number[] = []
+xs = JSON.parse('[1,2,3]')
+console.log(xs.length, xs[0], xs[2])
+interface Pt { x: number; y: number }
+let p: Pt = { x: 0, y: 0 }
+p = JSON.parse('{"x":5,"y":9}')
+console.log(p.x, p.y)
+`, "3 1 3\n5 9")
+}
+
 func TestE2EJSONParseDeepNestingRejected(t *testing.T) {
 	// A pathologically deep document is rejected by the runtime depth guard as a
 	// SyntaxError rather than overflowing the parser's stack (TDD-00077).

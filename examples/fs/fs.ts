@@ -95,9 +95,12 @@ fs.unlinkSync(dir + '/a_copy.txt')
 fs.unlinkSync(dir + '/b.txt')
 console.log(fs.readdirSync(dir).length)   // 0 — empty again
 
-// rmdirSync removes an empty directory (no {recursive: true} option — it
-// only ever removes a directory that's already empty, just like mkdirSync
-// has no recursive-create option)
+// rmdirSync removes an empty directory; { recursive: true } removes the whole
+// tree (Node deprecated the option here in favor of rmSync but still honors it)
+fs.mkdirSync(dir + "/nested/deep", { recursive: true })
+fs.writeFileSync(dir + "/nested/deep/f.txt", "x")
+fs.rmdirSync(dir + "/nested", { recursive: true })
+console.log(fs.existsSync(dir + "/nested"))   // false — tree removed
 fs.rmdirSync(dir)
 console.log(fs.existsSync(dir))   // false — cleaned up
 

@@ -223,6 +223,37 @@ console.log(a.at(-1))
 `, "2\n150\n20\n2\n50\n10")
 }
 
+// ADR-00593: console.log of a whole TypedArray shows Node's TypeName(len) prefix.
+func TestE2ETypedArrayInspectPrefix(t *testing.T) {
+	assertOutput(t, `
+console.log(new Uint8Array([1, 2, 3]))
+console.log(new Int16Array([10, -20]))
+console.log(new Float32Array([1.5, 2.5]))
+console.log(new BigInt64Array([1n, 2n]))
+console.log(new Uint8Array(0))
+console.log([1, 2, 3])
+`, "Uint8Array(3) [ 1, 2, 3 ]\nInt16Array(2) [ 10, -20 ]\nFloat32Array(2) [ 1.5, 2.5 ]\nBigInt64Array(2) [ 1n, 2n ]\nUint8Array(0) []\n[ 1, 2, 3 ]")
+}
+
+// ADR-00592: compound element assignment on a bigint typed array.
+func TestE2EBigInt64ArrayCompoundAssign(t *testing.T) {
+	assertOutput(t, `
+const a = new BigInt64Array(3)
+a[0] = 10n
+a[0] += 5n
+a[1] = 100n
+a[1] -= 30n
+a[2] = 3n
+a[2] *= 4n
+console.log(a[0], a[1], a[2])
+const u = new BigUint64Array(1)
+u[0] = 8n
+u[0] += 2n
+console.log(u[0])
+console.log(u)
+`, "15n 70n 12n\n10n\nBigUint64Array(1) [ 10n ]")
+}
+
 // BigInt64Array/BigUint64Array (TDD-00101): raw i64/u64 storage, bigint
 // handles at the language boundary.
 func TestE2EBigInt64ArrayBasics(t *testing.T) {

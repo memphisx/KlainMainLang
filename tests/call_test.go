@@ -166,6 +166,18 @@ console.dir(42)
 `, "hello\n42")
 }
 
+// ADR-00583: console.dir honors the { depth } option (Node's util.inspect
+// nesting cap), rendering deeper values as [Object]. Default depth is 2.
+func TestE2EConsoleDirDepth(t *testing.T) {
+	assertOutput(t, `
+const o = { label: "x", mid: { inner: { v: 1 } } };
+console.dir(o);
+console.dir(o, { depth: 0 });
+console.dir(o, { depth: 1 });
+console.dir(o, { depth: null });
+`, "{ label: 'x', mid: { inner: { v: 1 } } }\n{ label: 'x', mid: [Object] }\n{ label: 'x', mid: { inner: [Object] } }\n{ label: 'x', mid: { inner: { v: 1 } } }")
+}
+
 func TestE2EConsoleDirWrongArgCountRejected(t *testing.T) {
 	_, err := parseAndCompile(`console.dir()`)
 	if err == nil {
@@ -192,6 +204,70 @@ console.timeEnd()
 	}
 	if !strings.HasPrefix(lines[1], "default: ") || !strings.HasSuffix(lines[1], "ms") {
 		t.Errorf("line 2: got %q, want prefix %q and suffix %q", lines[1], "default: ", "ms")
+	}
+}
+
+// console.table renders Node's Unicode box-drawing table — byte-for-byte the
+// same layout Node produces (verified against Node v26): an array of objects
+// gets one column per field, an array of primitives a single "Values" column,
+// and cells left-aligned with the column sized to its widest entry (ADR-00563).
+func TestE2EConsoleTableObjects(t *testing.T) {
+	got := compileAndRun(t, `console.table([{a: 1, b: 2}, {a: 30, b: 4}])`)
+	want := "┌─────────┬────┬───┐\n" +
+		"│ (index) │ a  │ b │\n" +
+		"├─────────┼────┼───┤\n" +
+		"│ 0       │ 1  │ 2 │\n" +
+		"│ 1       │ 30 │ 4 │\n" +
+		"└─────────┴────┴───┘"
+	if got != want {
+		t.Errorf("console.table(objects):\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestE2EConsoleTablePrimitivesAndStrings(t *testing.T) {
+	got := compileAndRun(t, `console.table([10, 20, 300]); console.table(["x", "longvalue"])`)
+	want := "┌─────────┬────────┐\n" +
+		"│ (index) │ Values │\n" +
+		"├─────────┼────────┤\n" +
+		"│ 0       │ 10     │\n" +
+		"│ 1       │ 20     │\n" +
+		"│ 2       │ 300    │\n" +
+		"└─────────┴────────┘\n" +
+		"┌─────────┬─────────────┐\n" +
+		"│ (index) │ Values      │\n" +
+		"├─────────┼─────────────┤\n" +
+		"│ 0       │ 'x'         │\n" +
+		"│ 1       │ 'longvalue' │\n" +
+		"└─────────┴─────────────┘"
+	if got != want {
+		t.Errorf("console.table(primitives):\n got %q\nwant %q", got, want)
+	}
+}
+
+// A non-array argument falls back to console.log, matching Node.
+func TestE2EConsoleTableFallback(t *testing.T) {
+	assertOutput(t, `console.table(42)`, "42")
+}
+
+func TestE2EConsoleTimePerLabel(t *testing.T) {
+	// Two concurrently-running labels track independent start times — the
+	// per-label backing map, not a single global slot. Both must print with
+	// their own label prefix and the "...ms" suffix.
+	got := compileAndRun(t, `
+console.time("outer")
+console.time("inner")
+console.timeEnd("inner")
+console.timeEnd("outer")
+`)
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines of output, got %d: %q", len(lines), got)
+	}
+	if !strings.HasPrefix(lines[0], "inner: ") || !strings.HasSuffix(lines[0], "ms") {
+		t.Errorf("line 1: got %q, want prefix %q and suffix %q", lines[0], "inner: ", "ms")
+	}
+	if !strings.HasPrefix(lines[1], "outer: ") || !strings.HasSuffix(lines[1], "ms") {
+		t.Errorf("line 2: got %q, want prefix %q and suffix %q", lines[1], "outer: ", "ms")
 	}
 }
 
@@ -386,10 +462,23 @@ console.log((0).toPrecision())
 }
 
 func TestE2ENumberToExponential(t *testing.T) {
+	// The exponent is rendered in JS's minimum-digit form (e+3, not e+03) —
+	// ADR-00551.
 	assertOutput(t, `
 console.log((1234).toExponential(2))
 console.log((0.0012345).toExponential(2))
-`, "1.23e+03\n1.23e-03")
+console.log((1).toExponential(0))
+console.log((123456).toExponential(3))
+`, "1.23e+3\n1.23e-3\n1e+0\n1.235e+5")
+}
+
+// TestE2ENumberToPrecisionExponentMinDigits: the exponential-notation branch of
+// toPrecision also renders its exponent in minimum-digit form (ADR-00551).
+func TestE2ENumberToPrecisionExponentMinDigits(t *testing.T) {
+	assertOutput(t, `
+console.log((123456).toPrecision(2))
+console.log((1234567).toPrecision(3))
+`, "1.2e+5\n1.23e+6")
 }
 
 func TestE2ENumberToStringRadix(t *testing.T) {
@@ -401,6 +490,38 @@ console.log((-255).toString(16))
 console.log((42).toString())
 console.log((35).toString(36))
 `, "ff\n11111111\n0\n-ff\n42\nz")
+}
+
+// A fractional receiver is no longer truncated (ADR-00566): base 10 (and the
+// no-arg form) delegate to the faithful shortest-decimal, and a power-of-two
+// base expands the fractional digits bit-exactly to V8.
+func TestE2ENumberToStringRadixFractional(t *testing.T) {
+	assertOutput(t, `
+console.log((255.5).toString())
+console.log((255.5).toString(10))
+console.log((255.5).toString(16))
+console.log((0.5).toString(2))
+console.log((3.75).toString(2))
+console.log((10.25).toString(16))
+console.log((0.1).toString(2))
+`, "255.5\n255.5\nff.8\n0.1\n11.11\na.4\n0.0001100110011001100110011001100110011001100110011001101")
+}
+
+// TestE2ENumberToStringRadixRangeError: a radix outside 2..36 throws a
+// RangeError, matching real JS (ADR-00552).
+func TestE2ENumberToStringRadixRangeError(t *testing.T) {
+	assertOutput(t, `
+function tryRadix(r: number): void {
+  try {
+    console.log((5).toString(r))
+  } catch (e) {
+    console.log((e as Error).name)
+  }
+}
+tryRadix(1)
+tryRadix(37)
+tryRadix(16)
+`, "RangeError\nRangeError\n5")
 }
 
 func TestE2EObjectHasOwn(t *testing.T) {
@@ -472,7 +593,10 @@ for (let i = 0; i < 200000; i++) { arr.push(i) }
 const t2: number = performance.now()
 console.log(arr.length)
 console.log(t2 >= t1)
-`, "200000\ntrue")
+// Origin is process start (ADR-00568), so the first reading is small, not the
+// raw seconds-since-boot CLOCK_MONOTONIC value.
+console.log(t1 >= 0 && t1 < 60000)
+`, "200000\ntrue\ntrue")
 }
 
 func TestE2EPerformanceMarkMeasure(t *testing.T) {
@@ -571,6 +695,26 @@ console.log(decodeURIComponent(encodeURIComponent("weird chars: <>{}[]")))
 `, "hello%20world\na%3Db%26c%3Dd\npath%2Fto%2Fthing%3Fx%3D1\nhello world\na=b&c=d\nweird chars: <>{}[]")
 }
 
+// The global decodeURIComponent/decodeURI throw a URIError on a malformed
+// escape (a lone/truncated `%`, or one not followed by two hex digits),
+// matching real JS (ADR-00556).
+func TestE2EDecodeURIMalformedThrows(t *testing.T) {
+	assertOutput(t, `
+function tryDec(s: string): void {
+  try {
+    console.log(decodeURIComponent(s))
+  } catch (e) {
+    console.log((e as Error).name)
+  }
+}
+tryDec("%")
+tryDec("%ZZ")
+tryDec("abc%2")
+tryDec("ok%20here")
+try { decodeURI("%G1") } catch (e) { console.log((e as Error).name) }
+`, "URIError\nURIError\nURIError\nok here\nURIError")
+}
+
 func TestE2EEncodeDecodeURIPreservesReservedChars(t *testing.T) {
 	assertOutput(t, `
 console.log(encodeURI("http://example.com/path?a=1&b=2 space"))
@@ -625,4 +769,29 @@ try { atob("we go!"); console.log("no throw"); } catch (e) { console.log(e.name)
 console.log(typeof DOMException);
 console.log(atob(btoa("round trip")));
 `, "InvalidCharacterError\nfunction\nround trip")
+}
+
+// WHATWG forgiving-base64 (ADR-00550): ASCII whitespace is stripped, missing
+// padding is tolerated (the trailing 2-/3-char group still decodes), and a
+// remaining length ≡ 1 (mod 4) throws InvalidCharacterError.
+func TestE2EAtobForgivingBase64(t *testing.T) {
+	assertOutput(t, `
+console.log(atob("SGVs bG8="))
+console.log(atob("SGVsbG8"))
+console.log(atob("YWI"))
+console.log(atob(""))
+try { atob("a"); console.log("no throw"); } catch (e) { console.log((e as Error).name); }
+`, "Hello\nHello\nab\n\nInvalidCharacterError")
+}
+
+// WHATWG forgiving-base64 (ADR-00563): after up-to-two trailing '=' are
+// stripped, an interior or excess '=' in the data region is a failure — real
+// atob accepts '=' only as trailing padding.
+func TestE2EAtobInteriorPaddingThrows(t *testing.T) {
+	assertOutput(t, `
+try { atob("a=b="); console.log("no throw"); } catch (e) { console.log((e as Error).name); }
+try { atob("ab==="); console.log("no throw"); } catch (e) { console.log((e as Error).name); }
+try { atob("=abc"); console.log("no throw"); } catch (e) { console.log((e as Error).name); }
+console.log(atob("aGVsbG8="))
+`, "InvalidCharacterError\nInvalidCharacterError\nInvalidCharacterError\nhello")
 }

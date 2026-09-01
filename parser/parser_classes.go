@@ -183,11 +183,12 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// when a member name follows; like the ctor-param form (ADR-00447)
 		// it is parsed and recorded but not enforced as immutability
 		// (ADR-00480).
-		var isStatic, isMemberAbstract bool
+		var isStatic, isMemberAbstract, isReadonly bool
 		var visibility string
 		for {
 			if p.peek().Type == lexer.IDENT && p.peek().Literal == "readonly" &&
 				(isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
+				isReadonly = true
 				p.advance()
 				continue
 			}
@@ -429,7 +430,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 						// from the same default expression.
 						init = prm.Default
 					}
-					fields = append(fields, ast.AnnotField{Name: prm.Name, Type: ft, Initializer: init, Visibility: vis})
+					fields = append(fields, ast.AnnotField{Name: prm.Name, Type: ft, Initializer: init, Visibility: vis, Readonly: prm.PropReadonly})
 					assign := ast.NewExpressionStatement(
 						ast.NewAssignmentExpression("=",
 							ast.NewMemberExpression(ast.NewThisExpression(fieldPos), prm.Name, fieldPos),
@@ -492,7 +493,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// rather than accepted — a disclosed narrowing.
 			ft = &ast.TypeAnnotation{Name: "number", Source: "ts"}
 		}
-		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility})
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if pendingOverload != "" {

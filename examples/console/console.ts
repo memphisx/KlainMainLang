@@ -4,17 +4,21 @@
 // other examples — this one focuses on the newer, less basic console
 // methods.)
 
-// --- console.dir(obj) ---
-// Prints a single value, exactly like a single-argument console.log —
-// options (real Node's depth/color controls) are accepted syntactically
-// but ignored, a documented V1 scope narrowing.
+// --- console.dir(obj, { depth?, colors? }) ---
+// Prints a single value like a single-argument console.log, at Node's
+// util.inspect default nesting depth of 2. The depth option overrides it
+// (a number caps nesting, null is unlimited); beyond the cap a nested value
+// renders as [Object]. (colors is accepted but ignored — no ANSI here.)
 console.dir('hello')   // hello
 console.dir(42)        // 42
+const nested = { a: { b: { c: 1 } } }
+console.dir(nested, { depth: 0 })     // { a: [Object] }
+console.dir(nested, { depth: null })  // { a: { b: { c: 1 } } }
 
 // --- console.time(label?) / console.timeEnd(label?) ---
-// V1 scope: a single global timer slot, not a per-label map — calling
-// time() again before timeEnd() just overwrites the one running timer,
-// regardless of what label either call used. The elapsed value itself
+// Each label tracks an independent timer (a per-label backing map),
+// matching real Node — nested/concurrent timers don't clobber each
+// other. The elapsed value itself
 // isn't deterministic (and can even print exactly 0ms if -O2 collapses a
 // simple timed loop into a closed-form constant — a known, harmless
 // LLVM optimization artifact, not a bug), so it isn't checked here.
@@ -66,3 +70,15 @@ console.log('still top level')
 console.group('multi-arg')
 console.log('a', 'b', 'c')
 console.groupEnd()
+
+// --- console.table(rows) ---
+// Renders an array of objects (one column per field) or an array of
+// primitives (a single "Values" column) as Node's Unicode box-drawing
+// table — byte-for-byte the same layout Node produces. Cells are
+// left-aligned and the column is sized to its widest entry; string cells
+// are shown quoted, exactly like console.log's inspector.
+console.table([{ id: 1, city: 'Thessaloniki' }, { id: 2, city: 'Athens' }])
+console.table([10, 20, 300])
+
+// A non-array argument falls back to console.log, matching Node.
+console.table(42)   // 42

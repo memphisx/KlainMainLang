@@ -125,6 +125,7 @@ func (e *Emitter) ensureExecFileSync() {
 	e.ensureForkDecl()
 	e.emitGlobal("declare i32 @dup2(i32 noundef, i32 noundef)")
 	e.ensureCloseDecl()
+	e.ensureChdirDecl() // for the optional cwd option
 	e.ensureExecvpDecl()
 	e.ensureExitRawDecl()
 	e.ensureReadDecl()
@@ -135,7 +136,7 @@ func (e *Emitter) ensureExecFileSync() {
 	errNamePtr := e.internString("Error")
 
 	part1 := `
-define ptr @__kml_exec_file_sync(ptr %file, ptr %argsdata, i64 %argslen) {
+define ptr @__kml_exec_file_sync(ptr %file, ptr %argsdata, i64 %argslen, ptr %cwd) {
 entry:
   %argvlen = add i64 %argslen, 2
   %argvbytes = mul i64 %argvlen, 8
@@ -171,6 +172,12 @@ child:
   call i32 @close(i32 %readfd)
   call i32 @dup2(i32 %writefd, i32 1)
   call i32 @close(i32 %writefd)
+  %hascwd = icmp ne ptr %cwd, null
+  br i1 %hascwd, label %dochdir, label %doexec
+dochdir:
+  call i32 @chdir(ptr %cwd)
+  br label %doexec
+doexec:
   call i32 @execvp(ptr %file, ptr %argv)
   call void @_exit(i32 127)
   unreachable

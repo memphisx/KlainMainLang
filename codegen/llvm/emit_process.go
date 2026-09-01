@@ -3,7 +3,6 @@ package llvm
 
 import (
 	"fmt"
-	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -89,18 +88,64 @@ func (e *Emitter) emitProcessUptime(args []ast.Expression, pos ast.Pos) (Value, 
 	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
-// emitProcessHrtime implements process.hrtime(): the high-resolution monotonic
-// time as a [seconds, nanoseconds] tuple. V1 takes no argument (the legacy
-// diff-from-a-previous-reading form is not supported — use process.hrtime.bigint
-// and subtract).
+// emitProcessHrtime implements process.hrtime([prev]): the high-resolution
+// monotonic time as a [seconds, nanoseconds] tuple. With a previous reading
+// (itself a [seconds, nanoseconds] tuple) it returns the elapsed diff, applying
+// Node's borrow when the nanosecond field would go negative.
 func (e *Emitter) emitProcessHrtime(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: process.hrtime takes no arguments in V1 (use process.hrtime.bigint())", pos.Line, pos.Col)
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: process.hrtime takes at most 1 argument (a previous [s, ns] reading)", pos.Line, pos.Col)
 	}
+	tupleTy := TupleType([]Type{TypeI64, TypeI64})
 	e.ensureProcessHrtime()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_hrtime()", r))
-	return Value{Ref: r, Ty: TupleType([]Type{TypeI64, TypeI64})}, nil
+	cur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_hrtime()", cur))
+	if len(args) == 0 {
+		return Value{Ref: cur, Ty: tupleTy}, nil
+	}
+	// Diff form: subtract the previous [sec, nsec] reading.
+	prev, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !prev.Ty.IsTuple || len(prev.Ty.Fields) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: process.hrtime's argument must be a [seconds, nanoseconds] tuple (a prior process.hrtime() result)", pos.Line, pos.Col)
+	}
+	tupIR := tupleTy.StructIR()
+	loadElem := func(base string, idx int) string {
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, tupIR, base, idx))
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v, gep))
+		return v
+	}
+	curSec, curNsec := loadElem(cur, 0), loadElem(cur, 1)
+	prevSec, prevNsec := loadElem(prev.Ref, 0), loadElem(prev.Ref, 1)
+	dSec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", dSec, curSec, prevSec))
+	dNsec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", dNsec, curNsec, prevNsec))
+	// Borrow: if dNsec < 0, dSec -= 1 and dNsec += 1e9.
+	neg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, dNsec))
+	dSecAdj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", dSecAdj, dSec))
+	dNsecAdj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1000000000", dNsecAdj, dNsec))
+	finalSec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", finalSec, neg, dSecAdj, dSec))
+	finalNsec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", finalNsec, neg, dNsecAdj, dNsec))
+	e.ensureMalloc()
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", out, tupleTy.StructSize()))
+	g0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", g0, tupIR, out))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", finalSec, g0))
+	g1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", g1, tupIR, out))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", finalNsec, g1))
+	return Value{Ref: out, Ty: tupleTy}, nil
 }
 
 // emitProcessHrtimeBigint implements process.hrtime.bigint(): the monotonic
@@ -177,8 +222,8 @@ func (e *Emitter) emitProcessEnvGetDynamic(keyExpr ast.Expression) (Value, error
 // is inherited, printed straight to this program's own stderr, not
 // captured).
 func (e *Emitter) emitProcessExecFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: process.execFileSync takes 1 or 2 arguments (file, args?)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: process.execFileSync takes (file[, args][, options])", pos.Line, pos.Col)
 	}
 	fileVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -186,21 +231,64 @@ func (e *Emitter) emitProcessExecFileSync(args []ast.Expression, pos ast.Pos) (V
 	}
 	fileVal = e.coerce(fileVal, TypePtr)
 
+	// The 2nd argument is the args array, unless it's the options object (Node
+	// allows execFileSync(file, options)). The 3rd, if present, is options.
 	argsPtr, argsLen := "null", "0"
-	if len(args) == 2 {
-		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[1], pos)
-		if err != nil {
-			return Value{}, err
+	var optsExpr ast.Expression
+	rest := args[1:]
+	if len(rest) > 0 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); isObj {
+			optsExpr = rest[0]
+			rest = rest[1:]
+		} else if al, isArr := rest[0].(*ast.ArrayLiteral); isArr && len(al.Elements) == 0 {
+			// An empty args array — no argv entries to append.
+			rest = rest[1:]
+		} else {
+			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(rest[0], pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if elemTy.IR != "ptr" || elemTy.IsObject || elemTy.IsArray || elemTy.IsFunc || elemTy.IsDynamic {
+				return Value{}, fmt.Errorf("%d:%d: process.execFileSync's args argument must be a string[]", pos.Line, pos.Col)
+			}
+			argsPtr, argsLen = ptrReg, lenReg
+			rest = rest[1:]
 		}
-		if elemTy.IR != "ptr" || elemTy.IsObject || elemTy.IsArray || elemTy.IsFunc || elemTy.IsDynamic {
-			return Value{}, fmt.Errorf("%d:%d: process.execFileSync's args argument must be a string[]", pos.Line, pos.Col)
+	}
+	if len(rest) > 0 {
+		if _, isObj := rest[0].(*ast.ObjectLiteral); !isObj {
+			return Value{}, fmt.Errorf("%d:%d: process.execFileSync's options argument must be an object literal", pos.Line, pos.Col)
 		}
-		argsPtr, argsLen = ptrReg, lenReg
+		optsExpr = rest[0]
+	}
+
+	// options: only `{ cwd }` is honored (encoding: 'utf8' is the default and
+	// accepted); any other key is a clean rejection.
+	cwdRef := "null"
+	if optsExpr != nil {
+		ol := optsExpr.(*ast.ObjectLiteral)
+		for _, prop := range ol.Properties {
+			switch prop.Key {
+			case "cwd":
+				cv, err := e.emitExpr(prop.Value)
+				if err != nil {
+					return Value{}, err
+				}
+				cwdRef = e.coerce(cv, TypePtr).Ref
+			case "encoding":
+				sl, ok := prop.Value.(*ast.StringLiteral)
+				if !ok || sl.Value != "utf8" {
+					return Value{}, fmt.Errorf("%d:%d: process.execFileSync's encoding option supports only 'utf8'", pos.Line, pos.Col)
+				}
+			default:
+				return Value{}, fmt.Errorf("%d:%d: process.execFileSync options support only { cwd, encoding: 'utf8' }", pos.Line, pos.Col)
+			}
+		}
 	}
 
 	e.ensureExecFileSync()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_exec_file_sync(ptr %s, ptr %s, i64 %s)", r, fileVal.Ref, argsPtr, argsLen))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_exec_file_sync(ptr %s, ptr %s, i64 %s, ptr %s)", r, fileVal.Ref, argsPtr, argsLen, cwdRef))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -265,15 +353,17 @@ func (e *Emitter) emitProcessExecPath() (Value, error) {
 	return Value{Ref: boxed, Ty: TypePtr}, nil
 }
 
-// emitProcessEmitWarning implements process.emitWarning(message, type?): writes
-// `(node:<pid>) <type>: <message>` to stderr, matching Node's default warning
-// format (the `type` defaults to "Warning", as Node's does). The richer
-// options-object form (`{ code, detail }`) and the `'unhandledRejection'`-style
-// process 'warning' event are out of V1 scope — this is the plain textual
-// emission the vast majority of callers use.
+// emitProcessEmitWarning implements process.emitWarning(message, type?) and the
+// options-object form process.emitWarning(message, { type?, code?, detail? }):
+// writes `(node:<pid>) [<code>] <type>: <message>` to stderr (the `[code]` bit
+// only when a code is given), matching Node's default warning format (the `type`
+// defaults to "Warning", as Node's does), and a following `<detail>` line when a
+// detail is given. The one-shot `--trace-warnings` hint line Node prints is
+// deliberately omitted, and the process 'warning' event's Error carries only
+// name+message (not code/detail) — the fixed error-object shape.
 func (e *Emitter) emitProcessEmitWarning(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: process.emitWarning takes (message, type?)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: process.emitWarning takes (message, type?|options?)", pos.Line, pos.Col)
 	}
 	msg, err := e.emitExpr(args[0])
 	if err != nil {
@@ -283,23 +373,59 @@ func (e *Emitter) emitProcessEmitWarning(args []ast.Expression, pos ast.Pos) (Va
 		return Value{}, fmt.Errorf("%d:%d: process.emitWarning's message must be a string", pos.Line, pos.Col)
 	}
 	typeRef := e.internString("Warning")
+	var codeRef, detailRef string // "" when absent
 	if len(args) == 2 {
-		t, err := e.emitExpr(args[1])
-		if err != nil {
-			return Value{}, err
+		if ol, ok := args[1].(*ast.ObjectLiteral); ok {
+			// Options-object form: { type?, code?, detail? } — each a string.
+			for _, prop := range ol.Properties {
+				switch prop.Key {
+				case "type", "code", "detail":
+					v, err := e.emitExpr(prop.Value)
+					if err != nil {
+						return Value{}, err
+					}
+					if v.Ty.IR != "ptr" {
+						return Value{}, fmt.Errorf("%d:%d: process.emitWarning's %s option must be a string", pos.Line, pos.Col, prop.Key)
+					}
+					switch prop.Key {
+					case "type":
+						typeRef = v.Ref
+					case "code":
+						codeRef = v.Ref
+					case "detail":
+						detailRef = v.Ref
+					}
+				default:
+					return Value{}, fmt.Errorf("%d:%d: process.emitWarning options support only { type, code, detail }", pos.Line, pos.Col)
+				}
+			}
+		} else {
+			t, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			if t.Ty.IR != "ptr" {
+				return Value{}, fmt.Errorf("%d:%d: process.emitWarning's type must be a string", pos.Line, pos.Col)
+			}
+			typeRef = t.Ref
 		}
-		if t.Ty.IR != "ptr" {
-			return Value{}, fmt.Errorf("%d:%d: process.emitWarning's type must be a string", pos.Line, pos.Col)
-		}
-		typeRef = t.Ref
 	}
 	pid, err := e.emitProcessPid()
 	if err != nil {
 		return Value{}, err
 	}
 	e.ensureDprintf()
-	fmtStr := e.internString("(node:%lld) %s: %s\n")
-	e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i64 %s, ptr %s, ptr %s)", fmtStr, pid.Ref, typeRef, msg.Ref))
+	if codeRef != "" {
+		fmtStr := e.internString("(node:%lld) [%s] %s: %s\n")
+		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i64 %s, ptr %s, ptr %s, ptr %s)", fmtStr, pid.Ref, codeRef, typeRef, msg.Ref))
+	} else {
+		fmtStr := e.internString("(node:%lld) %s: %s\n")
+		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i64 %s, ptr %s, ptr %s)", fmtStr, pid.Ref, typeRef, msg.Ref))
+	}
+	if detailRef != "" {
+		detFmt := e.internString("%s\n")
+		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", detFmt, detailRef))
+	}
 
 	// If a process.on('warning', handler) is registered, invoke it with the
 	// warning as an Error object (name = type, message). The stderr print above
@@ -389,33 +515,20 @@ func memoryUsageType() Type {
 
 // emitProcessMemoryUsage implements process.memoryUsage(): an object with the
 // same shape Node returns. This compiler has no managed V8 heap, so the only
-// field with a real value is `rss` — the process's peak resident set size,
-// read from getrusage(2)'s ru_maxrss (bytes on macOS, kilobytes on Linux, so
-// the Linux path scales by 1024). heapTotal/heapUsed/external/arrayBuffers are
-// V8-specific and report 0 (calloc-zeroed), disclosed as a caveat rather than
-// fabricated. ru_maxrss sits at byte offset 32 of struct rusage on both
-// platforms (two struct timevals — 32 bytes — precede it).
+// field with a real value is `rss` — the process's *instantaneous* resident set
+// size (ADR-00570), read via __kml_current_rss_bytes (Darwin task_info /
+// Linux /proc/self/statm), matching Node's own rss rather than getrusage's
+// ru_maxrss peak. heapTotal/heapUsed/external/arrayBuffers are V8-specific and
+// report 0 (calloc-zeroed), disclosed as a caveat rather than fabricated.
 func (e *Emitter) emitProcessMemoryUsage(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: process.memoryUsage takes no arguments", pos.Line, pos.Col)
 	}
-	e.ensureGetrusage()
+	e.ensureCurrentRSS()
 	e.ensureCalloc()
 
-	// struct rusage is ~144 bytes on both platforms; over-allocate to be safe.
-	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = alloca [256 x i8], align 8", buf))
-	e.emitInstr(fmt.Sprintf("call i32 @getrusage(i32 0, ptr %s)", buf))
-	maxrssPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 32", maxrssPtr, buf))
-	maxrss := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", maxrss, maxrssPtr))
-	rss := maxrss
-	if runtime.GOOS == "linux" {
-		scaled := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 1024", scaled, maxrss))
-		rss = scaled
-	}
+	rss := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_current_rss_bytes()", rss))
 
 	ty := memoryUsageType()
 	dataReg := e.freshReg()

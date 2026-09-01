@@ -14,6 +14,11 @@ server.on('message', (msg: Uint8Array, rinfo) => {
 server.bind(9199);
 console.log('UDP echo server bound to 9199');
 
+// setBroadcast enables SO_BROADCAST so datagrams can target a broadcast
+// address; .address() reports the real bound { address, family, port }.
+server.setBroadcast(true);
+console.log('bound family:', server.address().family);
+
 setTimeout(() => {
   server.close();
   console.log('server closed');

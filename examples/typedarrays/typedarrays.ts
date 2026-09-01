@@ -88,6 +88,10 @@ console.log(bigs[0])            // 9007199254740993n
 const ubigs = new BigUint64Array([18446744073709551615n])
 console.log(ubigs[0])           // 18446744073709551615n
 for (const v of bigs.subarray(0, 1)) { console.log(v) } // 9007199254740993n
+// Compound element assignment works (through the bigint runtime).
+bigs[1] = 40n
+bigs[1] += 2n
+console.log(bigs[1])            // 42n
 
 // ── growable / resizable buffers ────────────────────────────────────────────
 // The {maxByteLength} option reserves the maximum upfront, so existing views

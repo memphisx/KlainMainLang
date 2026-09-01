@@ -7,12 +7,16 @@ import "testing"
 
 func TestE2EEventBasics(t *testing.T) {
 	assertOutput(t, `
-const e = new Event("click")
+const e = new Event("click", { cancelable: true })
 console.log(e.type)
 console.log(e.defaultPrevented)
 e.preventDefault()
 console.log(e.defaultPrevented)
-`, "click\nfalse\ntrue")
+// A non-cancelable event's preventDefault is a no-op (WHATWG).
+const n = new Event("scroll")
+n.preventDefault()
+console.log(n.defaultPrevented)
+`, "click\nfalse\ntrue\nfalse")
 }
 
 func TestE2ECustomEventDetail(t *testing.T) {
@@ -33,7 +37,7 @@ function handle(e: Event): string {
   e.preventDefault()
   return e.type
 }
-const ev = new Event("submit")
+const ev = new Event("submit", { cancelable: true })
 console.log(handle(ev))
 console.log(ev.defaultPrevented)
 `, "submit\ntrue")

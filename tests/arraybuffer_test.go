@@ -23,6 +23,21 @@ console.log(dv.getFloat32(0));
 `, "16 0\n123456789 365779719\n44 44\n3.14159\n-2 65534 65279\n1.5")
 }
 
+// DataView Float16 accessors (ADR-00553): half-precision reads/writes with the
+// spec's per-call endianness flag; values round-trip at float16 precision.
+func TestE2EDataViewFloat16(t *testing.T) {
+	assertOutput(t, `
+const buf = new ArrayBuffer(8);
+const dv = new DataView(buf);
+dv.setFloat16(0, 1.5);
+console.log(dv.getFloat16(0));
+dv.setFloat16(2, 3.14, true);
+console.log(dv.getFloat16(2, true));
+dv.setFloat16(4, -0.5);
+console.log(dv.getFloat16(4));
+`, "1.5\n3.140625\n-0.5")
+}
+
 // DataView BigInt64/BigUint64 accessors: values round-trip through the
 // arbitrary-precision bigint handles (raw i64/u64 bit pattern in memory),
 // with the spec's per-call endianness flag and unsigned > 2^63 support.
@@ -121,4 +136,24 @@ ab.resize(8)
 console.log(ab.byteLength)
 try { sab.grow(8) } catch (e) { console.log("caught RangeError:", e.message.indexOf("RangeError") === 0) }
 `, "8\ntrue\n32\n16\n42\nfalse\n4\ntrue\n8\ncaught RangeError: true")
+}
+
+// ArrayBuffer.resize permits shrinking (ADR-00564), unlike SharedArrayBuffer.grow.
+// The backing block stays reserved at maxByteLength, so shrinking is just a
+// smaller length word; growing back up is still in range. A shrink on a
+// SharedArrayBuffer's grow() still throws.
+func TestE2EArrayBufferResizeShrink(t *testing.T) {
+	assertOutput(t, `
+const ab = new ArrayBuffer(8, {maxByteLength: 16})
+console.log(ab.byteLength)
+ab.resize(12)
+console.log(ab.byteLength)
+ab.resize(4)
+console.log(ab.byteLength)
+ab.resize(10)
+console.log(ab.byteLength)
+try { ab.resize(20) } catch (e) { console.log("caught:", e.message.indexOf("RangeError") === 0) }
+const sab = new SharedArrayBuffer(8, {maxByteLength: 16})
+try { sab.grow(4) } catch (e) { console.log("shrink-blocked:", e.message.indexOf("RangeError") === 0) }
+`, "8\n12\n4\n10\ncaught: true\nshrink-blocked: true")
 }

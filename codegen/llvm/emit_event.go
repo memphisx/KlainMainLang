@@ -32,7 +32,25 @@ func (e *Emitter) emitNewEventExpression(ex *ast.NewEventExpression) (Value, err
 	e.storeEventField(ty, objReg, "type", "ptr", typeVal.Ref)
 	e.storeEventField(ty, objReg, "defaultPrevented", "i1", "0")
 	e.storeEventField(ty, objReg, "stopImmediate", "i1", "0")
+	cancelable, err := e.eventCancelableRef(ex.Cancelable)
+	if err != nil {
+		return Value{}, err
+	}
+	e.storeEventField(ty, objReg, "cancelable", "i1", cancelable)
 	return Value{Ref: objReg, Ty: ty}, nil
+}
+
+// eventCancelableRef evaluates the init object's `cancelable` value to an i1
+// register (or the literal "0" when absent) — the WHATWG default is false.
+func (e *Emitter) eventCancelableRef(expr ast.Expression) (string, error) {
+	if expr == nil {
+		return "0", nil
+	}
+	v, err := e.emitExpr(expr)
+	if err != nil {
+		return "", err
+	}
+	return e.coerce(v, TypeBool).Ref, nil
 }
 
 func (e *Emitter) emitNewCustomEventExpression(ex *ast.NewCustomEventExpression) (Value, error) {
@@ -62,6 +80,11 @@ func (e *Emitter) emitNewCustomEventExpression(ex *ast.NewCustomEventExpression)
 	e.storeEventField(ty, objReg, "detail", StructFieldIR(detailTy), detailRef)
 	e.storeEventField(ty, objReg, "defaultPrevented", "i1", "0")
 	e.storeEventField(ty, objReg, "stopImmediate", "i1", "0")
+	cancelable, err := e.eventCancelableRef(ex.Cancelable)
+	if err != nil {
+		return Value{}, err
+	}
+	e.storeEventField(ty, objReg, "cancelable", "i1", cancelable)
 	return Value{Ref: objReg, Ty: ty}, nil
 }
 
@@ -76,7 +99,16 @@ func (e *Emitter) emitEventMethod(objExpr ast.Expression, method string, pos ast
 	}
 	switch method {
 	case "preventDefault":
-		e.storeEventField(objVal.Ty, objVal.Ref, "defaultPrevented", "i1", "1")
+		// Per WHATWG, preventDefault() sets defaultPrevented only on a cancelable
+		// event; on a non-cancelable one it is a no-op. Load the cancelable flag
+		// and store it straight into defaultPrevented (true stays true, false is a
+		// no-op that leaves the existing false).
+		cidx, _, _ := objVal.Ty.FieldIndex("cancelable")
+		cgep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", cgep, objVal.Ty.StructIR(), objVal.Ref, cidx))
+		cval := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", cval, cgep))
+		e.storeEventField(objVal.Ty, objVal.Ref, "defaultPrevented", "i1", cval)
 	case "stopImmediatePropagation":
 		e.storeEventField(objVal.Ty, objVal.Ref, "stopImmediate", "i1", "1")
 	case "stopPropagation":

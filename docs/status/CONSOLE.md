@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 11/12 (~92%) · **Strict Coverage**: 7/12 (~58%).
+**Coverage**: 12/12 (100%) · **Strict Coverage**: 8/12 (~67%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -17,8 +17,8 @@ Format: [Status page format](README.md#status-page-format).
 | `console.debug(...)` | ✅ | | |
 | `console.trace(...)` | ✅ | • Prints `"Trace: <message>"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all | • Same generic print path as `.debug()`/`.info()`, no stack-walking logic. See [ADR-00166](../adr/ADR-00166.md). |
 | `console.assert(cond, msg)` | ✅ | | |
-| `console.table()` | ❌ | | • Deliberately deferred, not attempted — needs a genuinely new algorithm (dynamic per-column width computation, box-drawing header/index rows over arbitrarily-shaped input), not a quick extension of existing print machinery like the other rows below |
-| `console.time()` / `.timeEnd()` | ✅ | • V1 scope: a single global monotonic-time slot, not a per-label map — calling `time()` again overwrites the one running timer regardless of label | • See [ADR-00029](../adr/ADR-00029.md). |
+| `console.table()` | ✅ | • An array of objects (columns = the shared fields) or an array of primitives (a single `Values` column) is tabulated; a `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated (they fall back to `console.log`, as a non-tabular value does) | • Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/ADR-00560.md)) |
+| `console.time()` / `.timeEnd()` | ✅ | | • Per-label backing `Map<string, number>` — distinct labels track independent timers, matching real Node. See [ADR-00029](../adr/ADR-00029.md), [ADR-00544](../adr/ADR-00544.md). |
 | `console.count()` / `.countReset()` | ✅ | | • Backed by a real `Map<string, number>` — matches real Node's per-label semantics exactly, unlike `time`'s single-slot narrowing above. See [ADR-00029](../adr/ADR-00029.md). |
 | `console.group()` / `.groupEnd()` | ✅ | | • Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/ADR-00029.md). |
-| `console.dir()` | ✅ | • The real API's second `options` argument — depth/color controls — is accepted syntactically but ignored | • Prints a single value exactly like a single-argument `console.log`. See [ADR-00029](../adr/ADR-00029.md). |
+| `console.dir(obj, { depth?, colors? })` | ✅ | • The `colors` option is accepted but ignored — inspected output carries no ANSI here | • Prints a single value like a single-argument `console.log`, but with Node's `util.inspect` default nesting depth of **2** (a bare `console.log` uses this compiler's deeper default); the `depth` option overrides it — a literal number caps nesting, `null` is unlimited, and beyond the cap a nested value shows as `[Object]`/`[Array]`, matching Node ([ADR-00583](../adr/ADR-00583.md))<br>• See [ADR-00029](../adr/ADR-00029.md). |

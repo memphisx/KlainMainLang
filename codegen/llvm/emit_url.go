@@ -11,6 +11,8 @@ import (
 const (
 	curluPartURL      = 0
 	curluPartScheme   = 1
+	curluPartUser     = 2
+	curluPartPass     = 3
 	curluPartHost     = 5
 	curluPartPort     = 6
 	curluPartPath     = 7
@@ -97,28 +99,66 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 	}
 	rawVal = e.coerce(rawVal, TypePtr)
 
+	// The optional base argument is evaluated (if present) before the handle is
+	// created so its side effects order before the relative resolution.
+	var baseVal Value
+	if ex.Base != nil {
+		baseVal, err = e.emitExpr(ex.Base)
+		if err != nil {
+			return Value{}, err
+		}
+		baseVal = e.coerce(baseVal, TypePtr)
+	}
+
 	handle := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
 
-	setCode := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, rawVal.Ref))
-	badURL := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", badURL, setCode))
+	// setURLPartOrThrow sets CURLUPART_URL to `ref` (curl resolves a relative
+	// value against whatever the handle already holds) and throws a catchable
+	// "Invalid URL" Error on failure, matching Node — which throws for both an
+	// invalid base and an invalid relative URL.
+	setURLPartOrThrow := func(ref string) {
+		setCode := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, ref))
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, setCode))
+		badL := e.freshLabel("url.bad")
+		okL := e.freshLabel("url.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		e.emitInternalThrow(e.internString("Invalid URL"))
+		e.emitLabel(okL)
+	}
 
-	badL := e.freshLabel("url.bad")
-	okL := e.freshLabel("url.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badURL, badL, okL))
+	// With a base: seed the handle with the (absolute) base first, then apply the
+	// possibly-relative URL, which curl resolves against the base. An absolute
+	// URL value simply overwrites the base, matching the WHATWG algorithm.
+	if ex.Base != nil {
+		setURLPartOrThrow(baseVal.Ref)
+	}
+	setURLPartOrThrow(rawVal.Ref)
 
-	e.emitLabel(badL)
-	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
-	e.emitInternalThrow(e.internString("Invalid URL"))
+	urlTy := URLType()
+	objReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, urlTy.StructSize()))
+	if err := e.deriveURLFieldsIntoObject(handle, objReg); err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: objReg, Ty: urlTy}, nil
+}
 
-	e.emitLabel(okL)
-
+// deriveURLFieldsIntoObject reads every component out of an already-parsed
+// CURLU `handle` and stores the derived URL fields (href/protocol/host/…/
+// searchParams) into the URLType() object at `objReg`, then cleans up the
+// handle. Shared by `new URL(...)` construction and the component setters
+// (ADR-00572), which re-derive every field after mutating one part so the
+// object never desyncs.
+func (e *Emitter) deriveURLFieldsIntoObject(handle, objReg string) error {
 	schemeRaw, _ := e.curlURLGetPart(handle, curluPartScheme) // always present after a successful set
 	protocol, err := e.emitStringConcat(Value{Ref: schemeRaw, Ty: TypePtr}, Value{Ref: e.internString(":"), Ty: TypePtr})
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	hostnameRaw, hostnamePresent := e.curlURLGetPart(handle, curluPartHost)
@@ -133,7 +173,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return e.internString(""), nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	portRaw, portPresent := e.curlURLGetPart(handle, curluPartPort)
@@ -148,7 +188,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return e.internString(""), nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	host, err := e.emitStrBranch(portPresent,
@@ -166,7 +206,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return hostname, nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	pathRaw, pathPresent := e.curlURLGetPart(handle, curluPartPath)
@@ -181,7 +221,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return e.internString("/"), nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	queryRaw, queryPresent := e.curlURLGetPart(handle, curluPartQuery)
@@ -196,7 +236,7 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return e.internString(""), nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	fragRaw, fragPresent := e.curlURLGetPart(handle, curluPartFragment)
@@ -211,22 +251,52 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 		func() (string, error) { return e.internString(""), nil },
 	)
 	if err != nil {
-		return Value{}, err
+		return err
+	}
+
+	userRaw, userPresent := e.curlURLGetPart(handle, curluPartUser)
+	username, err := e.emitStrBranch(userPresent,
+		func() (string, error) {
+			v, err := e.emitStringConcat(Value{Ref: userRaw, Ty: TypePtr}, Value{Ref: e.internString(""), Ty: TypePtr})
+			if err != nil {
+				return "", err
+			}
+			return v.Ref, nil
+		},
+		func() (string, error) { return e.internString(""), nil },
+	)
+	if err != nil {
+		return err
+	}
+
+	passRaw, passPresent := e.curlURLGetPart(handle, curluPartPass)
+	password, err := e.emitStrBranch(passPresent,
+		func() (string, error) {
+			v, err := e.emitStringConcat(Value{Ref: passRaw, Ty: TypePtr}, Value{Ref: e.internString(""), Ty: TypePtr})
+			if err != nil {
+				return "", err
+			}
+			return v.Ref, nil
+		},
+		func() (string, error) { return e.internString(""), nil },
+	)
+	if err != nil {
+		return err
 	}
 
 	hrefRaw, _ := e.curlURLGetPart(handle, curluPartURL) // always present after a successful set
 	href, err := e.emitStringConcat(Value{Ref: hrefRaw, Ty: TypePtr}, Value{Ref: e.internString(""), Ty: TypePtr})
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	originPrefix, err := e.emitStringConcat(protocol, Value{Ref: e.internString("//"), Ty: TypePtr})
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 	origin, err := e.emitStringConcat(originPrefix, Value{Ref: host, Ty: TypePtr})
 	if err != nil {
-		return Value{}, err
+		return err
 	}
 
 	// searchParams: an ordinary Map<string,string>, populated from the raw
@@ -246,8 +316,6 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 
 	urlTy := URLType()
 	structIR := urlTy.StructIR()
-	objReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, urlTy.StructSize()))
 	storeField := func(name, ref string) {
 		idx, fieldTy, _ := urlTy.FieldIndex(name)
 		gep := e.freshReg()
@@ -263,9 +331,11 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 	storeField("search", search)
 	storeField("hash", hash)
 	storeField("origin", origin.Ref)
+	storeField("username", username)
+	storeField("password", password)
 	storeField("searchParams", mapPtr)
 
-	return Value{Ref: objReg, Ty: urlTy}, nil
+	return nil
 }
 
 // emitStripLeadingQuestionMark returns s unchanged, or a 1-byte-advanced
@@ -291,6 +361,175 @@ func (e *Emitter) emitStripLeadingQuestionMark(s Value) (Value, error) {
 		return Value{}, err
 	}
 	return Value{Ref: stripped, Ty: TypePtr}, nil
+}
+
+// emitStripLeadingChar returns s advanced past a single leading byte equal to
+// charCode, or s unchanged otherwise — the generalization of
+// emitStripLeadingQuestionMark used by the URL component setters (ADR-00572) so
+// `url.hash = "#x"` and `url.hash = "x"` both set the fragment to `x`.
+func (e *Emitter) emitStripLeadingChar(s Value, charCode int) (Value, error) {
+	first := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", first, s.Ref))
+	is := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", is, first, charCode))
+	stripped, err := e.emitStrBranch(is,
+		func() (string, error) {
+			g := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 1", g, s.Ref))
+			return g, nil
+		},
+		func() (string, error) { return s.Ref, nil },
+	)
+	if err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: stripped, Ty: TypePtr}, nil
+}
+
+// emitStripTrailingColon returns s with a single trailing ':' removed (a fresh
+// copy), or s unchanged — so `url.protocol = "https:"` and `url.protocol =
+// "https"` both hand curl the bare scheme it expects (ADR-00572).
+func (e *Emitter) emitStripTrailingColon(s Value) (Value, error) {
+	e.ensureStrlen()
+	sLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, s.Ref))
+	hasLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", hasLen, sLen))
+	lastIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, sLen))
+	// Guard the load: index 0 is always valid (empty string's NUL), and the
+	// select below keeps the full length when the string is empty.
+	safeLast := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", safeLast, hasLen, lastIdx))
+	lastPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", lastPtr, s.Ref, safeLast))
+	lastCh := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", lastCh, lastPtr))
+	isColon := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 58", isColon, lastCh)) // 58 == ':'
+	trim := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", trim, isColon, hasLen))
+	newLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", newLen, trim, lastIdx, sLen))
+	return e.emitStringExtract(s.Ref, "0", newLen), nil
+}
+
+// emitURLComponentSet implements a URL component setter (`url.hash = …`,
+// `url.protocol = …`, etc. — ADR-00572). It re-parses the URL's current href
+// into a fresh CURLU handle, applies the one changed part, and re-derives every
+// field back into the same URL object so the derived components never desync.
+// `href` re-parses from scratch and throws on an invalid value (Node's own
+// behavior); the other setters are lenient — an invalid curl_url_set leaves the
+// handle (and thus the URL) unchanged, matching Node's silent-ignore posture.
+func (e *Emitter) emitURLComponentSet(objVal Value, property string, rhsExpr ast.Expression, pos ast.Pos) (Value, error) {
+	part, ok := map[string]int{
+		"href": curluPartURL, "protocol": curluPartScheme, "hostname": curluPartHost,
+		"port": curluPartPort, "pathname": curluPartPath, "search": curluPartQuery,
+		"hash": curluPartFragment, "username": curluPartUser, "password": curluPartPass,
+		"host": curluPartHost,
+	}[property]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: assigning to URL component '%s' is not supported (settable: href/protocol/host/hostname/port/pathname/search/hash/username/password)", pos.Line, pos.Col, property)
+	}
+	e.ensureCurlURL()
+	e.ensureMalloc()
+	e.ensureExceptionHelpers()
+	e.ensureMapStrHelpers()
+	e.ensureHTTPParseQuery()
+
+	rhsVal, err := e.emitExpr(rhsExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	rhsVal = e.coerce(rhsVal, TypePtr)
+
+	// Normalize away the marker Node tolerates on each component.
+	switch property {
+	case "hash":
+		if rhsVal, err = e.emitStripLeadingChar(rhsVal, '#'); err != nil {
+			return Value{}, err
+		}
+	case "search":
+		if rhsVal, err = e.emitStripLeadingChar(rhsVal, '?'); err != nil {
+			return Value{}, err
+		}
+	case "protocol":
+		if rhsVal, err = e.emitStripTrailingColon(rhsVal); err != nil {
+			return Value{}, err
+		}
+	}
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+
+	if property == "href" {
+		// Full re-parse: set the whole URL and throw on an invalid value.
+		setCode := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, rhsVal.Ref))
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, setCode))
+		badL := e.freshLabel("url.set.bad")
+		okL := e.freshLabel("url.set.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		e.emitInternalThrow(e.internString("Invalid URL"))
+		e.emitLabel(okL)
+	} else {
+		// Seed from the current href (valid by construction), then apply the one
+		// component. A failed part-set is ignored (Node leniency): the handle
+		// keeps the original URL, so re-derivation reproduces it unchanged.
+		hrefIdx, hrefTy, _ := objVal.Ty.FieldIndex("href")
+		hrefGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", hrefGep, objVal.Ty.StructIR(), objVal.Ref, hrefIdx))
+		curHref := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curHref, hrefTy.IR, hrefGep, hrefTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartURL, curHref))
+		if property == "host" {
+			// Node's `url.host` is the combined `hostname[:port]`. curl has no
+			// combined HOST part (CURLUPART_HOST rejects an embedded port), so split
+			// on the first ':' and set hostname and port separately. Without a colon
+			// only hostname is set, leaving the existing port (Node's behavior).
+			e.ensureStrlen()
+			e.ensureStrchr()
+			total := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", total, rhsVal.Ref))
+			colonPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @strchr(ptr %s, i32 58)", colonPtr, rhsVal.Ref))
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, colonPtr))
+			basePtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", basePtr, rhsVal.Ref))
+			colonInt := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", colonInt, colonPtr))
+			colonIdxRaw := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", colonIdxRaw, colonInt, basePtr))
+			hostLen := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", hostLen, isNull, total, colonIdxRaw))
+			hostname := e.emitStringExtract(rhsVal.Ref, "0", hostLen)
+			e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, hostname.Ref))
+			// Set the port only when a colon was present.
+			portL := e.freshLabel("url.host.port")
+			afterL := e.freshLabel("url.host.after")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, afterL, portL))
+			e.emitLabel(portL)
+			portStart := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", portStart, colonIdxRaw))
+			portLen := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", portLen, total, portStart))
+			portStr := e.emitStringExtract(rhsVal.Ref, portStart, portLen)
+			e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartPort, portStr.Ref))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+			e.emitLabel(afterL)
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, part, rhsVal.Ref))
+		}
+	}
+
+	if err := e.deriveURLFieldsIntoObject(handle, objVal.Ref); err != nil {
+		return Value{}, err
+	}
+	return rhsVal, nil
 }
 
 // emitNewURLSearchParamsExpression implements `new URLSearchParams()`

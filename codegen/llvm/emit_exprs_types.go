@@ -192,6 +192,13 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 	if lit.HasComputedKey() {
 		return e.inferDynamicObjectType(lit)
 	}
+	if lit.HasAccessors() {
+		// TDD-00153: an accessor-bearing literal is a synthetic-class instance;
+		// its type must be that class (registered lazily & idempotently so the
+		// variable-slot type computed here matches the value the emit site
+		// produces). Registration builds only class metadata, never IR.
+		return e.classes[e.ensureObjLitClass(lit)].Ty
+	}
 	var fields []Field
 	upsert := func(f Field) {
 		for i, existing := range fields {
@@ -812,6 +819,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// another field access (ev.when.getFullYear() needs to know
 		// ev.when's type before it can resolve getFullYear on it).
 		if objTy := e.inferExprType(ex.Object); objTy.IsObject {
+			// A class getter's read type is its return type, not a field type —
+			// consult accessors before FieldIndex (an accessor name is never a
+			// real Field, so FieldIndex would miss it). Matches the read path in
+			// emit_exprs_member.go (TDD-00030).
+			if objTy.IsClass {
+				if getter, _, ok := e.classAccessorSigs(objTy.ClassName, ex.Property); ok && getter != nil {
+					return e.canonicalizeClassTy(getter.RetType)
+				}
+			}
 			if _, fieldTy, ok := objTy.FieldIndex(ex.Property); ok {
 				return e.canonicalizeClassTy(fieldTy)
 			}
@@ -847,8 +863,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 		}
 	case *ast.TaggedTemplateExpression:
-		// TDD-00059: same desugaring emitExpr's own case uses — a tagged
-		// template's type is exactly its tag function's return type.
+		// String.raw always yields a string (ADR-00562); other tags: same
+		// desugaring emitExpr's own case uses — a tagged template's type is
+		// exactly its tag function's return type (TDD-00059).
+		if e.isStringRawTag(ex.Tag) {
+			return TypePtr // a string
+		}
 		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
 		// klain:assets (TDD-00142 Stage 7): embedDir(...) → EmbeddedAssets,
@@ -1336,6 +1356,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeI64
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "BigInt" && !e.isShadowedByLocal(id.Name) &&
+				(mem.Property == "asIntN" || mem.Property == "asUintN") {
+				return BigIntType()
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Math" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "random", "sqrt", "pow", "hypot", "log", "log2", "log10", "sin", "cos", "tan",
@@ -1476,8 +1500,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypePtr
 				}
 			}
-			// ClientRequest methods chain (end/abort/on return the handle).
+			// ClientRequest methods chain (end/abort/on return the handle);
+			// req.write(body) returns a boolean (ADR-00575).
 			if objTy := e.inferExprType(mem.Object); objTy.IsClientRequest {
+				if mem.Property == "write" {
+					return TypeBool
+				}
 				return ClientRequestType()
 			}
 			// child.send(msg) / worker.send(msg) → boolean (the fork IPC

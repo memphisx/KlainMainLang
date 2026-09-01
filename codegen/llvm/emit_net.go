@@ -70,12 +70,17 @@ func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, err
 	// Two call shapes: positional `(port, host, cb?)` or options-object
 	// `({ port, host? }, cb?)` (Node's IPC `{ path }` form is not supported —
 	// this is TCP only). `host` defaults to "localhost".
-	var portExpr, hostExpr, cbExpr ast.Expression
+	var portExpr, hostExpr, cbExpr, pathExpr ast.Expression
 	if len(args) >= 1 {
 		if ol, ok := args[0].(*ast.ObjectLiteral); ok {
+			// IPC form: `{ path }` connects to a Unix-domain socket.
+			pathExpr = objectLiteralProp(ol, "path")
 			portExpr = objectLiteralProp(ol, "port")
-			if portExpr == nil {
-				return Value{}, fmt.Errorf("%d:%d: net.connect's options object requires a 'port'", pos.Line, pos.Col)
+			if pathExpr == nil && portExpr == nil {
+				return Value{}, fmt.Errorf("%d:%d: net.connect's options object requires a 'port' or a 'path'", pos.Line, pos.Col)
+			}
+			if pathExpr != nil && portExpr != nil {
+				return Value{}, fmt.Errorf("%d:%d: net.connect's options object takes 'port' or 'path', not both", pos.Line, pos.Col)
 			}
 			hostExpr = objectLiteralProp(ol, "host")
 			if len(args) > 2 {
@@ -110,6 +115,18 @@ func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, fmt.Errorf("%d:%d: net.connect takes (port, host, connectListener?) or (options, connectListener?)", pos.Line, pos.Col)
 	}
 
+	sk := e.freshReg()
+	if pathExpr != nil {
+		// IPC: connect to a Unix-domain socket at `path`.
+		pv, err := e.emitExpr(pathExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		pathVal := e.coerce(pv, TypePtr)
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_net_connect_unix(ptr %s)", sk, pathVal.Ref))
+		return e.finishNetConnect(sk, cbExpr, pos)
+	}
+
 	portVal, err := e.emitExpr(portExpr)
 	if err != nil {
 		return Value{}, err
@@ -128,8 +145,14 @@ func (e *Emitter) emitNetConnect(args []ast.Expression, pos ast.Pos) (Value, err
 		hostVal = Value{Ref: e.internString("localhost"), Ty: TypePtr}
 	}
 
-	sk := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_net_connect(i32 %s, ptr %s)", sk, port32, hostVal.Ref))
+	return e.finishNetConnect(sk, cbExpr, pos)
+}
+
+// finishNetConnect handles the post-connect tail shared by the TCP and Unix
+// (IPC) forms: throw on a null (failed) socket, else store the optional
+// deferred 'connect' listener and return the NetSocket.
+func (e *Emitter) finishNetConnect(sk string, cbExpr ast.Expression, pos ast.Pos) (Value, error) {
 	isnull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, sk))
 	okL := e.freshLabel("netconnok")

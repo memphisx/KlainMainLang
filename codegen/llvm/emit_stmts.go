@@ -133,11 +133,24 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		return e.emitObjectDestructuring(s)
 	case *ast.BlockStatement:
 		e.pushScope()
+		// TDD-00152: a lexical block is its own scope for nested function
+		// declarations — pre-scan this block's own statements so a `function`
+		// declared inside an `if`/`for`/`while`/bare block (one or more blocks
+		// deeper than the enclosing function body) is registered and callable
+		// within the block, then popped at block exit so it doesn't leak out
+		// (strict-mode block scoping). Reuses the exact per-body mechanism the
+		// enclosing function/arrow already uses (capture classification
+		// included); `nil` params because a block introduces none of its own.
+		if err := e.pushNestedFuncScope(nil, s.Body); err != nil {
+			e.popScope()
+			return err
+		}
 		for _, child := range s.Body {
 			if err := e.emitStmt(child); err != nil {
 				return err
 			}
 		}
+		e.popNestedFuncScope()
 		e.popScope()
 		return nil
 	case *ast.ExpressionStatement:
@@ -186,6 +199,13 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			align := e.currentPromiseTy.Align()
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d",
 				StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align))
+		}
+		// Run any enclosing `finally` blocks before settling — the return value
+		// is already stored, so the finally's side effects (which may `await`)
+		// run in order, matching JS (ADR-00612). Previously skipped, so a
+		// `finally` around an async `return` never ran.
+		if err := e.emitPendingFinallys(); err != nil {
+			return err
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", e.coroRetLabel))
 		return nil
@@ -313,6 +333,15 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 			return err
 		}
 	}
+	// TDD-00152: mark this loop's own variable name(s) as active for the
+	// duration of the body, so a block-nested `function` capturing one is
+	// rejected cleanly rather than closing over the shared counter cell.
+	loopVars := map[string]bool{}
+	if s.Init != nil {
+		collectCapturableNames([]ast.Statement{s.Init}, loopVars)
+	}
+	e.activeForLoopVars = append(e.activeForLoopVars, loopVars)
+	defer func() { e.activeForLoopVars = e.activeForLoopVars[:len(e.activeForLoopVars)-1] }()
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(condL)
@@ -463,6 +492,41 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	e.pushScope()
 	defer e.popScope()
+
+	// Sync generator (ADR-00613/ADR-00614): register an iterator-close `finally`
+	// *before* the break/continue targets, so a `return`/`throw`/outer
+	// break-continue out of the loop body closes the generator (running its own
+	// `finally`) — interleaved with any body/consumer `finally` on the shared
+	// pendingFinallys stack. A plain this-loop `break`/normal completion still
+	// closes it once via endL (ADR-00613): those unwind only to the depth
+	// recorded *after* this push, so they don't double-run the close. The
+	// generator instance is evaluated exactly once here and bound to a synthetic
+	// name the synthesized `.return()` references; emitForOfGenerator reuses it.
+	if !s.Await {
+		if objTy := e.inferExprType(s.Iterable); objTy.IsGenerator && !objTy.GeneratorIsAsync {
+			genVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genVal.Ref, slot))
+			gname := fmt.Sprintf("__kml_forof_gen_%s", e.freshReg()[1:])
+			e.define(gname, Symbol{Ptr: slot, Ty: objTy})
+			closeStmt := ast.NewExpressionStatement(
+				ast.NewCallExpression(
+					ast.NewMemberExpression(ast.NewIdentifier(gname, s.GetPos()), "return", s.GetPos()),
+					nil, s.GetPos()),
+				s.GetPos())
+			e.pendingFinallys = append(e.pendingFinallys, []ast.Statement{closeStmt})
+			defer func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }()
+			defer e.pushBreakTarget(endL)()
+			defer e.pushContinueTarget(incL)()
+			defer e.pushPendingLabel(endL, incL)()
+			return e.emitForOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
+		}
+	}
+
 	defer e.pushBreakTarget(endL)()
 	defer e.pushContinueTarget(incL)()
 	defer e.pushPendingLabel(endL, incL)()
@@ -1016,6 +1080,19 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 		return err
 	}
 	discIsStr := isStringTy(disc.Ty)
+
+	// TDD-00152: a `switch` body is a single lexical block in JS — a function
+	// declared in any case is hoisted to the switch block and visible across
+	// cases (fallthrough). Pre-scan every case's statements as one block so
+	// block-nested declarations are registered, popped once the switch ends.
+	var switchStmts []ast.Statement
+	for _, c := range s.Cases {
+		switchStmts = append(switchStmts, c.Body...)
+	}
+	if err := e.pushNestedFuncScope(nil, switchStmts); err != nil {
+		return err
+	}
+	defer e.popNestedFuncScope()
 
 	// Assign a body label to every case in source order.
 	bodyLabels := make([]string, len(s.Cases))

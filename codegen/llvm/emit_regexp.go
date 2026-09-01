@@ -213,6 +213,24 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 		flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
 	}
 
+	// Validate the flags string as real JS does: an unrecognized flag character
+	// or a repeated flag is a SyntaxError, not a silent accept (ADR-00549).
+	e.ensureRegexValidateFlags()
+	flagsOkReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_regex_validate_flags(ptr %s)", flagsOkReg, flagsVal.Ref))
+	flagsBad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", flagsBad, flagsOkReg))
+	flagsBadL := e.freshLabel("regex.badflags")
+	flagsOkL := e.freshLabel("regex.okflags")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", flagsBad, flagsBadL, flagsOkL))
+	e.emitLabel(flagsBadL)
+	e.ensureStrHeaderRuntime()
+	flagsMsg := e.internString("Invalid flags supplied to RegExp constructor")
+	flagsErr := e.buildErrorObj(errorKindIDs["SyntaxError"], flagsMsg, e.internString("SyntaxError"))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", flagsErr))
+	e.emitTerminator("unreachable")
+	e.emitLabel(flagsOkL)
+
 	optSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", optSlot))
 	globalSlot := e.freshReg()

@@ -142,6 +142,17 @@ console.log("banana".replaceAll("ana", "ANA"))
 `, "bbbbbb\nhi world hi\nno match here\naaa\nbANAna")
 }
 
+// An empty search string matches JS's insert-between-every-char behavior:
+// "abc".replaceAll("", "-") is "-a-b-c-" (leading rep, then each char followed
+// by rep), not a no-op (ADR-00547).
+func TestE2EStringReplaceAllEmptySearch(t *testing.T) {
+	assertOutput(t, `
+console.log("abc".replaceAll("", "-"))
+console.log("".replaceAll("", "-"))
+console.log("x".replaceAll("", "*"))
+`, "-a-b-c-\n-\n*x*")
+}
+
 func TestE2ETemplateLiteral(t *testing.T) {
 	assertOutput(t, `
 const x: number = 42
@@ -197,6 +208,20 @@ function tag(strings: string[]): string {
 }
 console.log(tag`+"`"+`hello world`+"`"+`)
 `, "hello world")
+}
+
+// String.raw yields the RAW (undecoded) quasi text interleaved with the
+// string-coerced interpolations — escape sequences appear verbatim, byte-for-
+// byte the same as Node (ADR-00562).
+func TestE2EStringRaw(t *testing.T) {
+	assertOutput(t, `
+console.log(String.raw`+"`"+`a\nb`+"`"+`)
+console.log(String.raw`+"`"+`\t\\`+"`"+`)
+const x = 5
+console.log(String.raw`+"`"+`val=${x}\n`+"`"+`)
+console.log(String.raw`+"`"+`C:\path\to\file`+"`"+`)
+console.log(String.raw`+"`"+`plain`+"`"+`)
+`, "a\\nb\n\\t\\\\\nval=5\\n\nC:\\path\\to\\file\nplain")
 }
 
 func TestE2ETaggedTemplateValuesAreRealTypedValues(t *testing.T) {

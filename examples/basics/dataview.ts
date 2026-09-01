@@ -18,6 +18,13 @@ const tail = new DataView(buf, 6, 6);
 console.log(tail.byteOffset, tail.byteLength, tail.buffer.byteLength);
 console.log(tail.getFloat32(0, true));
 
+// Half-precision (Float16) accessors round-trip at 16-bit float precision.
+const half = new DataView(new ArrayBuffer(4));
+half.setFloat16(0, 1.5);
+console.log(half.getFloat16(0));            // 1.5
+half.setFloat16(2, 3.14, true);
+console.log(half.getFloat16(2, true));      // 3.140625 (float16 rounding)
+
 // 64-bit integer accessors carry real bigints — no 2^53 precision loss.
 const big = new DataView(new ArrayBuffer(8));
 big.setBigUint64(0, 18446744073709551615n);

@@ -30,3 +30,15 @@ const greet = function greeter(): string {
     return "hello";
 };
 console.log(greet());  // hello
+
+// The expression's name may even shadow a top-level function of the same name
+// (ADR-00601). Inside the body, `fib` is the expression itself; the outer
+// `fib` call reaches the top-level function.
+function fib(n: number): number {
+    return -1;  // a distinct top-level function that happens to share the name
+}
+const realFib = function fib(n: number): number {
+    return n < 2 ? n : fib(n - 1) + fib(n - 2);
+};
+console.log(realFib(10));  // 55 — self-recursion through the expression
+console.log(fib(10));      // -1 — the shadowed top-level function

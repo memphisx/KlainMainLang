@@ -569,32 +569,127 @@ func (e *Emitter) typeofStaticAnswer(arg ast.Expression) string {
 		// JS: `typeof undeclared` is "undefined", never an error.
 		return "undefined"
 	case *ast.MemberExpression:
-		obj, ok := a.Object.(*ast.Identifier)
-		if !ok {
-			return ""
+		if obj, ok := a.Object.(*ast.Identifier); ok {
+			if _, shadowed := e.lookup(obj.Name); !shadowed {
+				switch obj.Name {
+				case "Promise":
+					if typeofPromiseStatics[a.Property] {
+						return "function"
+					}
+					return "undefined"
+				case "Math":
+					if typeofMathMethods[a.Property] {
+						return "function"
+					}
+					return "" // constants (Math.PI etc.) infer as number correctly
+				case "JSON":
+					if a.Property == "parse" || a.Property == "stringify" {
+						return "function"
+					}
+					return "undefined"
+				case "console":
+					// Every console member this compiler exposes is a method — and
+					// real console has no non-function own properties — so any member
+					// reference is a function.
+					return "function"
+				case "Object", "Number", "String", "Array", "Date", "Symbol", "Reflect", "Boolean":
+					if typeofNamespaceStatics[obj.Name][a.Property] {
+						return "function"
+					}
+					// A non-method static (Number.MAX_VALUE, Symbol.iterator, …) or an
+					// unknown member falls through to normal inference / "undefined".
+					return ""
+				}
+			}
 		}
-		if _, shadowed := e.lookup(obj.Name); shadowed {
-			return ""
-		}
-		switch obj.Name {
-		case "Promise":
-			if typeofPromiseStatics[a.Property] {
-				return "function"
-			}
-			return "undefined"
-		case "Math":
-			if typeofMathMethods[a.Property] {
-				return "function"
-			}
-			return "" // constants (Math.PI etc.) infer as number correctly
-		case "JSON":
-			if a.Property == "parse" || a.Property == "stringify" {
-				return "function"
-			}
-			return "undefined"
+		// A *value*-receiver method reference (`c.m`, `"hi".slice`, `[1].push`):
+		// `typeof` is "function" (ADR-00607). Without this the member access
+		// infers as the i64 default and wrongly answers "number". Only real
+		// methods qualify — a plain field, a `length`, or an accessor property
+		// still answers through normal inference.
+		if e.isValueMethodRef(e.inferExprType(a.Object), a.Property) {
+			return "function"
 		}
 	}
 	return ""
+}
+
+// isValueMethodRef reports whether `objTy.prop` (a member reference on a value,
+// not a namespace) names a callable method — a class instance method, or a known
+// method of a built-in value type (string/array) — so `typeof` answers
+// "function" (ADR-00607). Conservative: a name it doesn't recognize falls back
+// to normal inference, so this only ever upgrades a wrong "number" to the right
+// "function", never the reverse. A class accessor (getter/setter) is
+// deliberately excluded — `typeof obj.accessor` is the accessed value's type.
+func (e *Emitter) isValueMethodRef(objTy Type, prop string) bool {
+	if objTy.IsClass {
+		if info, ok := e.classes[objTy.ClassName]; ok {
+			if _, isMethod := info.MethodSigs[prop]; isMethod {
+				return true // a plain method (accessor keys are accessorMethodName-mangled, never a bare prop)
+			}
+		}
+		return false
+	}
+	if objTy.IsArray {
+		return typeofArrayMethods[prop]
+	}
+	if isForOfStringTy(objTy) {
+		return typeofStringMethods[prop]
+	}
+	return false
+}
+
+// typeofStringMethods / typeofArrayMethods are the method names whose `typeof`
+// on a string / array value is "function" (ADR-00607). Membership tests only —
+// an omitted name simply falls back to normal inference, so the lists need not
+// be exhaustive to stay sound.
+var typeofStringMethods = map[string]bool{
+	"slice": true, "substring": true, "substr": true, "charAt": true, "charCodeAt": true,
+	"codePointAt": true, "indexOf": true, "lastIndexOf": true, "includes": true,
+	"startsWith": true, "endsWith": true, "toUpperCase": true, "toLowerCase": true,
+	"trim": true, "trimStart": true, "trimEnd": true, "split": true, "replace": true,
+	"replaceAll": true, "repeat": true, "padStart": true, "padEnd": true, "concat": true,
+	"at": true, "match": true, "matchAll": true, "search": true, "normalize": true,
+	"localeCompare": true, "toString": true, "valueOf": true,
+}
+
+var typeofArrayMethods = map[string]bool{
+	"push": true, "pop": true, "shift": true, "unshift": true, "slice": true, "splice": true,
+	"concat": true, "join": true, "indexOf": true, "lastIndexOf": true, "includes": true,
+	"find": true, "findIndex": true, "findLast": true, "findLastIndex": true, "filter": true,
+	"map": true, "forEach": true, "reduce": true, "reduceRight": true, "some": true,
+	"every": true, "sort": true, "reverse": true, "fill": true, "flat": true, "flatMap": true,
+	"keys": true, "values": true, "entries": true, "at": true, "copyWithin": true,
+	"toReversed": true, "toSorted": true, "toSpliced": true, "with": true, "toString": true,
+}
+
+// typeofNamespaceStatics maps a built-in namespace to its static *method* names,
+// so `typeof Object.keys === "function"` etc. Non-method statics (numeric/symbol
+// constants) are deliberately absent — they answer through normal inference.
+// Enumeration-based (the ES static surface is stable), covering the common
+// namespaces; an unlisted method reads "undefined" rather than a wrong "number".
+var typeofNamespaceStatics = map[string]map[string]bool{
+	"Object": {
+		"keys": true, "values": true, "entries": true, "assign": true,
+		"freeze": true, "isFrozen": true, "create": true, "fromEntries": true,
+		"getOwnPropertyNames": true, "getPrototypeOf": true, "setPrototypeOf": true,
+		"defineProperty": true, "defineProperties": true, "getOwnPropertyDescriptor": true,
+		"hasOwn": true, "is": true, "seal": true, "isSealed": true, "preventExtensions": true,
+	},
+	"Number": {
+		"isInteger": true, "isFinite": true, "isNaN": true, "isSafeInteger": true,
+		"parseFloat": true, "parseInt": true,
+	},
+	"String": {"fromCharCode": true, "fromCodePoint": true, "raw": true},
+	"Array":  {"isArray": true, "from": true, "of": true},
+	"Date":   {"now": true, "parse": true, "UTC": true},
+	"Symbol": {"for": true, "keyFor": true},
+	"Boolean": {},
+	"Reflect": {
+		"get": true, "set": true, "has": true, "ownKeys": true,
+		"getPrototypeOf": true, "defineProperty": true, "deleteProperty": true,
+		"apply": true, "construct": true,
+	},
 }
 
 // typeofMathMethods are the implemented Math functions (the emit_call_math.go
@@ -785,29 +880,41 @@ func (e *Emitter) emitUpdate(ex *ast.UpdateExpression) (Value, error) {
 // compound assignment's result); postfix returns the value read before the
 // update.
 //
-// Caveat: for a postfix update whose value is consumed, the target's object is
-// evaluated twice (once for the pre-read, once inside the compound assignment),
-// so an object sub-expression with side effects (`makeObj().x++` as a value)
-// would run those twice — use a simple receiver. A statement-position postfix
-// (the common case) discards the pre-read, so it is dead-code-eliminated.
+// A postfix update whose value is consumed reads the target twice (the pre-read
+// and again inside the compound assignment), so a side-effecting *receiver*
+// (`makeObj().x++`) is first hoisted into a temp binding (ADR-00606) — the
+// receiver runs exactly once, both reads then go through the temp. A
+// statement-position postfix discards the pre-read (dead-code-eliminated), and a
+// simple receiver (identifier/`this`/static name) never had the problem.
 func (e *Emitter) emitTargetUpdate(ex *ast.UpdateExpression) (Value, error) {
 	op := "+="
 	if ex.Op == "--" {
 		op = "-="
 	}
 	pos := ex.GetPos()
+	arg := ex.Arg
+	// Only a *consumed* postfix reads twice; hoist the receiver so its side
+	// effects run once. (Prefix reads once, and a discarded postfix is DCE'd —
+	// hoisting there would be harmless but pointless.)
+	if !ex.Prefix {
+		hoisted, err := e.hoistUpdateReceiver(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		arg = hoisted
+	}
 	var one ast.Expression
-	if e.inferExprType(ex.Arg).IsBigInt {
+	if e.inferExprType(arg).IsBigInt {
 		one = ast.NewBigIntLiteral("1", pos)
 	} else {
 		one = ast.NewNumberLiteral("1", pos)
 	}
-	assign := ast.NewAssignmentExpression(op, ex.Arg, one, pos)
+	assign := ast.NewAssignmentExpression(op, arg, one, pos)
 
 	if ex.Prefix {
 		return e.emitAssign(assign)
 	}
-	old, err := e.emitExpr(ex.Arg)
+	old, err := e.emitExpr(arg)
 	if err != nil {
 		return Value{}, err
 	}
@@ -815,6 +922,83 @@ func (e *Emitter) emitTargetUpdate(ex *ast.UpdateExpression) (Value, error) {
 		return Value{}, err
 	}
 	return old, nil
+}
+
+// hoistUpdateReceiver evaluates a postfix update target's side-effecting
+// receiver exactly once and rewrites the target to read it back from a temp
+// binding (ADR-00606), so the pre-read and the compound-assign no longer
+// re-run those side effects. Only a member target with a non-trivial object
+// (`makeObj().x`, not `obj.x`/`this.x`) needs it; every other shape is returned
+// unchanged. The temp is a ptr (object receivers are always ptr-typed); a
+// non-ptr receiver (none exist for member access today) falls back unchanged.
+func (e *Emitter) hoistUpdateReceiver(arg ast.Expression) (ast.Expression, error) {
+	switch t := arg.(type) {
+	case *ast.MemberExpression:
+		switch t.Object.(type) {
+		case *ast.Identifier, *ast.ThisExpression:
+			return arg, nil // idempotent receiver — no hoist needed
+		}
+		recv, err := e.emitExpr(t.Object)
+		if err != nil {
+			return nil, err
+		}
+		if recv.Ty.IR != "ptr" {
+			return arg, nil
+		}
+		tmpName := fmt.Sprintf("__kml_upd_recv_%s", e.freshReg()[1:])
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", recv.Ref, slot))
+		e.define(tmpName, Symbol{Ptr: slot, Ty: recv.Ty})
+		return ast.NewMemberExpression(ast.NewIdentifier(tmpName, t.GetPos()), t.Property, t.GetPos()), nil
+	case *ast.IndexExpression:
+		// Hoist both a side-effecting array-producing *object* (`makeArr()[i]++`)
+		// and a side-effecting *index* expression (`arr[side()]++`) so each runs
+		// once (ADR-00606). Evaluation order is object-then-index, matching JS.
+		obj := t.Object
+		switch obj.(type) {
+		case *ast.Identifier, *ast.ThisExpression:
+			// idempotent receiver — leave as is
+		default:
+			recv, err := e.emitExpr(obj)
+			if err != nil {
+				return nil, err
+			}
+			if recv.Ty.IsArray {
+				header := e.boxArrayValue(recv)
+				tmpName := fmt.Sprintf("__kml_upd_arr_%s", e.freshReg()[1:])
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+				e.define(tmpName, Symbol{Ptr: slot, Ty: recv.Ty})
+				obj = ast.NewIdentifier(tmpName, t.GetPos())
+			}
+			// (A non-array receiver falls through; other index-target kinds are
+			// handled by their own assignment paths.)
+		}
+		idx := t.Index
+		switch idx.(type) {
+		case *ast.NumberLiteral, *ast.Identifier, *ast.ThisExpression:
+			// idempotent index — leave as is
+		default:
+			idxVal, err := e.emitExpr(idx)
+			if err != nil {
+				return nil, err
+			}
+			idxVal = e.coerce(idxVal, TypeI64)
+			tmpName := fmt.Sprintf("__kml_upd_idx_%s", e.freshReg()[1:])
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal.Ref, slot))
+			e.define(tmpName, Symbol{Ptr: slot, Ty: TypeI64})
+			idx = ast.NewIdentifier(tmpName, t.GetPos())
+		}
+		if obj == t.Object && idx == t.Index {
+			return arg, nil
+		}
+		return ast.NewIndexExpression(obj, idx, t.GetPos()), nil
+	}
+	return arg, nil
 }
 
 // dateCompoundAssignGuard rejects compound-assigning one Date into another

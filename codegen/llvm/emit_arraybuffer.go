@@ -760,13 +760,18 @@ func (e *Emitter) emitBufferGrowableProps(bufVal Value, prop string) (Value, err
 	return Value{Ref: res, Ty: TypeI64}, nil
 }
 
-// emitBufferGrow implements sab.grow(newLength) (ADR-00494): bounds-check
-// against the reserved max (and against shrinking — growable buffers only
-// grow), then bump the header's length word. The data block was reserved at
-// max size up front, so no view is ever invalidated.
-func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+// emitBufferGrow implements sab.grow(newLength) and buf.resize(newLength)
+// (ADR-00494/ADR-00564): bounds-check against the reserved max, then bump the
+// header's length word. The data block was reserved at max size up front, so no
+// view is ever invalidated and shrinking is just a smaller length word (the
+// backing bytes beyond the new length stay allocated but unreachable). The two
+// methods differ only in direction: SharedArrayBuffer.grow rejects a smaller
+// length (growable buffers only grow — allowShrink=false), while
+// ArrayBuffer.resize permits both directions (allowShrink=true). A negative new
+// length is rejected either way.
+func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Pos, allowShrink bool) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: grow() requires 1 argument (newByteLength)", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: grow()/resize() requires 1 argument (newByteLength)", pos.Line, pos.Col)
 	}
 	if !bufVal.Ty.BufferGrowable {
 		return Value{}, fmt.Errorf("%d:%d: grow()/resize() requires a buffer constructed with {maxByteLength}", pos.Line, pos.Col)
@@ -784,15 +789,27 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, bufVal.Ref))
 	tooBig := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooBig, nVal.Ref, maxReg))
-	shrinks := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", shrinks, nVal.Ref, lenReg))
 	bad := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, tooBig, shrinks))
+	if allowShrink {
+		// resize: any 0..=max is legal; only a negative length is rejected.
+		neg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, nVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, tooBig, neg))
+	} else {
+		// grow: a length below the current length is also rejected.
+		shrinks := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", shrinks, nVal.Ref, lenReg))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, tooBig, shrinks))
+	}
 	throwL := e.freshLabel("sab.grow.throw")
 	okL := e.freshLabel("sab.grow.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
 	e.emitLabel(throwL)
-	e.emitInternalThrow(e.internString("RangeError: SharedArrayBuffer.grow: new length is below the current length or above maxByteLength"))
+	if allowShrink {
+		e.emitInternalThrow(e.internString("RangeError: ArrayBuffer.resize: new length is negative or above maxByteLength"))
+	} else {
+		e.emitInternalThrow(e.internString("RangeError: SharedArrayBuffer.grow: new length is below the current length or above maxByteLength"))
+	}
 	e.emitLabel(okL)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nVal.Ref, bufVal.Ref))
 	return Value{Ty: TypeVoid}, nil

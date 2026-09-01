@@ -48,6 +48,21 @@ server.bind(8961)
 	}
 }
 
+// ADR-00581: socket.setBroadcast(flag) is a real setsockopt(SO_BROADCAST); the
+// socket stays usable and .address() still reports the bound ephemeral port.
+func TestE2EDgramSetBroadcast(t *testing.T) {
+	assertOutputImports(t, `
+import dgram from 'dgram'
+const s = dgram.createSocket('udp4')
+s.setBroadcast(true)
+s.bind(0)
+const a = s.address()
+console.log(a.family, a.port > 0)
+s.setBroadcast(false)
+s.close()
+`, "IPv4 true")
+}
+
 // startUDPServer compiles a dgram server and waits until it responds to a
 // probe datagram before returning; killed via t.Cleanup since it never exits.
 func startUDPServer(t *testing.T, src string, port int) {

@@ -425,11 +425,12 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if len(args) != 1 {
 			return Value{}, fmt.Errorf("%d:%d: map.forEach() requires 1 argument", pos.Line, pos.Col)
 		}
-		cb, err := e.resolveCallbackWithHints(args[0], []Type{valTy, keyTy})
+		mapTy := MapType(keyTy, valTy)
+		cb, err := e.resolveCallbackWithHints(args[0], []Type{valTy, keyTy, mapTy})
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitMapForEach(mapPtr, strKey, keyTy, valTy, cb)
+		return e.emitMapForEach(mapPtr, strKey, keyTy, valTy, mapTy, cb)
 
 	case "clear":
 		if len(args) != 0 {
@@ -519,13 +520,14 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 			return Value{}, fmt.Errorf("%d:%d: set.forEach() requires 1 argument", pos.Line, pos.Col)
 		}
 		// Real JS calls back(value, value, set) for a Set — the same value
-		// twice, kept only for Map/Set callback-shape parity. Mirrored here
-		// as (element, element) when the callback declares a 2nd parameter.
-		cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, elemTy})
+		// twice (kept only for Map/Set callback-shape parity), then the set
+		// itself. Mirrored here per the callback's declared arity (ADR-00573).
+		setTy := SetType(elemTy)
+		cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, elemTy, setTy})
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitSetForEach(setPtr, strElem, elemTy, cb)
+		return e.emitSetForEach(setPtr, strElem, elemTy, setTy, cb)
 
 	case "clear":
 		if len(args) != 0 {
@@ -734,12 +736,10 @@ func (e *Emitter) emitMapEntries(mapPtr string, strKey bool, keyTy, valTy Type) 
 	return Value{Ref: r1, Ty: ArrayOf(entryTy)}, nil
 }
 
-// emitMapForEach implements map.forEach(fn): calls fn(value, key?) for each
-// entry, matching real JS's (value, key, map) callback order minus the
-// dropped third argument — the same "drop the trailing, rarely-used
-// argument" convention Array.forEach already uses for its own (elem, index)
-// callback.
-func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy Type, cb Callback) (Value, error) {
+// emitMapForEach implements map.forEach(fn): calls fn(value, key?, map?) for
+// each entry, matching real JS's (value, key, map) callback order (ADR-00573).
+// The 3rd `map` argument is the same map object being iterated.
+func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy, mapTy Type, cb Callback) (Value, error) {
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, strKey)
 
 	idxAlloca := e.freshReg()
@@ -770,6 +770,9 @@ func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy Type, 
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: kElem, Ty: keyTy})
 	}
+	if cb.arity() >= 3 {
+		cbArgs = append(cbArgs, Value{Ref: mapPtr, Ty: mapTy})
+	}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err
 	}
@@ -787,7 +790,7 @@ func (e *Emitter) emitMapForEach(mapPtr string, strKey bool, keyTy, valTy Type, 
 // each element — the second argument (when the callback declares one)
 // mirrors real JS's own quirky Set.prototype.forEach(value, value, set)
 // shape, where the "key" is just the value again.
-func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy Type, cb Callback) (Value, error) {
+func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type, cb Callback) (Value, error) {
 	keysRes := e.freshReg()
 	if strElem {
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keysRes, setPtr))
@@ -823,6 +826,9 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy Type, cb Ca
 	cbArgs := []Value{{Ref: eElem, Ty: elemTy}}
 	if cb.arity() >= 2 {
 		cbArgs = append(cbArgs, Value{Ref: eElem, Ty: elemTy})
+	}
+	if cb.arity() >= 3 {
+		cbArgs = append(cbArgs, Value{Ref: setPtr, Ty: setTy})
 	}
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err

@@ -253,9 +253,9 @@ const tab = ref('concurrency')
 const gallery = [
   {
     to: '/docs/guides/concurrent-load-tester', img: loadtestImg, tag: 'Concurrency',
-    alt: 'A terminal load-test dashboard with a progress bar, requests-per-second, latency percentiles, and a histogram',
+    alt: 'A terminal load-test dashboard: requests-per-second, success rate, latency percentiles, a status-code breakdown, and an RPS sparkline',
     title: 'A concurrent load tester',
-    body: 'Goroutines drive requests through a service in parallel while a live dashboard shows throughput, latency percentiles, and a histogram — Go-style channels and select in one binary.',
+    body: 'Point klainload at any URL: goroutine agents hammer it in parallel while a live dashboard shows throughput, success rate, and latency percentiles — stop it any time and keep the report. Go-style channels and select in one binary.',
     cta: 'Read the guide'
   },
   {

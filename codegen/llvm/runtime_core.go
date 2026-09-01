@@ -144,6 +144,77 @@ func (e *Emitter) ensureGetrusage() {
 	}
 }
 
+// ensureCurrentRSS declares __kml_current_rss_bytes() -> i64: the process's
+// *instantaneous* resident set size in bytes, matching real Node's
+// process.memoryUsage().rss (ADR-00570) — not getrusage's ru_maxrss peak.
+//
+//   - Darwin: task_info(mach_task_self(), MACH_TASK_BASIC_INFO=20) →
+//     resident_size (u64 at offset 8 of struct mach_task_basic_info; count = 12
+//     natural_t words). Verified on Apple Silicon.
+//   - Linux: /proc/self/statm field 2 (resident pages) × 4096. The page size is
+//     4 KiB on x86-64 and arm64 Linux; parsing via fscanf("%*ld %ld"). Encoded
+//     but verified on Mac only, like the other Linux /proc paths.
+//
+// On a read failure the result is 0 (the same zeroed fallback the field had
+// before).
+func (e *Emitter) ensureCurrentRSS() {
+	if e.usedCurrentRSS {
+		return
+	}
+	e.usedCurrentRSS = true
+	if runtime.GOOS == "darwin" {
+		e.emitGlobal("@mach_task_self_ = external global i32")
+		e.emitGlobal("declare i32 @task_info(i32, i32, ptr, ptr)")
+		e.emitGlobal(`
+define i64 @__kml_current_rss_bytes() {
+entry:
+  %info = alloca [48 x i8], align 8
+  %cnt = alloca i32, align 4
+  store i32 12, ptr %cnt, align 4
+  %port = load i32, ptr @mach_task_self_, align 4
+  %kr = call i32 @task_info(i32 %port, i32 20, ptr %info, ptr %cnt)
+  %ok = icmp eq i32 %kr, 0
+  br i1 %ok, label %read, label %fail
+read:
+  %rp = getelementptr i8, ptr %info, i64 8
+  %rss = load i64, ptr %rp, align 8
+  ret i64 %rss
+fail:
+  ret i64 0
+}`)
+		return
+	}
+	// Linux (and other non-Darwin POSIX): /proc/self/statm. fopen/fclose reuse
+	// the shared guarded declarations (fs streams already declare them); only
+	// fscanf is unique here.
+	e.ensureFopen()
+	e.ensureFclose()
+	e.emitGlobal("declare i32 @fscanf(ptr, ptr, ...)")
+	e.emitGlobal(`@.kml_statm_path = private unnamed_addr constant [18 x i8] c"/proc/self/statm\00\00"`)
+	e.emitGlobal(`@.kml_statm_mode = private unnamed_addr constant [2 x i8] c"r\00"`)
+	e.emitGlobal(`@.kml_statm_fmt = private unnamed_addr constant [9 x i8] c"%*ld %ld\00"`)
+	e.emitGlobal(`
+define i64 @__kml_current_rss_bytes() {
+entry:
+  %f = call ptr @fopen(ptr @.kml_statm_path, ptr @.kml_statm_mode)
+  %isnull = icmp eq ptr %f, null
+  br i1 %isnull, label %fail, label %read
+read:
+  %pages_p = alloca i64, align 8
+  store i64 0, ptr %pages_p, align 8
+  %n = call i32 (ptr, ptr, ...) @fscanf(ptr %f, ptr @.kml_statm_fmt, ptr %pages_p)
+  call i32 @fclose(ptr %f)
+  %got = icmp eq i32 %n, 1
+  br i1 %got, label %scale, label %fail
+scale:
+  %pages = load i64, ptr %pages_p, align 8
+  %bytes = mul i64 %pages, 4096
+  ret i64 %bytes
+fail:
+  ret i64 0
+}`)
+}
+
 func (e *Emitter) ensureRealloc() {
 	if !e.usedRealloc {
 		e.emitGlobal("declare ptr @realloc(ptr noundef, i64 noundef)")
@@ -158,10 +229,90 @@ func (e *Emitter) ensureMemmove() {
 	}
 }
 
+// ensureStripExpZeros defines @__kml_strip_exp_zeros: rewrites a C printf-style
+// exponent ("1.23e+03") in place to JS's minimum-digit form ("1.23e+3"), and
+// returns the new string length. It finds the first 'e'/'E', skips an optional
+// sign, then drops leading '0' digits from the exponent while keeping at least
+// one digit ("e+00" → "e+0"), memmove-ing the tail (including the NUL) left.
+// No 'e'/'E' → the string is returned unchanged. Shared by
+// toExponential/toPrecision, whose only remaining deviation from real JS was
+// this two-digit zero-padded exponent (ADR-00551).
+func (e *Emitter) ensureStripExpZeros() {
+	if e.usedStripExpZeros {
+		return
+	}
+	e.usedStripExpZeros = true
+	e.ensureStrlen()
+	e.ensureMemmove()
+	e.emitGlobal(`
+define i64 @__kml_strip_exp_zeros(ptr %s) {
+entry:
+  %len0 = call i64 @strlen(ptr %s)
+  br label %find
+find:
+  %i = phi i64 [ 0, %entry ], [ %in, %adv ]
+  %atend = icmp sge i64 %i, %len0
+  br i1 %atend, label %noe, label %chk
+chk:
+  %p = getelementptr i8, ptr %s, i64 %i
+  %c = load i8, ptr %p, align 1
+  %ise = icmp eq i8 %c, 101
+  %isE = icmp eq i8 %c, 69
+  %isexp = or i1 %ise, %isE
+  br i1 %isexp, label %founde, label %adv
+adv:
+  %in = add i64 %i, 1
+  br label %find
+founde:
+  %s1 = add i64 %i, 1
+  %sp = getelementptr i8, ptr %s, i64 %s1
+  %sc = load i8, ptr %sp, align 1
+  %isplus = icmp eq i8 %sc, 43
+  %isminus = icmp eq i8 %sc, 45
+  %issign = or i1 %isplus, %isminus
+  %signadj = select i1 %issign, i64 1, i64 0
+  %digstart = add i64 %s1, %signadj
+  br label %zloop
+zloop:
+  %z = phi i64 [ %digstart, %founde ], [ %zn, %zadv ]
+  %zp = getelementptr i8, ptr %s, i64 %z
+  %zc = load i8, ptr %zp, align 1
+  %isz = icmp eq i8 %zc, 48
+  %z1 = add i64 %z, 1
+  %hasnext = icmp slt i64 %z1, %len0
+  %cond = and i1 %isz, %hasnext
+  br i1 %cond, label %zadv, label %zdone
+zadv:
+  %zn = add i64 %z, 1
+  br label %zloop
+zdone:
+  %drop = sub i64 %z, %digstart
+  %nodrop = icmp eq i64 %drop, 0
+  br i1 %nodrop, label %noe, label %shift
+shift:
+  %movelen0 = sub i64 %len0, %z
+  %movelen = add i64 %movelen0, 1
+  %dst = getelementptr i8, ptr %s, i64 %digstart
+  %src = getelementptr i8, ptr %s, i64 %z
+  call ptr @memmove(ptr %dst, ptr %src, i64 %movelen)
+  %newlen = sub i64 %len0, %drop
+  ret i64 %newlen
+noe:
+  ret i64 %len0
+}`)
+}
+
 func (e *Emitter) ensureStrlen() {
 	if !e.usedStrlen {
 		e.emitGlobal("declare i64 @strlen(ptr noundef)")
 		e.usedStrlen = true
+	}
+}
+
+func (e *Emitter) ensureStrchr() {
+	if !e.usedStrchr {
+		e.emitGlobal("declare ptr @strchr(ptr noundef, i32 noundef)")
+		e.usedStrchr = true
 	}
 }
 
@@ -206,6 +357,14 @@ func (e *Emitter) ensureStrncmp() {
 		e.usedStrncmp = true
 	}
 }
+
+func (e *Emitter) ensureStrncasecmp() {
+	if !e.usedStrncasecmp {
+		e.emitGlobal("declare i32 @strncasecmp(ptr noundef, ptr noundef, i64 noundef)")
+		e.usedStrncasecmp = true
+	}
+}
+
 
 func (e *Emitter) ensureAtoll() {
 	if !e.usedAtoll {
@@ -614,6 +773,62 @@ invalid:
 keep:
   ret double %%v
 }`, infPtr))
+}
+
+// ensureStrtodParseFloat defines @__kml_strtod_parsefloat, the parseFloat-only
+// variant of __kml_strtod_js. It differs in one respect: a "0x"/"0X" hex prefix
+// is NOT a valid StrDecimalLiteral for parseFloat, so parseFloat("0x10") is 0
+// (it reads the leading "0" and stops at the "x"), whereas C's strtod — and
+// JS's ToNumber/Number("0x10") — read the whole thing as 16. This wrapper
+// detects a hex prefix past optional leading whitespace and an optional sign;
+// when found it returns a signed zero and points endptr just past the "0" so
+// the caller sees a successful one-digit conversion. Otherwise it delegates to
+// __kml_strtod_js unchanged.
+func (e *Emitter) ensureStrtodParseFloat() {
+	if e.usedStrtodParseFloat {
+		return
+	}
+	e.usedStrtodParseFloat = true
+	e.ensureStrtodJS()
+	e.emitGlobal(`
+define double @__kml_strtod_parsefloat(ptr %s, ptr %endpp) {
+entry:
+  br label %wsloop
+wsloop:
+  %p = phi ptr [ %s, %entry ], [ %pnext, %wsadv ]
+  %c = load i8, ptr %p, align 1
+  %c_sp = icmp eq i8 %c, 32
+  %c_ge9 = icmp uge i8 %c, 9
+  %c_le13 = icmp ule i8 %c, 13
+  %c_ctl = and i1 %c_ge9, %c_le13
+  %c_ws = or i1 %c_sp, %c_ctl
+  br i1 %c_ws, label %wsadv, label %afterws
+wsadv:
+  %pnext = getelementptr i8, ptr %p, i64 1
+  br label %wsloop
+afterws:
+  %is_plus = icmp eq i8 %c, 43
+  %is_minus = icmp eq i8 %c, 45
+  %issign = or i1 %is_plus, %is_minus
+  %psign = getelementptr i8, ptr %p, i64 1
+  %p0 = select i1 %issign, ptr %psign, ptr %p
+  %c0 = load i8, ptr %p0, align 1
+  %is0 = icmp eq i8 %c0, 48
+  br i1 %is0, label %checkx, label %delegate
+checkx:
+  %p1 = getelementptr i8, ptr %p0, i64 1
+  %c1 = load i8, ptr %p1, align 1
+  %c1u = and i8 %c1, 223
+  %isx = icmp eq i8 %c1u, 88
+  br i1 %isx, label %hex, label %delegate
+hex:
+  store ptr %p1, ptr %endpp, align 8
+  %z = select i1 %is_minus, double -0.0, double 0.0
+  ret double %z
+delegate:
+  %v = call double @__kml_strtod_js(ptr %s, ptr %endpp)
+  ret double %v
+}`)
 }
 
 // ensureToNumber defines @__kml_to_number, JS's ToNumber for a string:

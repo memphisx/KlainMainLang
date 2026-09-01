@@ -765,19 +765,24 @@ func (l *Lexer) readPrivateName(line, col int) (Token, error) {
 }
 
 // readTemplateSegment reads template content from the current position until
-// a closing backtick (atEnd=true) or an opening ${ (atEnd=false).
-func (l *Lexer) readTemplateSegment() (string, bool, error) {
+// a closing backtick (atEnd=true) or an opening ${ (atEnd=false). It returns
+// both the cooked text (escapes decoded) and the raw source slice (escapes
+// verbatim), the latter backing String.raw (ADR-00562).
+func (l *Lexer) readTemplateSegment() (cooked, raw string, atEnd bool, err error) {
 	var buf strings.Builder
+	rawStart := l.pos
 	for l.pos < len(l.src) {
 		c := l.peek()
 		if c == '`' {
+			raw = string(l.src[rawStart:l.pos])
 			l.advance()
-			return buf.String(), true, nil
+			return buf.String(), raw, true, nil
 		}
 		if c == '$' && l.peekAt(1) == '{' {
+			raw = string(l.src[rawStart:l.pos])
 			l.advance() // $
 			l.advance() // {
-			return buf.String(), false, nil
+			return buf.String(), raw, false, nil
 		}
 		if c == '\\' {
 			l.advance()
@@ -787,40 +792,48 @@ func (l *Lexer) readTemplateSegment() (string, bool, error) {
 			// `$` and `` \` `` into a backtick without the leading
 			// backslash). See scanStringEscape.
 			if err := l.scanStringEscape(&buf, l.line, l.col); err != nil {
-				return "", false, err
+				return "", "", false, err
 			}
 			continue
 		}
 		buf.WriteRune(l.advance())
 	}
-	return "", false, fmt.Errorf("unterminated template literal")
+	return "", "", false, fmt.Errorf("unterminated template literal")
 }
 
 // readTemplateHead is called when a backtick is seen (not yet consumed).
 func (l *Lexer) readTemplateHead(line, col int) (Token, error) {
 	l.advance() // consume `
-	seg, atEnd, err := l.readTemplateSegment()
+	seg, raw, atEnd, err := l.readTemplateSegment()
 	if err != nil {
 		return Token{}, err
 	}
 	if atEnd {
-		return l.tok(TEMPLATE_NO_SUB, seg, line, col), nil
+		t := l.tok(TEMPLATE_NO_SUB, seg, line, col)
+		t.Raw = raw
+		return t, nil
 	}
 	l.templateStack = append(l.templateStack, 0)
-	return l.tok(TEMPLATE_HEAD, seg, line, col), nil
+	t := l.tok(TEMPLATE_HEAD, seg, line, col)
+	t.Raw = raw
+	return t, nil
 }
 
 // readTemplatePart is called after the } that closes a ${ expression.
 func (l *Lexer) readTemplatePart(line, col int) (Token, error) {
-	seg, atEnd, err := l.readTemplateSegment()
+	seg, raw, atEnd, err := l.readTemplateSegment()
 	if err != nil {
 		return Token{}, err
 	}
 	if atEnd {
-		return l.tok(TEMPLATE_TAIL, seg, line, col), nil
+		t := l.tok(TEMPLATE_TAIL, seg, line, col)
+		t.Raw = raw
+		return t, nil
 	}
 	l.templateStack = append(l.templateStack, 0)
-	return l.tok(TEMPLATE_MIDDLE, seg, line, col), nil
+	t := l.tok(TEMPLATE_MIDDLE, seg, line, col)
+	t.Raw = raw
+	return t, nil
 }
 
 func Tokenize(src string) ([]Token, error) {

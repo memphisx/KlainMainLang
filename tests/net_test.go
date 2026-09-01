@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,47 @@ sock.on('data', (chunk: Uint8Array) => {
   sock.end()
 })
 `
+	bin := buildBinaryImports(t, src)
+	out, err := exec.Command(bin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run client: %v\noutput: %s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "got: echo:hello"; got != want {
+		t.Errorf("client output: got %q, want %q", got, want)
+	}
+}
+
+// ADR-00588: net.connect({ path }) connects to a Unix-domain socket. A Go-side
+// AF_UNIX echo server drives the compiled klain client.
+func TestE2ENetConnectUnixSocket(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "kml.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 128)
+		n, _ := conn.Read(buf)
+		conn.Write([]byte("echo:" + string(buf[:n])))
+	}()
+
+	src := fmt.Sprintf(`
+import net from 'net'
+const dec = new TextDecoder()
+const sock = net.connect({ path: %q }, () => {
+  sock.write("hello")
+})
+sock.on('data', (chunk: Uint8Array) => {
+  console.log("got:", dec.decode(chunk))
+  sock.end()
+})
+`, sockPath)
 	bin := buildBinaryImports(t, src)
 	out, err := exec.Command(bin).CombinedOutput()
 	if err != nil {

@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -558,7 +557,7 @@ func normalizeNodeModule(mod string) string {
 	return mod
 }
 
-func runNodeSuite(workDir string, timeout time.Duration) {
+func runNodeSuite(workDir string, timeout time.Duration, workers int) {
 	root := ".node-tests/test/parallel"
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -588,8 +587,11 @@ func runNodeSuite(workDir string, timeout time.Duration) {
 	// Worker pool — the full test/parallel corpus is ~3,500 files, most of which
 	// compile-fail fast (untyped-dynamic Node test code) but some reach clang+run,
 	// so parallelism matters. Each worker gets its own scratch-file tag so the
-	// per-file .ll/.bin don't collide.
-	workers := runtime.NumCPU()
+	// per-file .ll/.bin don't collide. `workers` comes from the -workers flag
+	// (default leaves cores free to keep the run phase from starving — see main.go).
+	if workers < 1 {
+		workers = 1
+	}
 	jobs := make(chan string, len(files))
 	out := make(chan nodeResult, len(files))
 	var wg sync.WaitGroup

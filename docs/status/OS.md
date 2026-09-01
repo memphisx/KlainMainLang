@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information. See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md).
 
-**Coverage**: 7/7 (100%) · **Strict Coverage**: 6/7 (~86%).
+**Coverage**: 7/7 (100%) · **Strict Coverage**: 7/7 (100%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,6 +14,6 @@ Format: [Status page format](README.md#status-page-format).
 | `os.homedir()` | ✅ | | • `getenv("HOME")`; throws a catchable Error if unset (matches real Node) |
 | `os.tmpdir()` | ✅ | | • `getenv("TMPDIR")`, falling back to `"/tmp"` — never throws |
 | `os.hostname()` | ✅ | | • POSIX `gethostname()` |
-| `os.cpus()` | ✅ | • Darwin `speed` is 0 on Apple Silicon — `sysctlbyname("hw.cpufrequency")` has no answer on M-series (Apple removed the fixed-clock model from M1 on); matches real Node's documented M-series behavior, not a defect<br>• Darwin `times.irq` is always 0 — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice) | • Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `"Apple M4 Pro"`, live tick counters)<br>• Linux `speed` reflects the CPU's current/scaled frequency (from `/proc/cpuinfo`'s `cpu MHz`), not a rated base/max clock — matches what libuv/real Node reports on Linux |
+| `os.cpus()` | ✅ | | • Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `"Apple M4 Pro"`, live tick counters)<br>• Darwin `speed`: `hw.cpufrequency` is unavailable on Apple Silicon (M-series removed the fixed-clock model), so a fixed `2400` MHz nominal is reported there — byte-for-byte what real Node/libuv reports on the same hardware; an Intel Mac's real value flows through unchanged ([ADR-00569](../adr/ADR-00569.md))<br>• Darwin `times.irq` is always `0` — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice); real Node reports `irq: 0` on Darwin too, so this is parity, not a gap<br>• Linux `speed` reflects the CPU's current/scaled frequency (from `/proc/cpuinfo`'s `cpu MHz`), not a rated base/max clock — matches what libuv/real Node reports on Linux |
 | `os.totalmem()` / `os.freemem()` | ✅ | | • Verified on Linux and on Apple Silicon M4 Pro — `totalmem()` matches `sysctl hw.memsize`; Darwin `freemem()` (Mach `host_statistics`) returns a live free-page figure |
 | `os.EOL` | ✅ | | • Always `"\n"` — this compiler is POSIX-only (no Windows target), so there's no real `"\r\n"` case |

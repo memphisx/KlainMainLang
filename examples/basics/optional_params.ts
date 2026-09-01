@@ -47,3 +47,11 @@ console.log(g.greet())            // Hi, null
 console.log(g.greet('Alice'))     // Hi, Alice
 console.log(Greeter.shout())      // HI, null
 console.log(Greeter.shout('Al'))  // HI, Al
+
+// A default parameter value may reference an earlier parameter (ADR-00598) —
+// including chaining, where a later default builds on an earlier one.
+function rect(w: number, h: number = w): number { return w * h }  // h defaults to w (a square)
+console.log(rect(4))        // 16
+console.log(rect(4, 2))     // 8
+function label(name: string, title: string = "Mr. " + name): string { return title }
+console.log(label("Smith")) // Mr. Smith

@@ -138,6 +138,102 @@ console.log("received " + ch.receive());
 	}
 }
 
+// TestE2EGoroutineChannelParam: a `Channel<T>` passed as a function parameter
+// keeps its channel type, so .send()/.receive()/close()/`for..of` dispatch on
+// it — not just a top-level `new Channel` local. This is what lets channel
+// plumbing be split across helper functions and modules (ADR-00617); before it,
+// a `Channel<number>` parameter resolved to a plain array ("an array has no
+// method 'send'").
+func TestE2EGoroutineChannelParam(t *testing.T) {
+	out := compileAndRunImports(t, `
+import { go, Channel } from 'klain:sync';
+function fill(ch: Channel<number>, n: number): void {
+  for (let i = 0; i < n; i++) ch.send(i * i);
+  ch.close();
+}
+function drain(ch: Channel<number>): number {
+  let sum = 0;
+  for (const v of ch) sum = sum + v;
+  return sum;
+}
+const ch = new Channel<number>(64);
+go(() => { fill(ch, 6); });
+console.log("sum " + drain(ch));
+`)
+	if out != "sum 55" { // 0+1+4+9+16+25
+		t.Fatalf("want %q, got %q", "sum 55", out)
+	}
+}
+
+// TestE2EGoroutineHTTPListenLoadTest: an in-process HTTP server running inside a
+// goroutine (http.listen), hammered by a pool of worker goroutines making real
+// synchronous XMLHttpRequest calls to it — the load-tester pattern (ADR-00616).
+//
+// http.listen's event loop is thread-affine (its ucontext connection fibers and
+// its per-loop state — @__kml_listen_fd etc. — are thread-bound). Before the fix
+// the server goroutine could be migrated to another M by the work-stealing
+// scheduler, land on a thread whose thread-local listen_fd was the default -1,
+// decide it had no listener, and return out from under the live server — after
+// which every worker's request blocked forever (caught here by the timeout).
+// klainsync_lock_os_thread (Go's runtime.LockOSThread), applied at event-loop
+// entry, pins the reactor goroutine to its M so it never migrates. Runs with the
+// default multi-M GOMAXPROCS: with only one M the bug cannot occur.
+func TestE2EGoroutineHTTPListenLoadTest(t *testing.T) {
+	bin := buildBinaryImports(t, `
+import { go, Channel } from 'klain:sync';
+import http from 'http';
+
+interface Res { status: number; body: string; headers: Map<string, string> }
+
+const PORT = 8213;
+const N = 8;
+const TOTAL = 600;
+
+go(() => {
+  http.listen(PORT, (req: HttpRequest): Res => {
+    const h: Map<string, string> = new Map<string, string>();
+    h.set('Content-Type', 'text/plain');
+    // A little real per-request work so the reactor goroutine actually spends
+    // time in the (safepoint-bearing) handler — the case that used to migrate.
+    let acc = 0;
+    for (let i = 0; i < 2000; i++) acc = (acc + i) >>> 0;
+    return { status: 200, body: acc + '', headers: h };
+  });
+});
+
+const reqs = new Channel<number>(256);
+const done = new Channel<number>(0);
+go(() => { for (let i = 0; i < TOTAL; i++) reqs.send(i); reqs.close(); });
+for (let w = 0; w < N; w++) go(() => {
+  let ok = 0;
+  for (const id of reqs) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', 'http://127.0.0.1:' + PORT + '/work', false);
+    xhr.send();
+    if (xhr.status === 200) ok = ok + 1;
+  }
+  done.send(ok);
+});
+
+let ok = 0;
+for (let i = 0; i < N; i++) ok = ok + done.receive();
+console.log('ok=' + ok);
+process.exit(0);
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin).Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatal("timed out — the http.listen server goroutine was migrated off its M and exited, orphaning the workers")
+	}
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := strings.TrimRight(string(out), "\n"); got != "ok=600" {
+		t.Fatalf("want %q, got %q", "ok=600", got)
+	}
+}
+
 // TestE2EChannelRange: `for (const v of ch)` ranges a channel until it is
 // closed and drained (Go's channel range).
 func TestE2EChannelRange(t *testing.T) {

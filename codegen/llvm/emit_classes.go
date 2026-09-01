@@ -154,6 +154,10 @@ type ClassInfo struct {
 	// annotation, since InheritedFields/OwnFields/FlatFields don't
 	// otherwise track per-field provenance.
 	FieldOrigin map[string]string
+	// ReadonlyFields is the set of `readonly` instance-field names (own +
+	// inherited) — TDD-00154. A write is rejected unless it is inside the
+	// constructor of the field's declaring class (FieldOrigin).
+	ReadonlyFields map[string]bool
 	// OwnFieldVisibility/OwnMethodVisibility are this class's own-declared
 	// members' visibility ("private"/"protected"/"" for public) — an
 	// inherited (not overridden) member's effective visibility is found by
@@ -373,6 +377,23 @@ func (e *Emitter) checkFieldVisibility(className, fieldName string, pos ast.Pos)
 	}
 	vis := e.classes[origin].OwnFieldVisibility[fieldName]
 	return e.checkMemberVisibility(origin, vis, "field", fieldName, pos)
+}
+
+// checkReadonlyWrite enforces the TS `readonly` field modifier (TDD-00154): a
+// write to a readonly field is allowed only inside the constructor of the class
+// that declares it (which also covers field initializers, spliced into the
+// constructor). Any other write — a regular method, an outside `obj.x = v`, or a
+// subclass constructor writing an inherited readonly field — is a clean error.
+func (e *Emitter) checkReadonlyWrite(className, fieldName string, pos ast.Pos) error {
+	info, ok := e.classes[className]
+	if !ok || !info.ReadonlyFields[fieldName] {
+		return nil
+	}
+	origin := info.FieldOrigin[fieldName]
+	if e.currentCtorClass == origin {
+		return nil
+	}
+	return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a read-only property (declared on class '%s') — a readonly field can only be set in that class's constructor", pos.Line, pos.Col, fieldName, inspectClassName(origin))
 }
 
 // emitStaticFieldRead evaluates `ClassName.staticField` (TDD-00009 Stage
@@ -761,6 +782,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		for k, v := range baseInfo.FieldOrigin {
 			fieldOrigin[k] = v
 		}
+		// TDD-00154: readonly field names (own + inherited). A write is checked
+		// against FieldOrigin so only the *declaring* class's constructor may set
+		// it, matching TypeScript.
+		readonlyFields := make(map[string]bool, len(baseInfo.ReadonlyFields))
+		for k, v := range baseInfo.ReadonlyFields {
+			readonlyFields[k] = v
+		}
 		ownFieldVisibility := make(map[string]string)
 		staticFieldTypes := make(map[string]Type, len(baseInfo.StaticFieldTypes))
 		for k, v := range baseInfo.StaticFieldTypes {
@@ -824,6 +852,9 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 			fieldOrigin[f.Name] = cd.Name
 			ownFieldVisibility[f.Name] = f.Visibility
+			if f.Readonly {
+				readonlyFields[f.Name] = true
+			}
 		}
 		flatFields := append(append([]Field{}, inheritedFields...), ownFields...)
 
@@ -861,6 +892,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			IsAbstract:                cd.IsAbstract,
 			Implements:                cd.Implements,
 			FieldOrigin:               fieldOrigin,
+			ReadonlyFields:            readonlyFields,
 			OwnFieldVisibility:        ownFieldVisibility,
 			OwnMethodVisibility:       make(map[string]string),
 			StaticFieldTypes:          staticFieldTypes,
@@ -1358,7 +1390,10 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 	info := e.classes[cd.Name]
 	if info.Constructor != nil {
 		llvmName := cd.Name + "_constructor"
-		if err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false); err != nil {
+		e.currentCtorClass = cd.Name
+		err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false)
+		e.currentCtorClass = ""
+		if err != nil {
 			return err
 		}
 	}
@@ -1801,24 +1836,58 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	}
 
 	if info.Constructor != nil {
-		if len(ex.Args) != len(info.CtorSig.ParamTypes) {
+		sig := info.CtorSig
+		// Default parameters are supported (ADR-00599): trailing params with a
+		// default or a `?` may be omitted, and a default may reference an earlier
+		// scalar/string parameter — the same arg/default/optional switch and
+		// paramDefaultScratch the method call paths use. A rest-parameter
+		// constructor stays out of scope (it never worked under the old
+		// exact-count loop either).
+		if sig.HasRest {
+			return Value{}, fmt.Errorf("%d:%d: a rest parameter on a constructor is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		regularCount := len(sig.ParamTypes)
+		minRequired := regularCount
+		for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
+			(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
+			minRequired--
+		}
+		if len(ex.Args) < minRequired || len(ex.Args) > len(sig.ParamTypes) {
 			return Value{}, fmt.Errorf("%d:%d: %s constructor expects %d argument(s), got %d",
-				ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(info.CtorSig.ParamTypes), len(ex.Args))
+				ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(sig.ParamTypes), len(ex.Args))
 		}
 		argParts := []string{"ptr " + dataReg}
-		for i, a := range ex.Args {
-			paramTy := info.CtorSig.ParamTypes[i]
+		scratch := e.newParamDefaultScratch(sig.ParamNames)
+		for i := 0; i < regularCount; i++ {
+			paramTy := sig.ParamTypes[i]
+			var a ast.Expression
+			fromDefault := false
+			switch {
+			case i < len(ex.Args):
+				a = ex.Args[i]
+			case i < len(sig.Defaults) && sig.Defaults[i] != nil:
+				a = sig.Defaults[i]
+				fromDefault = true
+			case i < len(sig.Optional) && sig.Optional[i]:
+				// ADR-00164: an omitted `param?: T` gets T's zero value.
+				if paramTy.IsArray {
+					argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				} else {
+					argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+					scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})
+				}
+				continue
+			default:
+				return Value{}, fmt.Errorf("%d:%d: %s constructor missing argument %d with no default",
+					ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, i+1)
+			}
 			// An array-typed constructor parameter decomposes into two LLVM
 			// params (ptr, i64 len) at the callee side, exactly like an
-			// array-typed method parameter — emitClassCall's own argument loop
-			// already does this; this constructor path had never been taught
-			// the matching decomposition, so `new C([1, 2, 3])` against a
-			// `constructor(xs: number[])` was a hard clang-stage type mismatch
-			// ({ptr,i64} where a single ptr was expected). Found in passing
-			// while wiring generator methods (TDD-00063 Stage 2b); a real,
-			// pre-existing bug independent of them.
+			// array-typed method parameter.
 			if paramTy.IsArray {
+				scratch.enter(fromDefault)
 				val, err := e.emitExprWithObjectHint(a, paramTy)
+				scratch.leave(fromDefault)
 				if err != nil {
 					return Value{}, err
 				}
@@ -1827,23 +1896,32 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				}
 				header, lenReg := e.packArrayArg(a, val)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+				scratch.bindArray(i, header, paramTy)
 				continue
 			}
 			// Nullable-scalar constructor parameter (TDD-00064 Stage 3).
 			if isNullableScalar(paramTy) {
-				argStr, err := e.emitNullableScalarArg(a, paramTy)
+				scratch.enter(fromDefault)
+				agg, err := e.emitNullableScalarBoxedValue(a, paramTy)
+				scratch.leave(fromDefault)
 				if err != nil {
 					return Value{}, err
 				}
-				argParts = append(argParts, argStr)
+				argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+				scratch.bindNullable(i, agg, paramTy)
 				continue
 			}
+			scratch.enter(fromDefault)
 			val, err := e.emitExpr(a)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
 			val = e.coerce(val, paramTy)
 			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+			if !paramTy.IsDynamic {
+				scratch.bind(i, val)
+			}
 		}
 		e.emitInstr(fmt.Sprintf("call void @%s_constructor(%s)", className, strings.Join(argParts, ", ")))
 	} else if len(ex.Args) != 0 {
@@ -1873,6 +1951,73 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 // objExpr is not evaluated here — callers with an unevaluated receiver
 // expression (a plain `obj.method(args)` call site) should use
 // emitClassMethodCall instead, which evaluates it once and delegates here.
+// paramDefaultScratch lets a class method/constructor parameter default
+// reference an earlier scalar/string parameter (ADR-00598, extended to class
+// calls). Each earlier scalar param's final value (argument, its own default, or
+// the optional zero) is materialized and exposed under the parameter's name —
+// but only while a default is being emitted, so an ordinary argument is still
+// evaluated in the caller's scope and never sees a sibling parameter.
+type paramDefaultScratch struct {
+	e     *Emitter
+	names []string
+	syms  map[string]Symbol
+}
+
+func (e *Emitter) newParamDefaultScratch(names []string) *paramDefaultScratch {
+	return &paramDefaultScratch{e: e, names: names, syms: map[string]Symbol{}}
+}
+
+func (s *paramDefaultScratch) enter(active bool) {
+	if active && len(s.syms) > 0 {
+		s.e.pushScope()
+		for n, sym := range s.syms {
+			s.e.define(n, sym)
+		}
+	}
+}
+
+func (s *paramDefaultScratch) leave(active bool) {
+	if active && len(s.syms) > 0 {
+		s.e.popScope()
+	}
+}
+
+// bind materializes parameter i's final scalar value for a later default to use.
+func (s *paramDefaultScratch) bind(i int, val Value) {
+	if i >= len(s.names) {
+		return
+	}
+	slot := s.e.freshReg()
+	s.e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, val.Ty.IR, val.Ty.Align()))
+	s.e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", val.Ty.IR, val.Ref, slot, val.Ty.Align()))
+	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: val.Ty}
+}
+
+// bindArray materializes an array parameter i via a slot holding its header
+// pointer (arrayDataLenSlots derives data/len from it), so a later default can
+// read `a.length`, `a[i]`, etc. (ADR-00610).
+func (s *paramDefaultScratch) bindArray(i int, header string, arrTy Type) {
+	if i >= len(s.names) {
+		return
+	}
+	slot := s.e.freshReg()
+	s.e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	s.e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: arrTy}
+}
+
+// bindNullable materializes a nullable-scalar parameter i via its { i1, T }
+// aggregate slot, so a later default can `??`/`=== null`/narrow it (ADR-00611).
+func (s *paramDefaultScratch) bindNullable(i int, agg string, pty Type) {
+	if i >= len(s.names) {
+		return
+	}
+	slot := s.e.freshReg()
+	s.e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, nullableScalarStorageIR(pty), storageAlign(pty)))
+	s.e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(pty), agg, slot, storageAlign(pty)))
+	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: pty, NullableBoxed: true}
+}
+
 func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, args []ast.Expression, pos ast.Pos, forceDirect bool) (Value, error) {
 	info, ok := e.classes[objTy.ClassName]
 	if !ok {
@@ -1942,14 +2087,17 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 
 	argParts := []string{"ptr " + thisVal.Ref}
+	scratch := e.newParamDefaultScratch(sig.ParamNames)
 	for i := 0; i < regularCount; i++ {
 		paramTy := sig.ParamTypes[i]
 		var a ast.Expression
+		fromDefault := false
 		switch {
 		case i < len(args):
 			a = args[i]
 		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
 			a = sig.Defaults[i]
+			fromDefault = true
 		case i < len(sig.Optional) && sig.Optional[i]:
 			// ADR-00164: an omitted `param?: T` argument gets T's zero
 			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
@@ -1960,6 +2108,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+				scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})
 			}
 			continue
 		default:
@@ -1981,7 +2130,9 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		// been touched, since no test exercised a class method with an
 		// array parameter before now.
 		if paramTy.IsArray {
+			scratch.enter(fromDefault)
 			val, err := e.emitExprWithObjectHint(a, paramTy)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
@@ -1990,19 +2141,25 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			}
 			header, lenReg := e.packArrayArg(a, val)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			scratch.bindArray(i, header, paramTy)
 			continue
 		}
 		// A nullable-scalar method parameter takes its boxed { i1, T }
 		// aggregate (TDD-00064 Stage 3).
 		if isNullableScalar(paramTy) {
-			argStr, err := e.emitNullableScalarArg(a, paramTy)
+			scratch.enter(fromDefault)
+			agg, err := e.emitNullableScalarBoxedValue(a, paramTy)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, argStr)
+			argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
+		scratch.enter(fromDefault)
 		val, err := e.emitExpr(a)
+		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
 		}
@@ -2022,6 +2179,9 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			val = e.coerce(val, paramTy)
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+		if !paramTy.IsDynamic {
+			scratch.bind(i, val)
+		}
 	}
 	// Pack rest args into a temporary heap array — identical shape to
 	// emitCallToFuncSig's own rest-packing (emit_call.go).
@@ -2253,14 +2413,17 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	}
 
 	var argParts []string
+	scratch := e.newParamDefaultScratch(sig.ParamNames)
 	for i := 0; i < regularCount; i++ {
 		paramTy := sig.ParamTypes[i]
 		var a ast.Expression
+		fromDefault := false
 		switch {
 		case i < len(args):
 			a = args[i]
 		case i < len(sig.Defaults) && sig.Defaults[i] != nil:
 			a = sig.Defaults[i]
+			fromDefault = true
 		case i < len(sig.Optional) && sig.Optional[i]:
 			// ADR-00164: an omitted `param?: T` argument gets T's zero
 			// value, the same undefined stand-in ADR-00157/ADR-00158 use.
@@ -2271,6 +2434,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
+				scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})
 			}
 			continue
 		default:
@@ -2278,7 +2442,9 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 				pos.Line, pos.Col, className, methodName, i+1)
 		}
 		if paramTy.IsArray {
+			scratch.enter(fromDefault)
 			val, err := e.emitExprWithObjectHint(a, paramTy)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
@@ -2287,18 +2453,24 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			}
 			header, lenReg := e.packArrayArg(a, val)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			scratch.bindArray(i, header, paramTy)
 			continue
 		}
 		// Nullable-scalar parameter (TDD-00064 Stage 3): its boxed aggregate.
 		if isNullableScalar(paramTy) {
-			argStr, err := e.emitNullableScalarArg(a, paramTy)
+			scratch.enter(fromDefault)
+			agg, err := e.emitNullableScalarBoxedValue(a, paramTy)
+			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
 			}
-			argParts = append(argParts, argStr)
+			argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
+			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
+		scratch.enter(fromDefault)
 		val, err := e.emitExpr(a)
+		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
 		}
@@ -2322,6 +2494,9 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			val = e.coerce(val, paramTy)
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
+		if !paramTy.IsDynamic {
+			scratch.bind(i, val)
+		}
 	}
 	if sig.HasRest {
 		restArgs := args[regularCount:]
@@ -2565,13 +2740,11 @@ func (e *Emitter) emitForOfClassIterator(s *ast.ForOfStatement, objTy Type, next
 // compile-time constant, the same reasoning emitInstanceOf's own case 3/4
 // (a statically-mismatched user-class comparison) already uses.
 //
-// Deliberately doesn't include `Object` — real JS's own semantics for
-// `instanceof Object` are "true for anything that isn't one of the
-// primitive types," which would need an exhaustive enumeration of every
-// object-shaped Type flag this compiler has (and require remembering to
-// extend it every time a new one is added later, or silently drift wrong)
-// — a real, narrower gap, left as the existing clean rejection rather than
-// risk a silently-incomplete answer.
+// Doesn't include `Object` — `instanceof Object` is handled separately in
+// emitInstanceOf (ADR-00605) by *negating* the closed set of primitive types
+// (number/string/boolean/bigint/symbol/null/undefined) rather than enumerating
+// object types: every remaining typed ptr value is a JS object, and an
+// undecidable static type (any/union/nullable) keeps a clean rejection.
 var builtinInstanceofTypes = map[string]func(Type) bool{
 	"Array":  func(t Type) bool { return t.IsArray },
 	"Map":    func(t Type) bool { return t.IsMap },
@@ -2602,6 +2775,35 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	// shadowed by this compiler's own fallback built-in handling.
 	info, isClass := e.classes[rightIdent.Name]
 	if !isClass {
+		// `x instanceof Object` (ADR-00605): true for any non-primitive. The
+		// primitive set is *closed* (number, string, boolean, bigint, symbol,
+		// null, undefined), so negating it is drift-safe — every remaining typed
+		// ptr value is genuinely a JS object. A value whose static type can't be
+		// decided (any/union/nullable) keeps the clean rejection rather than
+		// risking a wrong constant.
+		if rightIdent.Name == "Object" {
+			leftVal, err := e.emitExpr(ex.Left)
+			if err != nil {
+				return Value{}, err
+			}
+			t := leftVal.Ty
+			if t.IsDynamic || t.UnionMembers != nil || t.Nullable {
+				return Value{}, fmt.Errorf("%d:%d: `instanceof Object` on a value of an undecidable static type (any/union/nullable) is not supported", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			// A non-ptr *object*-semantics type is caught first (Date is a plain
+			// i64 timestamp but a JS object) — otherwise the scalar rule below
+			// would misread it as a primitive. Every ptr object type falls through
+			// to the default `true`, so only such non-ptr object types need listing.
+			if t.IsDate {
+				return Value{Ref: "1", Ty: TypeBool}, nil
+			}
+			isPrimitive := (t.IR != "ptr" && t.IR != "void") || t.IsBigInt || t.IsSymbol ||
+				t.IsNull || t.IsUndefined || isForOfStringTy(t)
+			if isPrimitive {
+				return Value{Ref: "0", Ty: TypeBool}, nil
+			}
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		}
 		if matches, ok := builtinInstanceofTypes[rightIdent.Name]; ok {
 			// Still a real expression — evaluate for side effects, same as
 			// every other branch below, even though the answer never

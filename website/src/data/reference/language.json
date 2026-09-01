@@ -120,11 +120,10 @@
       "statusRow": "try / catch / finally",
       "signature": "try { … } catch (e) { … } finally { … }",
       "badge": "caveats",
-      "description": "Exception handling with a single catch variable or a destructured object pattern. finally runs on early return/break/continue (labeled or not), a return in finally overrides, and nested finallys run innermost-first.",
+      "description": "Exception handling with a single catch variable or a destructured object pattern. finally runs on early return/break/continue (labeled or not), a return in finally overrides, and nested finallys run innermost-first — inside async functions and generators too, including a finally that itself awaits.",
       "snippet": "function readWithCleanup(): number {\n  try {\n    return 42\n  } finally {\n    console.log(\"close resource\")\n  }\n}",
       "differences": [
-        "A catch pattern can only destructure the caught value's fixed `{kind, message, name}` shape (every thrown value, including a thrown non-Error primitive, is force-shaped into that one runtime layout), not an arbitrary custom object's own fields, and there's no array-pattern form.",
-        "`finally` runs on an early `return`/`break`/`continue` everywhere except inside an `async`/generator function body, where an early exit runs through a separate coroutine return path so `finally` still only runs on fall-through."
+        "A catch pattern can only destructure the caught value's fixed `{kind, message, name}` shape (every thrown value, including a thrown non-Error primitive, is force-shaped into that one runtime layout), not an arbitrary custom object's own fields, and there's no array-pattern form."
       ],
       "seeAlso": ["lang.throw", "lang.optcatch"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/try...catch" }
@@ -292,11 +291,9 @@
       "name": "Logical assignment operators &&= ||= ??=",
       "statusRow": "Logical assignment operators &&= ||= ??= (ES2021)",
       "signature": "x ??= v, x ||= d",
-      "badge": "caveats",
-      "description": "Genuinely short-circuiting logical assignment (ES2021). Works against scalar variables, array elements, object fields, and static class fields, including a nullable-scalar field routed through the presence-flagged path so obj.n ??= v fires exactly when the field is absent.",
-      "differences": [
-        "Computed-key dynamic-object bracket assignment is a clean compile error, not built."
-      ],
+      "badge": "exact",
+      "description": "Genuinely short-circuiting logical assignment (ES2021). Works against scalar variables, array elements, object fields, static class fields, and a computed dynamic-object key (dynObj[key] ??= v), including a nullable-scalar field routed through the presence-flagged path so obj.n ??= v fires exactly when the field is absent.",
+      "differences": [],
       "seeAlso": ["lang.logical", "lang.nullish"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Logical_AND_assignment" }
     },
@@ -305,11 +302,9 @@
       "name": "Increment / decrement ++ -- (prefix & postfix)",
       "statusRow": "Increment / decrement ++ -- (prefix & postfix)",
       "signature": "i++, --j, obj.x++, arr[i]++",
-      "badge": "caveats",
-      "description": "Prefix and postfix increment/decrement. A member/index target desugars to the equivalent += 1 / -= 1 compound assignment; prefix yields the new value, postfix the old.",
-      "differences": [
-        "The one edge is a **postfix** update on a **side-effecting receiver whose value is consumed** (`makeObj().x++` read into a variable), where the receiver is evaluated twice — a statement-position postfix and a simple receiver (identifier/`this`/static name) are unaffected."
-      ],
+      "badge": "full",
+      "description": "Prefix and postfix increment/decrement on an identifier, member (obj.x++, this.x++, C.staticField++, makeObj().x++), or index (arr[i]++, makeArr()[i]++) target. A member/index target desugars to += 1 / -= 1; prefix yields the new value, postfix the old. A consumed postfix hoists any side-effecting component so each runs exactly once, matching JS.",
+      "differences": [],
       "seeAlso": ["lang.assignops"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Increment" }
     },
@@ -364,7 +359,8 @@
       "badge": "caveats",
       "description": "Compile-time constant resolved from inferred type. Heap-backed built-in values (a Promise, Map/Set, a generator, Date, null) are \"object\"; classes, implemented built-in constructors, and implemented global functions are \"function\"; Math/JSON/console are \"object\"; an undeclared name or runtime-absent static is \"undefined\".",
       "differences": [
-        "A static-method reference on a namespace outside the covered tables — `Object.keys`, `console.log`, `Number.isInteger`, `Date.now` — answers from inference (usually `\"number\"`), not JS's `\"function\"`; the covered tables are the `Promise` combinators, the `Math` function set, and `JSON.parse`/`stringify`."
+        "`typeof <namespace>.<method>` answers `\"function\"` for the common built-in namespaces (`Promise`/`Math`/`JSON`, `console`, and the static methods of `Object`/`Number`/`String`/`Array`/`Date`/`Symbol`/`Reflect`); a non-method static (`Number.MAX_VALUE`) answers through normal inference, and a namespace outside this allow-list falls back to inference.",
+        "`typeof value.method` is `\"function\"` for a class instance method or a common built-in string/array method (a class getter reads as its return type); a string/array method name outside the curated set falls back to inference."
       ],
       "seeAlso": ["lang.instanceof"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/typeof" }
@@ -411,8 +407,7 @@
       "badge": "caveats",
       "description": "Array destructuring with holes, defaults (fire when past the source length), and a rest element that makes a real independent copy. Usable as a for-of loop variable and a destructured parameter; nested patterns work in a declaration/for-of/parameter.",
       "differences": [
-        "*Assignment* to already-declared targets (`[a, b] = expr`, not a fresh declaration) is narrower: every target must be a plain variable — no nested patterns, no default, no compound operator.",
-        "Nested patterns work in a declaration, for-of loop variable, and destructured parameter, but not yet in the *assignment* form; a `= default` on a nested position is a clean rejection."
+        "*Assignment* to already-declared targets (`[a, b] = expr`, not a fresh declaration) reaches declaration-form parity for nesting: nested array/object patterns, a trailing `...rest`, and a per-element `= default` all work. A compound operator (`[a, b] += …`) and a member target (`[obj.x] = e`) stay rejected."
       ],
       "seeAlso": ["lang.objdestructure", "lang.destructparams"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#array_destructuring" }
@@ -426,10 +421,9 @@
       "description": "Object destructuring with renaming, string/numeric-literal keys, nested patterns, and a rest element that binds a fresh residual object. Usable as a for-of loop variable and destructured parameter. Assignment to already-declared targets requires parens.",
       "differences": [
         "Default values (`{ x = 1 }`) are supported only for a field typed as a nullable *reference* (`T | null` where T is string/array/object/class) — the only field shape with a real \"not provided\" signal; a default on a nullable scalar or any non-nullable field is a clean compile-time rejection.",
-        "*Assignment* to already-declared targets is the same narrower scope as the array form; nested patterns don't work in the assignment form and there's no `= default` on a nested position.",
+        "*Assignment* to already-declared targets supports nested patterns (`({ p, q: { r } } = obj)`, `({ arr: [x, y] } = obj)`) and object-property defaults (`{ x = default }`, `{ k: x = default }`) on a nullable-reference field, at declaration-form parity.",
         "`{ ...rest }` over an `any`/union/generic source and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections.",
-        "No computed key (`{ [key]: val }`).",
-        "The object-*type* annotation grammar still rejects a string-literal-named field, so a genuinely non-identifier field name (`\"first-name\"`) is reachable only via object-literal type inference."
+        "A computed key (`{ [k]: v }`) is supported only for a constant string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }`); a runtime-valued key on a fixed object is a clean rejection."
       ],
       "seeAlso": ["lang.arraydestructure", "lang.objliteral"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment#object_destructuring" }
@@ -442,7 +436,7 @@
       "badge": "caveats",
       "description": "Desugars to a plain call (tag([\"a\",\"b\"], x)) — interpolated values reach the tag as real typed values, not implicitly stringified. Any callable works as a tag, including an arrow/closure with a ...rest parameter.",
       "differences": [
-        "No `.raw` property on the `strings` array (real `String.raw` stays separately out of scope)."
+        "A user tag's `strings` argument has no `.raw` property (arrays carry no extra properties); the built-in `String.raw` tag itself is implemented and interleaves the raw, un-escaped quasis."
       ],
       "seeAlso": ["lang.template"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals#tagged_templates" }
@@ -479,11 +473,9 @@
       "statusRow": "Function expressions (var f = function(x) {...}, callback arguments, IIFE bodies)",
       "signature": "const f = function(x) { … }",
       "badge": "caveats",
-      "description": "Anonymous and named function expressions, including as callback arguments. A named function expression binds its own name inside its own body for recursion without leaking. async function(...) {...} expressions are supported. Reuses arrow closure machinery.",
+      "description": "Anonymous and named function expressions, including as callback arguments. A named function expression binds its own name inside its own body for recursion without leaking — even when that name shadows a top-level function of the same name (the self-reference is the expression; outer calls reach the top-level function). async function(...) {...} expressions are supported. Reuses arrow closure machinery.",
       "snippet": "const add = function (x: number, y: number): number {\n  return x + y;\n};",
       "differences": [
-        "A named function expression whose name shadows a *top-level function* of the same name is a clean compile error — rename one of them.",
-        "An IIFE parses cleanly but hits the separate \"only simple function calls are supported\" rejection when actually called inline.",
         "A generic function used by value is out of scope (no single monomorphized symbol to point at)."
       ],
       "seeAlso": ["lang.arrow", "lang.callapplybind"],
@@ -497,7 +489,7 @@
       "badge": "caveats",
       "description": "Default parameter values.",
       "differences": [
-        "A default expression can't reference an earlier parameter — `function f(a: number, b: number = a * 2)` fails with `undefined variable 'a'` when evaluating `b`'s default, even though real TS allows this."
+        "A default may reference an earlier scalar/string parameter — `function f(a: number, b: number = a * 2)`, chaining included (`c = b + 1`) — for a free function, an instance/static method, and a constructor (parameter properties included, `constructor(public x = 1, public y = x)`); an earlier param of any supported kind is referenceable — scalar/string, array (`b = a.length`, `a[i]`), and nullable-scalar (`b = (a ?? 0) + 1`). A rest-parameter constructor is unsupported."
       ],
       "seeAlso": ["lang.optparams"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Default_parameters" }
@@ -548,7 +540,8 @@
       "description": "A helper function declared inside another function's body — hoisted, forward-referenceable, self-recursive, and visible to its own further-nested descendants.",
       "snippet": "function outer(x: number): number {\n  function double(y: number): number {\n    return y * 2;\n  }\n  return double(x) + 1;\n}",
       "differences": [
-        "V1-scoped: only directly in the enclosing function/arrow body's own immediate statement list — one block deeper (inside a further `if`/`for`/`while`/`switch`) is a clean compile error.",
+        "A declaration inside a lexical block (an `if`/`for`/`while`/`do-while`/bare block, `try`/`catch`/`finally`, or a `switch` case) is supported and block-scoped; the residual is the specialized `for…of`/`for…in` iterator variants (generator/stream/`Symbol.iterator` paths) that iterate their body directly (no miscompile — capturing such a loop variable is a clean rejection).",
+        "A block-nested declaration capturing a C-style `for` loop variable is a clean rejection — the loop variable is a single per-iteration cell; copy it to a `const` inside the loop body and capture that.",
         "Captures enclosing locals/parameters by reference, but only for use **at or after** the declaration point — a capturing nested function called before its declaration is a clean error (a non-capturing one keeps full hoisting/forward-reference). Capturing an array variable, and a capturing nested *generator*, stay clean rejections.",
         "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors."
       ],
@@ -596,7 +589,6 @@
       "differences": [
         "A free `function*` may be top-level **or nested** (a nested one captures enclosing state by reference; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding — an argument/nested/IIFE use is a clean rejection. `static`/`abstract` generator methods stay clean rejections.",
         "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array element/parameter type.",
-        "`break`ing out of a `for...of` over a generator leaves its fiber simply abandoned — the loop doesn't auto-call `.return()`, so a pending `finally` doesn't run on that path (an explicit `.return()` does run it).",
         "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}` — this compiler's usual stand-in for real JS's `undefined`."
       ],
       "seeAlso": ["lang.asyncgen", "lang.forof"],
@@ -758,7 +750,7 @@
       "badge": "caveats",
       "description": "A key may be an identifier, or a string/numeric literal.",
       "differences": [
-        "A numeric-literal key isn't dot/bracket-readable back through existing access syntax and can't be declared in an `interface`/type annotation (quoted names are an object-literal-only extension so far) — still a real field, visible to `JSON.stringify`.",
+        "Constant-key bracket access reads and writes the matching field on a fixed object or class instance (`o[\"a\"]`, `o[0]`, `o[\"a\"] = v`) — the same field `o.a` reaches; a non-constant key on a fixed object stays a clean rejection (use a `{ [k: string]: T }` dynamic object for runtime keys). A numeric-literal key still can't be declared in an `interface`/type annotation.",
         "No duplicate-`__proto__`-key detection (Annex B legacy `SyntaxError` rule)."
       ],
       "seeAlso": ["lang.objdestructure", "lang.interfaces"],
@@ -766,13 +758,15 @@
     },
     {
       "id": "lang.getset",
-      "name": "Getters / setters on classes",
-      "statusRow": "Getters / setters (get x() {} / set x(v) {}) on classes",
+      "name": "Getters / setters on classes and object literals",
+      "statusRow": "Getters / setters (get x() {} / set x(v) {}) on classes and object literals",
       "signature": "get x() { … } / set x(v) { … }",
       "badge": "caveats",
-      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound assignment all route through the accessor, including from inside the class's own methods and through optional chaining.",
+      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound assignment all route through the accessor, including from inside the class's own methods and through optional chaining. On object literals too: the literal is lowered to a synthetic anonymous class so the accessor body gets a real this reading/writing the object's own fields.",
       "differences": [
-        "Object-literal getters/setters, static accessors, and logical assignment (`&&=`/`||=`/`??=`) on an accessor are deliberately out of scope for V1."
+        "An accessor-bearing object literal can't be assigned to a differently-shaped structural object type (its accessors are methods, not fields) — a clean rejection; used directly it works.",
+        "console.log of an accessor object prints only its data fields, not x: [Getter].",
+        "Static accessors, and logical assignment (`&&=`/`||=`/`??=`) on an accessor, remain out of scope for V1."
       ],
       "seeAlso": ["lang.class"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/get" }
@@ -844,7 +838,7 @@
         "A computed/dynamic member name is a clean rejection; the recognized well-known-symbol keys are `[Symbol.asyncIterator]` and `[Symbol.iterator]`.",
         "A class expression used as a runtime value or a named self-reference (`class D {...}` whose body references `D`) is a clean rejection; `extends <expression>` is out of scope.",
         "Class early-error gaps (deferred): a field initializer containing `arguments` or a `super()` call, a `super()` in a method parameter default, field-definition ASI on the same line, and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`.",
-        "The **`readonly` field modifier** parses and declares the field but is not enforced as immutability — a later write is not rejected."
+        "The **`readonly` field modifier** is enforced as a compile-time immutability check — a write is allowed only in the declaring class's constructor and rejected elsewhere (method, outside `obj.x = v`, nested closure, subclass constructor). Deep immutability (`readonly xs: number[]` then `xs.push(...)`) stays unenforced, matching TS."
       ],
       "seeAlso": ["lang.classstatic", "lang.classinherit", "lang.getset", "lang.paramprops"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes" }
@@ -854,12 +848,11 @@
       "name": "Constructor parameter properties",
       "statusRow": "Constructor parameter properties (constructor(public x: number, readonly y: T))",
       "signature": "class C { constructor(public x: number, private readonly y: string) {} }",
-      "badge": "caveats",
+      "badge": "full",
       "description": "A visibility/readonly modifier on a constructor parameter (public/private/protected/readonly) both declares the field and assigns it from the parameter — the TypeScript shorthand for the declare-plus-assign boilerplate.",
-      "snippet": "class Point {\n  constructor(public x: number, public y: number) {}\n}\nconst p = new Point(3, 4);\nconsole.log(p.x, p.y);",
+      "snippet": "class Point {\n  constructor(public x: number, public readonly y: number) {}\n}\nconst p = new Point(3, 4);\nconsole.log(p.x, p.y);",
       "differences": [
-        "Desugars at parse time to a declared field plus a `this.x = x` constructor prologue; `private`/`protected` get the same enforcement as ordinary declared fields.",
-        "`readonly` is parsed and declares the field but is not enforced as immutability — a later write is not rejected.",
+        "Desugars at parse time to a declared field plus a `this.x = x` constructor prologue; `private`/`protected` get the same enforcement as ordinary declared fields, and `readonly` is enforced (a write after construction is rejected).",
         "The modifiers are valid only on a constructor parameter — elsewhere they are a clean parse error."
       ],
       "seeAlso": ["lang.class"],
@@ -907,7 +900,7 @@
       "badge": "caveats",
       "description": "Every instance carries a hidden runtime type tag. A class-typed variable whose static class is T or an ancestor of T folds to a compile-time constant; one whose static class is an ancestor of the right-hand class needs a real runtime tag read. instanceof against Array/Map/Set/Date/RegExp is a compile-time constant.",
       "differences": [
-        "`instanceof Object` isn't supported — real JS's \"true for anything non-primitive\" semantics would need an exhaustive, easy-to-drift enumeration of every object-shaped type this compiler has."
+        "`x instanceof Object` is a compile-time constant — true for any non-primitive (class instance, object, array, function, Date, Map/Set, RegExp, …), false for a primitive. Only an undecidable static type (any/union/nullable) is a clean rejection."
       ],
       "seeAlso": ["lang.classinherit", "lang.errorsubtypes"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof" }

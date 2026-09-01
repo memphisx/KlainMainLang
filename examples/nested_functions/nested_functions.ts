@@ -56,14 +56,37 @@ function b(): number {
 console.log(a());  // 1
 console.log(b());  // 2
 
-// --- V1 scope note: a nested function declaration does NOT close over its
-// enclosing function's locals the way an arrow function would — it gets its
-// own clean scope, just like a top-level function. Referencing an outer
-// local (e.g. `x` below) is a compile error, not silently-wrong behavior.
-// See docs/tdd/TDD-00057.md for the reasoning and what's deliberately
-// deferred:
+// --- A nested function CAN close over its enclosing function's locals and
+// parameters — it is emitted as a closure value when it does (TDD-00129) ---
+function withCapture(x: number): number {
+    function inner(): number { return x + 1; }
+    return inner();
+}
+console.log(withCapture(10));  // 11
+
+// --- Declarations inside a lexical block (an if/for/while body, one or more
+// blocks deeper than the enclosing body) are supported too, and are scoped to
+// that block (TDD-00152) ---
+function classify(n: number): string {
+    if (n < 0) {
+        function label(): string { return "negative"; }
+        return label();
+    }
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        function step(): number { return 2; }  // non-capturing: fine
+        sum += step();
+    }
+    return "sum=" + sum;
+}
+console.log(classify(-1));  // negative
+console.log(classify(3));   // sum=6
+
+// --- One deliberate limit: a block-nested function cannot capture a C-style
+// for-loop's own variable (it is a single per-iteration cell) — copy it to a
+// `const` inside the loop body and capture that instead:
 //
-// function withCapture(x: number): number {
-//     function inner(): number { return x; }  // compile error
-//     return inner();
-// }
+//   for (let i = 0; i < 3; i++) {
+//       const cur = i;
+//       function useCur(): number { return cur; }  // ok
+//   }
