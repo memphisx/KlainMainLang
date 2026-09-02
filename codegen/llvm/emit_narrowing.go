@@ -217,6 +217,26 @@ func (e *Emitter) discriminantNarrowing(t *ast.BinaryExpression) (name string, m
 // of an `if`'s branches proves it. Call after pushing the branch's own scope so
 // the narrowing is discarded on exit (mirrors applyBranchNarrowing).
 func (e *Emitter) applyUnionBranchNarrowing(test ast.Expression, branchIsTrue bool) {
+	// `e instanceof HttpError` on a caught error (TDD-00155 Stage 6): in the
+	// true branch, the binding narrows to the Error-subclass type, so its
+	// extra fields/methods become readable. The pointer is the same either
+	// way (subclass instances are prefix-compatible with the error struct).
+	if branchIsTrue {
+		if bin, isBin := test.(*ast.BinaryExpression); isBin && bin.Op == "instanceof" {
+			if id, isID := bin.Left.(*ast.Identifier); isID {
+				if rid, isRID := bin.Right.(*ast.Identifier); isRID {
+					if sym, found := e.lookup(id.Name); found && sym.Ty.IsError {
+						if info, isClass := e.classes[rid.Name]; isClass && info.IsErrorSubclass {
+							nt := info.Ty
+							sym.NarrowedTo = &nt
+							e.define(id.Name, sym)
+							return
+						}
+					}
+				}
+			}
+		}
+	}
 	name, matchTy, matchWhenTrue, complTy, hasCompl, ok := e.unionNarrowingFromCondition(test)
 	if !ok {
 		return

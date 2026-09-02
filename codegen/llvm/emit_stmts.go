@@ -1247,15 +1247,29 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	// runtime value/pointer, so this works for any object-typed expression,
 	// not just a named variable — e.g. `for (const k in c.point)`.
 	objTy := e.inferExprType(s.Object)
-	fields := objTy.VisibleFields()
-	if !objTy.IsObject || (!objTy.IsClass && len(fields) == 0) {
-		return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
-	}
-
-	// Build a compile-time string[] of field names and materialise it at runtime.
-	keysVal, err := e.emitObjectFieldNames(fields, s.GetPos())
-	if err != nil {
-		return err
+	var keysVal Value
+	if isUnconstrainedDynamic(objTy) {
+		// A bare any/unknown object iterates its D1 dynamic-object keys at
+		// runtime (TDD-00155 Stage 1), insertion order.
+		objVal, err := e.emitExpr(s.Object)
+		if err != nil {
+			return err
+		}
+		keysVal, err = e.emitDynAnyKeys(objVal, s.GetPos())
+		if err != nil {
+			return err
+		}
+	} else {
+		fields := objTy.VisibleFields()
+		if !objTy.IsObject || (!objTy.IsClass && len(fields) == 0) {
+			return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
+		}
+		// Build a compile-time string[] of field names and materialise it at runtime.
+		var err error
+		keysVal, err = e.emitObjectFieldNames(fields, s.GetPos())
+		if err != nil {
+			return err
+		}
 	}
 
 	// Cache the {ptr, i64} aggregate fields into allocas so the loop can read them.

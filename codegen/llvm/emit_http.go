@@ -1851,10 +1851,7 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 		// TDD-00119: the body box's tag picks the tail at runtime — kmlTagStream
 		// → chunked writer (unbox the stream pointer), otherwise → buffered writer
 		// (unbox the string pointer). bodyReg is the { i8, i64 } box.
-		tagReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", tagReg, bodyReg))
-		payloadReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 1", payloadReg, bodyReg))
+		tagReg, payloadReg := e.emitUnboxTagPayload(Value{Ref: bodyReg, Ty: TypeAny})
 		isStreamReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStreamReg, tagReg, kmlTagStream))
 		streamL := e.freshLabel("http.unionstream")

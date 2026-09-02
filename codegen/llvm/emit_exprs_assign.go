@@ -252,6 +252,20 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		keyVal = e.coerce(keyVal, TypePtr)
 		return e.emitProcessEnvSet(keyVal.Ref, ex.Right, ex.GetPos())
 	}
+	// `F.prototype = value` on a recognized vanilla-JS constructor function
+	// (TDD-00155 Stage 4, `-compat=js`) re-points the prototype bag.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
+		if id, ok := memEx.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && memEx.Property == "prototype" {
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment to a prototype is not supported", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitProtoBagWrite(id.Name, rhs, ex.GetPos())
+		}
+	}
 	// Static field assignment: ClassName.staticField = val (or compound
 	// ops) — TDD-00009 Stage 4. A bare class-name identifier is a
 	// compile-time namespace, never a real runtime value, so this must be
@@ -280,6 +294,28 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, idxEx.Index, ex.Op, ex.Right, ex.GetPos())
+		}
+	}
+	// Bracket assignment on a bare any/unknown base: runtime-keyed write into
+	// the D1 dynamic object model (TDD-00155 Stage 1).
+	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		if baseTy := e.inferExprType(idxEx.Object); isUnconstrainedDynamic(baseTy) {
+			if ex.Op != "=" {
+				return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on a dynamic property is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+			}
+			objVal, err := e.emitExpr(idxEx.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			keyRef, err := e.dynAnyKeyRef(idxEx.Index, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSet(objVal, keyRef, rhs, ex.GetPos())
 		}
 	}
 	// Tuple element assignment: t[0] = val (TDD-00066). A tuple is a fixed-shape
@@ -472,6 +508,35 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			keyExpr := ast.NewStringLiteral(memEx.Property, memEx.GetPos())
 			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, keyExpr, ex.Op, ex.Right, ex.GetPos())
 		}
+		// Property write on a bare any/unknown base: a runtime tag dispatch
+		// into the D1 dynamic object model (TDD-00155 Stage 1).
+		if isUnconstrainedDynamic(objVal.Ty) {
+			if ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
+				// `-compat=js` (TDD-00076 A2): read-modify-write through the
+				// runtime dispatch (`this.x *= k`); strict keeps the rejection.
+				if !e.compatJS() {
+					return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on a dynamic property is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+				}
+				cur, err := e.emitDynAnyMemberGetNamed(objVal, e.internString(memEx.Property), memEx.Property, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				rhsVal, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+				if err != nil {
+					return Value{}, err
+				}
+				res, err := e.emitAnyBinary(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyMemberSetNamed(objVal, e.internString(memEx.Property), memEx.Property, res, ex.GetPos())
+			}
+			rhs, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(objVal, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+		}
 		if !objVal.Ty.IsObject {
 			return Value{}, fmt.Errorf("field assignment on non-object")
 		}
@@ -634,8 +699,31 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		return e.emitNullableScalarAssign(sym, ex)
 	}
 
-	if sym.Ty.IsDynamic && ex.Op != "=" {
-		return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+	if sym.Ty.IsDynamic && ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
+		// `-compat=js` (TDD-00076 A2): compound assignment dispatches the
+		// operator at runtime; strict keeps the rejection.
+		if !e.compatJS() {
+			return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		}
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, sym.Ptr))
+		rhsVal, err := e.emitExprWithObjectHint(ex.Right, TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		res, err := e.emitAnyBinary(strings.TrimSuffix(ex.Op, "="), Value{Ref: cur, Ty: TypeAny}, rhsVal, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(res)
+		if err != nil {
+			return Value{}, err
+		}
+		if fresh, ok := e.lookup(ident.Name); ok {
+			sym = fresh
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, sym.Ptr))
+		return boxed, nil
 	}
 
 	if isLogicalAssignOp(ex.Op) {

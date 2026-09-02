@@ -1934,11 +1934,10 @@ func StructFieldSize(ty Type) int64 {
 	if ty.IsArray {
 		return 16
 	}
-	// A dynamic/union field's storage is the { i8, i64 } box — 16 bytes (the i8
-	// tag padded to the i64's 8-byte alignment, plus the i64 payload), not the
-	// 8 bytes ty.Align() alone would suggest (TDD-00119).
+	// A dynamic/union field's storage is the NaN-boxed word (TDD-00156) —
+	// one 8-byte i64, same as every other scalar slot.
 	if ty.IsDynamic {
-		return 16
+		return 8
 	}
 	// A nullable-scalar field's { i1, T } slot occupies the payload's alignment
 	// (for the leading i1 + padding) plus the payload itself — 2*align for every
@@ -2138,10 +2137,12 @@ var (
 	TypePtr       = Type{IR: "ptr"}
 	TypeNull      = Type{IR: "ptr", IsNull: true}
 	TypeUndefined = Type{IR: "ptr", IsNull: true, IsUndefined: true}
-	// TypeAny backs any/unknown: an anonymous/literal LLVM struct { tag, payload },
-	// following the same "literal struct type used directly, no named-type
-	// declaration needed" convention ObjectType()'s StructIR() already relies on.
-	TypeAny = Type{IR: "{ i8, i64 }", IsDynamic: true}
+	// TypeAny backs any/unknown: the NaN-boxed single-word dynamic value
+	// (TDD-00156) — numbers offset-encoded doubles, heap references
+	// low-3-bit-kind-tagged raw pointers, undefined/null/true/false small
+	// immediates. The logical kmlTag* model decodes from it via
+	// __kml_nb_tag/__kml_nb_pay (runtime_nanbox.go).
+	TypeAny = Type{IR: "i64", IsDynamic: true}
 	// TypeDate backs Date: a plain i64 milliseconds-since-epoch timestamp.
 	TypeDate = Type{IR: "i64", Signed: true, IsDate: true}
 )

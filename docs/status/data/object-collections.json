@@ -37,7 +37,10 @@
           },
           {
             "feature": "`Object.keys(obj)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag in insertion order, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)"
+            ]
           },
           {
             "feature": "`Object.values(obj)`",
@@ -71,17 +74,53 @@
             ]
           },
           {
-            "feature": "`Object.create()`",
-            "status": "missing",
+            "feature": "`Object.create()` / `getPrototypeOf` / `setPrototypeOf` / `__proto__` (dynamic objects)",
+            "status": "implemented",
+            "caveats": [
+              "Prototype machinery exists on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link, and a boxed primitive's `getPrototypeOf` answers `null` (no primitive prototype objects)",
+              "`Object.create`'s property-descriptors second argument is rejected until descriptors land",
+              "Inherited properties don't appear in `for...in` (own-only enumeration; real JS walks the chain's enumerables)"
+            ],
             "notes": [
-              "Out of scope: its core is prototype-chain creation, which this compiler's fixed-shape struct object model can't represent — the deferred dynamic/prototype object model ([TDD-00068](../tdd/TDD-00068.md))"
+              "The D1 prototype chain ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/ADR-00623.md)): property reads and the `in` operator walk the chain (own shadows inherited; `delete` re-exposes the proto's value), writes/`Object.keys`/`JSON.stringify` stay own-table — matching JS. `Object.create(proto|null)`, `get/setPrototypeOf`, the `__proto__` accessor (JS setter semantics: non-object values silently ignored), and the `{ __proto__: base }` literal form all work; a prototype cycle throws V8's `Cyclic __proto__ value`"
+            ]
+          },
+          {
+            "feature": "`Object.defineProperty` / `getOwnPropertyDescriptor` / `getOwnPropertyNames` / accessors (dynamic objects)",
+            "status": "implemented",
+            "caveats": [
+              "Dynamic (`any`-typed / js-mode-literal) objects only — statically-typed structs have no descriptor table",
+              "`Object.defineProperties` and the descriptor-aware `Object.assign` form are follow-ons; `Cannot delete` TypeError text omits the property name"
+            ],
+            "notes": [
+              "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors"
+            ]
+          },
+          {
+            "feature": "`new Proxy(target, handler)`",
+            "status": "implemented",
+            "caveats": [
+              "Traps implemented: `get`/`set`/`has`/`deleteProperty` — dispatched in the dynamic-object runtime entry points, forwarding to the target when absent ([ADR-00630](../adr/ADR-00630.md)); other traps (`ownKeys`, `getOwnPropertyDescriptor`, `apply`, `construct`, …) are not consulted (those operations forward to the target)",
+              "The target must be a dynamic object (an untyped/`any` literal); statically-typed structs can't be proxied"
+            ],
+            "notes": [
+              "`JSON.stringify` of a proxy serializes its target (spec behavior for data properties)"
+            ]
+          },
+          {
+            "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty`",
+            "status": "implemented",
+            "caveats": [
+              "`Reflect.apply` / `Reflect.construct` are missing",
+              "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec; targets must be dynamic objects"
             ]
           },
           {
             "feature": "`Object.freeze(obj)`",
             "status": "implemented",
             "notes": [
-              "Real runtime enforcement, not a no-op: tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter ([ADR-00055](../adr/ADR-00055.md))"
+              "Real runtime enforcement, not a no-op: tracks `obj`'s heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias/function parameter ([ADR-00055](../adr/ADR-00055.md))",
+              "A **dynamic** object freezes via its descriptor attributes instead ([ADR-00629](../adr/ADR-00629.md)): writes/adds/deletes throw, `Object.isFrozen`/`isSealed`/`isExtensible` answer truthfully; `Object.seal` and `Object.preventExtensions` enforce their own tiers the same way"
             ]
           },
           {

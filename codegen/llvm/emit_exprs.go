@@ -101,6 +101,14 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 	case *ast.NewDateExpression:
 		return e.emitNewDate(ex)
 	case *ast.ObjectLiteral:
+		// `-compat=js`: a bare (context-free) object literal is a D1 dynamic
+		// object — untyped JS returns/passes literals ad hoc, and only a
+		// hint-typed context (an annotated slot, a typed parameter) keeps the
+		// native static-struct form (emitExprWithObjectHint routes those
+		// before reaching here).
+		if e.compatJS() {
+			return e.emitDynObjLiteral(ex)
+		}
 		return e.emitObjectLiteral(ex)
 	case *ast.ArrowFunction:
 		return e.emitArrowFunction(ex)
@@ -269,7 +277,10 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 // out-of-range literal — all of which fall back to the normal double path
 // (correct there, since values ≤ 2^53 and narrow-int targets lose nothing).
 func (e *Emitter) emitInt64LiteralForTarget(n *ast.NumberLiteral, ty Type) (Value, bool) {
-	if n.IsBigInt || ty.Float || ty.IR != "i64" {
+	// A dynamic target shares i64's IR since the NaN-box migration
+	// (TDD-00156) but is NOT an integer slot — without this guard the raw
+	// literal flowed into the box-idempotence passthrough unboxed.
+	if n.IsBigInt || ty.Float || ty.IR != "i64" || ty.IsDynamic || ty.IsDate {
 		return Value{}, false
 	}
 	if ty.Signed {
@@ -329,13 +340,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// `e instanceof TypeError` never reach here — both have their own
 		// dedicated paths.
 		if isErrorKindName(id.Name) {
-			r0 := e.freshReg()
-			r1 := e.freshReg()
-			pay := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pay, e.internString(id.Name)))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagFuncRef))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pay))
-			return Value{Ref: r1, Ty: TypeAny}, nil
+			return Value{Ref: e.emitNbTagPtr(e.internString(id.Name), kmlTagFuncRef), Ty: TypeAny}, nil
 		}
 		// A builtin-module marker reaching the generic identifier path means
 		// an unhandled member/usage of that module leaked past its dispatch —
@@ -350,7 +355,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// { i8, i64 } box and unbox it to the concrete narrowed type, so the
 		// value reads as a real string/number/boolean (or a smaller union).
 		box := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load { i8, i64 }, ptr %s, align 8", box, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, sym.Ptr))
 		return e.emitUnboxBoxToType(box, *sym.NarrowedTo), nil
 	}
 	if sym.Ty.IsArray {

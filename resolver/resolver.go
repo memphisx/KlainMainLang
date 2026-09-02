@@ -112,11 +112,13 @@ func ResolveProgram(entryPath string) (*ast.Program, error) {
 	return ResolveProgramWithOptions(entryPath, false, false)
 }
 
-// ResolveProgramWithOptions is ResolveProgram plus allowGlobalShadowing
-// (TDD-00050, `-compat=js` in main.go — default false, i.e.
-// `-compat=strict`): whether a program may declare its own binding named
+// ResolveProgramWithOptions is ResolveProgram plus allowGlobalShadowing —
+// the resolver-side `-compat=js` bool (default false, i.e. `-compat=strict`).
+// It governs two things: whether a program may declare its own binding named
 // the same as a Tier 1 ambient global (`Math`/`process`/`fetch`/… — see
-// resolver/reserved_names.go). Tier 2 names (`Map`/`Date`/`RegExp`/… —
+// resolver/reserved_names.go, TDD-00050), and whether the TS-only
+// definite-assignment early error is suppressed (plain JS has no such
+// concept — TDD-00022 sub-problem 5). Tier 2 names (`Map`/`Date`/`RegExp`/… —
 // parser-level `new`-form built-ins) are rejected either way; there is no
 // flag value that lifts those, see reserved_names.go's own doc comment for
 // why.
@@ -432,8 +434,16 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 		// Definite-assignment early error (TDD-00071 Stage 2): a typed var/let
 		// read on a path where it wasn't assigned. Sound-only — conservative
 		// merges and cross-function exemption keep it free of false positives.
-		if err := checkDefiniteAssignment(info.prog); err != nil {
-			return nil, err
+		// TS-only strictness: plain JS has no definite-assignment concept (the
+		// read is `undefined`), so `-compat=js` suppresses this one check
+		// (TDD-00022 sub-problem 5) — TDZ and redeclaration above stay on in
+		// both modes because they are real JS runtime/SyntaxError rules. A
+		// suppressed read is safe: an uninitialized let/const slot is
+		// zero-initialized (ADR-00215), so it yields the type's zero value.
+		if !allowGlobalShadowing {
+			if err := checkDefiniteAssignment(info.prog); err != nil {
+				return nil, err
+			}
 		}
 		mangled, err := mangleFileDecls(path, info.prog, info.index, allowGlobalShadowing)
 		if err != nil {

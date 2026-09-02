@@ -276,6 +276,7 @@
             "status": "implemented",
             "notes": [
               "Reduces to the same compile-time `FieldIndex` lookup `Object.hasOwn()`/`.hasOwnProperty()` already use (object shapes are fully structural/static — no dynamic property add/delete) — a string-literal key against an object is a compile-time-constant `true`/`false`, not a runtime scan",
+              "On a bare `any` value it *is* a runtime membership scan of the D1 dynamic object's property bag, and the key may be runtime-computed ([TDD-00155](../tdd/TDD-00155.md) Stage 1); `delete anyVal.key` likewise deletes for real",
               "Parsed as a contextual keyword (not a reserved token) at the same precedence as `instanceof`, matching how `for...in` already recognizes \"in\". See [ADR-00091](../adr/ADR-00091.md)"
             ]
           },
@@ -676,7 +677,7 @@
             "feature": "Built-in `Error` subtypes (`new TypeError(msg)`, `RangeError`, `SyntaxError`, `EvalError`, `URIError`, `ReferenceError`, `DOMException`) and `instanceof` against them",
             "status": "implemented",
             "caveats": [
-              "No user-definable `class X extends Error` — built-in types aren't valid `extends` targets ([TDD-00009](../tdd/TDD-00009.md) Stage 3, [ADR-00083](../adr/ADR-00083.md)); Error subtyping stays on its own independent Option A mechanism",
+              "`class X extends Error` works one level deep ([ADR-00630](../adr/ADR-00630.md)): construction, `super(msg)`, `.message`/`.name` (default `\"Error\"` unless assigned), extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses, `Error.prototype.toString`; extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist",
               "`DOMException` carries no legacy numeric `.code`"
             ],
             "notes": [

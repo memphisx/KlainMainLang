@@ -151,6 +151,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitStaticMethodCall(info, id.Name, mem.Property, ex.Args, ex.GetPos())
 			}
 		}
+		// `Base.call(this, args)` on a recognized prototype constructor
+		// (TDD-00155 Stage 4): the pre-ES6 inheritance chain — the receiver
+		// is passed through, unlike the generic .call path (which discards
+		// thisArg, ADR-00398 Stage A).
+		if id, ok := mem.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && mem.Property == "call" {
+			return e.emitProtoCtorChainCall(id.Name, ex.Args, ex.GetPos())
+		}
 		// Symbol.for / Symbol.keyFor (ADR-00488) — before class dispatch, a
 		// user binding named Symbol still wins via the shadow check.
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Symbol" && !e.isShadowedByLocal("Symbol") &&
@@ -203,7 +210,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "stringify":
 				return e.emitJSONStringify(ex.Args, ex.GetPos())
 			case "parse":
-				return e.emitJSONParse(ex.Args, TypePtr, ex.GetPos())
+				// Context-free JSON.parse is JS-faithful untyped parse: the
+				// result is a dynamic (`any`) tree — tag-10 objects / tag-11
+				// arrays / boxed scalars (TDD-00155 Stage 2). A typed target
+				// (declared annotation) routes through emitDeclJSONProjection
+				// with the real target type instead of reaching here.
+				return e.emitJSONParse(ex.Args, TypeAny, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Date" && mem.Property == "now" {
@@ -480,7 +492,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			if len(ex.Args) != 1 {
 				return Value{}, fmt.Errorf("%d:%d: hasOwnProperty takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
 			}
-			return e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", ex.GetPos())
+			return e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", true, ex.GetPos())
 		}
 		if mem.Property == "toString" && isNumberTy(e.inferExprType(mem.Object)) {
 			return e.emitNumberToStringRadix(mem, ex.Args, ex.GetPos())
@@ -540,6 +552,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitPromiseReject(ex.Args, ex.GetPos())
 			}
 		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Reflect" && !e.isShadowedByLocal(id.Name) {
+			return e.emitReflectCall(mem.Property, ex.Args, ex.GetPos())
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
 			switch mem.Property {
 			case "groupBy":
@@ -562,7 +577,38 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				if len(ex.Args) != 2 {
 					return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
 				}
-				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", ex.GetPos())
+				return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", true, ex.GetPos())
+			case "create":
+				return e.emitObjectCreate(ex.Args, ex.GetPos())
+			case "getPrototypeOf":
+				return e.emitObjectGetPrototypeOf(ex.Args, ex.GetPos())
+			case "setPrototypeOf":
+				return e.emitObjectSetPrototypeOf(ex.Args, ex.GetPos())
+			case "defineProperty":
+				return e.emitObjectDefineProperty(ex.Args, ex.GetPos())
+			case "getOwnPropertyDescriptor":
+				return e.emitObjectGetOwnPropertyDescriptor(ex.Args, ex.GetPos())
+			case "getOwnPropertyNames":
+				return e.emitObjectGetOwnPropertyNames(ex.Args, ex.GetPos())
+			case "preventExtensions", "isExtensible", "isSealed", "isFrozen":
+				// Dynamic-object forms (TDD-00155 Stage 5); the static-object
+				// freeze/seal paths keep their own handlers below.
+				if len(ex.Args) == 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) {
+					v, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
+					if err != nil {
+						return Value{}, err
+					}
+					switch mem.Property {
+					case "preventExtensions":
+						return e.emitDynPrevent(v, 0)
+					case "isExtensible":
+						return e.emitDynFlagsTest(v, 0)
+					case "isSealed":
+						return e.emitDynFlagsTest(v, 1)
+					case "isFrozen":
+						return e.emitDynFlagsTest(v, 2)
+					}
+				}
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
@@ -1412,6 +1458,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		// Named function — a nested one (TDD-00057) shadows an outer/
 		// top-level function of the same name, same as real JS/TS scoping.
 		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
+			// A recognized prototype constructor's ABI carries a hidden boxed
+			// `this` — a plain call has no receiver to pass (JS strict-mode
+			// `this === undefined` inside would make every `this.x =` throw
+			// anyway), so it stays a clean rejection.
+			if e.compatJS() && e.jsProtoCtor[id.Name] {
+				return Value{}, fmt.Errorf("%d:%d: '%s' is a prototype constructor — call it with `new %s(...)` (or chain it via `%s.call(this, ...)`)", ex.GetPos().Line, ex.GetPos().Col, id.Name, id.Name, id.Name)
+			}
 			return e.emitCallToFuncSig(mangled, sig, ex.Args, ex.GetPos())
 		}
 		// Generic (TDD-00010 V1) function: infer the type argument from
@@ -1485,6 +1538,20 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return Value{}, err
 		}
 		return e.emitClosureCallByPtr(val.Ref, val.Ty, ex.Args, ex.GetPos())
+	}
+
+	// A method call on a bare any/unknown receiver is a runtime prototype
+	// dispatch (TDD-00155 Stage 4): chain-walking property read, then an
+	// indirect call through the dynamic-function record with the receiver
+	// bound as `this`.
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if objTy := e.inferExprType(mem.Object); isUnconstrainedDynamic(objTy) {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMethodCall(objVal, mem.Property, ex.Args, ex.GetPos())
+		}
 	}
 
 	// A method call whose receiver type doesn't have that method reaches here

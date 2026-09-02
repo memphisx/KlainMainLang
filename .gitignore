@@ -21,6 +21,8 @@
 examples/**
 !examples/**/
 !examples/**/*.ts
+# JS-mode examples are .js sources by nature (-compat=js, TDD-00022)
+!examples/jsmode/*.js
 !examples/**/klain.json
 # The webview SPA examples ship a dist/ of static assets (a hand-written page,
 # or the file-explorer's app + vendored Quasar/Vue UMD) — source for those

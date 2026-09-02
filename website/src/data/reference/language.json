@@ -789,7 +789,7 @@
       "badge": "caveats",
       "description": "A small fixed kind enum (a hidden runtime tag on the shared Error object shape, not a real class hierarchy), plus a real .name field. instanceof Error matches any kind; instanceof TypeError matches only that one. new DOMException(message?, name?) takes its .name from the 2nd argument.",
       "differences": [
-        "No user-definable `class X extends Error` — built-in types aren't valid `extends` targets; Error subtyping stays on its own independent mechanism.",
+        "`class X extends Error` works one level deep — construction, `super(msg)`, `.message`/`.name`, extra fields/methods, throw/catch with `instanceof` discrimination against sibling subclasses. Extending an Error *subclass* is a clean rejection, and `.stack`/`Error.captureStackTrace` don't exist.",
         "`DOMException` carries no legacy numeric `.code`."
       ],
       "seeAlso": ["lang.newerror", "lang.instanceof"],

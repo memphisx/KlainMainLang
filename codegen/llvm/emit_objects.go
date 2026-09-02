@@ -48,6 +48,52 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 			return v, nil
 		}
 	}
+	// An object literal bound into a bare any/unknown slot becomes a D1
+	// dynamic object (TDD-00155) — a real runtime property bag, not a static
+	// struct boxed as an opaque tag-6 pointer.
+	if lit, ok := expr.(*ast.ObjectLiteral); ok && isUnconstrainedDynamic(hint) {
+		return e.emitDynObjLiteral(lit)
+	}
+	// An array literal in a dynamic position: a HOMOGENEOUS scalar literal
+	// keeps the typed tag-7 form (the ADR-00478 boxed-array round trip the
+	// closure adapters rely on — a tag-11 body under a tag-7 unbox read the
+	// dynarr header as a {ptr,len} pair, found as a real segfault in the
+	// any_unknown example); only a heterogeneous or nested literal — the
+	// shapes tag 7 cannot represent — becomes a D1 dynamic array
+	// (TDD-00155 Stage 2).
+	if lit, ok := expr.(*ast.ArrayLiteral); ok && isUnconstrainedDynamic(hint) {
+		homogeneous := len(lit.Elements) > 0
+		var kind string
+		for _, el := range lit.Elements {
+			t := e.inferExprType(el)
+			k := scalarTypeKind(t)
+			if k == "" {
+				homogeneous = false
+				break
+			}
+			if kind == "" {
+				kind = k
+			} else if k != kind {
+				homogeneous = false
+				break
+			}
+		}
+		if homogeneous {
+			return e.emitExpr(expr) // typed array literal; boxed tag 7 downstream
+		}
+		return e.emitDynArrLiteral(lit)
+	}
+	// A function expression in a dynamic position — `F.prototype.m =
+	// function() {...}`, a dyn-object method property — compiles under the
+	// uniform dynamic ABI (TDD-00155 Stage 4), with `this` as the boxed
+	// receiver.
+	if fe, ok := expr.(*ast.FunctionExpression); ok && isUnconstrainedDynamic(hint) {
+		return e.emitDynFunctionExpression(fe, fe.GetPos())
+	}
+	// An arrow in a dynamic position compiles the same way (lexical `this`).
+	if af, ok := expr.(*ast.ArrowFunction); ok && isUnconstrainedDynamic(hint) {
+		return e.emitDynArrowFunction(af, af.GetPos())
+	}
 	if lit, ok := expr.(*ast.ObjectLiteral); ok && hint.IsObject {
 		return e.emitObjectLiteralWithHint(lit, &hint)
 	}
@@ -927,6 +973,11 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_gmap_keys(ptr %s)", retReg, val.Ref))
 		return Value{Ref: retReg, Ty: ArrayOf(TypePtr)}, nil
 	}
+	// A bare any/unknown value: runtime key enumeration on a D1 dynamic object
+	// (TDD-00155 Stage 1) — [] for primitives, TypeError for null/undefined.
+	if isUnconstrainedDynamic(val.Ty) {
+		return e.emitDynAnyKeys(val, pos)
+	}
 	// A dynamic object (or any string-keyed Map<string,V>) is backed by the
 	// same runtime as Map<K,V> — delegate to its own .keys() rather than
 	// walking a compile-time field list, see docs/tdd/TDD-00012.md.
@@ -1222,6 +1273,10 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
+	// A dynamic object freezes via its descriptor attrs (TDD-00155 Stage 5).
+	if isUnconstrainedDynamic(val.Ty) {
+		return e.emitDynPrevent(val, 2)
+	}
 	if !val.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: Object.freeze requires an object", pos.Line, pos.Col)
 	}
@@ -1244,10 +1299,19 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 // a silent always-false/true, since there's no field-name table at runtime
 // to check it against. callerName customizes the error text so it reads
 // naturally regardless of which of the three call sites triggered it.
-func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName string, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName string, ownOnly bool, pos ast.Pos) (Value, error) {
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
+	}
+	// A bare any/unknown object is a runtime dynamic-object membership test
+	// (TDD-00155 Stage 1) — the one case where the key may be runtime-computed.
+	if isUnconstrainedDynamic(objVal.Ty) {
+		keyRef, err := e.dynAnyKeyRef(keyExpr, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyHas(objVal, keyRef, ownOnly, pos)
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: %s requires an object", pos.Line, pos.Col, callerName)
@@ -1272,7 +1336,7 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 // puts the key on the left and the object on the right, the opposite of
 // hasOwnProperty(obj, key).
 func (e *Emitter) emitInOperator(ex *ast.BinaryExpression) (Value, error) {
-	return e.emitHasOwnProperty(ex.Right, ex.Left, "the 'in' operator", ex.GetPos())
+	return e.emitHasOwnProperty(ex.Right, ex.Left, "the 'in' operator", false, ex.GetPos())
 }
 
 // emitObjectSeal implements Object.seal(obj). Real JS's seal blocks adding
@@ -1289,6 +1353,10 @@ func (e *Emitter) emitObjectSeal(args []ast.Expression, pos ast.Pos) (Value, err
 	val, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
+	}
+	// A dynamic object seals via its descriptor attrs (TDD-00155 Stage 5).
+	if isUnconstrainedDynamic(val.Ty) {
+		return e.emitDynPrevent(val, 1)
 	}
 	if !val.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: Object.seal requires an object", pos.Line, pos.Col)

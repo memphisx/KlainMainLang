@@ -207,6 +207,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// Array parameters expand to two LLVM params: (ptr, i64 length).
 	// Object and scalar parameters are each one ptr/scalar LLVM param.
 	var llvmParams []string
+	// A recognized prototype constructor (TDD-00155 Stage 4, `-compat=js`)
+	// takes a hidden boxed `this` first parameter — its body's `this.x = v`
+	// assignments are dynamic member writes on the receiver bag.
+	if e.compatJS() && e.jsProtoCtor[llvmName] {
+		llvmParams = append(llvmParams, "i64 %p_this")
+		thisPtr := "%v_this"
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", thisPtr))
+		e.emitInstr(fmt.Sprintf("store i64 %%p_this, ptr %s, align 8", thisPtr))
+		e.define("this", Symbol{Ptr: thisPtr, Ty: TypeAny})
+	}
 	if taskBody {
 		// Params come from the args bundle, not LLVM parameters; the only LLVM
 		// parameter is the bundle pointer.
@@ -760,7 +770,7 @@ func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isCo
 		// Seed with the type's deterministic default (a body-block store, since
 		// newCell is a body register — emitVarSlotDefault targets the entry block).
 		if ty.IsDynamic {
-			e.emitInstr(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, newCell, ty.Align()))
+			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, newCell))
 		} else {
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), newCell, ty.Align()))
 		}
@@ -1439,7 +1449,7 @@ func (e *Emitter) boxHoistedCapture(name string, ty Type, initReg string, isCons
 	emit(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", box, ty.Align()))
 	if initReg == "" {
 		if ty.IsDynamic {
-			emit(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, box, ty.Align()))
+			emit(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, box))
 		} else {
 			emit(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), box, ty.Align()))
 		}

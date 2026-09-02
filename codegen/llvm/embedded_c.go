@@ -92,6 +92,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesJSONParse() {
 		out = append(out, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})
 	}
+	if e.UsesDynJSON() {
+		out = append(out, CSource{"dynjson", DynJSONSource(), nil, nil, ""})
+	}
 	if e.UsesURLPattern() {
 		out = append(out, CSource{"urlpattern", URLPatternSource(), nil, nil, ""})
 	}

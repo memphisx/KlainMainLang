@@ -2,16 +2,11 @@ package llvm
 
 import ()
 
-// ensureAnyEq declares __kml_any_eq: compares two boxed any/unknown values
-// { i8 tag, i64 payload } for equality (backs === / !==). Equal-tag pairs
-// compare directly per tag's meaning (string payloads are ptrtoint'd string
-// pointers, so string/string compares via strcmp, not pointer identity;
-// object/object and array/array compare by pointer, matching JS reference
-// equality); an int/float tag mismatch (either order) is still a real numeric
-// comparison, converting the int side to double first; any other tag mismatch
-// is false.
-// Tags: 0=int, 1=float, 2=string, 3=boolean, 4=null, 5=undefined, 6=object,
-// 7=array.
+// ensureAnyEq declares __kml_any_eq over two NaN-boxed words (TDD-00156),
+// backing === / !== on dynamic values. Two numbers compare as doubles
+// (NaN !== NaN, -0 === 0); bitwise-equal non-numbers are identical
+// immediates or the same tagged pointer — true; two string-kind values
+// compare by strcmp (content equality); every other combination is false.
 func (e *Emitter) ensureAnyEq() {
 	if e.usedAnyEq {
 		return
@@ -19,88 +14,61 @@ func (e *Emitter) ensureAnyEq() {
 	e.usedAnyEq = true
 	e.ensureStrcmp()
 	e.emitGlobal(`
-define i1 @__kml_any_eq({ i8, i64 } %a, { i8, i64 } %b) {
+define i1 @__kml_any_eq(i64 %a, i64 %b) {
 entry:
-  %tagA = extractvalue { i8, i64 } %a, 0
-  %payA = extractvalue { i8, i64 } %a, 1
-  %tagB = extractvalue { i8, i64 } %b, 0
-  %payB = extractvalue { i8, i64 } %b, 1
-  %same_tag = icmp eq i8 %tagA, %tagB
-  br i1 %same_tag, label %same, label %cross_check
-cross_check:
-  %a_is_int = icmp eq i8 %tagA, 0
-  %a_is_float = icmp eq i8 %tagA, 1
-  %b_is_int = icmp eq i8 %tagB, 0
-  %b_is_float = icmp eq i8 %tagB, 1
-  %int_float = and i1 %a_is_int, %b_is_float
-  %float_int = and i1 %a_is_float, %b_is_int
-  %is_cross_numeric = or i1 %int_float, %float_int
-  br i1 %is_cross_numeric, label %cross_numeric, label %not_equal
-cross_numeric:
-  %a_from_int = sitofp i64 %payA to double
-  %a_from_float = bitcast i64 %payA to double
-  %a_double = select i1 %a_is_int, double %a_from_int, double %a_from_float
-  %b_from_int = sitofp i64 %payB to double
-  %b_from_float = bitcast i64 %payB to double
-  %b_double = select i1 %b_is_int, double %b_from_int, double %b_from_float
-  %cross_eq = fcmp oeq double %a_double, %b_double
-  ret i1 %cross_eq
-same:
-  %is_int = icmp eq i8 %tagA, 0
-  br i1 %is_int, label %cmp_int, label %check_float
-cmp_int:
-  %int_eq = icmp eq i64 %payA, %payB
-  ret i1 %int_eq
-check_float:
-  %is_float = icmp eq i8 %tagA, 1
-  br i1 %is_float, label %cmp_float, label %check_string
-cmp_float:
-  %fa = bitcast i64 %payA to double
-  %fb = bitcast i64 %payB to double
-  %float_eq = fcmp oeq double %fa, %fb
-  ret i1 %float_eq
-check_string:
-  %is_string = icmp eq i8 %tagA, 2
-  br i1 %is_string, label %cmp_string, label %check_bool
+  %anum = icmp uge i64 %a, 562949953421312
+  %bnum = icmp uge i64 %b, 562949953421312
+  %bothnum = and i1 %anum, %bnum
+  br i1 %bothnum, label %num, label %notnum
+num:
+  %abits = sub i64 %a, 562949953421312
+  %bbits = sub i64 %b, 562949953421312
+  %ad = bitcast i64 %abits to double
+  %bd = bitcast i64 %bbits to double
+  %feq = fcmp oeq double %ad, %bd
+  ret i1 %feq
+notnum:
+  %eithernum = or i1 %anum, %bnum
+  br i1 %eithernum, label %not_equal, label %nonnums
+nonnums:
+  %same = icmp eq i64 %a, %b
+  br i1 %same, label %ret_true, label %diff
+diff:
+  ; both string-kind (pointer range, low-3 kind bits 0) => content compare
+  %aptr = icmp uge i64 %a, 65536
+  %bptr = icmp uge i64 %b, 65536
+  %ak = and i64 %a, 7
+  %bk = and i64 %b, 7
+  %astr0 = icmp eq i64 %ak, 0
+  %bstr0 = icmp eq i64 %bk, 0
+  %astr = and i1 %aptr, %astr0
+  %bstr = and i1 %bptr, %bstr0
+  %bothstr = and i1 %astr, %bstr
+  br i1 %bothstr, label %cmp_string, label %not_string
+not_string:
+  ; both arrayheader-kind (kind bits 2): two boxings of one array malloc two
+  ; headers, so identity is the data pointer *inside* the header (ADR-00478)
+  %aarr0 = icmp eq i64 %ak, 2
+  %barr0 = icmp eq i64 %bk, 2
+  %aarr = and i1 %aptr, %aarr0
+  %barr = and i1 %bptr, %barr0
+  %botharr = and i1 %aarr, %barr
+  br i1 %botharr, label %cmp_array, label %not_equal
+cmp_array:
+  %ha = and i64 %a, -8
+  %hb = and i64 %b, -8
+  %hap = inttoptr i64 %ha to ptr
+  %hbp = inttoptr i64 %hb to ptr
+  %da = load ptr, ptr %hap, align 8
+  %db = load ptr, ptr %hbp, align 8
+  %arr_eq = icmp eq ptr %da, %db
+  ret i1 %arr_eq
 cmp_string:
-  %sa = inttoptr i64 %payA to ptr
-  %sb = inttoptr i64 %payB to ptr
+  %sa = inttoptr i64 %a to ptr
+  %sb = inttoptr i64 %b to ptr
   %scmp = call i32 @strcmp(ptr %sa, ptr %sb)
   %string_eq = icmp eq i32 %scmp, 0
   ret i1 %string_eq
-check_bool:
-  %is_bool = icmp eq i8 %tagA, 3
-  br i1 %is_bool, label %cmp_bool, label %check_null_undef
-cmp_bool:
-  %bool_eq = icmp eq i64 %payA, %payB
-  ret i1 %bool_eq
-check_null_undef:
-  %is_null = icmp eq i8 %tagA, 4
-  %is_undef = icmp eq i8 %tagA, 5
-  %is_null_or_undef = or i1 %is_null, %is_undef
-  br i1 %is_null_or_undef, label %ret_true, label %check_object
-check_object:
-  %is_array = icmp eq i8 %tagA, 7
-  br i1 %is_array, label %cmp_array, label %check_obj_ref
-cmp_array:
-  ; the payload is a { ptr, i64 } header (ADR-00478); identity is the data
-  ; pointer inside it, so two boxings of the same array still compare equal.
-  %ha = inttoptr i64 %payA to ptr
-  %hb = inttoptr i64 %payB to ptr
-  %da = load ptr, ptr %ha, align 8
-  %db = load ptr, ptr %hb, align 8
-  %arr_eq = icmp eq ptr %da, %db
-  ret i1 %arr_eq
-check_obj_ref:
-  %is_object = icmp eq i8 %tagA, 6
-  %is_funcref = icmp eq i8 %tagA, 8
-  %is_ref = or i1 %is_object, %is_funcref
-  br i1 %is_ref, label %cmp_object, label %not_equal
-cmp_object:
-  %oa = inttoptr i64 %payA to ptr
-  %ob = inttoptr i64 %payB to ptr
-  %obj_eq = icmp eq ptr %oa, %ob
-  ret i1 %obj_eq
 ret_true:
   ret i1 true
 not_equal:

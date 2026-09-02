@@ -397,6 +397,19 @@ char *__kml_json_string_dup(const KmlJsonNode *n) {
     return out;
 }
 
+// __kml_json_key / __kml_json_val expose an object node's i-th pair for the
+// dynamic-tree conversion (TDD-00155 Stage 2): the key is transient (the
+// caller's bag-set copies it before the tree is freed).
+const char *__kml_json_key(const KmlJsonNode *n, long i) {
+    if (!n || n->kind != KJSON_OBJECT || i < 0 || i >= n->len) return "";
+    return n->keys[i];
+}
+
+KmlJsonNode *__kml_json_val(const KmlJsonNode *n, long i) {
+    if (!n || n->kind != KJSON_OBJECT || i < 0 || i >= n->len) return NULL;
+    return n->vals[i];
+}
+
 // __kml_json_get returns an object's value for key, or NULL if the key is absent
 // or n isn't an object. Scans backward so a duplicate key is last-wins (JS).
 KmlJsonNode *__kml_json_get(const KmlJsonNode *n, const char *key) {

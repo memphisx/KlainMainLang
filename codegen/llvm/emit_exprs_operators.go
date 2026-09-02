@@ -42,6 +42,17 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	// operand must reach emitValueToString as the full aggregate so a null
 	// renders "null" (real JS), not the payload's zero (ADR-00537). Keep it
 	// intact here and let the concat branch below stringify it.
+	// `-compat=js` (TDD-00076 A2): `null/undefined + number` is numeric in JS
+	// (`null + 1 === 1`, `undefined + 1 → NaN`) — route it to the dynamic
+	// dispatch before the concat decision below would stringify the nullish
+	// side. A nullish + *string* pair stays concatenation, as in JS.
+	if e.compatJS() && ex.Op == "+" {
+		lNullish := left.Ty.IsNull || left.Ty.IsUndefined
+		rNullish := right.Ty.IsNull || right.Ty.IsUndefined
+		if (lNullish && scalarTypeKind(right.Ty) == "number") || (rNullish && scalarTypeKind(left.Ty) == "number") {
+			return e.emitAnyBinary("+", left, right, ex.GetPos())
+		}
+	}
 	strConcatToStr := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
 	if isNullableScalar(left.Ty) && !strConcatToStr {
 		left = e.nullableScalarPayloadOf(left)
@@ -51,12 +62,34 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	}
 
 	if left.Ty.IsDynamic || right.Ty.IsDynamic {
+		// String concatenation with a dynamic operand goes through the JS
+		// ToString coercion (TDD-00155 Stage 4) — `"hi " + anyVal` and
+		// `anyVal + "!"` render the runtime value via the tag dispatch,
+		// exactly like a template literal already does. Arithmetic between
+		// two dynamic operands stays rejected (real operator dispatch is
+		// TDD-00076's NaN-box territory).
+		if ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty)) {
+			ls, err := e.emitValueToString(left)
+			if err != nil {
+				return Value{}, err
+			}
+			rs, err := e.emitValueToString(right)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitStringConcat(ls, rs)
+		}
 		switch ex.Op {
 		case "===", "==":
 			return e.emitAnyEquals(left, right, false)
 		case "!==", "!=":
 			return e.emitAnyEquals(left, right, true)
 		default:
+			// `-compat=js` (TDD-00076 A2): real runtime operator dispatch on
+			// the NaN-boxed word. strict keeps the clean rejection.
+			if e.compatJS() {
+				return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
+			}
 			return Value{}, fmt.Errorf("%d:%d: operator '%s' on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 		}
 	}
@@ -224,6 +257,15 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	if !isNullCheck && right.Ty.IR != ty.IR &&
 		!ty.IsObject && !ty.IsArray && !ty.IsFunc && !ty.IsDynamic && !ty.IsDate &&
 		!right.Ty.IsObject && !right.Ty.IsArray && !right.Ty.IsFunc && !right.Ty.IsDynamic {
+		// `-compat=js` (TDD-00076 A2): a mixed concrete pair (`n * "4"`,
+		// `true + 1`) coerces exactly like JS — box both sides and dispatch.
+		// strict keeps the typed-subset rejection.
+		if e.compatJS() {
+			switch ex.Op {
+			case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+				return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
+			}
+		}
 		return Value{}, fmt.Errorf("%d:%d: operator '%s' between incompatible types is not supported — this compiler is a typed subset (a value of one type cannot be combined with an incompatible one the way untyped JS allows)", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 	}
 
@@ -726,6 +768,14 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, objVal.Ref, e.internString(mem.Property)))
 				return Value{Ref: res, Ty: TypeBool}, nil
 			}
+			// `delete anyVal.key` — D1 dynamic object (TDD-00155 Stage 1).
+			if objTy := e.inferExprType(mem.Object); isUnconstrainedDynamic(objTy) {
+				objVal, err := e.emitExpr(mem.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyDelete(objVal, e.internString(mem.Property), ex.GetPos())
+			}
 		}
 		if idx, ok := ex.Arg.(*ast.IndexExpression); ok {
 			if objTy := e.inferExprType(idx.Object); objTy.IsDynamicObject {
@@ -744,6 +794,18 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 				res := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_delete(ptr %s, ptr %s)", res, objVal.Ref, keyVal.Ref))
 				return Value{Ref: res, Ty: TypeBool}, nil
+			}
+			// `delete anyVal[key]` — D1 dynamic object (TDD-00155 Stage 1).
+			if objTy := e.inferExprType(idx.Object); isUnconstrainedDynamic(objTy) {
+				objVal, err := e.emitExpr(idx.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				keyRef, err := e.dynAnyKeyRef(idx.Index, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyDelete(objVal, keyRef, ex.GetPos())
 			}
 		}
 		return Value{}, fmt.Errorf("%d:%d: 'delete' supports process.env.KEY and index-signature/dynamic-object keys only — fixed-shape fields and array elements have static layouts", ex.GetPos().Line, ex.GetPos().Col)
@@ -783,6 +845,20 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 		}
 		// "!" falls through to the generic path below, whose toBool now handles
 		// bigint truthiness (0n falsy, else truthy).
+	}
+	// Unary numeric coercion on a dynamic value (TDD-00076 A2, `-compat=js`):
+	// ToNumber, negate for `-`, re-box. strict keeps the rejection.
+	if arg.Ty.IsDynamic && (ex.Op == "-" || ex.Op == "+") {
+		if !e.compatJS() {
+			return Value{}, fmt.Errorf("%d:%d: operator '%s' on any/unknown is not yet supported", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+		}
+		d := e.emitAnyToNum(arg)
+		if ex.Op == "-" {
+			n := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fneg double %s", n, d))
+			d = n
+		}
+		return Value{Ref: e.emitNbEncodeDouble(d), Ty: TypeAny}, nil
 	}
 	reg := e.freshReg()
 	switch ex.Op {
@@ -1322,6 +1398,11 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	// each branch to its own binding, or convert both to a common type. (The
 	// `cond ? scalar : null` nullable case is handled above.)
 	altTy := e.inferExprType(ex.Alternate)
+	// A ternary with a dynamic (`any`) branch has a representable result after
+	// all: `any`. Box both branches into the NaN-boxed word (TDD-00155/00156).
+	if ty.IsDynamic || altTy.IsDynamic {
+		return e.emitConditionalAny(ex)
+	}
 	if isStringTy(ty) != isStringTy(altTy) {
 		return Value{}, fmt.Errorf("%d:%d: ternary branches have incompatible types (%s vs %s) — a union-typed ternary (e.g. string | number) is not supported; assign each branch separately or convert both to one type", ex.GetPos().Line, ex.GetPos().Col, ternaryTypeName(ty), ternaryTypeName(altTy))
 	}
@@ -1362,6 +1443,51 @@ func (e *Emitter) emitConditional(ex *ast.ConditionalExpression) (Value, error) 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, resPtr, ty.Align()))
 	return Value{Ref: result, Ty: ty}, nil
+}
+
+// emitConditionalAny emits a `cond ? a : b` where at least one branch is
+// dynamic: each branch value is boxed into the NaN-boxed `any` word, so the
+// result is a well-typed `any` regardless of how the branch types mix.
+func (e *Emitter) emitConditionalAny(ex *ast.ConditionalExpression) (Value, error) {
+	thenL := e.freshLabel("ternary.then")
+	elseL := e.freshLabel("ternary.else")
+	mergeL := e.freshLabel("ternary.merge")
+
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resPtr))
+
+	cond, err := e.emitExpr(ex.Test)
+	if err != nil {
+		return Value{}, err
+	}
+	cond = e.toBool(cond)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond.Ref, thenL, elseL))
+
+	emitBranch := func(label string, expr ast.Expression) error {
+		e.emitLabel(label)
+		v, err := e.emitExpr(expr)
+		if err != nil {
+			return err
+		}
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, resPtr))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		return nil
+	}
+	if err := emitBranch(thenL, ex.Consequent); err != nil {
+		return Value{}, err
+	}
+	if err := emitBranch(elseL, ex.Alternate); err != nil {
+		return Value{}, err
+	}
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resPtr))
+	return Value{Ref: result, Ty: TypeAny}, nil
 }
 
 // emitConditionalNullableScalar emits a `cond ? a : b` whose result type is a

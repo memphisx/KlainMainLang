@@ -750,8 +750,10 @@ class Derived extends Ghost {
 }
 
 func TestE2EClassExtendsBuiltinIsError(t *testing.T) {
+	// `extends Error` is a supported synthetic root since TDD-00155 Stage 6;
+	// other built-ins remain invalid extends targets.
 	_, err := parseAndCompile(`
-class Derived extends Error {
+class Derived extends Date {
 }
 `)
 	if err == nil {

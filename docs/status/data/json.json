@@ -114,9 +114,13 @@
           },
           {
             "feature": "`JSON.parse(s)` → `any`/`unknown` (dynamic shape)",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "The result is a dynamic tree — statically-typed operations on it (arithmetic on elements, passing into typed slots) hit the normal `any` limits until narrowed"
+            ],
             "notes": [
-              "Needs the tree kept as a dynamic value — [TDD-00077](../tdd/TDD-00077.md) Track P P4, coupled to the dynamic object model ([TDD-00068](../tdd/TDD-00068.md))"
+              "Untyped/`any`-annotated `JSON.parse` keeps the whole tree as dynamic values ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/ADR-00622.md)): objects become runtime property bags, arrays dynamic arrays (`.length`, index reads/writes with JS extension semantics, `for...in`), scalars their runtime tags — `data.server.ports[0]` just works. A bare `const data = JSON.parse(s)` with no annotation is this dynamic parse, matching JS",
+              "`JSON.stringify` serializes a dynamic tree back (round-trip clean): undefined values skipped in objects / `null` in arrays, NaN/Infinity → `null`, cycles throw `Converting circular structure to JSON`"
             ]
           }
         ]

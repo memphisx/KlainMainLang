@@ -194,5 +194,5 @@ export const headline = [
 export const conformance = [
   { label: 'Test262 (in-scope subset)', value: '15.4%', sub: '5,279 / 34,334 · 11.3% over the full corpus' },
   { label: 'TypeScript accept/reject', value: '57.2%', sub: '5,293 / 9,256 cases agree with tsc' },
-  { label: 'Node.js test/parallel', value: '1.8%', sub: '43 / 2,451 runnable files pass' }
+  { label: 'Node.js test/parallel', value: '1.8%', sub: '45 / 2,451 runnable files pass (both compat lanes)' }
 ]

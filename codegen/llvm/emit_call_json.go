@@ -210,6 +210,22 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 
 	argTy := e.inferExprType(args[0])
 
+	// A bare any/unknown value serializes through the dynamic walker
+	// (TDD-00155 Stage 2): tag-10 bags and tag-11 dynamic arrays recurse,
+	// scalars render per JSON, undefined/function values are skipped (object)
+	// or null (array), cycles throw TypeError. Returns `any` — a string box,
+	// or undefined for a top-level undefined/function, matching JS.
+	if isUnconstrainedDynamic(argTy) {
+		if ind.unit != "" {
+			return Value{}, fmt.Errorf("%d:%d: JSON.stringify with a space argument is not supported for a dynamic value yet", pos.Line, pos.Col)
+		}
+		val, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitJSONStringifyDynamic(val, pos)
+	}
+
 	if argTy.IsArray && argTy.ElemType != nil {
 		return e.emitJSONStringifyArray(args[0], pos, ind)
 	}
@@ -471,6 +487,16 @@ func (e *Emitter) emitJSONParse(args []ast.Expression, targetTy Type, pos ast.Po
 // used directly by Response.json() (emit_fetch.go), which already has the
 // buffered response body as a Value with nothing left to re-evaluate.
 func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Value, error) {
+	// A dynamic argument goes through ToString first, matching JS's own
+	// coercion (a boxed string round-trips unchanged; JSON.parse(undefined)
+	// then throws the SyntaxError the parser raises for "undefined").
+	if val.Ty.IsDynamic {
+		s, err := e.emitDynamicToString(val)
+		if err != nil {
+			return Value{}, err
+		}
+		val = s
+	}
 	if val.Ty.IR != "ptr" {
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse expects a string argument", pos.Line, pos.Col)
 	}

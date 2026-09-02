@@ -7,6 +7,26 @@ import (
 
 // coerce inserts a type conversion instruction if necessary.
 func (e *Emitter) coerce(v Value, target Type) Value {
+	// A dynamic (NaN-boxed, TDD-00156) source coerced into a concrete
+	// numeric/boolean target goes through the real JS conversion — never a
+	// raw reinterpretation of the encoded word (which is what the generic
+	// scalar paths below would do now that TypeAny's IR is i64).
+	if v.Ty.IsDynamic && target.IR != "" && !target.IsDynamic {
+		switch {
+		case target.Float:
+			d := e.emitAnyToNum(v)
+			return e.coerce(Value{Ref: d, Ty: TypeF64}, target)
+		case target.IR == "i1":
+			return e.emitAnyTruthy(v)
+		case target.IR == "i64" || target.IR == "i32" || target.IR == "i16" || target.IR == "i8":
+			if !target.IsDate {
+				d := e.emitAnyToNum(v)
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", r, d))
+				return e.coerce(Value{Ref: r, Ty: TypeI64}, target)
+			}
+		}
+	}
 	// A nullable-scalar aggregate ({ i1, T }, TDD-00064 Stage 3) demotes to its
 	// bare payload whenever a plain scalar is wanted — the single point that
 	// lets arithmetic, stores, returns, and argument passing consume a boundary

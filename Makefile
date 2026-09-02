@@ -86,6 +86,16 @@ examples: build
 			echo "FAIL"; fail=$$((fail+1)); \
 		fi; \
 	done; \
+	for f in examples/jsmode/*.js; do \
+		[ -e "$$f" ] || continue; \
+		out=$$(dirname $$f)/$$(basename $$f .js); \
+		printf '%-50s' "  $$f (-compat=js)"; \
+		if ./$(BINARY) -compat=js $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+			echo "OK"; ok=$$((ok+1)); \
+		else \
+			echo "FAIL"; fail=$$((fail+1)); \
+		fi; \
+	done; \
 	echo ""; \
 	echo "Results: $$ok passed, $$fail failed"; \
 	test $$fail -eq 0
@@ -158,9 +168,9 @@ conformance-fetch:
 conformance: conformance-fetch
 	$(GO) run ./tools/conformance
 
-## conformance-node: regenerate docs/testing/CONFORMANCE-RESULTS-NODE.md — Node pure-module behavioral tests (TDD-00121 Track B)
+## conformance-node: regenerate docs/testing/CONFORMANCE-RESULTS-NODE.md — Node pure-module behavioral tests (TDD-00121 Track B), both compat lanes (strict baseline + -compat=js, TDD-00022)
 conformance-node: conformance-fetch
-	$(GO) run ./tools/conformance -suite=node
+	$(GO) run ./tools/conformance -suite=node -compat=both
 
 ## conformance-ts: regenerate docs/testing/CONFORMANCE-RESULTS-TS.md — TypeScript accept/reject oracle (TDD-00121 Track C)
 conformance-ts: conformance-fetch

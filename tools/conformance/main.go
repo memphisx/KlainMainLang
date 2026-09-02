@@ -126,6 +126,15 @@ func inScope(fm frontmatter, category string) bool {
 	return true
 }
 
+// laneCompat is the emitter compat mode for the lane currently running
+// ("" == strict, "js" == -compat=js) — a package global, like regexModeFlag,
+// because the per-file runners are deep in worker goroutines. Lanes never
+// run concurrently (a -compat=both node run is strictly sequential), so a
+// plain global is safe. Note the resolver-side permissive bool is `true` in
+// BOTH lanes (ADR-00472: both oracles' referents allow global shadowing) —
+// the lane axis is the emitter's -compat semantics.
+var laneCompat string
+
 // regexModeFlag mirrors klainmain's -regex flag (TDD-00067) for the compiled
 // test binaries, so a conformance run can measure a specific RegExp dialect
 // (e.g. -regex=pcre to compare against the pre-alignment baseline). Empty ==
@@ -249,6 +258,7 @@ func main() {
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
+	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
 	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), or ts (TypeScript acceptance oracle, Track C)")
 	flag.Parse()
 	regexModeFlag = *regexMode
@@ -257,13 +267,30 @@ func main() {
 	// (Node behavioral run; TS front-end accept/reject) — dispatch to their own
 	// runners, which reuse the shared helpers (killableCommand/firstLine/…) but
 	// not the Test262 file walk below.
+	switch *compatFlag {
+	case "strict", "js", "both":
+	default:
+		fatal("unknown -compat %q (want strict, js, or both)", *compatFlag)
+	}
 	switch *suite {
 	case "test262":
 		// fall through to the Test262 runner below
+		if *compatFlag == "both" {
+			fatal("-compat=both is node-suite-only for now — run test262 once per lane")
+		}
+		if *compatFlag == "js" {
+			laneCompat = "js"
+		}
 	case "node":
-		runNodeSuite(*workDir, *perFileTimeout, *workers)
+		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
 		return
 	case "ts":
+		if *compatFlag == "both" {
+			fatal("-compat=both is node-suite-only for now — run ts once per lane")
+		}
+		if *compatFlag == "js" {
+			laneCompat = "js"
+		}
 		runTSSuite(*workDir, *perFileTimeout)
 		return
 	default:
@@ -466,6 +493,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	if perr == nil {
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
+		em.SetCompatMode(laneCompat)
 		ir, cerr = em.EmitProgram(prog)
 		linkLibs = em.LinkLibs()
 		if cerr == nil {

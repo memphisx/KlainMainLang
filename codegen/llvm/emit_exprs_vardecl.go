@@ -243,6 +243,12 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			return ty, true
 		}
 	case *ast.ObjectLiteral:
+		// `-compat=js` (TDD-00022 break shape 4): an untyped object-literal
+		// binding is a D1 dynamic object, so it never promotes as a static
+		// struct here (the vardecl types it TypeAny below).
+		if e.compatJS() {
+			return Type{}, false
+		}
 		ty := e.inferObjectType(init)
 		if ty.IsObject && !ty.IsDynamicObject {
 			return ty, true
@@ -433,7 +439,7 @@ func isSimpleGlobalType(ty Type) bool {
 // constant, so it is valid to place in the entry (alloca) block. See TDD-00070.
 func (e *Emitter) emitVarSlotDefault(ptrName string, ty Type) {
 	if ty.IsDynamic {
-		e.emitAlloca(fmt.Sprintf("store %s { i8 %d, i64 0 }, ptr %s, align %d", ty.IR, kmlTagUndefined, ptrName, ty.Align()))
+		e.emitAlloca(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, ptrName))
 		return
 	}
 	e.emitAlloca(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), ptrName, ty.Align()))
@@ -548,6 +554,12 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	}
 
 	ty := e.resolveType(v.TypeAnnot)
+	// `-compat=js` (TDD-00076 A1): an untyped, uninitialized binding is a
+	// dynamic `undefined`, exactly as JS — not the strict-mode number
+	// default (which would make a later `u + 1` answer 1 instead of NaN).
+	if v.TypeAnnot == nil && v.Init == nil && e.compatJS() {
+		ty = TypeAny
+	}
 
 	// TDD-00153 V1 boundary: a synthetic object-literal accessor class can't be
 	// assigned to a *different* structural object/class type — its accessor
@@ -611,7 +623,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 		case *ast.ArrayLiteral:
 			ty = e.inferArrayType(init)
 		case *ast.ObjectLiteral:
-			ty = e.inferObjectType(init)
+			// `-compat=js` (TDD-00022 break shape 4): an untyped object
+			// literal is a D1 dynamic object — dynamic add/delete,
+			// descriptors, accessors all work on it; the boxed-field
+			// arithmetic runs through the TDD-00076 dispatch. strict keeps
+			// the static struct (native-speed fields).
+			if e.compatJS() {
+				ty = TypeAny
+			} else {
+				ty = e.inferObjectType(init)
+			}
 		case *ast.NewErrorExpression:
 			ty = errorObjType
 		case *ast.NewDateExpression:
@@ -798,7 +819,9 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 					}
 				default:
 					inferred := e.inferExprType(init)
-					if inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject {
+					// IsDynamic checked explicitly: TypeAny shares i64's IR
+					// since the NaN-box migration (TDD-00156).
+					if inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject || inferred.IsDynamic {
 						ty = inferred
 					}
 				}
@@ -817,7 +840,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				ty = ArrayOf(e.resolveType(init.ElemType))
 			}
 		case *ast.NewExpression:
-			if init.ClassName == "Promise" {
+			if init.ClassName == "Proxy" {
+				// A Proxy is a dynamic object (TDD-00155 Stage 7).
+				ty = TypeAny
+			} else if init.ClassName == "Promise" {
 				// new Promise<T>(executor) → task Promise<T> (default number) — TDD-00087.
 				valTy := TypeI64
 				if len(init.TypeArgs) == 1 {
@@ -837,6 +863,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				if instTy, err := e.genericClassInstanceType(genDecl, subs); err == nil {
 					ty = instTy
 				}
+			} else if e.compatJS() && e.jsProtoCtor[init.ClassName] {
+				// A vanilla-JS prototype-constructor instance is a dynamic
+				// object (TDD-00155 Stage 4).
+				ty = TypeAny
 			}
 		}
 	}

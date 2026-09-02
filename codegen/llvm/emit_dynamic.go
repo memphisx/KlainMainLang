@@ -321,6 +321,25 @@ const (
 	// equality on the pointer (like an array). Lets `string | ReadableStream`
 	// round-trip through a union box — e.g. an http.listen response `body` field.
 	kmlTagStream = 9
+	// kmlTagDynObject boxes a D1 dynamic object (TDD-00155): the payload is a
+	// ptrtoint'd pointer to a __kml_dynobj bag (runtime_dynobj.go) — a
+	// per-instance property table whose values are themselves { i8, i64 }
+	// boxes. `typeof` → "object" and toString → "[object Object]" fall out of
+	// the existing remaining-tag arms; `===` is reference equality on the bag
+	// pointer (a check_obj_ref case in __kml_any_eq).
+	kmlTagDynObject = 10
+	// kmlTagDynArray boxes a D1 dynamic array (TDD-00155 Stage 2): the payload
+	// is a ptrtoint'd __kml_dynarr header whose elements are themselves boxes
+	// (runtime_dynarr.go) — the element universe untyped JSON.parse needs.
+	// `typeof` → "object"; `===` is reference equality on the header pointer;
+	// toString is the JS Array join (via __kml_dynarr_join).
+	kmlTagDynArray = 11
+	// kmlTagDynFunc boxes a dynamic function (TDD-00155 Stage 4): the payload
+	// is a ptrtoint'd { fnptr, env, i64 arity } record compiled under the
+	// uniform dynamic ABI (emit_dynfunc.go) — the value behind vanilla-JS
+	// prototype methods. `typeof` → "function"; `===` is record identity
+	// (one record per function-expression evaluation, like a JS closure).
+	kmlTagDynFunc = 12
 )
 
 // emitBoxValue converts any concrete Value into a Value{Ty: TypeAny}. Boxing
@@ -332,25 +351,16 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	}
 	// A nullable scalar (`number | null`, …) is a { i1, T } aggregate, not a bare
 	// scalar — box the payload (recursively, as its own scalar) when present, or
-	// `undefined` when absent. Without this the Float/i64 payload path below
-	// bitcasts the whole aggregate and produces invalid IR (TDD-00123: surfaced
-	// once `number|null` became { i1, double }).
+	// `undefined` when absent (TDD-00123).
 	if isNullableScalar(v.Ty) {
 		present, payload := e.nullableScalarAggParts(v)
 		boxedVal, err := e.emitBoxValue(payload)
 		if err != nil {
 			return Value{}, err
 		}
-		vtag, vpl := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", vtag, boxedVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 1", vpl, boxedVal.Ref))
-		tag, pl := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i8 %s, i8 %d", tag, present, vtag, kmlTagUndefined))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", pl, present, vpl))
-		r0, r1 := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %s, 0", r0, tag))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, pl))
-		return Value{Ref: r1, Ty: TypeAny}, nil
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", r, present, boxedVal.Ref, nbUndefined))
+		return Value{Ref: r, Ty: TypeAny}, nil
 	}
 	// An array value is a { ptr, i64 } aggregate (data pointer + length),
 	// which doesn't fit the box's single i64 payload slot. The payload is a
@@ -366,76 +376,88 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	// `[object Array]` tag string (TDD-00062).
 	if v.Ty.IsArray {
 		hdr := e.boxArrayValue(v)
-		payload := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", payload, hdr))
-		r0 := e.freshReg()
-		r1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, kmlTagArray))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, payload))
-		return Value{Ref: r1, Ty: TypeAny}, nil
+		return Value{Ref: e.emitNbTagPtr(hdr, kmlTagArray), Ty: TypeAny}, nil
 	}
 
-	var tag int
-	var payload string
 	switch {
 	case v.Ty.IsUndefined:
-		tag = kmlTagUndefined
-		payload = "0"
+		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, nil
 	case v.Ty.IsNull:
-		tag = kmlTagNull
-		payload = "0"
+		return Value{Ref: fmt.Sprintf("%d", nbNull), Ty: TypeAny}, nil
 	case v.Ty.IR == "i1":
-		tag = kmlTagBoolean
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
-		payload = r
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %d", r, v.Ref, nbTrue, nbFalse))
+		return Value{Ref: r, Ty: TypeAny}, nil
 	case v.Ty.Float:
-		tag = kmlTagFloat
 		val := v
 		if v.Ty.IR == "float" {
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", r, v.Ref))
 			val = Value{Ref: r, Ty: TypeF64}
 		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", r, val.Ref))
-		payload = r
+		return Value{Ref: e.emitNbEncodeDouble(val.Ref), Ty: TypeAny}, nil
+	case v.Ty.IsFunc:
+		// A statically-typed closure boxes through a per-signature dynamic-ABI
+		// adapter (emit_dynfunc.go): the tag-12 record's env carries the
+		// closure header, the adapter unboxes arguments to the concrete
+		// parameter types and boxes the result.
+		return e.emitDynClosureAdapter(v)
 	case v.Ty.IsObject:
-		tag = kmlTagObject
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
-		payload = r
+		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagObject), Ty: TypeAny}, nil
 	case v.Ty.IsReadableStream:
-		// TDD-00119: box distinctly from a string (both are IR "ptr") so a
-		// `string | ReadableStream` union box can tell them apart at runtime.
-		tag = kmlTagStream
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
-		payload = r
+		return Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagStream), Ty: TypeAny}, nil
 	case v.Ty.IR == "ptr":
-		tag = kmlTagString
+		// String: kind bits 0 — the value IS the pointer.
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
-		payload = r
+		return Value{Ref: r, Ty: TypeAny}, nil
 	default:
-		tag = kmlTagInt
-		payload = e.coerce(v, TypeI64).Ref
+		// Integers become encoded doubles — a JS number IS a double
+		// (TDD-00156); precision past 2^53 rounds exactly as JS does.
+		iv := e.coerce(v, TypeI64)
+		d := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, iv.Ref))
+		return Value{Ref: e.emitNbEncodeDouble(d), Ty: TypeAny}, nil
 	}
-
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %d, 0", r0, tag))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r1, r0, payload))
-	return Value{Ref: r1, Ty: TypeAny}, nil
 }
 
-// emitUnboxTagPayload extracts the tag (i8) and payload (i64) registers from
-// a boxed any/unknown Value.
+// emitNbEncodeDouble encodes a double register as a NaN-boxed number
+// (canonicalize NaN, add the double-encode offset).
+func (e *Emitter) emitNbEncodeDouble(dReg string) string {
+	isnan := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, %s", isnan, dReg, dReg))
+	bits := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, dReg))
+	canon := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 9221120237041090560, i64 %s", canon, isnan, bits))
+	enc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", enc, canon, nbDoubleOffset))
+	return enc
+}
+
+// emitNbTagPtr tags a pointer register with its NaN-box kind bits.
+func (e *Emitter) emitNbTagPtr(ptrReg string, tag int) string {
+	kind := map[int]int64{kmlTagString: 0, kmlTagObject: 1, kmlTagArray: 2, kmlTagFuncRef: 3,
+		kmlTagStream: 4, kmlTagDynObject: 5, kmlTagDynArray: 6, kmlTagDynFunc: 7}[tag]
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, ptrReg))
+	if kind == 0 {
+		return r
+	}
+	o := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", o, r, kind))
+	return o
+}
+
+// emitUnboxTagPayload decodes a NaN-boxed value into the logical (tag,
+// payload) pair every dispatch site switches on — a number always decodes
+// to kmlTagFloat with its double bits as the payload.
 func (e *Emitter) emitUnboxTagPayload(v Value) (tag, payload string) {
+	e.ensureNanBox()
 	tag = e.freshReg()
 	payload = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 0", tag, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %s, 1", payload, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", payload, v.Ref))
 	return tag, payload
 }
 
@@ -538,6 +560,25 @@ func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
 	store(fnBuf)
 	e.emitLabel(nextL)
 
+	// A dynamic (prototype-method) function stringifies like a native
+	// function — the source text isn't retained.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagDynFunc, "dynstr.dynfn")
+	e.emitLabel(matchL)
+	store(e.internString("function () { [native code] }"))
+	e.emitLabel(nextL)
+
+	// A dynamic array stringifies as its JS Array join ("1,hi,true"), matching
+	// `String([1,'hi',true])` — the C walker handles nesting/null/undefined.
+	matchL, nextL = e.emitTagCheck(tag, kmlTagDynArray, "dynstr.dynarr")
+	e.emitLabel(matchL)
+	e.ensureDynJSONC()
+	daHdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", daHdr, payload))
+	daStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_join(ptr %s)", daStr, daHdr))
+	store(daStr)
+	e.emitLabel(nextL)
+
 	// Remaining tag: object → "[object Object]", matching JS's
 	// `String({}) === "[object Object]"` (a plain object has no useful
 	// value-string, and its field contents aren't recovered from the boxed
@@ -604,6 +645,11 @@ func (e *Emitter) emitDynamicTypeof(v Value) (Value, error) {
 	store("function")
 	e.emitLabel(nextL)
 
+	matchL, nextL = e.emitTagCheck(tag, kmlTagDynFunc, "dyntypeof.dynfn")
+	e.emitLabel(matchL)
+	store("function")
+	e.emitLabel(nextL)
+
 	// Remaining tag: object.
 	store("object")
 
@@ -628,7 +674,7 @@ func (e *Emitter) emitAnyEquals(a, b Value, negate bool) (Value, error) {
 	}
 	e.ensureAnyEq()
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq({ i8, i64 } %s, { i8, i64 } %s)", result, boxedA.Ref, boxedB.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", result, boxedA.Ref, boxedB.Ref))
 	if negate {
 		neg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", neg, result))

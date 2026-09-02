@@ -143,6 +143,11 @@ type ClassInfo struct {
 	// "every method must have a real implementation" completeness check
 	// every other (concrete) class is held to.
 	IsAbstract bool
+	// IsErrorSubclass marks `class X extends Error` (TDD-00155 Stage 6): the
+	// instance layout is prefix-compatible with errorObjType (the class tag
+	// slot IS the error kind slot), TagID lives in the >=1000 error-subclass
+	// range, and throw/catch/instanceof treat instances as real errors.
+	IsErrorSubclass bool
 	// Implements is the class's `implements A, B, ...` clause — purely a
 	// compile-time self-check (registerClasses' Pass 1), never affecting
 	// codegen/dispatch: does this class already structurally satisfy each
@@ -679,6 +684,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if len(cd.BaseTypeArgs) != 1 {
 				return fmt.Errorf("%d:%d: class '%s' extends EventEmitter but supplies %d type argument(s), expected exactly 1 (EventEmitter<T>)", cd.GetPos().Line, cd.GetPos().Col, name, len(cd.BaseTypeArgs))
 			}
+		} else if cd.BaseClass == "Error" {
+			// A synthetic root (TDD-00155 Stage 6): Error is never a
+			// registered class — nothing to recurse into; its fields are
+			// grafted in Pass 1.
+			if len(cd.BaseTypeArgs) > 0 {
+				return fmt.Errorf("%d:%d: class '%s' extends Error with type arguments, but Error is not generic", cd.GetPos().Line, cd.GetPos().Col, name)
+			}
 		} else if len(cd.BaseTypeArgs) > 0 {
 			return fmt.Errorf("%d:%d: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
 		} else if cd.BaseClass != "" {
@@ -715,9 +727,26 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// all.
 		isEEDirect := cd.BaseClass == "EventEmitter"
 		rootReadable, rootWritable, isStreamRoot := nodeStreamRootKind(cd.BaseClass)
-		haveBase := cd.BaseClass != "" && !isEEDirect && !isStreamRoot
+		// `extends Error` (TDD-00155 Stage 6): Error is a synthetic root
+		// whose "inherited fields" are the error struct's own — minus its
+		// kind slot, which the class tag field occupies byte-for-byte. The
+		// subclass instance is therefore prefix-compatible with every
+		// throw/catch/message reader, and its TagID doubles as its error
+		// kind (allocated in a dedicated >=1000 range).
+		isErrorRoot := cd.BaseClass == "Error"
+		haveBase := cd.BaseClass != "" && !isEEDirect && !isStreamRoot && !isErrorRoot
 		if haveBase {
 			baseInfo = e.classes[cd.BaseClass]
+			if baseInfo.IsErrorSubclass {
+				return fmt.Errorf("%d:%d: extending an Error subclass ('%s extends %s') is not supported yet — extend Error directly", cd.GetPos().Line, cd.GetPos().Col, cd.Name, cd.BaseClass)
+			}
+		}
+		if isErrorRoot {
+			baseInfo.FlatFields = append([]Field{}, errorObjType.Fields[1:]...)
+			baseInfo.FieldOrigin = map[string]string{}
+			for _, f := range errorObjType.Fields[1:] {
+				baseInfo.FieldOrigin[f.Name] = cd.Name
+			}
 		}
 		hasEventEmitter := isEEDirect || (haveBase && baseInfo.HasEventEmitter)
 
@@ -856,6 +885,22 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				readonlyFields[f.Name] = true
 			}
 		}
+		// JS-compat field inference (TDD-00022 sub-problem 2, `-compat=js`
+		// only): a class with a constructor and no declared instance fields
+		// collects them from the constructor's `this.NAME = expr` assignments
+		// — the vanilla-JS class shape. See emit_classes_jsinfer.go.
+		if e.compatJS() && len(ownFields) == 0 && cd.Constructor != nil {
+			inferred, err := e.jsInferConstructorFields(cd, seen)
+			if err != nil {
+				return err
+			}
+			for _, f := range inferred {
+				seen[f.Name] = true
+				ownFields = append(ownFields, f)
+				fieldOrigin[f.Name] = cd.Name
+				ownFieldVisibility[f.Name] = "" // public
+			}
+		}
 		flatFields := append(append([]Field{}, inheritedFields...), ownFields...)
 
 		// Provisional Ty for this class's own unannotated-return-type
@@ -889,6 +934,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			MethodImplementor:         make(map[string]string),
 			MethodDispatchSlot:        make(map[string]*MethodSlot),
 			TagID:                     nextTagID,
+			IsErrorSubclass:           isErrorRoot,
 			IsAbstract:                cd.IsAbstract,
 			Implements:                cd.Implements,
 			FieldOrigin:               fieldOrigin,
@@ -911,6 +957,13 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			StreamInTy:                streamInTy,
 		}
 		nextTagID++
+		// An error subclass's TagID doubles as its runtime error kind — the
+		// >=1000 range keeps it disjoint from the builtin kinds (0–8) so a
+		// caught instance never satisfies `instanceof TypeError` and friends.
+		if isErrorRoot {
+			info.TagID = 1000 + e.errSubCount
+			e.errSubCount++
+		}
 
 		if haveBase {
 			for mname, sig := range baseInfo.MethodSigs {
@@ -1201,7 +1254,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if baseCtor != nil && !callsSuper {
 				return fmt.Errorf("%d:%d: constructor of class '%s' must call super(...) (base class '%s' has a constructor)", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
 			}
-			if baseCtor == nil && callsSuper && !isStreamRoot {
+			if baseCtor == nil && callsSuper && !isStreamRoot && !isErrorRoot {
 				// A stream-root subclass (TDD-00132) is allowed to call
 				// `super({ highWaterMark, objectMode })`: the options are read
 				// statically and threaded into the hidden stream handle at
@@ -1218,6 +1271,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			info.Constructor = cd.Constructor
 			sig := e.buildParamSig(cd.Constructor.Params)
 			sig.RetType = TypeVoid
+			// `-compat=js`: overlay call-site-inferred types onto unannotated
+			// constructor parameters (TDD-00022 sub-problem 1, ctor slice).
+			if e.compatJS() {
+				e.jsApplyCtorParamOverride(cd.Name, cd.Constructor.Params, &sig)
+			}
 			info.CtorSig = sig
 			// TDD-00063 Stage 1: splice own field initializers in right after
 			// super() returns (`this` now exists), or at the top for a base
@@ -1743,6 +1801,13 @@ func (e *Emitter) emitThisExpression(pos ast.Pos) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: 'this' is only valid inside a method or constructor body", pos.Line, pos.Col)
 	}
 	reg := e.freshReg()
+	// A dynamic `this` (a prototype-class constructor/method under
+	// `-compat=js`, TDD-00155 Stage 4) is a boxed { i8, i64 } slot, not a
+	// class-instance pointer.
+	if sym.Ty.IsDynamic {
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.Ptr))
+		return Value{Ref: reg, Ty: sym.Ty}, nil
+	}
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", reg, sym.Ptr))
 	return Value{Ref: reg, Ty: sym.Ty}, nil
 }
@@ -1762,6 +1827,10 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	// not a user class.
 	if ex.ClassName == "Promise" {
 		return e.emitNewPromise(ex)
+	}
+	// new Proxy(target, handler) — TDD-00155 Stage 7, not a user class.
+	if ex.ClassName == "Proxy" {
+		return e.emitNewProxy(ex)
 	}
 	className := ex.ClassName
 	info, ok := e.classes[ex.ClassName]
@@ -1784,6 +1853,9 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			}
 			className = mangled
 			info = e.classes[mangled]
+		} else if e.compatJS() && e.jsProtoCtor[ex.ClassName] {
+			// A vanilla-JS prototype constructor (TDD-00155 Stage 4).
+			return e.emitProtoCtorNew(ex)
 		} else {
 			return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
 		}
@@ -1832,6 +1904,42 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if info.HasNodeReadable || info.HasNodeWritable {
 		if err := e.emitConstructNodeStreamHandle(info, className, dataReg, ex.GetPos()); err != nil {
 			return Value{}, err
+		}
+	}
+
+	// An error subclass (TDD-00155 Stage 6): default the error-struct prefix
+	// before the constructor — name is the class's source name, message the
+	// empty string. A constructor-less subclass takes JS's optional message
+	// argument directly.
+	if info.IsErrorSubclass {
+		storeField := func(field, ref string) {
+			idx, _, ok := info.Ty.FieldIndex(field)
+			if ok {
+				gep := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), dataReg, idx))
+				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ref, gep))
+			}
+		}
+		// JS: `.name` is inherited from Error.prototype ("Error") unless the
+		// class assigns `this.name` itself.
+		storeField("name", e.internString("Error"))
+		storeField("message", e.internString(""))
+		if info.Constructor == nil {
+			if len(ex.Args) > 1 {
+				return Value{}, fmt.Errorf("%d:%d: %s takes at most one message argument", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+			}
+			if len(ex.Args) == 1 {
+				msg, err := e.emitExpr(ex.Args[0])
+				if err != nil {
+					return Value{}, err
+				}
+				msgStr, err := e.emitValueToString(msg)
+				if err != nil {
+					return Value{}, err
+				}
+				storeField("message", msgStr.Ref)
+			}
+			return Value{Ref: dataReg, Ty: info.Ty}, nil
 		}
 	}
 
@@ -1916,6 +2024,17 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			scratch.leave(fromDefault)
 			if err != nil {
 				return Value{}, err
+			}
+			// The ADR-00042 unannotated-parameter guard, applied to
+			// constructor calls (previously the function-call paths only —
+			// a string argument to a number-defaulted constructor parameter
+			// silently stored the pointer as a number).
+			if paramTy.Inferred && !isSafeNumericArg(val.Ty) {
+				paramName := fmt.Sprintf("%d", i+1)
+				if i < len(sig.ParamNames) {
+					paramName = "'" + sig.ParamNames[i] + "'"
+				}
+				return Value{}, fmt.Errorf("%d:%d: constructor parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", a.GetPos().Line, a.GetPos().Col, paramName, ex.ClassName)
 			}
 			val = e.coerce(val, paramTy)
 			argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
@@ -2579,6 +2698,34 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
+	// An error subclass's `super(message?)` (TDD-00155 Stage 6) stores the
+	// message into the error-struct prefix; kind/name were already set at
+	// construction. Error's synthetic root has no real constructor.
+	if info.IsErrorSubclass {
+		if len(ex.Args) > 1 {
+			return Value{}, fmt.Errorf("%d:%d: super(...) on Error takes at most one message argument", ex.GetPos().Line, ex.GetPos().Col)
+		}
+		if len(ex.Args) == 1 {
+			msg, err := e.emitExpr(ex.Args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			msgStr, err := e.emitValueToString(msg)
+			if err != nil {
+				return Value{}, err
+			}
+			thisReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+			idx, _, okF := info.Ty.FieldIndex("message")
+			if !okF {
+				return Value{}, fmt.Errorf("%d:%d: internal: error subclass without a message field", ex.GetPos().Line, ex.GetPos().Col)
+			}
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgStr.Ref, gep))
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
 	baseInfo := e.classes[info.BaseClass]
 	if baseInfo.Constructor == nil {
 		return Value{}, fmt.Errorf("%d:%d: base class '%s' has no constructor to call via super(...)", ex.GetPos().Line, ex.GetPos().Col, info.BaseClass)
@@ -2825,6 +2972,19 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		return Value{}, err
 	}
 
+	// A caught error (errorObjType) against an error-subclass class
+	// (TDD-00155 Stage 6): runtime kind-slot compare — the subclass TagID
+	// lives in the error struct's kind position.
+	if leftVal.Ty.IsError && info.IsErrorSubclass {
+		kindGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
+		loadedKind := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, loadedKind, info.TagID))
+		return Value{Ref: r, Ty: TypeBool}, nil
+	}
+
 	if leftVal.Ty.IsDynamic {
 		tag, payload := e.emitUnboxTagPayload(leftVal)
 		isObj := e.freshReg()
@@ -3026,6 +3186,17 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 
+	// An error-subclass instance (TDD-00155 Stage 6): `instanceof Error` is
+	// true by construction; a specific builtin kind never matches (the
+	// subclass TagID range is disjoint from the builtin kinds).
+	if leftVal.Ty.IsClass {
+		if ci, ok := e.classes[leftVal.Ty.ClassName]; ok && ci.IsErrorSubclass {
+			if kindName == "Error" {
+				return Value{Ref: "1", Ty: TypeBool}, nil
+			}
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		}
+	}
 	if leftVal.Ty.IsError {
 		if kindName == "Error" {
 			return Value{Ref: "1", Ty: TypeBool}, nil

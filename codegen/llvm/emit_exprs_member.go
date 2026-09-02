@@ -479,6 +479,19 @@ func (e *Emitter) emitIndex(ex *ast.IndexExpression) (Value, error) {
 		}
 		return e.emitDynamicObjectGet(objVal.Ty, objVal.Ref, ex.Index, ex.GetPos())
 	}
+	// Bracket read on a bare any/unknown base: runtime-keyed read from the D1
+	// dynamic object model (TDD-00155 Stage 1).
+	if baseTy := e.inferExprType(ex.Object); isUnconstrainedDynamic(baseTy) {
+		objVal, err := e.emitExpr(ex.Object)
+		if err != nil {
+			return Value{}, err
+		}
+		keyRef, err := e.dynAnyKeyRef(ex.Index, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyMemberGet(objVal, keyRef, ex.GetPos())
+	}
 	// String indexing: s[i] returns a single-character string.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && isStringTy(sym.Ty) {
@@ -1078,7 +1091,18 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", reg, objVal.Ref))
 			return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
 		}
+		// A dynamic value answers `.length` at runtime — a tag-11 dynamic
+		// array's element count via the same by-key path brackets use
+		// (TDD-00155 Stage 2), a boxed string/primitive per the Stage-1 rules.
+		if isUnconstrainedDynamic(objVal.Ty) {
+			return e.emitDynAnyMemberGetNamed(objVal, e.internString("length"), "length", ex.GetPos())
+		}
 		return Value{}, fmt.Errorf("%d:%d: .length is only supported on arrays and strings", ex.GetPos().Line, ex.GetPos().Col)
+	}
+	// `F.prototype` on a recognized vanilla-JS constructor function
+	// (TDD-00155 Stage 4, `-compat=js`): the boxed prototype bag.
+	if id, ok := ex.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && ex.Property == "prototype" {
+		return e.emitProtoBagRead(id.Name), nil
 	}
 	// Static field read: ClassName.staticField (TDD-00009 Stage 4) — a bare
 	// class-name identifier is a compile-time namespace, never a real
@@ -1123,6 +1147,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: val, Ty: dTy}, nil
 		}
 		return Value{}, fmt.Errorf("%d:%d: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.%s === ...)` or `typeof`)", ex.GetPos().Line, ex.GetPos().Col, ex.Property, ex.Property)
+	}
+	// A property read on a bare any/unknown value is a runtime tag dispatch
+	// into the D1 dynamic object model (TDD-00155 Stage 1).
+	if isUnconstrainedDynamic(objVal.Ty) {
+		return e.emitDynAnyMemberGetNamed(objVal, e.internString(ex.Property), ex.Property, ex.GetPos())
 	}
 	if !objVal.Ty.IsObject {
 		return Value{}, fmt.Errorf("%d:%d: field access on non-object (no field '%s')", ex.GetPos().Line, ex.GetPos().Col, ex.Property)

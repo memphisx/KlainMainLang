@@ -65,6 +65,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -191,6 +192,22 @@ func appendJSONParseTree(t *testing.T, em *llvm.Emitter, dir string, clangArgs [
 		t.Fatalf("write JSON parse-tree source: %v", err)
 	}
 	return append(clangArgs, jsonFile)
+}
+
+// appendDynJSON compiles the dynamic-value stringify/join C file
+// (__kml_dynjson_* ABI, libc + dtoa) into the clang invocation when the
+// program stringified a dynamic value, mirroring main.go so the test build
+// and the real build can't drift (TDD-00155 Stage 2).
+func appendDynJSON(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesDynJSON() {
+		return clangArgs
+	}
+	djFile := filepath.Join(dir, "dynjson.c")
+	if err := os.WriteFile(djFile, []byte(llvm.DynJSONSource()), 0644); err != nil {
+		t.Fatalf("write dynjson source: %v", err)
+	}
+	return append(clangArgs, djFile)
 }
 
 // appendBufferCodecs compiles the Buffer codec C file (__kml_buf_* ABI, libc
@@ -384,6 +401,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -452,6 +470,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -563,6 +582,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -705,6 +725,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -785,6 +806,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -882,6 +904,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -946,6 +969,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1040,6 +1064,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1097,6 +1122,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
@@ -1169,6 +1195,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	clangArgs = appendBufferCodecs(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)

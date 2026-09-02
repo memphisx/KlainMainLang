@@ -20,8 +20,17 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	switch {
 	case targetTy.IsClass:
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
+	case targetTy.IsDynamic && targetTy.UnionMembers != nil:
+		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a union type is not supported — use any/unknown or a concrete shape", pos.Line, pos.Col)
 	case targetTy.IsDynamic:
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into any/unknown is not yet supported", pos.Line, pos.Col)
+		// Untyped parse (TDD-00155 Stage 2 / TDD-00077 P4): convert the whole
+		// tree into dynamic values — objects become tag-10 bags, arrays tag-11
+		// dynamic arrays, scalars their box tags. Strings/keys are copied out,
+		// so the caller's __kml_json_free stays correct.
+		e.ensureDynJSONFromNode()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node(ptr %s)", r, node))
+		return Value{Ref: r, Ty: TypeAny}, nil
 	case targetTy.IsTuple:
 		return e.emitJSONProjectTuple(node, targetTy, pos)
 	case targetTy.IsArray:

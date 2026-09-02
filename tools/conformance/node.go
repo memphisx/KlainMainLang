@@ -63,6 +63,7 @@ func frontEnd(entryPath string) (e emitted, err error) {
 	}
 	em := llvm.NewEmitter()
 	em.SetRegexMode(regexModeFlag)
+	em.SetCompatMode(laneCompat)
 	ir, cerr := em.EmitProgram(prog)
 	if cerr != nil {
 		return emitted{}, cerr
@@ -557,7 +558,7 @@ func normalizeNodeModule(mod string) string {
 	return mod
 }
 
-func runNodeSuite(workDir string, timeout time.Duration, workers int) {
+func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string) {
 	root := ".node-tests/test/parallel"
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -582,45 +583,26 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int) {
 			files = append(files, name)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "node suite: running %d files from %s ...\n", len(files), root)
 
-	// Worker pool — the full test/parallel corpus is ~3,500 files, most of which
-	// compile-fail fast (untyped-dynamic Node test code) but some reach clang+run,
-	// so parallelism matters. Each worker gets its own scratch-file tag so the
-	// per-file .ll/.bin don't collide. `workers` comes from the -workers flag
-	// (default leaves cores free to keep the run phase from starving — see main.go).
-	if workers < 1 {
-		workers = 1
+	// Lanes run strictly sequentially (laneCompat is a shared global). Under
+	// -compat=both the strict lane runs first (the historical baseline), then
+	// the js lane; the report carries both scores (TDD-00022).
+	var strictResults, jsResults []nodeResult
+	if compat == "strict" || compat == "both" {
+		laneCompat = ""
+		strictResults = runNodeLane(root, files, workDir, timeout, workers, "strict")
 	}
-	jobs := make(chan string, len(files))
-	out := make(chan nodeResult, len(files))
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for name := range jobs {
-				out <- runOneNode(filepath.Join(root, name), name, workDir, id, timeout)
-			}
-		}(w)
+	if compat == "js" || compat == "both" {
+		laneCompat = "js"
+		jsResults = runNodeLane(root, files, workDir, timeout, workers, "js")
 	}
-	for _, f := range files {
-		jobs <- f
-	}
-	close(jobs)
-	go func() { wg.Wait(); close(out) }()
-
-	var results []nodeResult
-	done := 0
-	for r := range out {
-		results = append(results, r)
-		if done++; done%500 == 0 {
-			fmt.Fprintf(os.Stderr, "  %d/%d\n", done, len(files))
-		}
+	results := jsResults
+	if results == nil {
+		results = strictResults
 	}
 
 	reportPath := "docs/testing/CONFORMANCE-RESULTS-NODE.md"
-	if err := writeNodeReport(reportPath, results); err != nil {
+	if err := writeNodeReport(reportPath, strictResults, jsResults); err != nil {
 		fatal("writing node report: %v", err)
 	}
 	// Optional diagnostics: dump every FAIL/SKIP as `file\treason` for triage.
@@ -820,7 +802,78 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 	return res
 }
 
-func writeNodeReport(path string, all []nodeResult) error {
+// runNodeLane executes the whole corpus once under the current laneCompat
+// setting — the worker-pool body runNodeSuite historically inlined.
+func runNodeLane(root string, files []string, workDir string, timeout time.Duration, workers int, label string) []nodeResult {
+	fmt.Fprintf(os.Stderr, "node suite (-compat=%s): running %d files from %s ...\n", label, len(files), root)
+	// Worker pool — the full test/parallel corpus is ~3,500 files, most of which
+	// compile-fail fast (untyped-dynamic Node test code) but some reach clang+run,
+	// so parallelism matters. Each worker gets its own scratch-file tag so the
+	// per-file .ll/.bin don't collide. `workers` comes from the -workers flag
+	// (default leaves cores free to keep the run phase from starving — see main.go).
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan string, len(files))
+	out := make(chan nodeResult, len(files))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for name := range jobs {
+				out <- runOneNode(filepath.Join(root, name), name, workDir, id, timeout)
+			}
+		}(w)
+	}
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+	go func() { wg.Wait(); close(out) }()
+
+	var results []nodeResult
+	done := 0
+	for r := range out {
+		results = append(results, r)
+		if done++; done%500 == 0 {
+			fmt.Fprintf(os.Stderr, "  %d/%d\n", done, len(files))
+		}
+	}
+	return results
+}
+
+// nodeOverallLine aggregates one lane's totals into the Overall wording.
+func nodeOverallLine(all []nodeResult) (pass int, line string) {
+	var oPass, oFail, oSkip int
+	for _, r := range all {
+		switch r.Status {
+		case "PASS":
+			oPass++
+		case "FAIL":
+			oFail++
+		default:
+			oSkip++
+		}
+	}
+	ran := oPass + oFail
+	pct := 0.0
+	if ran > 0 {
+		pct = 100 * float64(oPass) / float64(ran)
+	}
+	return oPass, fmt.Sprintf("%d files total: **%d passed**, %d failed, %d skipped (out of scope); of the %d that compiled far enough to run, %.1f%% passed", len(all), oPass, oFail, oSkip, ran, pct)
+}
+
+// writeNodeReport renders one or both lanes: detail tables always come from
+// the js lane when it ran (the corpus is untyped JS, so that lane is the
+// representative surface); a strict-only run keeps its historical shape.
+func writeNodeReport(path string, strictAll, jsAll []nodeResult) error {
+	all := jsAll
+	detailLane := "js"
+	if all == nil {
+		all = strictAll
+		detailLane = "strict"
+	}
 	var b strings.Builder
 	b.WriteString("# Node-core conformance results\n\n")
 	b.WriteString("Generated by `tools/conformance -suite=node` (TDD-00121 Track B) against the **full `test/parallel` behavioral suite** of a pinned `nodejs/node` checkout (every `test-*.js`), regenerate with `make conformance-node`. Do not hand-edit; re-run instead.\n\n")
@@ -855,12 +908,56 @@ func writeNodeReport(path string, all []nodeResult) error {
 			bySkip[nodeReasonBucket(r.Reason)]++
 		}
 	}
-	ran := oPass + oFail
-	pct := 0.0
-	if ran > 0 {
-		pct = 100 * float64(oPass) / float64(ran)
+	b.WriteString("## Overall\n\n")
+	if strictAll != nil && jsAll != nil {
+		// Dual-lane run (TDD-00022): both compat scores, plus the delta —
+		// the direct measurement of what the vanilla-JS-compat work buys.
+		_, strictLine := nodeOverallLine(strictAll)
+		_, jsLine := nodeOverallLine(jsAll)
+		fmt.Fprintf(&b, "- `-compat=strict`: %s.\n", strictLine)
+		fmt.Fprintf(&b, "- `-compat=js`: %s.\n\n", jsLine)
+		strictPass := map[string]bool{}
+		for _, r := range strictAll {
+			if r.Status == "PASS" {
+				strictPass[r.File] = true
+			}
+		}
+		var jsOnly, strictOnly []string
+		jsPass := map[string]bool{}
+		for _, r := range jsAll {
+			if r.Status == "PASS" {
+				jsPass[r.File] = true
+				if !strictPass[r.File] {
+					jsOnly = append(jsOnly, r.File)
+				}
+			}
+		}
+		for f := range strictPass {
+			if !jsPass[f] {
+				strictOnly = append(strictOnly, f)
+			}
+		}
+		sort.Strings(jsOnly)
+		sort.Strings(strictOnly)
+		fmt.Fprintf(&b, "Passing only under `-compat=js`: **%d**", len(jsOnly))
+		if len(jsOnly) > 0 {
+			fmt.Fprintf(&b, " — %s", strings.Join(jsOnly, ", "))
+		}
+		b.WriteString(".\n")
+		fmt.Fprintf(&b, "Passing only under `-compat=strict`: **%d**", len(strictOnly))
+		if len(strictOnly) > 0 {
+			fmt.Fprintf(&b, " — %s", strings.Join(strictOnly, ", "))
+		}
+		b.WriteString(".\n\n")
+		b.WriteString("The detail sections below reflect the `-compat=js` lane — the corpus is untyped JS, so that lane is the representative surface; strict is the regression baseline.\n\n")
+	} else {
+		ran := oPass + oFail
+		pct := 0.0
+		if ran > 0 {
+			pct = 100 * float64(oPass) / float64(ran)
+		}
+		fmt.Fprintf(&b, "Lane: `-compat=%s`.\n\n%d files total: **%d passed**, %d failed, %d skipped (out of scope).\n\nOf the %d files that compiled far enough to run, **%d passed (%.1f%%)**.\n\n", detailLane, len(all), oPass, oFail, oSkip, ran, oPass, pct)
 	}
-	fmt.Fprintf(&b, "## Overall\n\n%d files total: **%d passed**, %d failed, %d skipped (out of scope).\n\nOf the %d files that compiled far enough to run, **%d passed (%.1f%%)**.\n\n", len(all), oPass, oFail, oSkip, ran, oPass, pct)
 
 	// Per-module histogram, most files first.
 	b.WriteString("## By module (top 40 by file count)\n\n| Module | Passed | Failed | Skipped | Total |\n|---|---|---|---|---|\n")

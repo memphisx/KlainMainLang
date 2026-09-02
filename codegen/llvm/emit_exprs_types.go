@@ -109,6 +109,42 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 				}
 			}
 		}
+		// An error subclass without its own toString() (TDD-00155 Stage 6):
+		// JS's Error.prototype.toString — "name: message", or just the name
+		// when the message is empty.
+		if canon.IsClass {
+			if info, ok := e.classes[canon.ClassName]; ok && info.IsErrorSubclass {
+				loadStr := func(field string) string {
+					idx, _, _ := info.Ty.FieldIndex(field)
+					gep := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), v.Ref, idx))
+					r := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+					return r
+				}
+				namePtr := loadStr("name")
+				msgPtr := loadStr("message")
+				joined, err := e.emitStringConcat(
+					Value{Ref: namePtr, Ty: TypePtr},
+					Value{Ref: e.internString(": "), Ty: TypePtr})
+				if err != nil {
+					return Value{}, err
+				}
+				full, err := e.emitStringConcat(joined, Value{Ref: msgPtr, Ty: TypePtr})
+				if err != nil {
+					return Value{}, err
+				}
+				lenGep := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", lenGep, msgPtr))
+				msgLen := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", msgLen, lenGep))
+				isEmpty := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, msgLen))
+				res := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", res, isEmpty, namePtr, full.Ref))
+				return Value{Ref: res, Ty: TypePtr}, nil
+			}
+		}
 		// No user toString(): -compat=js gives JS's primitive `[object Object]`;
 		// -compat=strict (default) gives the useful util.inspect view.
 		if e.compatJS() {
@@ -437,6 +473,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypePtr
 		}
 		objTy := e.inferExprType(ex.Object)
+		// A bracket read off a bare any/unknown base is itself dynamic
+		// (TDD-00155): the runtime tag dispatch yields another box.
+		if isUnconstrainedDynamic(objTy) {
+			return TypeAny
+		}
 		// String-keyed Map bracket access yields the value type (TDD-00139).
 		if objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
 			if objTy.MapVal != nil {
@@ -479,6 +520,40 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// the bigint check already forced both anyway.
 		lt := e.inferExprType(ex.Left)
 		rt := e.inferExprType(ex.Right)
+		// A dynamic operand under `-compat=js` makes an arithmetic result
+		// dynamic — the runtime dispatch (TDD-00076 A2) yields a NaN-boxed
+		// word (`+` may concatenate, others produce a boxed number); a
+		// comparison stays a bool.
+		if e.compatJS() && (isUnconstrainedDynamic(lt) || isUnconstrainedDynamic(rt)) {
+			switch ex.Op {
+			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
+				return TypeBool
+			case "+", "-", "*", "/", "%", "**":
+				return TypeAny
+			}
+		}
+		// A mixed concrete scalar pair (`n * "4"`, `true + 1`) also routes
+		// through the runtime dispatch under `-compat=js` — its result is a
+		// boxed dynamic value too.
+		if e.compatJS() {
+			lk, rk := scalarTypeKind(lt), scalarTypeKind(rt)
+			if lk != "" && rk != "" && lk != rk {
+				switch ex.Op {
+				case "<", ">", "<=", ">=":
+					return TypeBool
+				case "+":
+					// `+` with a string side is always concatenation → string
+					// (the pre-existing concat path emits it; only a
+					// string-free mixed pair reaches the dynamic dispatch).
+					if lk == "string" || rk == "string" {
+						return TypePtr
+					}
+					return TypeAny
+				case "-", "*", "/", "%", "**":
+					return TypeAny
+				}
+			}
+		}
 		// A bigint operand makes an arithmetic/bitwise result a bigint (a
 		// comparison stays a bool) — so `const x = 2n ** 53n + 1n` types as
 		// bigint, not the i64/string the generic cases below would infer.
@@ -551,6 +626,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeF64
 		}
 	case *ast.MemberExpression:
+		// `F.prototype` on a recognized prototype constructor is a dynamic
+		// object (TDD-00155 Stage 4).
+		if id, ok := ex.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && ex.Property == "prototype" {
+			return TypeAny
+		}
+		// A property read off a bare any/unknown base is itself dynamic
+		// (TDD-00155): the runtime tag dispatch yields another box.
+		if baseTy := e.inferExprType(ex.Object); isUnconstrainedDynamic(baseTy) {
+			return TypeAny
+		}
 		// process.stdout/.stderr/.stdin `.isTTY` — a boolean isatty probe.
 		if ex.Property == "isTTY" {
 			if inner, ok := ex.Object.(*ast.MemberExpression); ok {
@@ -849,6 +934,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
+		}
+		// A vanilla-JS prototype-constructor instance is a dynamic object
+		// (TDD-00155 Stage 4, `-compat=js`); a Proxy is one too (Stage 7).
+		if ex.ClassName == "Proxy" {
+			return TypeAny
+		}
+		if e.compatJS() && e.jsProtoCtor[ex.ClassName] {
+			return TypeAny
 		}
 		// A generic class (TDD-00010 V1) is never itself in e.classes — ask
 		// genericClassInstanceType for the shape its `new
@@ -1405,9 +1498,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "stringify":
+					// A dynamic argument stringifies through the dynamic
+					// walker, whose result is `any` (string or undefined —
+					// TDD-00155 Stage 2); every static path returns string.
+					if len(ex.Args) >= 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) {
+						return TypeAny
+					}
 					return TypePtr
 				case "parse":
-					return TypePtr
+					// Context-free JSON.parse is untyped dynamic parse
+					// (TDD-00155 Stage 2); a typed declaration context never
+					// consults this default (emitDeclJSONProjection).
+					return TypeAny
 				}
 			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Date" && mem.Property == "now" {
@@ -1895,6 +1997,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return vt
 				}
 			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Reflect" && !e.isShadowedByLocal(id.Name) {
+				switch mem.Property {
+				case "get", "getPrototypeOf":
+					return TypeAny
+				case "ownKeys":
+					return ArrayOf(TypePtr)
+				case "set", "has", "deleteProperty", "setPrototypeOf", "isExtensible", "preventExtensions", "defineProperty":
+					return TypeBool
+				}
+			}
 			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Object" && !e.isShadowedByLocal(id.Name) {
 				switch mem.Property {
 				case "groupBy":
@@ -1906,6 +2018,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 						}
 					}
 					return Type{IR: "ptr", IsGroupMap: true}
+				case "create", "getPrototypeOf", "setPrototypeOf":
+					// Prototype statics operate on and return dynamic values
+					// (TDD-00155 Stage 3).
+					return TypeAny
+				case "defineProperty", "getOwnPropertyDescriptor":
+					// Descriptor statics (Stage 5): the object back / a
+					// descriptor object (or undefined).
+					return TypeAny
+				case "getOwnPropertyNames":
+					return ArrayOf(TypePtr)
+				case "isExtensible", "isSealed", "isFrozen":
+					return TypeBool
 				case "keys", "values", "entries":
 					// A dynamic object (or any string-keyed Map<string,V>) is
 					// Map-backed — Object.keys/values/entries on it delegate
@@ -2339,6 +2463,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if nty, ok := ternaryNullableScalarType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
 			return nty
 		}
+		// A dynamic branch makes the whole ternary `any` (mirrors
+		// emitConditionalAny).
+		if e.inferExprType(ex.Consequent).IsDynamic || e.inferExprType(ex.Alternate).IsDynamic {
+			return TypeAny
+		}
 		return e.inferExprType(ex.Consequent)
 	case *ast.SequenceExpression:
 		// The comma operator's value (and type) is its last operand's.
@@ -2511,6 +2640,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 	case *ast.NewXMLHttpRequestExpression:
 		return XMLHttpRequestType()
 	case *ast.ObjectLiteral:
+		// Bare literals are dynamic under `-compat=js` (matching emitExpr's
+		// routing); hint-typed contexts never consult this default.
+		if e.compatJS() {
+			return TypeAny
+		}
 		return e.inferObjectType(ex)
 	case *ast.ArrayLiteral:
 		// TDD-00028: inferExprType previously had no case for a bare array
@@ -2662,6 +2796,13 @@ func isPlainStringTy(ty Type) bool {
 func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IR == "i1" {
 		return v
+	}
+	// A dynamic value's truthiness is the real JS ToBoolean over the
+	// NaN-boxed word (TDD-00076): false/null/undefined/±0/NaN/"" are false,
+	// everything else true. Runs in both compat modes — truthiness has one
+	// correct answer, unlike the js-gated operator dispatch.
+	if v.Ty.IsDynamic {
+		return e.emitAnyTruthy(v)
 	}
 	if v.Ty.IsBigInt {
 		// 0n is falsy, every other bigint truthy — a bigint handle is never

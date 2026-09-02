@@ -268,6 +268,30 @@ type Emitter struct {
 	// plain object instead of re-dispatching toJSON.
 	jsonToJSONActive       map[string]bool
 	usedAnyEq              bool
+	usedDynObj             bool
+	usedDynArr             bool
+	usedDynJSONFromNode    bool
+	usedDynJSONC           bool
+	usedNanBox             bool
+	usedAnyOps             bool
+	// jsCtorParamTy is `-compat=js` call-site-inferred constructor parameter
+	// types (class name → per-index type; zero Type = no site could infer),
+	// filled by jsCollectCtorParamTypes and consumed in registerClasses.
+	jsCtorParamTy map[string][]Type
+	// jsFuncParamTy is the plain-function counterpart: identifier-callee call
+	// sites' argument types per name/index. Conflicts are recorded, not
+	// errored, at collection time — the callee namespace includes builtins
+	// (`console.log(1)` vs `console.log("s")` is fine) — and validated in
+	// registerFunctions only for user functions with an unannotated
+	// parameter at that index.
+	jsFuncParamTy map[string][]jsParamSlot
+	// dynFnCtr numbers @__kml_dynfn_N dynamic-ABI functions (TDD-00155
+	// Stage 4); jsProtoCtor marks top-level function declarations recognized
+	// as vanilla-JS prototype constructors under -compat=js.
+	dynFnCtr        int
+	jsProtoCtor     map[string]bool
+	protoBagEmitted map[string]bool
+	errSubCount     int64
 	usedClockGettime       bool
 	usedDateNow            bool
 	usedPerformanceNow     bool
@@ -1617,13 +1641,35 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// signatures) — after interfaces (a class field/param/return may
 	// reference one) and before functions (a function signature may
 	// reference a class by name).
+	// `-compat=js` (TDD-00022): infer unannotated constructor parameter
+	// types from `new` call sites before class registration, so field
+	// inference and the constructor sig see real types instead of the
+	// number default.
+	if e.compatJS() {
+		if err := e.jsCollectCtorParamTypes(prog); err != nil {
+			return "", err
+		}
+	}
 	if err := e.registerClasses(prog); err != nil {
 		return "", err
+	}
+	// `-compat=js`: the plain-function collection pass runs after class
+	// registration (so class-instance arguments infer to real class types)
+	// and before registerFunctions, which consumes the slots.
+	if e.compatJS() {
+		if err := e.jsCollectFuncParamTypes(prog); err != nil {
+			return "", err
+		}
 	}
 
 	// Pass 1: register all top-level function signatures so calls work regardless of order.
 	if err := e.registerFunctions(prog); err != nil {
 		return "", err
+	}
+	// `-compat=js` (TDD-00155 Stage 4): recognize vanilla-JS prototype
+	// constructors — after function sigs exist, before any body is emitted.
+	if e.compatJS() {
+		e.jsCollectProtoCtors(prog)
 	}
 	// Mark async functions that can actually suspend (TDD-00083 Stage 2), so the
 	// emitter compiles them as coroutine tasks; the rest keep the synchronous
@@ -2230,6 +2276,11 @@ func (e *Emitter) registerFunctions(prog *ast.Program) error {
 		if !ok {
 			continue
 		}
+		// `-compat=js`: call sites disagreeing on an unannotated parameter's
+		// kind used to be a hard error; with implicit-`any` (TDD-00076 A1)
+		// a genuinely polymorphic parameter simply becomes a boxed `any` —
+		// both callers are valid JS — so buildFunctionSig's conflict-aware
+		// fallback handles it and no validation is needed here.
 		// TDD-00061/ADR-00172: a generator function is never registered into
 		// e.funcs at all — constructing one (`gen(args)`) doesn't emit an
 		// ordinary `call`, it builds a fiber-backed instance struct instead
@@ -2364,12 +2415,26 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		retType = e.resolveType(fd.ReturnType)
 	}
 	sig := FuncSig{RetType: retType, IsAsync: fd.IsAsync}
-	for _, p := range fd.Params {
+	jsOverride := e.jsFuncParamTy[fd.Name] // nil outside -compat=js
+	for i, p := range fd.Params {
 		var pty Type
 		if p.Type != nil {
 			pty = e.resolveType(p.Type)
 		} else if p.Rest {
 			pty = ArrayOf(TypeI64) // default rest element type: number
+		} else if i < len(jsOverride) && jsOverride[i].ty.IR != "" && !jsOverride[i].conflict {
+			// `-compat=js` call-site inference (TDD-00022 sub-problem 1 /
+			// TDD-00005 option 2): an unannotated parameter takes the type
+			// the call sites actually pass. Applied here (not post-hoc) so
+			// the fixed-point re-inference sweep rebuilds with it too.
+			pty = jsOverride[i].ty
+		} else if e.compatJS() {
+			// TDD-00076 A1 (implicit-`any`): under `-compat=js`, an
+			// unannotated parameter no call site can type — or whose call
+			// sites genuinely disagree (a polymorphic JS function) — is a
+			// boxed `any`, dispatched at runtime. Precedence: annotation →
+			// call-site-inferred concrete type → boxed any.
+			pty = TypeAny
 		} else {
 			pty = TypeI64
 			pty.Inferred = true // no annotation given — see docs/adr/ADR-00042.md
