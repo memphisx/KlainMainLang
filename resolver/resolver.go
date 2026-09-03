@@ -673,6 +673,12 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 			break
 		}
 	}
+	for _, f := range files {
+		if fileImportsModule(f.prog, "klain:ws") {
+			merged.UsesKlainWS = true
+			break
+		}
+	}
 	return merged, nil
 }
 
@@ -680,8 +686,15 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 // `klain:sync` (TDD-00143). Imports are top-level statements, so this is a
 // shallow scan — no full-AST walk needed.
 func fileImportsKlainSync(prog *ast.Program) bool {
+	return fileImportsModule(prog, "klain:sync")
+}
+
+// fileImportsModule reports whether a file's top-level imports include the
+// given module specifier. Imports are top-level statements, so a shallow scan
+// suffices.
+func fileImportsModule(prog *ast.Program, source string) bool {
 	for _, stmt := range prog.Body {
-		if imp, ok := stmt.(*ast.ImportDeclaration); ok && imp.Source == "klain:sync" {
+		if imp, ok := stmt.(*ast.ImportDeclaration); ok && imp.Source == source {
 			return true
 		}
 	}

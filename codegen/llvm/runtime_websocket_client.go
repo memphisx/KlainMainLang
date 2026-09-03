@@ -588,23 +588,38 @@ closedentry:
 }
 
 // wsClientCallCallback returns the IR snippet that builds a
-// WSMessageEventType() ({data: ptr}, a single 8-byte field — malloc+direct
-// store, no GEP needed) carrying dataRef and calls the {ptr,ptr} closure
-// header in closureReg with it — the one call shape __kml_wsclient_scan
-// needs five times (onopen/onmessage/onclose/onerror, the last two counted
-// once each from two different call sites: a fresh connection failure and
-// a later mid-session close), factored out once rather than repeated
-// five times by hand.
-func wsClientCallCallback(uniq, closureReg, dataRef string) string {
+// WSMessageEventType() carrying dataRef/isBinaryRef/bytesRef/lenRef (TDD-00160
+// widened it from a single {data: ptr} field to also carry isBinary + the
+// hidden byte-accessor pair) and calls the {ptr,ptr} closure header in
+// closureReg with it — the one call shape __kml_wsclient_scan needs five
+// times (onopen/onmessage/onclose/onerror, the last two counted once each
+// from two different call sites: a fresh connection failure and a later
+// mid-session close). The three non-data events (onopen/onclose/onerror)
+// pass a null/false/0 payload via wsClientEmptyMsgArgs.
+func (e *Emitter) wsClientCallCallback(uniq, closureReg, dataRef, isBinaryRef, bytesRef, lenRef string) string {
+	msgTy := WSMessageEventType()
+	structIR := msgTy.StructIR()
+	dataIdx, _, _ := msgTy.FieldIndex("data")
+	binIdx, _, _ := msgTy.FieldIndex("isBinary")
+	bytesIdx, _, _ := msgTy.FieldIndex(WSMsgBytesField)
+	lenIdx, _, _ := msgTy.FieldIndex(WSMsgLenField)
 	return fmt.Sprintf(`
-  %%%[1]smsgevt = call ptr @malloc(i64 8)
-  store ptr %[3]s, ptr %%%[1]smsgevt, align 8
+  %%%[1]smsgevt = call ptr @malloc(i64 %[7]d)
+  %%%[1]sdata_p = getelementptr %[8]s, ptr %%%[1]smsgevt, i32 0, i32 %[9]d
+  store ptr %[3]s, ptr %%%[1]sdata_p, align 8
+  %%%[1]sbin_p = getelementptr %[8]s, ptr %%%[1]smsgevt, i32 0, i32 %[10]d
+  store i1 %[4]s, ptr %%%[1]sbin_p, align 1
+  %%%[1]sbytes_p = getelementptr %[8]s, ptr %%%[1]smsgevt, i32 0, i32 %[11]d
+  store ptr %[5]s, ptr %%%[1]sbytes_p, align 8
+  %%%[1]slen_p = getelementptr %[8]s, ptr %%%[1]smsgevt, i32 0, i32 %[12]d
+  store i64 %[6]s, ptr %%%[1]slen_p, align 8
   %%%[1]sfp_p = getelementptr { ptr, ptr }, ptr %[2]s, i32 0, i32 0
   %%%[1]sfp = load ptr, ptr %%%[1]sfp_p, align 8
   %%%[1]sep_p = getelementptr { ptr, ptr }, ptr %[2]s, i32 0, i32 1
   %%%[1]sep = load ptr, ptr %%%[1]sep_p, align 8
   call void %%%[1]sfp(ptr %%%[1]sep, ptr %%%[1]smsgevt)
-`, uniq, closureReg, dataRef)
+`, uniq, closureReg, dataRef, isBinaryRef, bytesRef, lenRef,
+		msgTy.StructSize(), structIR, dataIdx, binIdx, bytesIdx, lenIdx)
 }
 
 // emitWSClientScan declares __kml_wsclient_scan — see this file's own top
@@ -818,14 +833,14 @@ scandone:
   ret void
 }`,
 		entryTy, wsStructIR, rsIdx, onopenIdx,
-		wsClientCallCallback("fo", "%fo_onopen", emptyStr),
+		e.wsClientCallCallback("fo", "%fo_onopen", emptyStr, "false", "null", "0"),
 		onerrorIdx,
-		wsClientCallCallback("fe", "%fe_onerror", emptyStr),
+		e.wsClientCallCallback("fe", "%fe_onerror", emptyStr, "false", "null", "0"),
 		oncloseIdx,
-		wsClientCallCallback("co1", "%co1_onclose", emptyStr),
+		e.wsClientCallCallback("co1", "%co1_onclose", emptyStr, "false", "null", "0"),
 		errnoAccessor(), httpEagainErrno(),
 		onmessageIdx,
-		wsClientCallCallback("dm", "%dm_onmsg", "%dstrbuf"),
-		wsClientCallCallback("co2", "%dc_onclose", emptyStr),
+		e.wsClientCallCallback("dm", "%dm_onmsg", "%dstrbuf", "%disbinary", "%dstrbuf", "%dpayloadlen"),
+		e.wsClientCallCallback("co2", "%dc_onclose", emptyStr, "false", "null", "0"),
 	))
 }

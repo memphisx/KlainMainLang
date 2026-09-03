@@ -5,7 +5,7 @@
   "statusPage": "EVENT-EMITTER.md",
   "coversRows": "all",
   "coverage": { "loose": "6/6", "loosePct": 100, "strict": "3/6", "strictPct": 50 },
-  "lede": "Node's classic EventEmitter, not the WHATWG EventTarget/Event trio. The big divergence is that it's a compiler-recognized generic built-in (monomorphized per T like Map/Set/Promise), not a real registered class — so the on/once/emit/off surface is hand-written codegen dispatched by name, and a subclass can't override those methods. Payloads are statically typed through an event-map type argument, with tuple payloads standing in for Node's multi-argument events.",
+  "lede": "Node's classic EventEmitter, not the WHATWG EventTarget/Event trio. The big divergence is that it's a compiler-recognized generic built-in (monomorphized per T like Map/Set/Promise), not a real registered class — so the on/once/emit/off surface is hand-written codegen dispatched by name and instanceof answers as a compile-time constant. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in). Payloads are statically typed through an event-map type argument, with tuple payloads standing in for Node's multi-argument events.",
   "entries": [
     {
       "id": "events.EventEmitter",
@@ -18,7 +18,7 @@
       "exampleKey": "eventemitter/eventemitter",
       "snippet": "class Downloader extends EventEmitter<string> {\n  progress(chunk: number): void {\n    this.emit(\"progress\", this.name + \": \" + this.bytesDone + \" bytes\");\n  }\n}\nconst bus = new EventEmitter<number>();",
       "differences": [
-        "No overriding an EventEmitter method — a class in an EventEmitter-rooted tree declaring `on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames` is a compile-time error (these are hand-written codegen dispatched by name, not real AST-driven methods/vtable slots), not a real override"
+        "A subclass may override any EventEmitter method (`on`/`once`/`emit`/`off`/`removeListener`/`removeAllListeners`/`listenerCount`/`eventNames`) — the override wins at every call site (statically and virtually), and `super.<method>(...)` reaches the nearest ancestor override or the built-in dispatch. The override's declared signature isn't checked against the built-in it replaces"
       ],
       "seeAlso": ["events.on", "events.emit"],
       "spec": { "mdn": "https://nodejs.org/api/events.html#class-eventemitter" }

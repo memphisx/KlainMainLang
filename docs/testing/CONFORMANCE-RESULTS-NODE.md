@@ -69,26 +69,26 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 207 | COMPILE_ERROR: capturing variable '%s' in a dynamic (prototype-method) function is not supported yet |
+| 204 | COMPILE_ERROR: slice is only supported on strings |
 | 203 | COMPILE_ERROR: a number has no method '%s' |
-| 125 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
+| 126 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
 | 124 | COMPILE_ERROR: undefined variable '%s' |
-| 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 96 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 49 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 45 | COMPILE_ERROR: unknown class '%s' |
+| 51 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 46 | COMPILE_ERROR: unknown class '%s' |
 | 43 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 42 | COMPILE_ERROR: no field '%s' |
 | 38 | COMPILE_ERROR: undefined function or closure '%s' |
 | 36 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 26 | COMPILE_ERROR: process has no method '%s' |
-| 25 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s', listener) (got '%s') |
 | 25 | COMPILE_ERROR: expected ), got => |
 | 23 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 22 | COMPILE_ERROR: a Request has no method '%s' |
+| 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
 | 20 | COMPILE_ERROR: field assignment on non-object |
 | 20 | COMPILE_ERROR: fs has no method '%s' |
@@ -97,10 +97,10 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
+| 17 | RUNTIME_NONZERO_EXIT:  |
 | 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
-| 16 | RUNTIME_NONZERO_EXIT:  |
-| 16 | RUN_TIMEOUT |
 | 15 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
+| 15 | RUN_TIMEOUT |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |

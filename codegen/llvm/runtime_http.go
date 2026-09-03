@@ -743,6 +743,12 @@ define void @__kml_reactor_thread_lock() {
 	// populates or reads it, rather than needing its own conditional
 	// declaration path.
 	e.emitGlobal("@__kml_listen_ws_handler = internal thread_local global ptr null, align 8")
+	// @__kml_listen_upgrade_handler (TDD-00158): the Node-faithful `'upgrade'`
+	// event handler closure from `server.on('upgrade', …)`, null when none —
+	// declared unconditionally like the others; the dispatcher's upgrade block
+	// (gated at codegen time on e.usedHTTPUpgrade) reads it and, when non-null
+	// on an `Upgrade:` request, builds (req, socket, head) and calls it.
+	e.emitGlobal("@__kml_listen_upgrade_handler = internal thread_local global ptr null, align 8")
 
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()

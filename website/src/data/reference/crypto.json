@@ -4,7 +4,7 @@
   "kind": "web",
   "statusPage": "WEB-CRYPTO.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
+  "coverage": { "loose": "10/10", "loosePct": 100, "strict": "1/10", "strictPct": 10 },
   "lede": "Web Crypto here is compile-time dispatched: the algorithm argument must be a string literal or an object literal with a literal name: — a variable holding the name is a compile error, and bare crypto.subtle as a value is unsupported. Operational failures throw synchronously at the call site rather than rejecting the returned promise, though await/.then/.catch/.finally all work on the settled result. crypto.subtle.* delegates to a native backend picked with -crypto (OpenSSL libcrypto by default, Apple CommonCrypto on macOS); getRandomValues and randomUUID need only a CSPRNG and no external library.",
   "entries": [
     {
@@ -169,10 +169,28 @@
         "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
         "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
         "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails)",
-        "A namespace import's binding covers these five members only — `crypto.subtle` is reached via the ambient global, not the module"
+        "A namespace import's binding covers the module's own members (generateKeyPair(Sync)/randomBytes/randomUUID/getRandomValues/createHash) — `crypto.subtle` is reached via the ambient global, not the module"
       ],
-      "seeAlso": ["crypto.subtle.generateKey", "crypto.getRandomValues"],
+      "seeAlso": ["crypto.subtle.generateKey", "crypto.getRandomValues", "crypto.createhash"],
       "spec": { "mdn": "https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback" }
+    },
+    {
+      "id": "crypto.createhash",
+      "name": "crypto.createHash(algorithm) / crypto.createHmac(algorithm, key)",
+      "statusRow": "Node `crypto` module: `createHash(algorithm)` / `createHmac(algorithm, key)` → `Hash`/`Hmac` (`.update(data).digest(encoding?)`)",
+      "signature": "import crypto from 'crypto'; crypto.createHash(algorithm): Hash; crypto.createHmac(algorithm, key): Hmac",
+      "badge": "caveats",
+      "description": "Node's Hash and Hmac objects: createHash(algorithm) / createHmac(algorithm, key) then .update(data).digest(encoding). Real streaming digests over OpenSSL EVP / CommonCrypto — no input buffering. The faithful way to compute a WebSocket Sec-WebSocket-Accept inside a server.on('upgrade') handler.",
+      "returns": { "type": "Hash | Hmac", "desc": "A handle with chainable .update(data) and .digest(encoding?)." },
+      "differences": [
+        "Algorithms: `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); others are a clean rejection.",
+        "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string; `.digest()` returns a Buffer. `latin1`/`binary` work but share the UTF-8-only string caveat for non-ASCII bytes (like Buffer.toString('latin1')); other encodings are clean rejections.",
+        "`.update` (chainable) and createHmac's key take a string (UTF-8, binary-safe) or a Buffer/TypedArray/ArrayBuffer.",
+        "Real streaming (EVP_MD_CTX/EVP_MAC, CC_* /CCHmac) — arbitrarily large inputs, no buffering."
+      ],
+      "snippet": "import crypto from 'crypto'\nconst accept = crypto.createHash('sha1')\n  .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')\n  .digest('base64')\nconst sig = crypto.createHmac('sha256', secret).update(msg).digest('hex')",
+      "seeAlso": ["crypto.node", "crypto.subtle.digest"],
+      "spec": { "mdn": "https://nodejs.org/api/crypto.html#cryptocreatehashalgorithm-options" }
     },
     {
       "id": "crypto.subtle.deriveKey",

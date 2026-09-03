@@ -141,6 +141,27 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		return p.parseVarDecl(true)
 	case lexer.FUNCTION:
 		return p.parseFunctionDecl(false, "")
+	case lexer.AT:
+		// Class decorators (TDD-00161 Stage 1): `@dec class C {}`,
+		// `@dec export [default] class C {}`, `@dec abstract class C {}`. Parse
+		// the decorator run, then the class-bearing statement it prefixes, and
+		// attach — `export @dec class` (decorators after `export`) is handled
+		// symmetrically inside parseExportDeclaration.
+		decs, err := p.parseDecorators()
+		if err != nil {
+			return nil, err
+		}
+		pos := posOf(p.peek())
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		cd := unwrapClassDecl(stmt)
+		if cd == nil {
+			return nil, fmt.Errorf("%d:%d: decorators can only be applied to a class declaration or its members", pos.Line, pos.Col)
+		}
+		cd.Decorators = decs
+		return stmt, nil
 	case lexer.CLASS:
 		return p.parseClassDecl(false, "")
 	case lexer.ABSTRACT:
@@ -958,6 +979,12 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 	p.inCtorParams = false
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+		// `@dec` parameter decorators (TDD-00161 Stage 1), before any
+		// parameter-property modifier and the name.
+		paramDecorators, err := p.parseDecorators()
+		if err != nil {
+			return nil, err
+		}
 		// A leading `this` parameter (`function f(this: T, x: number)`) is TS's
 		// explicit-`this` typing form — purely a type-checker annotation that
 		// real TS erases at emit and that is never a runtime argument. It is only
@@ -1062,7 +1089,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				return nil, fmt.Errorf("%d:%d: a default value on a destructured parameter is not yet supported", p.peek().Line, p.peek().Col)
 			}
 			syntheticName := fmt.Sprintf("__param%d", len(params))
-			params = append(params, ast.Param{Name: syntheticName, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat})
+			params = append(params, ast.Param{Name: syntheticName, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat, Decorators: paramDecorators})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -1098,7 +1125,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 				return nil, err
 			}
 		}
-		params = append(params, ast.Param{Name: nameTok.Literal, Type: ta, Rest: rest, Default: dflt, Optional: optional, PropVisibility: propVis, PropReadonly: propReadonly})
+		params = append(params, ast.Param{Name: nameTok.Literal, Type: ta, Rest: rest, Default: dflt, Optional: optional, PropVisibility: propVis, PropReadonly: propReadonly, Decorators: paramDecorators})
 		if rest {
 			break // rest param must be last
 		}

@@ -193,6 +193,10 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 		if f.Params[i].Default != nil {
 			f.Params[i].Default = rewriteExpr(f.Params[i].Default, sc, lu)
 		}
+		// Parameter decorators (TDD-00161) resolve in the enclosing scope.
+		for di := range f.Params[i].Decorators {
+			f.Params[i].Decorators[di] = rewriteExpr(f.Params[i].Decorators[di], sc, lu)
+		}
 	}
 	if f.ReturnType != nil {
 		rewriteType(f.ReturnType, sc, lu)
@@ -306,13 +310,37 @@ func rewriteClassDecl(c *ast.ClassDeclaration, lu lookupTable) {
 			}
 		}
 	}
+	// Class decorators (TDD-00161) are evaluated in the enclosing scope — their
+	// references to top-level names need the same per-file rewrite as any other
+	// expression.
+	for i := range c.Decorators {
+		c.Decorators[i] = rewriteExpr(c.Decorators[i], sc, lu)
+	}
+	for ai := range c.AutoAccessors {
+		for di := range c.AutoAccessors[ai].Decorators {
+			c.AutoAccessors[ai].Decorators[di] = rewriteExpr(c.AutoAccessors[ai].Decorators[di], sc, lu)
+		}
+	}
 	for i := range c.Fields {
 		rewriteType(c.Fields[i].Type, sc, lu)
+		// A field's `= expr` initializer references top-level names that must be
+		// rewritten to their mangled form, exactly like any other expression —
+		// omitting this left `static x = f()` (and property decorators) unable
+		// to resolve `f` at emit time.
+		if c.Fields[i].Initializer != nil {
+			c.Fields[i].Initializer = rewriteExpr(c.Fields[i].Initializer, sc, lu)
+		}
+		for di := range c.Fields[i].Decorators {
+			c.Fields[i].Decorators[di] = rewriteExpr(c.Fields[i].Decorators[di], sc, lu)
+		}
 	}
 	if c.Constructor != nil {
 		rewriteFunctionLike(c.Constructor, sc, lu)
 	}
 	for _, m := range c.Methods {
+		for di := range m.Decorators {
+			m.Decorators[di] = rewriteExpr(m.Decorators[di], sc, lu)
+		}
 		rewriteFunctionLike(m, sc, lu)
 	}
 	for _, blk := range c.StaticBlocks {
@@ -552,6 +580,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				// (TDD-00143). `go` is a function member and takes the marker
 				// member-expression route below.
 				if ref.Marker == "sync__kml_builtin" && ref.Member == "Channel" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
+				// klain:ws's WebSocketServer is a parse-time constructor —
+				// identity (TDD-00158), same as stream's class names.
+				if ref.Marker == "ws__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())

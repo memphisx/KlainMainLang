@@ -121,6 +121,7 @@ const (
 	NULLISH      // ??
 	OPTIONAL_DOT // ?.
 	ARROW        // =>
+	AT           // @ — decorator prefix (TDD-00161)
 
 	// Template literal tokens
 	TEMPLATE_NO_SUB // `plain text` (no substitutions)
@@ -162,7 +163,7 @@ var tokenNames = map[TokenType]string{
 	LOGICAL_AND_ASSIGN: "&&=", LOGICAL_OR_ASSIGN: "||=", NULLISH_ASSIGN: "??=",
 	LPAREN: "(", RPAREN: ")", LBRACE: "{", RBRACE: "}",
 	LBRACKET: "[", RBRACKET: "]",
-	SEMICOLON: ";", COLON: ":", COMMA: ",", DOT: ".", QUESTION: "?", NULLISH: "??", OPTIONAL_DOT: "?.", ARROW: "=>",
+	SEMICOLON: ";", COLON: ":", COMMA: ",", DOT: ".", QUESTION: "?", NULLISH: "??", OPTIONAL_DOT: "?.", ARROW: "=>", AT: "@",
 	TEMPLATE_NO_SUB: "TEMPLATE_NO_SUB", TEMPLATE_HEAD: "TEMPLATE_HEAD",
 	TEMPLATE_MIDDLE: "TEMPLATE_MIDDLE", TEMPLATE_TAIL: "TEMPLATE_TAIL",
 	REGEX: "REGEX",

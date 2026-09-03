@@ -9,7 +9,7 @@
 //
 // Self-closes after a short delay so it runs to completion unattended.
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number

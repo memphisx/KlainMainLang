@@ -70,16 +70,17 @@
             "feature": "`WebSocket`",
             "status": "implemented",
             "caveats": [
-              "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`, [TDD-00039](../tdd/TDD-00039.md) Stage 4/[ADR-00346](../adr/ADR-00346.md)); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side `wss` (a TLS listener) is not offered — front it with `tls`/a reverse proxy",
-              "Neither side supports binary `.send()` (`ArrayBuffer` payloads)",
+              "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`, [TDD-00039](../tdd/TDD-00039.md) Stage 4/[ADR-00346](../adr/ADR-00346.md)); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out)",
+              "A binary message's `ev.data` is still the `strlen`-terminated string view (truncating at an embedded NUL); the byte-exact payload is read via `ev.dataBytes(): ArrayBuffer` instead, discriminated by `ev.isBinary` ([TDD-00160](../tdd/TDD-00160.md)). The browser-faithful `ev.data: string | ArrayBuffer` union isn't used because `ArrayBuffer` isn't yet an allowed union member — a separate type-system item, not a behavioral gap (every byte is recoverable)",
               "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification)",
               "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline"
             ],
             "notes": [
               "Both server and client",
-              "Server: `http.listen(port, handler, { ws })`'s optional third-argument handler is called once per successfully upgraded connection with a `WSConnection` (`.onmessage`/`.send(data: string)`/`.close()`), coexisting with ordinary HTTP requests on the same listener; a client `ping` gets an automatic `pong` reply with identical payload (RFC 6455 §5.5.2), and both a peer `close` frame and `.close()` itself send a proper Close frame before the connection ends (RFC 6455 §5.5.1)",
+              "Server: attach klain:ws's `new WebSocketServer({ server })` to an `http.createServer` (`ws://`) or `https.createServer` (**`wss://`**) server, then `wss.on('connection', socket => …)` gives a `WSConnection` (`.onmessage`/`.send(data)`/`.close()`) per upgraded connection, coexisting with ordinary HTTP; a client `ping` gets an automatic `pong` with identical payload (RFC 6455 §5.5.2), and both a peer `close` frame and `.close()` itself send a proper Close frame before the connection ends (RFC 6455 §5.5.1). `wss://` falls out because the frame I/O rides the TLS connection ([TDD-00158](../tdd/TDD-00158.md)). The raw Node `server.on('upgrade', (req, socket, head) => …)` event is available too, for a hand-rolled or non-WebSocket upgrade",
+              "Binary frames both directions ([TDD-00160](../tdd/TDD-00160.md)): `.send()` takes a `string` (text frame) or an `ArrayBuffer`/`Uint8Array` (binary frame); a received message carries `ev.isBinary` and a byte-exact `ev.dataBytes(): ArrayBuffer` alongside the `ev.data` string view",
               "A failed connect never throws (`.onerror`/`.onclose` fire instead, matching real `WebSocket`)",
-              "See [TDD-00039](../tdd/TDD-00039.md) ([ADR-00125](../adr/ADR-00125.md) Stage 0 frame codec/SHA-1, [ADR-00126](../adr/ADR-00126.md) Stage 1 server handshake, [ADR-00127](../adr/ADR-00127.md) Stage 2 ping/pong + close handshake, [ADR-00128](../adr/ADR-00128.md) Stage 3 client)"
+              "See [TDD-00039](../tdd/TDD-00039.md) ([ADR-00125](../adr/ADR-00125.md) Stage 0 frame codec/SHA-1, [ADR-00126](../adr/ADR-00126.md) Stage 1 server handshake, [ADR-00127](../adr/ADR-00127.md) Stage 2 ping/pong + close handshake, [ADR-00128](../adr/ADR-00128.md) Stage 3 client) and [TDD-00158](../tdd/TDD-00158.md) (the faithful `'upgrade'` event, `wss://` server, and the klain:ws re-homing)"
             ]
           },
           {

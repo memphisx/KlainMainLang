@@ -116,6 +116,17 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 			if !isArr || len(pair.Elements) != 2 {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-element pairs", pos.Line, pos.Col)
 			}
+			// keyTy/valTy were inferred from the first pair (mapKVTypes); a later
+			// pair whose key/value type differs (`new Map([['a','b'],[1,1]])` — a
+			// mixed-type map that would need any-typed keys/values) is rejected
+			// cleanly here, rather than being hinted to the first pair's tuple
+			// shape and storing the mismatched scalar raw into a ptr field.
+			if kt := e.inferExprType(pair.Elements[0]); kt.IR != keyTy.IR && !keyTy.IsArray && !keyTy.IsDynamic && !isNullableScalar(keyTy) {
+				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one key type — a heterogeneous-key map is not supported", pair.Elements[0].GetPos().Line, pair.Elements[0].GetPos().Col)
+			}
+			if vt := e.inferExprType(pair.Elements[1]); vt.IR != valTy.IR && !valTy.IsArray && !valTy.IsDynamic && !isNullableScalar(valTy) {
+				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one value type — a heterogeneous-value map is not supported", pair.Elements[1].GetPos().Line, pair.Elements[1].GetPos().Col)
+			}
 		}
 		tupleTy := TupleType([]Type{keyTy, valTy})
 		var val Value
@@ -325,7 +336,15 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if err != nil {
 			return Value{}, err
 		}
-		vVal, err := e.emitExpr(args[1])
+		// A function-typed value contextually types an untyped arrow /
+		// function-expression argument's parameters from the value signature
+		// (ADR-00632); otherwise they self-infer to the numeric default.
+		var vVal Value
+		if valTy.IsFunc {
+			vVal, err = e.emitExprWithObjectHint(args[1], valTy)
+		} else {
+			vVal, err = e.emitExpr(args[1])
+		}
 		if err != nil {
 			return Value{}, err
 		}

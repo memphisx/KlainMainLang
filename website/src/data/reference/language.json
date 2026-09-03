@@ -904,6 +904,21 @@
       ],
       "seeAlso": ["lang.classinherit", "lang.errorsubtypes"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/instanceof" }
+    },
+    {
+      "id": "lang.decorators",
+      "name": "Experimental decorators — class, property, parameter & method @decorator",
+      "statusRow": "Experimental decorators — class, property, parameter & method @decorator",
+      "signature": "@Component\nclass Api {\n  @required name: string = \"\";\n  @route index(): string { return \"index\"; }\n  constructor(@inject db: number) {}\n}",
+      "badge": "caveats",
+      "description": "Experimental class (constructor), property (target, key), parameter (target, key, index), and method (target, key, descriptor) decorators run at the class's source position — member decorators first, then class decorators (bottom-up). A method decorator receives a live descriptor whose value is the method as a callable; mutating descriptor.value or returning a new descriptor re-routes that method's calls through a per-method runtime slot. With -emit-decorator-metadata, decorated members and a decorated class's constructor get design:* metadata readable via Reflect.getMetadata.",
+      "differences": [
+        "A class decorator that returns a replacement constructor is refused at runtime (a loud throw) — the static-class model has no constructor-replacement routing yet; observe-only class decorators (registration) run faithfully. A generic class decorator is a compile-time rejection.",
+        "Accessor (get/set), static, and generator method decorators, and method decorators on a generic class, are rejected; so is a method whose parameter/return types can't be marshalled (array/nullable/rest params).",
+        "Factory-call decorators (@dec(...) — the @Controller('/api')/@Get('/users') shape) work across placements, including a returned closure that captures the factory's arguments (dynamic functions now carry their captures). The standard dialect covers every member placement — class, method, instance-field, getter/setter, and accessor auto-field decorators — plus context.addInitializer (per-instance). A decorated `accessor x` desugars to a backing field + get/set and follows the TC39 { get, set, init } protocol. A decorator that *replaces* a method/getter/setter can't do typed this.field access (the replacement runs with a boxed this) — observe-only and init decorators are unaffected.",
+        "The standard (TC39) (value, context) dialect (-decorators=standard, default is experimental) runs class and method decorators; its field/accessor/getter-setter decorators and context.addInitializer are a rejected sub-stage, and TC39 has no parameter decorators. design:* metadata types are name-carrying descriptors, not the real constructors."
+      ],
+      "seeAlso": ["lang.class", "lang.classstatic"]
     }
   ]
 }

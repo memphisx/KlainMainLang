@@ -785,6 +785,27 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 	} else {
 		rhs = e.coerce(rhs, sym.Ty)
+		// A binding's type is fixed at its declaration (annotated, or inferred
+		// from its initializer / first assignment). Assigning an incompatible
+		// type (`let x = 5; x = 'hi'`, or an untyped `let x; x = 1; x = 's'`)
+		// leaves rhs with a storage IR that differs from the slot's — a bare
+		// `store <sym.IR> <rhs>` that clang rejects as invalid. Reject cleanly
+		// instead, matching TypeScript (which infers the binding's type and
+		// errors on the incompatible assignment) and this compiler's two-tier
+		// rule: a variable that genuinely holds different types must be
+		// annotated `: any` (works today) or compiled with `-compat=js`. The
+		// composite/aggregate targets (array/object/dynamic/nullable) all
+		// return from their own branches above, so this scalar-store site is
+		// the only place an IR mismatch can reach the emitter.
+		if rhs.Ty.IR != sym.Ty.IR {
+			describe := func(t Type) string {
+				if k := scalarTypeKind(t); k != "" {
+					return k
+				}
+				return t.IR
+			}
+			return Value{}, fmt.Errorf("%d:%d: cannot assign a %s value to '%s' (a %s) — a variable's type is fixed at its declaration; annotate it `: any` for a value that holds different types, or compile with -compat=js", ex.GetPos().Line, ex.GetPos().Col, describe(rhs.Ty), pureDisplayName(ident.Name), describe(sym.Ty))
+		}
 	}
 	// Evaluating the RHS may have promoted `ident` to a heap cell for closure
 	// capture (updateSymbolInPlace changes its storage pointer) — re-resolve it so

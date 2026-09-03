@@ -119,11 +119,23 @@
               "`generateKeyPair` requires both encodings as `{ type: 'spki'/'pkcs8', format: 'pem' }` — KeyObject results, `pkcs1`/`sec1`/`der` formats, and `cipher`/`passphrase` are clean rejections; types are `'rsa'` (modulusLength, 65537 exponent) and `'ec'` (P-256/384/521) only — no `rsa-pss`/`dsa`/`dh`/`ed25519`",
               "Generation is synchronous — the async form fires its callback inline (async-shaped, not offloaded)",
               "`randomBytes(size, cb)`'s callback fires `cb(null, buf)` synchronously (async-shaped, not offloaded — generation never fails) ([ADR-00590](../adr/ADR-00590.md))",
-              "A namespace import's binding covers these five members only — `crypto.subtle` is reached via the ambient global, not the module"
+              "A namespace import's binding covers the module's own members (`generateKeyPair`(`Sync`)/`randomBytes`/`randomUUID`/`getRandomValues`/`createHash`/`createHmac`) — `crypto.subtle` is reached via the ambient global, not the module"
             ],
             "notes": [
               "`import { generateKeyPair } from 'crypto'` ([ADR-00434](../adr/ADR-00434.md)): PEM assembly (`__kml_pem_from_der`, Node's 64-column shape) over the same per-backend keygen ABI as `subtle.generateKey`; callback shapes `(err, publicKey, privateKey)` and mustSucceed's `(publicKey, privateKey)` both contextually typed",
               "`const { subtle } = globalThis.crypto` binds a compile-time subtle alias ([ADR-00435](../adr/ADR-00435.md)); `globalThis.crypto.subtle` chains dispatch directly"
+            ]
+          },
+          {
+            "feature": "Node `crypto` module: `createHash(algorithm)` / `createHmac(algorithm, key)` → `Hash`/`Hmac` (`.update(data).digest(encoding?)`)",
+            "status": "implemented",
+            "caveats": [
+              "Algorithms: `md5`/`sha1`/`sha256`/`sha384`/`sha512` (a string literal); other names are a clean rejection",
+              "`.digest('hex')`/`'base64'`/`'base64url'` return a byte-exact string, `.digest()` a `Buffer`; `.digest('latin1')`/`'binary'` work but share the UTF-8-only string caveat for non-ASCII bytes (same as `Buffer.toString('latin1')` — [TDD-00034](../tdd/TDD-00034.md)); other encodings are clean rejections",
+              "`.update` (chainable) and `createHmac`'s key take a `string` (UTF-8, binary-safe via the length header) or a `Buffer`/`TypedArray`/`ArrayBuffer`"
+            ],
+            "notes": [
+              "Real streaming digests — `.update` feeds the backend's incremental context (OpenSSL `EVP_MD_CTX`/`EVP_MAC`, CommonCrypto `CC_*`/`CCHmac`), no input buffering ([TDD-00159](../tdd/TDD-00159.md)/[ADR-00636](../adr/ADR-00636.md)/[ADR-00637](../adr/ADR-00637.md)). Makes the hand-rolled Node WebSocket handshake (`server.on('upgrade', …)` + `createHash('sha1').…digest('base64')`) faithful end to end — the loose end TDD-00158 left. Vectors verified incl. the Wikipedia HMAC-SHA256 example"
             ]
           },
           {

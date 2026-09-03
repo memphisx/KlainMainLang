@@ -17,7 +17,7 @@
 // actually happen, e.g. (the \x00 embeds a real null byte in the body):
 //   printf 'AB\x00CD' | curl --data-binary @- http://localhost:8081/echo | xxd
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number

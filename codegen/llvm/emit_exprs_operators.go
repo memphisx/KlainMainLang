@@ -1579,6 +1579,15 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 		present, payload := e.nullableScalarAggParts(left)
 		return e.emitNullCoalesceScalar(present, payload, ex.Right)
 	}
+	// `null ?? x` / `undefined ?? x`: the left is statically nullish, so the
+	// whole expression *is* the right operand, with the right's own type — not
+	// the left's null (ptr) type. Without this the ptr-slot path below would
+	// coerce a non-ptr right (a number/boolean) to ptr, and `coerce(number,
+	// ptr)` silently returns the number, emitting an invalid `store ptr
+	// <double>`. Matches JS (`null ?? 42 === 42`) and keeps the IR well-typed.
+	if left.Ty.IsNull || left.Ty.IsUndefined {
+		return e.emitExpr(ex.Right)
+	}
 	if left.Ty.IR != "ptr" {
 		return left, nil
 	}
@@ -1600,7 +1609,14 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	right = e.coerce(right, TypePtr)
+	// The result slot is a single `ptr`, so a non-ptr right operand (`str | null
+	// ?? 42`) is a genuine `ptr | number` union this compiler can't represent —
+	// reject cleanly rather than let `coerce(number, ptr)` fall through and emit
+	// an invalid `store ptr <double>`.
+	right, err = e.coerceChecked(right, TypePtr, ex.GetPos(), "?? operands")
+	if err != nil {
+		return Value{}, err
+	}
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", right.Ref, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 

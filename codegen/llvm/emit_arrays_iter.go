@@ -169,6 +169,14 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 			return Value{}, err
 		}
 		val = e.coerce(val, elemTy)
+		// Array.of(...) builds a homogeneous array, same as an `[...]` literal:
+		// an argument whose type coerce couldn't convert to the element type
+		// (`Array.of(undefined, false, null)` — a mixed set that would need
+		// `any[]`) is rejected cleanly, mirroring emitArrayLiteralData's own
+		// guard, rather than emitting an invalid `store <elemTy> <mismatchedRef>`.
+		if val.Ty.IR != elemTy.IR && !elemTy.IsArray && !elemTy.IsDynamic && !isNullableScalar(elemTy) {
+			return Value{}, fmt.Errorf("%d:%d: Array.of(...) elements must share one type — argument %d does not match the element type inferred from the first argument (a heterogeneous array is not supported)", argExpr.GetPos().Line, argExpr.GetPos().Col, i)
+		}
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slot, elemTy.IR, dataReg, i))
 		e.storeArrayElem(slot, elemTy, val)

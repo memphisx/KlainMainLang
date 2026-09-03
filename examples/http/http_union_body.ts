@@ -10,7 +10,7 @@
 // A self-closing setTimeout keeps `make examples` able to run this to completion
 // unattended (same shape as http_close.ts).
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number

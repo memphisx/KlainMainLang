@@ -28,6 +28,37 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 // and carry many messages (16MiB, vs. HTTP's 10MiB single-request cap).
 const maxWSFrameBufferBytes = 16 * 1024 * 1024
 
+// wsWriteCall / wsReadCallee / wsCloseCall pick the socket I/O function for a
+// WebSocket server frame site: raw write/read/close for a ws:// (plaintext)
+// connection, or the TLS-aware conn shims for a wss:// one (TDD-00158). The
+// shims self-dispatch on the fd→SSL table, so routing every site through them
+// under usedHTTPS1Server is correct for both a TLS-negotiated and a
+// no-ALPN-plaintext connection on the same server. A program with no HTTPS
+// server keeps byte-identical raw I/O.
+func (e *Emitter) wsWriteCall(fd32, buf, n string) string {
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		return fmt.Sprintf("call i64 @__kml_http_conn_send(i32 %s, ptr %s, i64 %s)", fd32, buf, n)
+	}
+	return fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, buf, n)
+}
+
+func (e *Emitter) wsReadCallee(fd32, buf, n string) string {
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		return fmt.Sprintf("call i64 @__kml_http_conn_recv(i32 %s, ptr %s, i64 %s)", fd32, buf, n)
+	}
+	return fmt.Sprintf("call i64 @read(i32 %s, ptr %s, i64 %s)", fd32, buf, n)
+}
+
+func (e *Emitter) wsCloseCall(fd32 string) string {
+	if e.usedHTTPS1Server {
+		e.emitHTTPSConnShims()
+		return fmt.Sprintf("call void @__kml_http_conn_close(i32 %s)", fd32)
+	}
+	return fmt.Sprintf("call i32 @close(i32 %s)", fd32)
+}
+
 // emitWSUpgradeDetect emits the case-insensitive `Upgrade: websocket` +
 // `Connection: ...upgrade...` check (RFC 6455 §4.2.1) against the
 // already-parsed, already-lowercased-key headers map, branching to upgradeL
@@ -167,7 +198,7 @@ func (e *Emitter) emitWSHandshakeAndLoop(headersMapFinal, fd32, fd64, fdPtr, noR
 	}
 	respLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", respLen, resp2.Ref))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, resp2.Ref, respLen))
+	e.emitInstr(e.wsWriteCall(fd32, resp2.Ref, respLen))
 
 	// Build the WSConnection object and call the user's `ws` handler once
 	// — mirrors how buildHTTPDispatcher builds and passes a Request object
@@ -318,7 +349,7 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	readCap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", readCap, capForRead, trForRead))
 	nReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @read(i32 %s, ptr %s, i64 %s)", nReg, fd32, readPtr, readCap))
+	e.emitInstr(fmt.Sprintf("%s = %s", nReg, e.wsReadCallee(fd32, readPtr, readCap)))
 	gotData := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", gotData, nReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gotData, accumulateL, checkErrL))
@@ -411,7 +442,7 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", closeEncBuf, closeEnc))
 	closeEncLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", closeEncLen, closeEnc))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, closeEncBuf, closeEncLen))
+	e.emitInstr(e.wsWriteCall(fd32, closeEncBuf, closeEncLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", closeEncBuf))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", closePayload))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
@@ -435,7 +466,7 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", pongEncBuf, pongEnc))
 	pongEncLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", pongEncLen, pongEnc))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, pongEncBuf, pongEncLen))
+	e.emitInstr(e.wsWriteCall(fd32, pongEncBuf, pongEncLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pongEncBuf))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pingPayload))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", decodeLoopL))
@@ -474,6 +505,10 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	dataGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dataGep, msgTy.StructIR(), msgReg, dataIdx))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strBuf, dataGep))
+	// isBinary + the byte-exact accessor fields (TDD-00160). strBuf already
+	// holds an exact payload copy (payloadLen bytes + trailing NUL), so
+	// dataBytes() can wrap it directly with no extra allocation.
+	e.storeWSMsgBinaryFields(msgTy, msgReg, isBinary, strBuf, payloadLen)
 
 	connReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", connReg, connObjA))
@@ -503,7 +538,7 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	// own noReqL/parseL cleanup: close the fd, mark this fiber-array slot
 	// done, decrement @__kml_conn_active.
 	e.emitLabel(endL)
-	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+	e.emitInstr(e.wsCloseCall(fd32))
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 	activeNow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_conn_active, align 8", activeNow))
@@ -515,11 +550,104 @@ func (e *Emitter) emitWSServerLoop(wsConnReg string) error {
 	return nil
 }
 
-// emitWSConnectionSend implements `socket.send(data: string)`: a single
-// unmasked text frame (opcode 1) — server-to-client frames MUST NOT be
-// masked (RFC 6455 §5.1), the one asymmetry from a future client-side
-// `.send()`. Binary send (an ArrayBuffer payload) isn't scoped for Stage 1
-// — matches this stage's "unfragmented echo" goal, which only needs text.
+// emitWSMsgDataBytes implements `ev.dataBytes(): ArrayBuffer` (TDD-00160) —
+// wraps the WSMessageEvent's hidden byte pointer + length into an
+// ArrayBuffer header ({ i64 size, ptr data }), byte-exact past an embedded
+// NUL. Mirrors emitRequestBodyBytes: no copy, the header just points at the
+// payload buffer the receive path already allocated.
+func (e *Emitter) emitWSMsgDataBytes(objVal Value, pos ast.Pos) (Value, error) {
+	bytesIdx, bytesTy, ok := objVal.Ty.FieldIndex(WSMsgBytesField)
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a WebSocket message event", pos.Line, pos.Col)
+	}
+	bytesVal := e.loadFieldValue(objVal, bytesIdx, bytesTy)
+	lenIdx, lenTy, _ := objVal.Ty.FieldIndex(WSMsgLenField)
+	lenVal := e.loadFieldValue(objVal, lenIdx, lenTy)
+
+	e.ensureMalloc()
+	hdrReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenVal.Ref, hdrReg))
+	dataSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bytesVal.Ref, dataSlot))
+	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
+}
+
+// storeWSMsgBinaryFields fills the TDD-00160 additions on a freshly-malloc'd
+// WSMessageEventType (`isBinary`, and the hidden byte-pointer/length pair
+// backing `ev.dataBytes()`). isBinaryReg is an i1; bytesReg/lenReg are the
+// exact payload buffer and its byte length (for a text frame, its UTF-8
+// bytes — legitimately readable, mirroring `req.body`/`req.bodyBytes()`).
+func (e *Emitter) storeWSMsgBinaryFields(msgTy Type, msgReg, isBinaryReg, bytesReg, lenReg string) {
+	binIdx, _, _ := msgTy.FieldIndex("isBinary")
+	binGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", binGep, msgTy.StructIR(), msgReg, binIdx))
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isBinaryReg, binGep))
+
+	bytesIdx, _, _ := msgTy.FieldIndex(WSMsgBytesField)
+	bytesGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bytesGep, msgTy.StructIR(), msgReg, bytesIdx))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bytesReg, bytesGep))
+
+	lenIdx, _, _ := msgTy.FieldIndex(WSMsgLenField)
+	lenGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lenGep, msgTy.StructIR(), msgReg, lenIdx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenGep))
+}
+
+// wsResolveSendPayload evaluates a `.send()` argument and normalizes it to
+// (opcode, dataPtr, byteLen) for __kml_ws_frame_encode — the shared half of
+// both the server-side (unmasked) and client-side (masked) send sites, whose
+// only remaining difference is the mask bit/key (TDD-00160). A `string` is a
+// text frame (opcode 1) sized by strlen; an `ArrayBuffer` or a byte-width
+// `Uint8Array` (element align 1) is a binary frame (opcode 2) sized from the
+// buffer/view — binary-safe past an embedded NUL, unlike the strlen path.
+// Any other argument type is a clean compile-time rejection.
+func (e *Emitter) wsResolveSendPayload(arg ast.Expression, pos ast.Pos) (opcode int, dataPtr, byteLen string, err error) {
+	argTy := e.inferExprType(arg)
+	switch {
+	case argTy.IsArrayBuffer:
+		bufVal, verr := e.emitExpr(arg)
+		if verr != nil {
+			return 0, "", "", verr
+		}
+		byteLen = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", byteLen, bufVal.Ref))
+		dataSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
+		dataPtr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
+		return 2, dataPtr, byteLen, nil
+	case argTy.IsTypedArray && argTy.ElemType != nil && argTy.ElemType.Align() == 1:
+		ptrReg, lenReg, _, rerr := e.resolveArrayForHOF(arg, pos)
+		if rerr != nil {
+			return 0, "", "", rerr
+		}
+		// element align 1 (Uint8Array/Int8Array/Uint8ClampedArray) ⇒ byte
+		// length == element count, no scaling needed.
+		return 2, ptrReg, lenReg, nil
+	case argTy.IsTypedArray:
+		return 0, "", "", fmt.Errorf("%d:%d: WebSocket send() of a non-byte typed array is not supported — pass a Uint8Array or ArrayBuffer", pos.Line, pos.Col)
+	default:
+		// Treated as string (opcode 1, strlen-sized). A non-string scalar
+		// coerces to ptr the same way the old text-only path did.
+		e.ensureStrlen()
+		dataVal, verr := e.emitExpr(arg)
+		if verr != nil {
+			return 0, "", "", verr
+		}
+		dataVal = e.coerce(dataVal, TypePtr)
+		byteLen = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", byteLen, dataVal.Ref))
+		return 1, dataVal.Ref, byteLen, nil
+	}
+}
+
+// emitWSConnectionSend implements `socket.send(data)` — a single unmasked
+// frame: text (opcode 1) for a string, binary (opcode 2) for an
+// ArrayBuffer/Uint8Array (TDD-00160). Server-to-client frames MUST NOT be
+// masked (RFC 6455 §5.1), the one asymmetry from the client-side `.send()`.
 func (e *Emitter) emitWSConnectionSend(objExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: send() requires 1 argument (data: string)", pos.Line, pos.Col)
@@ -528,16 +656,15 @@ func (e *Emitter) emitWSConnectionSend(objExpr ast.Expression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
-	dataVal, err := e.emitExpr(args[0])
+
+	e.ensureWSFrameEncode()
+	e.ensureFree()
+	e.ensureCloseDecl()
+
+	opcode, dataPtr, dataLen, err := e.wsResolveSendPayload(args[0], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	dataVal = e.coerce(dataVal, TypePtr)
-
-	e.ensureWSFrameEncode()
-	e.ensureStrlen()
-	e.ensureFree()
-	e.ensureCloseDecl()
 
 	ty := WSConnectionType()
 	fdIdx, _, _ := ty.FieldIndex(WSConnFdField)
@@ -548,15 +675,13 @@ func (e *Emitter) emitWSConnectionSend(objExpr ast.Expression, args []ast.Expres
 	fd32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
 
-	dataLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", dataLen, dataVal.Ref))
 	frame := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_ws_frame_encode(i32 1, i1 false, ptr %s, i64 %s, i32 0)", frame, dataVal.Ref, dataLen))
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_ws_frame_encode(i32 %d, i1 false, ptr %s, i64 %s, i32 0)", frame, opcode, dataPtr, dataLen))
 	frameBuf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", frameBuf, frame))
 	frameLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", frameLen, frame))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, frameBuf, frameLen))
+	e.emitInstr(e.wsWriteCall(fd32, frameBuf, frameLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", frameBuf))
 
 	return Value{Ty: TypeVoid}, nil
@@ -613,11 +738,11 @@ func (e *Emitter) emitWSConnectionCloseMethod(objExpr ast.Expression, pos ast.Po
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", closeEncBuf, closeEnc))
 	closeEncLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", closeEncLen, closeEnc))
-	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, closeEncBuf, closeEncLen))
+	e.emitInstr(e.wsWriteCall(fd32, closeEncBuf, closeEncLen))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", closeEncBuf))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", codeBuf))
 
-	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", fd32))
+	e.emitInstr(e.wsCloseCall(fd32))
 
 	return Value{Ty: TypeVoid}, nil
 }

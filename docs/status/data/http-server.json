@@ -17,7 +17,7 @@
     },
     {
       "kind": "block",
-      "text": "The `http` module now exposes the **real Node.js API** — `http.createServer` (first row). The bespoke `http.listen(handler ⇒ response)` model (the rest of this page) is this project's own re-imagining; it stays importable, and is also reachable under the explicitly-non-Node `klain:http` specifier ([TDD-00131](../tdd/TDD-00131.md))."
+      "text": "The Node `http` module exposes only the **real Node.js API** — `http.createServer`/`get`/`request`/`Agent`. The bespoke `http.listen(handler ⇒ response)` model (the rest of this page) is this project's own re-imagining, reachable **only** under the explicitly-non-Node `klain:http` specifier now ([TDD-00131](../tdd/TDD-00131.md)/[ADR-00635](../adr/ADR-00635.md)) — it is no longer exposed on `http` (Node has `listen`/`close`/`closeAllConnections` as `Server` methods, not `http.*` functions). Importing them from `http` is a clean rejection pointing at `klain:http`."
     },
     {
       "kind": "table",
@@ -40,11 +40,11 @@
             ]
           },
           {
-            "feature": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request', cb)`",
+            "feature": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)`",
             "status": "implemented",
             "caveats": [
               "`server.listen` is **non-blocking** ([ADR-00514](../adr/ADR-00514.md)): it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback still fires synchronously at `listen()` time rather than on a later tick, so a `close()` before that tick doesn't cancel it (edge divergence). The bespoke `http.listen` stays blocking (its `{workers}` cluster fork depends on it)",
-              "`.on` supports `'request'` (one listener), `'stream'`, and `'listening'` ([ADR-00502](../adr/ADR-00502.md)); no `'close'`/`'error'`/`'connection'`/`'clientError'`/`'upgrade'` events",
+              "`.on` supports `'request'` (one listener), `'stream'`, `'listening'` ([ADR-00502](../adr/ADR-00502.md)), and the Node-faithful `'upgrade'` event (`(req, socket, head)`, where `socket` is a `net.Socket` over the connection — TLS-backed on an `https` server, so `wss://` falls out; [TDD-00158](../tdd/TDD-00158.md)); no `'close'`/`'error'`/`'connection'`/`'clientError'` events",
               "A handler wrapped in a `test` counting wrapper (`createServer(mustCall(fn))`) *is* contextually typed ([ADR-00412](../adr/ADR-00412.md)); other wrapper calls are not",
               "`createServer`'s options argument accepts only `{}` or `{requireHostHeader: false}` (stating existing no-Host-check behavior); timeouts and other options are clean rejections ([ADR-00503](../adr/ADR-00503.md))"
             ],
@@ -54,7 +54,7 @@
             ]
           },
           {
-            "feature": "`http.listen(port, handler)` — bind, accept, dispatch (bespoke; also `klain:http`)",
+            "feature": "`klain:http`'s `http.listen(port, handler)` — bind, accept, dispatch (bespoke)",
             "status": "implemented",
             "notes": [
               "One fiber per accepted connection (`ucontext.h`), so a slow connection never blocks the others",

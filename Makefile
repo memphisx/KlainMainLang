@@ -7,7 +7,7 @@ CLANG        := clang
 TEST_TIMEOUT ?= 20m
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
-EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' | sort)
+EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' ! -name 'standard_decorators.ts' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 
@@ -91,6 +91,16 @@ examples: build
 		out=$$(dirname $$f)/$$(basename $$f .js); \
 		printf '%-50s' "  $$f (-compat=js)"; \
 		if ./$(BINARY) -compat=js $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+			echo "OK"; ok=$$((ok+1)); \
+		else \
+			echo "FAIL"; fail=$$((fail+1)); \
+		fi; \
+	done; \
+	for f in examples/decorators/standard_decorators.ts; do \
+		[ -e "$$f" ] || continue; \
+		out=$$(dirname $$f)/$$(basename $$f .ts); \
+		printf '%-50s' "  $$f (-decorators=standard)"; \
+		if ./$(BINARY) -decorators=standard $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \

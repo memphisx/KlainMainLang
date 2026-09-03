@@ -74,7 +74,8 @@
             "status": "missing",
             "notes": [
               "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against",
-              "A fixed-length mixed sequence expressed as a **tuple** (`[number, string, boolean]`) does stringify correctly (`JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`) — the tuple, not a heterogeneous array, is how such a value is represented here"
+              "A fixed-length mixed sequence expressed as a **tuple** (`[number, string, boolean]`) does stringify correctly (`JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`) — the tuple, not a heterogeneous array, is how such a value is represented here",
+              "An `any`-typed heterogeneous array (a dynamic array, e.g. `const a: any = [1, \"two\", null]`) also stringifies through the dynamic walker ([ADR-00639](../adr/ADR-00639.md)); the missing case is only a *statically*-typed heterogeneous array, which has no representation"
             ]
           },
           {
@@ -120,7 +121,7 @@
             ],
             "notes": [
               "Untyped/`any`-annotated `JSON.parse` keeps the whole tree as dynamic values ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/ADR-00622.md)): objects become runtime property bags, arrays dynamic arrays (`.length`, index reads/writes with JS extension semantics, `for...in`), scalars their runtime tags — `data.server.ports[0]` just works. A bare `const data = JSON.parse(s)` with no annotation is this dynamic parse, matching JS",
-              "`JSON.stringify` serializes a dynamic tree back (round-trip clean): undefined values skipped in objects / `null` in arrays, NaN/Infinity → `null`, cycles throw `Converting circular structure to JSON`"
+              "`JSON.stringify` serializes a dynamic tree back (round-trip clean): undefined values skipped in objects / `null` in arrays, NaN/Infinity → `null`, cycles throw `Converting circular structure to JSON`. The `space` argument pretty-prints a dynamic value byte-identically to the static path and to Node ([TDD-00077](../tdd/TDD-00077.md) P4, [ADR-00639](../adr/ADR-00639.md)); a nested array literal inside an `any`-typed object literal recurses into a dynamic array, so it is navigable and serializable"
             ]
           }
         ]

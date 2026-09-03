@@ -110,14 +110,17 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// Eager-boxing capture set for this body (see hoistedCaptures): its own
 	// locals/params captured by some nested closure, boxed at declaration.
 	savedHoistedCaptures := e.hoistedCaptures
+	savedWidened := e.widenedBindings
 	if decl.Body != nil {
 		paramNames := make([]string, len(decl.Params))
 		for i, p := range decl.Params {
 			paramNames[i] = p.Name
 		}
 		e.hoistedCaptures = capturedLocalNames(decl.Body.Body, paramNames)
+		e.widenedBindings = e.crossTypeWidenedBindings(decl.Body.Body)
 	} else {
 		e.hoistedCaptures = nil
+		e.widenedBindings = nil
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
@@ -126,6 +129,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.currentGenerator = savedCurrentGenerator
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
+		e.widenedBindings = savedWidened
 	}()
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
@@ -1420,6 +1424,124 @@ func capturedLocalNames(body []ast.Statement, paramNames []string) map[string]bo
 	return result
 }
 
+// crossTypeWidenedBindings (compat=js only) returns the untyped scalar bindings
+// in one scope's body that are assigned two or more distinct scalar kinds
+// (number / string / boolean) across their lifetime — a "dynamic variable" in
+// the JS sense (`let x = 5; x = 'hi'`). Under -compat=js such a binding must be
+// backed by the any-box (NaN-boxed { i8, i64 }) from its declaration, since a
+// fixed scalar slot can't hold a later different-kinded value without emitting
+// invalid IR. Strict rejects this instead (ADR-00651); this widening is the
+// -compat=js counterpart (TDD-00162). Only *untyped* var/let are eligible — an
+// explicit annotation is a contract kept even under -compat=js — and nested
+// function/arrow bodies are separate scopes scanned by their own pass, so this
+// walker does not descend into them (a rare closure-reassignment to a different
+// kind stays a clean rejection, a documented V1 edge).
+func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool {
+	if !e.compatJS() {
+		return nil
+	}
+	untyped := map[string]bool{}
+	kinds := map[string]map[string]bool{}
+	note := func(name string, t Type) {
+		if !untyped[name] {
+			return
+		}
+		if k := scalarTypeKind(t); k != "" {
+			if kinds[name] == nil {
+				kinds[name] = map[string]bool{}
+			}
+			kinds[name][k] = true
+		}
+	}
+	declare := func(v *ast.VarDeclaration) {
+		if v.Kind == "const" || v.TypeAnnot != nil {
+			return
+		}
+		untyped[v.Name] = true
+		if v.Init != nil {
+			note(v.Name, e.inferExprType(v.Init))
+		}
+	}
+	var walkExpr func(ast.Expression)
+	walkExpr = func(expr ast.Expression) {
+		as, ok := expr.(*ast.AssignmentExpression)
+		if !ok {
+			return
+		}
+		if id, ok := as.Left.(*ast.Identifier); ok && as.Op == "=" {
+			note(id.Name, e.inferExprType(as.Right))
+		}
+		walkExpr(as.Right)
+	}
+	var walkStmts func([]ast.Statement)
+	walkStmts = func(stmts []ast.Statement) {
+		for _, stmt := range stmts {
+			switch s := stmt.(type) {
+			case *ast.VarDeclaration:
+				declare(s)
+			case *ast.VarDeclarationList:
+				for _, d := range s.Decls {
+					declare(d)
+				}
+			case *ast.ExpressionStatement:
+				walkExpr(s.Expr)
+			case *ast.IfStatement:
+				if s.Consequent != nil {
+					walkStmts(s.Consequent.Body)
+				}
+				if s.Alternate != nil {
+					walkStmts([]ast.Statement{s.Alternate})
+				}
+			case *ast.ForStatement:
+				if es, ok := s.Init.(*ast.ExpressionStatement); ok {
+					walkExpr(es.Expr)
+				}
+				for _, upd := range s.Update {
+					walkExpr(upd)
+				}
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.WhileStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.BlockStatement:
+				walkStmts(s.Body)
+			case *ast.ForOfStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+			case *ast.SwitchStatement:
+				for _, c := range s.Cases {
+					walkStmts(c.Body)
+				}
+			case *ast.TryStatement:
+				if s.Body != nil {
+					walkStmts(s.Body.Body)
+				}
+				if s.Catch != nil && s.Catch.Body != nil {
+					walkStmts(s.Catch.Body.Body)
+				}
+				if s.Finally != nil {
+					walkStmts(s.Finally.Body)
+				}
+			}
+		}
+	}
+	walkStmts(body)
+	result := map[string]bool{}
+	for name := range untyped {
+		if len(kinds[name]) > 1 {
+			result[name] = true
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // boxHoistedCapture allocates a heap cell for a captured local/param at its
 // dominating declaration point, seeds it (with the given already-materialized
 // initReg IR value of type ty, or the type's deterministic default when initReg
@@ -1607,6 +1729,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	e.currentCtorClass = ""
 	// Eager-boxing capture set for this closure body (see hoistedCaptures).
 	savedHoistedCaptures := e.hoistedCaptures
+	savedWidened := e.widenedBindings
 	{
 		paramNames := make([]string, len(af.Params))
 		for i, p := range af.Params {
@@ -1614,10 +1737,13 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		}
 		if af.Block != nil {
 			e.hoistedCaptures = capturedLocalNames(af.Block.Body, paramNames)
+			e.widenedBindings = e.crossTypeWidenedBindings(af.Block.Body)
 		} else if af.Body != nil {
 			e.hoistedCaptures = capturedLocalNames([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}}, paramNames)
+			e.widenedBindings = e.crossTypeWidenedBindings([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
 		} else {
 			e.hoistedCaptures = nil
+			e.widenedBindings = nil
 		}
 	}
 	defer func() {
@@ -1627,6 +1753,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		e.currentGenerator = savedCurrentGenerator
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
+		e.widenedBindings = savedWidened
 	}()
 
 	e.allocas = strings.Builder{}
@@ -2386,6 +2513,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.currentCtorClass = ""
 	// Eager-boxing capture set for this function-expression body.
 	savedHoistedCaptures := e.hoistedCaptures
+	savedWidened := e.widenedBindings
 	{
 		paramNames := make([]string, len(fe.Params))
 		for i, p := range fe.Params {
@@ -2393,8 +2521,10 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		}
 		if fe.Body != nil {
 			e.hoistedCaptures = capturedLocalNames(fe.Body.Body, paramNames)
+			e.widenedBindings = e.crossTypeWidenedBindings(fe.Body.Body)
 		} else {
 			e.hoistedCaptures = nil
+			e.widenedBindings = nil
 		}
 	}
 	defer func() {
@@ -2404,6 +2534,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		e.currentGenerator = savedCurrentGenerator
 		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
+		e.widenedBindings = savedWidened
 	}()
 
 	e.allocas = strings.Builder{}

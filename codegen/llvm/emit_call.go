@@ -414,6 +414,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsNetSocket {
 			return e.emitNetSocketMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsWebSocketServer {
+			return e.emitWebSocketServerMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsHash {
+			return e.emitHashMethod(mem.Object, mem.Property, ex.Args, ex.GetPos(), false)
+		}
+		if e.inferExprType(mem.Object).IsHmac {
+			return e.emitHashMethod(mem.Object, mem.Property, ex.Args, ex.GetPos(), true)
+		}
 		if e.inferExprType(mem.Object).IsDgramSocket {
 			return e.emitDgramMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -441,6 +450,17 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitRequestBodyBytes(objVal, ex.GetPos())
+		}
+		if mem.Property == "dataBytes" {
+			if ot := e.inferExprType(mem.Object); ot.IsObject {
+				if _, _, ok := ot.FieldIndex(WSMsgBytesField); ok {
+					objVal, err := e.emitExpr(mem.Object)
+					if err != nil {
+						return Value{}, err
+					}
+					return e.emitWSMsgDataBytes(objVal, ex.GetPos())
+				}
+			}
 		}
 		// User-defined class method call: instance.method(args). Checked
 		// before the long unguarded mem.Property == "<name>" chain below
@@ -858,12 +878,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "http__kml_builtin" {
 			switch mem.Property {
-			case "listen":
-				return e.emitHTTPListen(ex.Args, ex.GetPos())
-			case "close":
-				return e.emitHTTPClose(ex.Args, ex.GetPos())
-			case "closeAllConnections":
-				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
+			case "listen", "close", "closeAllConnections":
+				// Bespoke server functions moved to klain:http (ADR-00635) — Node
+				// has these as Server methods, not `http.*` functions.
+				return Value{}, fmt.Errorf("%d:%d: http.%s is not a Node API — use `http.createServer(handler).listen(port)` for the faithful server, or import the bespoke handler-returns-response model from klain:http: `import http from 'klain:http'`", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
 			case "get", "request":
 				return e.emitHTTPClientGet(ex.Args, ex.GetPos(), mem.Property == "request")
 			case "createServer":
@@ -872,6 +890,21 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// handle form (TDD-00131 follow-on).
 				return e.emitHTTPCreateServer(ex.Args, ex.GetPos())
 			}
+		}
+		// klain:http — the bespoke handler-returns-response server model
+		// (`listen`/`close`/`closeAllConnections`), on its own marker so it is
+		// reachable ONLY via `import … from 'klain:http'`, not the Node `http`
+		// namespace (ADR-00635). Same implementations as http's former ones.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "klainhttp__kml_builtin" {
+			switch mem.Property {
+			case "listen":
+				return e.emitHTTPListen(ex.Args, ex.GetPos())
+			case "close":
+				return e.emitHTTPClose(ex.Args, ex.GetPos())
+			case "closeAllConnections":
+				return e.emitHTTPCloseAllConnections(ex.Args, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: klain:http has no method '%s' (supported: listen, close, closeAllConnections) — the Node client/server surface (createServer/get/request) is under 'http'", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "diagch__kml_builtin" {
 			return e.emitDiagChModuleCall(mem.Property, ex.Args, ex.GetPos())
@@ -1574,6 +1607,23 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			}
 		}
 		return Value{}, fmt.Errorf("%d:%d: %s has no method '%s'", ex.GetPos().Line, ex.GetPos().Col, recv, mem.Property)
+	}
+
+	// A callee that is an arbitrary expression producing a callable value — a
+	// factory-returned decorator `@tag(...)` (which lowers to `(tag(...))(args)`,
+	// TDD-00161), `getHandler()(x)`, or a function pulled out of an any-typed
+	// value — is evaluated and called through. Last, after every named-function/
+	// method/closure-variable/arrow/IIFE form above, so those keep their specific
+	// paths and diagnostics; member callees already returned above.
+	if calleeTy := e.inferExprType(ex.Callee); calleeTy.IsFunc || calleeTy.IsDynamic {
+		calleeVal, err := e.emitExpr(ex.Callee)
+		if err != nil {
+			return Value{}, err
+		}
+		if calleeVal.Ty.IsFunc {
+			return e.emitClosureCallByPtr(calleeVal.Ref, calleeVal.Ty, ex.Args, ex.GetPos())
+		}
+		return e.emitDynCallValue(calleeVal, ex.Args, ex.GetPos())
 	}
 
 	return Value{}, fmt.Errorf("%d:%d: only simple function calls are supported (the callee is not a named function, a function value, or a supported method)", ex.GetPos().Line, ex.GetPos().Col)

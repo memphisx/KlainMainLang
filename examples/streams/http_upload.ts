@@ -3,7 +3,7 @@
 // req.stream() — bodies larger than the buffered path's 10 MiB cap flow
 // through without ever being held in memory whole. The in-process client
 // uploads 12 MiB through fetch to prove it end to end.
-import http from 'http';
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 async function tally(req: HttpRequest): Promise<string> {
   let total = 0;

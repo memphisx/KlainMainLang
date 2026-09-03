@@ -12,7 +12,7 @@
 // exit), not just that process.exit() works. Try it interactively too: run
 // this and press Ctrl-C instead of waiting for the scheduled self-signal.
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 let requestCount = 0
 

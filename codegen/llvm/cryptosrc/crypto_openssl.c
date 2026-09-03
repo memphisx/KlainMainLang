@@ -24,6 +24,7 @@ static const EVP_MD *kml_md(long long hashId) {
     case 2: return EVP_sha256();
     case 3: return EVP_sha384();
     case 4: return EVP_sha512();
+    case 5: return EVP_md5(); /* crypto.createHash('md5') — TDD-00159 */
     }
     return NULL;
 }
@@ -117,8 +118,89 @@ static const char *kml_md_name(long long hashId) {
     case 2: return "SHA256";
     case 3: return "SHA384";
     case 4: return "SHA512";
+    case 5: return "MD5"; /* crypto.createHmac('md5') — TDD-00159 */
     }
     return NULL;
+}
+
+/* Streaming digest — crypto.createHash's Hash object (ADR-00637): a real
+ * EVP_MD_CTX so update()/digest() hash incrementally rather than buffering. */
+void *__kml_crypto_hash_new(long long hashId) {
+    const EVP_MD *md = kml_md(hashId);
+    EVP_MD_CTX *ctx;
+    if (!md) return NULL;
+    ctx = EVP_MD_CTX_new();
+    if (!ctx) return NULL;
+    if (!EVP_DigestInit_ex(ctx, md, NULL)) { EVP_MD_CTX_free(ctx); return NULL; }
+    return ctx;
+}
+
+long long __kml_crypto_hash_update(void *ctx, const unsigned char *data,
+                                   long long len) {
+    if (!ctx) return -1;
+    return EVP_DigestUpdate((EVP_MD_CTX *)ctx, data, (size_t)len) ? 0 : -1;
+}
+
+long long __kml_crypto_hash_final(void *ctx, unsigned char *out,
+                                  long long *outLen) {
+    unsigned int n = 0;
+    int ok;
+    if (!ctx) return -1;
+    ok = EVP_DigestFinal_ex((EVP_MD_CTX *)ctx, out, &n);
+    EVP_MD_CTX_free((EVP_MD_CTX *)ctx);
+    if (!ok) return -1;
+    *outLen = (long long)n;
+    return 0;
+}
+
+/* Streaming HMAC — crypto.createHmac's Hmac object (ADR-00637). Wrap the
+ * EVP_MAC and its ctx so both free together at final(). */
+struct kml_hmac_stream { EVP_MAC *mac; EVP_MAC_CTX *ctx; };
+
+void *__kml_crypto_hmac_new(long long hashId, const unsigned char *key,
+                            long long keyLen) {
+    const char *mdName = kml_md_name(hashId);
+    struct kml_hmac_stream *w;
+    OSSL_PARAM params[2];
+    if (!mdName) return NULL;
+    w = (struct kml_hmac_stream *)malloc(sizeof(*w));
+    if (!w) return NULL;
+    w->mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    if (!w->mac) { free(w); return NULL; }
+    w->ctx = EVP_MAC_CTX_new(w->mac);
+    if (!w->ctx) { EVP_MAC_free(w->mac); free(w); return NULL; }
+    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+                                                 (char *)mdName, 0);
+    params[1] = OSSL_PARAM_construct_end();
+    if (!EVP_MAC_init(w->ctx, key, (size_t)keyLen, params)) {
+        EVP_MAC_CTX_free(w->ctx);
+        EVP_MAC_free(w->mac);
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+long long __kml_crypto_hmac_update(void *h, const unsigned char *data,
+                                   long long len) {
+    struct kml_hmac_stream *w = (struct kml_hmac_stream *)h;
+    if (!w) return -1;
+    return EVP_MAC_update(w->ctx, data, (size_t)len) ? 0 : -1;
+}
+
+long long __kml_crypto_hmac_final(void *h, unsigned char *out,
+                                  long long *outLen) {
+    struct kml_hmac_stream *w = (struct kml_hmac_stream *)h;
+    size_t n = 0;
+    int ok;
+    if (!w) return -1;
+    ok = EVP_MAC_final(w->ctx, out, &n, 64);
+    EVP_MAC_CTX_free(w->ctx);
+    EVP_MAC_free(w->mac);
+    free(w);
+    if (!ok) return -1;
+    *outLen = (long long)n;
+    return 0;
 }
 
 long long __kml_crypto_hmac_sign(long long hashId, const unsigned char *key,

@@ -132,16 +132,17 @@ func wsRecvFrame(t *testing.T, conn net.Conn) (opcode int, payload []byte) {
 func TestE2EWSHandshakeAndEcho(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8975, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("echo: " + ev.data)
     }
-  }
 })
+server.listen(8975)
 `
 	startHTTPServer(t, src, 8975)
 
@@ -165,16 +166,17 @@ http.listen(8975, (req: HttpRequest): Res => {
 func TestE2EWSExtendedLength(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8976, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("echo: " + ev.data)
     }
-  }
 })
+server.listen(8976)
 `
 	startHTTPServer(t, src, 8976)
 
@@ -200,16 +202,17 @@ http.listen(8976, (req: HttpRequest): Res => {
 func TestE2EWSCoexistsWithNormalHTTP(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8977, (req: HttpRequest): Res => {
-  return { status: 200, body: "plain http: " + req.path }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("plain http: " + req.path)
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("ws: " + ev.data)
     }
-  }
 })
+server.listen(8977)
 `
 	startHTTPServer(t, src, 8977)
 
@@ -241,16 +244,17 @@ http.listen(8977, (req: HttpRequest): Res => {
 func TestE2EWSCloseFrameEndsConnectionCleanly(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8978, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("echo: " + ev.data)
     }
-  }
 })
+server.listen(8978)
 `
 	startHTTPServer(t, src, 8978)
 
@@ -300,16 +304,17 @@ http.listen(8978, (req: HttpRequest): Res => {
 func TestE2EWSPingPong(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8979, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("got onmessage: " + ev.data)
     }
-  }
 })
+server.listen(8979)
 `
 	startHTTPServer(t, src, 8979)
 
@@ -347,11 +352,12 @@ http.listen(8979, (req: HttpRequest): Res => {
 func TestE2EWSServerInitiatedClose(t *testing.T) {
 	src := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8980, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       if (ev.data === "bye") {
         socket.close()
@@ -359,8 +365,8 @@ http.listen(8980, (req: HttpRequest): Res => {
         socket.send("echo: " + ev.data)
       }
     }
-  }
 })
+server.listen(8980)
 `
 	startHTTPServer(t, src, 8980)
 
@@ -418,16 +424,17 @@ func runClientWithTimeout(t *testing.T, src string, timeout time.Duration) strin
 func TestE2EWebSocketClientAgainstServer(t *testing.T) {
 	serverSrc := `
 import http from 'http'
-interface Res { status: number; body: string }
-http.listen(8981, (req: HttpRequest): Res => {
-  return { status: 200, body: "not a websocket request" }
-}, {
-  ws: (socket: WSConnection) => {
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
     socket.onmessage = (ev) => {
       socket.send("echo: " + ev.data)
     }
-  }
 })
+server.listen(8981)
 `
 	startHTTPServer(t, serverSrc, 8981)
 
@@ -453,6 +460,57 @@ setTimeout(() => {
 `
 	out := runClientWithTimeout(t, clientSrc, 8*time.Second)
 	want := "readyState right after construction: 0\nonopen\nonmessage: echo: hello from client\nonclose"
+	if out != want {
+		t.Errorf("client output:\ngot:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestE2EWebSocketBinaryRoundTrip verifies binary frames (TDD-00160) end to
+// end: the client sends a Uint8Array (a masked binary frame, opcode 2), the
+// server reads it byte-exact via ev.dataBytes() — the embedded 0 byte proves
+// the payload survives past a NUL, unlike the strlen `ev.data` view — and
+// echoes those raw bytes back as its own (unmasked) binary frame; the client
+// then sees ev.isBinary true and reads the four bytes back verbatim.
+func TestE2EWebSocketBinaryRoundTrip(t *testing.T) {
+	serverSrc := `
+import http from 'http'
+import { WebSocketServer } from 'klain:ws'
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.writeHead(200); res.end("not a websocket request")
+})
+const wss = new WebSocketServer({ server })
+wss.on('connection', (socket: WSConnection) => {
+    socket.onmessage = (ev) => {
+      socket.send(ev.dataBytes())
+    }
+})
+server.listen(8983)
+`
+	startHTTPServer(t, serverSrc, 8983)
+
+	clientSrc := `
+const ws = new WebSocket("ws://127.0.0.1:8983/")
+ws.onopen = () => {
+  const payload = new Uint8Array([1, 0, 2, 255])
+  ws.send(payload)
+}
+ws.onmessage = (ev) => {
+  const bytes = new Uint8Array(ev.dataBytes())
+  console.log("isBinary: " + ev.isBinary)
+  console.log("len: " + bytes.length)
+  console.log("bytes: " + bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3])
+  ws.close()
+}
+ws.onclose = () => {
+  process.exit(0)
+}
+setTimeout(() => {
+  console.log("SAFETY TIMEOUT — should not be reached")
+  process.exit(1)
+}, 4000)
+`
+	out := runClientWithTimeout(t, clientSrc, 8*time.Second)
+	want := "isBinary: true\nlen: 4\nbytes: 1,0,2,255"
 	if out != want {
 		t.Errorf("client output:\ngot:\n%s\nwant:\n%s", out, want)
 	}

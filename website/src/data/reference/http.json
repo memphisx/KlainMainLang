@@ -5,7 +5,7 @@
   "statusPage": "HTTP-SERVER.md",
   "coversRows": "all",
   "coverage": { "loose": "16/16", "loosePct": 100, "strict": "14/16", "strictPct": 88 },
-  "lede": "Two server APIs share one engine. http.createServer((req, res) => …) is the real Node.js shape — portable to Node unchanged, currently a V1 res subset. http.listen(handler => response) is this project's own re-imagining, also reachable as klain:http: a handler returns a { status, body, headers } object. Both run one fiber per connection on the shared select() event loop, so a slow connection never blocks the others. Everything below the two createServer rows is the http.listen model.",
+  "lede": "Two server APIs share one engine. http.createServer((req, res) => …) is the real Node.js shape — portable to Node unchanged, currently a V1 res subset. The bespoke model where a handler returns a { status, body, headers } object is this project's own re-imagining, reachable only via the explicitly-non-Node klain:http specifier (`import http from 'klain:http'`) — it is no longer on the Node http namespace. Both run one fiber per connection on the shared select() event loop, so a slow connection never blocks the others. Everything below the two createServer rows is the klain:http model.",
   "entries": [
     {
       "id": "http.createServer",
@@ -28,33 +28,33 @@
     {
       "id": "http.server",
       "name": "const server = http.createServer(cb?)",
-      "statusRow": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request', cb)`",
-      "signature": "server.listen(port?, cb?); server.close(cb?); server.address(); server.on('request', cb)",
+      "statusRow": "`const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)`",
+      "signature": "server.listen(port?, cb?); server.close(cb?); server.address(); server.on('request'/'upgrade', cb)",
       "badge": "caveats",
       "description": "The standard Node idiom: bind to a variable, .listen(0) for an ephemeral port, read .address().port, .close() from inside the loop. The chained form const server = http.createServer(cb).listen(0, readyCb) also works — the handle is stored before the ready callback runs, so server.address().port is valid inside it.",
       "exampleKey": "http/create_server_handle",
       "snippet": "const server = http.createServer((req, res) => {\n  res.writeHead(200); res.end(\"hi\")\n})\nserver.listen(0, () => {\n  const port: number = server.address().port\n  setTimeout(() => server.close(), 100)\n})",
       "differences": [
         "`server.listen` is **non-blocking** — it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback fires synchronously at `listen()` time rather than on a later tick. (The bespoke `http.listen` below stays blocking.)",
-        "`.on` supports only the `'request'` event (one listener); no `'close'`/`'error'`/`'connection'`/`'listening'` events."
+        "`.on` supports `'request'` (one listener), `'stream'`, `'listening'`, and the Node-faithful `'upgrade'` event (`(req, socket, head)` — `socket` is a `net.Socket`, TLS-backed on an `https` server so `wss://` falls out); no `'close'`/`'error'`/`'connection'`/`'clientError'` events."
       ],
       "seeAlso": ["http.createServer", "http.close"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#class-httpserver" }
     },
     {
       "id": "http.listen",
-      "name": "http.listen(port, handler)",
-      "statusRow": "`http.listen(port, handler)` — bind, accept, dispatch (bespoke; also `klain:http`)",
-      "signature": "http.listen(port: number, handler: (req: HttpRequest) => Res): void",
+      "name": "klain:http — http.listen(port, handler)",
+      "statusRow": "`klain:http`'s `http.listen(port, handler)` — bind, accept, dispatch (bespoke)",
+      "signature": "import http from 'klain:http'; http.listen(port: number, handler: (req: HttpRequest) => Res): void",
       "badge": "exact",
-      "description": "This project's own server model — a handler returns a { status, body, headers } object rather than writing to a res. One fiber per accepted connection (ucontext.h), so a slow connection never blocks the others, running on the shared select() event loop alongside timers, fetch, and the other socket APIs. Also importable as klain:http.",
+      "description": "This project's own server model, under the explicitly-non-Node klain:http specifier — a handler returns a { status, body, headers } object rather than writing to a res. One fiber per accepted connection (ucontext.h), so a slow connection never blocks the others, running on the shared select() event loop alongside timers, fetch, and the other socket APIs. Not on the Node http namespace: `import http from 'klain:http'`.",
       "params": [
         { "name": "port", "type": "number", "desc": "Port to bind." },
         { "name": "handler", "type": "(req: HttpRequest) => Res", "desc": "Returns an object with status / body / optional headers." }
       ],
       "returns": { "type": "void", "desc": "Blocks until http.close()." },
       "exampleKey": "http/http_server",
-      "snippet": "http.listen(8080, (req: HttpRequest): Res => {\n  const name = req.query.has('name') ? req.query.get('name') : 'stranger'\n  return { status: 200, body: 'hello, ' + name }\n})",
+      "snippet": "import http from 'klain:http'\nhttp.listen(8080, (req: HttpRequest): Res => {\n  const name = req.query.has('name') ? req.query.get('name') : 'stranger'\n  return { status: 200, body: 'hello, ' + name }\n})",
       "seeAlso": ["http.listen.workers", "http.req.method", "http.close"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener" }
     },

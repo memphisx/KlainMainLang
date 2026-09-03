@@ -14,7 +14,7 @@
 //   curl -H "X-Greeting: hi" "http://localhost:8080/hello?name=world"
 //   curl -X POST -d '{"k":"v"}' "http://localhost:8080/echo"
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number

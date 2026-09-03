@@ -60,7 +60,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// is the current `http.listen(handler ⇒ response)` server model, which is
 	// NOT Node's `http.createServer` shape — kept intentionally, on the same
 	// runtime, under an explicitly-non-Node specifier.
-	"klain:http":    "http__kml_builtin",
+	// klain:http gets its OWN marker (distinct from http's) so codegen can tell
+	// a bespoke `listen`/`close`/`closeAllConnections` call apart by its import
+	// origin — the same implementation, but only reachable through klain:http
+	// (ADR-00635). http and klain:http sharing one marker is what previously let
+	// `http.listen` slip through the http namespace.
+	"klain:http":    "klainhttp__kml_builtin",
 	// TDD-00142: the system-webview desktop-window module. `Webview` binds as
 	// identity (a parse-time constructor, like stream's class names).
 	"klain:webview": "webview__kml_builtin",
@@ -82,6 +87,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// (marker-dispatched); `Channel` binds as identity (a parse-time
 	// constructor, like Webview / stream class names).
 	"klain:sync": "sync__kml_builtin",
+	// TDD-00158: the WebSocket-server convenience (the ergonomic WSConnection
+	// frame layer the `ws` npm package occupies in Node — non-Node, so under
+	// klain:). `WebSocketServer` binds as identity (a parse-time constructor,
+	// like Webview / Channel / stream class names); it attaches to a Node
+	// http/https server and rides the faithful `'upgrade'` event.
+	"klain:ws": "ws__kml_builtin",
 	"cluster":       "cluster__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
@@ -170,12 +181,18 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"ok": true, "equal": true, "strictEqual": true, "notEqual": true,
 		"notStrictEqual": true, "fail": true, "throws": true,
 	},
-	"http":       {"listen": true, "close": true, "get": true, "request": true, "createServer": true, "closeAllConnections": true, "Agent": true},
+	// The Node `http` namespace exposes only Node-real members. The bespoke
+	// `listen`/`close`/`closeAllConnections` module-level functions (Node has
+	// these as `Server` methods, not `http.*` functions) live solely under
+	// `klain:http` now (TDD-00158 follow-up / ADR-00635) — importing them from
+	// `http` is a clean "no export" rejection pointing there.
+	"http":       {"get": true, "request": true, "createServer": true, "Agent": true},
 	"klain:http":    {"listen": true, "close": true, "closeAllConnections": true},
 	"klain:webview": {"Webview": true},
 	"klain:assets":  {"embedDir": true},
 	"klain:tty":     {"readByte": true, "readKey": true},
 	"klain:sync":    {"go": true, "Channel": true, "select": true, "defaultCase": true},
+	"klain:ws":      {"WebSocketServer": true},
 	"klain:tui": {
 		"Box": true, "Text": true, "List": true, "Spinner": true,
 		"Progress": true, "TextInput": true,
@@ -194,6 +211,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"crypto": {
 		"generateKeyPair": true, "generateKeyPairSync": true,
 		"randomBytes": true, "randomUUID": true, "getRandomValues": true,
+		"createHash": true, "createHmac": true,
 	},
 	"diagnostics_channel": {"channel": true, "subscribe": true, "unsubscribe": true, "hasSubscribers": true, "tracingChannel": true},
 	"http2": {

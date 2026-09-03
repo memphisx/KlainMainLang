@@ -637,7 +637,7 @@ func (e *Emitter) emitDynProtoWrite(objVal Value, rhs Value, pos ast.Pos) (Value
 // C walker (TDD-00155 Stage 2). Result is `any`: a string box, or undefined
 // when the top-level value is undefined/function (JS returns undefined).
 // A circular structure or a statically-typed value inside the tree throws.
-func (e *Emitter) emitJSONStringifyDynamic(val Value, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitJSONStringifyDynamic(val Value, ind jsonIndent, pos ast.Pos) (Value, error) {
 	boxed, err := e.emitBoxValue(val)
 	if err != nil {
 		return Value{}, err
@@ -648,10 +648,17 @@ func (e *Emitter) emitJSONStringifyDynamic(val Value, pos ast.Pos) (Value, error
 	// extend sub-32-bit arguments, which a bare i8 call arg doesn't guarantee.
 	tagW := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", tagW, tag))
+	// The pretty-print unit (JSON.stringify's `space`) is a compile-time
+	// constant string; an empty unit passes null → compact output, byte-
+	// identical to the pre-pretty path.
+	indentArg := "null"
+	if ind.unit != "" {
+		indentArg = e.internString(ind.unit)
+	}
 	errSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errSlot))
 	s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynjson_stringify(i64 %s, i64 %s, ptr %s)", s, tagW, payload, errSlot))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynjson_stringify(i64 %s, i64 %s, ptr %s, ptr %s)", s, tagW, payload, indentArg, errSlot))
 	errv := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", errv, errSlot))
 
@@ -833,6 +840,16 @@ func (e *Emitter) emitDynObjLiteral(lit *ast.ObjectLiteral) (Value, error) {
 		var boxed Value
 		if nested, ok := prop.Value.(*ast.ObjectLiteral); ok {
 			nv, err := e.emitDynObjLiteral(nested)
+			if err != nil {
+				return Value{}, err
+			}
+			boxed = nv
+		} else if nested, ok := prop.Value.(*ast.ArrayLiteral); ok {
+			// A nested array literal must recurse into a dynamic array (tag 11),
+			// symmetric to emitDynArrLiteral's handling of nested object/array
+			// literals — otherwise it is built as a static array boxed as any,
+			// which neither dynamic member access nor JSON.stringify can walk.
+			nv, err := e.emitDynArrLiteral(nested)
 			if err != nil {
 				return Value{}, err
 			}

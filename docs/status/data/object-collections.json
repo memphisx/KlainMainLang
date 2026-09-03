@@ -108,11 +108,13 @@
             ]
           },
           {
-            "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty`",
+            "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty` + `defineMetadata`/`getMetadata`/`hasMetadata`",
             "status": "implemented",
             "caveats": [
               "`Reflect.apply` / `Reflect.construct` are missing",
-              "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec; targets must be dynamic objects"
+              "The metadata API (`defineMetadata`/`getMetadata`/`getOwnMetadata`/`hasMetadata`/`hasOwnMetadata`, TDD-00161 Stage 3) stores on a dynamic-object target and does not walk the prototype chain (so `get` == `getOwn`); `Reflect.metadata` as a decorator factory is rejected",
+              "Boolean-returning forms (`set`/`deleteProperty`/`setPrototypeOf`) return the success flag rather than throwing, per spec",
+              "Every form requires a dynamic (`any`-typed, or `-compat=js`) target: a statically-typed object operand is a clean compile-time rejection (strict mode does not widen a typed struct to a bag, [ADR-00630](../adr/ADR-00630.md)), including `get`/`has`"
             ]
           },
           {

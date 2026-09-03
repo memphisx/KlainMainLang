@@ -500,6 +500,19 @@ type Type struct {
 	// IsDCChannel marks a diagnostics_channel Channel handle.
 	IsDCChannel bool
 	IsNetSocket bool
+	// IsWebSocketServer marks a klain:ws `new WebSocketServer({server})` handle
+	// (TDD-00158 Stage 2). The http server is a process-singleton, so the
+	// handle carries no per-instance state — its only role is to route
+	// `.on('connection', …)` to the WSConnection-handler global.
+	IsWebSocketServer bool
+	// IsHash marks a `crypto.createHash(algo)` Hash handle (TDD-00159): an
+	// opaque ptr to the backend's streaming digest context (EVP_MD_CTX /
+	// CommonCrypto), with `.update(data)` / `.digest(encoding?)` methods.
+	IsHash bool
+	// IsHmac marks a `crypto.createHmac(algo, key)` Hmac handle (ADR-00637):
+	// an opaque ptr to the backend's streaming HMAC context, same
+	// `.update`/`.digest` surface as a Hash.
+	IsHmac bool
 	// IsDgramSocket marks a dgram.createSocket() handle (a ptr to
 	// runtime_dgram.go's dgramSocketIR), for .bind/.on('message')/.send/.close.
 	IsDgramSocket bool
@@ -1310,18 +1323,42 @@ func WSConnectionType() Type {
 	return ty
 }
 
-// WSMessageEventType returns the fixed, concrete payload type an
-// `onmessage` listener is called with (TDD-00039 Stage 1) — just `data`,
-// unlike MessageEventType's SSE-specific `type`/`lastEventId` (which have
-// no WebSocket-frame equivalent). Both text and binary frames are exposed
-// through this same string field: a binary payload with an embedded null
-// byte truncates through ordinary string operations exactly like every
-// other strlen-based string value in this compiler (`req.body`, `fetch`'s
-// `.text()`) — a real, documented V1 narrowing, not a bug; a binary-safe
-// accessor (mirroring `req.bodyBytes()`) is a real, undesigned follow-on.
+// WSMsgBytesField / WSMsgLenField are the two hidden fields backing
+// `ev.dataBytes()` — the raw frame payload pointer and its exact byte length,
+// carried alongside the strlen-terminated `data` string view so a binary
+// frame is recoverable byte-exact past an embedded NUL (TDD-00160). Hidden
+// (`__kml_` prefix) so they never surface via VisibleFields()/Object.keys/
+// JSON, the same convention WSConnFdField uses.
+const (
+	WSMsgBytesField = "__kml_ws_msg_bytes"
+	WSMsgLenField   = "__kml_ws_msg_len"
+)
+
+// WSMessageEventType returns the fixed, concrete payload type an `onmessage`
+// listener is called with (TDD-00039 Stage 1, extended for binary frames in
+// TDD-00160). Unlike MessageEventType's SSE-specific `type`/`lastEventId`
+// (no WebSocket-frame equivalent), it carries:
+//   - `data` — a string view of the payload. For a text frame, the message;
+//     for a binary frame, the same strlen-terminated view (truncating at an
+//     embedded NUL, exactly like `req.body`) — no longer the *only* reader.
+//   - `isBinary` — `true` for a binary frame (opcode 2), `false` for text
+//     (opcode 1); the Node `ws` `('message', (data, isBinary) => …)`
+//     discriminant, exposed as a field to keep the browser-style single
+//     `onmessage` callback ABI.
+//   - `dataBytes()` — a method (wired in emit_call.go, not a field) wrapping
+//     the hidden WSMsgBytesField/WSMsgLenField into an `ArrayBuffer`,
+//     byte-exact, no NUL truncation — mirrors `req.bodyBytes()`.
+//
+// The browser-faithful `data: string | ArrayBuffer` union is deliberately
+// not used: `ArrayBuffer` is not an allowed union member (emit_dynamic.go),
+// so a union-typed `data` is a separate type-system arc; observable
+// semantics (every byte recoverable) are faithful regardless.
 func WSMessageEventType() Type {
 	return ObjectType([]Field{
 		{Name: "data", Ty: TypePtr},
+		{Name: "isBinary", Ty: TypeBool},
+		{Name: WSMsgBytesField, Ty: TypePtr},
+		{Name: WSMsgLenField, Ty: TypeI64},
 	})
 }
 

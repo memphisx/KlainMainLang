@@ -2,7 +2,7 @@
 // body (TDD-00097 Stage 5): the connection stays open while the pull-driven
 // source produces chunks; the server then fetches its own endpoint and
 // consumes the chunks incrementally through fetch's streaming Response.body.
-import http from 'http';
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 async function consume(): Promise<void> {
   const res = await fetch("http://127.0.0.1:8087/");

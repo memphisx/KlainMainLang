@@ -25,6 +25,19 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 				e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", r, d))
 				return e.coerce(Value{Ref: r, Ty: TypeI64}, target)
 			}
+		case target.IR == "ptr" && !target.IsArray:
+			// A dynamic value flowing into a string- (or other single-pointer-)
+			// typed target reinterprets its boxed payload as that pointer:
+			// TS's `any`→`string` (and `any`→object) is an unchecked
+			// assignment with no runtime conversion, so we extract the pointer
+			// the NaN box carries (string kind is 0, so the payload IS the data
+			// pointer) rather than leave the raw i64 word where a `ptr` is
+			// required — which the generic scalar paths below would emit as
+			// invalid IR (`i64` value used where `ptr` is expected).
+			_, payload := e.emitUnboxTagPayload(v)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			return Value{Ref: r, Ty: target}
 		}
 	}
 	// A nullable-scalar aggregate ({ i1, T }, TDD-00064 Stage 3) demotes to its

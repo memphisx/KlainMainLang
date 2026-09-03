@@ -652,3 +652,52 @@ for (const [key, val] of n) { console.log(key, val); }
 for (const v of m) { console.log("val", v); }
 `, "a 1\nb 2\n10 x\nval 1\nval 2")
 }
+
+func TestE2EMapFromHeterogeneousEntriesRejected(t *testing.T) {
+	// ADR-00650: new Map(...) infers its key/value types from the first entry
+	// pair; a later pair with a different key or value type (a mixed-type map
+	// that would need any-typed keys/values, not yet supported) is a clean
+	// compile error rather than storing the mismatched scalar raw into a ptr
+	// field (invalid IR).
+	cases := []string{
+		`const m = new Map([['a', 'b'], [1, 1]]);`,       // key string→number
+		`const m = new Map([['a', 1], ['b', 'c']]);`,     // value number→string
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a clean rejection for a heterogeneous Map entries array, got none for: %s", src)
+		}
+	}
+	// The homogeneous forms still compile and run.
+	assertOutput(t, `
+const s = new Map([['foo', 'bar'], ['baz', 'qux']]);
+console.log(s.get('foo'));
+const n = new Map([[1, 10], [2, 20]]);
+console.log(n.get(2));
+`, "bar\n20")
+}
+
+func TestE2EArrayOfHeterogeneousRejected(t *testing.T) {
+	// ADR-00650: Array.of(...) builds a homogeneous array (element type from
+	// the first argument), same as an `[...]` literal; a mixed argument set
+	// (`Array.of(undefined, false, null)` — an any[] the compiler doesn't yet
+	// support) is rejected cleanly rather than storing a scalar raw into a ptr
+	// slot (invalid IR).
+	cases := []string{
+		`const a = Array.of(1, 'x');`,
+		`const a = Array.of(undefined, false, null);`,
+		`const a = Array.of('s', 3);`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a clean rejection for a heterogeneous Array.of, got none for: %s", src)
+		}
+	}
+	// Homogeneous Array.of still compiles and runs.
+	assertOutput(t, `
+const a = Array.of(1, 2, 3);
+console.log(a[0] + a[2]);
+const b = Array.of('x', 'y');
+console.log(b[1]);
+`, "4\ny")
+}

@@ -232,9 +232,11 @@ func TestPrivateName(t *testing.T) {
 }
 
 func TestUnexpectedCharError(t *testing.T) {
-	_, err := lexer.Tokenize("@bad")
+	// `\` outside a string/template is not a valid token start (`@` now lexes
+	// as the decorator prefix, TDD-00161).
+	_, err := lexer.Tokenize("\\bad")
 	if err == nil {
-		t.Fatal("expected error for '@', got nil")
+		t.Fatal("expected error for '\\', got nil")
 	}
 }
 

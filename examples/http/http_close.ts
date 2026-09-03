@@ -15,7 +15,7 @@
 //   curl "http://localhost:8081/shutdown"   # graceful: stop accepting, let in-flight finish
 //   curl "http://localhost:8081/drain"      # forceful: stop accepting + drop in-flight now
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number

@@ -145,6 +145,29 @@ console.log(JSON.stringify(o.missing))
 `, "{\"keep\":1}\n[1,\"two\",null,3.5]\nundefined")
 }
 
+func TestE2EDynJSONStringifyPrettySpace(t *testing.T) {
+	// TDD-00077 P4: JSON.stringify of a dynamic (any-typed) value honors the
+	// `space` argument, byte-identical to the statically-typed pretty path and
+	// to Node — nested tag-10 bags and tag-11 arrays indent, empties stay inline.
+	assertOutput(t, `
+const v: any = JSON.parse('{"a":1,"b":[2,3],"c":{"d":4},"e":{},"f":[]}')
+console.log(JSON.stringify(v, null, 2))
+`, "{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ],\n  \"c\": {\n    \"d\": 4\n  },\n  \"e\": {},\n  \"f\": []\n}")
+}
+
+func TestE2EDynJSONNestedArrayLiteralInObject(t *testing.T) {
+	// Regression: a nested array literal inside an any-typed object literal must
+	// recurse into a dynamic array (tag 11), symmetric to a nested object
+	// literal — so it is navigable dynamically and walkable by JSON.stringify,
+	// not built as a static array boxed as any (which the dynamic walker rejects).
+	assertOutput(t, `
+const o: any = { name: "x", vals: [1, 2, [3, 4]], meta: { tags: ["a"], n: 5 } }
+console.log(JSON.stringify(o))
+console.log(o.vals[2][1])
+console.log(o.meta.tags[0])
+`, "{\"name\":\"x\",\"vals\":[1,2,[3,4]],\"meta\":{\"tags\":[\"a\"],\"n\":5}}\n4\na")
+}
+
 func TestE2EDynJSONErrors(t *testing.T) {
 	assertOutput(t, `
 try { JSON.parse("{bad") } catch (e) { console.log("caught:", e.name) }

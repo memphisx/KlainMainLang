@@ -989,15 +989,15 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		ownDeclared := make(map[string]bool, len(cd.Methods))
 		ownStaticDeclared := make(map[string]bool, len(cd.Methods))
 		for _, m := range cd.Methods {
-			// Reserved-method-name collision (TDD-00023): a class in an
-			// EventEmitter-rooted tree cannot declare any of EventEmitter's
-			// own method names — those are hand-written codegen dispatched
-			// by name (emit_call.go), never real AST-driven class methods,
-			// so there is no vtable slot for them to occupy and no
-			// "override an EventEmitter method" interaction to support.
-			if !m.IsStatic && hasEventEmitter && isEventEmitterMethodName(m.Name) {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — reserved by EventEmitter<T>", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
-			}
+			// Overriding an EventEmitter method (TDD-00157): a class in an
+			// EventEmitter-rooted tree MAY declare any of EventEmitter's own
+			// method names to override the hand-written built-in dispatch.
+			// The declaration flows through the ordinary MethodSigs/vtable
+			// path below; emit_call.go's member dispatch already prefers a
+			// real MethodSig over the HasEventEmitter built-in branch, so the
+			// override wins at every call site, and an override body reaches
+			// the underlying behavior via super.<method>(...) (routed to the
+			// built-in in emitSuperMethodCall). No rejection here anymore.
 			// Node-stream classes (TDD-00132) hand-dispatch on/push/pipe/…
 			// by name (emit_call.go) against the hidden stream handle, never
 			// a real vtable slot — but the `_read`/`_write`/`_transform`
@@ -1290,7 +1290,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				cd.Constructor.Body.Body = spliced
 			}
 
-		case len(ownFields) > 0 && (baseCtor == nil || !baseCtorSig.HasRest):
+		case (len(ownFields) > 0 || (e.standardDecorators() && classHasStandardDecorators(cd))) && (baseCtor == nil || !baseCtorSig.HasRest):
+			// A standard-decorated class needs a constructor even with no fields,
+			// so its per-instance decorator effects (field-init transforms,
+			// addInitializer callbacks) run in the constructor tail (TDD-00161
+			// Stage 5).
 			// TDD-00063 Stage 1 (relaxed, ADR-00373): a class with own fields
 			// and no explicit constructor no longer needs *every* field to carry
 			// an initializer — synthesize a constructor that runs whatever
@@ -1446,6 +1450,26 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 // nearest ancestor's own function instead.
 func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 	info := e.classes[cd.Name]
+	// TDD-00161: class decorators run on a non-generic class (Stage 4). A
+	// generic class's per-instantiation monomorphization has no single
+	// decorator target, so a decorated generic class is a clean rejection.
+	if len(cd.Decorators) > 0 && len(cd.TypeParams) > 0 {
+		return fmt.Errorf("%d:%d: a decorator on a generic class is not yet supported", cd.GetPos().Line, cd.GetPos().Col)
+	}
+	for _, m := range cd.Methods {
+		if len(m.Decorators) == 0 || methodDecoratorSupported(cd, m) {
+			continue
+		}
+		// The standard dialect additionally supports instance getter/setter
+		// decorators (routed through the accessor slot).
+		if e.standardDecorators() && m.AccessorKind != "" && !m.IsStatic && len(cd.TypeParams) == 0 {
+			continue
+		}
+		return fmt.Errorf("%d:%d: a decorator on this member is not yet supported — accessor (get/set), static, and generator method decorators, and decorators on a generic class's methods, are the unsupported cases; a plain instance method decorator is supported", m.GetPos().Line, m.GetPos().Col)
+	}
+	if len(cd.AutoAccessors) > 0 && !e.standardDecorators() {
+		return fmt.Errorf("%d:%d: an `accessor` auto-field decorator is a standard (TC39) decorator — compile with -decorators=standard", cd.GetPos().Line, cd.GetPos().Col)
+	}
 	if info.Constructor != nil {
 		llvmName := cd.Name + "_constructor"
 		e.currentCtorClass = cd.Name
@@ -1759,6 +1783,17 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		}
 	}
 
+	// TDD-00161 Stage 5: standard-dialect per-instance construction effects
+	// (field-initializer transforms + addInitializer callbacks) run at the end
+	// of the constructor. e.currentCtorClass is set only while emitting a
+	// constructor, so this is a no-op for methods. Skipped if the body already
+	// terminated (e.g. an unconditional throw).
+	if e.currentCtorClass != "" && !e.blockDone {
+		if err := e.emitStandardConstructorTail(e.currentCtorClass); err != nil {
+			return err
+		}
+	}
+
 	if isAsync {
 		e.emitInlineAsyncEpilogue()
 		e.functions.WriteString(fmt.Sprintf("\ndefine ptr @%s(%s) {\nentry:\n",
@@ -1831,6 +1866,12 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	// new Proxy(target, handler) — TDD-00155 Stage 7, not a user class.
 	if ex.ClassName == "Proxy" {
 		return e.emitNewProxy(ex)
+	}
+	// new WebSocketServer({ server }) — klain:ws (TDD-00158 Stage 2), not a
+	// user class. Returns a handle whose .on('connection', …) registers the
+	// per-connection WSConnection handler.
+	if ex.ClassName == "WebSocketServer" && e.usedKlainWS {
+		return e.emitNewWebSocketServer(ex)
 	}
 	className := ex.ClassName
 	info, ok := e.classes[ex.ClassName]
@@ -2152,6 +2193,15 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			return Value{}, err
 		}
 	}
+	// TDD-00161 Stage 2: a decorated method's calls route through its runtime
+	// slot so a decorator that replaced the descriptor's `value` takes effect.
+	// A `super.method()` call (forceDirect) deliberately bypasses this — it
+	// targets the parent implementation directly, not the instance's descriptor.
+	if !forceDirect {
+		if slot, ok := e.decoratedMethodSlots[implementor][methodName]; ok {
+			return e.emitDecoratedMethodCall(objTy, thisVal, methodName, args, slot, pos)
+		}
+	}
 	// Generator method (TDD-00063 Stage 2b): calling it constructs a generator
 	// instance (receiver stored into __this, args into __paramN), not an
 	// ordinary method call — the returned value is the generator, iterated via
@@ -2276,8 +2326,23 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
+		// A function-typed parameter contextually types an untyped arrow /
+		// function-expression argument's parameters from its own declared
+		// signature — the same hint propagation the free-function call path
+		// (emitExprWithObjectHint) already applies. Without it, a class
+		// method's callback argument (`bus.on("x", (a, b) => ...)` against a
+		// `(a: string, b: number) => void` parameter) left its untyped params
+		// to self-infer to the ADR-00042 default, silently mis-decoding the
+		// callback's arguments — a real pre-existing bug, independent of
+		// TDD-00157's EventEmitter overrides that surfaced it.
 		scratch.enter(fromDefault)
-		val, err := e.emitExpr(a)
+		var val Value
+		var err error
+		if paramTy.IsFunc {
+			val, err = e.emitExprWithObjectHint(a, paramTy)
+		} else {
+			val, err = e.emitExpr(a)
+		}
 		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
@@ -2429,6 +2494,23 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 		if err := e.checkMemberVisibility(implementor, vis, "method", methodName, pos); err != nil {
 			return Value{}, err
 		}
+	}
+	// TDD-00161 Stage 5: a decorated setter routes through its slot (the getter
+	// already routes via emitClassCall's decorated-method path).
+	if slot, ok := e.decoratedMethodSlots[implementor][methodName]; ok {
+		boxedArg, err := e.emitBoxValue(argVal)
+		if err != nil {
+			return Value{}, err
+		}
+		argv := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca [1 x i64], align 8", argv))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxedArg.Ref, argv))
+		fnBox := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fnBox, slot))
+		if _, err := e.emitDynFnBoxCall(Value{Ref: fnBox, Ty: TypeAny}, thisVal, argv, 1, "setter is not a function", pos); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: "0", Ty: TypeVoid}, nil
 	}
 
 	// An array-typed setter parameter decomposes into two LLVM call
@@ -2587,8 +2669,18 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			scratch.bindNullable(i, agg, paramTy)
 			continue
 		}
+		// A function-typed parameter contextually types an untyped arrow /
+		// function-expression argument's parameters from its declared
+		// signature — same hint propagation as emitClassCall and the
+		// free-function path (see ADR-00632).
 		scratch.enter(fromDefault)
-		val, err := e.emitExpr(a)
+		var val Value
+		var err error
+		if paramTy.IsFunc {
+			val, err = e.emitExprWithObjectHint(a, paramTy)
+		} else {
+			val, err = e.emitExpr(a)
+		}
 		scratch.leave(fromDefault)
 		if err != nil {
 			return Value{}, err
@@ -2767,6 +2859,36 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 // "this", only inside a class with a base) to know both the underlying
 // instance pointer and the base's own static type.
 func (e *Emitter) emitSuperMethodCall(methodName string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// EventEmitter method override (TDD-00157): inside an override of an
+	// EventEmitter method, `super.emit(...)` (etc.) must reach the underlying
+	// behavior — either the nearest ancestor that *also* overrides it, or the
+	// hand-written built-in dispatch. This is checked before the `super`
+	// scope lookup because a class directly `extends EventEmitter<T>` has no
+	// registered base and so no bound `super` symbol; the receiver here is
+	// `this`, which is always available inside an instance method.
+	if thisSym, okThis := e.lookup("this"); okThis && isEventEmitterMethodName(methodName) {
+		if encInfo, okEnc := e.classes[thisSym.Ty.ClassName]; okEnc && encInfo.HasEventEmitter {
+			thisReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+			thisVal := Value{Ref: thisReg, Ty: thisSym.Ty}
+			// Nearest ancestor override lives in the base's MethodImplementor
+			// table (which already resolves to the closest implementor at or
+			// below the base). If present, call it directly; otherwise fall to
+			// the built-in against this instance's hidden listener map.
+			if encInfo.BaseClass != "" {
+				if baseInfo, okBase := e.classes[encInfo.BaseClass]; okBase {
+					if _, overridden := baseInfo.MethodImplementor[methodName]; overridden {
+						return e.emitClassCall(baseInfo.Ty, thisVal, methodName, args, pos, true)
+					}
+				}
+			}
+			eeGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", eeGep, encInfo.Ty.StructIR(), thisReg, classEventEmitterFieldIndex(encInfo.Ty)))
+			listenersPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", listenersPtr, eeGep))
+			return e.emitEventEmitterCall(encInfo.EventEmitterPayload, listenersPtr, methodName, args, pos, thisVal)
+		}
+	}
 	superSym, ok := e.lookup("super")
 	if !ok {
 		return Value{}, fmt.Errorf("%d:%d: super.%s(...) is only valid inside a method of a class with a base class", pos.Line, pos.Col, methodName)

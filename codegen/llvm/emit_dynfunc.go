@@ -18,6 +18,7 @@ package llvm
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -62,6 +63,10 @@ func (e *Emitter) emitDynCallable(selfName string, params []ast.Param, bodyStmts
 	bound := map[string]bool{"this": true}
 	addParamBoundNames(bound, params)
 	scanStmtsFV(bodyStmts, bound, refs)
+	// Enclosing locals referenced by the body are captured into the tag-12
+	// record's env (by shared heap cell, exactly like an arrow/closure), read
+	// back in the body below. Sorted for a deterministic env layout.
+	var capNames []string
 	for name := range refs {
 		if name == selfName {
 			continue
@@ -70,8 +75,14 @@ func (e *Emitter) emitDynCallable(selfName string, params []ast.Param, bodyStmts
 			continue
 		}
 		if _, found := e.lookup(name); found {
-			return Value{}, fmt.Errorf("%d:%d: capturing variable '%s' in a dynamic (prototype-method) function is not supported yet", pos.Line, pos.Col, name)
+			capNames = append(capNames, name)
 		}
+	}
+	sort.Strings(capNames)
+	var caps []CapturedVar
+	for _, name := range capNames {
+		sym, _ := e.lookup(name)
+		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
 	}
 
 	fnName := fmt.Sprintf("@__kml_dynfn_%d", e.dynFnCtr)
@@ -148,9 +159,9 @@ func (e *Emitter) emitDynCallable(selfName string, params []ast.Param, bodyStmts
 			e.define(p.Name, Symbol{Ptr: ptrName, Ty: TypeAny})
 			continue
 		}
-		ptrName := "%v_" + p.Name
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", ptrName))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, ptrName))
+		boxSlot := "%v_" + p.Name + "_box"
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", boxSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, boxSlot))
 		have := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%p_argc, %d", have, i))
 		haveL := e.freshLabel("dynfn.arg")
@@ -161,10 +172,43 @@ func (e *Emitter) emitDynCallable(selfName string, params []ast.Param, bodyStmts
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%p_argv, i64 %d", slot, i))
 		v := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v, slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, ptrName))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, boxSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 		e.emitLabel(nextL)
-		e.define(p.Name, Symbol{Ptr: ptrName, Ty: TypeAny})
+		// A parameter with a concrete (non-dynamic) declared type binds as that
+		// type — unbox the received box to it — so the body can do typed
+		// operations (`initial * 2`, a decorator field initializer). An
+		// unannotated / `any` / `unknown` parameter stays a boxed `any`.
+		pty := TypeAny
+		if p.Type != nil {
+			pty = e.resolveType(p.Type)
+		}
+		box := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, boxSlot))
+		if pty.IsDynamic || pty.IR == "" || pty.IsArray || isNullableScalar(pty) {
+			e.define(p.Name, Symbol{Ptr: boxSlot, Ty: TypeAny})
+		} else {
+			uv := e.emitUnboxBoxToType(box, pty)
+			typedSlot := "%v_" + p.Name
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", typedSlot, pty.IR, pty.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", pty.IR, uv.Ref, typedSlot, pty.Align()))
+			e.define(p.Name, Symbol{Ptr: typedSlot, Ty: pty})
+		}
+	}
+
+	// Bind each captured variable to its shared heap cell, read from %env.
+	if len(caps) > 0 {
+		envIR := envStructIR(caps)
+		for i, cap := range caps {
+			slotGep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, envIR, i))
+			cellPtr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
+			sym := cap.Sym
+			sym.Ptr = cellPtr
+			sym.Boxed = true
+			e.define(cap.Name, sym)
+		}
 	}
 
 	e.emitSafepoint()
@@ -184,14 +228,31 @@ func (e *Emitter) emitDynCallable(selfName string, params []ast.Param, bodyStmts
 
 	e.restoreDynFnState(savedAllocas, savedBody, savedRegCtr, savedLabelCtr, savedScopes, savedRetType, savedBlockDone)
 
-	// The tag-12 record: { fnptr, env (null in V1), i64 arity }.
+	// The tag-12 record: { fnptr, env, i64 arity }. env carries the captured
+	// variables' shared heap cells (or null when nothing is captured).
 	e.ensureMalloc()
 	rec := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", rec))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fnName, rec))
 	envSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", envSlot))
+	if len(caps) > 0 {
+		envIR := envStructIR(caps)
+		env := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envStructSize(caps)))
+		for i, cap := range caps {
+			cellPtr := cap.Sym.Ptr
+			if !cap.Sym.Boxed {
+				cellPtr = e.promoteCaptureToCell(cap.Name, cap.Ty, cap.Sym.Ptr, cap.Sym.IsConst)
+			}
+			slotReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, env, i))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, envSlot))
+	} else {
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", envSlot))
+	}
 	aritySlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", aritySlot, rec))
 	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", len(params), aritySlot))
@@ -413,6 +474,64 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, slot))
 	}
 
+	return e.emitDynFnBoxCall(fnBox, objVal, argv, n, propName+" is not a function", pos)
+}
+
+// emitDynCallValue calls a boxed function value (a tag-12 dynamic function)
+// directly, with an `undefined` receiver — the general "call the result of an
+// expression that produced a function value" path (a factory-returned decorator
+// `@tag(...)`, `getHandler()(x)`, a function element read out of an `any`).
+// Boxes the arguments and dispatches through the tag-12 ABI.
+func (e *Emitter) emitDynCallValue(fnBox Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+	n := len(args)
+	argv := e.freshReg()
+	if n > 0 {
+		e.emitAlloca(fmt.Sprintf("%s = alloca [%d x i64], align 8", argv, n))
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", argv))
+	}
+	for i, a := range args {
+		av, err := e.emitExprWithObjectHint(a, TypeAny)
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(av)
+		if err != nil {
+			return Value{}, err
+		}
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, argv, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, gep))
+	}
+	return e.emitDynFnBoxCall(fnBox, Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, argv, n, "value is not a function", pos)
+}
+
+// emitDynFnBoxCallUnchecked calls a boxed value already known to be a tag-12
+// dynamic function (no tag check, no throw), against a pre-built argv and a
+// pre-boxed receiver. Returns the boxed result register. For callers that have
+// already guarded the tag themselves (e.g. the standard-decorator constructor
+// tail), avoiding emitDynFnBoxCall's internal branch/throw.
+func (e *Emitter) emitDynFnBoxCallUnchecked(fnBox, recvBox string, argv string, n int) string {
+	payload := e.freshReg()
+	e.ensureNanBox()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", payload, fnBox))
+	rec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, payload))
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, rec))
+	envSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envSlot))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s, i64 %s, i64 %d, ptr %s)", r, fp, env, recvBox, n, argv))
+	return r
+}
+
+// emitDynFnBoxCall dispatches a boxed function value (tag 12) against a
+// pre-built argv, passing recvVal as the receiver and throwing errMsg on a
+// non-function. Shared by dynamic method calls and bare dynamic-value calls.
+func (e *Emitter) emitDynFnBoxCall(fnBox, recvVal Value, argv string, n int, errMsg string, pos ast.Pos) (Value, error) {
 	tag, payload := e.emitUnboxTagPayload(fnBox)
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resPtr))
@@ -427,7 +546,7 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
 	env := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envSlot))
-	recvBox, err := e.emitBoxValue(objVal)
+	recvBox, err := e.emitBoxValue(recvVal)
 	if err != nil {
 		return Value{}, err
 	}
@@ -436,7 +555,7 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(nextL)
-	e.emitThrowTypeError(fmt.Sprintf("%s is not a function", propName))
+	e.emitThrowTypeError(errMsg)
 	e.emitLabel(doneL)
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resPtr))

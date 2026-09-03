@@ -1143,6 +1143,98 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	return binFile
 }
 
+// assertOutputWithDecoratorMetadata compiles src with
+// -emit-decorator-metadata, runs it, and compares stdout line-by-line
+// (TDD-00161 Stage 3).
+func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	em := llvm.NewEmitter()
+	em.SetEmitDecoratorMetadata(true)
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	if out, err := exec.Command("clang", clangArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(result), "\n"), want)
+}
+
+// assertOutputStandardDecorators compiles src under -decorators=standard, runs
+// it, and compares stdout line-by-line (TDD-00161 Stage 5).
+func assertOutputStandardDecorators(t *testing.T, src, want string) {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
+	}
+	prog, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	em := llvm.NewEmitter()
+	em.SetDecoratorDialect("standard")
+	ir, err := em.EmitProgram(prog)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	dir := t.TempDir()
+	llFile := filepath.Join(dir, "prog.ll")
+	binFile := filepath.Join(dir, "prog")
+	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
+	}
+	clangArgs = appendDtoa(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
+	if out, err := exec.Command("clang", clangArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("clang: %v\n%s", err, out)
+	}
+	result, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(result), "\n"), want)
+}
+
+// compileStandardDecorators compiles src under -decorators=standard and returns
+// any codegen error (for rejection tests).
+func compileStandardDecorators(src string) error {
+	prog, err := parser.Parse(src)
+	if err != nil {
+		return err
+	}
+	em := llvm.NewEmitter()
+	em.SetDecoratorDialect("standard")
+	_, err = em.EmitProgram(prog)
+	return err
+}
+
 // assertOutputCompatJS compiles src under -compat=js, runs it, and compares
 // stdout line-by-line against want.
 func assertOutputCompatJS(t *testing.T, src, want string) {

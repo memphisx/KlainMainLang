@@ -341,6 +341,8 @@ func (l *Lexer) nextToken() (Token, error) {
 			return l.tok(OPTIONAL_DOT, "?.", line, col), nil
 		}
 		return l.tok(QUESTION, "?", line, col), nil
+	case '@':
+		return l.tok(AT, "@", line, col), nil
 	}
 
 	return Token{}, fmt.Errorf("%d:%d: unexpected character %q", line, col, ch)

@@ -148,11 +148,20 @@ static void sb_number(Sb *b, long long tag, long long pay) {
     sb_cstr(b, tmp);
 }
 
+/* sb_indent writes a newline followed by `depth` copies of the indent unit —
+   the pretty-print gap JSON.stringify(x, null, space) inserts before each
+   nested element. Only called when an indent unit is active. */
+static void sb_indent(Sb *b, const char *indent, int depth) {
+    sb_ch(b, '\n');
+    for (int i = 0; i < depth; i++) sb_cstr(b, indent);
+}
+
 /* err: 0 ok, 1 circular, 2 statically-typed value in a dynamic position.
    Returns 1 if a value was written, 0 if it must be skipped (undefined /
-   funcRef in an object position). */
+   funcRef in an object position). `indent` is the pretty-print unit (one
+   level) or NULL/"" for compact output byte-identical to the pre-pretty path. */
 static int stringify_val(Sb *b, long long tag, long long pay,
-                         void **parents, int depth, int *err) {
+                         const char *indent, void **parents, int depth, int *err) {
     switch (tag) {
     case 0:
     case 1:
@@ -190,17 +199,20 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         }
     }
     parents[depth] = (void *)pay;
+    int pretty = indent && indent[0];
     if (tag == 11) {
         char *a = (char *)pay;
         sb_ch(b, '[');
         long long n = arr_len(a);
         for (long long i = 0; i < n; i++) {
             if (i) sb_ch(b, ',');
-            if (!stringify_val(b, arr_tag(a, i), arr_pay(a, i), parents, depth + 1, err)) {
+            if (pretty) sb_indent(b, indent, depth + 1);
+            if (!stringify_val(b, arr_tag(a, i), arr_pay(a, i), indent, parents, depth + 1, err)) {
                 if (*err) return 0;
                 sb_cstr(b, "null"); /* array holes/undefined → null */
             }
         }
+        if (pretty && n) sb_indent(b, indent, depth);
         sb_ch(b, ']');
         return 1;
     }
@@ -230,35 +242,40 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         }
         Sb probe; /* value may be skippable — write to a probe first */
         sb_init(&probe);
-        int ok = stringify_val(&probe, etag, epay, parents, depth + 1, err);
+        int ok = stringify_val(&probe, etag, epay, indent, parents, depth + 1, err);
         if (*err) {
             free(probe.d);
             return 0;
         }
         if (ok) {
             if (wrote) sb_ch(b, ',');
+            if (pretty) sb_indent(b, indent, depth + 1);
             sb_json_string(b, obj_key(o, i));
-            sb_ch(b, ':');
+            sb_cstr(b, pretty ? ": " : ":");
             sb_raw(b, probe.d, probe.len);
             wrote = 1;
         }
         free(probe.d);
     }
+    if (pretty && wrote) sb_indent(b, indent, depth);
     sb_ch(b, '}');
     return 1;
 }
 
 /* __kml_dynjson_stringify serializes one boxed dynamic value (tag passed
    widened to long long — the arm64 ABI wants the caller to extend sub-32-bit
-   arguments, which the IR call site does not guarantee for i8). NULL result
-   with err==0 means the JS result is undefined (top-level undefined/function).
+   arguments, which the IR call site does not guarantee for i8). `indent` is the
+   pretty-print unit (JSON.stringify's `space`) or NULL/"" for compact output.
+   NULL result with err==0 means the JS result is undefined (top-level
+   undefined/function).
    err: 1 = circular structure, 2 = statically-typed value in the tree. */
-char *__kml_dynjson_stringify(long long tag, long long pay, int *err) {
+char *__kml_dynjson_stringify(long long tag, long long pay,
+                              const char *indent, int *err) {
     void *parents[KML_DYN_MAX_DEPTH];
     *err = 0;
     Sb b;
     sb_init(&b);
-    int ok = stringify_val(&b, tag, pay, parents, 0, err);
+    int ok = stringify_val(&b, tag, pay, indent, parents, 0, err);
     if (*err || !ok) {
         free(b.d);
         return NULL;

@@ -202,7 +202,7 @@
       "statusRow": "JSON.parse(s) → any/unknown (dynamic shape)",
       "signature": "const data = JSON.parse(s); // dynamic tree\ndata.server.ports[0]; data.tags.length;",
       "badge": "implemented",
-      "description": "Untyped (or any-annotated) JSON.parse keeps the whole tree as dynamic values: objects become runtime property bags, arrays real dynamic arrays with .length, index reads/writes, and for...in — so member chains like data.server.ports[0] work without a declared shape. JSON.stringify serializes the dynamic tree back (round-trip clean): undefined values are skipped in objects and become null in arrays, and a circular structure throws the Node-matching TypeError. Operations beyond property access on the dynamic values follow the normal any limits until narrowed.",
+      "description": "Untyped (or any-annotated) JSON.parse keeps the whole tree as dynamic values: objects become runtime property bags, arrays real dynamic arrays with .length, index reads/writes, and for...in — so member chains like data.server.ports[0] work without a declared shape. JSON.stringify serializes the dynamic tree back (round-trip clean): undefined values are skipped in objects and become null in arrays, and a circular structure throws the Node-matching TypeError. The space argument pretty-prints a dynamic value byte-identically to the typed path. Operations beyond property access on the dynamic values follow the normal any limits until narrowed.",
       "seeAlso": ["json.parse.object", "json.parse.array"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse" }
     }

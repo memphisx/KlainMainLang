@@ -45,6 +45,10 @@ func (e *Emitter) emitNodeCryptoModuleCall(method string, args []ast.Expression,
 		return e.emitNodeCryptoGenerateKeyPair(args, pos, true)
 	case "generateKeyPairSync":
 		return e.emitNodeCryptoGenerateKeyPair(args, pos, false)
+	case "createHash":
+		return e.emitCryptoCreateHash(args, pos)
+	case "createHmac":
+		return e.emitCryptoCreateHmac(args, pos)
 	}
 	return Value{}, fmt.Errorf("%d:%d: crypto.%s is not supported", pos.Line, pos.Col, method)
 }

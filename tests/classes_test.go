@@ -2386,3 +2386,42 @@ console.log(new Derived(5).id);
 		t.Fatalf("expected 'read-only', got: %v", err)
 	}
 }
+
+// A function-typed method parameter contextually types an untyped arrow
+// argument's parameters from its own declared signature — mirroring the
+// free-function call path. Regression: previously a class method's callback
+// argument left its untyped params to self-infer to the numeric default,
+// silently mis-decoding the callback's arguments (surfaced by TDD-00157's
+// EventEmitter method overrides, but reproduced here with a plain class).
+func TestE2EClassMethodCallbackParamContextualTyping(t *testing.T) {
+	assertOutput(t, `
+class Runner {
+  go(cb: (name: string, value: number) => void): void {
+    cb("cpu", 42);
+  }
+}
+new Runner().go((name, value) => console.log(name + "=" + value));
+`, "cpu=42")
+}
+
+// The same function-typed-parameter contextual-typing fix (ADR-00632)
+// applies to the static-method call path, array .push into a function-typed
+// element, and Map.set with a function-typed value — every site that emits a
+// value against a known target type and could receive an untyped arrow.
+func TestE2ECallbackParamContextualTypingSweep(t *testing.T) {
+	assertOutput(t, `
+class Util {
+  static run(cb: (name: string, value: number) => void): void { cb("cpu", 1); }
+}
+Util.run((name, value) => console.log("static " + name + "=" + value));
+
+const fns: ((name: string, value: number) => void)[] = [];
+fns.push((name, value) => console.log("push " + name + "=" + value));
+fns[0]("mem", 2);
+
+const m = new Map<string, (name: string, value: number) => void>();
+m.set("k", (name, value) => console.log("map " + name + "=" + value));
+const g = m.get("k");
+g("disk", 3);
+`, "static cpu=1\npush mem=2\nmap disk=3")
+}

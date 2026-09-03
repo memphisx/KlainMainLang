@@ -932,6 +932,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			pt.PromiseTask = true
 			return pt
 		}
+		// new WebSocketServer({server}) → the klain:ws handle (TDD-00158).
+		if ex.ClassName == "WebSocketServer" && e.usedKlainWS {
+			return WebSocketServerType()
+		}
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
 		}
@@ -984,10 +988,32 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if mem.Property == "get" && e.inferExprType(mem.Object).IsEmbeddedAssets {
 				return ArrayBufferType()
 			}
+			// WSMessageEvent.dataBytes() → ArrayBuffer (TDD-00160): the
+			// byte-exact accessor for a binary frame, guarded structurally on
+			// the hidden byte field the event type carries.
+			if mem.Property == "dataBytes" {
+				if ot := e.inferExprType(mem.Object); ot.IsObject {
+					if _, _, ok := ot.FieldIndex(WSMsgBytesField); ok {
+						return ArrayBufferType()
+					}
+				}
+			}
 			// node:sqlite (ADR-00540): db.prepare() → StatementSync; the
 			// StatementSync reads take their row shape from an explicit call-site
 			// type argument (`stmt.all<Row>()` / `stmt.get<Row>()`), matching the
 			// Node .d.ts get<T>()/all<T>() signatures.
+			if ot := e.inferExprType(mem.Object); ot.IsHash || ot.IsHmac {
+				switch mem.Property {
+				case "update":
+					return ot // chainable (Hash or Hmac)
+				case "digest":
+					// an encoding → string; omitted → Buffer.
+					if len(ex.Args) == 1 {
+						return TypePtr
+					}
+					return TypedArrayType("uint8")
+				}
+			}
 			if e.inferExprType(mem.Object).IsSQLiteDatabase {
 				switch mem.Property {
 				case "prepare":
@@ -1733,6 +1759,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypedArrayType("uint8")
 				case "randomUUID":
 					return TypePtr
+				case "createHash":
+					return HashType()
+				case "createHmac":
+					return HmacType()
 				}
 				return TypeVoid
 			}

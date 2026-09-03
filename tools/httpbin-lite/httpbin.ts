@@ -13,7 +13,7 @@
 // (`/delay`, `/chunked`) awaits inside the stream's `pull`, so it never blocks
 // the event loop — concurrent requests still overlap.
 
-import http from "http";
+import http from "klain:http"; // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
   status: number;

@@ -100,6 +100,11 @@ type Emitter struct {
 	// restored) per function body, exactly like e.allocas. See capturedLocalNames
 	// and boxHoistedCapture.
 	hoistedCaptures       map[string]bool
+	// widenedBindings names the untyped scalar bindings in the current scope
+	// that -compat=js must back with the any-box from declaration because they
+	// hold two or more distinct scalar kinds over their lifetime (crossType-
+	// WidenedBindings / TDD-00162). Saved/restored per body like hoistedCaptures.
+	widenedBindings       map[string]bool
 	regCtr                int
 	labelCtr              int
 	strConsts             map[string]string // Go string value → @.s<n> name
@@ -292,6 +297,32 @@ type Emitter struct {
 	jsProtoCtor     map[string]bool
 	protoBagEmitted map[string]bool
 	errSubCount     int64
+	// decoratedMethodSlots (TDD-00161 Stage 2) maps class name → method name →
+	// the LLVM global holding that method's current callable (a boxed tag-12
+	// value). A decorated method's call sites route through this slot instead of
+	// a static direct call, so a method decorator that replaces the descriptor's
+	// `value` takes effect. Only ever populated for actually-decorated methods;
+	// every other method keeps the static dispatch path byte-for-byte.
+	decoratedMethodSlots map[string]map[string]string
+	// standardFieldInitSlots (TDD-00161 Stage 5): class → field → the LLVM
+	// global holding that field's standard-decorator initializer (a boxed
+	// callable, or undefined for none). Consulted per-instance in the
+	// constructor tail to transform the field's initial value.
+	standardFieldInitSlots map[string]map[string]string
+	// standardInitListGlobals: class → the LLVM global holding a dynamic array
+	// of `context.addInitializer` callbacks, run per-instance in the constructor
+	// tail with `this` as receiver.
+	standardInitListGlobals map[string]string
+	// emitDecoratorMetadata is TypeScript's emitDecoratorMetadata flag
+	// (TDD-00161 Stage 3): when set, decorated members get design:type /
+	// design:paramtypes / design:returntype reflection metadata.
+	emitDecoratorMetadata bool
+	// decoratorDialect selects the decorator semantics (TDD-00161 Stage 5):
+	// "experimental" (the legacy `(target, key, descriptor)` dialect, Stages
+	// 1-4, the default) or "standard" (the TC39 `(value, context)` dialect).
+	// TypeScript 5.0 defaults to standard; this compiler defaults to
+	// experimental (the dialect it shipped first) — a documented divergence.
+	decoratorDialect string
 	usedClockGettime       bool
 	usedDateNow            bool
 	usedPerformanceNow     bool
@@ -396,6 +427,18 @@ type Emitter struct {
 	// served by the normal connection fiber, whose I/O is routed through the
 	// SSL-aware conn_recv/conn_send/conn_close shims.
 	usedHTTPS1Server bool
+	// usedHTTPUpgrade marks that the program uses the Node-faithful HTTP
+	// `'upgrade'` event (`server.on('upgrade', …)`) or the `klain:ws`
+	// WebSocket-server convenience built on it (TDD-00158). Set by a
+	// whole-program pre-scan in EmitProgram — needed because `.on('upgrade')`
+	// is a separate statement that may be emitted *after* buildHTTPDispatcher,
+	// so the dispatcher can't detect it inline; the flag gates the upgrade
+	// detection + net.Socket + generic-read-loop machinery it emits.
+	usedHTTPUpgrade bool
+	// usedKlainWS marks the klain:ws WebSocket-server convenience (TDD-00158
+	// Stage 2). Gates the dispatcher's WebSocket handshake + frame loop, now
+	// decoupled from the removed http.listen({ws}) option.
+	usedKlainWS bool
 	// emittedHTTPSConnShims guards the one-time emission of the fd→SSL registry
 	// and the conn_recv/conn_send/conn_close I/O shims (emitHTTPSConnShims).
 	emittedHTTPSConnShims bool
@@ -491,6 +534,8 @@ type Emitter struct {
 	usedCryptoCheck              bool
 	usedCryptoDigest             bool
 	usedCryptoHmac               bool
+	usedCryptoHashStream         bool
+	usedCryptoHmacStream         bool
 	usedCryptoMemeq              bool
 	usedCryptoAesGcm             bool
 	usedCryptoAesCbc             bool
@@ -747,6 +792,9 @@ func NewEmitter() *Emitter {
 		interfaces:           make(map[string]Type),
 		interfaceMethodSigs:  make(map[string]map[string]FuncSig),
 		classes:              make(map[string]ClassInfo),
+		decoratedMethodSlots: make(map[string]map[string]string),
+		standardFieldInitSlots: make(map[string]map[string]string),
+		standardInitListGlobals: make(map[string]string),
 		enums:                make(map[string]map[string]Value),
 		enumBacking:          make(map[string]Type),
 		jsonToJSONActive:     make(map[string]bool),
@@ -845,6 +893,19 @@ func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
 // genuine strict-vs-JS tradeoff; global-shadowing (the old -globals flag) is
 // handled resolver-side, so this drives the emitter-side inhabitants.
 func (e *Emitter) SetCompatMode(mode string) { e.compatMode = mode }
+
+// SetEmitDecoratorMetadata toggles TypeScript's emitDecoratorMetadata behavior
+// (TDD-00161 Stage 3): design:type/paramtypes/returntype metadata for decorated
+// members.
+func (e *Emitter) SetEmitDecoratorMetadata(on bool) { e.emitDecoratorMetadata = on }
+
+// SetDecoratorDialect selects the decorator dialect (TDD-00161 Stage 5):
+// "experimental" (default) or "standard" (TC39). Empty means experimental.
+func (e *Emitter) SetDecoratorDialect(d string) { e.decoratorDialect = d }
+
+// standardDecorators reports whether the TC39 `(value, context)` dialect is
+// selected.
+func (e *Emitter) standardDecorators() bool { return e.decoratorDialect == "standard" }
 
 // compatJS reports whether JS-faithful compatibility mode is active.
 func (e *Emitter) compatJS() bool { return e.compatMode == "js" }
@@ -1607,6 +1668,20 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// stackbottom mechanism up front.
 	e.hasWorkers = len(prog.WorkerModules) > 0
 
+	// TDD-00158: whether the program registers a Node HTTP `'upgrade'` handler
+	// (`server.on('upgrade', …)`) anywhere. Decided up front by a whole-program
+	// walk because `.on('upgrade')` is a separate statement that can be emitted
+	// after buildHTTPDispatcher — the flag gates the upgrade block the
+	// dispatcher emits at its header-parse seam.
+	e.usedHTTPUpgrade = programUsesHTTPUpgrade(prog)
+
+	// TDD-00158 Stage 2: klain:ws (the WSConnection frame-codec convenience).
+	// The resolver records the import on the merged program; when set, the
+	// dispatcher emits the WebSocket handshake + frame loop (TLS-aware), guarded
+	// at runtime by the connection-handler global a `new WebSocketServer(
+	// {server}).on('connection', …)` populates.
+	e.usedKlainWS = prog.UsesKlainWS
+
 	// TDD-00143 Stage 2: if the program imports klain:sync, the safepoint pass
 	// emits cooperative preempt checks (function entry + loop back-edges). Force
 	// the runtime's extern decls + link now so those `call @klainsync_safepoint`
@@ -1653,6 +1728,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	if err := e.registerClasses(prog); err != nil {
 		return "", err
 	}
+	// TDD-00161 Stage 2: register a routing slot for every decorated method,
+	// before any method body or call site is emitted, so call sites can route
+	// through the slot. Populates e.decoratedMethodSlots and declares the
+	// globals; validation/rejection of unsupported shapes happens at emit time.
+	if err := e.registerDecoratedMethodSlots(prog); err != nil {
+		return "", err
+	}
 	// `-compat=js`: the plain-function collection pass runs after class
 	// registration (so class-instance arguments infer to real class types)
 	// and before registerFunctions, which consumes the slots.
@@ -1675,6 +1757,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// emitter compiles them as coroutine tasks; the rest keep the synchronous
 	// malloc-slot fast path. Must run after registerFunctions (needs e.funcs).
 	e.classifyAsyncSuspension(prog)
+
+	// -compat=js cross-type widening (TDD-00162): compute which untyped top-level
+	// bindings hold multiple scalar kinds *before* registerModuleGlobals, so
+	// reliableGlobalType can promote a widened binding as an any-box global
+	// (matching emitVarDecl's own widened typing). Recomputed for each function
+	// body in emit_func.go; this sets the module-scope set.
+	e.widenedBindings = e.crossTypeWidenedBindings(prog.Body)
 
 	// Pass 1.7: promote top-level simple `const`/`let`/`var` to module globals
 	// (TDD-00093) so the function bodies emitted next can read them (a named
@@ -1842,6 +1931,9 @@ entry:
 	// excluded at the declaration site (emit_exprs_vardecl.go) — a global already
 	// dominates everything and is resolved directly, never captured.
 	e.hoistedCaptures = capturedLocalNames(prog.Body, nil)
+	// e.widenedBindings was already computed for prog.Body before
+	// registerModuleGlobals (above) and hasn't been overwritten since (function
+	// bodies save/restore it), so it still holds the module-scope set here.
 	for _, stmt := range prog.Body {
 		if _, ok := stmt.(*ast.FunctionDeclaration); ok {
 			continue

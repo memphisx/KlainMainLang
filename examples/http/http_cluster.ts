@@ -21,7 +21,7 @@
 // actually load-balanced across workers, e.g. run several times in a row:
 //   curl "http://localhost:8081/"
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 import os from 'os'
 import cluster from 'cluster'
 

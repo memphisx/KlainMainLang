@@ -156,8 +156,15 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	case *ast.ExpressionStatement:
 		_, err := e.emitExpr(s.Expr)
 		return err
-	case *ast.InterfaceDeclaration, *ast.TypeAliasDeclaration, *ast.EnumDeclaration, *ast.ClassDeclaration:
-		return nil // registered in pre-pass (classes: also emitted in their own pass); no IR emitted here
+	case *ast.InterfaceDeclaration, *ast.TypeAliasDeclaration, *ast.EnumDeclaration:
+		return nil // registered in pre-pass; no IR emitted here
+	case *ast.ClassDeclaration:
+		// The class body/vtable/static-init are emitted in their own earlier
+		// pass; nothing is emitted here EXCEPT observe-only decorator
+		// applications (TDD-00161), which must run at the class's *source
+		// position* in top-level execution order — a decorator that mutates
+		// module state declared before the class must see it initialized.
+		return e.emitClassDecoratorApplications(s)
 	case *ast.ThrowStatement:
 		return e.emitThrow(s)
 	case *ast.TryStatement:

@@ -278,3 +278,53 @@ console.log(x)
 		t.Fatalf("expected -compat=js to suppress definite-assignment, got: %v", err)
 	}
 }
+
+// --- TDD-00162: -compat=js cross-type binding widening ---
+
+func TestE2EJSModeCrossTypeBindingWidening(t *testing.T) {
+	// An untyped binding assigned two or more distinct scalar kinds over its
+	// lifetime is backed by the any-box under -compat=js (crossTypeWidenedBindings)
+	// — the JS-faithful "dynamic variable" — where strict rejects it (ADR-00651).
+	// Covers an initialized binding (let x = 5; x = 'hi'), three kinds, a
+	// module-global widened binding read by a named function, and that a
+	// single-kind binding is NOT widened (stays a plain number, arithmetic works).
+	assertOutputCompatJS(t, `
+let x = 5
+x = 'hi'
+console.log(x)
+
+let t = 1
+t = 'two'
+t = true
+console.log(typeof t, t)
+
+let g = 10
+g = 'later'
+function show() { console.log(g) }
+show()
+
+let n = 1
+n = 2
+console.log(n + 10)
+`, "hi\nboolean true\nlater\n12")
+}
+
+func TestE2EJSModeCrossTypeWideningInFunction(t *testing.T) {
+	// The same widening inside a function scope (its own pre-pass).
+	assertOutputCompatJS(t, `
+function f() {
+  let v = 42
+  v = 'answer'
+  console.log(v)
+}
+f()
+`, "answer")
+}
+
+func TestE2EStrictRejectsCrossTypeReassignment(t *testing.T) {
+	// The strict-lane counterpart (ADR-00651): the same program is a clean
+	// rejection, not widened and not invalid IR. Strict must stay opinionated.
+	if _, err := parseAndCompile(`let x = 5; x = 'hi';`); err == nil {
+		t.Fatal("strict must reject an incompatible reassignment")
+	}
+}

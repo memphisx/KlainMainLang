@@ -18,7 +18,7 @@
       "statusRow": "WebSocket",
       "signature": "new WebSocket(url: string): WebSocket",
       "badge": "caveats",
-      "description": "Both a client and a server-side WebSocket. The client's connect and HTTP upgrade handshake run synchronously before the constructor returns; .onmessage/.send(data)/.close() then drive the connection under the event loop. Server-side, http.listen(port, handler, { ws }) hands each upgraded connection a WSConnection that coexists with ordinary HTTP requests on the same listener. A client ping gets an automatic pong reply, and both peer close frames and .close() send a proper Close frame.",
+      "description": "Both a client and a server-side WebSocket. The client's connect and HTTP upgrade handshake run synchronously before the constructor returns; .onmessage/.send(data)/.close() then drive the connection under the event loop. Server-side, attach klain:ws's `new WebSocketServer({ server })` to an http.createServer (ws://) or https.createServer (wss://) server and `wss.on('connection', socket => …)` hands each upgraded connection a WSConnection that coexists with ordinary HTTP. A client ping gets an automatic pong reply, and both peer close frames and .close() send a proper Close frame. The raw Node `server.on('upgrade', (req, socket, head) => …)` event is also available for hand-rolled or non-WebSocket upgrades.",
       "params": [
         {
           "name": "url",
@@ -33,8 +33,8 @@
       "exampleKey": "websocket/websocket_client",
       "snippet": "const ws = new WebSocket('ws://127.0.0.1:8083/')\nws.onopen = () => { ws.send('ping') }\nws.onmessage = (ev) => { console.log(ev.data); ws.close() }",
       "differences": [
-        "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side `wss` (a TLS listener) is not offered — front it with `tls`/a reverse proxy.",
-        "Neither side supports binary `.send()` (`ArrayBuffer` payloads).",
+        "Client `new WebSocket(url)` supports **`wss://`** (TLS via libssl — same OpenSSL layer as `tls`); the handshake is blocking and verifies the cert (SNI on, no `rejectUnauthorized` opt-out). Server-side **`wss://`** works too — attach the klain:ws WebSocketServer (or a raw `'upgrade'` handler) to an `https.createServer` and the frame I/O rides the TLS connection.",
+        "Binary frames work both directions: `.send()` takes a `string` (text frame) or an `ArrayBuffer`/`Uint8Array` (binary frame), and a received message carries `ev.isBinary` plus a byte-exact `ev.dataBytes(): ArrayBuffer` alongside the `ev.data` string view. `ev.data` is still typed as a string (not the browser's `string | ArrayBuffer` union — `ArrayBuffer` isn't yet an allowed union member), but every byte of a binary payload is recoverable via `dataBytes()`.",
         "`.close()` on either side doesn't wait for the peer's own echo back before actually closing (a deliberate simplification).",
         "The client's connect + handshake runs *synchronously*, before the constructor returns, so `.onopen`/`.onerror` are deliberately deferred to the first event-loop pass after construction (giving assignment code a chance to run first) rather than fired inline."
       ],

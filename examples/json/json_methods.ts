@@ -105,8 +105,7 @@ const serializedStr: string = JSON.stringify(origStr)
 const restoredStr: string = JSON.parse(serializedStr)
 console.log(restoredStr)            // TypeGo
 
-// ── parse object (flat objects, primitive fields only — nested object ──────────
-// ── fields are not yet supported) ───────────────────────────────────────────────
+// ── parse object into a statically-typed target ───────────────────────────────
 interface Coord { x: number; y: number }
 const coord: Coord = JSON.parse('{"x":10,"y":20}')
 console.log(coord.x)                // 10

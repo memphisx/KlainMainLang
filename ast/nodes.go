@@ -93,6 +93,11 @@ type Program struct {
 	// checks — and only then, so a program that never imports the module is
 	// wholly untouched and links none of the runtime.
 	UsesKlainSync bool
+	// UsesKlainWS is set by the resolver when any file imports `klain:ws`
+	// (TDD-00158). Known before codegen so the HTTP dispatcher can decide up
+	// front whether to emit the WebSocket handshake + frame loop; a program
+	// that never imports it is wholly untouched.
+	UsesKlainWS bool
 }
 
 // NSAliasDecl is one `import X = Y.Z` alias declaration (ADR-00456).
@@ -228,7 +233,12 @@ type FunctionDeclaration struct {
 	// verifies an implementation follows and returns only the
 	// implementation, so codegen never sees this flag set.
 	IsOverloadSig bool
-	pos           Pos
+	// Decorators are `@expr` prefixes on a class method/accessor (TDD-00161
+	// Stage 1), in source order (outermost/topmost first). Empty for a plain
+	// function or an undecorated method. Applied bottom-up at class-init time
+	// per the experimental-decorators spec.
+	Decorators []Expression
+	pos        Pos
 }
 
 func (*FunctionDeclaration) nodeMarker()   {}
@@ -272,6 +282,10 @@ type Param struct {
 	// never inspects these. Outside a constructor they are a parse error.
 	PropVisibility string
 	PropReadonly   bool
+	// Decorators are `@expr` prefixes on a constructor/method parameter
+	// (TDD-00161 Stage 1) — an observe-only experimental parameter decorator,
+	// invoked with (target, propertyKey, parameterIndex). Empty when none.
+	Decorators []Expression
 }
 
 // IsPropertyParam reports whether this parameter carries a TS parameter-
@@ -1863,7 +1877,24 @@ type ClassDeclaration struct {
 	IsAbstract   bool
 	Implements   []string
 	StaticBlocks []*BlockStatement
-	pos          Pos
+	// Decorators are `@expr` prefixes on the class itself (TDD-00161 Stage 1),
+	// in source order. Empty when undecorated.
+	Decorators []Expression
+	// AutoAccessors records each `@dec accessor x` auto-field that was desugared
+	// to a backing field + generated get/set (TDD-00161) — the decorator follows
+	// the TC39 `{get,set,init}` accessor protocol, distinct from a get/set
+	// decorator, so it is tracked as a unit rather than split across the two
+	// generated methods.
+	AutoAccessors []AutoAccessorSpec
+	pos           Pos
+}
+
+// AutoAccessorSpec describes a decorated `accessor x` after desugaring: the
+// public name, its private backing field, and the accessor decorators.
+type AutoAccessorSpec struct {
+	Name       string
+	Backing    string
+	Decorators []Expression
 }
 
 func (*ClassDeclaration) nodeMarker()   {}
@@ -2076,6 +2107,15 @@ type AnnotField struct {
 	// (an unannotated `x = expr`, whose field type is inferred from the
 	// initializer at registerClasses time).
 	Initializer Expression
+	// Decorators are `@expr` prefixes on a class property field (TDD-00161
+	// Stage 1) — an observe-only experimental property decorator invoked with
+	// (target, propertyKey). Empty when none / for non-class reuse.
+	Decorators []Expression
+	// IsAutoAccessor marks a TC39 `accessor x` auto-accessor field (TDD-00161):
+	// a get/set-backed field. Recognized so a decorator on it (an accessor
+	// decorator, distinct from a field decorator) isn't silently mistreated;
+	// non-decorated it behaves as an ordinary field.
+	IsAutoAccessor bool
 }
 
 // TypeAnnotation holds the resolved type name from TS syntax or JSDoc.

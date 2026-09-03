@@ -482,7 +482,17 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 
 	vals := make([]Value, 0, len(args))
 	for _, arg := range args {
-		v, err := e.emitExpr(arg)
+		// A function-typed element contextually types an untyped arrow /
+		// function-expression argument's parameters from the element
+		// signature (ADR-00632) — otherwise its params self-infer to the
+		// numeric default and mis-decode when later called.
+		var v Value
+		var err error
+		if elemTy.IsFunc {
+			v, err = e.emitExprWithObjectHint(arg, elemTy)
+		} else {
+			v, err = e.emitExpr(arg)
+		}
 		if err != nil {
 			return Value{}, err
 		}
@@ -542,7 +552,17 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	// the whole count and store each at its slot.
 	vals := make([]Value, 0, len(args))
 	for _, arg := range args {
-		v, err := e.emitExpr(arg)
+		// A function-typed element contextually types an untyped arrow /
+		// function-expression argument's parameters from the element
+		// signature (ADR-00632) — otherwise its params self-infer to the
+		// numeric default and mis-decode when later called.
+		var v Value
+		var err error
+		if elemTy.IsFunc {
+			v, err = e.emitExprWithObjectHint(arg, elemTy)
+		} else {
+			v, err = e.emitExpr(arg)
+		}
 		if err != nil {
 			return Value{}, err
 		}

@@ -48,8 +48,118 @@ long long __kml_crypto_digest(long long hashId, const unsigned char *data,
     case 4:
         KML_CC_DIGEST(CC_SHA512_CTX, CC_SHA512_Init, CC_SHA512_Update,
                       CC_SHA512_Final, CC_SHA512_DIGEST_LENGTH);
+    case 5: /* crypto.createHash('md5') — TDD-00159 */
+        KML_CC_DIGEST(CC_MD5_CTX, CC_MD5_Init, CC_MD5_Update,
+                      CC_MD5_Final, CC_MD5_DIGEST_LENGTH);
     }
     return -3;
+}
+
+/* Streaming digest — crypto.createHash's Hash object (ADR-00637): a tagged
+ * union of the CC context types, so update()/digest() hash incrementally. */
+struct kml_cc_hash {
+    long long algo;
+    union {
+        CC_SHA1_CTX s1;
+        CC_SHA256_CTX s256;
+        CC_SHA512_CTX s512; /* SHA-384 shares the 512 context, per the map above */
+        CC_MD5_CTX md5;
+    } u;
+};
+
+void *__kml_crypto_hash_new(long long hashId) {
+    struct kml_cc_hash *h;
+    if (hashId < 1 || hashId > 5) return NULL;
+    h = (struct kml_cc_hash *)malloc(sizeof(*h));
+    if (!h) return NULL;
+    h->algo = hashId;
+    switch (hashId) {
+    case 1: CC_SHA1_Init(&h->u.s1); break;
+    case 2: CC_SHA256_Init(&h->u.s256); break;
+    case 3: CC_SHA384_Init(&h->u.s512); break;
+    case 4: CC_SHA512_Init(&h->u.s512); break;
+    case 5: CC_MD5_Init(&h->u.md5); break;
+    }
+    return h;
+}
+
+long long __kml_crypto_hash_update(void *ctx, const unsigned char *data,
+                                   long long len) {
+    struct kml_cc_hash *h = (struct kml_cc_hash *)ctx;
+    long long off = 0;
+    if (!h) return -1;
+    while (off < len) {
+        long long chunk = len - off;
+        if (chunk > 0x40000000LL) chunk = 0x40000000LL;
+        switch (h->algo) {
+        case 1: CC_SHA1_Update(&h->u.s1, data + off, (CC_LONG)chunk); break;
+        case 2: CC_SHA256_Update(&h->u.s256, data + off, (CC_LONG)chunk); break;
+        case 3: CC_SHA384_Update(&h->u.s512, data + off, (CC_LONG)chunk); break;
+        case 4: CC_SHA512_Update(&h->u.s512, data + off, (CC_LONG)chunk); break;
+        case 5: CC_MD5_Update(&h->u.md5, data + off, (CC_LONG)chunk); break;
+        }
+        off += chunk;
+    }
+    return 0;
+}
+
+long long __kml_crypto_hash_final(void *ctx, unsigned char *out,
+                                  long long *outLen) {
+    struct kml_cc_hash *h = (struct kml_cc_hash *)ctx;
+    if (!h) return -1;
+    switch (h->algo) {
+    case 1: CC_SHA1_Final(out, &h->u.s1); *outLen = CC_SHA1_DIGEST_LENGTH; break;
+    case 2: CC_SHA256_Final(out, &h->u.s256); *outLen = CC_SHA256_DIGEST_LENGTH; break;
+    case 3: CC_SHA384_Final(out, &h->u.s512); *outLen = CC_SHA384_DIGEST_LENGTH; break;
+    case 4: CC_SHA512_Final(out, &h->u.s512); *outLen = CC_SHA512_DIGEST_LENGTH; break;
+    case 5: CC_MD5_Final(out, &h->u.md5); *outLen = CC_MD5_DIGEST_LENGTH; break;
+    }
+    free(h);
+    return 0;
+}
+
+/* Streaming HMAC — crypto.createHmac's Hmac object (ADR-00637). */
+struct kml_cc_hmac_stream {
+    CCHmacContext ctx;
+    long long dlen;
+};
+
+void *__kml_crypto_hmac_new(long long hashId, const unsigned char *key,
+                            long long keyLen) {
+    CCHmacAlgorithm alg;
+    long long dlen;
+    struct kml_cc_hmac_stream *h;
+    switch (hashId) {
+    case 1: alg = kCCHmacAlgSHA1; dlen = CC_SHA1_DIGEST_LENGTH; break;
+    case 2: alg = kCCHmacAlgSHA256; dlen = CC_SHA256_DIGEST_LENGTH; break;
+    case 3: alg = kCCHmacAlgSHA384; dlen = CC_SHA384_DIGEST_LENGTH; break;
+    case 4: alg = kCCHmacAlgSHA512; dlen = CC_SHA512_DIGEST_LENGTH; break;
+    case 5: alg = kCCHmacAlgMD5; dlen = CC_MD5_DIGEST_LENGTH; break;
+    default: return NULL;
+    }
+    h = (struct kml_cc_hmac_stream *)malloc(sizeof(*h));
+    if (!h) return NULL;
+    CCHmacInit(&h->ctx, alg, key, (size_t)keyLen);
+    h->dlen = dlen;
+    return h;
+}
+
+long long __kml_crypto_hmac_update(void *ctx, const unsigned char *data,
+                                   long long len) {
+    struct kml_cc_hmac_stream *h = (struct kml_cc_hmac_stream *)ctx;
+    if (!h) return -1;
+    CCHmacUpdate(&h->ctx, data, (size_t)len);
+    return 0;
+}
+
+long long __kml_crypto_hmac_final(void *ctx, unsigned char *out,
+                                  long long *outLen) {
+    struct kml_cc_hmac_stream *h = (struct kml_cc_hmac_stream *)ctx;
+    if (!h) return -1;
+    CCHmacFinal(&h->ctx, out);
+    *outLen = h->dlen;
+    free(h);
+    return 0;
 }
 
 long long __kml_crypto_memeq(const unsigned char *a, const unsigned char *b,

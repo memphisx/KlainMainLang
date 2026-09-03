@@ -253,18 +253,61 @@ sq.describe()
 
 // --- negative / compile-error cases ---
 
-func TestE2EEventEmitterReservedMethodNameRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-class Foo extends EventEmitter<string> {
-  on(): void {}
+// TDD-00157: declaring an EventEmitter method name is now a legal override,
+// not a reserved-name collision. An override wins at the call site, and
+// super.<method>(...) reaches the built-in behavior.
+func TestE2EEventEmitterOverrideEmitCountsAndDelegates(t *testing.T) {
+	assertOutput(t, `
+class Bus extends EventEmitter<string> {
+  emitCount: number = 0;
+  emit(event: string, payload: string): boolean {
+    this.emitCount++;
+    return super.emit(event, payload);
+  }
 }
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a method name reserved by EventEmitter")
-	}
-	if !strings.Contains(err.Error(), "reserved by EventEmitter") {
-		t.Errorf("unexpected error message: %v", err)
-	}
+const bus = new Bus();
+bus.on("msg", (p: string) => console.log("got:", p));
+bus.emit("msg", "hello");
+bus.emit("msg", "world");
+console.log("count:", bus.emitCount, "listeners:", bus.listenerCount("msg"));
+`, "got: hello\ngot: world\ncount: 2 listeners: 1")
+}
+
+func TestE2EEventEmitterOverrideOnChains(t *testing.T) {
+	assertOutput(t, `
+class Bus extends EventEmitter<string> {
+  on(event: string, listener: (p: string) => void): Bus {
+    console.log("attach:", event);
+    return super.on(event, listener);
+  }
+}
+const bus = new Bus();
+bus.on("a", (p: string) => console.log("a:", p)).on("b", (p: string) => console.log("b:", p));
+bus.emit("a", "1");
+bus.emit("b", "2");
+`, "attach: a\nattach: b\na: 1\nb: 2")
+}
+
+func TestE2EEventEmitterOverrideTwoLevelSuperChain(t *testing.T) {
+	// B.emit -> A.emit -> built-in, and virtual dispatch through a base ref.
+	assertOutput(t, `
+class A extends EventEmitter<string> {
+  emit(event: string, payload: string): boolean {
+    console.log("A.emit");
+    return super.emit(event, payload);
+  }
+}
+class B extends A {
+  emit(event: string, payload: string): boolean {
+    console.log("B.emit");
+    return super.emit(event, payload);
+  }
+}
+const b = new B();
+b.on("x", (p: string) => console.log("heard:", p));
+const a: A = b;
+a.emit("x", "via-A-ref");
+`, "B.emit\nA.emit\nheard: via-A-ref")
 }
 
 func TestE2EEventEmitterGenericExtendsOnNonEventEmitterRejected(t *testing.T) {

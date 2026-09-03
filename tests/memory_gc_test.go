@@ -175,7 +175,7 @@ func TestE2EGCModeBoundsMemory(t *testing.T) {
 // the fix works.
 func TestE2EHTTPListenGCModeConcurrentChurn(t *testing.T) {
 	src := `
-import http from 'http'
+import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8952, (req: HttpRequest): Res => {
   let total = 0;

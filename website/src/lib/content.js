@@ -59,8 +59,32 @@ const boxedString: Box<string> = { value: "seven" };`
   },
 
   server: {
+    filename: 'node_createserver.ts',
+    code: `// The real Node.js shape — this file runs unchanged under Node too.
+import http from 'http'
+
+const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  res.setHeader('Content-Type', 'text/plain')
+
+  if (req.url === '/hello') {
+    res.writeHead(200)
+    res.end('hello from a native binary')
+    return
+  }
+
+  res.writeHead(404)
+  res.end('not found: ' + req.url)
+})
+
+server.listen(8080)`
+  },
+
+  // The bespoke, more compact server model — a handler that returns a
+  // { status, body } object instead of writing to res. Not a Node API, so it
+  // lives under the explicit klain:http specifier.
+  serverBespoke: {
     filename: 'http_server.ts',
-    code: `import http from 'http'
+    code: `import http from 'klain:http'
 
 interface Res {
   status: number

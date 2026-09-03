@@ -505,6 +505,39 @@ console.log(r)
 `, "first")
 }
 
+func TestE2ENullishLiteralLeftYieldsRight(t *testing.T) {
+	// ADR-00652: `null ?? x` / `undefined ?? x` yields the right operand with
+	// its own type — the left's null (ptr) type is not the result type. Before
+	// the fix a non-ptr right (a number/boolean) was coerced to ptr and emitted
+	// an invalid `store ptr <double>`; now it just yields the right value.
+	assertOutput(t, `
+console.log(null ?? 42)
+console.log(undefined ?? 'x')
+console.log(null ?? true)
+console.log((null ?? 42) + 1)
+`, "42\nx\ntrue\n43")
+}
+
+func TestE2ENullishPtrOrNonPtrUnionRejected(t *testing.T) {
+	// ADR-00652: a nullable-ptr left with a non-ptr right (`str | null ?? 42`)
+	// is a genuine `ptr | number` union the single-ptr result slot can't
+	// represent — a clean rejection, not an invalid `store ptr <double>`.
+	cases := []string{
+		`let s: string | null = null; const r = s ?? 42;`,
+		`let s: string | null = 'a'; const r = s ?? true;`,
+	}
+	for _, src := range cases {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a clean rejection for a ptr|non-ptr ?? union, got none for: %s", src)
+		}
+	}
+	// A nullable string with a string default still works.
+	assertOutput(t, `
+let s: string | null = null
+console.log(s ?? 'def')
+`, "def")
+}
+
 // --- Nullable non-pointer scalars (TDD-00064 Stage 1) ---
 
 // A `number | null` local now carries a real presence bit rather than
@@ -1476,4 +1509,31 @@ console.log(0o17)
 console.log(100)
 console.log(3.14)
 `, "255\n5\n15\n100\n3.14")
+}
+
+func TestE2EIncompatibleReassignmentRejectedInStrict(t *testing.T) {
+	// ADR-00651: a binding's type is fixed at its declaration (annotated, or
+	// inferred from its initializer / first assignment). Assigning an
+	// incompatible type in the strict lane is a clean compile error — matching
+	// TypeScript (which infers the type and errors on the mismatch) — rather
+	// than emitting a `store <slotIR> <wrongIR>` that clang rejects as invalid
+	// IR (the pre-existing bug this closes). The escape hatch is an explicit
+	// `: any` annotation (or -compat=js), both exercised as the passing case.
+	reject := []string{
+		`let x = 5; x = 'hi';`,          // inferred number, string assigned
+		`let x; x = 1; x = 's';`,        // untyped, first-assignment number, then string
+		`let s = 'a'; s = 3;`,           // inferred string, number assigned
+		`let b = true; b = 'no';`,       // inferred boolean, string assigned
+	}
+	for _, src := range reject {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a clean rejection for incompatible reassignment, got none for: %s", src)
+		}
+	}
+	// Compatible reassignment and the `: any` escape hatch still work.
+	assertOutput(t, `
+let n = 1; n = 2; n = 3.5; console.log(n);
+let s = 'a'; s = 'b'; console.log(s);
+let x: any = 1; x = 'hi'; x = true; console.log(x);
+`, "3.5\nb\ntrue")
 }

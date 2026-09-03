@@ -3,7 +3,7 @@
 // and sets a content-type by extension. The dist/-walking helper lives here,
 // in the example, not in the compiler (per TDD-00142).
 
-import http from 'http'
+import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 import { readFileSync, existsSync } from 'fs'
 import { parentPort, workerData } from 'worker_threads'
 

@@ -181,7 +181,7 @@ console.log("sum " + drain(ch));
 func TestE2EGoroutineHTTPListenLoadTest(t *testing.T) {
 	bin := buildBinaryImports(t, `
 import { go, Channel } from 'klain:sync';
-import http from 'http';
+import http from 'klain:http';
 
 interface Res { status: number; body: string; headers: Map<string, string> }
 

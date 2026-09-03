@@ -258,6 +258,24 @@ func (p *Parser) expectIdentOrDefault() (string, error) {
 // here, with no separate resolver handling needed for the expression form.
 func (p *Parser) parseDefaultExportTarget() (ast.Statement, error) {
 	switch p.peek().Type {
+	case lexer.AT:
+		// `export default @dec class …` (TDD-00161) — decorators after
+		// `default`, before the class.
+		decs, err := p.parseDecorators()
+		if err != nil {
+			return nil, err
+		}
+		pos := posOf(p.peek())
+		stmt, err := p.parseDefaultExportTarget()
+		if err != nil {
+			return nil, err
+		}
+		cd := unwrapClassDecl(stmt)
+		if cd == nil {
+			return nil, fmt.Errorf("%d:%d: decorators can only be applied to a class declaration or its members", pos.Line, pos.Col)
+		}
+		cd.Decorators = decs
+		return stmt, nil
 	case lexer.FUNCTION:
 		return p.parseFunctionDecl(false, "default")
 	case lexer.CLASS:

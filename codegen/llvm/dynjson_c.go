@@ -27,6 +27,6 @@ func (e *Emitter) ensureDynJSONC() {
 	}
 	e.usedDynJSONC = true
 	e.ensureDtoa() // dynjson.c calls __kml_dtoa for float rendering
-	e.emitGlobal(`declare ptr @__kml_dynjson_stringify(i64, i64, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_dynjson_stringify(i64, i64, ptr, ptr)`)
 	e.emitGlobal(`declare ptr @__kml_dynarr_join(ptr)`)
 }

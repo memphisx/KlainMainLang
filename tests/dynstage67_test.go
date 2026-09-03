@@ -156,6 +156,41 @@ console.log(Reflect.isExtensible(o))
 `, "1\ntrue\n2\ntrue false\n[ 'a', 'b' ]\ntrue\nfalse\n3\ntrue\nfalse")
 }
 
+// Reflect.get/has on an any-typed target works under strict — the target is a
+// real dynamic bag, so no widening is needed.
+func TestE2EReflectGetHasOnAnyTargetStrict(t *testing.T) {
+	assertOutput(t, `
+const o: any = { p: 42 }
+console.log(Reflect.has(o, "p"), Reflect.has(o, "z"))
+console.log(Reflect.get(o, "p"))
+`, "true false\n42")
+}
+
+// Reflect.get/has on a statically-typed struct under strict is a clean
+// compile-time rejection, never invalid IR: strict mode does not widen a typed
+// struct into a dynamic bag (ADR-00630). Previously these two forms — unlike
+// set/deleteProperty, which already rejected — emitted `nb_tag(i64 <ptr>)`,
+// invalid LLVM IR that only failed at the clang stage.
+func TestE2EReflectHasOnStaticObjectRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const o = { p: 42 }
+console.log(Reflect.has(o, "p"))
+`)
+	if err == nil {
+		t.Fatal("expected a compile error: Reflect.has on a statically-typed object")
+	}
+}
+
+func TestE2EReflectGetOnStaticObjectRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const o = { p: 42 }
+console.log(Reflect.get(o, "p"))
+`)
+	if err == nil {
+		t.Fatal("expected a compile error: Reflect.get on a statically-typed object")
+	}
+}
+
 func TestE2EReflectPrototypes(t *testing.T) {
 	assertOutputCompatJS(t, `
 const proto = { greet() { return "hi" } }

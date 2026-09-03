@@ -250,10 +250,10 @@ func (e *Emitter) emitNewWebSocketClientExpression(ex *ast.NewWebSocketExpressio
 	return Value{Ref: objReg, Ty: wsTy}, nil
 }
 
-// emitWSClientSend implements `ws.send(data: string)` — a single masked
-// text frame (opcode 1): client-to-server frames MUST be masked (RFC 6455
-// §5.1), the one asymmetry from WSConnection's own (server-side, unmasked)
-// `.send()`. The mask key is 4 random bytes read as a single big-endian
+// emitWSClientSend implements `ws.send(data)` — a single masked frame: text
+// (opcode 1) for a string, binary (opcode 2) for an ArrayBuffer/Uint8Array
+// (TDD-00160). Client-to-server frames MUST be masked (RFC 6455 §5.1), the
+// one asymmetry from WSConnection's own (server-side, unmasked) `.send()`. The mask key is 4 random bytes read as a single big-endian
 // i32 via the shared bigEndianLoad helper (runtime_websocket.go) — its
 // "meaning" as a number doesn't matter, only that __kml_ws_frame_encode's
 // own masking loop and this call agree on what bytes it represents, which
@@ -267,16 +267,15 @@ func (e *Emitter) emitWSClientSend(objExpr ast.Expression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	dataVal, err := e.emitExpr(args[0])
+
+	e.ensureWSFrameEncode()
+	e.ensureFree()
+	e.ensureCryptoRandomBytes()
+
+	opcode, dataPtr, dataLen, err := e.wsResolveSendPayload(args[0], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	dataVal = e.coerce(dataVal, TypePtr)
-
-	e.ensureWSFrameEncode()
-	e.ensureStrlen()
-	e.ensureFree()
-	e.ensureCryptoRandomBytes()
 
 	fd32, err := e.wsClientLoadFd(objVal)
 	if err != nil {
@@ -290,10 +289,8 @@ func (e *Emitter) emitWSClientSend(objExpr ast.Expression, args []ast.Expression
 	maskKey := bigEndianLoad(&maskIR, "wssendmask", maskBuf, 0, 4, "i32")
 	e.emitInstr(maskIR.String())
 
-	dataLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", dataLen, dataVal.Ref))
 	frame := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_ws_frame_encode(i32 1, i1 true, ptr %s, i64 %s, i32 %s)", frame, dataVal.Ref, dataLen, maskKey))
+	e.emitInstr(fmt.Sprintf("%s = call { ptr, i64 } @__kml_ws_frame_encode(i32 %d, i1 true, ptr %s, i64 %s, i32 %s)", frame, opcode, dataPtr, dataLen, maskKey))
 	frameBuf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", frameBuf, frame))
 	frameLen := e.freshReg()
@@ -430,7 +427,13 @@ func (e *Emitter) buildEmptyWSMessageEvent() (Value, error) {
 	msgTy := WSMessageEventType()
 	msgReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", msgReg, msgTy.StructSize()))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), msgReg))
+	dataIdx, _, _ := msgTy.FieldIndex("data")
+	dataGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dataGep, msgTy.StructIR(), msgReg, dataIdx))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), dataGep))
+	// TDD-00160: zero the binary fields so a non-message event's ev.isBinary
+	// reads false and ev.dataBytes() yields an empty buffer, not malloc garbage.
+	e.storeWSMsgBinaryFields(msgTy, msgReg, "false", "null", "0")
 	return Value{Ref: msgReg, Ty: msgTy}, nil
 }
 

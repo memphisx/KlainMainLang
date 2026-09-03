@@ -65,6 +65,34 @@ func (e *Emitter) ensureCryptoDigest() {
 	e.emitGlobal("declare i64 @__kml_crypto_digest(i64 noundef, ptr noundef, i64 noundef, ptr noundef, ptr noundef)")
 }
 
+// ensureCryptoHashStream declares the streaming digest ABI backing
+// crypto.createHash's Hash object (TDD-00159/ADR-00637).
+func (e *Emitter) ensureCryptoHashStream() {
+	if e.usedCryptoHashStream {
+		return
+	}
+	e.usedCryptoHashStream = true
+	e.usesCrypto = true
+	e.ensureCryptoCheck()
+	e.emitGlobal("declare ptr @__kml_crypto_hash_new(i64 noundef)")
+	e.emitGlobal("declare i64 @__kml_crypto_hash_update(ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @__kml_crypto_hash_final(ptr noundef, ptr noundef, ptr noundef)")
+}
+
+// ensureCryptoHmacStream declares the streaming HMAC ABI backing
+// crypto.createHmac's Hmac object (ADR-00637).
+func (e *Emitter) ensureCryptoHmacStream() {
+	if e.usedCryptoHmacStream {
+		return
+	}
+	e.usedCryptoHmacStream = true
+	e.usesCrypto = true
+	e.ensureCryptoCheck()
+	e.emitGlobal("declare ptr @__kml_crypto_hmac_new(i64 noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @__kml_crypto_hmac_update(ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare i64 @__kml_crypto_hmac_final(ptr noundef, ptr noundef, ptr noundef)")
+}
+
 // ensureCryptoHmac declares the backend's __kml_crypto_hmac_sign.
 func (e *Emitter) ensureCryptoHmac() {
 	if e.usedCryptoHmac {

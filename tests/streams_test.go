@@ -458,7 +458,7 @@ console.log(text === t1);
 
 func TestE2EStreamsHTTPChunkedResponse(t *testing.T) {
 	src := `
-import http from 'http';
+import http from 'klain:http';
 http.listen(18631, (req: HttpRequest) => {
   let n = 0;
   const body = new ReadableStream<string>({
@@ -492,7 +492,7 @@ http.listen(18631, (req: HttpRequest) => {
 
 func TestE2EStreamsHTTPChunkedBinaryBody(t *testing.T) {
 	src := `
-import http from 'http';
+import http from 'klain:http';
 http.listen(18632, (req: HttpRequest) => {
   const body = new ReadableStream<Uint8Array>({
     start: (c) => {
@@ -522,7 +522,7 @@ func TestE2EStreamsRequestBodyStream(t *testing.T) {
 	// 12 MiB — beyond the buffered path's 10 MiB request cap — consumed
 	// chunk-at-a-time by a coroutine task via req.stream().
 	src := `
-import http from 'http';
+import http from 'klain:http';
 async function count(req: HttpRequest): Promise<string> {
   let total = 0;
   let chunks = 0;
@@ -555,7 +555,7 @@ func TestE2EStreamsRequestBodyEcho(t *testing.T) {
 	// through the server without ever being fully buffered, fed by the event
 	// loop's pump (the stream is consumed outside the connection fiber).
 	src := `
-import http from 'http';
+import http from 'klain:http';
 http.listen(18652, (req: HttpRequest) => {
   return { status: 200, body: req.stream() };
 });
@@ -580,7 +580,7 @@ func TestE2EStreamsRequestBufferedAccessorsStillWork(t *testing.T) {
 	// A streaming-mode program (req.stream() used somewhere) keeps the
 	// buffered accessors working — they drain the remaining body in place.
 	src := `
-import http from 'http';
+import http from 'klain:http';
 async function streamed(req: HttpRequest): Promise<string> {
   let total = 0;
   for await (const c of req.stream()) { total = total + c.length; }
@@ -620,7 +620,7 @@ http.listen(18653, async (req: HttpRequest) => {
 // pre-stream prefix.
 func TestE2EStreamsRequestBodyAfterStreamThrows(t *testing.T) {
 	src := `
-import http from 'http';
+import http from 'klain:http';
 async function handle(req: HttpRequest): Promise<string> {
   let total = 0;
   for await (const c of req.stream()) { total = total + c.length; }
@@ -653,7 +653,7 @@ http.listen(18654, async (req: HttpRequest) => {
 // buffered write for a string and chunked transfer for a stream.
 func TestE2EHTTPUnionResponseBodyString(t *testing.T) {
 	src := `
-import http from 'http'
+import http from 'klain:http'
 interface Res { status: number; body: string | ReadableStream<Uint8Array> }
 http.listen(18655, (req: HttpRequest): Res => {
   if (req.path === '/stream') {
@@ -679,7 +679,7 @@ http.listen(18655, (req: HttpRequest): Res => {
 
 func TestE2EHTTPUnionResponseBodyStream(t *testing.T) {
 	src := `
-import http from 'http'
+import http from 'klain:http'
 interface Res { status: number; body: string | ReadableStream<Uint8Array> }
 http.listen(18656, (req: HttpRequest): Res => {
   if (req.path === '/stream') {
@@ -795,7 +795,7 @@ func TestE2EStreamsGzipGoInterop(t *testing.T) {
 	// The mirror direction: a compiled server streams a gzip-compressed
 	// chunked response; Go's gzip reader decodes it.
 	src := `
-import http from 'http';
+import http from 'klain:http';
 http.listen(18661, (req: HttpRequest) => {
   const enc = new TextEncoder();
   let n = 0;

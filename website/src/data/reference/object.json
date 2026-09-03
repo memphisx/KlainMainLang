@@ -191,10 +191,10 @@
     {
       "id": "object.reflect",
       "name": "Reflect",
-      "statusRow": "Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty",
-      "signature": "Reflect.get(o, \"a\");\nReflect.set(o, \"b\", 2);\nReflect.ownKeys(o);\nReflect.defineProperty(o, \"c\", { value: 3 });",
-      "badge": "implemented",
-      "description": "The Reflect surface mapped 1:1 onto the dynamic-object runtime: get, set, has, deleteProperty, ownKeys, getPrototypeOf, setPrototypeOf, isExtensible, preventExtensions and defineProperty. The boolean-returning forms (set, deleteProperty, setPrototypeOf) return the success flag instead of throwing, per spec. Reflect.apply and Reflect.construct are missing, and targets must be dynamic objects."
+      "statusRow": "Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty + defineMetadata/getMetadata/hasMetadata",
+      "signature": "Reflect.get(o, \"a\");\nReflect.set(o, \"b\", 2);\nReflect.ownKeys(o);\nReflect.defineProperty(o, \"c\", { value: 3 });\nReflect.defineMetadata(\"k\", v, o, \"prop\");\nReflect.getMetadata(\"k\", o, \"prop\");",
+      "badge": "caveats",
+      "description": "The Reflect surface mapped 1:1 onto the dynamic-object runtime: get, set, has, deleteProperty, ownKeys, getPrototypeOf, setPrototypeOf, isExtensible, preventExtensions and defineProperty. The boolean-returning forms (set, deleteProperty, setPrototypeOf) return the success flag instead of throwing, per spec. A metadata API — defineMetadata/getMetadata/getOwnMetadata/hasMetadata/hasOwnMetadata — stores on a dynamic-object target (no prototype-chain walk, so get == getOwn); it also backs -emit-decorator-metadata's design:* metadata. Reflect.apply, Reflect.construct, and Reflect.metadata-as-a-decorator-factory are missing; targets must be dynamic objects."
     },
     {
       "id": "object.create",

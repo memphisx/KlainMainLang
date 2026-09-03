@@ -75,6 +75,14 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 // later emits. Anything else (object/`Map`/`Set`/`bigint`/un-annotated call)
 // returns ok=false and stays a local.
 func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
+	// A -compat=js cross-type-widened untyped binding (crossTypeWidenedBindings)
+	// is an any-box: promote it as an `any` global so its initializer and later
+	// different-kinded stores all box, matching emitVarDecl's own widened typing
+	// (they must agree, or the pre-declared global's IR would disagree with the
+	// store). A named function referencing it then reads an `any`.
+	if v.TypeAnnot == nil && e.widenedBindings[v.Name] {
+		return TypeAny, true
+	}
 	// Map/Set: emitMapVarDecl/emitSetVarDecl derive the type from the initializer
 	// (not any annotation), so compute it the same way to match their store. Both
 	// are a single ptr slot. A `new Set([…])` whose element type comes from the
@@ -560,6 +568,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	if v.TypeAnnot == nil && v.Init == nil && e.compatJS() {
 		ty = TypeAny
 	}
+	// -compat=js widening (TDD-00162): an untyped binding assigned two or more
+	// distinct scalar kinds over its lifetime (`let x = 5; x = 'hi'`) is backed
+	// by the any-box from declaration, so every store boxes and the later
+	// different-kinded assignment works instead of being a strict-lane rejection
+	// (ADR-00651). The pre-pass (crossTypeWidenedBindings) already gated this on
+	// -compat=js and on the binding being untyped, so honor it unconditionally.
+	if v.TypeAnnot == nil && e.widenedBindings[v.Name] {
+		ty = TypeAny
+	}
 
 	// TDD-00153 V1 boundary: a synthetic object-literal accessor class can't be
 	// assigned to a *different* structural object/class type — its accessor
@@ -852,6 +869,9 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				pt := PromiseOf(valTy)
 				pt.PromiseTask = true
 				ty = pt
+			} else if init.ClassName == "WebSocketServer" && e.usedKlainWS {
+				// klain:ws handle (TDD-00158) — an opaque singleton handle.
+				ty = WebSocketServerType()
 			} else if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
 			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == len(genDecl.TypeParams) {
@@ -897,7 +917,7 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	// literal is a double, so an integer-looking `1` gets an f64 slot too, not
 	// the old i64 default (which corrupted a store-back or closure capture of an
 	// unannotated `let a = 1`).
-	if v.TypeAnnot == nil {
+	if v.TypeAnnot == nil && !ty.IsDynamic {
 		if nl, ok := v.Init.(*ast.NumberLiteral); ok {
 			if nl.IsBigInt {
 				ty = BigIntType()

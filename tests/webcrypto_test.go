@@ -461,3 +461,63 @@ async function main() {
 main()
 `, "digest bytes: 32\nsame: true")
 }
+
+// TDD-00159: crypto.createHash — a faithful Node Hash object. Known vectors
+// across md5/sha1/sha256, hex/base64/Buffer encodings, chaining, and
+// multi-update streaming equivalence.
+func TestE2ECryptoCreateHashVectors(t *testing.T) {
+	assertOutputImports(t, `
+import crypto from 'crypto'
+console.log(crypto.createHash('sha1').update('hello').digest('hex'))
+console.log(crypto.createHash('md5').update('hello').digest('hex'))
+console.log(crypto.createHash('sha256').update('abc').digest('base64'))
+const buf = crypto.createHash('sha256').update('abc').digest()
+console.log('buflen:', buf.length)
+const h = crypto.createHash('sha256')
+h.update('a'); h.update('b'); h.update('c')
+console.log(h.digest('hex'))
+`, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d\n"+
+		"5d41402abc4b2a76b9719d911017c592\n"+
+		"ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=\n"+
+		"buflen: 32\n"+
+		"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+}
+
+// The faithfulness payoff (TDD-00159 closing TDD-00158's open question): the
+// RFC 6455 §1.3 example — the spec's own Sec-WebSocket-Key/Accept pair —
+// computed by hand with crypto.createHash, no klain:ws.
+func TestE2ECryptoCreateHashWSAccept(t *testing.T) {
+	assertOutputImports(t, `
+import crypto from 'crypto'
+const key = 'dGhlIHNhbXBsZSBub25jZQ=='
+const accept = crypto.createHash('sha1')
+  .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+  .digest('base64')
+console.log(accept)
+`, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+}
+
+// ADR-00637: crypto.createHmac + the full digest encoding set. Canonical
+// vectors: the Wikipedia HMAC-SHA256 example, HMAC-MD5, and base64url.
+func TestE2ECryptoCreateHmacVectors(t *testing.T) {
+	assertOutputImports(t, `
+import crypto from 'crypto'
+console.log(crypto.createHmac('sha256', 'key')
+  .update('The quick brown fox jumps over the lazy dog').digest('hex'))
+console.log(crypto.createHmac('md5', 'key').update('data').digest('hex'))
+// chained multi-update + Buffer result
+const mac = crypto.createHmac('sha256', 'k').update('a').update('b').digest()
+console.log('maclen:', mac.length)
+`, "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\n"+
+		"9d5c73ef85594d34ec4438b7c97e51d8\n"+
+		"maclen: 32")
+}
+
+func TestE2ECryptoHashEncodings(t *testing.T) {
+	assertOutputImports(t, `
+import crypto from 'crypto'
+console.log(crypto.createHash('sha256').update('abc').digest('base64'))
+console.log(crypto.createHash('sha256').update('abc').digest('base64url'))
+`, "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=\n"+
+		"ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0")
+}

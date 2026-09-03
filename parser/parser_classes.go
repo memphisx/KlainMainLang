@@ -6,6 +6,41 @@ import (
 	"fmt"
 )
 
+// parseDecorators consumes a run of `@<LeftHandSideExpression>` decorator
+// prefixes (TDD-00161 Stage 1) and returns them in source order. A decorator
+// expression is an identifier / property-access chain / call
+// (`@foo`, `@foo.bar`, `@foo(1, 2)`, `@(expr)`) — exactly parseCallMember's
+// grammar. Returns nil when no `@` is present, so it is safe to call
+// unconditionally at any decoratable position.
+func (p *Parser) parseDecorators() ([]ast.Expression, error) {
+	var decs []ast.Expression
+	for p.check(lexer.AT) {
+		p.advance() // consume '@'
+		expr, err := p.parseCallMember()
+		if err != nil {
+			return nil, err
+		}
+		decs = append(decs, expr)
+	}
+	return decs, nil
+}
+
+// unwrapClassDecl returns the *ast.ClassDeclaration a statement carries — the
+// statement itself, or the one wrapped in an `export [default]` declaration —
+// or nil if the statement is not a class. Used to attach class-level
+// decorators (TDD-00161) regardless of an intervening `export`.
+func unwrapClassDecl(stmt ast.Statement) *ast.ClassDeclaration {
+	switch s := stmt.(type) {
+	case *ast.ClassDeclaration:
+		return s
+	case *ast.ExportDeclaration:
+		if cd, ok := s.Decl.(*ast.ClassDeclaration); ok {
+			return cd
+		}
+	}
+	return nil
+}
+
 // parseClassDecl parses `[abstract] class Name [extends Base] [implements
 // I, ...] { ... }`. A class body member may be prefixed by any of
 // static/private/protected/public/abstract (any order, TDD-00009 Stage 4),
@@ -165,10 +200,22 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		doc := p.takeDoc()
 
+		// `@decorator` prefixes on this member (TDD-00161 Stage 1), before the
+		// modifier run — the canonical position. Attached to the produced
+		// method (FunctionDeclaration.Decorators) or field
+		// (AnnotField.Decorators) below.
+		memberDecorators, err := p.parseDecorators()
+		if err != nil {
+			return nil, err
+		}
+
 		// `static { ... }` initializer block — distinguished from a
 		// `static`-modified member by checking for `{` immediately after
 		// `static`, before any member name has been consumed.
 		if p.check(lexer.STATIC) && p.peekNth(1).Type == lexer.LBRACE {
+			if len(memberDecorators) > 0 {
+				return nil, fmt.Errorf("%d:%d: decorators are not allowed on a static initializer block", p.peek().Line, p.peek().Col)
+			}
 			p.advance() // static
 			block, err := p.parseBlock()
 			if err != nil {
@@ -183,12 +230,21 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// when a member name follows; like the ctor-param form (ADR-00447)
 		// it is parsed and recorded but not enforced as immutability
 		// (ADR-00480).
-		var isStatic, isMemberAbstract, isReadonly bool
+		var isStatic, isMemberAbstract, isReadonly, isAutoAccessor bool
 		var visibility string
 		for {
 			if p.peek().Type == lexer.IDENT && p.peek().Literal == "readonly" &&
 				(isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
 				isReadonly = true
+				p.advance()
+				continue
+			}
+			// `accessor x` — a TC39 auto-accessor field (contextual, like
+			// `readonly`). Only before a member name; a field literally named
+			// `accessor` keeps working.
+			if p.peek().Type == lexer.IDENT && p.peek().Literal == "accessor" &&
+				(isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
+				isAutoAccessor = true
 				p.advance()
 				continue
 			}
@@ -344,6 +400,9 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				return nil, fmt.Errorf("%d:%d: overload signature for '%s' must be followed by another overload signature or its implementation", memberTok.Line, memberTok.Col, pendingOverload)
 			}
 			p.inCtorParams = memberTok.Literal == "constructor"
+			if isAutoAccessor {
+				return nil, fmt.Errorf("%d:%d: 'accessor' is only valid on a class field, not a method", memberTok.Line, memberTok.Col)
+			}
 			fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract, !isMemberAbstract && accessorKind == "")
 			p.inCtorParams = false
 			if err != nil {
@@ -440,8 +499,10 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				if len(propStmts) > 0 && fn.Body != nil {
 					fn.Body.Body = append(propStmts, fn.Body.Body...)
 				}
+				fn.Decorators = memberDecorators
 				ctor = fn
 			} else {
+				fn.Decorators = memberDecorators
 				methods = append(methods, fn)
 			}
 			continue
@@ -493,7 +554,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// rather than accepted — a disclosed narrowing.
 			ft = &ast.TypeAnnotation{Name: "number", Source: "ts"}
 		}
-		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly})
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if pendingOverload != "" {
@@ -502,8 +563,57 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
+	// Desugar a *decorated* `accessor x` auto-field to a private backing field
+	// plus generated get/set, and record the accessor decorators as a unit
+	// (TDD-00161 — the TC39 `{get,set,init}` protocol). A non-decorated
+	// `accessor x` stays a plain field (observably identical).
+	var autoAccessors []ast.AutoAccessorSpec
+	if hasDecoratedAutoAccessor(fields) {
+		var kept []ast.AnnotField
+		for _, f := range fields {
+			if !f.IsAutoAccessor || len(f.Decorators) == 0 {
+				kept = append(kept, f)
+				continue
+			}
+			backing := "__kml_acc_" + f.Name
+			bf := f
+			bf.Name = backing
+			bf.Decorators = nil
+			bf.IsAutoAccessor = false
+			bf.Visibility = "private"
+			kept = append(kept, bf)
+			getBody := ast.NewBlockStatement([]ast.Statement{
+				ast.NewReturnStatement(ast.NewMemberExpression(ast.NewThisExpression(pos), backing, pos), pos),
+			}, pos)
+			getFn := &ast.FunctionDeclaration{Name: f.Name, AccessorKind: "get", ReturnType: f.Type, Body: getBody}
+			getFn.SetPos(pos)
+			setBody := ast.NewBlockStatement([]ast.Statement{
+				ast.NewExpressionStatement(ast.NewAssignmentExpression("=",
+					ast.NewMemberExpression(ast.NewThisExpression(pos), backing, pos),
+					ast.NewIdentifier("value", pos), pos), pos),
+			}, pos)
+			setFn := &ast.FunctionDeclaration{Name: f.Name, AccessorKind: "set", Params: []ast.Param{{Name: "value", Type: f.Type}}, Body: setBody}
+			setFn.SetPos(pos)
+			methods = append(methods, getFn, setFn)
+			autoAccessors = append(autoAccessors, ast.AutoAccessorSpec{Name: f.Name, Backing: backing, Decorators: f.Decorators})
+		}
+		fields = kept
+	}
+
 	decl := ast.NewClassDeclaration(name, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
+	decl.AutoAccessors = autoAccessors
 	return decl, nil
+}
+
+// hasDecoratedAutoAccessor reports whether any field is a decorated `accessor`
+// auto-field (needing the desugar).
+func hasDecoratedAutoAccessor(fields []ast.AnnotField) bool {
+	for _, f := range fields {
+		if f.IsAutoAccessor && len(f.Decorators) > 0 {
+			return true
+		}
+	}
+	return false
 }

@@ -30,7 +30,7 @@ console.log("workerId:", cluster.workerId)
 func TestE2EClusterHTTPServed(t *testing.T) {
 	src := `
 import cluster from 'cluster'
-import http from 'http'
+import http from 'klain:http'
 interface Res { status: number; body: string }
 if (cluster.isPrimary) {
   for (let i = 0; i < 3; i++) { cluster.fork() }

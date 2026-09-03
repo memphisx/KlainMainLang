@@ -132,25 +132,28 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	// Stage 1): any value whose inferred type has these fields — no shared
 	// ListenOptions interface has to exist, matching the same
 	// FieldIndex-on-the-inferred-type pattern fetch's own optional init
-	// object already uses (emit_fetch.go). Both fields are independently
-	// optional and can coexist in the same options object. Absent 'workers'
-	// (the two-argument form) means 1 worker, byte-identical to today's
-	// single-process behavior — the interned "1" is a literal operand, not
-	// a register, since nothing needed evaluating. Absent 'ws' means
-	// hasWSHandler stays false, so buildHTTPDispatcher emits none of the
-	// upgrade-detection machinery at all — a program with no `ws` handler
-	// pays zero extra branches, matching this file's existing "only pull in
-	// what's used" discipline.
+	// object already uses (emit_fetch.go). Absent 'workers' (the two-argument
+	// form) means 1 worker, byte-identical to today's single-process behavior
+	// — the interned "1" is a literal operand, not a register, since nothing
+	// needed evaluating. The former `ws` handler option was removed (TDD-00158)
+	// — a WebSocket server is klain:ws's `new WebSocketServer({server})` now.
 	workersRef := "1"
-	hasWSHandler := false
-	var wsHandlerVal Value
 	if len(args) == 3 {
 		optsVal, err := e.emitExpr(args[2])
 		if err != nil {
 			return Value{}, err
 		}
 		if !optsVal.Ty.IsObject {
-			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must be an object with a 'workers' and/or 'ws' field", pos.Line, pos.Col)
+			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must be an object with a 'workers' field", pos.Line, pos.Col)
+		}
+		// The former `ws` handler option (a WebSocket server directly on
+		// http.listen) was removed (TDD-00158): a built-in WebSocket server is
+		// not Node, so it lives under the explicit klain:ws specifier now —
+		// `new WebSocketServer({ server }).on('connection', …)` on an
+		// http/https server. Reject with a pointer there rather than silently
+		// ignoring the field.
+		if _, _, hasWSField := optsVal.Ty.FieldIndex("ws"); hasWSField {
+			return Value{}, fmt.Errorf("%d:%d: http.listen no longer takes a 'ws' handler — use klain:ws: `import { WebSocketServer } from 'klain:ws'`, then `new WebSocketServer({ server }).on('connection', socket => …)`", pos.Line, pos.Col)
 		}
 		_, _, hasWorkersField := optsVal.Ty.FieldIndex("workers")
 		if hasWorkersField {
@@ -169,22 +172,8 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 			// integer, so coerce it (truncating) to i64.
 			workersRef = e.coerce(e.loadFieldValue(optsVal, idx, fieldTy), TypeI64).Ref
 		}
-		idx, fieldTy, hasWSField := optsVal.Ty.FieldIndex("ws")
-		if hasWSField {
-			if !fieldTy.IsFunc {
-				return Value{}, fmt.Errorf("%d:%d: http.listen's 'ws' field must be a function", pos.Line, pos.Col)
-			}
-			if len(fieldTy.FuncParams) != 1 || !fieldTy.FuncParams[0].IsWSConnection {
-				return Value{}, fmt.Errorf("%d:%d: http.listen's 'ws' handler must take exactly one parameter (socket: WSConnection)", pos.Line, pos.Col)
-			}
-			if fieldTy.FuncRetType != nil && fieldTy.FuncRetType.IR != "void" {
-				return Value{}, fmt.Errorf("%d:%d: http.listen's 'ws' handler must return nothing (void)", pos.Line, pos.Col)
-			}
-			hasWSHandler = true
-			wsHandlerVal = e.loadFieldValue(optsVal, idx, fieldTy)
-		}
-		if !hasWorkersField && !hasWSField {
-			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must have a 'workers' and/or 'ws' field", pos.Line, pos.Col)
+		if !hasWorkersField {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must have a 'workers' field", pos.Line, pos.Col)
 		}
 	}
 
@@ -210,15 +199,12 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	e.usedHTTP2 = true
 	e.emitHTTP2ServerDecls()
 
-	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler, hasWSHandler); err != nil {
+	if err := e.buildHTTPDispatcher(paramTy, retTy, isAsyncHandler); err != nil {
 		return Value{}, err
 	}
 
 	e.emitInstr(fmt.Sprintf("store i32 %s, ptr @__kml_listen_fd, align 4", listenfd))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_handler, align 8", handlerVal.Ref))
-	if hasWSHandler {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_ws_handler, align 8", wsHandlerVal.Ref))
-	}
 	e.emitInstr("store ptr @__kml_http_dispatch, ptr @__kml_listen_dispatch, align 8")
 	e.emitInstr("call void @__kml_event_loop_run()")
 	e.emitPostLoopFlush()
@@ -392,7 +378,7 @@ func (e *Emitter) emitHTTPCreateServerCore(cbExpr ast.Expression, pos ast.Pos) e
 	e.emitHTTP2ServerDecls()
 
 	e.httpResMode = true
-	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false, false)
+	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false)
 	e.httpResMode = false
 	if dispErr != nil {
 		return dispErr
@@ -509,7 +495,7 @@ func (e *Emitter) emitHTTPStreamHandlerCore(cbExpr ast.Expression, pos ast.Pos) 
 	e.emitHTTP2ServerDecls()
 
 	e.httpStreamMode = true
-	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false, false)
+	dispErr := e.buildHTTPDispatcher(paramTy, retTy, false)
 	e.httpStreamMode = false
 	if dispErr != nil {
 		return dispErr
@@ -715,8 +701,35 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 			e.emitLabel(afterL)
 			return Value{Ty: TypeVoid}, nil
 		}
+		if evt == "upgrade" {
+			// Node-faithful HTTP upgrade event (TDD-00158): store the handler
+			// in the module global the dispatcher's upgrade block reads. The
+			// block itself is emitted only when e.usedHTTPUpgrade — set by the
+			// whole-program pre-scan (programUsesHTTPUpgrade). If that pre-scan
+			// somehow missed this very call, the handler would be stored but
+			// never read; fail loudly rather than silently drop it.
+			if !e.usedHTTPUpgrade {
+				return Value{}, fmt.Errorf("%d:%d: internal: server.on('upgrade') was not detected by the upgrade pre-scan — please report", pos.Line, pos.Col)
+			}
+			if len(args) != 2 {
+				return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
+			}
+			// Contextually type the `(req, socket, head)` params from the
+			// faithful Node shapes (HttpRequest / net.Socket / Buffer) so an
+			// unannotated arrow resolves correctly (ADR-00632 hint path).
+			cb, err := e.resolveCallbackWithHints(args[1], []Type{RequestType(), NetSocketType(), BufferType()})
+			if err != nil {
+				return Value{}, err
+			}
+			if cb.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: an 'upgrade' listener must be a function literal", pos.Line, pos.Col)
+			}
+			e.ensureHTTPRuntime()
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_upgrade_handler, align 8", cb.hdrPtr))
+			return Value{Ty: TypeVoid}, nil
+		}
 		if evt != "request" && evt != "stream" {
-			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening', listener) (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening'|'upgrade', listener) (got '%s')", pos.Line, pos.Col, evt)
 		}
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
@@ -1151,11 +1164,12 @@ const maxHTTPRequestBytes = 10 * 1024 * 1024
 // in the same program is dead code). isAsyncHandler is true when the
 // handler itself is `async` (needed to `await fetch(...)` inside it, the
 // main reason to want one) — retTy is already unwrapped from Promise<T> to
-// T by the caller (emitHTTPListen) either way. hasWSHandler (TDD-00039
-// Stage 1) is true when a third-argument `{ ws }` handler was given at this
-// call site: right after headers are parsed in parseL below, a
-// case-insensitive Upgrade/Connection header check diverts a matching
-// request into the handshake + persistent WS read loop (emit_websocket.go)
+// T by the caller (emitHTTPListen) either way. When the program uses klain:ws
+// (e.usedKlainWS, TDD-00158) or a Node `'upgrade'` handler (e.usedHTTPUpgrade),
+// right after headers are parsed in parseL below a case-insensitive
+// Upgrade/Connection header check diverts a matching request into the
+// handshake + persistent WS read loop (emit_websocket.go) or the raw upgrade
+// socket loop (emit_http_upgrade.go)
 // instead of ever reaching the normal single-request/single-response path
 // — false means none of that extra branching is emitted at all, so a
 // program with no `ws` handler is byte-for-byte what it was before this
@@ -1266,7 +1280,7 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	return respReg
 }
 
-func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWSHandler bool) error {
+func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) error {
 	savedAllocas := e.allocas
 	savedBody := e.body
 	savedRegCtr := e.regCtr
@@ -1624,22 +1638,40 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler, hasWS
 	headersMapFinal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", headersMapFinal, headersMapA))
 
-	// WebSocket upgrade detection (TDD-00039 Stage 1) — only emitted at all
-	// when this call site actually passed a `ws` handler (hasWSHandler),
-	// so a program with none pays zero extra branches here. A matching
-	// upgrade request diverts into the handshake + persistent WS loop and
-	// never reaches (or falls back out of) the normal request-handling code
-	// below; wsNormalL is where every other request continues exactly as
-	// before this feature existed.
-	if hasWSHandler {
+	// WebSocket upgrade handling (TDD-00039 codec; TDD-00158 re-homed under
+	// klain:ws). Emitted when the program imports klain:ws (usedKlainWS); a
+	// matching `Upgrade: websocket` request diverts into the RFC 6455
+	// handshake + persistent frame loop and never returns to normal request
+	// handling. Guarded at runtime by the connection-handler global that
+	// `new WebSocketServer({server}).on('connection', …)` populates — so a
+	// websocket upgrade arriving before any handler was registered falls
+	// through to normal handling rather than calling a null closure. wss://
+	// falls out: emitWSHandshakeAndLoop routes its I/O through the TLS-aware
+	// conn shims when usedHTTPS1Server.
+	if e.usedKlainWS {
 		wsUpgradeL := e.freshLabel("http.wsupgrade")
 		wsNormalL := e.freshLabel("http.wsnormal")
+		wsHaveHandlerL := e.freshLabel("http.wshavehandler")
+		wsH := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_ws_handler, align 8", wsH))
+		wsHasH := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", wsHasH, wsH))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", wsHasH, wsHaveHandlerL, wsNormalL))
+		e.emitLabel(wsHaveHandlerL)
 		e.emitWSUpgradeDetect(headersMapFinal, wsUpgradeL, wsNormalL)
 		e.emitLabel(wsUpgradeL)
 		if err := e.emitWSHandshakeAndLoop(headersMapFinal, fd32, fd64, fdPtr, noReqL); err != nil {
 			return err
 		}
 		e.emitLabel(wsNormalL)
+	}
+
+	// Node-faithful HTTP upgrade event (TDD-00158): emitted when the program
+	// registers a `server.on('upgrade', …)` handler anywhere (pre-scanned into
+	// e.usedHTTPUpgrade). Diverts an upgrade request into the (req, socket,
+	// head) handler + generic read loop; every other request continues below.
+	if e.usedHTTPUpgrade {
+		e.emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, queryMapFinal, fd32, fd64, bufFinal, headerEndA, totalReadA, noReqL)
 	}
 
 	headerEndFinal := e.freshReg()

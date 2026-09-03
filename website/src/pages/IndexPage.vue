@@ -290,7 +290,7 @@ const gallery = [
 
 const tabs = [
   { key: 'concurrency', file: 'parallel_primes.ts', blurb: 'Go-style goroutines & channels' },
-  { key: 'server', file: 'http_server.ts', blurb: 'An HTTP/1.1 + HTTP/2 server' },
+  { key: 'server', file: 'node_createserver.ts', blurb: 'An HTTP server — the real Node shape' },
   { key: 'desktop', file: 'embedded.ts', blurb: 'A single-file desktop app' },
   { key: 'fetch', file: 'fetch.ts', blurb: 'async / await + typed JSON' },
   { key: 'generics', file: 'generics.ts', blurb: 'Generics & interfaces' },
@@ -299,7 +299,7 @@ const tabs = [
 
 const props = [
   { icon: 'bolt', title: 'No runtime, no VM', body: 'The output is a native executable from clang -O2, not a bundled interpreter. Zero startup warmup, small binaries, plain libc by default.' },
-  { icon: 'dns', title: 'Real servers', body: 'http.listen speaks HTTP/1.1 and HTTP/2 (h2c) on one port. fs, worker_threads and cluster give you real OS threads and processes. TLS on both ends.' },
+  { icon: 'dns', title: 'Real servers', body: 'http.createServer — the real Node shape — speaks HTTP/1.1 and HTTP/2 (h2c) on one port, with WebSocket (ws/wss) upgrades. fs, worker_threads and cluster give you real OS threads and processes. TLS on both ends.' },
   { icon: 'public', title: 'Browser-shaped APIs, off-browser', body: 'fetch, URL, WebSocket, Web Crypto, Streams, AbortController, timers, the web APIs that make sense without a DOM, and none of the ones that don\'t.' },
   { icon: 'desktop_windows', title: 'Desktop apps, one file', body: 'klain:webview opens a real window over the system browser engine and calls straight into typed native code. Any SPA (React/Vue/Svelte/Quasar) embeds into the binary with new Webview({ serve }) — a single-file app, packaged to a .app or .desktop.' },
   { icon: 'tune', title: 'You pick the trade-offs', body: 'number is a JS-faithful 64-bit float by default, opt into sized machine ints (int8…uint64) with a JSDoc width when you want them. Memory is manual by default (never frees, perfect for short-lived CLIs); pass -mm=gc for a real Boehm collector. Crypto / bigint / regex backends chosen per compile.' },

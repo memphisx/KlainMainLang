@@ -216,14 +216,11 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	// or null (array), cycles throw TypeError. Returns `any` — a string box,
 	// or undefined for a top-level undefined/function, matching JS.
 	if isUnconstrainedDynamic(argTy) {
-		if ind.unit != "" {
-			return Value{}, fmt.Errorf("%d:%d: JSON.stringify with a space argument is not supported for a dynamic value yet", pos.Line, pos.Col)
-		}
 		val, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitJSONStringifyDynamic(val, pos)
+		return e.emitJSONStringifyDynamic(val, ind, pos)
 	}
 
 	if argTy.IsArray && argTy.ElemType != nil {
