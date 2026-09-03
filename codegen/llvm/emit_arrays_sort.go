@@ -173,6 +173,14 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		case isStringTy(elemTy):
 			e.ensureSortTrampolineStr()
 			cmpFnRef = "@__kml_sort_tramp_str"
+		case elemTy.IsObject || elemTy.IsClass:
+			// An object/class comparator (`(a, b) => a.k - b.k`) returns a
+			// `number` (double); the i64 trampoline would read that double's bits
+			// as i64 and truncate to garbage, making the sort a silent no-op
+			// (ADR-00681). The obj trampoline loads ptr elements and reads a
+			// double result, like the string one.
+			e.ensureSortTrampolineObj()
+			cmpFnRef = "@__kml_sort_tramp_obj"
 		default:
 			e.ensureSortTrampolineI64()
 			cmpFnRef = "@__kml_sort_tramp_i64"

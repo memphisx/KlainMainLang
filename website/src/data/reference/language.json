@@ -588,7 +588,7 @@
       "snippet": "function* basic(): number {\n  yield 1;\n  yield 2;\n  return 3;\n}\nconst g = basic();\nconsole.log(g.next().value, g.next().done);",
       "differences": [
         "A free `function*` may be top-level **or nested** (a nested one captures enclosing state by reference; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding — an argument/nested/IIFE use is a clean rejection. `static`/`abstract` generator methods stay clean rejections.",
-        "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array element/parameter type.",
+        "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array parameter type. An array element type is supported — yielded/sent arrays round-trip through for...of, .next(), yield*, and for await.",
         "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}` — this compiler's usual stand-in for real JS's `undefined`."
       ],
       "seeAlso": ["lang.asyncgen", "lang.forof"],

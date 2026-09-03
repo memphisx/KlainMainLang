@@ -696,3 +696,33 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00651](ADR-00651.md) | Strict-lane clean rejection of an incompatible scalar reassignment | `Implements [TDD-00162](../tdd/TDD-00162.md)` (the strict half; the compat=js widening + implicit-any policy stay open in the TDD) |
 | [00652](ADR-00652.md) | `null ?? x` yields the right operand's type; a ptr\|non-ptr `??` union rejects cleanly | `Implements [TDD-00162](../tdd/TDD-00162.md)` (the coerce-honesty prerequisite it names), `Extends [ADR-00651](ADR-00651.md)` |
 | [00653](ADR-00653.md) | `-compat=js` cross-type binding widening — untyped scalars that hold multiple kinds become the any-box | `Implements [TDD-00162](../tdd/TDD-00162.md)` (the compat=js half; strict rejection is [ADR-00651](ADR-00651.md)), `Extends [ADR-00628](ADR-00628.md)` (the NaN-boxed any value) |
+| [00654](ADR-00654.md) | Reconcile callback call arity in higher-order array methods | |
+| [00655](ADR-00655.md) | Fix the CI-breaking regressions from the last release | Extends [ADR-00650](ADR-00650.md) |
+| [00656](ADR-00656.md) | Per-flag conformance report folders + a strict-rejection phase | Implements [TDD-00022](../tdd/TDD-00022.md), Extends [ADR-00651](ADR-00651.md) |
+| [00657](ADR-00657.md) | Per-process scratch isolation for the conformance runner | |
+| [00658](ADR-00658.md) | -compat=js constructor params widen to any on call-site disagreement | Extends [ADR-00656](ADR-00656.md), [ADR-00653](ADR-00653.md) |
+| [00659](ADR-00659.md) | Codegen wall-clock guard in the conformance runners | Extends [ADR-00657](ADR-00657.md) |
+| [00660](ADR-00660.md) | Bitwise & shift operators on any-typed operands (-compat=js) | Extends [ADR-00656](ADR-00656.md) |
+| [00661](ADR-00661.md) | WeakMap/WeakSet/WeakRef accept a dynamic object key under -compat=js | Extends [ADR-00656](ADR-00656.md) |
+| [00662](ADR-00662.md) | Closure free-variable scan misses try / for-in / throw / do-while / labeled statements | |
+| [00663](ADR-00663.md) | Object-pattern destructuring over a D1 dynamic source (`-compat=js`) | Implements [TDD-00155](../tdd/TDD-00155.md) (D1 dynamic object model) |
+| [00664](ADR-00664.md) | A completeness index for Node.js built-in modules | |
+| [00665](ADR-00665.md) | Completeness indexes for TypeScript features and JavaScript built-ins | Extends [ADR-00664](ADR-00664.md) |
+| [00666](ADR-00666.md) | Same-name imports of the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 1) |
+| [00667](ADR-00667.md) | Aliased imports of the codegen-recognized Web-global reexports (TDD-00165 Stage 2) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 2); Extends [ADR-00666](ADR-00666.md) |
+| [00668](ADR-00668.md) | Aliased imports of the parse-time reexport constructors (TDD-00165 Stage 3) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 3); Extends [ADR-00667](ADR-00667.md) |
+| [00669](ADR-00669.md) | Legacy `url.parse` — the first module-only member of a hybrid reexport module (TDD-00165 Stage 4) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 4); Extends [ADR-00668](ADR-00668.md) |
+| [00670](ADR-00670.md) | Legacy `url.format` — the inverse of `url.parse` (TDD-00165 Stage 4) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 4); Extends [ADR-00669](ADR-00669.md) |
+| [00671](ADR-00671.md) | `url.fileURLToPath` / `url.pathToFileURL` — the file-URL pair (TDD-00165 Stage 4) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 4); Extends [ADR-00670](ADR-00670.md) |
+| [00672](ADR-00672.md) | The remaining legacy `url` helpers — `resolve` / `urlToHttpOptions` / `domainToASCII` / `domainToUnicode` (TDD-00165 Stage 4) | Implements [TDD-00165](../tdd/TDD-00165.md) (Stage 4); Extends [ADR-00671](ADR-00671.md) |
+| [00673](ADR-00673.md) | `PerformanceObserver` (perf_hooks) — synchronous V1 | Implements [TDD-00166](../tdd/TDD-00166.md); Extends [ADR-00672](ADR-00672.md) |
+| [00674](ADR-00674.md) | Fix `Promise<T[]>` value corruption — resolve-thunk vs. closure array-arg ABI mismatch | |
+| [00675](ADR-00675.md) | `events.once` — Promise-of-args via desugar (TDD-00167) | Implements [TDD-00167](../tdd/TDD-00167.md); Extends [ADR-00674](ADR-00674.md) |
+| [00676](ADR-00676.md) | Generator array element types | Extends [ADR-00172](ADR-00172.md), [TDD-00061](../tdd/TDD-00061.md) (generators), [TDD-00085](../tdd/TDD-00085.md) (async generators), [TDD-00086](../tdd/TDD-00086.md) (`yield*`/`.throw`/`.return`), [TDD-00094](../tdd/TDD-00094.md) (nested generators), [TDD-00096](../tdd/TDD-00096.md) (element-type inference); builds on [TDD-00029](../tdd/TDD-00029.md) (nested-array boxing) and [TDD-00127](../tdd/TDD-00127.md) (object-reference array model) |
+| [00677](ADR-00677.md) | `events.on` — an async iterator over an event | Implements [TDD-00167](../tdd/TDD-00167.md) (completes it — `once` shipped in [ADR-00675](ADR-00675.md)); builds on [ADR-00676](ADR-00676.md) (array-yielding generators), [ADR-00674](ADR-00674.md) (`Promise<T[]>` values), [ADR-00263](ADR-00263.md)/[TDD-00087](../tdd/TDD-00087.md) (Promise executor / escaping resolvers), [TDD-00085](../tdd/TDD-00085.md) (async generators) |
+| [00678](ADR-00678.md) | `async_hooks` AsyncLocalStorage — context across `await` | Implements [TDD-00168](../tdd/TDD-00168.md) (Stages 1–2); builds on [TDD-00083](../tdd/TDD-00083.md)/00084/00088 (coroutine task scheduler), [TDD-00156](../tdd/TDD-00156.md)/[ADR-00628](ADR-00628.md) (NaN-boxed `any`), [ADR-00420](ADR-00420.md) (diagnostics_channel wiring precedent) |
+| [00679](ADR-00679.md) | AsyncLocalStorage — timer-callback context propagation | Extends [ADR-00678](ADR-00678.md) (AsyncLocalStorage Stages 1–2); Implements [TDD-00168](../tdd/TDD-00168.md) Stage 3; builds on the timer runtime (`emit_timers.go`) and the whole-program pre-scan pattern of ADR (programUsesHTTPUpgrade) |
+| [00680](ADR-00680.md) | AsyncLocalStorage — static `bind` + `AsyncResource` | Extends [ADR-00678](ADR-00678.md), [ADR-00679](ADR-00679.md) (AsyncLocalStorage Stages 1–3); Implements [TDD-00168](../tdd/TDD-00168.md) Stage 4; builds on the closure ABI (`emitClosureCallByPtr`) |
+| [00681](ADR-00681.md) | object-array `sort(comparator)` was a silent no-op | |
+| [00682](ADR-00682.md) | optional-chaining `a?.m()` didn't short-circuit a method call | |
+| [00683](ADR-00683.md) | `JSON.stringify` segfaulted on null object/string fields | |

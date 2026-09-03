@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "17/32",
-    "strictPct": 53
+    "strict": "16/32",
+    "strictPct": 50
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as the null stand-in.",
   "entries": [

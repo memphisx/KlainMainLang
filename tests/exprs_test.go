@@ -1537,3 +1537,22 @@ let s = 'a'; s = 'b'; console.log(s);
 let x: any = 1; x = 'hi'; x = true; console.log(x);
 `, "3.5\nb\ntrue")
 }
+
+// ADR-00682: `a?.m()` on a null receiver short-circuits — the method is NOT
+// invoked (previously it ran on null, printing side effects / faulting).
+func TestE2EOptionalChainCallShortCircuits(t *testing.T) {
+	assertOutput(t, `
+class C { m(): number { console.log("called"); return 7; } }
+const a: C | null = null;
+const r = a?.m();
+console.log("done", r);
+`, "done 0")
+}
+
+func TestE2EOptionalChainCallNonNullInvokes(t *testing.T) {
+	assertOutput(t, `
+class C { m(): number { return 7; } }
+const a: C | null = new C();
+console.log(a?.m());
+`, "7")
+}

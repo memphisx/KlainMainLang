@@ -4,7 +4,12 @@
   "kind": "web",
   "statusPage": "TIMERS.md",
   "coversRows": "all",
-  "coverage": { "loose": "4/4", "loosePct": 100, "strict": "2/4", "strictPct": 50 },
+  "coverage": {
+    "loose": "4/4",
+    "loosePct": 100,
+    "strict": "1/4",
+    "strictPct": 25
+  },
   "lede": "WHATWG/browser-standard timer functions as bare globals, matching real JS rather than a namespace. The one recurring divergence is that a timer callback must be a zero-argument, void-returning closure value — a bare reference to a top-level named function isn't accepted yet. Under the hood there's no phased event loop: setTimeout, setInterval, and setImmediate share a single flat fire-time-ordered queue that drains after the synchronous script, while queueMicrotask has its own FIFO drained before that queue.",
   "entries": [
     {
@@ -15,17 +20,33 @@
       "badge": "caveats",
       "description": "Schedules a callback to fire once after ms milliseconds and returns an id; clearTimeout cancels it before it fires. These are bare global functions, matching real JS (not a namespace). Multiple timeouts fire in delay order, not registration order.",
       "params": [
-        { "name": "fn", "type": "() => void", "desc": "Zero-argument, void-returning callback." },
-        { "name": "ms", "type": "number", "desc": "Delay in milliseconds." }
+        {
+          "name": "fn",
+          "type": "() => void",
+          "desc": "Zero-argument, void-returning callback."
+        },
+        {
+          "name": "ms",
+          "type": "number",
+          "desc": "Delay in milliseconds."
+        }
       ],
-      "returns": { "type": "number", "desc": "Timer id, usable with clearTimeout." },
+      "returns": {
+        "type": "number",
+        "desc": "Timer id, usable with clearTimeout."
+      },
       "exampleKey": "timers/timers",
       "snippet": "setTimeout(() => { console.log(\"timeout fired\") }, 10)\nconst cancelledId = setTimeout(() => {}, 8)\nclearTimeout(cancelledId)",
       "differences": [
         "Callback is restricted to a zero-argument, `void`-returning function — an arrow/function-expression closure, or a bare reference to a top-level named function."
       ],
-      "seeAlso": ["timers.setInterval", "timers.setImmediate"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/setTimeout" }
+      "seeAlso": [
+        "timers.setInterval",
+        "timers.setImmediate"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/setTimeout"
+      }
     },
     {
       "id": "timers.setInterval",
@@ -35,15 +56,30 @@
       "badge": "exact",
       "description": "Schedules a callback to repeat every ms milliseconds until cleared. Closures capture by reference, so the idiomatic self-cancelling pattern — a callback that reads the id its own declaration produces — works correctly. Same callback scope as setTimeout.",
       "params": [
-        { "name": "fn", "type": "() => void", "desc": "Zero-argument, void-returning callback." },
-        { "name": "ms", "type": "number", "desc": "Interval in milliseconds." }
+        {
+          "name": "fn",
+          "type": "() => void",
+          "desc": "Zero-argument, void-returning callback."
+        },
+        {
+          "name": "ms",
+          "type": "number",
+          "desc": "Interval in milliseconds."
+        }
       ],
-      "returns": { "type": "number", "desc": "Timer id, usable with clearInterval." },
+      "returns": {
+        "type": "number",
+        "desc": "Timer id, usable with clearInterval."
+      },
       "exampleKey": "timers/timers",
       "snippet": "let count: number = 0\nconst id = setInterval(() => {\n    count = count + 1\n    if (count >= 3) { clearInterval(id) }\n}, 5)",
       "differences": [],
-      "seeAlso": ["timers.setTimeout"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/setInterval" }
+      "seeAlso": [
+        "timers.setTimeout"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/setInterval"
+      }
     },
     {
       "id": "timers.setImmediate",
@@ -53,16 +89,27 @@
       "badge": "caveats",
       "description": "Schedules a callback to run as soon as possible, reusing the exact same timer queue as a delay-0 setTimeout — clearImmediate is clearTimeout under another name. Fires after the synchronous script alongside the rest of the timer queue.",
       "params": [
-        { "name": "fn", "type": "() => void", "desc": "Zero-argument, void-returning callback." }
+        {
+          "name": "fn",
+          "type": "() => void",
+          "desc": "Zero-argument, void-returning callback."
+        }
       ],
-      "returns": { "type": "number", "desc": "Timer id, usable with clearImmediate." },
+      "returns": {
+        "type": "number",
+        "desc": "Timer id, usable with clearImmediate."
+      },
       "exampleKey": "timers/timers",
       "snippet": "setImmediate(() => { console.log(\"immediate fired\") })\nconst cancelledImmediateId = setImmediate(() => {})\nclearImmediate(cancelledImmediateId)",
       "differences": [
         "Real Node guarantees `setImmediate` fires before a same-tick `setTimeout(fn, 0)` when scheduled from inside an I/O callback, because its event loop has distinct phases (check vs. timers); this compiler's timer drain is a single flat fire-time-ordered queue with no phase concept, so the two are genuinely indistinguishable here (both fire at \"now\")."
       ],
-      "seeAlso": ["timers.setTimeout"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Window/setImmediate" }
+      "seeAlso": [
+        "timers.setTimeout"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Window/setImmediate"
+      }
     },
     {
       "id": "timers.queueMicrotask",
@@ -72,12 +119,23 @@
       "badge": "exact",
       "description": "Queues a callback onto a real microtask FIFO, distinct from the timer queue, drained after the synchronous script and before any timers fire.",
       "params": [
-        { "name": "fn", "type": "() => void", "desc": "Zero-argument, void-returning callback." }
+        {
+          "name": "fn",
+          "type": "() => void",
+          "desc": "Zero-argument, void-returning callback."
+        }
       ],
-      "returns": { "type": "void", "desc": "Nothing." },
+      "returns": {
+        "type": "void",
+        "desc": "Nothing."
+      },
       "differences": [],
-      "seeAlso": ["timers.setTimeout"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask" }
+      "seeAlso": [
+        "timers.setTimeout"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask"
+      }
     }
   ]
 }

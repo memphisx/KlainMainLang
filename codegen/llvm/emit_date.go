@@ -466,6 +466,8 @@ func (e *Emitter) emitPerformanceMark(args []ast.Expression, pos ast.Pos) (Value
 	bits := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, nowReg))
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, nameVal.Ref, bits))
+	// TDD-00166: notify any PerformanceObserver watching 'mark' (duration 0).
+	e.emitPerfDispatch(nameVal.Ref, "mark", nowReg, "0.0", perfMaskMark)
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -491,7 +493,7 @@ func (e *Emitter) emitPerformanceMeasure(args []ast.Expression, pos ast.Pos) (Va
 	if err != nil {
 		return Value{}, err
 	}
-	_ = e.coerce(nameVal, TypePtr) // evaluated for side effects/ordering only — not stored, see doc comment
+	nameStr := e.coerce(nameVal, TypePtr) // evaluated for ordering; also the entry name for observers (TDD-00166)
 
 	startVal, err := e.emitExpr(args[1])
 	if err != nil {
@@ -527,6 +529,8 @@ func (e *Emitter) emitPerformanceMeasure(args []ast.Expression, pos ast.Pos) (Va
 
 	dur := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", dur, endTs, startTs))
+	// TDD-00166: notify any PerformanceObserver watching 'measure'.
+	e.emitPerfDispatch(nameStr.Ref, "measure", startTs, dur, perfMaskMeasure)
 	return Value{Ref: dur, Ty: TypeF64}, nil
 }
 

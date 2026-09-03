@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 35/35 (100%) · **Strict Coverage**: 33/35 (~94%).
+**Coverage**: 35/35 (100%) · **Strict Coverage**: 30/35 (~86%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -24,14 +24,14 @@ Format: [Status page format](README.md#status-page-format).
 | `Number.POSITIVE_INFINITY` | ✅ | | |
 | `Number.NEGATIVE_INFINITY` | ✅ | | |
 | `Number.NaN` | ✅ | | |
-| `Number.prototype.toFixed(n)` | ✅ | | • The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `"4"`), matching real JS ([ADR-00533](../adr/ADR-00533.md)) |
+| `Number.prototype.toFixed(n)` | ✅ | • Exact-halfway values round half-to-even (C `printf`), not JS's round-half-up — `(2.5).toFixed(0)` is `'2'` (Node: `'3'`) and `(8.5).toFixed(0)` is `'8'` (Node: `'9'`). | • The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `"4"`), matching real JS ([ADR-00533](../adr/ADR-00533.md)) |
 | `Number.prototype.toString(radix?)` | ✅ | • For a **non-power-of-two** base a repeating fractional expansion is capped at 1100 digits and the double-precision multiply can differ from V8's exact-bignum result in the trailing digits; base 10 (and any power-of-two base) are exact ([ADR-00566](../adr/ADR-00566.md)) | • A fractional receiver now renders fractional digits: the default/`radix 10` form delegates to `String(x)` (shortest round-trip decimal), and any other base runs a hand-rolled integer-part digit loop plus a repeated-multiply fractional expansion — bit-exact to V8 for a power-of-two base ([ADR-00566](../adr/ADR-00566.md))<br>• A radix outside 2..36 throws a `RangeError` as in real JS ([ADR-00552](../adr/ADR-00552.md)) |
 | `Number.prototype.toPrecision(n)` | ✅ | • Chooses exponential vs fixed notation at C `%g`'s threshold (exponent < -4) rather than JS's (exponent < -6), so a small magnitude like `0.0000123` renders `"1.23e-5"` where real JS gives `"0.0000123"` ([ADR-00065](../adr/ADR-00065.md)) | • `sprintf("%#.*g", ...)`; the exponent is normalized to JS's minimum-digit form (`e+5`, not `e+05`), and exact halfway-tie rounding may differ from JS (glibc round-half-to-even) ([ADR-00551](../adr/ADR-00551.md)/[ADR-00065](../adr/ADR-00065.md))<br>• The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md)) |
 | `Number.prototype.toExponential(n)` | ✅ | | • `sprintf("%.*e", ...)`; the exponent is normalized to JS's minimum-digit form (`1.23e+4`, not `1.23e+04`) ([ADR-00551](../adr/ADR-00551.md)) |
 | `parseInt(s, radix?)` (global) | ✅ | | • No-digits input → real `NaN`; with radix omitted, hex auto-detect for a `"0x"` prefix, base 10 otherwise — same as `Number.parseInt(s)` above ([ADR-00287](../adr/ADR-00287.md)/[ADR-00530](../adr/ADR-00530.md)) |
 | `parseFloat(s)` (global) | ✅ | | • Same `__kml_strtod_parsefloat` wrapper as `Number.parseFloat(s)` above — a `"0x10"` hex prefix reads only its leading `0` → `0` ([ADR-00545](../adr/ADR-00545.md))<br>• No-conversion input → real `NaN`; only the exact word `"Infinity"` parses to `Infinity` ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md)) |
-| `isNaN(x)` (global) | ✅ | | |
-| `isFinite(x)` (global) | ✅ | | |
+| `isNaN(x)` (global) | ✅ | • Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`). | |
+| `isFinite(x)` (global) | ✅ | • Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`. | |
 | `Math.floor/ceil/round/trunc` | ✅ | | • A float input stays a double end-to-end, so `NaN`/`±Infinity` pass through unchanged; `Math.round` uses JS's tie-toward-`+Infinity` (`Math.round(-4.5) === -4`) incl. the `-0` result for `Math.round(-0.5)` ([ADR-00286](../adr/ADR-00286.md)); integer input keeps the exact-i64 path |
 | `Math.abs` | ✅ | | |
 | `Math.sqrt/pow/hypot` | ✅ | | |

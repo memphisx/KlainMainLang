@@ -90,7 +90,7 @@ type Emitter struct {
 	// captures that same variable (`const s = f(() => use(s))`) must NOT seed its
 	// capture cell by loading the still-uninitialized slot — see
 	// promoteCaptureToCell.
-	varsBeingInitialized  map[string]bool
+	varsBeingInitialized map[string]bool
 	// hoistedCaptures names the current function body's own locals/params that
 	// are captured by some nested closure. Such a variable is heap-boxed eagerly
 	// at its dominating declaration point (params: at function entry) rather than
@@ -99,7 +99,7 @@ type Emitter struct {
 	// invalid "instruction does not dominate all uses" IR. Installed (saved/
 	// restored) per function body, exactly like e.allocas. See capturedLocalNames
 	// and boxHoistedCapture.
-	hoistedCaptures       map[string]bool
+	hoistedCaptures map[string]bool
 	// widenedBindings names the untyped scalar bindings in the current scope
 	// that -compat=js must back with the any-box from declaration because they
 	// hold two or more distinct scalar kinds over their lifetime (crossType-
@@ -160,6 +160,13 @@ type Emitter struct {
 	// function the way an ordinary named-function call does; see
 	// emit_generators.go.
 	generators map[string]*GeneratorInfo
+	// eventsOnHelpers memoizes the synthesized setup+iterator function pair
+	// backing `events.on(emitter, name)` (TDD-00167), keyed by element
+	// type + arity — see emit_events_helpers.go.
+	eventsOnHelpers map[string]*eventsOnHelper
+	// alsBindTramps memoizes the monomorphic AsyncLocalStorage.bind trampolines
+	// by closure-signature key (TDD-00168 Stage 4) — see emit_asynchooks.go.
+	alsBindTramps map[string]bool
 	// asyncGenStepFns memoizes the per-generator-type deferred `.next()` microtask
 	// step function, keyed by the generator struct IR (TDD-00094).
 	asyncGenStepFns map[string]string
@@ -234,13 +241,13 @@ type Emitter struct {
 	// (TDD-00154), or "" outside any constructor — a write to a `readonly` field
 	// is allowed only when this equals the field's declaring class.
 	currentCtorClass string
-	usedStrlen     bool
-	usedStrchr           bool
+	usedStrlen       bool
+	usedStrchr       bool
 	// inspectDepthCap overrides the inspector's default recursion cap for the
 	// duration of a single console.dir call; inspectDepthSet gates it (so a valid
 	// depth of 0 is distinguishable from "no override").
-	inspectDepthCap int
-	inspectDepthSet bool
+	inspectDepthCap      int
+	inspectDepthSet      bool
 	usedIsatty           bool
 	usedTermiosRaw       bool // TDD-00031: process.stdin.setRawMode termios machinery
 	usedWinSize          bool // TDD-00031: process.stdout.columns/.rows ioctl(TIOCGWINSZ)
@@ -271,14 +278,14 @@ type Emitter struct {
 	// which would recurse forever at compile time (cf. ADR-00221). A class
 	// name present here is mid-serialization; re-entry serializes it as a
 	// plain object instead of re-dispatching toJSON.
-	jsonToJSONActive       map[string]bool
-	usedAnyEq              bool
-	usedDynObj             bool
-	usedDynArr             bool
-	usedDynJSONFromNode    bool
-	usedDynJSONC           bool
-	usedNanBox             bool
-	usedAnyOps             bool
+	jsonToJSONActive    map[string]bool
+	usedAnyEq           bool
+	usedDynObj          bool
+	usedDynArr          bool
+	usedDynJSONFromNode bool
+	usedDynJSONC        bool
+	usedNanBox          bool
+	usedAnyOps          bool
 	// jsCtorParamTy is `-compat=js` call-site-inferred constructor parameter
 	// types (class name → per-index type; zero Type = no site could infer),
 	// filled by jsCollectCtorParamTypes and consumed in registerClasses.
@@ -322,7 +329,7 @@ type Emitter struct {
 	// 1-4, the default) or "standard" (the TC39 `(value, context)` dialect).
 	// TypeScript 5.0 defaults to standard; this compiler defaults to
 	// experimental (the dialect it shipped first) — a documented divergence.
-	decoratorDialect string
+	decoratorDialect       string
 	usedClockGettime       bool
 	usedDateNow            bool
 	usedPerformanceNow     bool
@@ -671,6 +678,14 @@ type Emitter struct {
 	thenCtr                 int // unique-name counter for .then/.catch/.finally reaction runners
 	newPromiseCtr           int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
 	usedCurrentTaskGlobal   bool
+	usedAsyncLocalStorage   bool
+	usedAsyncCtxAccessors   bool
+	// programUsesALS is a whole-program pre-scan result (set in EmitProgram
+	// before Pass 2): true when the program constructs an AsyncLocalStorage
+	// anywhere, so timer callbacks are wrapped to carry the async context across
+	// the schedule→fire boundary (TDD-00168 Stage 3). Distinct from
+	// usedAsyncLocalStorage (the emit-time ensure guard).
+	programUsesALS bool
 	hasMaySuspend           bool // any async fn classified may-suspend (TDD-00083 Stage 2)
 	usedCbrt                bool
 	usedCtlz32              bool
@@ -690,6 +705,8 @@ type Emitter struct {
 	usedSortTrampolineI64   bool
 	usedSortTrampolineF64   bool
 	usedSortTrampolineStr   bool
+	usedSortTrampolineObj   bool
+	optionalCallCtr         int
 	usedSortClosGlobal      bool
 	usedMapStrHelpers       bool
 	usedMapNumHelpers       bool
@@ -720,6 +737,7 @@ type Emitter struct {
 	usedExceptionHelpers    bool
 	usedFrozenSet           bool
 	usedPathNormalize       bool
+	usedPerfObsRegistry     bool
 	usedPathDirname         bool
 	usedPathBasename        bool
 	usedPathExtname         bool
@@ -784,29 +802,31 @@ type Emitter struct {
 
 func NewEmitter() *Emitter {
 	e := &Emitter{
-		strConsts:            make(map[string]string),
-		moduleGlobals:        make(map[string]Symbol),
-		promotedGlobalDecls:  make(map[*ast.VarDeclaration]bool),
-		varsBeingInitialized: make(map[string]bool),
-		funcs:                make(map[string]FuncSig),
-		interfaces:           make(map[string]Type),
-		interfaceMethodSigs:  make(map[string]map[string]FuncSig),
-		classes:              make(map[string]ClassInfo),
-		decoratedMethodSlots: make(map[string]map[string]string),
-		standardFieldInitSlots: make(map[string]map[string]string),
+		strConsts:               make(map[string]string),
+		moduleGlobals:           make(map[string]Symbol),
+		promotedGlobalDecls:     make(map[*ast.VarDeclaration]bool),
+		varsBeingInitialized:    make(map[string]bool),
+		funcs:                   make(map[string]FuncSig),
+		interfaces:              make(map[string]Type),
+		interfaceMethodSigs:     make(map[string]map[string]FuncSig),
+		classes:                 make(map[string]ClassInfo),
+		decoratedMethodSlots:    make(map[string]map[string]string),
+		standardFieldInitSlots:  make(map[string]map[string]string),
 		standardInitListGlobals: make(map[string]string),
-		enums:                make(map[string]map[string]Value),
-		enumBacking:          make(map[string]Type),
-		jsonToJSONActive:     make(map[string]bool),
-		genericFuncs:         make(map[string]*ast.FunctionDeclaration),
-		genericInterfaces:    make(map[string]*ast.InterfaceDeclaration),
-		genericTypeAliases:   make(map[string]*ast.TypeAliasDeclaration),
-		genericClasses:       make(map[string]*ast.ClassDeclaration),
-		generators:           make(map[string]*GeneratorInfo),
-		asyncGenStepFns:      make(map[string]string),
-		fnValueTrampolines:   make(map[string]bool),
-		testTrampolines:      make(map[string]bool),
-		currentRetType:       TypeI32, // main returns i32
+		enums:                   make(map[string]map[string]Value),
+		enumBacking:             make(map[string]Type),
+		jsonToJSONActive:        make(map[string]bool),
+		genericFuncs:            make(map[string]*ast.FunctionDeclaration),
+		genericInterfaces:       make(map[string]*ast.InterfaceDeclaration),
+		genericTypeAliases:      make(map[string]*ast.TypeAliasDeclaration),
+		genericClasses:          make(map[string]*ast.ClassDeclaration),
+		generators:              make(map[string]*GeneratorInfo),
+		eventsOnHelpers:         make(map[string]*eventsOnHelper),
+		alsBindTramps:           make(map[string]bool),
+		asyncGenStepFns:         make(map[string]string),
+		fnValueTrampolines:      make(map[string]bool),
+		testTrampolines:         make(map[string]bool),
+		currentRetType:          TypeI32, // main returns i32
 	}
 	e.pushScope()
 	return e
@@ -1674,6 +1694,12 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// after buildHTTPDispatcher — the flag gates the upgrade block the
 	// dispatcher emits at its header-parse seam.
 	e.usedHTTPUpgrade = programUsesHTTPUpgrade(prog)
+
+	// TDD-00168 Stage 3: does the program construct an AsyncLocalStorage
+	// anywhere? A pre-scan (before Pass 2) so a timer callback scheduled inside
+	// an `als.run(...)` — possibly from a function body emitted before the
+	// top-level construction — is wrapped to carry the async context to its fire.
+	e.programUsesALS = programUsesAsyncLocalStorage(prog)
 
 	// TDD-00158 Stage 2: klain:ws (the WSConnection frame-codec convenience).
 	// The resolver records the import on the merged program; when set, the

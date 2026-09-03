@@ -32,6 +32,9 @@
             "status": "implemented",
             "notes": [
               "Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md))"
+            ],
+            "caveats": [
+              "A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes."
             ]
           },
           {
@@ -101,7 +104,10 @@
           },
           {
             "feature": "`.at(i)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Out-of-range `.at()` diverges from `undefined` — `[10,20,30].at(5)` is `0` and `[10,20,30].at(-5)` is `10` (Node: `undefined` for both; a negative index past the start is clamped to 0 rather than left out of range). The zero-value undefined stand-in `.pop()`/`.shift()` also use."
+            ]
           },
           {
             "feature": "`.indexOf(item)`",
@@ -119,7 +125,10 @@
           },
           {
             "feature": "`.find(fn)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "A no-match `.find()` returns the element type's zero value, not `undefined` — `[5,6,7].find(x => x > 10)` is `0` (Node: `undefined`); a reference-typed element returns the `null` stand-in (`.findIndex` correctly returns `-1`)."
+            ]
           },
           {
             "feature": "`.findIndex(fn)`",

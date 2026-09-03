@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -90,11 +91,17 @@ func TestE2EHTTPUpgradeCoexistsWithNormalHTTP(t *testing.T) {
 	if _, err := conn.Write([]byte("GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// The request sends `Connection: close`, so the server closes the socket
+	// after the full response — read to EOF rather than assuming a single
+	// Read() returns headers *and* body in one TCP segment (on Linux the body
+	// often arrives in a later segment, so a lone Read sees only the headers).
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 512)
-	n, _ := conn.Read(buf)
-	if !strings.Contains(string(buf[:n]), "plain http") {
-		t.Errorf("normal request: got %q, want body 'plain http'", string(buf[:n]))
+	resp, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if !strings.Contains(string(resp), "plain http") {
+		t.Errorf("normal request: got %q, want body 'plain http'", string(resp))
 	}
 }
 

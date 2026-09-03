@@ -1102,6 +1102,49 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 			if s.Body != nil {
 				scanStmtsFV(s.Body.Body, inner, result)
 			}
+		case *ast.ForInStatement:
+			scanExprFV(s.Object, local, result)
+			inner := make(map[string]bool, len(local)+1)
+			for k, v := range local {
+				inner[k] = v
+			}
+			inner[s.VarName] = true
+			if s.Body != nil {
+				scanStmtsFV(s.Body.Body, inner, result)
+			}
+		case *ast.DoWhileStatement:
+			if s.Body != nil {
+				scanStmtsFV(s.Body.Body, local, result)
+			}
+			scanExprFV(s.Test, local, result)
+		case *ast.LabeledStatement:
+			if s.Body != nil {
+				scanStmtsFV([]ast.Statement{s.Body}, local, result)
+			}
+		case *ast.ThrowStatement:
+			scanExprFV(s.Argument, local, result)
+		case *ast.TryStatement:
+			if s.Body != nil {
+				scanStmtsFV(s.Body.Body, local, result)
+			}
+			if s.Catch != nil {
+				inner := make(map[string]bool, len(local)+1)
+				for k, v := range local {
+					inner[k] = v
+				}
+				if s.Catch.Param != "" {
+					inner[s.Catch.Param] = true
+				}
+				for _, p := range s.Catch.ObjectPattern {
+					inner[p.Local] = true
+				}
+				if s.Catch.Body != nil {
+					scanStmtsFV(s.Catch.Body.Body, inner, result)
+				}
+			}
+			if s.Finally != nil {
+				scanStmtsFV(s.Finally.Body, local, result)
+			}
 		case *ast.SwitchStatement:
 			scanExprFV(s.Discriminant, local, result)
 			for _, c := range s.Cases {
@@ -1376,6 +1419,49 @@ func capScanStmts(stmts []ast.Statement, bound map[string]bool, result map[strin
 			}
 			if s.Body != nil {
 				capScanStmts(s.Body.Body, inner, result)
+			}
+		case *ast.ForInStatement:
+			capScanExpr(s.Object, local, result)
+			inner := make(map[string]bool, len(local)+1)
+			for k, v := range local {
+				inner[k] = v
+			}
+			inner[s.VarName] = true
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, inner, result)
+			}
+		case *ast.DoWhileStatement:
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, local, result)
+			}
+			capScanExpr(s.Test, local, result)
+		case *ast.LabeledStatement:
+			if s.Body != nil {
+				capScanStmts([]ast.Statement{s.Body}, local, result)
+			}
+		case *ast.ThrowStatement:
+			capScanExpr(s.Argument, local, result)
+		case *ast.TryStatement:
+			if s.Body != nil {
+				capScanStmts(s.Body.Body, local, result)
+			}
+			if s.Catch != nil {
+				inner := make(map[string]bool, len(local)+1)
+				for k, v := range local {
+					inner[k] = v
+				}
+				if s.Catch.Param != "" {
+					inner[s.Catch.Param] = true
+				}
+				for _, p := range s.Catch.ObjectPattern {
+					inner[p.Local] = true
+				}
+				if s.Catch.Body != nil {
+					capScanStmts(s.Catch.Body.Body, inner, result)
+				}
+			}
+			if s.Finally != nil {
+				capScanStmts(s.Finally.Body, local, result)
 			}
 		case *ast.SwitchStatement:
 			capScanExpr(s.Discriminant, local, result)
@@ -3189,13 +3275,29 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 	params := cb.paramTypes()
 	retTy := cb.retType()
 
-	// Coerce args to declared param types.
-	coerced := make([]Value, len(args))
-	for i, a := range args {
-		if i < len(params) {
-			coerced[i] = e.coerce(a, params[i])
-		} else {
-			coerced[i] = a
+	// Reconcile the argument count to the callback's declared arity so the
+	// emitted call always has exactly as many operands as the callee /
+	// function-pointer type declares. A higher-order method passes a fixed
+	// argument set (element, index, array), but a callback may declare fewer
+	// parameters — JS silently ignores the extras — or more, which JS binds to
+	// undefined. Passing the raw HOF arguments against the narrower or wider
+	// declared signature is invalid LLVM IR ("too many/too few arguments
+	// specified"); truncate the extras and pad any missing parameter with a
+	// zero value of its type so the call is always well-typed. Fixes the
+	// long-standing HOF-arity invalid-IR cluster (e.g. a zero-parameter
+	// predicate `[].findIndex(function () {})`, or a default-param skip).
+	coerced := make([]Value, len(params))
+	for i := range params {
+		switch {
+		case i < len(args):
+			coerced[i] = e.coerce(args[i], params[i])
+		case params[i].IsArray:
+			// A missing array parameter: an empty Ref marks it for the
+			// decomposition branches below, which emit an empty `ptr null,
+			// i64 0` header rather than materializing a real aggregate.
+			coerced[i] = Value{Ty: params[i]}
+		default:
+			coerced[i] = Value{Ref: zeroRef(params[i]), Ty: params[i]}
 		}
 	}
 
@@ -3233,18 +3335,20 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			// actually took an array parameter (the array-methods "no
 			// nested-array element as the callback's own parameter"
 			// caveat). See ADR-00151/TDD-00059.
-			if i < len(params) && params[i].IsArray {
+			if params[i].IsArray {
+				if v.Ref == "" {
+					// Padded missing array parameter (see the reconciliation
+					// above) — an empty header.
+					argParts = append(argParts, "ptr null", "i64 0")
+					continue
+				}
 				// The callback's array argument is a transient element value —
 				// materialize a fresh header for it (TDD-00127).
 				header, lenReg := e.arrayArgFromAggregate(v)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
-			ty := v.Ty.IR
-			if i < len(params) {
-				ty = params[i].IR
-			}
-			argParts = append(argParts, ty+" "+v.Ref)
+			argParts = append(argParts, params[i].IR+" "+v.Ref)
 		}
 		argStr := strings.Join(argParts, ", ")
 
@@ -3264,18 +3368,18 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			// by name to .map()) needs it too, independent of the closure
 			// ABI change: this branch also used to pass an array's raw
 			// {ptr,i64} aggregate as if it were a single scalar pointer.
-			if i < len(params) && params[i].IsArray {
+			if params[i].IsArray {
+				if v.Ref == "" {
+					argParts = append(argParts, "ptr null", "i64 0")
+					continue
+				}
 				// The callback's array argument is a transient element value —
 				// materialize a fresh header for it (TDD-00127).
 				header, lenReg := e.arrayArgFromAggregate(v)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
 			}
-			ty := v.Ty.IR
-			if i < len(params) {
-				ty = params[i].IR
-			}
-			argParts = append(argParts, ty+" "+v.Ref)
+			argParts = append(argParts, params[i].IR+" "+v.Ref)
 		}
 		argStr := strings.Join(argParts, ", ")
 		if retTy.IR == "void" {

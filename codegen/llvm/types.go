@@ -213,6 +213,12 @@ type Type struct {
 	// machinery, no dispatched methods of its own) built by parsing through
 	// libcurl's URL API. See emit_url.go.
 	IsURL bool
+	// IsPerfObserver marks a `new PerformanceObserver(cb)` handle (TDD-00166):
+	// a heap object holding the callback closure and its registry node, with
+	// dispatched `.observe`/`.disconnect` methods. IsPerfEntryList marks the
+	// list object the callback receives (dispatched `.getEntries`).
+	IsPerfObserver  bool
+	IsPerfEntryList bool
 	// IsURLPattern marks `new URLPattern(...)`'s result (TDD-00100): a heap
 	// object whose six visible fields are the (defaulted) component pattern
 	// strings, plus a hidden __kml_handle ptr to the C-side compiled state
@@ -499,6 +505,12 @@ type Type struct {
 	IsTestContext bool
 	// IsDCChannel marks a diagnostics_channel Channel handle.
 	IsDCChannel bool
+	// IsAsyncLocalStorage marks an async_hooks AsyncLocalStorage<T> handle
+	// (TDD-00168); the store element type T lives in ElemType.
+	IsAsyncLocalStorage bool
+	// IsAsyncResource marks an async_hooks AsyncResource handle (TDD-00168
+	// Stage 4): a captured async context replayed by runInAsyncScope.
+	IsAsyncResource bool
 	IsNetSocket bool
 	// IsWebSocketServer marks a klain:ws `new WebSocketServer({server})` handle
 	// (TDD-00158 Stage 2). The http server is a process-singleton, so the
@@ -775,6 +787,82 @@ func URLType() Type {
 	})
 	ty.IsURL = true
 	return ty
+}
+
+// LegacyUrlType returns the object `url.parse()` produces (TDD-00165 Stage 4) —
+// Node's legacy `Url` shape, distinct from the WHATWG URLType above. Its fields
+// are the legacy names (`auth`/`path`/`query`, plus the shared
+// href/protocol/host/hostname/port/pathname/search/hash). Every field is a
+// string; an absent component is the empty string (matching how URLType already
+// represents an absent part, rather than Node's `null` — a documented
+// divergence). `slashes` and the `parseQueryString` object form of `query` are
+// deferred.
+func LegacyUrlType() Type {
+	return ObjectType([]Field{
+		{Name: "href", Ty: TypePtr},
+		{Name: "protocol", Ty: TypePtr},
+		{Name: "auth", Ty: TypePtr},
+		{Name: "host", Ty: TypePtr},
+		{Name: "port", Ty: TypePtr},
+		{Name: "hostname", Ty: TypePtr},
+		{Name: "hash", Ty: TypePtr},
+		{Name: "search", Ty: TypePtr},
+		{Name: "query", Ty: TypePtr},
+		{Name: "pathname", Ty: TypePtr},
+		{Name: "path", Ty: TypePtr},
+	})
+}
+
+// PerformanceEntryType is one observed entry (TDD-00166): the plain-field
+// object a PerformanceObserver's list yields.
+func PerformanceEntryType() Type {
+	return ObjectType([]Field{
+		{Name: "name", Ty: TypePtr},
+		{Name: "entryType", Ty: TypePtr},
+		{Name: "startTime", Ty: TypeF64},
+		{Name: "duration", Ty: TypeF64},
+	})
+}
+
+// PerfEntryListType is the list object a PerformanceObserver callback receives
+// (TDD-00166): the entries buffer as a (data ptr, length) pair, rebuilt into the
+// `{ptr, i64}` array aggregate by the dispatched `.getEntries()` method.
+func PerfEntryListType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_data", Ty: TypePtr},
+		{Name: "__kml_len", Ty: TypeI64},
+	})
+	ty.IsPerfEntryList = true
+	return ty
+}
+
+// PerfObserverType is a `new PerformanceObserver(cb)` handle (TDD-00166): the
+// callback closure plus its registry-node pointer (set on `.observe`, cleared on
+// `.disconnect`).
+func PerfObserverType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_cb", Ty: TypePtr},
+		{Name: "__kml_node", Ty: TypePtr},
+	})
+	ty.IsPerfObserver = true
+	return ty
+}
+
+// HttpOptionsType returns the object `url.urlToHttpOptions()` produces
+// (TDD-00165 Stage 4) — the option-bag shape `http.request` accepts, remapped
+// from a WHATWG URL. `path` is `pathname`+`search`; `auth` is `user[:pass]`.
+func HttpOptionsType() Type {
+	return ObjectType([]Field{
+		{Name: "protocol", Ty: TypePtr},
+		{Name: "hostname", Ty: TypePtr},
+		{Name: "hash", Ty: TypePtr},
+		{Name: "search", Ty: TypePtr},
+		{Name: "pathname", Ty: TypePtr},
+		{Name: "path", Ty: TypePtr},
+		{Name: "href", Ty: TypePtr},
+		{Name: "port", Ty: TypePtr},
+		{Name: "auth", Ty: TypePtr},
+	})
 }
 
 // SQLiteDatabaseType returns node:sqlite's `new DatabaseSync(...)` result type
@@ -1824,6 +1912,27 @@ func Http2ServerStreamType() Type {
 func DiagChannelType() Type {
 	ty := ObjectType([]Field{{Name: "__dcchan", Ty: TypePtr}})
 	ty.IsDCChannel = true
+	return ty
+}
+
+// AsyncLocalStorageType is an async_hooks AsyncLocalStorage<T> handle
+// (TDD-00168): a pointer to the runtime record { i64 id, i64 disabled }. The
+// store element type T is carried in ElemType so getStore() types as
+// T | undefined and run(store, …) type-checks its store argument.
+func AsyncLocalStorageType(elem Type) Type {
+	el := elem
+	ty := ObjectType([]Field{{Name: "__als", Ty: TypePtr}})
+	ty.IsAsyncLocalStorage = true
+	ty.ElemType = &el
+	return ty
+}
+
+// AsyncResourceType is an async_hooks AsyncResource handle (TDD-00168 Stage 4):
+// a pointer to the runtime record { ptr capturedCtx } — the async context head
+// captured at construction and reinstalled by runInAsyncScope.
+func AsyncResourceType() Type {
+	ty := ObjectType([]Field{{Name: "__asyncres", Ty: TypePtr}})
+	ty.IsAsyncResource = true
 	return ty
 }
 

@@ -93,9 +93,6 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		}
 		elemTy = inferred
 	}
-	if elemTy.IsArray {
-		return nil, fmt.Errorf("%d:%d: an array element type is not yet supported on a generator function", fd.GetPos().Line, fd.GetPos().Col)
-	}
 	e.generatorBodyCtr++
 	return &GeneratorInfo{
 		ParamTypes:   paramTypes,
@@ -169,22 +166,105 @@ func (e *Emitter) ensureGeneratorRuntime() {
 // prologue/yield/return paths (emitGeneratorFunctionDecl/
 // emitYieldExpression), all of which repeat the identical
 // FieldIndex-then-GEP-then-store shape enough times to warrant one helper.
+//
+// An array-typed slot (the __yielded/__sent/__paramN fields of a generator
+// yielding an array element type, ADR-00676) is laid out and stored as the
+// inline { ptr, i64 } aggregate StructFieldIR reserves for it — the caller
+// passes the array's aggregate Value.Ref (its established {data,len} shape),
+// and the passed `ir` string ("ptr", the array *type*'s IR) is overridden
+// with the field's storage IR so the 16-byte slot and the store agree. Every
+// non-array field is unaffected (StructFieldIR == Type.IR there).
 func (e *Emitter) storeGeneratorField(genObjReg string, genTy Type, field, ir, val string) {
 	idx, fieldTy, _ := genTy.FieldIndex(field)
+	if fieldTy.IsArray {
+		ir = StructFieldIR(fieldTy)
+	}
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, val, gep, fieldTy.Align()))
 }
 
 // loadGeneratorField GEPs+loads one field of a generator instance — see
-// storeGeneratorField's own doc comment.
+// storeGeneratorField's own doc comment. An array-typed slot is loaded as the
+// inline { ptr, i64 } aggregate (StructFieldIR), returned as an ordinary array
+// Value whose Ref is that aggregate register (ADR-00676).
 func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string) Value {
 	idx, fieldTy, _ := genTy.FieldIndex(field)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, fieldTy.IR, gep, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}
+}
+
+// genZeroElem produces a zero value of a generator's element type for the
+// "nothing more to give" / uninitialised-slot positions (ADR-00676). For an
+// array element type this is the empty { null, 0 } aggregate (emitScalarZero
+// only builds scalar/pointer zeros, and would produce a bare null ptr where
+// the inline {ptr,i64} aggregate is required); every other type defers to
+// emitScalarZero unchanged.
+func (e *Emitter) genZeroElem(t Type) Value {
+	if t.IsArray {
+		agg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} { ptr null, i64 0 }, ptr null, 0", agg))
+		return Value{Ref: agg, Ty: t}
+	}
+	return e.emitScalarZero(t)
+}
+
+// genUnpackArrayElemPattern destructures a `for (const [a, b] of gen())` /
+// `for await` loop pattern whose element type is itself an array (ADR-00676) —
+// `const [a, b]` over a yielded `number[]` binds a=arr[0], b=arr[1]. The
+// element arrives as the inline {ptr,i64} aggregate; its data/len are extracted
+// and fed to the shared array-pattern unpack core (the same one plain array
+// destructuring uses). elemTy is the array element type (elemTy.ElemType is the
+// per-slot type the bindings receive).
+func (e *Emitter) genUnpackArrayElemPattern(agg string, elemTy Type, elems []ast.ArrayPatternElem) error {
+	dataReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataReg, agg))
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, agg))
+	return e.unpackArrayPatternInto(dataReg, lenReg, *elemTy.ElemType, elems)
+}
+
+// genLoadElemAt loads a generator element value (the {value} slot of a
+// `{value,done}` result object, or an async request-queue sent-value slot)
+// from an already-GEP'd address, as the inline {ptr,i64} aggregate for an
+// array element type or a plain scalar/pointer load otherwise (ADR-00676).
+func (e *Emitter) genLoadElemAt(gepReg string, elemTy Type) string {
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(elemTy), gepReg, elemTy.Align()))
+	return reg
+}
+
+// genDefineLoopVar binds a `for (const x of gen())` / `for await` loop
+// variable slot once, before the loop (ADR-00676). An array element type
+// binds a stable header slot (alloca ptr, object-reference array model,
+// TDD-00127) that each iteration re-points via genStoreLoopVar; every other
+// type binds a plain alloca of its own IR. Returns the slot register.
+func (e *Emitter) genDefineLoopVar(name string, elemTy Type) string {
+	varPtr := e.freshReg()
+	if elemTy.IsArray {
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
+	}
+	e.define(name, Symbol{Ptr: varPtr, Ty: elemTy})
+	return varPtr
+}
+
+// genStoreLoopVar writes one iteration's element aggregate into a loop-var
+// slot made by genDefineLoopVar. An array element is boxed into a fresh
+// {data,len} header whose pointer is stored into the stable ptr slot (a
+// per-iteration reassignment, object-reference model); every other type
+// stores its scalar/pointer value directly.
+func (e *Emitter) genStoreLoopVar(varPtr string, elemTy Type, val string) {
+	if elemTy.IsArray {
+		header := e.boxArrayValue(Value{Ref: val, Ty: elemTy})
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, varPtr))
+		return
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val, varPtr, elemTy.Align()))
 }
 
 // emitGeneratorConstruction implements `gen(args)` — calling a generator
@@ -244,9 +324,9 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 	e.storeGeneratorField(genObj, genTy, GeneratorCallerCtxField, "ptr", "null")
 	e.storeGeneratorField(genObj, genTy, GeneratorStartedField, "i1", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "0")
-	zeroElem := e.emitScalarZero(info.ElemTy)
+	zeroElem := e.genZeroElem(info.ElemTy)
 	e.storeGeneratorField(genObj, genTy, GeneratorYieldedField, zeroElem.Ty.IR, zeroElem.Ref)
-	zeroElem2 := e.emitScalarZero(info.ElemTy)
+	zeroElem2 := e.genZeroElem(info.ElemTy)
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, zeroElem2.Ty.IR, zeroElem2.Ref)
 	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", "null")
@@ -357,7 +437,7 @@ func (e *Emitter) emitYieldExpression(ex *ast.YieldExpression) (Value, error) {
 		}
 		val = e.coerce(v, gctx.elemTy)
 	} else {
-		val = e.emitScalarZero(gctx.elemTy)
+		val = e.genZeroElem(gctx.elemTy)
 	}
 	e.emitGeneratorSwapToCaller(gctx, val, false)
 	return e.emitYieldResumeDispatch(gctx)
@@ -455,14 +535,14 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resultTy.StructIR(), r, idx))
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, fieldTy.IR, gep, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 		return out
 	}
 
 	// r = inner.next(undefined)
 	inner0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", inner0, innerPtrA))
-	r0 := stepNext(inner0, e.emitScalarZero(innerElem))
+	r0 := stepNext(inner0, e.genZeroElem(innerElem))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r0, resultA))
 
 	condL := e.freshLabel("ystar.cond")
@@ -660,7 +740,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rForVal, vIdx))
 	valReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(elemTy), vGep, elemTy.Align()))
 	e.emitGeneratorSwapToCaller(gctx, Value{Ref: valReg, Ty: gctx.elemTy}, false)
 	// On resume, dispatch on how the outer was re-entered (the resumer set
 	// __resumeMode before swapping back in). Mode 0 loops for the next element;
@@ -707,7 +787,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 		rvGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rvGep, resultTy.StructIR(), rr, vIdx))
 		rvVal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rvVal, elemTy.IR, rvGep, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", rvVal, StructFieldIR(elemTy), rvGep, elemTy.Align()))
 		if err := e.emitPendingFinallys(); err != nil {
 			return Value{}, err
 		}
@@ -725,7 +805,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
-	return e.emitScalarZero(gctx.elemTy), nil
+	return e.genZeroElem(gctx.elemTy), nil
 }
 
 // emitYieldResumeDispatch emits the post-swap resume handling shared by every
@@ -782,7 +862,7 @@ func (e *Emitter) emitGeneratorReturn(r *ast.ReturnStatement) error {
 		}
 		val = e.coerce(v, gctx.elemTy)
 	} else {
-		val = e.emitScalarZero(gctx.elemTy)
+		val = e.genZeroElem(gctx.elemTy)
 	}
 	// A `return` inside a `try/finally` must run the enclosing finally blocks
 	// before it completes the generator — the same emitPendingFinallys an
@@ -952,7 +1032,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		errReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errReg))
 		e.storeGeneratorField(reGen, info.GenTy, GeneratorGenErrorField, "ptr", errReg)
-		zeroY := e.emitScalarZero(info.ElemTy)
+		zeroY := e.genZeroElem(info.ElemTy)
 		e.storeGeneratorField(reGen, info.GenTy, GeneratorYieldedField, zeroY.Ty.IR, zeroY.Ref)
 		e.storeGeneratorField(reGen, info.GenTy, GeneratorDoneField, "i1", "1")
 		callerCtx := e.loadGeneratorField(reGen, info.GenTy, GeneratorCallerCtxField)
@@ -984,7 +1064,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// "instructions after a terminator are dropped" convention every other
 	// implicit-epilogue call site in this codebase already follows).
 	if !e.blockDone {
-		e.emitGeneratorSwapToCaller(gctx, e.emitScalarZero(info.ElemTy), true)
+		e.emitGeneratorSwapToCaller(gctx, e.genZeroElem(info.ElemTy), true)
 		e.emitTerminator("ret void")
 	}
 
@@ -1138,7 +1218,7 @@ func (e *Emitter) emitGeneratorNextByValue(genObj string, genTy Type, args []ast
 		}
 		sentVal = e.coerce(v, elemTy)
 	} else {
-		sentVal = e.emitScalarZero(elemTy)
+		sentVal = e.genZeroElem(elemTy)
 	}
 	return e.emitSyncGeneratorNextCore(genObj, genTy, sentVal), nil
 }
@@ -1180,12 +1260,12 @@ func (e *Emitter) emitSyncGeneratorNextCore(genObj string, genTy Type, sentVal V
 	// value instead of the "nothing more to give" zero this generator's
 	// completion already established.
 	e.emitLabel(skipL)
-	skipZero := e.emitScalarZero(elemTy)
+	skipZero := e.genZeroElem(elemTy)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	yieldedReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", yieldedReg, elemTy.IR, swapYielded.Ref, swapEndL, skipZero.Ref, skipL))
+	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", yieldedReg, StructFieldIR(elemTy), swapYielded.Ref, swapEndL, skipZero.Ref, skipL))
 	yielded := Value{Ref: yieldedReg, Ty: elemTy}
 	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
 	return e.buildGenNextResult(resultTy, elemTy, yielded, done)
@@ -1200,7 +1280,7 @@ func (e *Emitter) buildGenNextResult(resultTy, elemTy Type, yielded, done Value)
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, yielded.Ref, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), yielded.Ref, vGep, elemTy.Align()))
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
@@ -1300,7 +1380,7 @@ func (e *Emitter) emitGeneratorReturnMethod(receiver ast.Expression, genTy Type,
 		}
 		rv = e.coerce(v, elemTy)
 	} else {
-		rv = e.emitScalarZero(elemTy)
+		rv = e.genZeroElem(elemTy)
 	}
 	return e.emitGeneratorReturnByValue(genVal.Ref, genTy, rv, pos)
 }
@@ -1498,7 +1578,7 @@ func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Ty
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", node))
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", slot, StructFieldSize(elemTy)))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, sentVal.Ref, slot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), sentVal.Ref, slot, elemTy.Align()))
 	storeAt := func(idx int, ir, val string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, asyncGenReqNodeIR, node, idx))
@@ -1571,7 +1651,7 @@ func (e *Emitter) emitAsyncGeneratorThrowByValue(genObj string, genTy Type, errP
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(submitL)
-	zeroSent := e.emitScalarZero(elemTy)
+	zeroSent := e.genZeroElem(elemTy)
 	qs := e.emitAsyncGenSubmitOrStart(genObj, genTy, elemTy, "1", zeroSent, errPtr)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qs, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -1651,7 +1731,7 @@ func (e *Emitter) emitAsyncGeneratorNextByValue(genObj string, genTy Type, args 
 		}
 		sentVal = e.coerce(v, elemTy)
 	} else {
-		sentVal = e.emitScalarZero(elemTy)
+		sentVal = e.genZeroElem(elemTy)
 	}
 	return e.emitAsyncGeneratorNextCore(genObj, genTy, sentVal), nil
 }
@@ -1777,7 +1857,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, sentBack)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
 	e.emitLabel(dZeroL)
-	zeroV := e.emitScalarZero(elemTy)
+	zeroV := e.genZeroElem(elemTy)
 	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, zeroV)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
 
@@ -1824,7 +1904,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	pnext := loadAt(4)
 	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", pnext)
 	psent := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", psent, elemTy.IR, pslot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", psent, StructFieldIR(elemTy), pslot, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pslot))
 	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", head.Ref))
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, elemTy.IR, psent)
@@ -1853,7 +1933,7 @@ func (e *Emitter) settleAsyncGenResult(q, genObj string, genTy, resultTy, elemTy
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, yielded.Ref, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), yielded.Ref, vGep, elemTy.Align()))
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
@@ -1968,8 +2048,7 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+		varPtr = e.genDefineLoopVar(s.VarName, elemTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2001,7 +2080,7 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
 	switch {
 	case s.ObjectPattern != nil:
 		// The yielded object's fields become the loop-body bindings; a
@@ -2014,14 +2093,19 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 		// A tuple element binds positionally to the tuple's fields (an async
 		// generator's element type is never an array, so a tuple is the only
 		// array-destructurable element shape here).
-		if !elemTy.IsTuple {
+		if elemTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if elemTy.IsTuple {
+			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", s.GetPos().Line, s.GetPos().Col)
 		}
-		if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
-			return err
-		}
 	default:
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, loaded, varPtr, elemTy.Align()))
+		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
 	if err := e.emitStmt(s.Body); err != nil {
 		return err
@@ -2061,8 +2145,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, awaitedTy.IR, awaitedTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
+		varPtr = e.genDefineLoopVar(s.VarName, awaitedTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2090,7 +2173,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
 
 	// Await the yielded value before binding (identity for a plain value).
 	boundVal := Value{Ref: loaded, Ty: elemTy}
@@ -2113,15 +2196,20 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if !boundTy.IsTuple {
+		if boundTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if boundTy.IsTuple {
+			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
-		}
-		if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
-			return err
 		}
 	default:
 		if awaitedTy.IR != "void" && awaitedTy.IR != "" {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, awaitedTy.Align()))
+			e.genStoreLoopVar(varPtr, boundTy, boundVal.Ref)
 		}
 	}
 	if err := e.emitStmt(s.Body); err != nil {
@@ -2198,8 +2286,7 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+		varPtr = e.genDefineLoopVar(s.VarName, elemTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2233,21 +2320,26 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
 	switch {
 	case s.ObjectPattern != nil:
 		if err := e.unpackObjectPatternInto(loaded, elemTy, s.ObjectPattern, pos); err != nil {
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if !elemTy.IsTuple {
+		if elemTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if elemTy.IsTuple {
+			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, pos); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
 		}
-		if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, pos); err != nil {
-			return err
-		}
 	default:
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, loaded, varPtr, elemTy.Align()))
+		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
 	if err := e.emitStmt(s.Body); err != nil {
 		return err
@@ -2325,8 +2417,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, boundDeclTy.IR, boundDeclTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: boundDeclTy})
+		varPtr = e.genDefineLoopVar(s.VarName, boundDeclTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2355,7 +2446,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
 
 	boundVal := Value{Ref: loaded, Ty: elemTy}
 	boundTy := elemTy
@@ -2377,15 +2468,20 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if !boundTy.IsTuple {
+		if boundTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if boundTy.IsTuple {
+			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-tuple type", pos.Line, pos.Col)
-		}
-		if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
-			return err
 		}
 	default:
 		if boundDeclTy.IR != "void" && boundDeclTy.IR != "" {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, boundDeclTy.Align()))
+			e.genStoreLoopVar(varPtr, boundTy, boundVal.Ref)
 		}
 	}
 	if err := e.emitStmt(s.Body); err != nil {
@@ -2502,8 +2598,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
 	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, awaitedTy.IR, awaitedTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: awaitedTy})
+		varPtr = e.genDefineLoopVar(s.VarName, awaitedTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2547,11 +2642,16 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if !boundTy.IsTuple {
+		if boundTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if boundTy.IsTuple {
+			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
-		}
-		if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
-			return err
 		}
 	default:
 		if awaitedTy.IsArray {
@@ -2559,7 +2659,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 			elemHeader := e.boxArrayValue(boundVal)
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemHeader, varPtr))
 		} else if awaitedTy.IR != "void" && awaitedTy.IR != "" {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", boundTy.IR, boundVal.Ref, varPtr, awaitedTy.Align()))
+			e.genStoreLoopVar(varPtr, boundTy, boundVal.Ref)
 		}
 	}
 
@@ -2593,8 +2693,7 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+		varPtr = e.genDefineLoopVar(s.VarName, elemTy)
 	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
@@ -2622,21 +2721,26 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, elemTy.IR, vGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(elemTy), vGep, elemTy.Align()))
 	switch {
 	case s.ObjectPattern != nil:
 		if err := e.unpackObjectPatternInto(loaded, elemTy, s.ObjectPattern, s.GetPos()); err != nil {
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if !elemTy.IsTuple {
+		if elemTy.IsArray {
+			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
+				return err
+			}
+		} else if elemTy.IsTuple {
+			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
+				return err
+			}
+		} else {
 			return fmt.Errorf("%d:%d: cannot array-destructure a for-of generator element of non-tuple type", s.GetPos().Line, s.GetPos().Col)
 		}
-		if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
-			return err
-		}
 	default:
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, loaded, varPtr, elemTy.Align()))
+		e.genStoreLoopVar(varPtr, elemTy, loaded)
 	}
 	if err := e.emitStmt(s.Body); err != nil {
 		return err
@@ -2656,7 +2760,7 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 	// shared loop-exit label. Async generators are consumed by the for-await
 	// path, not here.
 	if !genTy.GeneratorIsAsync {
-		if _, err := e.emitGeneratorReturnByValue(genVal.Ref, genTy, e.emitScalarZero(elemTy), s.GetPos()); err != nil {
+		if _, err := e.emitGeneratorReturnByValue(genVal.Ref, genTy, e.genZeroElem(elemTy), s.GetPos()); err != nil {
 			return err
 		}
 	}

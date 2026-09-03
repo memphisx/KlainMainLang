@@ -349,6 +349,36 @@ func (e *Emitter) ensureSortTrampolineF64() {
 }`)
 }
 
+// ensureSortTrampolineObj is the comparator trampoline for an object/class
+// element array (ADR-00681). Elements are object pointers (8-byte slots) and the
+// comparator (`(a, b) => a.k - b.k`) returns a `number` (double) — so it loads
+// each element as a `ptr` and reads the call's result as a `double`, exactly
+// like the string trampoline. The i64 trampoline could NOT be reused: it reads
+// the return as `i64` and truncates, turning a `double` result's bit pattern
+// into garbage/0, which made `objArr.sort(cmp)` a silent no-op.
+func (e *Emitter) ensureSortTrampolineObj() {
+	if e.usedSortTrampolineObj {
+		return
+	}
+	e.usedSortTrampolineObj = true
+	e.ensureSortClosGlobal()
+	e.emitGlobal(`define i32 @__kml_sort_tramp_obj(ptr %pa, ptr %pb) {
+  %clos = load ptr, ptr @__kml_sort_clos, align 8
+  %a = load ptr, ptr %pa, align 8
+  %b = load ptr, ptr %pb, align 8
+  %fp_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 0
+  %fp = load ptr, ptr %fp_slot, align 8
+  %ep_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 1
+  %ep = load ptr, ptr %ep_slot, align 8
+  %r = call double (ptr, ptr, ptr) %fp(ptr %ep, ptr %a, ptr %b)
+  %neg = fcmp olt double %r, 0.0
+  %pos = fcmp ogt double %r, 0.0
+  %s1 = select i1 %pos, i32 1, i32 0
+  %ri = select i1 %neg, i32 -1, i32 %s1
+  ret i32 %ri
+}`)
+}
+
 func (e *Emitter) ensureSortTrampolineStr() {
 	if e.usedSortTrampolineStr {
 		return

@@ -9,8 +9,10 @@ import (
 // A generator instance is its own fiber (a private ucontext_t + stack),
 // reusing this compiler's existing http.listen/fetch() fiber primitive
 // (TDD-00006 Part 2). V1 scope: top-level function declarations only, a
-// plain (non-destructured) parameter list, a non-array element type, an
-// explicit return type annotation, `yield`/bare `yield` (not `yield*`).
+// plain (non-destructured) parameter list, an explicit return type
+// annotation, `yield`/bare `yield` (not `yield*`). An array element type is
+// supported (ADR-00676) — yielded/sent arrays round-trip as the inline
+// {ptr,i64} aggregate through every generator slot.
 
 func TestE2EGeneratorBasicSequence(t *testing.T) {
 	assertOutput(t, `
@@ -1338,4 +1340,71 @@ take(function* () { yield 1; });
 	if err == nil {
 		t.Fatal("expected a compile error for a generator expression used as a value")
 	}
+}
+
+// --- Array element type (ADR-00676) ---
+//
+// A generator whose element type is an array yields/sends arrays that
+// round-trip as the inline {ptr,i64} aggregate through the __yielded/__sent
+// slots, the {value,done} result object, and every for-of/next()/yield*
+// binding (a boxed {data,len} header on the loop-variable side, object-
+// reference model). Regression-gated alongside the scalar generators above.
+
+func TestE2EGeneratorArrayYieldForOf(t *testing.T) {
+	assertOutput(t, `
+function* rows(): number[] {
+    yield [1, 2];
+    yield [3, 4, 5];
+    yield [];
+}
+for (const r of rows()) {
+    console.log(r.length, r.join(","));
+}
+`, "2 1,2\n3 3,4,5\n0 ")
+}
+
+func TestE2EGeneratorArrayYieldManualNext(t *testing.T) {
+	assertOutput(t, `
+function* pairs(): number[] {
+    const a = [10, 20];
+    yield a;
+    yield [30];
+}
+const it = pairs();
+const r1 = it.next();
+console.log(r1.done, r1.value.join("-"));
+const r2 = it.next();
+console.log(r2.done, r2.value.join("-"));
+console.log(it.next().done);
+`, "false 10-20\nfalse 30\ntrue")
+}
+
+func TestE2EGeneratorStringArrayYieldStarDelegate(t *testing.T) {
+	assertOutput(t, `
+function* words(): string[] {
+    yield ["a", "b"];
+    yield ["c"];
+}
+function* deleg(): string[] {
+    yield ["x"];
+    yield* words();
+    yield ["z"];
+}
+for (const w of deleg()) { console.log(w.join("+")); }
+`, "x\na+b\nc\nz")
+}
+
+func TestE2EAsyncGeneratorArrayYieldForAwait(t *testing.T) {
+	assertOutputImports(t, `
+async function* agen(): number[] {
+    yield [1, 2];
+    yield [3, 4, 5];
+}
+async function main2() {
+    for await (const r of agen()) {
+        console.log(r.length, r.join(","));
+    }
+}
+main2();
+`, "2 1,2\n3 3,4,5")
 }

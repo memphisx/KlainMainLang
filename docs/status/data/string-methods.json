@@ -33,23 +33,38 @@
           },
           {
             "feature": "`.length`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Byte length, not the JS UTF-16 code-unit count — `'café'.length` is `5` (Node: `4`)."
+            ]
           },
           {
             "feature": "`.slice(start, end?)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text."
+            ]
           },
           {
             "feature": "`.substring(start, end?)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text."
+            ]
           },
           {
             "feature": "`.indexOf(substr)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`)."
+            ]
           },
           {
             "feature": "`.includes(substr)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text)."
+            ]
           },
           {
             "feature": "`.startsWith(prefix)`",
@@ -93,11 +108,17 @@
           },
           {
             "feature": "`.toUpperCase()`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "ASCII-only case mapping (`a`–`z`/`A`–`Z`) — `'café'.toUpperCase()` is `'CAFé'` (Node: `'CAFÉ'`); no Unicode case tables."
+            ]
           },
           {
             "feature": "`.toLowerCase()`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "ASCII-only case mapping — `'Σ'.toLowerCase()` is `'Σ'` (Node: `'σ'`); non-ASCII bytes pass through unchanged."
+            ]
           },
           {
             "feature": "`.repeat(n)`",
@@ -187,11 +208,17 @@
           },
           {
             "feature": "`String.fromCharCode(n)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Each argument is truncated to one byte (0–255), not encoded as a UTF-16 code unit — `String.fromCharCode(0x263A)` is `':'` (Node: `'☺'`)."
+            ]
           },
           {
             "feature": "`String.fromCodePoint(n)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Shares `fromCharCode`'s one-byte truncation — no astral/surrogate encoding — a code point above `0xFF` is mangled (`String.fromCodePoint(0x263A)` → `':'`, Node: `'☺'`)."
+            ]
           },
           {
             "feature": "`String.raw` tag",

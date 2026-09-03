@@ -276,6 +276,27 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		out := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, resPtr))
 		return Value{Ref: out, Ty: TypeBool}, nil
+	case "&", "|", "^":
+		// JS bitwise ops ToInt32 both operands, compute in the 32-bit domain,
+		// and yield a Number (double) — the same path a typed `number & number`
+		// takes, applied to the any operands' numeric coercion.
+		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+		l32 := e.toInt32(Value{Ref: ld, Ty: TypeF64})
+		r32 := e.toInt32(Value{Ref: rd, Ty: TypeF64})
+		iop := map[string]string{"&": "and", "|": "or", "^": "xor"}[op]
+		bit := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = %s i32 %s, %s", bit, iop, l32, r32))
+		num := e.int32ToNumber(bit)
+		return Value{Ref: e.emitNbEncodeDouble(num.Ref), Ty: TypeAny}, nil
+	case "<<", ">>", ">>>":
+		// JS shift semantics (ToInt32 operand, 0-31 shift count, signed/unsigned
+		// result) — reuse emitBitShift over the any operands' numeric coercion.
+		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+		shifted, err := e.emitBitShift(op, Value{Ref: ld, Ty: TypeF64}, Value{Ref: rd, Ty: TypeF64})
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: e.emitNbEncodeDouble(shifted.Ref), Ty: TypeAny}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: operator '%s' on any/unknown is not yet supported", pos.Line, pos.Col, op)
 }

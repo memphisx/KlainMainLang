@@ -51,6 +51,27 @@ names.forEach((n) => console.log(n))
 `, "a\nb\nc")
 }
 
+func TestE2EArrayHOFCallbackFewerParams(t *testing.T) {
+	// A callback may declare fewer parameters than the higher-order method
+	// passes (JS ignores the extra element/index/array arguments). The call
+	// must be emitted against the callback's own arity, not the method's fixed
+	// argument set — otherwise the indirect call carries more operands than the
+	// function-pointer type declares and clang rejects the IR ("too many
+	// arguments specified"). Covers a zero-parameter predicate — the tightest
+	// case, e.g. `[].findIndex(function () {})`.
+	assertOutput(t, `
+const nums: number[] = [10, 20, 30]
+let count: number = 0
+nums.forEach(() => { count++ })
+console.log(count)
+console.log(nums.findIndex(() => true))
+console.log(nums.map(() => 7)[1])
+console.log(nums.every(() => true))
+console.log(nums.some(() => false))
+console.log([].findIndex(() => true))
+`, "3\n0\n7\ntrue\nfalse\n-1")
+}
+
 func TestE2EArrayForEachUnannotatedStringParam(t *testing.T) {
 	assertOutput(t, `
 const names: string[] = ["a", "bb", "ccc"]
@@ -1644,4 +1665,15 @@ const shouted = Array.from("abc", (c: string) => c + "!")
 console.log(shouted.join(","))
 `
 	assertOutput(t, src, "2,4,6\n0,1,2\na!,b!,c!")
+}
+
+// ADR-00681: sort(cmp) on an object array reorders (was a silent no-op — the
+// i64 trampoline truncated the comparator's double result to garbage).
+func TestE2EArraySortObjectComparator(t *testing.T) {
+	assertOutput(t, `
+interface R { k: number; o: number; }
+const xs: R[] = [{k:3,o:0},{k:1,o:1},{k:2,o:2}];
+xs.sort((x, y) => x.k - y.k);
+for (const r of xs) { console.log(r.k); }
+`, "1\n2\n3")
 }

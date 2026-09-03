@@ -136,6 +136,13 @@
           "category": "Modules",
           "pageFile": "MODULES.md",
           "caveats": "• Whole-program compile only<br>• `klmpm` is Stage 1 only — a `klain_modules/<name>/` package must be hand-built, no package-manager tool yet ([TDD-00054](../tdd/TDD-00054.md))<br>• No namespace re-exports (`export * as ns from`); no npm/`node_modules` interop ([TDD-00053](../tdd/TDD-00053.md)); dynamic `import()` works opt-in via `-dynamic-import=lazy` — real laziness through a `dlopen`'d `.so`/`.dylib` island per target ([ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); the eager compile-time-merge backend ([TDD-00055](../tdd/TDD-00055.md)) and a dynamic-or-lazy `require()` stay unbuilt<br>• Static CommonJS `require('<literal>')` works, desugared to an import ([ADR-00369](../adr/ADR-00369.md))<br>• Node-style built-ins (`fs`/`path`/…) require a default, namespace, named, or `require` import, not ambient; the `node:` prefix resolves too ([TDD-00049](../tdd/TDD-00049.md)/[ADR-00419](../adr/ADR-00419.md))"
+        },
+        {
+          "category": "**Language-feature index**",
+          "pageText": "[TYPESCRIPT-FEATURES.md](TYPESCRIPT-FEATURES.md)",
+          "coverageOverride": "— index",
+          "strictOverride": "—",
+          "caveats": "Completeness map of every TypeScript language feature (implemented / partial / not started / out of scope) — informational, not counted"
         }
       ]
     },
@@ -145,7 +152,7 @@
     },
     {
       "kind": "block",
-      "text": "WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. Not part of the JS *language* itself, but not Node-specific either. Filtered to those that make sense outside a browser context; pure browser-only APIs (DOM, Canvas, WebGL, CSS, Gamepad, etc.) are out of scope — see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md)."
+      "text": "WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. Not part of the JS *language* itself, but not Node-specific either. Filtered to those that make sense outside a browser context; pure browser-only APIs (DOM, Canvas, WebGL, CSS, etc.) are out of scope (the **Gamepad API** is being reinterpreted natively over OS controller input — [TDD-00170](../tdd/TDD-00170.md)) — see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md)."
     },
     {
       "kind": "sectionTotal"
@@ -209,6 +216,13 @@
           "category": "Workers / Concurrency",
           "pageFile": "CONCURRENCY-WORKERS.md",
           "caveats": "• One listener per event, arrow-function-literal handlers only; one message type per direction/channel<br>• `-mm=manual` leaks per message; `close()` leaks pipe fds<br>• Shared memory (`SharedArrayBuffer`/`Atomics`) is tracked on [BINARY-DATA-TYPED-ARRAYS.md](BINARY-DATA-TYPED-ARRAYS.md)"
+        },
+        {
+          "category": "**JS built-in object index**",
+          "pageText": "[JAVASCRIPT-BUILTINS.md](JAVASCRIPT-BUILTINS.md)",
+          "coverageOverride": "— index",
+          "strictOverride": "—",
+          "caveats": "Completeness map of every JavaScript standard built-in object (implemented / partial / not started / out of scope) — informational, not counted"
         }
       ]
     },
@@ -272,6 +286,13 @@
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
           "pageFile": "NODE-CORE-MODULES.md",
           "caveats": "`querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster`/`tls` done (`tls` = client + server); `https` = client (`get`/`request` over libcurl) + server (`https.createServer`, HTTPS/1.1, [ADR-00505](../adr/ADR-00505.md)); `stream/web` re-exports the WHATWG classes; `diagnostics_channel` pub/sub (string messages); `http2` ships all four stages — `createServer` (h2c) + `createSecureServer` (h2 over TLS, `allowHTTP1` 1.1 fallback), compat + `.on('stream')` APIs, client sessions, constants/settings ([TDD-00139](../tdd/TDD-00139.md)/[TDD-00111](../tdd/TDD-00111.md)); `vm` not started"
+        },
+        {
+          "category": "**Built-in module index**",
+          "pageText": "[NODE-MODULES.md](NODE-MODULES.md)",
+          "coverageOverride": "— index",
+          "strictOverride": "—",
+          "caveats": "Completeness map of every Node built-in module (importable / global-only / not started / out of scope) — informational, not counted"
         }
       ]
     },
@@ -428,6 +449,10 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "168": {
+          "title": "`async_hooks` — `AsyncLocalStorage`",
+          "notes": "Context propagation over the existing fiber model — the store lives in the coroutine task struct, so cross-`await` propagation is nearly free; low-level `createHook`/async-id lifecycle is a documented out-of-scope faithful impossibility"
+        },
         "1": {
           "title": "Memory Management (`manual`/`gc`/`auto`)",
           "notes": "`manual`+`gc` ship; compiler-inserted-free `auto` is design-only — see [Cross-Cutting](#cross-cutting)"
@@ -603,6 +628,38 @@
         "162": {
           "title": "Implicit `any` for untyped bindings + clean rejection of incompatible reassignment",
           "notes": "Closes the largest invalid-IR sub-family (untyped `var x` reassigned across types stores a scalar raw into a ptr slot). Wiring over the existing D1 dynamic box (an annotated `let x: any` cross-type reassignment already works): route an untyped-uninitialized binding to implicit `any` in the strict lane too (already the case under `-compat=js`), and cleanly reject an incompatible reassignment to an inferred-typed binding instead of emitting a bad store. Operator-on-`any` and compat=js binding-widening are follow-on stages"
+        },
+        "163": {
+          "title": "`FinalizationRegistry` — mode-dependent finalization + leak diagnostics",
+          "notes": "The `WeakRef` companion, reimagined per memory mode rather than ported: `-mm=gc` gives real Boehm-finalizer semantics; `-mm=manual` gives *deterministic* finalization at the `Memory.free()` point plus an `atexit` survivor-flush (deterministic destructors the GC world can't offer); `-finalizers=report` turns the registry into a labeled **leak detector** for the leak-by-default model (registered-but-never-freed reported at exit by held value). One API, honest per-mode timing (the spec's best-effort clause permits all of it), staying useful into the future `auto` mode ([00134](../tdd/TDD-00134.md)/[00135](../tdd/TDD-00135.md)). Turns a half-missing competitor feature into a memory-management + debugging tool. Not started — Stage 2 (manual-mode firing) is the highest-value first step"
+        },
+        "164": {
+          "title": "General C FFI — AOT `node:ffi` (`dlopen` + static signatures + callback trampolines)",
+          "notes": "The split-out concrete design for [00150](../tdd/TDD-00150.md) Stage 2 / the [00032](../tdd/TDD-00032.md) placeholder foundation — the pivot that unlocks opentui's native backend, the GTK/Qt/SDL/imgui GUI crossover, ncurses, and DB clients. Now anchored to Node's real first-party `node:ffi` (v26.1.0, experimental): implement the actual Node API (`dlopen`/`DynamicLibrary`/plain-object signatures/`registerCallback`/raw-memory helpers) rather than a bespoke dialect, so portable FFI code compiles unchanged. The fit is strong — the type-name enum ≈ the JSDoc int-width set, 64-bit↔`bigint` already modelled, `dlopen`/`dlsym` are the `ensure*()` libc-primitive shape, and a *static* signature is easier to lower AOT than Node's runtime-parsed one. Staged A (load + typed calls) → B (raw memory) → C (closure→C-function-pointer trampoline — the one genuinely new codegen piece, the core gap 00032/00150 named). Not started"
+        },
+        "165": {
+          "title": "Importable specifiers for the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`)",
+          "notes": "Closes the [Node modules index](../status/NODE-MODULES.md) gap where these worked as globals but their `import … from '<name>'` specifier was rejected. Per official spec the primary same-named export of each **is** the ambient global (no behavioral divergence). **Stages 1–3 shipped** ([ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) — the import wiring is complete: same-name/`node:`/default and **aliased** imports all resolve (erase-to-global, rename, or rebuild the parse-time constructor node). **Stage 4** is in progress — the **legacy `url`-module function surface is complete** — `parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode` ([ADR-00669](../adr/ADR-00669.md)–[ADR-00672](../adr/ADR-00672.md)), on the hybrid `url` module. Remaining across other modules: `PerformanceObserver`, `timers/promises` — new feature surfaces ranked by leverage"
+        },
+        "166": {
+          "title": "`PerformanceObserver` (perf_hooks)",
+          "notes": "Observe `mark`/`measure` performance entries. **V1 shipped** ([ADR-00673](../adr/ADR-00673.md)): `new PerformanceObserver(cb)` + `observe({entryTypes})`/`disconnect()`, a global observer registry `performance.mark`/`measure` walk, and `getEntries()` yielding `PerformanceEntry` objects — **synchronous** dispatch. Follow-ups: async batched delivery (the load-bearing fidelity gap), `buffered`/`takeRecords`/single-`type` form, `getEntriesBy*`"
+        },
+        "167": {
+          "title": "`events` async helpers (`once`/`on`)",
+          "notes": "`events.once` shipped ([ADR-00675](../adr/ADR-00675.md)) — desugars to `new Promise((res) => ee.once(name, (…a) => res([…a])))`, unblocked by the `Promise<T[]>` value fix ([ADR-00674](../adr/ADR-00674.md)). `events.on` (async iterator over a buffered event queue) shipped too ([ADR-00677](../adr/ADR-00677.md)) — eager listener registration, unbounded buffer, consumer parks when the queue drains"
+        },
+        "169": {
+          "title": "Faithful async rejection values",
+          "notes": "Preserve the original rejected/thrown value (a NaN-boxed `any`) instead of coercing to a stringified Error — fixes `Promise.allSettled` `.reason` fidelity and `throw <non-Error>`; touches the exception + combinator paths"
+        },
+        "170": {
+          "title": "Gamepad API (native controller input)",
+          "notes": "The W3C `navigator.getGamepads()` shape backed by **SDL2** (`SDL_GameController`) — one cross-platform library gives the standard mapping DB, hotplug, and rumble, so it's a mapping exercise rather than per-OS backends. Reinterprets a formerly out-of-scope browser API, like URL/fetch/EventTarget"
+        },
+        "171": {
+          "title": "Geolocation API (native reinterpretation)",
+          "notes": "The W3C `navigator.geolocation` shape backed by tiered native sources — V1 is IP-based geolocation over the existing `fetch` stack (zero new dep, matches a headless server), with `enableHighAccuracy` selecting OS services (Linux GeoClue / macOS CoreLocation) and serial-NMEA GPS as opt-in follow-ons; `KML_GEOLOCATION` override for pinning/CI"
         }
       }
     },

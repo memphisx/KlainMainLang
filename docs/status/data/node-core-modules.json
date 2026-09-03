@@ -24,15 +24,16 @@
         "countsTowardParity": true,
         "rows": [
           {
-            "feature": "`querystring` (`.parse`, `.stringify`)",
+            "feature": "`querystring`",
             "status": "implemented",
             "notes": [
+              "Surface: `.parse`, `.stringify`",
               "A `Map<string,string>` in, out — the same shape `req.query`/`URLSearchParams` already use",
               "`.parse` doesn't strip a leading `?` (matching real Node; distinct from `new URLSearchParams(str)`, which does)"
             ]
           },
           {
-            "feature": "`assert` (`.ok`, bare `assert(cond, msg?)`, `.equal`/`.strictEqual`, `.notEqual`/`.notStrictEqual`, `.deepEqual`/`.deepStrictEqual` (+`not*`), `.fail`, `.throws`, `.doesNotThrow`, `.ifError`, `.match`/`.doesNotMatch`)",
+            "feature": "`assert`",
             "status": "implemented",
             "caveats": [
               "`equal`/`strictEqual` and `deepEqual`/`deepStrictEqual` (and their `not*` counterparts) are aliases of each other — this compiler's `==` has no implicit coercion to distinguish them",
@@ -40,10 +41,13 @@
               "`.match`/`.doesNotMatch`'s regexp argument must be statically a RegExp ([ADR-00428](../adr/ADR-00428.md))",
               "`.throws` only checks that *something* was thrown, not the thrown value's type/message",
               "No `assert.rejects`/`doesNotReject` (needs await-a-rejection machinery) and no `AssertionError` class ([ADR-00499](../adr/ADR-00499.md))"
+            ],
+            "notes": [
+              "Surface: `.ok`, bare `assert(cond, msg?)`, `.equal`/`.strictEqual`, `.notEqual`/`.notStrictEqual`, `.deepEqual`/`.deepStrictEqual` (+`not*`), `.fail`, `.throws`, `.doesNotThrow`, `.ifError`, `.match`/`.doesNotMatch`"
             ]
           },
           {
-            "feature": "`test` / `node:test` (the **runner**: `test`/`it`, `describe`/`suite`, TestContext `t.test`/`t.after`/`t.skip`/`t.todo`/`t.diagnostic`, hooks `before`/`after`/`beforeEach`/`afterEach` — plus the native helpers `mustCall`/`mustCallAtLeast`/`mustNotCall`/`skip`/`expectsError` + env probes)",
+            "feature": "`test` / `node:test`",
             "status": "implemented",
             "caveats": [
               "Runner ([TDD-00140](../tdd/TDD-00140.md)/[ADR-00419](../adr/ADR-00419.md)): **run-at-registration** (top-level code after a `test()` runs after it here, before it in Node); `beforeEach`/`afterEach` are single slots (last wins) and also fire for subtests; no `mock.*`, `t.plan`, `run()`, concurrency, or snapshots",
@@ -52,12 +56,13 @@
               "`mustSucceed` is count-only (the \"err is falsy\" check is deferred); `expectWarning` runs the thunk but doesn't capture warnings"
             ],
             "notes": [
+              "Surface: the **runner**: `test`/`it`, `describe`/`suite`, TestContext `t.test`/`t.after`/`t.skip`/`t.todo`/`t.diagnostic`, hooks `before`/`after`/`beforeEach`/`afterEach` — plus the native helpers `mustCall`/`mustCallAtLeast`/`mustNotCall`/`skip`/`expectsError` + env probes",
               "`import { mustCall } from 'test'` — a first-class builtin (not Node's internal `../common`). `mustCall(fn, n=1)` — plus Node's function-less `mustCall()`/`mustCall(n)` forms, which count a synthesized noop ([ADR-00423](../adr/ADR-00423.md)) — wraps `fn` so its invocation count is verified at process exit (via the existing exit sink); an unmet/exceeded count prints a diagnostic and exits non-zero, giving examples/tests real async assertions instead of `console.log`. See [TDD-00122](../tdd/TDD-00122.md)/[ADR-00370](../adr/ADR-00370.md)",
               "Distinct from `console.assert` (see [CONSOLE.md](CONSOLE.md)) — throws a catchable `AssertionError` (kind-tagged as a base `Error`, since this compiler's fixed error-kind enum has no dedicated slot) instead of logging and continuing"
             ]
           },
           {
-            "feature": "`util` (`.inspect`, `.format`)",
+            "feature": "`util`",
             "status": "implemented",
             "caveats": [
               "No `.promisify` — the callback builtins (`zlib.gzip`, `child_process.exec`) are name-dispatched calls, not first-class function values to wrap; importing `promisify` fails cleanly ([ADR-00325](../adr/ADR-00325.md))",
@@ -65,12 +70,13 @@
               "`.inspect`'s options object is accepted but ignored (no `depth`/`colors`)"
             ],
             "notes": [
+              "Surface: `.inspect`, `.format`",
               "`.inspect` reuses the same value formatter as `console.log` (strings single-quoted, `ClassName { … }`, arrays, `10n`)",
               "`.format`: `%s`/`%d`/`%i`/`%f`/`%j`/`%o`/`%O`/`%%`, excess args appended space-separated, unrecognized specifiers left literal — matching Node"
             ]
           },
           {
-            "feature": "`net` (TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end'\\|'close'\\|'connect'/'ready')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`)",
+            "feature": "`net`",
             "status": "implemented",
             "caveats": [
               "`net.connect` uses a **blocking** `connect()` — a slow/unreachable host blocks the event loop until the OS connect timeout; a connect failure **throws** a catchable `Error` rather than emitting an async `'error'` event ([ADR-00328](../adr/ADR-00328.md))",
@@ -84,6 +90,7 @@
               "Socket `'close'` fires with no `hadError` argument, and `'error'` listeners stay a rejection — the runtime's failure paths throw instead of emitting ([ADR-00501](../adr/ADR-00501.md))"
             ],
             "notes": [
+              "Surface: TCP server: `net.createServer`, `server.listen`/`address()`/`on('connection'\\|'listening')`/`close`; TCP client: `net.connect`/`createConnection` (positional or `{ port, host }`); connection socket `.on('data'\\|'end'\\|'close'\\|'connect'/'ready')`/`.write`/`.end`/`.address()`/`.destroy()`/`.setNoDelay()`/`.setKeepAlive()`; `net.isIP`/`isIPv4`/`isIPv6`",
               "Accept loop and per-connection read pipes fold into the same `select()` event loop as `child_process` ([ADR-00324](../adr/ADR-00324.md)); a client socket reuses the same machinery once connected. A plausible base for a future `WebSocket` (see [NETWORKING.md](NETWORKING.md))",
               "`address()` reads the real bound address+port via `getsockname`+`inet_ntop`, making the `listen(0)` ephemeral-port idiom (`listen(0, () => net.connect(server.address().port, …))`) usable; `net.isIP` parses via `inet_pton` (0/4/6) ([ADR-00397](../adr/ADR-00397.md)/[ADR-00399](../adr/ADR-00399.md))",
               "`'data'` delivers a Buffer; `.write`/`.end` take a string/Buffer/ArrayBuffer/DataView",
@@ -92,7 +99,7 @@
             ]
           },
           {
-            "feature": "`dgram` (UDP sockets: `createSocket('udp4')`, `bind`, `address()`, `setBroadcast()`, `on('message')`, `send`, `close`)",
+            "feature": "`dgram`",
             "status": "implemented",
             "caveats": [
               "`udp4` only — no `udp6`",
@@ -101,6 +108,7 @@
               "`socket.send(msg, port, host)` positional form only — no `(msg, offset, length, port, address, cb)` form; no `.setTTL()`/membership methods"
             ],
             "notes": [
+              "Surface: UDP sockets: `createSocket('udp4')`, `bind`, `address()`, `setBroadcast()`, `on('message')`, `send`, `close`",
               "Each socket's fd folds into the same `select()` event loop as `net`/`child_process` ([ADR-00327](../adr/ADR-00327.md))",
               "`.address()` reports the real bound `{ address, family, port }` via `getsockname` (the `bind(0)` ephemeral-port idiom); `.setBroadcast(flag)` is a real `setsockopt(SO_BROADCAST)` — required before sending to a broadcast address ([ADR-00581](../adr/ADR-00581.md))",
               "`'message'` fires with a Buffer and an rinfo `{ address, port }`; `send(msg, port, host)` resolves `host` (name or IP) via the `dns` helper",
@@ -108,7 +116,7 @@
             ]
           },
           {
-            "feature": "`tls` (TLS-wrapped sockets)",
+            "feature": "`tls`",
             "status": "implemented",
             "caveats": [
               "**Blocking** TCP connect + TLS handshake on both sides (a slow peer stalls the loop), the same simplification `net.connect` makes",
@@ -116,11 +124,12 @@
               "Client options `{ rejectUnauthorized }` only (SNI = the host; no client-cert / ALPN / `servername` override); server `{ cert, key }` are PEM **strings** only (one cert per server, no chain/passphrase, no `requestCert`); the options may be an object literal or a bound object value ([ADR-00413](../adr/ADR-00413.md))"
             ],
             "notes": [
+              "Surface: TLS-wrapped sockets",
               "**Client** `tls.connect(port, host[, {rejectUnauthorized}][, onSecureConnect])` (cert verification + SNI on by default) and **server** `tls.createServer({ cert, key }, connectionListener)` (`.listen`/`.close`, per-connection `SSL_accept`) — both return **net-shaped** handles (an `SSL*` in the socket), so `.on('data')`/`.write()`/`.end()`/`.on('connection')` reuse the net machinery, routing through `SSL_read`/`SSL_write`. A handshake/verify failure throws a catchable `Error` ([TDD-00109](../tdd/TDD-00109.md)/[TDD-00110](../tdd/TDD-00110.md)/[ADR-00344](../adr/ADR-00344.md)/[ADR-00345](../adr/ADR-00345.md))"
             ]
           },
           {
-            "feature": "`dns` (`dns.lookup`, `dns.resolve4`/`resolve`, `dns.promises.lookup`)",
+            "feature": "`dns`",
             "status": "implemented",
             "caveats": [
               "`dns.resolve4`/`resolve` use `getaddrinfo` (the OS resolver), not real DNS `A` queries — no `resolve6`/`resolveMx`/`resolveTxt`/`reverse`",
@@ -129,12 +138,13 @@
               "Failure passes a generic `Error` (`getaddrinfo ENOTFOUND`), not a `code`-tagged Node error"
             ],
             "notes": [
+              "Surface: `dns.lookup`, `dns.resolve4`/`resolve`, `dns.promises.lookup`",
               "`getaddrinfo(3)`-backed ([ADR-00326](../adr/ADR-00326.md), [ADR-00329](../adr/ADR-00329.md)); `lookup` returns one dotted-quad, `resolve4` all A records as a `string[]`, `promises.lookup` a `Promise<{address, family}>`",
               "Verified on Mac (arm64) with the Darwin `struct addrinfo` `ai_addr`/`ai_next` offsets probed on the machine — the same layout the WebSocket-client resolver still gates out on Darwin"
             ]
           },
           {
-            "feature": "`zlib` (`gzip`/`gunzip`, `deflate`/`inflate`, `deflateRaw`/`inflateRaw`, `unzip`, each `*Sync` + `(err, result)` callback)",
+            "feature": "`zlib`",
             "status": "implemented",
             "caveats": [
               "The callback form fires synchronously, not deferred to the next event-loop tick",
@@ -143,19 +153,21 @@
               "`{ level }` is the only supported option and must be a compile-time constant"
             ],
             "notes": [
+              "Surface: `gzip`/`gunzip`, `deflate`/`inflate`, `deflateRaw`/`inflateRaw`, `unzip`, each `*Sync` + `(err, result)` callback",
               "One-shot calls over the same libz backend as `CompressionStream` ([ADR-00302](../adr/ADR-00302.md)), driven by a shared `@__kml_zlib_oneshot` helper ([ADR-00321](../adr/ADR-00321.md))",
               "Input may be a Buffer/TypedArray, ArrayBuffer, DataView, or string (UTF-8); output is always a Buffer"
             ]
           },
           {
-            "feature": "`vm` (`vm.Script`, sandboxed `eval`-like execution)",
+            "feature": "`vm`",
             "status": "missing",
             "notes": [
+              "Surface: `vm.Script`, sandboxed `eval`-like execution",
               "Same fundamental blocker as the already-tracked bare `eval()` — see [GLOBAL-FUNCTIONS.md](GLOBAL-FUNCTIONS.md). Opt-in embedded-engine path scoped in [TDD-00046](../tdd/TDD-00046.md), not started"
             ]
           },
           {
-            "feature": "`diagnostics_channel` (`channel`/`subscribe`/`unsubscribe`/`hasSubscribers`, Channel `.publish`/`.hasSubscribers`/`.name`)",
+            "feature": "`diagnostics_channel`",
             "status": "implemented",
             "caveats": [
               "Messages are **strings** (serialize with `JSON.stringify`) — a typed subset can't hand arbitrary object shapes to unknown subscribers",
@@ -163,11 +175,12 @@
               "`tracingChannel` and the store bindings (`bindStore`/`runStores`) are clean rejections; a Channel handle isn't module-global-promotable (capture it in a closure, not a named top-level function) ([ADR-00420](../adr/ADR-00420.md))"
             ],
             "notes": [
+              "Surface: `channel`/`subscribe`/`unsubscribe`/`hasSubscribers`, Channel `.publish`/`.hasSubscribers`/`.name`",
               "Name-keyed pub/sub; 0/1/2-arity subscribers, pointer-identity unsubscribe"
             ]
           },
           {
-            "feature": "`http` client (`http.get`/`http.request`)",
+            "feature": "`http` client",
             "status": "implemented",
             "caveats": [
               "Request bodies are supported ([ADR-00575](../adr/ADR-00575.md)): `req.write(chunk)` stages a string chunk (appending across calls) and `req.end([body])` appends a final chunk before firing — a `method: \"POST\"` (etc.) option pairs with it; response surface is `res.statusCode`/`res.on('data'/'end')`/`res.resume()`/`setEncoding` — see [TDD-00138](../tdd/TDD-00138.md)",
@@ -177,29 +190,32 @@
               "`agent` is accepted and ignored — this client opens one connection per request (Node's own `agent: false` behavior); `new http.Agent(...)` itself is not implemented, and no pooling ever happens"
             ],
             "notes": [
+              "Surface: `http.get`/`http.request`",
               "libcurl-backed with async event-loop delivery, contextually-typed callbacks incl. `test` wrappers ([ADR-00404](../adr/ADR-00404.md)–[ADR-00406](../adr/ADR-00406.md), [ADR-00412](../adr/ADR-00412.md))"
             ]
           },
           {
-            "feature": "`https` (`https.get`/`https.request` client + `https.createServer`)",
+            "feature": "`https`",
             "status": "implemented",
             "caveats": [
               "**`https.createServer({ cert, key }[, handler])`** serves **HTTPS/1.1** ([TDD-00111](../tdd/TDD-00111.md) / [ADR-00505](../adr/ADR-00505.md)): the same `(req, res)` core as `http.createServer`, with the connection fiber's socket I/O routed through per-fd `SSL_read`/`SSL_write` shims; an http/1.1-only ALPN means even an h2-capable client negotiates 1.1. Inherits the V1 `res` subset and the one-request-per-connection (`Connection: close`) posture of `http.createServer`; streaming response bodies over TLS are supported",
               "Same V1 client surface and caveats as `http.get`/`request` ([TDD-00138](../tdd/TDD-00138.md))"
             ],
             "notes": [
+              "Surface: `https.get`/`https.request` client + `https.createServer`",
               "`get`/`request` ride the libcurl backend, so TLS handshake + certificate verification come from the URL scheme — no https-specific machinery ([ADR-00410](../adr/ADR-00410.md)); verified against a live TLS host (Mac)"
             ]
           },
           {
-            "feature": "`stream/web` (re-exports: `ReadableStream`/`WritableStream`/`TransformStream`/`CompressionStream`/`DecompressionStream`)",
+            "feature": "`stream/web`",
             "status": "implemented",
             "notes": [
+              "Surface: re-exports: `ReadableStream`/`WritableStream`/`TransformStream`/`CompressionStream`/`DecompressionStream`",
               "The names bind as identity to the ambient WHATWG constructors that already exist — importing them is interchangeable with the globals ([ADR-00410](../adr/ADR-00410.md)); the queuing-strategy classes are not exported"
             ]
           },
           {
-            "feature": "`cluster` (`fork`, worker messaging, `isPrimary`/`isWorker`/`workerId`, `Worker.id`/`.process`)",
+            "feature": "`cluster`",
             "status": "implemented",
             "caveats": [
               "Messages are strings; one listener per event; `'online'` fires from a queued microtask (the worker is exec'd by then), not a wire handshake",
@@ -208,12 +224,13 @@
               "Can't be combined with Worker threads (same restriction as `http.listen({workers})`)"
             ],
             "notes": [
+              "Surface: `fork`, worker messaging, `isPrimary`/`isWorker`/`workerId`, `Worker.id`/`.process`",
               "Unifies with `http.listen({ workers: N })`'s worker-id global — the primary stays in the event loop while workers live (their IPC handles), then blocks in `waitpid` as the backstop",
               "Workers carry the TDD-00141 fork IPC channel ([ADR-00427](../adr/ADR-00427.md)): `worker.send`/`.on('message'/'online'/'exit'/'close'/'error')`/`.disconnect()`/`.kill()`/`.destroy()`/`.process.pid`; in-worker `process.send`/`process.on('message')`"
             ]
           },
           {
-            "feature": "`http2` **module** (`http2.createServer`/`createSecureServer`/`connect`, `Http2Session`/`Http2Stream`)",
+            "feature": "`http2` **module**",
             "status": "implemented",
             "caveats": [
               "**Server-side Stages 1–2** ([TDD-00139](../tdd/TDD-00139.md)/[ADR-00414](../adr/ADR-00414.md)/[ADR-00415](../adr/ADR-00415.md)): `http2.createServer` on the http server handle, serving **h2c** (it also still answers 1.1, a superset of Node); compat `.on('request', (req, res))` **and** the core streams API — `.on('stream', (stream, headers))` with pseudo-headers on the map, `stream.respond({ ':status', … })` incl. response headers, `.end`/`.write`, request body via `.on('data'\\|'end')` (one synchronous chunk)",
@@ -224,7 +241,24 @@
               "Request bodies on both `createServer` and `createSecureServer`, and server/client **push streams**, remain **clean rejections** — scoped in [TDD-00139](../tdd/TDD-00139.md)"
             ],
             "notes": [
+              "Surface: `http2.createServer`/`createSecureServer`/`connect`, `Http2Session`/`Http2Stream`",
               "Transparent h2, no `http2` import needed: `fetch` negotiates h2 over TLS (ALPN); `http.listen` serves **h2c** (cleartext prior-knowledge) alongside 1.1, riding nghttp2 (`http2src/http2.c`, linked when `http.listen` is used), the h2 preface detected per-connection and dispatched through the shared 1.1 handler. h2-over-TLS is served explicitly via `http2.createSecureServer`; async handlers under h2 remain unsupported ([TDD-00111](../tdd/TDD-00111.md) Stage 3b, [ADR-00357](../adr/ADR-00357.md))"
+            ]
+          },
+          {
+            "feature": "`async_hooks`",
+            "status": "implemented",
+            "notes": [
+              "Surface: `AsyncLocalStorage`, `AsyncResource`",
+              "`AsyncLocalStorage<T>`: `run`/`getStore`/`exit`/`enterWith`/`disable` with real context propagation **across `await`** — the store lives in the coroutine task struct, so a value set with `run(...)` survives an await/park/resume and a spawned task inherits it ([ADR-00678](../adr/ADR-00678.md)); a `setTimeout`/`setInterval` scheduled inside `run(...)` carries it to its fire ([ADR-00679](../adr/ADR-00679.md))",
+              "Static `AsyncLocalStorage.bind(fn)` (a wrapper of `fn`'s own signature that reinstalls the captured context) and `AsyncResource` (`runInAsyncScope`, capturing at construction) capture-and-replay the context ([ADR-00680](../adr/ADR-00680.md))"
+            ],
+            "caveats": [
+              "`AsyncLocalStorage.snapshot()` is a clean rejection — its runner is fully generic (parameter/return types vary per call site), needing generic first-class closures this compiler doesn't have",
+              "`getStore()` on an unset/disabled store returns the element type's zero value (this compiler's undefined stand-in); use an object store to distinguish absence via `=== null`",
+              "`AsyncResource.runInAsyncScope(fn, thisArg, …)` accepts `thisArg` but does not bind it (closures carry no dynamic `this`); a `run(...)` callback that throws does not restore the frame (exception-safe restore is a follow-up)",
+              "`.then`/`.catch` reaction callbacks and EventEmitter listeners do not yet propagate context (only `await`, task-spawn, and timers do)",
+              "The low-level `createHook`/`executionAsyncId`/`triggerAsyncId`/async-id lifecycle is out of scope — a compiled AOT binary has no V8 promise-hooks or GC-tracked async-ids (a faithful impossibility), so those stay clean rejections"
             ]
           }
         ]

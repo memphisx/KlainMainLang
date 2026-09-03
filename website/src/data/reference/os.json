@@ -4,7 +4,12 @@
   "kind": "node",
   "statusPage": "OS.md",
   "coversRows": "all",
-  "coverage": { "loose": "7/7", "loosePct": 100, "strict": "7/7", "strictPct": 100 },
+  "coverage": {
+    "loose": "7/7",
+    "loosePct": 100,
+    "strict": "5/7",
+    "strictPct": 71
+  },
   "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable) and Darwin times.irq is 0 — both exactly what real Node reports on that hardware; os.EOL is always \"\\n\" because this compiler is POSIX-only with no Windows target.",
   "entries": [
     {
@@ -14,11 +19,18 @@
       "signature": "platform(): string",
       "badge": "exact",
       "description": "Returns the operating-system platform string. Reuses process.platform's existing runtime.GOOS-constant mechanism, so the two always agree.",
-      "returns": { "type": "string", "desc": "The platform identifier (e.g. \"darwin\", \"linux\")." },
+      "returns": {
+        "type": "string",
+        "desc": "The platform identifier (e.g. \"darwin\", \"linux\")."
+      },
       "exampleKey": "os/os",
       "snippet": "console.log(os.platform().length > 0); // true",
-      "seeAlso": ["os.hostname"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#osplatform" }
+      "seeAlso": [
+        "os.hostname"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#osplatform"
+      }
     },
     {
       "id": "os.homedir",
@@ -27,11 +39,18 @@
       "signature": "homedir(): string",
       "badge": "exact",
       "description": "Returns the current user's home directory from getenv(\"HOME\"). Throws a catchable Error if HOME is unset, matching real Node.",
-      "returns": { "type": "string", "desc": "The home directory path." },
+      "returns": {
+        "type": "string",
+        "desc": "The home directory path."
+      },
       "exampleKey": "os/os",
       "snippet": "const home = os.homedir();\nconsole.log(home.length > 0); // true",
-      "seeAlso": ["os.tmpdir"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#oshomedir" }
+      "seeAlso": [
+        "os.tmpdir"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#oshomedir"
+      }
     },
     {
       "id": "os.tmpdir",
@@ -40,11 +59,18 @@
       "signature": "tmpdir(): string",
       "badge": "exact",
       "description": "Returns the default temporary-file directory from getenv(\"TMPDIR\"), falling back to \"/tmp\". Never throws.",
-      "returns": { "type": "string", "desc": "The temp directory path." },
+      "returns": {
+        "type": "string",
+        "desc": "The temp directory path."
+      },
       "exampleKey": "os/os",
       "snippet": "const tmp = os.tmpdir();\nconsole.log(tmp.length > 0); // true",
-      "seeAlso": ["os.homedir"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#ostmpdir" }
+      "seeAlso": [
+        "os.homedir"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#ostmpdir"
+      }
     },
     {
       "id": "os.hostname",
@@ -53,11 +79,18 @@
       "signature": "hostname(): string",
       "badge": "exact",
       "description": "Returns the host name of the operating system via POSIX gethostname().",
-      "returns": { "type": "string", "desc": "The host name." },
+      "returns": {
+        "type": "string",
+        "desc": "The host name."
+      },
       "exampleKey": "os/os",
       "snippet": "const host = os.hostname();\nconsole.log(host.length > 0); // true",
-      "seeAlso": ["os.platform"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#oshostname" }
+      "seeAlso": [
+        "os.platform"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#oshostname"
+      }
     },
     {
       "id": "os.cpus",
@@ -66,12 +99,19 @@
       "signature": "cpus(): { model: string; speed: number; times: { user: number; nice: number; sys: number; idle: number; irq: number } }[]",
       "badge": "exact",
       "description": "Returns real per-core {model, speed, times: {user, nice, sys, idle, irq}} objects — Linux via /proc/cpuinfo and /proc/stat parsing, Darwin via sysctlbyname and Mach host_processor_info — both verified (on Apple Silicon M4 Pro, model = \"Apple M4 Pro\" with live tick counters). On Apple Silicon, where hw.cpufrequency is unavailable, speed reports the fixed 2400 MHz nominal that real Node/libuv reports there; on Linux it reflects /proc/cpuinfo's current/scaled cpu MHz, matching real Node. Darwin times.irq is 0, exactly as real Node reports on Darwin.",
-      "returns": { "type": "object[]", "desc": "One entry per logical core." },
+      "returns": {
+        "type": "object[]",
+        "desc": "One entry per logical core."
+      },
       "exampleKey": "os/os",
       "snippet": "const cpus = os.cpus();\nconsole.log(cpus.length > 0); // true\nconsole.log(cpus[0].model.length > 0); // true",
       "differences": [],
-      "seeAlso": ["os.totalmem"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#oscpus" }
+      "seeAlso": [
+        "os.totalmem"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#oscpus"
+      }
     },
     {
       "id": "os.totalmem",
@@ -80,11 +120,18 @@
       "signature": "totalmem(): number; freemem(): number",
       "badge": "exact",
       "description": "Return the total and free system memory in bytes. Verified on Linux and on Apple Silicon M4 Pro — totalmem() matches sysctl hw.memsize, and Darwin freemem() (Mach host_statistics) returns a live free-page figure.",
-      "returns": { "type": "number", "desc": "Bytes of total or free memory." },
+      "returns": {
+        "type": "number",
+        "desc": "Bytes of total or free memory."
+      },
       "exampleKey": "os/os",
       "snippet": "const total = os.totalmem();\nconst free = os.freemem();\nconsole.log(free > 0 && free <= total); // true",
-      "seeAlso": ["os.cpus"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#ostotalmem" }
+      "seeAlso": [
+        "os.cpus"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#ostotalmem"
+      }
     },
     {
       "id": "os.EOL",
@@ -93,9 +140,16 @@
       "signature": "EOL: string",
       "badge": "exact",
       "description": "The operating-system-specific end-of-line marker. Always \"\\n\" — this compiler is POSIX-only (no Windows target), so there's no real \"\\r\\n\" case.",
-      "returns": { "type": "string", "desc": "Always \"\\n\"." },
-      "seeAlso": ["os.platform"],
-      "spec": { "mdn": "https://nodejs.org/api/os.html#oseol" }
+      "returns": {
+        "type": "string",
+        "desc": "Always \"\\n\"."
+      },
+      "seeAlso": [
+        "os.platform"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/os.html#oseol"
+      }
     }
   ]
 }

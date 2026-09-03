@@ -293,13 +293,34 @@ func (e *Emitter) emitResolveThunk(fn string, valTy Type) {
 	// __kml_promise_settle alone isn't enough — the value store happens here).
 	e.emitThunkAlreadySettledGuard()
 	if !isVoid {
-		e.storePromiseValue("%p", Value{Ref: "%v", Ty: valTy})
+		v := Value{Ref: "%v", Ty: valTy}
+		if valTy.IsArray {
+			// A resolved array value arrives via the closure array-argument ABI
+			// (`ptr %vptr` — the boxed {data, len} header — plus `i64 %vlen`), the
+			// same shape `emitClosureCall` marshals a `resolve(arr)` call into. Load
+			// the data pointer out of the box and rebuild the {ptr, i64} aggregate
+			// storePromiseValue expects. (Previously the thunk declared a single
+			// `{ptr,i64} %v` param, so it read the *box* pointer as the data pointer
+			// — corrupting every `Promise<T[]>`.)
+			dp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%vptr, align 8", dp))
+			a0 := e.freshReg()
+			a1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, dp))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %%vlen, 1", a1, a0))
+			v = Value{Ref: a1, Ty: valTy}
+		}
+		e.storePromiseValue("%p", v)
 	}
 	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
 	e.emitInstr("ret void")
 	params := "ptr %p"
 	if !isVoid {
-		params = fmt.Sprintf("ptr %%p, %s %%v", StructFieldIR(valTy))
+		if valTy.IsArray {
+			params = "ptr %p, ptr %vptr, i64 %vlen"
+		} else {
+			params = fmt.Sprintf("ptr %%p, %s %%v", StructFieldIR(valTy))
+		}
 	}
 	e.functions.WriteString(fmt.Sprintf("\ndefine void %s(%s) {\nentry:\n", fn, params))
 	e.functions.WriteString(e.allocas.String())

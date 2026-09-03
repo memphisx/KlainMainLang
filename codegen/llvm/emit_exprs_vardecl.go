@@ -346,6 +346,13 @@ func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
 		if ne.ClassName == "Promise" {
 			return Type{}, false
 		}
+		// AsyncLocalStorage is an opaque single-ptr handle (TDD-00168), not a
+		// user/generic class — promote it (a module-level `const als = new
+		// AsyncLocalStorage<T>()` read by named functions is the canonical use),
+		// falling through to the inferExprType + single-slot gate below.
+		if ne.ClassName == "AsyncLocalStorage" || ne.ClassName == "AsyncResource" {
+			break
+		}
 		_, concrete := e.classes[ne.ClassName]
 		genDecl, generic := e.genericClasses[ne.ClassName]
 		if !concrete && !generic {
@@ -872,6 +879,17 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			} else if init.ClassName == "WebSocketServer" && e.usedKlainWS {
 				// klain:ws handle (TDD-00158) — an opaque singleton handle.
 				ty = WebSocketServerType()
+			} else if init.ClassName == "PerformanceObserver" {
+				ty = PerfObserverType() // perf_hooks handle (TDD-00166)
+			} else if init.ClassName == "AsyncLocalStorage" {
+				// async_hooks AsyncLocalStorage<T> handle (TDD-00168).
+				elem := TypeAny
+				if len(init.TypeArgs) == 1 && init.TypeArgs[0] != nil {
+					elem = e.resolveType(init.TypeArgs[0])
+				}
+				ty = AsyncLocalStorageType(elem)
+			} else if init.ClassName == "AsyncResource" {
+				ty = AsyncResourceType() // async_hooks handle (TDD-00168 Stage 4)
 			} else if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
 			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == len(genDecl.TypeParams) {

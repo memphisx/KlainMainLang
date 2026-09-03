@@ -44,8 +44,9 @@ const (
 	taskResumerCtx   = 9
 	taskJmpStk       = 10 // this task's own jmpbuf stack (fiber-safe exceptions)
 	taskSavedJmpTop  = 11 // jmp_top saved across suspension
-	taskStructBytes  = 96
-	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }"
+	taskAsyncCtx     = 12 // AsyncLocalStorage context-frame head (TDD-00168) — inherited at spawn, survives await with the task
+	taskStructBytes  = 104
+	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }"
 	// promise resolved: 0 = pending, 1 = fulfilled (v0/v1 hold the value), 2 =
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
@@ -382,10 +383,28 @@ entry:
   store ptr %%fn, ptr %%fn_p, align 8
   %%args_p = getelementptr %s, ptr %%t, i32 0, i32 %d
   store ptr %%args, ptr %%args_p, align 8
+  ; TDD-00168: the child inherits the spawner's AsyncLocalStorage context-frame
+  ; head — the parent task's field 12, or the top-level root when spawned
+  ; outside any task — so a store set with als.run(...) before an async call
+  ; propagates into it. Harmless (both null) when the program has no ALS.
+  %%__alsprev = load ptr, ptr @__kml_current_task, align 8
+  %%__alsprevnull = icmp eq ptr %%__alsprev, null
+  br i1 %%__alsprevnull, label %%__als_root, label %%__als_parent
+__als_parent:
+  %%__alspp = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%__alsprev, i32 0, i32 12
+  %%__alspv = load ptr, ptr %%__alspp, align 8
+  br label %%__als_done
+__als_root:
+  %%__alsrv = load ptr, ptr @__kml_root_async_ctx, align 8
+  br label %%__als_done
+__als_done:
+  %%__alsinh = phi ptr [ %%__alspv, %%__als_parent ], [ %%__alsrv, %%__als_root ]
+  %%__alscp = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 12
+  store ptr %%__alsinh, ptr %%__alscp, align 8
   %%jstk = call ptr @malloc(i64 8192)
-  %%jstk_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%t, i32 0, i32 10
+  %%jstk_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 10
   store ptr %%jstk, ptr %%jstk_p, align 8
-  %%sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%t, i32 0, i32 11
+  %%sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 11
   store i64 0, ptr %%sjt_p, align 8
 
   ; register in the task array (grow by realloc-doubling, 8 min)
@@ -566,10 +585,10 @@ resume:
   store ptr @__kml_main_ctx, ptr %%r_rc_p, align 8
   %%rj_mainstk = load ptr, ptr @__kml_cur_jmp_stk, align 8
   %%rj_maintop = load i32, ptr @__kml_jmp_top, align 4
-  %%rj_tjstk_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%t, i32 0, i32 10
+  %%rj_tjstk_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 10
   %%rj_tjstk = load ptr, ptr %%rj_tjstk_p, align 8
   store ptr %%rj_tjstk, ptr @__kml_cur_jmp_stk, align 8
-  %%rj_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%t, i32 0, i32 11
+  %%rj_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%t, i32 0, i32 11
   %%rj_sjt = load i64, ptr %%rj_sjt_p, align 8
   %%rj_sjt32 = trunc i64 %%rj_sjt to i32
   store i32 %%rj_sjt32, ptr @__kml_jmp_top, align 4
@@ -717,7 +736,7 @@ wregdone:
   %%rc = load ptr, ptr %%rc_p, align 8
   %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   %%ctx = load ptr, ptr %%ctx_p, align 8
-  %%ao_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%ct, i32 0, i32 11
+  %%ao_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%ct, i32 0, i32 11
   %%ao_top = load i32, ptr @__kml_jmp_top, align 4
   %%ao_top64 = zext i32 %%ao_top to i64
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8
@@ -797,7 +816,7 @@ wregdone:
   %%rc = load ptr, ptr %%rc_p, align 8
   %%ctx_p = getelementptr %s, ptr %%ct, i32 0, i32 %d
   %%ctx = load ptr, ptr %%ctx_p, align 8
-  %%ao_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64 }, ptr %%ct, i32 0, i32 11
+  %%ao_sjt_p = getelementptr { ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr }, ptr %%ct, i32 0, i32 11
   %%ao_top = load i32, ptr @__kml_jmp_top, align 4
   %%ao_top64 = zext i32 %%ao_top to i64
   store i64 %%ao_top64, ptr %%ao_sjt_p, align 8

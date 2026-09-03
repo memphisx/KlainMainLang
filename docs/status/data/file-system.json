@@ -42,6 +42,9 @@
               "Binary-safe sibling of `readFileSync`: returns a `Uint8Array` with the file's exact byte count (no `strlen` involved), so a file with an embedded null byte reads back whole",
               "No `Buffer` class — this compiler has none; plain `ArrayBuffer`/TypedArrays instead",
               "See [ADR-00094](../adr/ADR-00094.md)"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
             ]
           },
           {
@@ -50,6 +53,10 @@
             "notes": [
               "Creates or truncates the file with `data`. Throws on failure",
               "`data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "No third `options` argument — `writeFileSync(p, d, 'utf8')` / `{ flag: 'a' }` are compile errors (`encoding`/`mode`/`flag` unavailable — use `appendFileSync` to append)."
             ]
           },
           {
@@ -58,6 +65,10 @@
             "notes": [
               "Like `writeFileSync`, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure",
               "Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync`"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "No third `options` argument (`encoding`/`mode`/`flag` rejected at compile time)."
             ]
           },
           {
@@ -97,6 +108,9 @@
             "status": "implemented",
             "notes": [
               "Deletes a file. Throws on failure"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
             ]
           },
           {
@@ -126,6 +140,10 @@
               "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, in whatever order the OS's own `readdir()` returns them — no ordering guarantee, matching real Node",
               "Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux",
               "See [ADR-00027](../adr/ADR-00027.md)"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "Path only — no `options`; `withFileTypes` (a `Dirent[]`), `recursive`, and `encoding: 'buffer'` are unsupported (always a one-level `string[]`)."
             ]
           },
           {
@@ -134,12 +152,18 @@
             "notes": [
               "Renames/moves a file via POSIX `rename()`. Throws on failure",
               "See [ADR-00027](../adr/ADR-00027.md)"
+            ],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
             ]
           },
           {
             "feature": "`fs.copyFileSync(src, dest)`",
             "status": "implemented",
-            "caveats": [],
+            "caveats": [
+              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "No `mode` argument — `fs.constants.COPYFILE_EXCL`/`FICLONE` unsupported; always overwrites the destination."
+            ],
             "notes": [
               "Binary-safe: composes the raw `__kml_fs_read_file_raw`/`__kml_fs_write_file_bytes` helpers ([ADR-00094](../adr/ADR-00094.md)), threading the source's exact byte count, so a file with an embedded null byte copies back whole — no new C-level I/O code",
               "See [ADR-00027](../adr/ADR-00027.md)/[ADR-00525](../adr/ADR-00525.md)"

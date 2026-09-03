@@ -55,7 +55,10 @@
           },
           {
             "feature": "`for…in` over object keys",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Enumerates keys in insertion/declaration order, not the ES order (ascending integer-index keys first, then remaining string keys) — `for (const k in {b:1,a:2,'2':3,'1':4})` visits `b,a,2,1` (Node: `1,2,b,a`); same for `Object.keys`/`values`/`entries`, spread, and `JSON.stringify` key order."
+            ]
           },
           {
             "feature": "`switch` / `case` / `default` / `break`",
@@ -344,7 +347,8 @@
               "Nested patterns (`{ inner: { v }, tag }`, `{ coords: [x, y] }`) work in a declaration, for-of loop variable, and destructured parameter — see [ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 2",
               "String- or numeric-literal keys (`{ \"k\": v }`, `{ 0: v }`) reuse the object-literal key grammar — a non-identifier key has no shorthand, so it must bind through an explicit `: name` ([ADR-00203](../adr/ADR-00203.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 3a)",
               "A rest element (`{ a, ...rest }`) works in the declaration, for-of, and destructured-parameter forms ([ADR-00204](../adr/ADR-00204.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 3b): `rest` binds a fresh residual object of every visible source field not named earlier — a plain object (a class instance's rest strips hidden metadata, matching JS's own-enumerable copy), shallow-copied (a pointer-valued field is shared), usable like any object; requires a statically-known source shape",
-              "Usable as a for-of loop variable (`for (const { x, y } of points)`) — see [ADR-00192](../adr/ADR-00192.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 1"
+              "Usable as a for-of loop variable (`for (const { x, y } of points)`) — see [ADR-00192](../adr/ADR-00192.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 1",
+              "Under `-compat=js`, an object pattern also destructures a **D1 dynamic** source (a bare `any` / dynamic object with no fixed struct shape, e.g. `for (const { x } of [{ x: 23 }])`): each property is read through the runtime dynamic-get, binding an `any` local — leaf, renamed, `= default` (fires on a missing key), and nested array/object sub-patterns; a `{ ...rest }` over the dynamic path stays a clean rejection like the static any/union case above ([ADR-00663](../adr/ADR-00663.md)/[TDD-00155](../tdd/TDD-00155.md))"
             ]
           }
         ]
@@ -387,7 +391,7 @@
             "feature": "Arrow functions / lambdas",
             "status": "implemented",
             "notes": [
-              "Full closures; captures via heap-allocated env struct",
+              "Full closures; captures via heap-allocated env struct — a variable referenced free from inside a `try`/`catch`/`finally`, `for…in`, `throw`, `do…while`, or labeled statement is captured like any other ([ADR-00662](../adr/ADR-00662.md))",
               "An arrow inside a class method captures the enclosing lexical `this` like any other variable (nested arrows included; a `function(){}` body keeps its own dynamic `this` and stays a clean rejection) ([ADR-00460](../adr/ADR-00460.md))"
             ]
           },
@@ -479,7 +483,7 @@
             "status": "implemented",
             "caveats": [
               "A free `function*` may be top-level **or nested** (a nested `function*` captures enclosing state by reference — an enclosing `let` mutated after the generator is created is seen by a later `.next()` — reusing the closure-boxing on the instance's `__env`; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding (rewritten to a named declaration, [TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md)) — an argument/nested/IIFE use is a clean rejection. Instance generator methods — sync and `async *m()` — are supported separately (rows below), but `static`/`abstract` generator methods stay clean rejections ([TDD-00094](../tdd/TDD-00094.md))",
-              "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array element/parameter type (a tuple/object element type works)",
+              "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array parameter type (an array *element* type is supported — yielded/sent arrays round-trip through every generator slot, `for...of`/`.next()`/`yield*`/`for await` alike, [ADR-00676](../adr/ADR-00676.md); a tuple/object element type also works)",
               "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}` — this compiler's usual stand-in for real JS's `undefined` ([TDD-00061](../tdd/TDD-00061.md)/[ADR-00173](../adr/ADR-00173.md))"
             ],
             "notes": [
@@ -527,6 +531,9 @@
               "Real concurrency over `Array<Promise<Response>>` (fetch) **and** over `Array<Promise<T>>` from may-suspend async fns ([TDD-00083](../tdd/TDD-00083.md) Stage 2); only a genuinely-already-resolved array collapses to a synchronous collect",
               "A rejecting task member rejects `.all`/`.race` (re-thrown at the `await`) and reports `rejected` in `.allSettled` (fiber-safe exceptions, [ADR-00244](../adr/ADR-00244.md))",
               "`.race`/`.any` over task promises wait via an event-driven waiter list (a settling member wakes the awaiter), not a busy poll ([ADR-00266](../adr/ADR-00266.md))"
+            ],
+            "caveats": [
+              "`Promise.allSettled` reports a rejected element's `.reason` as a wrapped `Error` (stringified message), not the original rejected value — `(await Promise.allSettled([Promise.reject(42)]))[0].reason.message` is `'42'`, where Node gives `.reason === 42`; the always-present `value`/`reason` fields also aren't omitted (a faithful reject-value model is [TDD-00169](../tdd/TDD-00169.md))."
             ]
           },
           {
@@ -691,15 +698,24 @@
             "status": "implemented",
             "notes": [
               "Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md))"
+            ],
+            "caveats": [
+              "A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes."
             ]
           },
           {
             "feature": "`new Map<K,V>()`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
+            ]
           },
           {
             "feature": "`new Set<T>()`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
+            ]
           },
           {
             "feature": "`class` (fields, constructor, methods, `this`, `new ClassName(args)`)",

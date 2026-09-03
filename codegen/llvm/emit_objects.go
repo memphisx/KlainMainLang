@@ -596,6 +596,12 @@ func cryptoGlobalExpr(expr ast.Expression) (bool, bool) {
 // the exact same problem ADR-00157 already found and could only make
 // deterministic, not distinguishable) has no signal to check at all.
 func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast.DestructProp, pos ast.Pos) error {
+	// A D1 dynamic source (a bare any / dynamic object, -compat=js) has no fixed
+	// struct shape to GEP — read each property through the runtime dynamic-get
+	// instead (emit_dynobj_destr.go). objPtr is the boxed any value register.
+	if isUnconstrainedDynamic(objTy) {
+		return e.unpackDynObjectPatternInto(Value{Ref: objPtr, Ty: objTy}, props, pos)
+	}
 	structIR := objTy.StructIR()
 
 	// Named keys consumed by non-rest properties — the residual `{ ...rest }`

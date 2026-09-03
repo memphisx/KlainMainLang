@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too.
 
-**Coverage**: 9/9 (100%) · **Strict Coverage**: 2/9 (~22%).
+**Coverage**: 10/10 (100%) · **Strict Coverage**: 2/10 (20%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -19,3 +19,4 @@ Format: [Status page format](README.md#status-page-format).
 | `Date` arithmetic (`date ± durationMs`, `date - date`, `date += durationMs`) | ✅ | • `Date ± number` gives a new Date (a deliberate deviation from real JS, where `+` on a Date string-concatenates instead — numeric duration arithmetic is far more useful for this compiler's plain-number Date representation)<br>• `Date + Date`, `number - Date`, and compound-assigning a Date into a Date are all rejected at compile time | • `Date - Date` gives the difference in milliseconds (a number), matching real JS<br>• See [ADR-00018](../adr/ADR-00018.md) |
 | `Date.prototype.toDateString()` | ✅ | • Always UTC, not local time | • Fixed `"Www Mon DD YYYY"` shape (e.g. `"Thu Jan 01 1970"`), matching real JS exactly except for the UTC deviation<br>• See [ADR-00019](../adr/ADR-00019.md) |
 | `Date.prototype.toLocaleDateString()` | ✅ | • One fixed `"M/D/YYYY"` format (the default en-US shape), always UTC; no locale argument or full `Intl`-style locale support | • See [ADR-00019](../adr/ADR-00019.md) |
+| `PerformanceObserver` | ✅ | • Dispatch is **synchronous** (during `mark`/`measure`), not Node's async batched next-microtask delivery — observer output precedes later straight-line output ([ADR-00673](../adr/ADR-00673.md)/[TDD-00166](../tdd/TDD-00166.md))<br>• Entry types `mark`/`measure` only; the `entryTypes: []` array form; `buffered`, `takeRecords()`, the single-`type` form, and `getEntriesByName`/`getEntriesByType` are deferred | • `new PerformanceObserver(cb)` + `observe({ entryTypes })` + `disconnect()`; the callback's list yields `PerformanceEntry` objects (`name`/`entryType`/`startTime`/`duration`) via `getEntries()` |

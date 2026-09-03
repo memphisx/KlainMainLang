@@ -28,6 +28,9 @@
             "status": "implemented",
             "notes": [
               "Joins with `/`, then normalizes (collapses repeated slashes, drops `.` segments, resolves `..` against segments already seen in the same call)"
+            ],
+            "caveats": [
+              "Drops a trailing slash on the result — `path.join('foo', 'bar/')` is `'foo/bar'`, where Node preserves `'foo/bar/'`."
             ]
           },
           {

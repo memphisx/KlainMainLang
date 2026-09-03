@@ -46,36 +46,61 @@ type emitted struct {
 // the first error. This mirrors the klainmain binary's pipeline exactly, so an
 // `import` reaches codegen resolved. A panic in the compiler is recovered into an
 // error so one pathological input can't take down a whole conformance batch.
-func frontEnd(entryPath string) (e emitted, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
+func frontEnd(entryPath string) (emitted, error) {
+	// Run the in-process front-end under the same wall-clock guard the Test262
+	// runner uses (codegenTimeout): a parser/emitter spin — seen under
+	// -compat=js on some untyped-JS inputs, which the Node corpus is full of —
+	// would otherwise wedge the worker forever (no subprocess to time out), and
+	// with every worker stuck the whole suite freezes without writing a report.
+	// On timeout, return CODEGEN_TIMEOUT and leak the stuck goroutine (it dies
+	// with the process). The panic-recover lives in the goroutine.
+	type res struct {
+		e   emitted
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		var out res
+		defer func() {
+			if r := recover(); r != nil {
+				out = res{err: fmt.Errorf("panic: %v", r)}
+			}
+			ch <- out
+		}()
+		// -compat=js semantics (allowGlobalShadowing): both oracles' referents
+		// — TypeScript and Node — permit a user binding to shadow a Tier-1
+		// global (`var Symbol = …`), so the permissive compat mode is the
+		// faithful measurement configuration (ADR-00472). Tier-2 names stay
+		// reserved either way.
+		prog, perr := resolver.ResolveProgramWithOptions(entryPath, true, false)
+		if perr != nil {
+			out.err = perr
+			return
 		}
+		em := llvm.NewEmitter()
+		em.SetRegexMode(regexModeFlag)
+		em.SetCompatMode(laneCompat)
+		ir, cerr := em.EmitProgram(prog)
+		if cerr != nil {
+			out.err = cerr
+			return
+		}
+		// Embedded C runtime files (dtoa, spawnsync, …) must be linked exactly
+		// as the CLI driver links them — omitting them made every Node test
+		// needing one fail at the clang step as a bogus CLANG_ERROR.
+		cs, cerr := em.EmbeddedCSources()
+		if cerr != nil {
+			out.err = cerr
+			return
+		}
+		out.e = emitted{ir: ir, linkLibs: em.LinkLibs(), cSources: cs}
 	}()
-	// -compat=js semantics (allowGlobalShadowing): both oracles' referents
-	// — TypeScript and Node — permit a user binding to shadow a Tier-1
-	// global (`var Symbol = …`), so the permissive compat mode is the
-	// faithful measurement configuration (ADR-00472). Tier-2 names stay
-	// reserved either way.
-	prog, perr := resolver.ResolveProgramWithOptions(entryPath, true, false)
-	if perr != nil {
-		return emitted{}, perr
+	select {
+	case r := <-ch:
+		return r.e, r.err
+	case <-time.After(codegenTimeout):
+		return emitted{}, fmt.Errorf("CODEGEN_TIMEOUT")
 	}
-	em := llvm.NewEmitter()
-	em.SetRegexMode(regexModeFlag)
-	em.SetCompatMode(laneCompat)
-	ir, cerr := em.EmitProgram(prog)
-	if cerr != nil {
-		return emitted{}, cerr
-	}
-	// Embedded C runtime files (dtoa, spawnsync, …) must be linked exactly as
-	// the CLI driver links them — omitting them made every Node test needing
-	// one fail at the clang step as a bogus CLANG_ERROR.
-	cs, cerr := em.EmbeddedCSources()
-	if cerr != nil {
-		return emitted{}, cerr
-	}
-	return emitted{ir: ir, linkLibs: em.LinkLibs(), cSources: cs}, nil
 }
 
 // frontEndSource writes src to a scratch .ts entry file under entryDir and runs
@@ -292,6 +317,20 @@ func commonShimFor(absPath string) string {
 	return `{ isWindows: false, isLinux: false, isMacOS: true, isOSX: true, isAIX: false, isFreeBSD: false, isSunOS: false, isOpenBSD: false, isIBMi: false, isMainThread: true, hasIntl: false, hasCrypto: true, hasIPv6: true, enoughTestMem: true, isDumbTerminal: false, hasOpenSSL3: false, localhostIPv4: '127.0.0.1', PIPE: ` + strconv.Quote(sock) + `, platformTimeout: (...a: number[]): number => a[0], skipIfWorker: (): void => {}, skipIfDumbTerminal: (): void => {} }`
 }
 
+// commonBuildInapplicable maps `common.*` guards whose skip condition is
+// *permanently* true for this compiler's build class, mapping each to an
+// accurate skip reason. A native AOT binary is, by construction, a Node build
+// with no V8 inspector (there is no V8 to inspect, no Chrome DevTools Protocol
+// endpoint, no `node:inspector` Session) — exactly the case Node's own
+// `--without-inspector` builds hit, where these same guards skip. So a file
+// gated on one is a *genuine build-inapplicable skip*, not a missing shim
+// ("requires Node common harness" wrongly implies it's shimmable) and not an
+// "unsupported module" gap (the guard means the inspector require never runs on
+// such a build). This capability cannot exist here — it is not backlog.
+var commonBuildInapplicable = map[string]string{
+	"skipIfInspectorDisabled": "no V8 inspector — a compiled native binary has none (like Node's --without-inspector build)",
+}
+
 // commonTestHelper maps the behavioral `common.*` helpers that the native `test`
 // builtin (TDD-00122) now implements for real. A `common.mustCall(fn)` is
 // rewritten to a bare `mustCall(fn)` and imported from 'test', so these files —
@@ -338,6 +377,11 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 	if usesCommon {
 		for _, mm := range reCommonMember.FindAllStringSubmatch(src, -1) {
 			switch {
+			case commonBuildInapplicable[mm[1]] != "":
+				// A guard whose condition is permanently true for this build class
+				// (e.g. no V8 inspector) — skip with the accurate reason, taking
+				// precedence over any shimmable/behavioral helper the same file uses.
+				return "", 0, commonBuildInapplicable[mm[1]], ""
 			case commonTestHelper[mm[1]]:
 				usedHelpers[mm[1]] = true // rewritten to a bare 'test' import below
 			case commonShimmable[mm[1]]:
@@ -584,27 +628,28 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 		}
 	}
 
-	// Lanes run strictly sequentially (laneCompat is a shared global). Under
-	// -compat=both the strict lane runs first (the historical baseline), then
-	// the js lane; the report carries both scores (TDD-00022).
-	var strictResults, jsResults []nodeResult
+	// Lanes run strictly sequentially (laneCompat is a shared global). Each
+	// lane writes an identically structured report into its own folder
+	// (docs/testing/<lane>/CONFORMANCE-RESULTS-NODE.md), so a per-flag
+	// regression is a clean per-file diff (TDD-00022).
+	var lanes []string
 	if compat == "strict" || compat == "both" {
-		laneCompat = ""
-		strictResults = runNodeLane(root, files, workDir, timeout, workers, "strict")
+		lanes = append(lanes, "")
 	}
 	if compat == "js" || compat == "both" {
-		laneCompat = "js"
-		jsResults = runNodeLane(root, files, workDir, timeout, workers, "js")
+		lanes = append(lanes, "js")
 	}
-	results := jsResults
-	if results == nil {
-		results = strictResults
+	var results []nodeResult
+	for _, lane := range lanes {
+		laneCompat = lane
+		results = runNodeLane(root, files, workDir, timeout, workers, laneLabel())
+		out := reportPath("CONFORMANCE-RESULTS-NODE.md")
+		if err := writeNodeReport(out, results); err != nil {
+			fatal("writing node report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "node suite (lane=%s): %d files, report written to %s\n", laneLabel(), len(results), out)
 	}
 
-	reportPath := "docs/testing/CONFORMANCE-RESULTS-NODE.md"
-	if err := writeNodeReport(reportPath, strictResults, jsResults); err != nil {
-		fatal("writing node report: %v", err)
-	}
 	// Optional diagnostics: dump every FAIL/SKIP as `file\treason` for triage.
 	if fl := os.Getenv("NODE_FAILLIST"); fl != "" {
 		var lines []string
@@ -626,7 +671,6 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 		sort.Strings(lines)
 		_ = os.WriteFile(sl, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 	}
-	fmt.Fprintf(os.Stderr, "node suite: %d files, report written to %s\n", len(results), reportPath)
 }
 
 // moduleOf buckets a Node test file by the module it exercises, taken as the
@@ -843,42 +887,18 @@ func runNodeLane(root string, files []string, workDir string, timeout time.Durat
 	return results
 }
 
-// nodeOverallLine aggregates one lane's totals into the Overall wording.
-func nodeOverallLine(all []nodeResult) (pass int, line string) {
-	var oPass, oFail, oSkip int
-	for _, r := range all {
-		switch r.Status {
-		case "PASS":
-			oPass++
-		case "FAIL":
-			oFail++
-		default:
-			oSkip++
-		}
-	}
-	ran := oPass + oFail
-	pct := 0.0
-	if ran > 0 {
-		pct = 100 * float64(oPass) / float64(ran)
-	}
-	return oPass, fmt.Sprintf("%d files total: **%d passed**, %d failed, %d skipped (out of scope); of the %d that compiled far enough to run, %.1f%% passed", len(all), oPass, oFail, oSkip, ran, pct)
-}
 
-// writeNodeReport renders one or both lanes: detail tables always come from
-// the js lane when it ran (the corpus is untyped JS, so that lane is the
-// representative surface); a strict-only run keeps its historical shape.
-func writeNodeReport(path string, strictAll, jsAll []nodeResult) error {
-	all := jsAll
-	detailLane := "js"
-	if all == nil {
-		all = strictAll
-		detailLane = "strict"
-	}
+// writeNodeReport renders one lane's Node-core results into that lane's folder
+// (docs/testing/<lane>/CONFORMANCE-RESULTS-NODE.md). Each lane is a separate,
+// identically structured file; the old both-lanes-in-one-file cross-analysis
+// ("passing only under -compat=js") is now just a diff of the two folders.
+func writeNodeReport(path string, all []nodeResult) error {
 	var b strings.Builder
 	b.WriteString("# Node-core conformance results\n\n")
+	b.WriteString(reportLaneHeader())
 	b.WriteString("Generated by `tools/conformance -suite=node` (TDD-00121 Track B) against the **full `test/parallel` behavioral suite** of a pinned `nodejs/node` checkout (every `test-*.js`), regenerate with `make conformance-node`. Do not hand-edit; re-run instead.\n\n")
 	b.WriteString("Each file is mechanically transformed from Node's untyped CommonJS (`require`/`'use strict'`/Node globals) into this compiler's typed-ESM form, then compiled and run. **PASS** = compiled and exited 0; **FAIL** = a compile error, a nonzero exit, or a require of a real Node core module this compiler doesn't implement (`MODULE_NOT_IMPLEMENTED` — an in-scope gap); **SKIP** = only Node-repo-internal harness surface the transform can't bridge (unshimmed `../common/*` helpers, `internal/*`, dynamic `require`, `.call`/`.apply`).\n\n")
-	b.WriteString("Interpretation, misclassification history, and the ranked remaining-work list live in the hand-written companion [NODE-GAP-ANALYSIS.md](NODE-GAP-ANALYSIS.md).\n\n")
+	b.WriteString("Interpretation, misclassification history, and the ranked remaining-work list live in the hand-written companion [NODE-GAP-ANALYSIS.md](../NODE-GAP-ANALYSIS.md).\n\n")
 	b.WriteString("> **Read this honestly.** Node's tests are written in untyped, dynamic JavaScript against the *full* Node API (platform namespaces, `.call`/`.apply`, `Object.entries` test-tables, `instanceof` on builtins, live sockets/child processes). This compiler is a typed subset, so most files legitimately don't compile — the pass count is a floor on \"how much of Node's own suite runs verbatim,\" not a measure of module correctness. The per-module histogram below shows where the runnable surface actually is; hand-mined typed value-semantics cases remain the productive complement.\n\n")
 
 	type agg struct{ pass, fail, skip int }
@@ -909,54 +929,13 @@ func writeNodeReport(path string, strictAll, jsAll []nodeResult) error {
 		}
 	}
 	b.WriteString("## Overall\n\n")
-	if strictAll != nil && jsAll != nil {
-		// Dual-lane run (TDD-00022): both compat scores, plus the delta —
-		// the direct measurement of what the vanilla-JS-compat work buys.
-		_, strictLine := nodeOverallLine(strictAll)
-		_, jsLine := nodeOverallLine(jsAll)
-		fmt.Fprintf(&b, "- `-compat=strict`: %s.\n", strictLine)
-		fmt.Fprintf(&b, "- `-compat=js`: %s.\n\n", jsLine)
-		strictPass := map[string]bool{}
-		for _, r := range strictAll {
-			if r.Status == "PASS" {
-				strictPass[r.File] = true
-			}
-		}
-		var jsOnly, strictOnly []string
-		jsPass := map[string]bool{}
-		for _, r := range jsAll {
-			if r.Status == "PASS" {
-				jsPass[r.File] = true
-				if !strictPass[r.File] {
-					jsOnly = append(jsOnly, r.File)
-				}
-			}
-		}
-		for f := range strictPass {
-			if !jsPass[f] {
-				strictOnly = append(strictOnly, f)
-			}
-		}
-		sort.Strings(jsOnly)
-		sort.Strings(strictOnly)
-		fmt.Fprintf(&b, "Passing only under `-compat=js`: **%d**", len(jsOnly))
-		if len(jsOnly) > 0 {
-			fmt.Fprintf(&b, " — %s", strings.Join(jsOnly, ", "))
-		}
-		b.WriteString(".\n")
-		fmt.Fprintf(&b, "Passing only under `-compat=strict`: **%d**", len(strictOnly))
-		if len(strictOnly) > 0 {
-			fmt.Fprintf(&b, " — %s", strings.Join(strictOnly, ", "))
-		}
-		b.WriteString(".\n\n")
-		b.WriteString("The detail sections below reflect the `-compat=js` lane — the corpus is untyped JS, so that lane is the representative surface; strict is the regression baseline.\n\n")
-	} else {
+	{
 		ran := oPass + oFail
 		pct := 0.0
 		if ran > 0 {
 			pct = 100 * float64(oPass) / float64(ran)
 		}
-		fmt.Fprintf(&b, "Lane: `-compat=%s`.\n\n%d files total: **%d passed**, %d failed, %d skipped (out of scope).\n\nOf the %d files that compiled far enough to run, **%d passed (%.1f%%)**.\n\n", detailLane, len(all), oPass, oFail, oSkip, ran, oPass, pct)
+		fmt.Fprintf(&b, "%d files total: **%d passed**, %d failed, %d skipped (out of scope).\n\nOf the %d files that compiled far enough to run, **%d passed (%.1f%%)**.\n\n", len(all), oPass, oFail, oSkip, ran, oPass, pct)
 	}
 
 	// Per-module histogram, most files first.
@@ -1033,6 +1012,16 @@ func writeNodeReport(path string, strictAll, jsAll []nodeResult) error {
 			stripped = fmt.Sprintf("−%d", r.Stripped)
 		}
 		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", r.File, r.Module, stripped)
+	}
+
+	if err := updateConformanceSummary("node", laneLabel(), nodeSummaryLane{
+		Pass:     oPass,
+		Fail:     oFail,
+		Skip:     oSkip,
+		Runnable: oPass + oFail,
+		Total:    len(all),
+	}, ""); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

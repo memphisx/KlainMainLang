@@ -31,6 +31,13 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 	if len(val.Ty.FuncParams) != 0 || (val.Ty.FuncRetType != nil && val.Ty.FuncRetType.IR != "void") {
 		return "", fmt.Errorf("%d:%d: %s's callback must take no arguments and return nothing (() => void)", pos.Line, pos.Col, fnName)
 	}
+	// TDD-00168 Stage 3: when the program uses AsyncLocalStorage, wrap the
+	// callback so it carries the async context captured at *this* schedule point
+	// to its deferred fire (a setTimeout inside als.run(...) still sees the
+	// store). No-op when the program has no AsyncLocalStorage.
+	if e.programUsesALS {
+		return e.wrapTimerClosureWithAsyncCtx(val.Ref), nil
+	}
 	return val.Ref, nil
 }
 

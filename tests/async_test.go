@@ -725,3 +725,29 @@ console.log(m.length)
 console.log(m[0].get("a"))
 `, "1\n1")
 }
+
+// TestE2EPromiseResolvesArrayValue: a `new Promise<T[]>` executor resolving with
+// an array must round-trip its elements through await (ADR-00673-fix / the
+// Promise<T[]> corruption fix). The resolve thunk previously read the boxed
+// array header pointer as the data pointer, corrupting every array-valued promise.
+func TestE2EPromiseResolvesArrayValue(t *testing.T) {
+	assertOutput(t, `
+async function main2(): Promise<void> {
+  const p = new Promise<number[]>((res, rej) => { res([10, 20, 30]) })
+  const arr = await p
+  console.log(arr[0], arr[1], arr[2], arr.length)
+}
+main2()
+`, "10 20 30 3")
+}
+
+func TestE2EPromiseResolvesStringArrayValue(t *testing.T) {
+	assertOutput(t, `
+async function main2(): Promise<void> {
+  const p = new Promise<string[]>((res, rej) => { res(["a", "bb", "ccc"]) })
+  const arr = await p
+  console.log(arr[0], arr[2], arr.length)
+}
+main2()
+`, "a ccc 3")
+}

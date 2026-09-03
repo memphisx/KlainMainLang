@@ -174,17 +174,17 @@ fuzz-all: fuzz fuzz-codegen
 conformance-fetch:
 	./tools/conformance/fetch.sh
 
-## conformance: regenerate docs/testing/CONFORMANCE-RESULTS.md by running the full Test262 corpus through this compiler's own pipeline (fetches the corpus first if needed; self-contained — go run, not the klainmain binary)
+## conformance: regenerate the Test262 reports (both compat lanes → docs/testing/strict/ and docs/testing/js/) by running the full corpus through this compiler's own pipeline (fetches first if needed; self-contained — go run, not the klainmain binary)
 conformance: conformance-fetch
-	$(GO) run ./tools/conformance
+	$(GO) run ./tools/conformance -compat=both
 
-## conformance-node: regenerate docs/testing/CONFORMANCE-RESULTS-NODE.md — Node pure-module behavioral tests (TDD-00121 Track B), both compat lanes (strict baseline + -compat=js, TDD-00022)
+## conformance-node: regenerate the Node-core reports (both compat lanes → docs/testing/strict|js/CONFORMANCE-RESULTS-NODE.md) — Node pure-module behavioral tests (TDD-00121 Track B, TDD-00022)
 conformance-node: conformance-fetch
 	$(GO) run ./tools/conformance -suite=node -compat=both
 
-## conformance-ts: regenerate docs/testing/CONFORMANCE-RESULTS-TS.md — TypeScript accept/reject oracle (TDD-00121 Track C)
+## conformance-ts: regenerate the TypeScript-oracle reports (both compat lanes → docs/testing/strict|js/CONFORMANCE-RESULTS-TS.md) — accept/reject oracle (TDD-00121 Track C)
 conformance-ts: conformance-fetch
-	$(GO) run ./tools/conformance -suite=ts
+	$(GO) run ./tools/conformance -suite=ts -compat=both
 
 ## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables. Also regenerates the docs/adr/ and docs/tdd/ index README tables (and the status TDD backlog) from the ADR/TDD record files — edit those files, never the index tables.
 status:

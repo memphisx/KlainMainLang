@@ -84,9 +84,15 @@ var streamClassNames = map[string]bool{
 // — see checkBinding's own doc comment). All are built once by the caller
 // (resolver.go) and passed down unchanged through the whole walk.
 type lookupTable struct {
-	names                map[string]string
-	ns                   map[string]map[string]string
-	builtinMembers       map[string]builtinMemberRef
+	names          map[string]string
+	ns             map[string]map[string]string
+	builtinMembers map[string]builtinMemberRef
+	// parseTimeAliases maps an aliased import local name to the canonical
+	// parse-time built-in constructor it stands for (`U` → `URL` for
+	// `import { URL as U } from 'url'`, TDD-00165 Stage 3). A `new U(...)` — which
+	// the parser produced as a generic NewExpression — is rebuilt into the
+	// specialized built-in node under the canonical name during the walk.
+	parseTimeAliases     map[string]string
 	allowGlobalShadowing bool
 	reservedErr          *error // first-write-wins: set by the first reserved-name violation found anywhere in the walk, checked by the caller once renameFile returns
 	filePath             string // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
@@ -582,6 +588,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "sync__kml_builtin" && ref.Member == "Channel" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// async_hooks's AsyncLocalStorage is a parse-time constructor —
+				// identity, so `new AsyncLocalStorage<T>()` routes through the
+				// generic NewExpression (TDD-00168).
+				if ref.Marker == "asynchooks__kml_builtin" && (ref.Member == "AsyncLocalStorage" || ref.Member == "AsyncResource") {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				// klain:ws's WebSocketServer is a parse-time constructor —
 				// identity (TDD-00158), same as stream's class names.
 				if ref.Marker == "ws__kml_builtin" {
@@ -925,6 +937,19 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.NewExpression:
 		if !sc.bound(e.ClassName) {
+			if canon, ok := lu.parseTimeAliases[e.ClassName]; ok {
+				// TDD-00165 Stage 3: an aliased parse-time built-in constructor.
+				// Rewrite the sub-expressions first, then rebuild as the specialized
+				// node under the canonical name (the parser produced a generic
+				// NewExpression because it keyed on the alias identifier).
+				for _, ta := range e.TypeArgs {
+					rewriteType(ta, sc, lu)
+				}
+				for i := range e.Args {
+					e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
+				}
+				return lu.buildReexportConstructor(canon, e)
+			}
 			if m, ok := lu.names[e.ClassName]; ok {
 				e.ClassName = m
 			}
@@ -1020,4 +1045,64 @@ func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if m, ok := lu.names[name]; ok {
 		ta.Name = m + suffix
 	}
+}
+
+// buildReexportConstructor rebuilds a generic `new <alias>(args)` NewExpression
+// (produced by the parser because it keyed on the alias identifier, not the
+// canonical built-in name) into the specialized built-in AST node the parser
+// would have produced for the un-aliased form — the mechanism behind aliased
+// imports of the parse-time reexport constructors (TDD-00165 Stage 3). Its
+// sub-expressions (Args/TypeArgs) are already rewritten by the caller. An
+// argument-count violation records a first-write-wins error via lu.reservedErr
+// (the same channel reserved-name checks use) and returns the node unchanged, so
+// compilation aborts with a clear message rather than silently miscompiling.
+func (lu lookupTable) buildReexportConstructor(canon string, e *ast.NewExpression) ast.Expression {
+	pos := e.GetPos()
+	fail := func(msg string) ast.Expression {
+		if lu.reservedErr != nil && *lu.reservedErr == nil {
+			*lu.reservedErr = fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, msg)
+		}
+		return e
+	}
+	switch canon {
+	case "URL":
+		if len(e.Args) < 1 || len(e.Args) > 2 {
+			return fail("new URL(url, base?) takes 1 or 2 arguments")
+		}
+		if len(e.Args) == 2 {
+			return ast.NewNewURLExpressionWithBase(e.Args[0], e.Args[1], pos)
+		}
+		return ast.NewNewURLExpression(e.Args[0], pos)
+	case "URLSearchParams":
+		if len(e.Args) > 1 {
+			return fail("new URLSearchParams(init?) takes at most 1 argument")
+		}
+		var init ast.Expression
+		if len(e.Args) == 1 {
+			init = e.Args[0]
+		}
+		return ast.NewNewURLSearchParamsExpression(init, pos)
+	case "Blob":
+		if len(e.Args) > 2 {
+			return fail("new Blob(parts?, options?) takes at most 2 arguments")
+		}
+		var parts, options ast.Expression
+		if len(e.Args) >= 1 {
+			parts = e.Args[0]
+		}
+		if len(e.Args) == 2 {
+			options = e.Args[1]
+		}
+		return ast.NewNewBlobExpression(parts, options, pos)
+	case "EventEmitter":
+		if len(e.Args) != 0 {
+			return fail("new EventEmitter() does not accept arguments")
+		}
+		var payload *ast.TypeAnnotation
+		if len(e.TypeArgs) == 1 {
+			payload = e.TypeArgs[0]
+		}
+		return ast.NewNewEventEmitterExpression(payload, pos)
+	}
+	return e
 }

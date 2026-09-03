@@ -34,6 +34,9 @@
               "`new TextEncoder().encode(str): Uint8Array` — UTF-8 only, which matches the spec (`TextEncoder` is UTF-8-only by spec, not a narrowing)",
               "Strings are already raw UTF-8 byte sequences, so `encode`/`decode` are direct byte copies with no real transcoding",
               "See [ADR-00112](../adr/ADR-00112.md)"
+            ],
+            "caveats": [
+              "Only `.encode()` is implemented — `.encodeInto(src, dest)` is a compile error and there is no `.encoding` property (real `TextEncoder` exposes both)."
             ]
           },
           {

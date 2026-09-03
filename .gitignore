@@ -5,6 +5,9 @@
 # Main binary (go build)
 /klainmain
 
+# Conformance runner binary (built by `make conformance*` from tools/conformance)
+/conformance
+
 # make examples' local httpbin-lite fixture server binary
 /.httpbin-lite
 # The httpbin-lite fixture is now compiled from tools/httpbin-lite/httpbin.ts
@@ -62,6 +65,8 @@ examples/**
 /.ts-tests/
 
 # Generated conformance-run artifacts (tools/conformance) — the committed
-# deliverable is docs/testing/CONFORMANCE-RESULTS.md, not these raw logs.
+# deliverables are the reports under docs/testing/, not these raw logs or the
+# compiled runner binary. The binary is ignored by its exact path so it does
+# not also swallow new source files under tools/conformance/.
 /.conformance-out/
-conformance
+/tools/conformance/conformance

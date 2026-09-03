@@ -4,14 +4,14 @@
 
 > Part of the [Implementation Status](README.md) index. What CLI tools and containerized services actually need day-to-day (argument parsing, stdin, environment config, exit codes). Prioritized because the long-term project direction favors CLI/microservice use cases. `console.log`/`.error` already write to stdout/stderr respectively — see [CONSOLE.md](CONSOLE.md) — the gaps below are everything *else* a CLI program needs.
 
-**Coverage**: 32/32 (100%) · **Strict Coverage**: 14/32 (~44%).
+**Coverage**: 32/32 (100%) · **Strict Coverage**: 13/32 (~41%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
 | Command-line arguments (`process.argv`) | ✅ | • Mirrors C's `argv` directly (`argv[0]` is the binary's own path), not Node's two-prefix convention — see [ADR-00002](../adr/ADR-00002.md)<br>• An out-of-range `process.argv[i]` read yields `""` (falsy), not Node's `undefined` and not the general array bounds throw ([ADR-00425](../adr/ADR-00425.md)) | |
-| Environment variables (`process.env.KEY` / `process.env["KEY"]`) | ✅ | | • Both dot and bracket notation; returns a possibly-null string (same convention as `.find()`), so `process.env.X ?? "default"` works |
+| Environment variables (`process.env.KEY` / `process.env["KEY"]`) | ✅ | • A missing variable reads as `null`, not `undefined` — `process.env.MISSING === null` is `true` (Node: `false`) and `typeof process.env.MISSING` is `'string'` (Node: `'undefined'`); `?? default` still works, but `=== undefined`/`typeof` guards diverge. | • Both dot and bracket notation; returns a possibly-null string (same convention as `.find()`), so `process.env.X ?? "default"` works |
 | Exit codes (`process.exit(code)`) | ✅ | | • Calls C `exit()`; never returns, code after it is correctly unreachable |
 | Reading stdin (sync line read) | ✅ | | • `process.readLineSync()` — one line via POSIX `getline()` (handles arbitrarily long lines), stripped of its trailing `\n`/`\r\n`. Returns `null` at EOF (same possibly-null convention as `process.env`). See [ADR-00024](../adr/ADR-00024.md). |
 | Simple synchronous file read/write (`fs.readFileSync`/`writeFileSync`-style) | ✅ | | • See [FILE-SYSTEM.md](FILE-SYSTEM.md) |

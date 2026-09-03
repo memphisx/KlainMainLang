@@ -4,7 +4,12 @@
   "kind": "node",
   "statusPage": "PATH.md",
   "coversRows": "all",
-  "coverage": { "loose": "8/8", "loosePct": 100, "strict": "7/8", "strictPct": 88 },
+  "coverage": {
+    "loose": "8/8",
+    "loosePct": 100,
+    "strict": "6/8",
+    "strictPct": 75
+  },
   "lede": "Node's `path` module for portable filesystem path manipulation, import-gated as a virtual built-in (`import path from 'path'`). The whole module is POSIX-only — this compiler doesn't cross-compile, so `sep` is always `/` and `delimiter` always `:`, and no Windows `\\`/`;` forms are ever emitted. Everything else — join, resolve, dirname, basename, extname, parse/format, isAbsolute — matches real Node's algorithms, including its asymmetric `basename` extension-stripping rule.",
   "entries": [
     {
@@ -14,11 +19,18 @@
       "signature": "join(...segments: string[]): string",
       "badge": "exact",
       "description": "Joins segments with `/`, then normalizes the result: collapses repeated slashes, drops `.` segments, and resolves `..` against segments already seen in the same call.",
-      "returns": { "type": "string", "desc": "The joined, normalized path." },
+      "returns": {
+        "type": "string",
+        "desc": "The joined, normalized path."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.join('a', 'b', 'c'))          // a/b/c\nconsole.log(path.join('/a', 'b', '../c'))      // /a/c\nconsole.log(path.join('a//b///c'))             // a/b/c",
-      "seeAlso": ["path.resolve"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathjoinpaths" }
+      "seeAlso": [
+        "path.resolve"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathjoinpaths"
+      }
     },
     {
       "id": "path.resolve",
@@ -27,11 +39,18 @@
       "signature": "resolve(...segments: string[]): string",
       "badge": "exact",
       "description": "Absolute-always: starts from `process.cwd()`, walks segments left to right, any segment starting with `/` resets the accumulator (discarding everything before it, including cwd) — equivalent to real Node's right-to-left \"stop at the last absolute segment\" algorithm.",
-      "returns": { "type": "string", "desc": "An absolute path." },
+      "returns": {
+        "type": "string",
+        "desc": "An absolute path."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.resolve('/foo', 'bar', 'baz'))  // /foo/bar/baz\nconsole.log(path.resolve('/foo', '/bar', 'baz')) // /bar/baz",
-      "seeAlso": ["path.join"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathresolvepaths" }
+      "seeAlso": [
+        "path.join"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathresolvepaths"
+      }
     },
     {
       "id": "path.dirname",
@@ -40,11 +59,18 @@
       "signature": "dirname(p: string): string",
       "badge": "exact",
       "description": "Directory portion of a path; trailing slashes are trimmed first.",
-      "returns": { "type": "string", "desc": "The directory portion." },
+      "returns": {
+        "type": "string",
+        "desc": "The directory portion."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.dirname('/foo/bar/baz.js'))   // /foo/bar",
-      "seeAlso": ["path.basename"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathdirnamepath" }
+      "seeAlso": [
+        "path.basename"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathdirnamepath"
+      }
     },
     {
       "id": "path.basename",
@@ -53,11 +79,19 @@
       "signature": "basename(p: string, ext?: string): string",
       "badge": "exact",
       "description": "Final path segment, optionally with a trailing `ext` stripped — not stripped when doing so would consume the whole segment, unless the entire `path` argument equals `ext` (then returns `\"\"`), matching real Node's own asymmetric rule here.",
-      "returns": { "type": "string", "desc": "The final segment." },
+      "returns": {
+        "type": "string",
+        "desc": "The final segment."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.basename('/foo/bar/baz.js'))  // baz.js\nconsole.log(path.basename('/foo/bar/baz.js', '.js')) // baz",
-      "seeAlso": ["path.dirname", "path.extname"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathbasenamepath-suffix" }
+      "seeAlso": [
+        "path.dirname",
+        "path.extname"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathbasenamepath-suffix"
+      }
     },
     {
       "id": "path.extname",
@@ -66,11 +100,18 @@
       "signature": "extname(p: string): string",
       "badge": "exact",
       "description": "Extension of the basename, including the leading `.`; returns `\"\"` for a dotfile whose only `.` is its first character.",
-      "returns": { "type": "string", "desc": "The extension, with leading dot." },
+      "returns": {
+        "type": "string",
+        "desc": "The extension, with leading dot."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.extname('/foo/bar/baz.js'))   // .js",
-      "seeAlso": ["path.basename"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathextnamepath" }
+      "seeAlso": [
+        "path.basename"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathextnamepath"
+      }
     },
     {
       "id": "path.parseformat",
@@ -79,11 +120,19 @@
       "signature": "parse(p: string): { root, dir, base, ext, name }; format(obj): string",
       "badge": "exact",
       "description": "`parse` returns `{root, dir, base, ext, name}`; `format` is the inverse (`base` wins over `name`+`ext`, `dir` falls back to `root`).",
-      "returns": { "type": "object | string", "desc": "A parsed path object, or a reassembled string." },
+      "returns": {
+        "type": "object | string",
+        "desc": "A parsed path object, or a reassembled string."
+      },
       "exampleKey": "path/path",
       "snippet": "const parsed = path.parse('/home/user/dir/file.txt')\nconsole.log(parsed.dir)  // /home/user/dir\nconsole.log(path.format(parsed)) // /home/user/dir/file.txt",
-      "seeAlso": ["path.dirname", "path.basename"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathparsepath" }
+      "seeAlso": [
+        "path.dirname",
+        "path.basename"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathparsepath"
+      }
     },
     {
       "id": "path.isAbsolute",
@@ -92,11 +141,18 @@
       "signature": "isAbsolute(p: string): boolean",
       "badge": "exact",
       "description": "True when the path is absolute — `p[0] === '/'`.",
-      "returns": { "type": "boolean", "desc": "Whether the path is absolute." },
+      "returns": {
+        "type": "boolean",
+        "desc": "Whether the path is absolute."
+      },
       "exampleKey": "path/path",
       "snippet": "console.log(path.isAbsolute('/foo/bar')) // true\nconsole.log(path.isAbsolute('foo/bar'))  // false",
-      "seeAlso": ["path.resolve"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathisabsolutepath" }
+      "seeAlso": [
+        "path.resolve"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathisabsolutepath"
+      }
     },
     {
       "id": "path.sepdelimiter",
@@ -110,8 +166,12 @@
       "differences": [
         "POSIX-only (this compiler doesn't cross-compile) — the compile-time constants `/` and `:`, never the Windows `\\`/`;` forms"
       ],
-      "seeAlso": ["path.join"],
-      "spec": { "mdn": "https://nodejs.org/api/path.html#pathsep" }
+      "seeAlso": [
+        "path.join"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathsep"
+      }
     }
   ]
 }

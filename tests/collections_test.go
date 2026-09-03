@@ -267,6 +267,22 @@ wm.set('x', 1)
 `, "must be an object")
 }
 
+func TestE2EWeakMapDynamicObjectKeyCompatJS(t *testing.T) {
+	// Under -compat=js a plain object literal is a dynamic (any-typed) value,
+	// so a WeakMap keyed on it can't be statically proven object-typed. Rather
+	// than reject (strict's behavior, above), unbox the referent and proceed —
+	// the value is a real object reference at runtime. Mirrors the Test262
+	// WeakMap object-key cases, which fail only under -compat=js otherwise.
+	assertOutputCompatJS(t, `
+var foo = {}
+var map = new WeakMap()
+map.set(foo, 42)
+var had = map.has(foo)
+var del = map.delete(foo)
+console.log(had, del, map.has(foo))
+`, "true true false")
+}
+
 // --- Set<T> ---
 
 func TestE2ESetString(t *testing.T) {

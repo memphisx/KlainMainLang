@@ -1,0 +1,467 @@
+{
+  "id": "node-modules",
+  "file": "NODE-MODULES.md",
+  "title": "Node.js built-in modules (completeness index)",
+  "segments": [
+    {
+      "kind": "block",
+      "text": "> Part of the [Implementation Status](README.md) index. A **completeness map of every Node.js built-in module** — so it's unambiguous which modules are supported, which work only as ambient globals, which are not started, and which are out of scope by design. This page is **informational**: its rows are *not* counted toward the coverage percentages (an out-of-scope or deprecated Node module isn't a missing feature). Modules move onto the counted pages as they're built. For the per-API detail of an implemented module, follow its link to the detailed page; for the *conformance* ranking of the not-yet-built modules (files each one blocks), see [NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)."
+    },
+    {
+      "kind": "block",
+      "text": "Format: [Status page format](README.md#status-page-format). ✅ = the module works; ❌ = not available today. The section groupings carry the real nuance (importable vs. global-only vs. not-started vs. out-of-scope)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "Implemented",
+        "featureColumn": "Module",
+        "hasCaveats": false,
+        "hasNotes": true,
+        "countsTowardParity": false,
+        "rows": [
+          {
+            "feature": "`fs`",
+            "status": "implemented",
+            "notes": [
+              "→ [File system](FILE-SYSTEM.md)"
+            ]
+          },
+          {
+            "feature": "`fs/promises`",
+            "status": "implemented",
+            "notes": [
+              "→ [File system](FILE-SYSTEM.md)"
+            ]
+          },
+          {
+            "feature": "`path`",
+            "status": "implemented",
+            "notes": [
+              "→ [path](PATH.md)"
+            ]
+          },
+          {
+            "feature": "`os`",
+            "status": "implemented",
+            "notes": [
+              "→ [os](OS.md)"
+            ]
+          },
+          {
+            "feature": "`process`",
+            "status": "implemented",
+            "notes": [
+              "Ambient global (no import needed) → [Process & CLI](PROCESS-CLI.md)"
+            ]
+          },
+          {
+            "feature": "`child_process`",
+            "status": "implemented",
+            "notes": [
+              "→ [Process & CLI](PROCESS-CLI.md)"
+            ]
+          },
+          {
+            "feature": "`readline`",
+            "status": "implemented",
+            "notes": [
+              "→ [Process & CLI](PROCESS-CLI.md)"
+            ]
+          },
+          {
+            "feature": "`console`",
+            "status": "implemented",
+            "notes": [
+              "Ambient global (no import needed) → [console](CONSOLE.md)"
+            ]
+          },
+          {
+            "feature": "`assert`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`querystring`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`util`",
+            "status": "implemented",
+            "notes": [
+              "`.inspect`/`.format` → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`net`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`dgram`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`dns`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`tls`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`zlib`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`http`",
+            "status": "implemented",
+            "notes": [
+              "→ [HTTP server](HTTP-SERVER.md) + client in [core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`https`",
+            "status": "implemented",
+            "notes": [
+              "Client + `createServer` → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`http2`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`cluster`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`diagnostics_channel`",
+            "status": "implemented",
+            "notes": [
+              "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`crypto` / `node:crypto`",
+            "status": "implemented",
+            "notes": [
+              "WebCrypto global + node crypto hashes/HMAC/keygen → [Web Crypto](WEB-CRYPTO.md)"
+            ]
+          },
+          {
+            "feature": "`worker_threads`",
+            "status": "implemented",
+            "notes": [
+              "→ [Concurrency & workers](CONCURRENCY-WORKERS.md)"
+            ]
+          },
+          {
+            "feature": "`events` (`EventEmitter`)",
+            "status": "implemented",
+            "notes": [
+              "`EventEmitter` is an ambient global; `import EventEmitter from 'events'` / `{ EventEmitter }` work, and the static helpers **`events.once`** ([ADR-00675](../adr/ADR-00675.md)) and **`events.on`** (async iterator, [ADR-00677](../adr/ADR-00677.md)) work too → [EventEmitter](EVENT-EMITTER.md)"
+            ]
+          },
+          {
+            "feature": "`stream`",
+            "status": "implemented",
+            "notes": [
+              "→ [Streams](STREAMS.md)"
+            ]
+          },
+          {
+            "feature": "`stream/promises`",
+            "status": "implemented",
+            "notes": [
+              "→ [Streams](STREAMS.md)"
+            ]
+          },
+          {
+            "feature": "`stream/web`",
+            "status": "implemented",
+            "notes": [
+              "→ [Streams](STREAMS.md)"
+            ]
+          },
+          {
+            "feature": "`node:sqlite`",
+            "status": "implemented",
+            "notes": [
+              "→ [node:sqlite](SQLITE.md)"
+            ]
+          },
+          {
+            "feature": "`test` / `node:test`",
+            "status": "implemented",
+            "notes": [
+              "Runner + native helpers → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          },
+          {
+            "feature": "`async_hooks`",
+            "status": "implemented",
+            "notes": [
+              "`AsyncLocalStorage` + `AsyncResource` → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Web-global-backed — primary exports fully importable, module extras pending\n\nThe primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { setTimeout } from 'node:timers'`), the `events` default (`import EventEmitter from 'events'`), and **aliased** (`import { URL as U } from 'url'`, `{ setTimeout as later }`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). What remains is **Stage 4**: the genuinely module-only *extras* with no same-named global — legacy `url.parse`/`format`/`fileURLToPath`, `perf_hooks.PerformanceObserver`, `timers/promises` — which are separate not-yet-built feature surfaces. `Buffer` is a Node-*specific* global (not a Web API)."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "",
+        "featureColumn": "Module",
+        "hasCaveats": true,
+        "hasNotes": false,
+        "countsTowardParity": false,
+        "rows": [
+          {
+            "feature": "`buffer` (`Buffer`)",
+            "status": "implemented",
+            "caveats": [
+              "A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
+            ]
+          },
+          {
+            "feature": "`timers`",
+            "status": "implemented",
+            "caveats": [
+              "`import { setTimeout }`/`setInterval`/`setImmediate`/`clear*` from 'timers'/'node:timers' works, same-name and aliased; the Web globals also work without import → [Timers](TIMERS.md). Pending: `timers/promises`"
+            ]
+          },
+          {
+            "feature": "`url`",
+            "status": "implemented",
+            "caveats": [
+              "`import { URL, URLSearchParams } from 'url'` works (same-name + aliased); the **legacy `url`-module functions are complete** — `parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode` ([ADR-00669](../adr/ADR-00669.md)–[ADR-00672](../adr/ADR-00672.md)) → [URL](URL.md). (IDN conversion is libcurl-backend-gated; lenient relative parsing deferred)"
+            ]
+          },
+          {
+            "feature": "`perf_hooks`",
+            "status": "implemented",
+            "caveats": [
+              "`import { performance } from 'perf_hooks'` works, same-name and aliased; **`PerformanceObserver` now works too** (synchronous V1 — [ADR-00673](../adr/ADR-00673.md)) → [Performance & Timing](PERFORMANCE-TIMING.md). Pending: `monitorEventLoopDelay`/`createHistogram` and async-batched observer delivery"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Not started (in scope)\n\nModules that fit the compiler's model and would add value — ranked and pulled onto the counted pages by importance in subsequent audits."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "",
+        "featureColumn": "Module",
+        "hasCaveats": false,
+        "hasNotes": true,
+        "countsTowardParity": false,
+        "rows": [
+          {
+            "feature": "`string_decoder`",
+            "status": "missing",
+            "notes": [
+              "Incremental UTF-8 decoder — no global equivalent; useful for streaming byte→text. Not started"
+            ]
+          },
+          {
+            "feature": "`util/types`",
+            "status": "missing",
+            "notes": [
+              "Runtime type predicates (`isDate`, `isMap`, …) — not started"
+            ]
+          },
+          {
+            "feature": "`assert/strict`",
+            "status": "missing",
+            "notes": [
+              "The strict-mode `assert` entrypoint (`assert` itself ships; this alias is a thin follow-on)"
+            ]
+          },
+          {
+            "feature": "`dns/promises`",
+            "status": "missing",
+            "notes": [
+              "Promise form of `dns` (the callback/`dns.promises` surface ships) — the dedicated subpath specifier is not wired"
+            ]
+          },
+          {
+            "feature": "`readline/promises`",
+            "status": "missing",
+            "notes": [
+              "Promise form of `readline` — not started"
+            ]
+          },
+          {
+            "feature": "`timers/promises`",
+            "status": "missing",
+            "notes": [
+              "`setTimeout`/`setInterval` as awaitables — not started"
+            ]
+          },
+          {
+            "feature": "`stream/consumers`",
+            "status": "missing",
+            "notes": [
+              "`text`/`json`/`buffer`/`arrayBuffer` stream collectors — not started"
+            ]
+          },
+          {
+            "feature": "`node:tty`",
+            "status": "missing",
+            "notes": [
+              "The `tty` module surface (`tty.isatty`, `ReadStream`/`WriteStream`); the primitives exist as `process.stdin.isTTY`/`setRawMode`/`columns` and the bespoke [`klain:tty`](../guides) reads, but the Node `tty` module is not exposed"
+            ]
+          },
+          {
+            "feature": "`constants`",
+            "status": "missing",
+            "notes": [
+              "Legacy aggregate of `os`/`fs`/`crypto` constants (superseded by per-module `.constants`) — not started"
+            ]
+          },
+          {
+            "feature": "`test/reporters`",
+            "status": "missing",
+            "notes": [
+              "Pluggable test reporters (`spec`/`tap`/`dot`) — the runner ships; reporter modules are not started"
+            ]
+          },
+          {
+            "feature": "`node:ffi`",
+            "status": "missing",
+            "notes": [
+              "Foreign function interface (Node v26.1.0, experimental) — designed in [TDD-00164](../tdd/TDD-00164.md); not started"
+            ]
+          },
+          {
+            "feature": "`vm`",
+            "status": "missing",
+            "notes": [
+              "Sandboxed `eval`-like execution — the **largest** unimplemented-module gap (~77 conformance files, [NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)); gated on an opt-in embedded JS engine (no runtime evaluator today)"
+            ]
+          },
+          {
+            "feature": "`sea` (single executable apps)",
+            "status": "missing",
+            "notes": [
+              "`klainmain` already emits a standalone native binary, so the *outcome* is native; the Node SEA blob/asset API shape is not implemented"
+            ]
+          },
+          {
+            "feature": "`domain`",
+            "status": "missing",
+            "notes": [
+              "Deprecated in Node (superseded by `AsyncLocalStorage`) — ~35 conformance files reference it, but it is the lowest-priority module gap ([NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md))"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "block",
+      "text": "## Out of scope (by the whole-program AOT / no-runtime model)\n\nThese depend on a live JavaScript engine, a runtime module loader, or V8 internals that native ahead-of-time output has no equivalent for — or are deprecated in Node itself. Listed for completeness, not planned."
+    },
+    {
+      "kind": "table",
+      "table": {
+        "heading": "",
+        "featureColumn": "Module",
+        "hasCaveats": false,
+        "hasNotes": true,
+        "countsTowardParity": false,
+        "rows": [
+          {
+            "feature": "`module`",
+            "status": "missing",
+            "notes": [
+              "Whole-program AOT compilation — no runtime `require()`/`import()` or module API ([ADR-00022](../adr/ADR-00022.md))"
+            ]
+          },
+          {
+            "feature": "`repl`",
+            "status": "missing",
+            "notes": [
+              "No interactive runtime evaluator (needs a live JS engine)"
+            ]
+          },
+          {
+            "feature": "`inspector`",
+            "status": "missing",
+            "notes": [
+              "No V8 inspector protocol — real Node also skips these files when the inspector is compiled out ([NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md))"
+            ]
+          },
+          {
+            "feature": "`v8`",
+            "status": "missing",
+            "notes": [
+              "No V8 engine — heap statistics/serialize/flags have no meaning in native output (~18 conformance files reference it)"
+            ]
+          },
+          {
+            "feature": "`wasi`",
+            "status": "missing",
+            "notes": [
+              "No WebAssembly runtime; a WASM *target* is a separate direction, not a hosted `wasi` module"
+            ]
+          },
+          {
+            "feature": "`trace_events`",
+            "status": "missing",
+            "notes": [
+              "No V8 trace-event subsystem"
+            ]
+          },
+          {
+            "feature": "`punycode`",
+            "status": "missing",
+            "notes": [
+              "Deprecated in Node (userland module)"
+            ]
+          },
+          {
+            "feature": "`sys`",
+            "status": "missing",
+            "notes": [
+              "Deprecated alias of `util`"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

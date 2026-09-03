@@ -1873,6 +1873,18 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if ex.ClassName == "WebSocketServer" && e.usedKlainWS {
 		return e.emitNewWebSocketServer(ex)
 	}
+	// new PerformanceObserver(cb) — perf_hooks (TDD-00166), not a user class.
+	if ex.ClassName == "PerformanceObserver" {
+		return e.emitNewPerformanceObserver(ex)
+	}
+	// new AsyncLocalStorage<T>() — async_hooks (TDD-00168), not a user class.
+	if ex.ClassName == "AsyncLocalStorage" {
+		return e.emitNewAsyncLocalStorage(ex)
+	}
+	// new AsyncResource(name?, opts?) — async_hooks (TDD-00168 Stage 4).
+	if ex.ClassName == "AsyncResource" {
+		return e.emitNewAsyncResource(ex)
+	}
 	className := ex.ClassName
 	info, ok := e.classes[ex.ClassName]
 	if !ok {

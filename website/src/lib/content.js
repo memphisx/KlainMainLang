@@ -1,6 +1,14 @@
 // Shared content: code samples (verbatim from the repo's examples/) and the
 // coverage figures (mirrored from docs/status/README.md). Keeping them here
 // means the marketing page and the docs never drift apart.
+//
+// External-conformance NUMBERS are not written here — they are sourced from
+// src/data/conformance-summary.json, which the conformance tool emits and
+// `npm run gen:conformance` copies in (see website/scripts/gen-conformance.mjs
+// and tools/conformance/summary.go). Only the prose/explanations below are
+// hand-written; the figures below the fold are derived, so they never drift.
+
+import conformanceSummary from 'src/data/conformance-summary.json'
 
 export const GITHUB_URL = 'https://github.com/memphisx/KlainMainLang'
 
@@ -211,12 +219,82 @@ export const headline = [
   { label: 'Node.js APIs', value: '~98%', sub: '97 / 99 targeted features' }
 ]
 
-// External conformance — full public test suites, run unfiltered.
-// Source: docs/testing/CONFORMANCE-RESULTS*.md. Deliberately kept visible: the
-// feature numbers above measure the paths this compiler targets; these measure
-// it against everything, most of which is out of scope by design.
-export const conformance = [
-  { label: 'Test262 (in-scope subset)', value: '15.4%', sub: '5,279 / 34,334 · 11.3% over the full corpus' },
-  { label: 'TypeScript accept/reject', value: '57.2%', sub: '5,293 / 9,256 cases agree with tsc' },
-  { label: 'Node.js test/parallel', value: '1.8%', sub: '45 / 2,451 runnable files pass (both compat lanes)' }
-]
+// External conformance — full public test suites, run unfiltered. The numbers
+// come from conformanceSummary (generated); only the prose here is hand-written.
+// The feature numbers above measure the paths this compiler targets; these
+// measure it against everything, most of which is out of scope by design.
+
+const fmtInt = (n) => (n ?? 0).toLocaleString('en-US')
+const pctStr = (n, d) => (d ? `${((100 * n) / d).toFixed(1)}%` : '—')
+
+// The two compat lanes, explained. Prose evolves; numbers never live here.
+export const compatFlags = {
+  strict: {
+    id: 'strict',
+    flag: '-compat=strict',
+    name: 'Strict (default)',
+    tagline: "The compiler's opinionated, safer-than-JS typed semantics — the default. Untyped-JS patterns it can't prove safe are rejected at compile time."
+  },
+  js: {
+    id: 'js',
+    flag: '-compat=js',
+    name: 'JS-compat',
+    tagline: 'Best-effort vanilla-JS compatibility — a permissive superset of strict, for running untyped JavaScript as-is. Trades some of strict’s guarantees for reach.'
+  }
+}
+
+// Per-suite explanation (numbers come from the summary, not from here).
+const suiteInfo = {
+  test262: {
+    label: 'Test262',
+    blurb: 'The official ECMAScript conformance corpus, run unfiltered. Most of it is out of scope by design — eval-based assertions, Intl/Temporal, dynamic import — so the honest figure is the in-scope subset.'
+  },
+  ts: {
+    label: 'TypeScript accept/reject',
+    blurb: "Agreement with tsc’s own accept/reject verdict over Microsoft’s compiler and conformance test cases — a measure of front-end fidelity, not runtime behavior."
+  },
+  node: {
+    label: 'Node.js test/parallel',
+    blurb: "How much of Node’s own behavioral test suite runs verbatim after a mechanical CommonJS→typed-ESM transform — a floor on Node fidelity, not a coverage claim."
+  }
+}
+
+const suites = conformanceSummary?.suites ?? {}
+
+// Headline value + subtitle for one suite/lane, derived from the summary.
+function laneFigure(suite, lane) {
+  const d = suites[suite]?.lanes?.[lane]
+  if (!d) return { value: '—', sub: 'not yet run' }
+  if (suite === 'test262') {
+    return {
+      value: pctStr(d.inScope.pass, d.inScope.total),
+      sub: `${fmtInt(d.inScope.pass)} / ${fmtInt(d.inScope.total)} in-scope · ${pctStr(d.overall.pass, d.overall.total)} of the full corpus`
+    }
+  }
+  if (suite === 'ts') {
+    return { value: pctStr(d.agree, d.classified), sub: `${fmtInt(d.agree)} / ${fmtInt(d.classified)} cases agree with tsc` }
+  }
+  if (suite === 'node') {
+    return { value: pctStr(d.pass, d.runnable), sub: `${fmtInt(d.pass)} / ${fmtInt(d.runnable)} runnable files pass` }
+  }
+  return { value: '—', sub: '' }
+}
+
+// Per-flag view: each suite with both lanes side by side, for the split display.
+export const conformanceByFlag = ['test262', 'ts', 'node'].map((suite) => ({
+  suite,
+  label: suiteInfo[suite].label,
+  blurb: suiteInfo[suite].blurb,
+  lanes: ['strict', 'js'].map((lane) => ({
+    flag: lane,
+    name: compatFlags[lane].name,
+    ...laneFigure(suite, lane)
+  }))
+}))
+
+// Backward-compatible flat array (strict lane) for the existing stat-card
+// renderers on the landing page and Coverage docs page.
+export const conformance = conformanceByFlag.map((s) => {
+  const strict = s.lanes.find((l) => l.flag === 'strict') || s.lanes[0]
+  return { label: s.label, value: strict.value, sub: strict.sub }
+})

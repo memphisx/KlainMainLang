@@ -56,6 +56,12 @@ var (
 	// read) so the reason buckets by message and doesn't leak the local
 	// machine's directory layout into the report.
 	reFilePosPrefix = regexp.MustCompile(`^/[\w.\-/]+:\s*\d+:\d+:\s*`)
+	// reScratchPrefix strips a clang error's leading `…/w<id>.ll:line:col: `
+	// prefix — the per-worker scratch module path (now under a per-process
+	// `run-<pid>/` subdirectory). Bucketing by the clang *message* keeps the
+	// reason histogram stable across runs; without this the pid in the path
+	// would fragment every CLANG_ERROR into its own bucket.
+	reScratchPrefix = regexp.MustCompile(`^\S*w\d+\.ll:\d+:\d+:\s*`)
 	// reAbsPath collapses any remaining absolute filesystem path to a stable
 	// placeholder (a path that appears mid-message rather than as the prefix).
 	reAbsPath = regexp.MustCompile(`/[\w.\-]+(?:/[\w.\-]+)+`)
@@ -126,6 +132,13 @@ func inScope(fm frontmatter, category string) bool {
 	return true
 }
 
+// codegenTimeout bounds the in-process parse+emit for a single file. Most
+// files compile in well under a second; anything past this is a spin (a
+// parser/emitter infinite loop), recorded as CODEGEN_TIMEOUT so one bad file
+// can't wedge the whole run. Generous on purpose — it is a hang backstop, not a
+// performance gate.
+const codegenTimeout = 30 * time.Second
+
 // laneCompat is the emitter compat mode for the lane currently running
 // ("" == strict, "js" == -compat=js) — a package global, like regexModeFlag,
 // because the per-file runners are deep in worker goroutines. Lanes never
@@ -181,6 +194,7 @@ func parseFlowList(re *regexp.Regexp, block string) []string {
 // single-quoted identifier/token to a placeholder so e.g. "undefined
 // variable 'x'" and "undefined variable 'y'" fall into one bucket.
 func normalizeReason(kind, msg string) string {
+	msg = reScratchPrefix.ReplaceAllString(msg, "")
 	msg = reFilePosPrefix.ReplaceAllString(msg, "")
 	msg = rePos.ReplaceAllString(msg, "")
 	msg = reAbsPath.ReplaceAllString(msg, "<path>")
@@ -233,7 +247,7 @@ var reQuotedCapture = regexp.MustCompile(`'([^']+)'`)
 
 func main() {
 	corpus := flag.String("corpus", ".test262", "path to a test262 checkout (see fetch.sh)")
-	out := flag.String("out", "docs/testing/CONFORMANCE-RESULTS.md", "report output path")
+	out := flag.String("out", "", "report output path override for a single-lane run (default: the per-lane folder docs/testing/<lane>/CONFORMANCE-RESULTS.md); ignored under -compat=both")
 	category := flag.String("category", "", "only run files under test/<category> (default: everything, unfiltered)")
 	// Leave two cores free by default: with every worker running a CPU-bound
 	// `clang -O2`, a fully-saturated machine starves the *run* phase of a
@@ -263,6 +277,19 @@ func main() {
 	flag.Parse()
 	regexModeFlag = *regexMode
 
+	// Isolate the per-worker scratch files (w{id}.ll / .bin / embedded C) into a
+	// per-process subdirectory when the default workdir is in effect, so a
+	// second runner invocation (an overlapping run, or a stale one that outlived
+	// its parent) can't overwrite this run's w{id}.ll mid-compile and hand clang
+	// a corrupted module — which surfaces as a spurious, non-reproducible
+	// CLANG_ERROR and makes two runs' pass sets diverge for reasons that have
+	// nothing to do with the compiler. An explicit -workdir is left exactly as
+	// given (the caller owns isolation then). Kept under the default root, not
+	// auto-deleted, so the .ll files stay inspectable after a run.
+	if *workDir == ".conformance-out" {
+		*workDir = filepath.Join(*workDir, fmt.Sprintf("run-%d", os.Getpid()))
+	}
+
 	// TDD-00121 Tracks B/C run entirely different corpora with different oracles
 	// (Node behavioral run; TS front-end accept/reject) — dispatch to their own
 	// runners, which reuse the shared helpers (killableCommand/firstLine/…) but
@@ -274,24 +301,14 @@ func main() {
 	}
 	switch *suite {
 	case "test262":
-		// fall through to the Test262 runner below
-		if *compatFlag == "both" {
-			fatal("-compat=both is node-suite-only for now — run test262 once per lane")
-		}
-		if *compatFlag == "js" {
-			laneCompat = "js"
-		}
+		// fall through to the Test262 runner below; -compat=both runs the
+		// corpus once per lane (strict then js) and the report carries both
+		// scores plus the delta (TDD-00022).
 	case "node":
 		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
 		return
 	case "ts":
-		if *compatFlag == "both" {
-			fatal("-compat=both is node-suite-only for now — run ts once per lane")
-		}
-		if *compatFlag == "js" {
-			laneCompat = "js"
-		}
-		runTSSuite(*workDir, *perFileTimeout)
+		runTSSuite(*workDir, *perFileTimeout, *compatFlag)
 		return
 	default:
 		fatal("unknown -suite %q (want test262, node, or ts)", *suite)
@@ -341,17 +358,80 @@ func main() {
 		files = files[:*limit]
 	}
 
-	fmt.Fprintf(os.Stderr, "running %d files with %d workers...\n", len(files), *workers)
+	// Lanes run strictly sequentially (laneCompat is a shared global). Under
+	// -compat=both the strict lane runs first (the historical correctness
+	// baseline), then the js lane; the report carries both scores plus the
+	// delta — the direct measurement of what the vanilla-JS-compat surface
+	// buys, and the honest home for files that strict deliberately rejects but
+	// js accepts (TDD-00022, TDD-00162).
+	var lanes []string
+	if *compatFlag == "strict" || *compatFlag == "both" {
+		lanes = append(lanes, "")
+	}
+	if *compatFlag == "js" || *compatFlag == "both" {
+		lanes = append(lanes, "js")
+	}
+	// Each lane runs the full corpus and writes its own report into its own
+	// folder (docs/testing/<lane>/…). `primary` (the last lane run) feeds the
+	// optional pass/fail dumps used for triage.
+	var primary []result
+	for _, lane := range lanes {
+		laneCompat = lane
+		all := runTest262Lane(files, testDir, harnessDir, defaultHarness, *workDir, *workers, *perFileTimeout)
+		primary = all
+		// An explicit -out overrides the folder layout only for a single-lane
+		// run (a scratch/triage report); -compat=both always uses the per-lane
+		// folders so the two never clobber one file.
+		outPath := reportPath("CONFORMANCE-RESULTS.md")
+		if *out != "" && *compatFlag != "both" {
+			outPath = *out
+		}
+		if err := writeReport(outPath, all); err != nil {
+			fatal("writing report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "done (lane=%s). report written to %s\n", laneLabel(), outPath)
+	}
+	if *passList != "" {
+		var passing []string
+		for _, r := range primary {
+			if r.Pass {
+				passing = append(passing, r.Path)
+			}
+		}
+		sort.Strings(passing)
+		if err := os.WriteFile(*passList, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
+			fatal("writing passlist: %v", err)
+		}
+	}
+	if *failList != "" {
+		var failing []string
+		for _, r := range primary {
+			if !r.Pass {
+				failing = append(failing, r.Path+"\t"+r.Reason)
+			}
+		}
+		sort.Strings(failing)
+		if err := os.WriteFile(*failList, []byte(strings.Join(failing, "\n")+"\n"), 0644); err != nil {
+			fatal("writing faillist: %v", err)
+		}
+	}
+}
+
+// runTest262Lane runs the whole file set once under the current laneCompat and
+// returns every per-file result. Called once per compat lane (strict, js, or
+// both in sequence).
+func runTest262Lane(files []string, testDir, harnessDir, defaultHarness, workDir string, workers int, perFileTimeout time.Duration) []result {
+	fmt.Fprintf(os.Stderr, "running %d files with %d workers (lane=%s)...\n", len(files), workers, laneLabel())
 
 	jobs := make(chan string, len(files))
 	results := make(chan result, len(files))
 	var wg sync.WaitGroup
-	for w := 0; w < *workers; w++ {
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			for path := range jobs {
-				results <- runOne(path, testDir, harnessDir, defaultHarness, *workDir, id, *perFileTimeout)
+				results <- runOne(path, testDir, harnessDir, defaultHarness, workDir, id, perFileTimeout)
 			}
 		}(w)
 	}
@@ -379,35 +459,33 @@ func main() {
 				done, len(files), el, rate, eta.Round(time.Second))
 		}
 	}
+	return all
+}
 
-	if err := writeReport(*out, all); err != nil {
-		fatal("writing report: %v", err)
+// laneLabel names the lane currently running for progress output and for the
+// per-lane report folder ("strict" or "js").
+func laneLabel() string {
+	if laneCompat == "js" {
+		return "js"
 	}
-	if *passList != "" {
-		var passing []string
-		for _, r := range all {
-			if r.Pass {
-				passing = append(passing, r.Path)
-			}
-		}
-		sort.Strings(passing)
-		if err := os.WriteFile(*passList, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
-			fatal("writing passlist: %v", err)
-		}
-	}
-	if *failList != "" {
-		var failing []string
-		for _, r := range all {
-			if !r.Pass {
-				failing = append(failing, r.Path+"\t"+r.Reason)
-			}
-		}
-		sort.Strings(failing)
-		if err := os.WriteFile(*failList, []byte(strings.Join(failing, "\n")+"\n"), 0644); err != nil {
-			fatal("writing faillist: %v", err)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "done. report written to %s\n", *out)
+	return "strict"
+}
+
+// reportPath is the per-compat-lane report location: docs/testing/<lane>/<file>.
+// Each lane writes an *identically structured* report into its own folder,
+// rather than both lanes sharing one file — so each flag's history is a clean,
+// independently diffable git delta (spotting a regression, or an error that
+// only appears in one lane, is a per-file diff), and the layout extends to a
+// future flag by adding a folder, not a column.
+func reportPath(filename string) string {
+	return filepath.Join("docs", "testing", laneLabel(), filename)
+}
+
+// reportLaneHeader is the one-line banner every per-lane report opens with,
+// naming its compat lane and the sibling-folder layout so a reader knows the
+// number is one flag's, and where the others live.
+func reportLaneHeader() string {
+	return fmt.Sprintf("> **Compat lane: `-compat=%s`.** This report covers the `%s` lane only. Each compat flag is generated into its own `docs/testing/<flag>/` folder — identical structure per flag — so its history is independently diffable and an error that surfaces in only one lane is obvious. Sibling lanes live in the neighbouring folders.\n\n", laneLabel(), laneLabel())
 }
 
 func loadHarness(dir string, names []string) (string, error) {
@@ -484,26 +562,60 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 	full += string(src)
 
-	prog, perr := parser.Parse(full)
-	var ir string
-	var cerr error
-	var linkLibs []string
-	var cSources []llvm.CSource
-	var embedBlobs []llvm.EmbeddedBlob
-	if perr == nil {
+	// Parse + emit run *in-process*, so a pathological input that makes the
+	// parser or emitter spin forever would wedge this worker indefinitely — the
+	// per-file clang/run subprocess timeouts below cannot catch an in-process
+	// loop, and with every worker stuck on such a file the whole run freezes at
+	// 0% CPU and never writes a report. Run codegen under a wall-clock guard: on
+	// timeout, record CODEGEN_TIMEOUT and move on, leaking the stuck goroutine
+	// (it dies with the process at exit) rather than stalling the run — one
+	// hanging file must not block the whole corpus. Observed under -compat=js,
+	// where a handful of files spin the emitter. The panic-recover is duplicated
+	// into the goroutine because the outer deferred recover only covers this
+	// function's own goroutine, not the one spawned here.
+	type cgOut struct {
+		ir         string
+		linkLibs   []string
+		cSources   []llvm.CSource
+		embedBlobs []llvm.EmbeddedBlob
+		err        error
+	}
+	cgCh := make(chan cgOut, 1)
+	go func() {
+		var out cgOut
+		defer func() {
+			if r := recover(); r != nil {
+				out = cgOut{err: fmt.Errorf("CRASH: %v", r)}
+			}
+			cgCh <- out
+		}()
+		prog, perr := parser.Parse(full)
+		if perr != nil {
+			out.err = perr
+			return
+		}
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
 		em.SetCompatMode(laneCompat)
-		ir, cerr = em.EmitProgram(prog)
-		linkLibs = em.LinkLibs()
-		if cerr == nil {
-			cSources, cerr = em.EmbeddedCSources()
-			embedBlobs, _ = em.EmbeddedBlobs()
+		out.ir, out.err = em.EmitProgram(prog)
+		if out.err == nil {
+			out.linkLibs = em.LinkLibs()
+			out.cSources, out.err = em.EmbeddedCSources()
+			out.embedBlobs, _ = em.EmbeddedBlobs()
 		}
-	}
-	compileErr := perr
-	if compileErr == nil {
-		compileErr = cerr
+	}()
+	var ir string
+	var compileErr error
+	var linkLibs []string
+	var cSources []llvm.CSource
+	var embedBlobs []llvm.EmbeddedBlob
+	select {
+	case cg := <-cgCh:
+		ir, compileErr = cg.ir, cg.err
+		linkLibs, cSources, embedBlobs = cg.linkLibs, cg.cSources, cg.embedBlobs
+	case <-time.After(codegenTimeout):
+		res.Reason = "CODEGEN_TIMEOUT"
+		return res
 	}
 
 	if fm.NegativePhase == "parse" {
@@ -515,7 +627,19 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 
 	if compileErr != nil {
-		res.Reason = normalizeReason("COMPILE_ERROR", compileErr.Error())
+		// Deliberate strict-lane typed rejections (TDD-00162) carry a stable
+		// "-compat=js" hint in their message: the two-tier model refuses an
+		// untyped-JS pattern (e.g. a cross-type reassignment) under strict and
+		// points at the -compat=js lane that accepts it. Bucket these apart
+		// from genuine front-end gaps and invalid-IR codegen bugs, so the
+		// strict/js delta reads as a designed tightening rather than a
+		// regression. Detected on the raw (untruncated) message, since the hint
+		// clause sits past normalizeReason's 120-char cut.
+		kind := "COMPILE_ERROR"
+		if strings.Contains(compileErr.Error(), "-compat=js") {
+			kind = "STRICT_REJECT"
+		}
+		res.Reason = normalizeReason(kind, compileErr.Error())
 		res.Blocker = blockerOf(compileErr.Error())
 		return res
 	}
@@ -634,8 +758,12 @@ func phaseOf(reason string) string {
 		return "runtime (ran, wrong result — near-miss)"
 	case strings.HasPrefix(reason, "RUN_TIMEOUT"):
 		return "runtime (timeout)"
+	case strings.HasPrefix(reason, "CODEGEN_TIMEOUT"):
+		return "codegen (in-process hang — emitter/parser spin)"
 	case strings.HasPrefix(reason, "CLANG_ERROR") || strings.HasPrefix(reason, "CLANG_TIMEOUT"):
 		return "clang (invalid IR — codegen bug)"
+	case strings.HasPrefix(reason, "STRICT_REJECT"):
+		return "strict typed-rejection (recoverable under -compat=js)"
 	case strings.HasPrefix(reason, "COMPILE_ERROR"):
 		return "compile (front-end parse/resolve/codegen)"
 	case strings.HasPrefix(reason, "MISSING_HARNESS_INCLUDE"):
@@ -657,8 +785,12 @@ func phaseShort(phase string) string {
 		return "runtime"
 	case strings.HasPrefix(phase, "runtime (timeout"):
 		return "run-timeout"
+	case strings.HasPrefix(phase, "codegen (in-process hang"):
+		return "codegen-hang"
 	case strings.HasPrefix(phase, "clang"):
 		return "clang"
+	case strings.HasPrefix(phase, "strict typed-rejection"):
+		return "strict-reject"
 	case strings.HasPrefix(phase, "compile"):
 		return "compile"
 	case strings.HasPrefix(phase, "wrongly-accepted"):
@@ -677,7 +809,9 @@ func phaseShort(phase string) string {
 var phaseOrder = []string{
 	"runtime (ran, wrong result — near-miss)",
 	"clang (invalid IR — codegen bug)",
+	"codegen (in-process hang — emitter/parser spin)",
 	"wrongly-accepted (negative test compiled/ran)",
+	"strict typed-rejection (recoverable under -compat=js)",
 	"compile (front-end parse/resolve/codegen)",
 	"runtime (timeout)",
 	"skipped (unsupported harness include)",
@@ -685,16 +819,17 @@ var phaseOrder = []string{
 	"other",
 }
 
-// writeReport renders the generated docs/testing/CONFORMANCE-RESULTS.md —
-// overall totals, per-top-level-category breakdown, a pipeline-phase summary,
+// writeReport renders one lane's generated docs/testing/<lane>/CONFORMANCE-RESULTS.md
+// — overall totals, per-top-level-category breakdown, a pipeline-phase summary,
 // and the most common failure-reason buckets (each with the phase it died in
 // and a representative example file). Regenerated wholesale each run, never
 // hand-edited.
 func writeReport(path string, all []result) error {
 	var b strings.Builder
 	b.WriteString("# Test262 conformance results\n\n")
+	b.WriteString(reportLaneHeader())
 	b.WriteString("Generated by `tools/conformance` (TDD-00008 Design V2) against the full, unfiltered `tc39/test262` corpus — not a hand-picked subset. Regenerate with `make conformance` (see the README's \"Test262 conformance\" section). Do not hand-edit; re-run instead.\n\n")
-	b.WriteString("**Read this number carefully**: a low pass rate here is expected right now for two reasons unrelated to per-feature correctness, not just missing features — this compiler doesn't target vanilla untyped-JS compatibility (TDD-00022, not started), and most Test262 files use `eval()` as their own assertion mechanism (this compiler's `eval` is a not-started opt-in, TDD-00046). See the failure-reason breakdown below to tell those apart from a genuine, in-scope feature gap.\n\n")
+	b.WriteString("**Read this number carefully**: a low pass rate here is expected right now for two reasons unrelated to per-feature correctness, not just missing features — this compiler doesn't target vanilla untyped-JS compatibility (TDD-00022), and most Test262 files use `eval()` as their own assertion mechanism (this compiler's `eval` is a not-started opt-in, TDD-00046). See the failure-reason breakdown below to tell those apart from a genuine, in-scope feature gap.\n\n")
 
 	total := len(all)
 	passed := 0
@@ -843,6 +978,20 @@ func writeReport(path string, all []result) error {
 	}
 	for _, rc := range reasons[:limit] {
 		fmt.Fprintf(&b, "| %d | %s | %s | `%s` |\n", rc.count, phaseShort(phaseOf(rc.reason)), rc.reason, reasonExample[rc.reason])
+	}
+
+	// Machine-readable projection for downstream consumers (the website),
+	// merged into the shared summary under this lane's key.
+	phaseCounts := map[string]int{}
+	for ph, n := range byPhase {
+		phaseCounts[phaseShort(ph)] = n
+	}
+	if err := updateConformanceSummary("test262", laneLabel(), test262SummaryLane{
+		Overall: passTotal{Pass: passed, Total: total},
+		InScope: passTotal{Pass: inPassed, Total: inTotal},
+		ByPhase: phaseCounts,
+	}, ""); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

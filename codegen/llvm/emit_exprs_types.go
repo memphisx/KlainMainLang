@@ -936,6 +936,22 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.ClassName == "WebSocketServer" && e.usedKlainWS {
 			return WebSocketServerType()
 		}
+		// new PerformanceObserver(cb) → the perf_hooks handle (TDD-00166).
+		if ex.ClassName == "PerformanceObserver" {
+			return PerfObserverType()
+		}
+		// new AsyncLocalStorage<T>() → the async_hooks handle (TDD-00168).
+		if ex.ClassName == "AsyncLocalStorage" {
+			elem := TypeAny
+			if len(ex.TypeArgs) == 1 && ex.TypeArgs[0] != nil {
+				elem = e.resolveType(ex.TypeArgs[0])
+			}
+			return AsyncLocalStorageType(elem)
+		}
+		// new AsyncResource(name?, opts?) → the async_hooks handle (TDD-00168 St 4).
+		if ex.ClassName == "AsyncResource" {
+			return AsyncResourceType()
+		}
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
 		}
@@ -987,6 +1003,14 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			}
 			if mem.Property == "get" && e.inferExprType(mem.Object).IsEmbeddedAssets {
 				return ArrayBufferType()
+			}
+			// PerformanceObserver.observe/disconnect → void; the list's
+			// getEntries() → PerformanceEntry[] (TDD-00166).
+			if mt := e.inferExprType(mem.Object); mt.IsPerfObserver {
+				return TypeVoid
+			}
+			if mem.Property == "getEntries" && e.inferExprType(mem.Object).IsPerfEntryList {
+				return ArrayOf(PerformanceEntryType())
 			}
 			// WSMessageEvent.dataBytes() → ArrayBuffer (TDD-00160): the
 			// byte-exact accessor for a binary frame, guarded structurally on
@@ -1278,6 +1302,51 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					if argTy := e.inferExprType(ex.Args[0]); argTy.IsArray {
 						return ReadableStreamType(*argTy.ElemType)
 					}
+				}
+			}
+		}
+		// AsyncLocalStorage instance-method result types (TDD-00168):
+		// run/exit evaluate to their callback's own return type; getStore to
+		// the stored element type T; enterWith/disable to void.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+			if objTy := e.inferExprType(mem.Object); objTy.IsAsyncLocalStorage {
+				switch mem.Property {
+				case "getStore":
+					if objTy.ElemType != nil {
+						return *objTy.ElemType
+					}
+					return TypeAny
+				case "run":
+					if len(ex.Args) >= 2 {
+						if cbTy := e.inferExprType(ex.Args[1]); cbTy.IsFunc && cbTy.FuncRetType != nil {
+							return *cbTy.FuncRetType
+						}
+					}
+					return TypeVoid
+				case "exit":
+					if len(ex.Args) >= 1 {
+						if cbTy := e.inferExprType(ex.Args[0]); cbTy.IsFunc && cbTy.FuncRetType != nil {
+							return *cbTy.FuncRetType
+						}
+					}
+					return TypeVoid
+				case "enterWith", "disable":
+					return TypeVoid
+				}
+			}
+			// AsyncResource.runInAsyncScope(fn, …) evaluates to fn's return type.
+			if objTy := e.inferExprType(mem.Object); objTy.IsAsyncResource && mem.Property == "runInAsyncScope" {
+				if len(ex.Args) >= 1 {
+					if cbTy := e.inferExprType(ex.Args[0]); cbTy.IsFunc && cbTy.FuncRetType != nil {
+						return *cbTy.FuncRetType
+					}
+				}
+				return TypeVoid
+			}
+			// AsyncLocalStorage.bind(fn) evaluates to fn's own function type.
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AsyncLocalStorage" && mem.Property == "bind" {
+				if len(ex.Args) == 1 {
+					return e.inferExprType(ex.Args[0])
 				}
 			}
 		}
@@ -1674,6 +1743,34 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "parse":
 					return MapType(TypePtr, TypePtr)
 				case "stringify":
+					return TypePtr
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "events__reexport_kml_builtin" && mem.Property == "once" {
+				if pt, ok := e.eventsOncePromiseType(ex.Args); ok {
+					return pt
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "events__reexport_kml_builtin" && mem.Property == "on" {
+				if gt, ok := e.eventsOnGeneratorType(ex.Args, ex.GetPos()); ok {
+					return gt
+				}
+			}
+			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "url__reexport_kml_builtin" {
+				switch mem.Property {
+				case "parse":
+					return LegacyUrlType()
+				case "format":
+					return TypePtr
+				case "fileURLToPath":
+					return TypePtr
+				case "pathToFileURL":
+					return URLType()
+				case "resolve":
+					return TypePtr
+				case "urlToHttpOptions":
+					return HttpOptionsType()
+				case "domainToASCII", "domainToUnicode":
 					return TypePtr
 				}
 			}

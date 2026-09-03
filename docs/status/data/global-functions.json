@@ -25,11 +25,17 @@
         "rows": [
           {
             "feature": "`isNaN(x)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`)."
+            ]
           },
           {
             "feature": "`isFinite(x)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`."
+            ]
           },
           {
             "feature": "`String(x)`",

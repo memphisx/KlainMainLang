@@ -8,10 +8,8 @@
           <Wordmark :stacked="false" size="sm" />
         </router-link>
         <q-space />
-        <button type="button" class="km-searchbtn" @click="searchOpen = true" aria-label="Search documentation">
-          <q-icon name="search" size="16px" />
-          <span class="km-searchbtn__label gt-sm">Search</span>
-          <kbd class="km-searchbtn__kbd gt-sm">⌘F</kbd>
+        <button type="button" class="km-searchbtn" @click="searchOpen = true" aria-label="Search documentation" title="Search (⌘F)">
+          <q-icon name="search" size="20px" />
         </button>
         <router-link to="/docs/getting-started" class="km-navlink gt-sm">Get started</router-link>
         <a :href="gh" target="_blank" rel="noopener" class="km-navlink">GitHub</a>
@@ -200,17 +198,14 @@ const nav = [
 }
 .km-navlink:hover { color: var(--km-gold); opacity: 1; }
 
+/* A plain icon button — it only opens the command palette, so it reads as an
+   action, not a text field. */
 .km-searchbtn {
-  display: inline-flex; align-items: center; gap: 8px; margin-left: 22px;
-  background: rgba(255,255,255,0.05); border: 1px solid var(--km-line); color: #b6b6b6;
-  border-radius: 6px; padding: 6px 10px; cursor: pointer; transition: all .14s ease;
+  display: inline-flex; align-items: center; justify-content: center; margin-left: 22px;
+  width: 38px; height: 38px; background: none; border: 0; color: #b6b6b6;
+  border-radius: 50%; cursor: pointer; transition: color .14s ease, background .14s ease;
 }
-.km-searchbtn:hover { color: #fff; border-color: #555; }
-.km-searchbtn__label { font-size: 0.82rem; }
-.km-searchbtn__kbd {
-  font-size: 0.66rem; color: #8a8a8a; background: #0d0d0d;
-  border: 1px solid var(--km-line); border-radius: 4px; padding: 1px 5px;
-}
+.km-searchbtn:hover { color: #fff; background: rgba(255,255,255,0.06); }
 
 .km-docdrawer { background: #0c0c0c; border-right: 1px solid var(--km-line); }
 .km-docnav { padding: 28px 20px 30px; }

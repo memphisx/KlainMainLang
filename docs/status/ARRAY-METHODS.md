@@ -4,14 +4,14 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 35/35 (100%) · **Strict Coverage**: 23/35 (~66%).
+**Coverage**: 35/35 (100%) · **Strict Coverage**: 20/35 (~57%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
 | Literal `[a, b, c]` | ✅ | | |
-| `new Array<T>(n?)` | ✅ | | • Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md)) |
+| `new Array<T>(n?)` | ✅ | • A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes. | • Zero-arg `new Array<T>()` is an empty array ([ADR-00463](../adr/ADR-00463.md)) |
 | `.length` | ✅ | • `a.length = 2` (real JS's array-truncation idiom) hard compile-errors with "field assignment on non-object" — length is read-only in practice ([ADR-00166](../adr/ADR-00166.md)) | |
 | `.push(...items)` | ✅ | • A length-mutating method inside a callee now grows the caller's array when it is passed as a plain **variable** — full JS reference semantics ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)). Residual: an array passed as an **object field** or **array element** (`obj.items`, `grid[i]`), or as a higher-order-callback element, still crosses as a copy, so a length change through those is not seen by the caller | • Variadic (incl. the zero-argument call), and works on any mutable receiver — a variable, an object/class array field (`this.items.push(x)`), or a nested-array element (`matrix[0].push(x)`) — see [ADR-00284](../adr/ADR-00284.md) |
 | `.pop()` | ✅ | • On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type ([ADR-00157](../adr/ADR-00157.md) convention)<br>• A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)) | • Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md) |
@@ -19,10 +19,10 @@ Format: [Status page format](README.md#status-page-format).
 | `.unshift(...items)` | ✅ | • A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)) | • Variadic (incl. the zero-argument call), any mutable receiver ([ADR-00284](../adr/ADR-00284.md)) |
 | `.splice(start, delete?, ...items)` | ✅ | • A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• [ADR-00056](../adr/ADR-00056.md) |
 | `.slice(start, end?)` | ✅ | | |
-| `.at(i)` | ✅ | | |
+| `.at(i)` | ✅ | • Out-of-range `.at()` diverges from `undefined` — `[10,20,30].at(5)` is `0` and `[10,20,30].at(-5)` is `10` (Node: `undefined` for both; a negative index past the start is clamped to 0 rather than left out of range). The zero-value undefined stand-in `.pop()`/`.shift()` also use. | |
 | `.indexOf(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
 | `.includes(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
-| `.find(fn)` | ✅ | | |
+| `.find(fn)` | ✅ | • A no-match `.find()` returns the element type's zero value, not `undefined` — `[5,6,7].find(x => x > 10)` is `0` (Node: `undefined`); a reference-typed element returns the `null` stand-in (`.findIndex` correctly returns `-1`). | |
 | `.findIndex(fn)` | ✅ | | |
 | `.some(fn)` | ✅ | | |
 | `.every(fn)` | ✅ | | |

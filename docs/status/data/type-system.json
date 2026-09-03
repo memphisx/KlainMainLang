@@ -54,6 +54,9 @@
             "status": "implemented",
             "notes": [
               "Sentinel `ptr null`"
+            ],
+            "caveats": [
+              "`null` and `undefined` share one `ptr null` sentinel, so strict `===`/`!==` between them can't distinguish the two — `null === undefined` is `true` (JS: `false`), and for a `null`-valued binding `x === undefined` is also `true`; `typeof`, `String()`, and loose `==` are unaffected."
             ]
           },
           {
@@ -206,11 +209,17 @@
             "status": "implemented",
             "notes": [
               "Separate helpers for `<string,number>`, `<string,string>`, etc."
+            ],
+            "caveats": [
+              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
             ]
           },
           {
             "feature": "`Set<T>`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Numeric keys are compared by raw double bit-pattern, not SameValueZero — `+0` and `-0` count as distinct keys (`new Set([0,-0]).size` is `2`, JS: `1`; `m.set(0,v); m.get(-0)` misses, JS returns `v`); a `NaN` key dedups only when bit patterns match."
+            ]
           },
           {
             "feature": "Union types beyond `T \\| null`",

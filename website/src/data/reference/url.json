@@ -4,7 +4,12 @@
   "kind": "web",
   "statusPage": "URL.md",
   "coversRows": "all",
-  "coverage": { "loose": "3/3", "loosePct": 100, "strict": "1/3", "strictPct": 33 },
+  "coverage": {
+    "loose": "10/10",
+    "loosePct": 100,
+    "strict": "0/10",
+    "strictPct": 0
+  },
   "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. Parsing reuses libcurl's already-linked URL API rather than a hand-rolled parser. The recurring divergence is single-value-per-key: URLSearchParams is backed by a plain Map<string,string>, so a repeated key keeps only its last value and getAll() never returns more than one element. URLPattern is object-literal init only, and its exec() returns a merged Map rather than the spec's per-component result object.",
   "entries": [
     {
@@ -15,15 +20,31 @@
       "badge": "exact",
       "description": "Parses an absolute URL into its component fields. Fields — href, protocol, host, hostname, port, pathname, search, hash, origin, username, password, searchParams — are plain object field reads, no dispatched methods, and href/protocol/host/hostname/port/pathname/search/hash/username/password are all settable (a setter re-parses and re-derives every field, matching Node; the combined `host` splits on the first `:` into hostname + port). A part absent from the URL reads back as \"\", matching real URL's own default. A malformed URL throws a catchable Error (\"Invalid URL\"). Parsing goes through libcurl's URL API rather than a hand-rolled parser.",
       "params": [
-        { "name": "url", "type": "string", "desc": "The URL to parse (absolute, or relative when a base is given)." },
-        { "name": "base", "type": "string", "desc": "Optional base against which a relative url is resolved; an invalid base throws." }
+        {
+          "name": "url",
+          "type": "string",
+          "desc": "The URL to parse (absolute, or relative when a base is given)."
+        },
+        {
+          "name": "base",
+          "type": "string",
+          "desc": "Optional base against which a relative url is resolved; an invalid base throws."
+        }
       ],
-      "returns": { "type": "URL", "desc": "The parsed URL with its component fields." },
+      "returns": {
+        "type": "URL",
+        "desc": "The parsed URL with its component fields."
+      },
       "exampleKey": "url/url",
       "snippet": "const u = new URL(\"https://example.com:8080/a/b?x=1&y=hello%20world#frag\")\nconsole.log(u.hostname)  // example.com\nconsole.log(new URL(\"/p\", \"http://h.com/a\").href)  // http://h.com/p",
       "differences": [],
-      "seeAlso": ["url.URLSearchParams", "url.URLPattern"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URL" }
+      "seeAlso": [
+        "url.URLSearchParams",
+        "url.URLPattern"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URL"
+      }
     },
     {
       "id": "url.URLSearchParams",
@@ -32,16 +53,29 @@
       "signature": "new URLSearchParams(init?: string): URLSearchParams",
       "badge": "caveats",
       "description": "Reads and builds query strings. new URLSearchParams() starts empty; new URLSearchParams(init) parses a query string and tolerates a leading '?', so passing a URL's own .search straight through just works. Backed by a plain Map<string,string>, so get/set/has/delete/size/keys()/values()/entries()/forEach() all come for free from the Map machinery, plus toString() (percent-encodes back into a query string) and getAll().",
-      "params": [{ "name": "init", "type": "string", "desc": "Optional query string to parse (a leading '?' is tolerated)." }],
-      "returns": { "type": "URLSearchParams", "desc": "The parameter collection." },
+      "params": [
+        {
+          "name": "init",
+          "type": "string",
+          "desc": "Optional query string to parse (a leading '?' is tolerated)."
+        }
+      ],
+      "returns": {
+        "type": "URLSearchParams",
+        "desc": "The parameter collection."
+      },
       "exampleKey": "url/url",
       "snippet": "const params = new URLSearchParams()\nparams.set(\"q\", \"hello world\")\nparams.set(\"page\", \"2\")\nconsole.log(params.toString())  // q=hello%20world&page=2",
       "differences": [
         "**Single value per key**: a repeated query-string key (`?a=1&a=2`) silently keeps only its last value — `.get()`/`.getAll()` never see the first one, so `.getAll()` never returns more than one element",
         "There is no true multi-value `.append()`, since it can't be represented faithfully on top of the `Map<string,string>` backing structure"
       ],
-      "seeAlso": ["url.URL"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams" }
+      "seeAlso": [
+        "url.URL"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams"
+      }
     },
     {
       "id": "url.URLPattern",
@@ -50,8 +84,17 @@
       "signature": "new URLPattern(init?: { protocol?; hostname?; port?; pathname?; search?; hash?; username?; password? }): URLPattern",
       "badge": "caveats",
       "description": "WHATWG route matching. Each component pattern compiles once at construction to an anchored PCRE2 regex; .test/.exec match a full URL string, which parses via libcurl's URL API. An omitted init component defaults to \"*\" and reads back as such from the component fields. An unparseable input is false/null, never a throw; an invalid pattern throws a catchable TypeError at construction.",
-      "params": [{ "name": "init", "type": "object", "desc": "Object-literal init over protocol/hostname/port/pathname/search/hash/username/password." }],
-      "returns": { "type": "URLPattern", "desc": "The compiled pattern." },
+      "params": [
+        {
+          "name": "init",
+          "type": "object",
+          "desc": "Object-literal init over protocol/hostname/port/pathname/search/hash/username/password."
+        }
+      ],
+      "returns": {
+        "type": "URLPattern",
+        "desc": "The compiled pattern."
+      },
       "exampleKey": "url/urlpattern",
       "snippet": "const pattern = new URLPattern({ pathname: \"/books/:id\" })\nconsole.log(pattern.test(\"https://example.com/books/123\"))  // true\nconst m = pattern.exec(\"https://example.com/books/123\")\nif (m !== null) { console.log(m.get(\"id\")) }  // 123",
       "differences": [
@@ -60,8 +103,231 @@
         "`.exec()` returns a merged `Map<string, string> | null` of every named group across components (an unset optional group is absent), not the spec's per-component `URLPatternResult` object — needs the deferred dynamic object model",
         "`*` wildcards aren't exposed as numbered groups; no `hasRegExpGroups`"
       ],
-      "seeAlso": ["url.URL", "url.URLSearchParams"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLPattern" }
+      "seeAlso": [
+        "url.URL",
+        "url.URLSearchParams"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/URLPattern"
+      }
+    },
+    {
+      "id": "url.parse",
+      "name": "url.parse()",
+      "statusRow": "url.parse(urlString) (legacy)",
+      "signature": "url.parse(urlString: string): Url",
+      "badge": "caveats",
+      "description": "Node's legacy URL parser. Returns a Url object with the legacy field names (protocol, auth, host, port, hostname, hash, search, query, pathname, path, href), distinct from the WHATWG URL. Importable named, via namespace, or as the default of the url module.",
+      "params": [
+        {
+          "name": "urlString",
+          "type": "string",
+          "desc": "An absolute URL to parse."
+        }
+      ],
+      "returns": {
+        "type": "Url",
+        "desc": "The legacy Url object."
+      },
+      "snippet": "import { parse } from 'url'\nconst u = parse('https://user:pw@example.com:8080/a?x=1#h')\nconsole.log(u.host)      // example.com:8080\nconsole.log(u.auth)      // user:pw\nconsole.log(u.query)     // x=1\nconsole.log(u.path)      // /a?x=1",
+      "differences": [
+        "Absolute URLs only — a malformed/relative input throws `Invalid URL` (like `new URL()`), not Node's never-throw lenient object",
+        "An absent component is `\"\"`, not Node's `null`",
+        "`slashes` and the `parseQueryString`-object form of `query` are not produced yet; `url.format`/`fileURLToPath` are separate follow-ons"
+      ],
+      "seeAlso": [
+        "URL",
+        "URLSearchParams"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlparseurlstring-parsequerystring-slashesdenotehost"
+      }
+    },
+    {
+      "id": "url.format",
+      "name": "url.format()",
+      "statusRow": "url.format(urlObject) (legacy)",
+      "signature": "url.format(urlObject: Url | URL | object): string",
+      "badge": "caveats",
+      "description": "The inverse of url.parse: serializes a legacy Url object (or a WHATWG URL, or a plain object with the legacy fields) back into a URL string.",
+      "params": [
+        {
+          "name": "urlObject",
+          "type": "Url | URL | object",
+          "desc": "The URL object to serialize."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The formatted URL string."
+      },
+      "snippet": "import { parse, format } from 'url'\nconst u = parse('https://a.com/x?q=1')\nconsole.log(format(u)) // https://a.com/x?q=1",
+      "differences": [
+        "The `options` argument is not supported; components are taken verbatim (no re-encoding)",
+        "A WHATWG URL argument serializes to its href"
+      ],
+      "seeAlso": [
+        "url.parse",
+        "URL"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlformaturlobject"
+      }
+    },
+    {
+      "id": "url.fileURLToPath",
+      "name": "url.fileURLToPath()",
+      "statusRow": "url.fileURLToPath(url) (POSIX)",
+      "signature": "url.fileURLToPath(url: string | URL): string",
+      "badge": "caveats",
+      "description": "Converts a file: URL (a string or WHATWG URL) into the percent-decoded POSIX filesystem path. Throws on a non-file: scheme.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string | URL",
+          "desc": "A file: URL."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The decoded path."
+      },
+      "snippet": "import { fileURLToPath } from 'url'\nconsole.log(fileURLToPath('file:///foo%20bar')) // /foo bar",
+      "differences": [
+        "POSIX only; the options (windows) argument is unsupported",
+        "A non-localhost host is ignored, not rejected"
+      ],
+      "seeAlso": [
+        "url.pathToFileURL",
+        "URL"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlfileurltopathurl-options"
+      }
+    },
+    {
+      "id": "url.pathToFileURL",
+      "name": "url.pathToFileURL()",
+      "statusRow": "url.pathToFileURL(path) (POSIX)",
+      "signature": "url.pathToFileURL(path: string): URL",
+      "badge": "caveats",
+      "description": "Resolves a path to absolute, percent-encodes it, and returns a WHATWG URL with the file: scheme.",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "desc": "A filesystem path."
+        }
+      ],
+      "returns": {
+        "type": "URL",
+        "desc": "A file: URL."
+      },
+      "snippet": "import { pathToFileURL } from 'url'\nconsole.log(pathToFileURL('/foo bar').href) // file:///foo%20bar",
+      "differences": [
+        "POSIX only; the options argument is unsupported"
+      ],
+      "seeAlso": [
+        "url.fileURLToPath",
+        "URL"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlpathtofileurlpath-options"
+      }
+    },
+    {
+      "id": "url.resolve",
+      "name": "url.resolve()",
+      "statusRow": "url.resolve(from, to) (legacy)",
+      "signature": "url.resolve(from: string, to: string): string",
+      "badge": "caveats",
+      "description": "Resolves a target URL relative to a base URL (the new URL(to, from) resolution), returning the resulting string.",
+      "params": [
+        {
+          "name": "from",
+          "type": "string",
+          "desc": "The base URL."
+        },
+        {
+          "name": "to",
+          "type": "string",
+          "desc": "The target to resolve."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The resolved URL."
+      },
+      "snippet": "import { resolve } from 'url'\nconsole.log(resolve('http://a.com/x/', '../y')) // http://a.com/y",
+      "differences": [
+        "Absolute bases only; a scheme-less base throws Invalid URL"
+      ],
+      "seeAlso": [
+        "URL",
+        "url.parse"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlresolvefrom-to"
+      }
+    },
+    {
+      "id": "url.urlToHttpOptions",
+      "name": "url.urlToHttpOptions()",
+      "statusRow": "url.urlToHttpOptions(url)",
+      "signature": "url.urlToHttpOptions(url: URL): HttpOptions",
+      "badge": "caveats",
+      "description": "Remaps a WHATWG URL into the option object http.request accepts (protocol, hostname, path, port, auth, ...).",
+      "params": [
+        {
+          "name": "url",
+          "type": "URL",
+          "desc": "A WHATWG URL."
+        }
+      ],
+      "returns": {
+        "type": "object",
+        "desc": "The http.request options."
+      },
+      "snippet": "import { urlToHttpOptions } from 'url'\nconst o = urlToHttpOptions(new URL('https://h:8443/p?a=1'))\nconsole.log(o.path) // /p?a=1",
+      "differences": [
+        "Expects a WHATWG URL; a legacy Url/plain object isn't accepted"
+      ],
+      "seeAlso": [
+        "URL"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urlurltohttpoptionsurl"
+      }
+    },
+    {
+      "id": "url.domainToASCII",
+      "name": "url.domainToASCII() / domainToUnicode()",
+      "statusRow": "url.domainToASCII(domain) / url.domainToUnicode(domain)",
+      "signature": "url.domainToASCII(domain: string): string",
+      "badge": "caveats",
+      "description": "Punycode/IDN conversion of a domain. Returns '' on failure, matching Node.",
+      "params": [
+        {
+          "name": "domain",
+          "type": "string",
+          "desc": "The domain to convert."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The converted domain, or ''."
+      },
+      "snippet": "import { domainToASCII } from 'url'\nconsole.log(domainToASCII('example.com')) // example.com",
+      "differences": [
+        "IDN conversion of a non-ASCII domain needs the libcurl IDN backend (libidn2) — present on typical Linux, absent on the Mac build (returns '')",
+        "ASCII domains pass through everywhere"
+      ],
+      "seeAlso": [
+        "URL"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/url.html#urldomaintoasciidomain"
+      }
     }
   ]
 }

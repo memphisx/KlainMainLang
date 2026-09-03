@@ -95,6 +95,9 @@
             "status": "implemented",
             "notes": [
               "The `digits` argument is optional and defaults to `0` (`(3.7).toFixed()` → `\"4\"`), matching real JS ([ADR-00533](../adr/ADR-00533.md))"
+            ],
+            "caveats": [
+              "Exact-halfway values round half-to-even (C `printf`), not JS's round-half-up — `(2.5).toFixed(0)` is `'2'` (Node: `'3'`) and `(8.5).toFixed(0)` is `'8'` (Node: `'9'`)."
             ]
           },
           {
@@ -143,11 +146,17 @@
           },
           {
             "feature": "`isNaN(x)` (global)",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`)."
+            ]
           },
           {
             "feature": "`isFinite(x)` (global)",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`."
+            ]
           },
           {
             "feature": "`Math.floor/ceil/round/trunc`",

@@ -72,15 +72,23 @@ new C(0)
 	}
 }
 
-func TestJSModeConflictingCallSitesRejected(t *testing.T) {
-	_, err := compileCompatJS(`
-class C { constructor(v) { this.v = v } }
-new C(1)
-new C("s")
-`)
-	if err == nil || !strings.Contains(err.Error(), "disagrees with another call site") {
-		t.Fatalf("expected call-site disagreement rejection, got: %v", err)
-	}
+func TestE2EJSModeConflictingCallSitesWidenToAny(t *testing.T) {
+	// A constructor parameter whose call sites disagree on type is widened to
+	// `any`, mirroring the plain-function behavior (see the polymorphic-param
+	// test) — vanilla JS lets a constructor receive different types at
+	// different sites, and -compat=js must be at least as permissive as strict
+	// (which has no call-site-inference pass and no such rejection). Previously
+	// this hard-errored, which made the js lane fail files the strict lane
+	// accepts (the Test262 harness's own `new Test262Error('msg')` vs
+	// `new Test262Error('msg' + n)`). A function-constructor's `this.field`
+	// lives on a D1 dynamic object, which stores the widened `any`.
+	assertOutputCompatJS(t, `
+function Box(v) { this.v = v }
+const a = new Box(1)
+const b = new Box("s")
+console.log(a.v)
+console.log(b.v)
+`, "1\ns")
 }
 
 func TestJSModeMethodIntroducedFieldStillRejected(t *testing.T) {
@@ -327,4 +335,86 @@ func TestE2EStrictRejectsCrossTypeReassignment(t *testing.T) {
 	if _, err := parseAndCompile(`let x = 5; x = 'hi';`); err == nil {
 		t.Fatal("strict must reject an incompatible reassignment")
 	}
+}
+
+// TestE2EClosureCapturesInsideTryForInThrow exercises the free-variable
+// scanner fix (ADR-00662): scanStmtsFV/capScanStmts previously had no case for
+// try/for-in/throw/do-while/labeled statements, so a variable referenced free
+// *only* inside one of those constructs was never detected as captured — the
+// closure then failed to resolve it (undefined variable / wrong slot). This is
+// a mode-independent capture-correctness fix.
+func TestE2EClosureCapturesInsideTry(t *testing.T) {
+	assertOutput(t, `
+let n: number = 10
+const f = (): number => {
+  try {
+    return n + 1
+  } catch (e) {
+    return -1
+  }
+}
+console.log(f())
+`, "11")
+}
+
+func TestE2EClosureCapturesInsideForInAndDoWhile(t *testing.T) {
+	assertOutput(t, `
+const base: number = 100
+const obj = { a: 1, b: 2 }
+const f = (): number => {
+  let total: number = 0
+  for (const k in obj) {
+    total = total + base
+  }
+  let i: number = 0
+  do {
+    total = total + base
+    i = i + 1
+  } while (i < 1)
+  return total
+}
+console.log(f())
+`, "300")
+}
+
+// TestE2EJSModeForInOverCapturedDynamicObject: -compat=js for...in over a
+// dynamic (D1) object captured into a closure. Before ADR-00662 the capture
+// scan skipped the for-in object, so the dynamic key iteration never saw it.
+func TestE2EJSModeForInOverCapturedDynamicObject(t *testing.T) {
+	assertOutputCompatJS(t, `
+var obj = { name: "Luna", age: 3 }
+var f = function() {
+  var out = ""
+  for (var k in obj) { out = out + k + "," }
+  return out
+}
+console.log(f())
+`, "name,age,")
+}
+
+// TestE2EJSModeDestructureDynamicObjectInForOf: -compat=js object-pattern
+// destructuring of a dynamic (D1) element (ADR-00663). The element has no
+// static struct shape, so each property is read through the runtime dynamic-get.
+func TestE2EJSModeDestructureDynamicObjectInForOf(t *testing.T) {
+	assertOutputCompatJS(t, `
+var sum = 0
+for (const { x, } of [{ x: 23 }, { x: 19 }]) { sum += x }
+console.log(sum)
+`, "42")
+}
+
+// TestE2EJSModeDestructureDynamicObjectRenamedAndDefault covers the renamed
+// (`{ k: local }`) and defaulted (`{ k = d }`) leaf forms over a dynamic source.
+func TestE2EJSModeDestructureDynamicObjectRenamedAndDefault(t *testing.T) {
+	assertOutputCompatJS(t, `
+for (const { x: y, z = 7 } of [{ x: 5 }]) { console.log(y, z) }
+`, "5 7")
+}
+
+// TestE2EJSModeDestructureDynamicObjectNestedArray covers a nested array
+// sub-pattern (`{ k: [a] }`) over a dynamic element holding a dynamic array.
+func TestE2EJSModeDestructureDynamicObjectNestedArray(t *testing.T) {
+	assertOutputCompatJS(t, `
+for (const { x: [a], } of [{ x: [45] }]) { console.log(a) }
+`, "45")
 }

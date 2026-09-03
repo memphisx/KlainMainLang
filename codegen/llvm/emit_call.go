@@ -38,7 +38,7 @@ func (e *Emitter) isStringRawTag(tag ast.Expression) bool {
 
 // emitStringRaw implements the `String.raw` tag: it interleaves the RAW
 // (undecoded) quasi text with the string-coerced interpolations, so escape
-// sequences appear verbatim (`String.raw`\n`` is the two characters `\` and
+// sequences appear verbatim (`String.raw`\n“ is the two characters `\` and
 // `n`). ADR-00562.
 func (e *Emitter) emitStringRaw(tt *ast.TaggedTemplateExpression) (Value, error) {
 	raw := tt.RawQuasis
@@ -76,6 +76,91 @@ func desugarTaggedTemplate(tt *ast.TaggedTemplateExpression) *ast.CallExpression
 	return ast.NewCallExpression(tt.Tag, args, tt.GetPos())
 }
 
+// emitOptionalCall implements `a?.m(...)` (ADR-00682): the receiver is
+// evaluated once; if it is a null/undefined pointer the whole call
+// short-circuits to the undefined/zero sentinel and `m` is not invoked
+// (mirroring emitOptionalMember for reads). Otherwise the receiver is bound to a
+// throwaway local and the call runs normally through it (no re-evaluation of a
+// side-effecting receiver). A nested chain (`a?.b?.m()`) composes: a nullish
+// inner link already produces the null sentinel this guard catches.
+func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, error) {
+	objVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	// A non-pointer (or aggregate-array) receiver can never be a null pointer —
+	// run the call normally, non-optional. (Rare; matches emitOptionalMember.)
+	if objVal.Ty.IR != "ptr" || objVal.Ty.IsArray {
+		plain := ast.NewCallExpression(&ast.MemberExpression{Object: mem.Object, Property: mem.Property}, ex.Args, ex.GetPos())
+		plain.TypeArgs = ex.TypeArgs
+		return e.emitCall(plain)
+	}
+
+	// Bind the already-evaluated receiver to a throwaway local so the actual
+	// call reuses it (evaluated exactly once).
+	e.optionalCallCtr++
+	recvName := fmt.Sprintf("__optc_recv_%d", e.optionalCallCtr)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, slot))
+	e.define(recvName, Symbol{Ptr: slot, Ty: objVal.Ty})
+
+	through := ast.NewCallExpression(&ast.MemberExpression{Object: ast.NewIdentifier(recvName, mem.GetPos()), Property: mem.Property}, ex.Args, ex.GetPos())
+	through.TypeArgs = ex.TypeArgs
+
+	retTy := e.inferExprType(through)
+	isVoid := retTy.IR == "void" || retTy.IR == ""
+
+	var resPtr, resIR string
+	if !isVoid {
+		resIR = StructFieldIR(retTy)
+		resPtr = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, retTy.Align()))
+	}
+
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, objVal.Ref))
+	nullL := e.freshLabel("optcall.null")
+	nnL := e.freshLabel("optcall.nn")
+	mergeL := e.freshLabel("optcall.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, nnL))
+
+	// null branch: undefined/zero sentinel, method NOT called.
+	e.emitLabel(nullL)
+	if !isVoid {
+		if retTy.IsArray {
+			z0 := e.freshReg()
+			z1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
+			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, retTy.Align()))
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(retTy), resPtr, retTy.Align()))
+		}
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	// non-null branch: the real call, through the bound receiver.
+	e.emitLabel(nnL)
+	callVal, err := e.emitCall(through)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isVoid {
+		stored := e.coerce(callVal, retTy)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, stored.Ref, resPtr, retTy.Align()))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	if isVoid {
+		return Value{Ty: TypeVoid}, nil
+	}
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, retTy.Align()))
+	return Value{Ref: out, Ty: retTy}, nil
+}
+
 func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	// super(args) / super.method(args) (TDD-00009 Stage 3) — checked first,
 	// since a SuperExpression callee/receiver never reaches the generic
@@ -95,6 +180,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		if _, ok := mem.Object.(*ast.SuperExpression); ok {
 			return e.emitSuperMethodCall(mem.Property, ex.Args, ex.GetPos())
+		}
+		// Optional-chaining method call `a?.m(...)` (ADR-00682): if the receiver
+		// is null/undefined the ENTIRE call short-circuits to undefined and `m`
+		// is never invoked. Only member *reads* honored `?.` before; a call went
+		// through the unguarded dispatch below and ran the method on null.
+		if mem.Optional {
+			return e.emitOptionalCall(ex, mem)
 		}
 	}
 	// Node's chained `http.createServer((req, res) => …).listen(port[, cb])`
@@ -369,6 +461,16 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsEmbeddedAssets {
 			return e.emitEmbeddedAssetsMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsPerfObserver {
+			return e.emitPerfObserverMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsPerfEntryList && mem.Property == "getEntries" {
+			lv, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitPerfEntryListGetEntries(lv)
+		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "assets__kml_builtin" {
 			return e.emitAssetsModuleCall(mem.Property, ex.Args, ex.GetPos())
 		}
@@ -410,6 +512,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if e.inferExprType(mem.Object).IsDCChannel {
 			return e.emitDiagChannelMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsAsyncLocalStorage {
+			return e.emitAsyncLocalStorageMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if e.inferExprType(mem.Object).IsAsyncResource {
+			return e.emitAsyncResourceMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		// Static AsyncLocalStorage.bind / .snapshot — the receiver is the bare
+		// class identifier (TDD-00168 Stage 4), which is not a variable, so it
+		// is matched syntactically before any receiver-type inference.
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AsyncLocalStorage" {
+			return e.emitAsyncLocalStorageStatic(mem.Property, ex.Args, ex.GetPos())
 		}
 		if e.inferExprType(mem.Object).IsNetSocket {
 			return e.emitNetSocketMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
@@ -797,6 +911,37 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitQuerystringParse(ex.Args, ex.GetPos())
 			case "stringify":
 				return e.emitQuerystringStringify(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "events__reexport_kml_builtin" {
+			switch mem.Property {
+			case "once":
+				return e.emitEventsOnce(ex.Args, ex.GetPos())
+			case "on":
+				return e.emitEventsOn(ex.Args, ex.GetPos())
+			}
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "url__reexport_kml_builtin" {
+			// TDD-00165 Stage 4: the legacy `url` module functions. The primary
+			// exports (URL/URLSearchParams) are reexports of the globals handled in
+			// the resolver; only the module-only functions reach codegen here.
+			switch mem.Property {
+			case "parse":
+				return e.emitUrlParse(ex.Args, ex.GetPos())
+			case "format":
+				return e.emitUrlFormat(ex.Args, ex.GetPos())
+			case "fileURLToPath":
+				return e.emitFileURLToPath(ex.Args, ex.GetPos())
+			case "pathToFileURL":
+				return e.emitPathToFileURL(ex.Args, ex.GetPos())
+			case "resolve":
+				return e.emitUrlResolve(ex.Args, ex.GetPos())
+			case "urlToHttpOptions":
+				return e.emitUrlToHttpOptions(ex.Args, ex.GetPos())
+			case "domainToASCII":
+				return e.emitUrlDomainConvert(ex.Args, ex.GetPos(), curluPunycode)
+			case "domainToUnicode":
+				return e.emitUrlDomainConvert(ex.Args, ex.GetPos(), curluPuny2IDN)
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "zlib__kml_builtin" {
@@ -1891,7 +2036,7 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 		}
 	}
 	for i := 0; i < regularCount; i++ {
-		var paramScalar *Value // set for a scalar/pointer param, to bind for later defaults
+		var paramScalar *Value      // set for a scalar/pointer param, to bind for later defaults
 		var paramArrayHeader string // set for an array param (its header ptr), to bind for later defaults (ADR-00610)
 		var paramNullableAgg string // set for a nullable-scalar param (its {i1,T} agg), to bind for later defaults (ADR-00611)
 		var paramTy Type

@@ -53,8 +53,9 @@ var virtualBuiltinMarkers = map[string]string{
 	// TDD-00139 Stage 1: the explicit http2 module. createServer shares the
 	// http server core (which already speaks h2c on the same port); the
 	// client/session surface arrives in later stages.
-	"http2": "http2__kml_builtin",
+	"http2":               "http2__kml_builtin",
 	"diagnostics_channel": "diagch__kml_builtin",
+	"async_hooks":         "asynchooks__kml_builtin",
 	// TDD-00131: the `klain:` namespace holds this project's own bespoke
 	// re-imaginings, distinct from the Node-faithful module names. `klain:http`
 	// is the current `http.listen(handler ⇒ response)` server model, which is
@@ -65,7 +66,7 @@ var virtualBuiltinMarkers = map[string]string{
 	// origin — the same implementation, but only reachable through klain:http
 	// (ADR-00635). http and klain:http sharing one marker is what previously let
 	// `http.listen` slip through the http namespace.
-	"klain:http":    "klainhttp__kml_builtin",
+	"klain:http": "klainhttp__kml_builtin",
 	// TDD-00142: the system-webview desktop-window module. `Webview` binds as
 	// identity (a parse-time constructor, like stream's class names).
 	"klain:webview": "webview__kml_builtin",
@@ -93,8 +94,8 @@ var virtualBuiltinMarkers = map[string]string{
 	// like Webview / Channel / stream class names); it attaches to a Node
 	// http/https server and rides the faithful `'upgrade'` event.
 	"klain:ws": "ws__kml_builtin",
-	"cluster":       "cluster__kml_builtin",
-	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
+	"cluster":  "cluster__kml_builtin",
+	"memory":   "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00097 Stage 8: Node's stream module. The class names bind as
 	// identity (see resolver.go's stream special-case) — `new Readable(...)`
 	// is recognized by name at parse time like every other builtin
@@ -117,6 +118,80 @@ var virtualBuiltinMarkers = map[string]string{
 	// registered only under the real `node:sqlite` specifier — there is no
 	// bare Node `sqlite` module, so the init() auto-prefixer leaves it alone.
 	"node:sqlite": "sqlite__kml_builtin",
+	// TDD-00165: Web-global-backed Node modules. Their primary exports are
+	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
+	// `performance`, `Buffer`, `EventEmitter`), so a same-name import is
+	// validated and *erased* — the global keeps working, no codegen change.
+	// These markers exist only to route the specifier through the virtual-import
+	// machinery (member validation, `node:` aliasing, not-a-file); they are never
+	// bound (globalReexportModules is handled before the generic marker path in
+	// resolver.go), so they must not collide with a real dispatch marker.
+	"url":        "url__reexport_kml_builtin",
+	"timers":     "timers__reexport_kml_builtin",
+	"perf_hooks": "perfhooks__reexport_kml_builtin",
+	"buffer":     "buffer__reexport_kml_builtin",
+	"events":     "events__reexport_kml_builtin",
+}
+
+// firstKey returns the lexicographically-smallest key of a set, for a stable,
+// deterministic example name in an error message.
+func firstKey(set map[string]bool) string {
+	first := ""
+	for k := range set {
+		if first == "" || k < first {
+			first = k
+		}
+	}
+	return first
+}
+
+// globalReexportModules (TDD-00165) are the Web-global-backed Node modules whose
+// primary exports are spec-identical to an ambient global. A same-name named (or,
+// for `events`, default) import of one of these is validated against the set here
+// and then erased — the global identifier keeps resolving as it does today, so no
+// codegen change is needed. Aliased, namespace, and default-mismatch forms are
+// deferred with a clear message (TDD-00165 Stages 2–3). The module-only *extras*
+// (legacy `url.parse`, `PerformanceObserver`, `events.once`, …) are deliberately
+// NOT listed — they have no same-named global and are separate future surface,
+// so they keep the standard "no exported member" rejection.
+var globalReexportModules = map[string]map[string]bool{
+	"url":        {"URL": true, "URLSearchParams": true},
+	"timers":     {"setTimeout": true, "setInterval": true, "setImmediate": true, "clearTimeout": true, "clearInterval": true, "clearImmediate": true},
+	"perf_hooks": {"performance": true, "PerformanceObserver": true},
+	"buffer":     {"Buffer": true, "Blob": true, "atob": true, "btoa": true},
+	"events":     {"EventEmitter": true},
+}
+
+// moduleFunctionMembers (TDD-00165 Stage 4) are the *module-only* function
+// exports of a global-reexport module — members with no same-named global, so
+// they are dispatched in codegen via the module's marker (like `querystring.parse`)
+// rather than erased to a global. Their presence also makes a namespace/default
+// import of the module bind the marker (so `import * as url from 'url'; url.parse(…)`
+// works). A named import of one records an ordinary builtin-member reference.
+var moduleFunctionMembers = map[string]map[string]bool{
+	"url":    {"parse": true, "format": true, "fileURLToPath": true, "pathToFileURL": true, "resolve": true, "urlToHttpOptions": true, "domainToASCII": true, "domainToUnicode": true},
+	"events": {"once": true, "on": true},
+}
+
+// parseTimeReexports are the global-reexport members recognized by the **parser**
+// as a literal `new <Name>(...)` construct (`parser/parser_literals.go`), before
+// imports are resolved. Because the parser keys on the literal identifier, an
+// aliased import of one of these cannot be made to work by the post-parse rename
+// pass — `new U()` was already parsed as a generic class instantiation, not the
+// built-in construct — so an alias stays a clean Stage 3 rejection. Every other
+// reexport member is resolved in codegen by its bare name (`setTimeout(...)`,
+// `performance.now()`, `atob(...)`), so aliasing it is just a rename (Stage 2).
+var parseTimeReexports = map[string]bool{
+	"URL": true, "URLSearchParams": true, "Blob": true, "EventEmitter": true,
+}
+
+// defaultReexportName is the canonical name a *default* import of a global-reexport
+// module binds to — set only where Node gives the module a meaningful default
+// (`events`' default export is `EventEmitter`). For the others a default import is
+// the namespace object, not a single primary export, so it has no entry and is
+// rejected.
+var defaultReexportName = map[string]string{
+	"events": "EventEmitter",
 }
 
 // virtualModuleMembers is Stage 2's addition: the real "exported member"
@@ -186,7 +261,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 	// these as `Server` methods, not `http.*` functions) live solely under
 	// `klain:http` now (TDD-00158 follow-up / ADR-00635) — importing them from
 	// `http` is a clean "no export" rejection pointing there.
-	"http":       {"get": true, "request": true, "createServer": true, "Agent": true},
+	"http":          {"get": true, "request": true, "createServer": true, "Agent": true},
 	"klain:http":    {"listen": true, "close": true, "closeAllConnections": true},
 	"klain:webview": {"Webview": true},
 	"klain:assets":  {"embedDir": true},
@@ -198,7 +273,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"Progress": true, "TextInput": true,
 		"render": true, "enter": true, "leave": true,
 	},
-	"cluster":    {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
+	"cluster": {"isPrimary": true, "workerId": true, "isWorker": true, "fork": true},
 	"memory":  {"free": true},
 	"stream": {
 		"Readable": true, "Writable": true, "Duplex": true, "Transform": true,
@@ -214,6 +289,7 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"createHash": true, "createHmac": true,
 	},
 	"diagnostics_channel": {"channel": true, "subscribe": true, "unsubscribe": true, "hasSubscribers": true, "tracingChannel": true},
+	"async_hooks":         {"AsyncLocalStorage": true, "AsyncResource": true},
 	"http2": {
 		"createServer": true, "createSecureServer": true, "connect": true,
 		"constants": true, "getDefaultSettings": true,
@@ -284,5 +360,40 @@ func init() {
 			continue
 		}
 		virtualModuleMembers["node:"+name] = members
+	}
+	// Mirror the global-reexport tables under the `node:` prefix too, so
+	// `import { URL } from 'node:url'` resolves exactly like the bare form
+	// (TDD-00165). Also expose each set as the module's member table so any
+	// generic member-existence check agrees with the special path.
+	for name, exports := range globalReexportModules {
+		if strings.HasPrefix(name, "node:") {
+			continue
+		}
+		globalReexportModules["node:"+name] = exports
+		// virtualModuleMembers is a FRESH union of the reexport primaries and any
+		// module-only function members — never the shared globalReexportModules
+		// map itself, so adding a function member below can't leak into the
+		// reexport-vs-function distinction the resolver relies on.
+		merged := map[string]bool{}
+		for m := range exports {
+			merged[m] = true
+		}
+		for m := range moduleFunctionMembers[name] {
+			merged[m] = true
+		}
+		virtualModuleMembers[name] = merged
+		virtualModuleMembers["node:"+name] = merged
+	}
+	for name, funcs := range moduleFunctionMembers {
+		if strings.HasPrefix(name, "node:") {
+			continue
+		}
+		moduleFunctionMembers["node:"+name] = funcs
+	}
+	for name, def := range defaultReexportName {
+		if strings.HasPrefix(name, "node:") {
+			continue
+		}
+		defaultReexportName["node:"+name] = def
 	}
 }

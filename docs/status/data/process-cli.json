@@ -37,7 +37,9 @@
             "notes": [
               "Both dot and bracket notation; returns a possibly-null string (same convention as `.find()`), so `process.env.X ?? \"default\"` works"
             ],
-            "caveats": []
+            "caveats": [
+              "A missing variable reads as `null`, not `undefined` — `process.env.MISSING === null` is `true` (Node: `false`) and `typeof process.env.MISSING` is `'string'` (Node: `'undefined'`); `?? default` still works, but `=== undefined`/`typeof` guards diverge."
+            ]
           },
           {
             "feature": "Exit codes (`process.exit(code)`)",

@@ -422,7 +422,32 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		return e.emitJSONStringifyTuple(val, ind)
 	}
 	if val.Ty.IsObject {
-		return e.emitJSONStringifyObject(val, ind)
+		// A null object pointer (an absent/null object-typed field — e.g. an
+		// allSettled settlement's unset `reason`/`value` slot, ADR-00683) must
+		// serialize as JSON `null` rather than dereferencing null in the field
+		// walk (which segfaulted).
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		isN := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isN, val.Ref))
+		nL := e.freshLabel("json.objnull")
+		nnL := e.freshLabel("json.objnn")
+		mL := e.freshLabel("json.objmerge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isN, nL, nnL))
+		e.emitLabel(nL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("null"), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(nnL)
+		ov, err := e.emitJSONStringifyObject(val, ind)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ov.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(mL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	if val.Ty.IsArray {
 		return e.emitJSONStringifyArrayValue(val, ind)

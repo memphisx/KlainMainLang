@@ -35,6 +35,9 @@
               "A part absent from the URL (no port/query/fragment) reads as `\"\"`, matching real `URL`'s own default",
               "Throws a catchable Error (\"Invalid URL\") on a malformed URL",
               "See [ADR-00076](../adr/ADR-00076.md)"
+            ],
+            "caveats": [
+              "Not a WHATWG parser (libcurl passthrough) — default ports aren't stripped (`new URL('http://example.com:80/x').port` is `'80'`, Node: `''`), host case isn't normalized (`new URL('HTTP://ExAmple.COM/x').hostname` is `'ExAmple.COM'`, Node: `'example.com'`), and a non-special scheme throws (`new URL('foo:bar')` throws, Node: valid with `pathname` `'bar'`)."
             ]
           },
           {
@@ -61,6 +64,79 @@
             ],
             "notes": [
               "Each component pattern compiles once at construction to an anchored PCRE2 regex (embedded C runtime); input URLs parse via libcurl's URL API, so `.test`/`.exec` link `-lpcre2-8` + `-lcurl` — both already conditional. An unparseable input is `false`/`null`, never a throw; an omitted init component defaults to `*` and reads back as such from the component fields ([TDD-00100](../tdd/TDD-00100.md)/[ADR-00311](../adr/ADR-00311.md))"
+            ]
+          },
+          {
+            "feature": "`url.parse(urlString)` (legacy)",
+            "status": "implemented",
+            "caveats": [
+              "Absolute URLs only — a malformed/relative input throws `Invalid URL` (like `new URL()`), rather than Node's never-throw lenient object ([ADR-00669](../adr/ADR-00669.md)/[TDD-00165](../tdd/TDD-00165.md) Stage 4)",
+              "An absent component is `\"\"`, not Node's `null` (same representation as the WHATWG `URL` object above)",
+              "`slashes` and the `parseQueryString`-object form of `query` are not produced yet; `url.format`/`fileURLToPath` and the other legacy helpers are separate follow-ons"
+            ],
+            "notes": [
+              "The legacy `Url` shape (`protocol`/`auth`/`host`/`port`/`hostname`/`hash`/`search`/`query`/`pathname`/`path`/`href`), distinct from the WHATWG `URL`; importable named (`import { parse } from 'url'`), via namespace (`import * as url from 'url'`), and via default (`import url from 'node:url'`)"
+            ]
+          },
+          {
+            "feature": "`url.format(urlObject)` (legacy)",
+            "status": "implemented",
+            "caveats": [
+              "The `options` argument (`auth`/`fragment`/`search`/`unicode` toggles) is not supported; components are taken verbatim, no re-encoding ([ADR-00670](../adr/ADR-00670.md))",
+              "Reconstructs `protocol // [auth@] host pathname (search|?query) hash`; a WHATWG `URL` argument serializes to its `href`"
+            ],
+            "notes": [
+              "The inverse of `url.parse` — round-trips a legacy `Url` object back to a string, and also accepts a plain object with the legacy fields; importable named, via namespace, or via default"
+            ]
+          },
+          {
+            "feature": "`url.fileURLToPath(url)` (POSIX)",
+            "status": "implemented",
+            "caveats": [
+              "POSIX only; the `options` (`windows`) argument is unsupported, and a non-`localhost` host is ignored rather than rejected ([ADR-00671](../adr/ADR-00671.md))"
+            ],
+            "notes": [
+              "Converts a `file:` URL (string or WHATWG `URL`) to the percent-decoded filesystem path; throws on a non-`file:` scheme"
+            ]
+          },
+          {
+            "feature": "`url.pathToFileURL(path)` (POSIX)",
+            "status": "implemented",
+            "caveats": [
+              "POSIX only; the `options` argument is unsupported ([ADR-00671](../adr/ADR-00671.md))"
+            ],
+            "notes": [
+              "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme"
+            ]
+          },
+          {
+            "feature": "`url.resolve(from, to)` (legacy)",
+            "status": "implemented",
+            "caveats": [
+              "Absolute bases only — a scheme-less/malformed base throws `Invalid URL`, the same leniency gap as `url.parse` ([ADR-00672](../adr/ADR-00672.md))"
+            ],
+            "notes": [
+              "Resolves `to` against the base `from` (the `new URL(to, from)` resolution), returning the resulting URL string"
+            ]
+          },
+          {
+            "feature": "`url.urlToHttpOptions(url)`",
+            "status": "implemented",
+            "caveats": [
+              "Expects a WHATWG `URL`; a legacy `Url`/plain object isn't accepted ([ADR-00672](../adr/ADR-00672.md))"
+            ],
+            "notes": [
+              "Remaps a `URL` into the `http.request` option bag (`protocol`/`hostname`/`hash`/`search`/`pathname`/`path`/`href`/`port`/`auth`)"
+            ]
+          },
+          {
+            "feature": "`url.domainToASCII(domain)` / `url.domainToUnicode(domain)`",
+            "status": "implemented",
+            "caveats": [
+              "IDN conversion of a **non-ASCII** domain requires the libcurl build to include an IDN backend (libidn2) — present on typical Linux, **absent on the Mac build** where a non-ASCII domain returns `\"\"` (Node's own failure contract). ASCII domains pass through everywhere ([ADR-00672](../adr/ADR-00672.md))"
+            ],
+            "notes": [
+              "Punycode/IDN conversion via libcurl (`CURLU_PUNYCODE`/`CURLU_PUNY2IDN`); returns `\"\"` on failure, matching Node"
             ]
           }
         ]

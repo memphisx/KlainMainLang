@@ -58,10 +58,12 @@
           </div>
         </div>
         <p class="km-stats__foot">
-          Low on purpose, and shown on purpose. This is a <strong>typed subset</strong>: most of
-          Test262 is <code>eval</code>-based untyped JS, and Node's suite is dynamic JavaScript
-          against the full platform. Both largely out of scope by design, not silent failures.
-          <router-link to="/docs/coverage" class="km-link">The honest breakdown.</router-link>
+          Shown for the default <code>-compat=strict</code> lane. Low on purpose, and shown on
+          purpose: this is a <strong>typed subset</strong> — most of Test262 is <code>eval</code>-based
+          untyped JS, and Node's suite is dynamic JavaScript against the full platform, both largely
+          out of scope by design, not silent failures. A second lane, <code>-compat=js</code>, trades
+          strict's guarantees for vanilla-JS reach and scores higher on the untyped corpora.
+          <router-link to="/docs/coverage" class="km-link">The per-flag breakdown.</router-link>
         </p>
       </div>
     </section>
@@ -169,7 +171,7 @@
         </div>
         <div class="km-cov">
           <router-link
-            v-for="row in coverage"
+            v-for="row in coverageRows"
             :key="row.area"
             to="/docs/coverage"
             class="km-cov__row"
@@ -233,13 +235,20 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import CodeBlock from 'components/CodeBlock.vue'
 import Wordmark from 'components/brand/Wordmark.vue'
 import MedallionKM from 'components/brand/MedallionKM.vue'
 import FoilSun from 'components/brand/FoilSun.vue'
 import PipelineFlow from 'components/PipelineFlow.vue'
 import { samples, terminal, coverage, headline, conformance, GITHUB_URL } from 'src/lib/content.js'
+
+// The "What actually works" matrix measures JS/TS-fidelity ("exact match to
+// JS" vs "minor differences"). Bespoke native capabilities (klain:webview,
+// grouped under "Desktop") aren't a JS feature with a fidelity %, so they're
+// excluded here — same as the docs Coverage page — and advertised via the
+// value-prop card and the gallery instead.
+const coverageRows = computed(() => coverage.filter((r) => r.group !== 'Desktop'))
 import klaintopImg from 'src/assets/tui/klaintop.png'
 import explorerImg from 'src/assets/webview/listing.png'
 import todoImg from 'src/assets/tui/todo.png'
@@ -359,7 +368,7 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-stat__sub { color: #6a6a6a; font-size: 0.78rem; }
 .km-stat--conf { border-top-color: var(--km-gold); }
 .km-stat--conf .km-stat__value { color: var(--km-gold-dk); }
-.km-stats__foot { margin-top: 24px; color: #444; font-size: 0.9rem; max-width: 46rem; }
+.km-stats__foot { margin-top: 24px; color: #444; font-size: 0.9rem; }
 .km-stats__foot code { color: var(--km-gold-dk); font-family: 'JetBrains Mono', monospace; font-size: 0.85em; }
 .km-stats__foot strong { color: var(--km-black); }
 @media (max-width: 640px) { .km-stats__grid { grid-template-columns: 1fr; } }
@@ -378,7 +387,7 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 @media (max-width: 700px) { .km-props { grid-template-columns: 1fr; } }
 
 /* ---- SHOWCASE ---- */
-.km-showcase__lede { max-width: 40rem; color: #4a4a44; margin-bottom: 34px; }
+.km-showcase__lede { color: #4a4a44; margin-bottom: 34px; }
 .km-showcase { display: grid; grid-template-columns: 260px 1fr; gap: 0; border: 1px solid rgba(0,0,0,0.14); }
 .km-showcase__tabs { display: flex; flex-direction: column; background: #efece4; border-right: 1px solid rgba(0,0,0,0.12); }
 .km-showtab {
@@ -400,7 +409,7 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-showcase__code { background: #0e0e0e; }
 
 /* ---- GALLERY (on stone / light) ---- */
-.km-gallery__lede { max-width: 42rem; color: #4a4a44; margin-bottom: 34px; }
+.km-gallery__lede { color: #4a4a44; margin-bottom: 34px; }
 .km-gallery {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -463,7 +472,7 @@ code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
 .km-cov__sw--caveat { background: var(--km-gold); opacity: 0.42; }
 .km-cov__pct { font-weight: 700; min-width: 3.2em; text-align: right; }
 .km-cov__foot { display: flex; align-items: center; gap: 24px; margin-top: 32px; flex-wrap: wrap; }
-.km-cov__foot p { color: #55524a; font-size: 0.82rem; max-width: 34rem; }
+.km-cov__foot p { color: #55524a; font-size: 0.82rem; }
 .km-cov__foot code { color: var(--km-gold-dk); }
 @media (max-width: 640px) {
   .km-cov__row { grid-template-columns: 1fr auto; gap: 6px 12px; }

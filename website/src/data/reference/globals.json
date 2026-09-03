@@ -4,7 +4,12 @@
   "kind": "language",
   "statusPage": "GLOBAL-FUNCTIONS.md",
   "coversRows": "all",
-  "coverage": { "loose": "20/21", "loosePct": 95, "strict": "13/21", "strictPct": 62 },
+  "coverage": {
+    "loose": "20/21",
+    "loosePct": 95,
+    "strict": "11/21",
+    "strictPct": 52
+  },
   "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X works as an alias for the bare ambient global X (member access to known globals only — there's no dynamic global object). Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
   "entries": [
     {
@@ -14,11 +19,19 @@
       "signature": "isNaN(x: number): boolean",
       "badge": "exact",
       "description": "Reports whether a number is NaN. Compiled as an unordered float comparison, so it agrees with NaN's defining self-inequality.",
-      "returns": { "type": "boolean", "desc": "true if x is NaN." },
+      "returns": {
+        "type": "boolean",
+        "desc": "true if x is NaN."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(isNaN(NaN))            // true",
-      "seeAlso": ["globals.isFinite", "globals.NaN"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isNaN" }
+      "seeAlso": [
+        "globals.isFinite",
+        "globals.NaN"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isNaN"
+      }
     },
     {
       "id": "globals.isFinite",
@@ -27,11 +40,19 @@
       "signature": "isFinite(x: number): boolean",
       "badge": "exact",
       "description": "Reports whether a number is neither NaN nor an infinity.",
-      "returns": { "type": "boolean", "desc": "true if x is a finite number." },
+      "returns": {
+        "type": "boolean",
+        "desc": "true if x is a finite number."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(isFinite(Infinity))    // false",
-      "seeAlso": ["globals.isNaN", "globals.Infinity"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isFinite" }
+      "seeAlso": [
+        "globals.isNaN",
+        "globals.Infinity"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/isFinite"
+      }
     },
     {
       "id": "globals.String",
@@ -40,14 +61,22 @@
       "signature": "String(x: any): string",
       "badge": "caveats",
       "description": "Coerces a value to its string form. Routes through the template-literal renderer; an any input dispatches on its runtime tag.",
-      "returns": { "type": "string", "desc": "The stringified value." },
+      "returns": {
+        "type": "string",
+        "desc": "The stringified value."
+      },
       "exampleKey": "basics/namespaces",
       "snippet": "return String(km * 621371 / 1000000) + \"mi\";",
       "differences": [
         "`String()` with no argument is `\"\"`, not real JS's `\"undefined\"` (a genuinely absent value doesn't arise in typed code)."
       ],
-      "seeAlso": ["globals.Number", "globals.Boolean"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/String" }
+      "seeAlso": [
+        "globals.Number",
+        "globals.Boolean"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/String"
+      }
     },
     {
       "id": "globals.Number",
@@ -56,11 +85,19 @@
       "signature": "Number(x: any): number",
       "badge": "exact",
       "description": "Coerces a value to a number using JS ToNumber semantics: a whole-string parse (\"12px\" is NaN, unlike parseFloat), \"\"/whitespace is 0, \"0x10\" is 16, boolean is 0/1, null is 0; a numeric input passes through unchanged (an exact i64 stays i64). Only the exact word \"Infinity\" (optionally signed) is Infinity — C's \"inf\"/case variants are NaN, matching real JS.",
-      "returns": { "type": "number", "desc": "The numeric value, or NaN." },
+      "returns": {
+        "type": "number",
+        "desc": "The numeric value, or NaN."
+      },
       "exampleKey": "basics/namespaces",
       "snippet": "const n = Number(s);\nif (Number.isNaN(n)) { throw new TypeError(\"not a number: \" + s); }",
-      "seeAlso": ["globals.parseFloat", "globals.String"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/Number" }
+      "seeAlso": [
+        "globals.parseFloat",
+        "globals.String"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/Number"
+      }
     },
     {
       "id": "globals.Boolean",
@@ -69,11 +106,19 @@
       "signature": "Boolean(x: any): boolean",
       "badge": "exact",
       "description": "Coerces a value to a boolean using the shared truthiness rules (NaN, \"\", and 0 are falsy).",
-      "returns": { "type": "boolean", "desc": "The truthiness of x." },
+      "returns": {
+        "type": "boolean",
+        "desc": "The truthiness of x."
+      },
       "exampleKey": "basics/namespaces",
       "snippet": "console.log(e instanceof TypeError, Boolean(e));",
-      "seeAlso": ["globals.String", "globals.Number"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean/Boolean" }
+      "seeAlso": [
+        "globals.String",
+        "globals.Number"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean/Boolean"
+      }
     },
     {
       "id": "globals.parseInt",
@@ -83,14 +128,30 @@
       "badge": "exact",
       "description": "Parses a leading integer out of a string, stopping at the first non-digit. A no-digits input returns a real NaN (endptr-checked, double result). With radix omitted, auto-detects base 16 for a \"0x\"/\"0X\" prefix (parseInt(\"0xFF\") is 255) and base 10 otherwise — no octal auto-detect, so \"077\" is 77.",
       "params": [
-        { "name": "s", "type": "string", "desc": "String to parse." },
-        { "name": "radix", "type": "number", "desc": "Base 2–36; defaults to 10, or 16 for a \"0x\" prefix." }
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "String to parse."
+        },
+        {
+          "name": "radix",
+          "type": "number",
+          "desc": "Base 2–36; defaults to 10, or 16 for a \"0x\" prefix."
+        }
       ],
-      "returns": { "type": "number", "desc": "The parsed integer, or NaN." },
+      "returns": {
+        "type": "number",
+        "desc": "The parsed integer, or NaN."
+      },
       "exampleKey": "basics/parse_functions",
       "snippet": "console.log(parseInt('3abc'))      // 3   (stops at first non-digit)\nconsole.log(parseInt('0xFF'))      // 255 (auto-detected hex)\nconsole.log(parseInt('FF', 16))    // 255",
-      "seeAlso": ["globals.parseFloat", "globals.Number"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt" }
+      "seeAlso": [
+        "globals.parseFloat",
+        "globals.Number"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt"
+      }
     },
     {
       "id": "globals.parseFloat",
@@ -99,12 +160,26 @@
       "signature": "parseFloat(s: string): number",
       "badge": "supported",
       "description": "Parses a leading floating-point number out of a string. A \"0x\" hex prefix reads only its leading 0 → 0 (real parseFloat, unlike Number(\"0x10\") → 16). A no-conversion input returns a real NaN; only the exact word \"Infinity\" parses to Infinity (\"inf\" is NaN).",
-      "params": [{ "name": "s", "type": "string", "desc": "String to parse." }],
-      "returns": { "type": "number", "desc": "The parsed float, or NaN." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "String to parse."
+        }
+      ],
+      "returns": {
+        "type": "number",
+        "desc": "The parsed float, or NaN."
+      },
       "exampleKey": "basics/parse_functions",
       "snippet": "console.log(parseFloat('3.14'))    // 3.14\nconsole.log(parseFloat('1e3'))     // 1000",
-      "seeAlso": ["globals.parseInt", "globals.Number"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat" }
+      "seeAlso": [
+        "globals.parseInt",
+        "globals.Number"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseFloat"
+      }
     },
     {
       "id": "globals.NaN",
@@ -113,14 +188,22 @@
       "signature": "const NaN: number",
       "badge": "caveats",
       "description": "The bare NaN global (same value as Number.NaN), usable without the Number. prefix. NaN != x and !== x comparisons are correct — compiled as unordered fcmp une, so NaN !== NaN is true as in JS.",
-      "returns": { "type": "number", "desc": "The IEEE-754 NaN value." },
+      "returns": {
+        "type": "number",
+        "desc": "The IEEE-754 NaN value."
+      },
       "exampleKey": "globals/globals",
       "snippet": "const nan: float64 = NaN\nconsole.log(nan !== nan)           // true  (the defining property of NaN)",
       "differences": [
         "`let NaN = 99;` is a reserved-name collision under the default `-compat=strict`; `-compat=js` allows the shadow real JS permits."
       ],
-      "seeAlso": ["globals.Infinity", "globals.isNaN"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/NaN" }
+      "seeAlso": [
+        "globals.Infinity",
+        "globals.isNaN"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/NaN"
+      }
     },
     {
       "id": "globals.Infinity",
@@ -129,14 +212,22 @@
       "signature": "const Infinity: number",
       "badge": "caveats",
       "description": "The bare Infinity global (same value as Number.POSITIVE_INFINITY), usable without the Number. prefix; -Infinity is the negative pole.",
-      "returns": { "type": "number", "desc": "The IEEE-754 positive infinity." },
+      "returns": {
+        "type": "number",
+        "desc": "The IEEE-754 positive infinity."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(-Infinity < 0)         // true\nconsole.log(Infinity > 1000000)    // true",
       "differences": [
         "Same shadowing caveat as `NaN` above — needs `-compat=js`, not unconditional."
       ],
-      "seeAlso": ["globals.NaN", "globals.isFinite"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Infinity" }
+      "seeAlso": [
+        "globals.NaN",
+        "globals.isFinite"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Infinity"
+      }
     },
     {
       "id": "globals.undefined",
@@ -145,9 +236,16 @@
       "signature": "const undefined",
       "badge": "exact",
       "description": "The undefined global, as a literal value.",
-      "returns": { "type": "undefined", "desc": "The undefined value." },
-      "seeAlso": ["globals.NaN"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/undefined" }
+      "returns": {
+        "type": "undefined",
+        "desc": "The undefined value."
+      },
+      "seeAlso": [
+        "globals.NaN"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/undefined"
+      }
     },
     {
       "id": "globals.globalThis",
@@ -156,10 +254,17 @@
       "signature": "globalThis.<knownGlobal>",
       "badge": "caveats",
       "description": "globalThis.X desugars to the bare ambient global X, so the standard portable alias works for member access — including nested and call forms like globalThis.JSON.stringify(...), globalThis.Math.max(...), and globalThis.setTimeout(...). There is no dynamic global object: only known globals resolve (an unknown globalThis.foo is a compile error), and a bare globalThis as a value, computed access (globalThis[\"x\"]), and assigning a new global are unsupported.",
-      "caveats": ["Only member access to known globals resolves — no dynamic global record", "Bare globalThis as a value, globalThis[\"x\"], and globalThis.x = … are unsupported"],
+      "caveats": [
+        "Only member access to known globals resolves — no dynamic global record",
+        "Bare globalThis as a value, globalThis[\"x\"], and globalThis.x = … are unsupported"
+      ],
       "snippet": "console.log(globalThis.JSON.stringify({ a: 1 }))",
-      "seeAlso": ["globals.undefined"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/globalThis" }
+      "seeAlso": [
+        "globals.undefined"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/globalThis"
+      }
     },
     {
       "id": "globals.encodeURI",
@@ -168,12 +273,26 @@
       "signature": "encodeURI(s: string): string",
       "badge": "exact",
       "description": "Percent-encodes a whole URI, leaving the unreserved and reserved (;/?:@&=+$,#) character sets unescaped so the URI's own structure survives.",
-      "params": [{ "name": "s", "type": "string", "desc": "The URI to encode." }],
-      "returns": { "type": "string", "desc": "The encoded URI." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "The URI to encode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The encoded URI."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(encodeURI(\"http://example.com/path?a=1&b=2 space\"))\n// http://example.com/path?a=1&b=2%20space (only the space got escaped)",
-      "seeAlso": ["globals.decodeURI", "globals.encodeURIComponent"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURI" }
+      "seeAlso": [
+        "globals.decodeURI",
+        "globals.encodeURIComponent"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURI"
+      }
     },
     {
       "id": "globals.decodeURI",
@@ -182,12 +301,26 @@
       "signature": "decodeURI(s: string): string",
       "badge": "supported",
       "description": "Decodes a whole URI; a malformed escape throws a URIError as in JS. Does not decode a %XX escape representing a reserved character (leaves it as literal %XX text) — the one real behavioral difference from decodeURIComponent.",
-      "params": [{ "name": "s", "type": "string", "desc": "The URI to decode." }],
-      "returns": { "type": "string", "desc": "The decoded URI." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "The URI to decode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The decoded URI."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(decodeURI(\"http://example.com/path%3Fa=1&b=2%20space\"))\n// http://example.com/path%3Fa=1&b=2 space (%3F stays literal — it's '?', reserved)",
-      "seeAlso": ["globals.encodeURI", "globals.decodeURIComponent"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURI" }
+      "seeAlso": [
+        "globals.encodeURI",
+        "globals.decodeURIComponent"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURI"
+      }
     },
     {
       "id": "globals.encodeURIComponent",
@@ -196,12 +329,26 @@
       "signature": "encodeURIComponent(s: string): string",
       "badge": "exact",
       "description": "Percent-encodes a single query-string value or path segment, leaving only the unreserved set (letters, digits, -_.!~*'()) unescaped.",
-      "params": [{ "name": "s", "type": "string", "desc": "The component to encode." }],
-      "returns": { "type": "string", "desc": "The encoded component." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "The component to encode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The encoded component."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(encodeURIComponent(\"hello world\"))         // hello%20world\nconsole.log(encodeURIComponent(\"a=b&c=d\"))             // a%3Db%26c%3Dd",
-      "seeAlso": ["globals.decodeURIComponent", "globals.encodeURI"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent" }
+      "seeAlso": [
+        "globals.decodeURIComponent",
+        "globals.encodeURI"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent"
+      }
     },
     {
       "id": "globals.decodeURIComponent",
@@ -210,12 +357,26 @@
       "signature": "decodeURIComponent(s: string): string",
       "badge": "exact",
       "description": "Decodes a query-string value or path segment, decoding every valid %XX escape unconditionally.",
-      "params": [{ "name": "s", "type": "string", "desc": "The component to decode." }],
-      "returns": { "type": "string", "desc": "The decoded component." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "The component to decode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The decoded component."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(decodeURIComponent(\"hello%20world\"))       // hello world\nconsole.log(decodeURIComponent(\"a%3Db%26c%3Dd\"))       // a=b&c=d",
-      "seeAlso": ["globals.encodeURIComponent", "globals.decodeURI"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURIComponent" }
+      "seeAlso": [
+        "globals.encodeURIComponent",
+        "globals.decodeURI"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURIComponent"
+      }
     },
     {
       "id": "globals.atob",
@@ -224,12 +385,25 @@
       "signature": "atob(s: string): string",
       "badge": "exact",
       "description": "Base64 decode implementing WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing group still decodes, a remaining length ≡ 1 (mod 4) throws InvalidCharacterError, and an interior or excess `=` (accepted only as trailing padding) throws too. Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed).",
-      "params": [{ "name": "s", "type": "string", "desc": "Base64 text to decode." }],
-      "returns": { "type": "string", "desc": "The decoded bytes as a string." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "Base64 text to decode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The decoded bytes as a string."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(atob(\"aGVsbG8=\"))                   // hello\nconsole.log(atob(btoa(\"round trip 123!@#\")))    // round trip 123!@#",
-      "seeAlso": ["globals.btoa"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/atob" }
+      "seeAlso": [
+        "globals.btoa"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/atob"
+      }
     },
     {
       "id": "globals.btoa",
@@ -238,12 +412,25 @@
       "signature": "btoa(s: string): string",
       "badge": "exact",
       "description": "Base64 encode, =-padded (RFC 4045).",
-      "params": [{ "name": "s", "type": "string", "desc": "Bytes to encode." }],
-      "returns": { "type": "string", "desc": "The base64 text." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "Bytes to encode."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The base64 text."
+      },
       "exampleKey": "globals/globals",
       "snippet": "console.log(btoa(\"hello\"))                      // aGVsbG8=\nconsole.log(btoa(\"hi\"))                         // aGk=",
-      "seeAlso": ["globals.atob"],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/btoa" }
+      "seeAlso": [
+        "globals.atob"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/btoa"
+      }
     },
     {
       "id": "globals.structuredClone",
@@ -252,15 +439,26 @@
       "signature": "structuredClone<T>(obj: T): T",
       "badge": "caveats",
       "description": "A real recursive deep copy, dispatched entirely on the argument's static type: arrays (incl. nested and TypedArrays), plain objects, and Maps/Sets recurse into freshly allocated storage, cloning every entry deeply; scalars pass through as value types. The result is fully independent of the original.",
-      "params": [{ "name": "obj", "type": "T", "desc": "The value to deep-copy." }],
-      "returns": { "type": "T", "desc": "An independent deep copy." },
+      "params": [
+        {
+          "name": "obj",
+          "type": "T",
+          "desc": "The value to deep-copy."
+        }
+      ],
+      "returns": {
+        "type": "T",
+        "desc": "An independent deep copy."
+      },
       "exampleKey": "structured_clone/structured_clone",
       "snippet": "const clone = structuredClone(original)\nclone.points[0].x = 500\nconsole.log(original.points[0].x) // 0",
       "differences": [
         "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError`); a `Map`/`Set` with an array/Map/Set key or value element type is also rejected (only scalar/string/object elements clone). A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name."
       ],
       "seeAlso": [],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/structuredClone" }
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/structuredClone"
+      }
     },
     {
       "id": "globals.queueMicrotask",
@@ -269,13 +467,24 @@
       "signature": "queueMicrotask(fn: () => void): void",
       "badge": "caveats",
       "description": "A FIFO of callback closures, run after the current synchronous script and before timers.",
-      "params": [{ "name": "fn", "type": "() => void", "desc": "Callback to run as a microtask." }],
-      "returns": { "type": "void", "desc": "Nothing." },
+      "params": [
+        {
+          "name": "fn",
+          "type": "() => void",
+          "desc": "Callback to run as a microtask."
+        }
+      ],
+      "returns": {
+        "type": "void",
+        "desc": "Nothing."
+      },
       "differences": [
         "Drained at the reachable checkpoints (end of the top-level script, each scheduler step); a program with neither timers nor async tasks drains once at exit."
       ],
       "seeAlso": [],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask" }
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask"
+      }
     },
     {
       "id": "globals.gc",
@@ -284,12 +493,17 @@
       "signature": "gc(): void",
       "badge": "caveats",
       "description": "The Node --expose-gc global.gc() idiom; added to make weak-reference reclamation deterministically observable.",
-      "returns": { "type": "void", "desc": "Nothing." },
+      "returns": {
+        "type": "void",
+        "desc": "Nothing."
+      },
       "differences": [
         "A no-op under `-mm=manual` (the default) — nothing is ever collected; only meaningful under `-mm=gc`, where it forces a full Boehm collection."
       ],
       "seeAlso": [],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/globalThis" }
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/globalThis"
+      }
     },
     {
       "id": "globals.eval",
@@ -298,12 +512,23 @@
       "signature": "eval(s: string): any",
       "badge": "missing",
       "description": "General/dynamic eval is unimplemented (it needs the opt-in embedded engine, not started). A narrow static subset does work: a compile-time-constant eval(\"<expression>\") is compiled in place through this compiler's own parser and codegen, no engine. A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw.",
-      "params": [{ "name": "s", "type": "string", "desc": "A compile-time-constant expression string (static subset only)." }],
-      "returns": { "type": "any", "desc": "The evaluated expression's value." },
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "A compile-time-constant expression string (static subset only)."
+        }
+      ],
+      "returns": {
+        "type": "any",
+        "desc": "The evaluated expression's value."
+      },
       "exampleKey": "globals/static_eval",
       "snippet": "console.log(eval(\"2 ** 10\"))          // 1024\nconst answer: number = eval(\"6 * 7\")\nconsole.log(answer)                    // 42",
       "seeAlso": [],
-      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval" }
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval"
+      }
     }
   ]
 }

@@ -120,6 +120,17 @@
             "notes": [
               "See [ADR-00019](../adr/ADR-00019.md)"
             ]
+          },
+          {
+            "feature": "`PerformanceObserver`",
+            "status": "implemented",
+            "caveats": [
+              "Dispatch is **synchronous** (during `mark`/`measure`), not Node's async batched next-microtask delivery — observer output precedes later straight-line output ([ADR-00673](../adr/ADR-00673.md)/[TDD-00166](../tdd/TDD-00166.md))",
+              "Entry types `mark`/`measure` only; the `entryTypes: []` array form; `buffered`, `takeRecords()`, the single-`type` form, and `getEntriesByName`/`getEntriesByType` are deferred"
+            ],
+            "notes": [
+              "`new PerformanceObserver(cb)` + `observe({ entryTypes })` + `disconnect()`; the callback's list yields `PerformanceEntry` objects (`name`/`entryType`/`startTime`/`duration`) via `getEntries()`"
+            ]
           }
         ]
       }

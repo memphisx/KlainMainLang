@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 32/32 (100%) · **Strict Coverage**: 17/32 (~53%).
+**Coverage**: 32/32 (100%) · **Strict Coverage**: 16/32 (50%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -13,7 +13,7 @@ Format: [Status page format](README.md#status-page-format).
 | Object literals `{ a: 1 }` | ✅ | | |
 | Field access `obj.field` | ✅ | | |
 | Object destructuring | ✅ | | |
-| `Object.keys(obj)` | ✅ | | • On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag in insertion order, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1) |
+| `Object.keys(obj)` | ✅ | • Integer-like keys are not reordered ahead of string keys — `Object.keys({b:1,a:2,'2':3,'1':4})` is `['b','a','2','1']` (Node: `['1','2','b','a']`); applies equally to `for...in`, `Object.values`/`entries`, spread, and `JSON.stringify`. | • On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag in insertion order, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1) |
 | `Object.values(obj)` | ✅ | • A heterogeneous object's values are stringified ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns a real typed `V[]` | |
 | `Object.entries(obj)` | ✅ | • A heterogeneous object's values are stringified — its value union is representable only as `any`, whose operators aren't dispatched yet ([ADR-00492](../adr/ADR-00492.md)); a homogeneous shape returns real typed `[string, V]` tuples | • Returns a real `[string, string][]` tuple array; destructure with `for (const [k, v] of Object.entries(obj))` |
 | `Object.groupBy(arr, fn)` | ✅ | | |

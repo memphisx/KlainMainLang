@@ -35,6 +35,9 @@
             "status": "implemented",
             "notes": [
               "`getenv(\"HOME\")`; throws a catchable Error if unset (matches real Node)"
+            ],
+            "caveats": [
+              "Throws when `$HOME` is unset (`os.homedir()` errors) instead of Node's passwd-database fallback (`getpwuid`), which returns the home dir without throwing."
             ]
           },
           {
@@ -42,6 +45,9 @@
             "status": "implemented",
             "notes": [
               "`getenv(\"TMPDIR\")`, falling back to `\"/tmp\"` — never throws"
+            ],
+            "caveats": [
+              "Consults only `$TMPDIR` (not `$TMP`/`$TEMP`) and keeps a trailing slash — `TMPDIR=/foo/` yields `'/foo/'`, where Node returns `'/foo'`."
             ]
           },
           {

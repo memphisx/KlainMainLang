@@ -41,6 +41,9 @@
               "Same scope as `setTimeout`",
               "An active interval that's never cleared keeps the process running indefinitely, matching real Node",
               "See [ADR-00031](../adr/ADR-00031.md)"
+            ],
+            "caveats": [
+              "Callback must be a zero-argument `() => void`; the extra-args form is a compile error — `setInterval(cb, 10, 42)` is rejected, where Node forwards `42` to `cb` (shares `setTimeout`'s restriction)."
             ]
           },
           {

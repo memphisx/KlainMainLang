@@ -4,14 +4,14 @@
 
 > Part of the [Implementation Status](README.md) index. JavaScript language-level globals unrelated to any browser API.
 
-**Coverage**: 20/21 (~95%) · **Strict Coverage**: 13/21 (~62%).
+**Coverage**: 20/21 (~95%) · **Strict Coverage**: 11/21 (~52%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `isNaN(x)` | ✅ | | |
-| `isFinite(x)` | ✅ | | |
+| `isNaN(x)` | ✅ | • Skips the `ToNumber` coercion real JS applies — a non-number argument (reachable via `any`) is treated as already numeric, so `isNaN('hello' as any)` is `false` (Node: `true`). | |
+| `isFinite(x)` | ✅ | • Skips `ToNumber` coercion like `isNaN` — a non-number argument (via `any`) isn't coerced, diverging from Node's `isFinite('x')`. | |
 | `String(x)` | ✅ | • `String()` with no argument is `""`, not real JS's `"undefined"` (a genuinely absent value doesn't arise in typed code — [ADR-00291](../adr/ADR-00291.md)) | • Routes through the template-literal renderer; an `any` input dispatches on its runtime tag |
 | `Number(x)` | ✅ | | • JS ToNumber: whole-string parse (`"12px"` → `NaN`, unlike `parseFloat`), `""`/whitespace → 0, `"0x10"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64)<br>• Only the exact word `"Infinity"` (optionally signed) is `Infinity`; C's `"inf"`/`"infinity"`/case variants are `NaN`, matching real JS ([ADR-00291](../adr/ADR-00291.md)/[ADR-00529](../adr/ADR-00529.md)) |
 | `Boolean(x)` | ✅ | | • Shared truthiness (`NaN`, `""`, 0 falsy — [ADR-00116](../adr/ADR-00116.md)) |

@@ -148,6 +148,559 @@ func (e *Emitter) emitNewURLExpression(ex *ast.NewURLExpression) (Value, error) 
 	return Value{Ref: objReg, Ty: urlTy}, nil
 }
 
+// emitUrlParse implements the legacy `url.parse(urlString)` (TDD-00165 Stage 4).
+// It parses the input with the same libcurl URL API `new URL(...)` uses, then
+// remaps the parsed components into the legacy `Url` object (LegacyUrlType) —
+// deriving `auth` (`user[:pass]`), `path` (`pathname`+`search`), and `query`
+// (`search` without its leading `?`) that the WHATWG object doesn't carry.
+//
+// Stage-4a scope: this parses absolute URLs faithfully and, like `new URL()`,
+// throws a catchable "Invalid URL" on a malformed/relative input — a documented
+// divergence from Node's never-throw leniency, left as a follow-up. `slashes`
+// and the `parseQueryString` object form of `query` are not produced yet.
+func (e *Emitter) emitUrlParse(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.parse(urlString) requires a string argument", pos.Line, pos.Col)
+	}
+	e.ensureCurlURL()
+	e.ensureMalloc()
+	e.ensureExceptionHelpers()
+	e.ensureMapStrHelpers()
+	e.ensureHTTPParseQuery()
+
+	rawVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	rawVal = e.coerce(rawVal, TypePtr)
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	setCode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, rawVal.Ref))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, setCode))
+	badL := e.freshLabel("urlparse.bad")
+	okL := e.freshLabel("urlparse.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	e.emitInternalThrow(e.internString("Invalid URL"))
+	e.emitLabel(okL)
+
+	// Build a WHATWG URLType object first (reuses the shared derivation, which
+	// also cleans up the handle), then remap its fields into the legacy shape.
+	urlTy := URLType()
+	urlObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", urlObj, urlTy.StructSize()))
+	if err := e.deriveURLFieldsIntoObject(handle, urlObj); err != nil {
+		return Value{}, err
+	}
+	structIR := urlTy.StructIR()
+	readField := func(name string) Value {
+		idx, fieldTy, _ := urlTy.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, urlObj, idx))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+		return Value{Ref: r, Ty: fieldTy}
+	}
+	href := readField("href")
+	protocol := readField("protocol")
+	host := readField("host")
+	port := readField("port")
+	hostname := readField("hostname")
+	hash := readField("hash")
+	search := readField("search")
+	pathname := readField("pathname")
+	username := readField("username")
+	password := readField("password")
+
+	// path = pathname + search.
+	path, err := e.emitStringConcat(pathname, search)
+	if err != nil {
+		return Value{}, err
+	}
+	// query = search without its leading '?'.
+	query, err := e.emitStripLeadingQuestionMark(search)
+	if err != nil {
+		return Value{}, err
+	}
+	// auth = username, plus ":"+password when a password is present.
+	userNonEmpty := e.emitStrNonEmpty(username.Ref)
+	passNonEmpty := e.emitStrNonEmpty(password.Ref)
+	auth, err := e.emitStrBranch(userNonEmpty,
+		func() (string, error) {
+			withPass, err := e.emitStrBranch(passNonEmpty,
+				func() (string, error) {
+					colonPass, err := e.emitStringConcat(Value{Ref: e.internString(":"), Ty: TypePtr}, password)
+					if err != nil {
+						return "", err
+					}
+					v, err := e.emitStringConcat(username, colonPass)
+					if err != nil {
+						return "", err
+					}
+					return v.Ref, nil
+				},
+				func() (string, error) { return username.Ref, nil },
+			)
+			return withPass, err
+		},
+		func() (string, error) { return e.internString(""), nil },
+	)
+	if err != nil {
+		return Value{}, err
+	}
+
+	legacyTy := LegacyUrlType()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, legacyTy.StructSize()))
+	legacyIR := legacyTy.StructIR()
+	storeField := func(name, ref string) {
+		idx, fieldTy, _ := legacyTy.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, legacyIR, obj, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
+	}
+	storeField("href", href.Ref)
+	storeField("protocol", protocol.Ref)
+	storeField("auth", auth)
+	storeField("host", host.Ref)
+	storeField("port", port.Ref)
+	storeField("hostname", hostname.Ref)
+	storeField("hash", hash.Ref)
+	storeField("search", search.Ref)
+	storeField("query", query.Ref)
+	storeField("pathname", pathname.Ref)
+	storeField("path", path.Ref)
+	return Value{Ref: obj, Ty: legacyTy}, nil
+}
+
+// emitUrlFormat implements the legacy `url.format(urlObject)` (TDD-00165 Stage 4)
+// — the inverse of url.parse. A WHATWG URL serializes to its `href`; a legacy
+// `Url` object (or any object carrying the legacy component fields) is
+// reconstructed as `protocol // [auth@] host pathname (search|?query) hash`,
+// with each absent component (the empty string) contributing nothing. Fields the
+// passed object doesn't define default to "", matching Node's leniency about
+// partial input objects.
+func (e *Emitter) emitUrlFormat(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.format(urlObject) requires an object argument", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	objTy := objVal.Ty
+	if !objTy.IsObject {
+		return Value{}, fmt.Errorf("%d:%d: url.format expects a URL or a Url-shaped object", pos.Line, pos.Col)
+	}
+	// A WHATWG URL serializes to its already-computed href.
+	readField := func(name string) (Value, bool) {
+		idx, fieldTy, ok := objTy.FieldIndex(name)
+		if !ok {
+			return Value{Ref: e.internString(""), Ty: TypePtr}, false
+		}
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objTy.StructIR(), objVal.Ref, idx))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+		return Value{Ref: r, Ty: fieldTy}, true
+	}
+	if objTy.IsURL {
+		href, _ := readField("href")
+		return href, nil
+	}
+
+	protocol, _ := readField("protocol")
+	auth, _ := readField("auth")
+	host, _ := readField("host")
+	pathname, _ := readField("pathname")
+	search, _ := readField("search")
+	query, _ := readField("query")
+	hash, _ := readField("hash")
+
+	// slashes segment: "//" when there's a host, else "".
+	slashes, err := e.emitStrBranch(e.emitStrNonEmpty(host.Ref),
+		func() (string, error) { return e.internString("//"), nil },
+		func() (string, error) { return e.internString(""), nil })
+	if err != nil {
+		return Value{}, err
+	}
+	// auth segment: "<auth>@" when auth is present, else "".
+	authSeg, err := e.emitStrBranch(e.emitStrNonEmpty(auth.Ref),
+		func() (string, error) {
+			v, err := e.emitStringConcat(auth, Value{Ref: e.internString("@"), Ty: TypePtr})
+			if err != nil {
+				return "", err
+			}
+			return v.Ref, nil
+		},
+		func() (string, error) { return e.internString(""), nil })
+	if err != nil {
+		return Value{}, err
+	}
+	// search segment: the `search` string (already "?…") if present, else "?"+query
+	// when only `query` is set, else "".
+	searchSeg, err := e.emitStrBranch(e.emitStrNonEmpty(search.Ref),
+		func() (string, error) { return search.Ref, nil },
+		func() (string, error) {
+			return e.emitStrBranch(e.emitStrNonEmpty(query.Ref),
+				func() (string, error) {
+					v, err := e.emitStringConcat(Value{Ref: e.internString("?"), Ty: TypePtr}, query)
+					if err != nil {
+						return "", err
+					}
+					return v.Ref, nil
+				},
+				func() (string, error) { return e.internString(""), nil })
+		})
+	if err != nil {
+		return Value{}, err
+	}
+
+	result := protocol
+	for _, part := range []Value{
+		{Ref: slashes, Ty: TypePtr},
+		{Ref: authSeg, Ty: TypePtr},
+		host, pathname,
+		{Ref: searchSeg, Ty: TypePtr},
+		hash,
+	} {
+		result, err = e.emitStringConcat(result, part)
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	return result, nil
+}
+
+// curluURLDecode / curluURLEncode are curl_url_get/set flags (curl/urlapi.h):
+// decode percent-escapes on get, encode them on set.
+const (
+	curluURLDecode = 1 << 6 // CURLU_URLDECODE
+	curluURLEncode = 1 << 7 // CURLU_URLENCODE
+)
+
+// emitFileURLToPath implements `url.fileURLToPath(url)` (TDD-00165 Stage 4,
+// POSIX): converts a `file:` URL (a string or a WHATWG URL) to the decoded
+// filesystem path. Throws a catchable Error on a non-`file:` scheme, matching
+// Node's `ERR_INVALID_URL_SCHEME`.
+func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.fileURLToPath(url) requires a url string or URL argument", pos.Line, pos.Col)
+	}
+	e.ensureCurlURL()
+	e.ensureExceptionHelpers()
+	e.ensureStrHeaderRuntime()
+	e.ensureStrcmp()
+
+	objVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	// A WHATWG URL argument contributes its href string; anything else is coerced
+	// to a string and parsed directly.
+	var urlStr Value
+	if objVal.Ty.IsObject && objVal.Ty.IsURL {
+		idx, fieldTy, _ := objVal.Ty.FieldIndex("href")
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+		urlStr = Value{Ref: r, Ty: TypePtr}
+	} else {
+		urlStr = e.coerce(objVal, TypePtr)
+	}
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	setCode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, urlStr.Ref))
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, setCode))
+	badL := e.freshLabel("f2p.bad")
+	okL := e.freshLabel("f2p.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	e.emitInternalThrow(e.internString("Invalid URL"))
+	e.emitLabel(okL)
+
+	// Require the file: scheme.
+	scheme, _ := e.curlURLGetPart(handle, curluPartScheme)
+	cmp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", cmp, scheme, e.internString("file")))
+	notFile := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", notFile, cmp))
+	nfL := e.freshLabel("f2p.notfile")
+	fileL := e.freshLabel("f2p.file")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notFile, nfL, fileL))
+	e.emitLabel(nfL)
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	e.emitInternalThrow(e.internString("The URL must be of scheme file"))
+	e.emitLabel(fileL)
+
+	// The decoded path is the filesystem path (POSIX).
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 %d)", e.freshReg(), handle, curluPartPath, slot, curluURLDecode))
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", raw, slot))
+	path := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", path, raw))
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	return Value{Ref: path, Ty: TypePtr}, nil
+}
+
+// emitPathToFileURL implements `url.pathToFileURL(path)` (TDD-00165 Stage 4,
+// POSIX): resolves the path to absolute, percent-encodes it, and returns a
+// WHATWG URL object with the `file:` scheme (`file:///abs/path`).
+func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.pathToFileURL(path) requires a path string argument", pos.Line, pos.Col)
+	}
+	e.ensureCurlURL()
+	e.ensureMalloc()
+	e.ensureMapStrHelpers()
+	e.ensureHTTPParseQuery()
+
+	// Resolve to an absolute, normalized path (path.resolve semantics).
+	abs, err := e.emitPathResolve(args[:1], pos)
+	if err != nil {
+		return Value{}, err
+	}
+	abs = e.coerce(abs, TypePtr)
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	// scheme=file, empty host (→ the `file://` authority), then the path with
+	// percent-encoding (so a space/`#`/`?` in the path stays part of the path).
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartScheme, e.internString("file")))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, e.internString("")))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 %d)", e.freshReg(), handle, curluPartPath, abs.Ref, curluURLEncode))
+
+	urlTy := URLType()
+	objReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, urlTy.StructSize()))
+	if err := e.deriveURLFieldsIntoObject(handle, objReg); err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: objReg, Ty: urlTy}, nil
+}
+
+// curluPunycode / curluPuny2IDN are curl_url_get flags (curl/urlapi.h): return
+// the host in punycode (ASCII), or convert a punycode host back to IDN (Unicode).
+const (
+	curluPunycode = 1 << 12 // CURLU_PUNYCODE
+	curluPuny2IDN = 1 << 13 // CURLU_PUNY2IDN
+)
+
+// emitUrlDomainConvert implements `url.domainToASCII` / `url.domainToUnicode`
+// (TDD-00165 Stage 4) via libcurl's IDN support: it wraps the bare domain in a
+// throwaway `http://<domain>` URL and reads the host back with the given punycode
+// flag. Returns "" on any failure — matching Node, which also yields "" for a
+// domain it can't convert (and which is what a build lacking a libcurl IDN
+// backend produces here). `flag` is curluPunycode (→ ASCII) or curluPuny2IDN
+// (→ Unicode).
+func (e *Emitter) emitUrlDomainConvert(args []ast.Expression, pos ast.Pos, flag int) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.domainTo* requires a domain string argument", pos.Line, pos.Col)
+	}
+	e.ensureCurlURL()
+	e.ensureStrHeaderRuntime()
+
+	domainVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	domainVal = e.coerce(domainVal, TypePtr)
+	urlStr, err := e.emitStringConcat(Value{Ref: e.internString("http://"), Ty: TypePtr}, domainVal)
+	if err != nil {
+		return Value{}, err
+	}
+
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), resPtr))
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	setCode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", setCode, handle, curluPartURL, urlStr.Ref))
+	setOk := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", setOk, setCode))
+	tryGetL := e.freshLabel("d2a.tryget")
+	cleanupL := e.freshLabel("d2a.cleanup")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", setOk, tryGetL, cleanupL))
+
+	e.emitLabel(tryGetL)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	getCode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_get(ptr %s, i32 %d, ptr %s, i32 %d)", getCode, handle, curluPartHost, slot, flag))
+	getOk := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", getOk, getCode))
+	haveL := e.freshLabel("d2a.have")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", getOk, haveL, cleanupL))
+
+	e.emitLabel(haveL)
+	raw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", raw, slot))
+	host := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", host, raw))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", host, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", cleanupL))
+
+	e.emitLabel(cleanupL)
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	return Value{Ref: result, Ty: TypePtr}, nil
+}
+
+// emitUrlResolve implements the legacy `url.resolve(from, to)` (TDD-00165 Stage
+// 4): resolves `to` against the base `from` and returns the resulting URL string
+// — the same base-relative resolution `new URL(to, from)` performs. Absolute
+// bases only; a scheme-less/malformed base throws `Invalid URL` (the documented
+// Stage-4a leniency gap it shares with `url.parse`).
+func (e *Emitter) emitUrlResolve(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 2 {
+		return Value{}, fmt.Errorf("%d:%d: url.resolve(from, to) requires two string arguments", pos.Line, pos.Col)
+	}
+	e.ensureCurlURL()
+	e.ensureExceptionHelpers()
+	e.ensureStrHeaderRuntime()
+
+	fromVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fromVal = e.coerce(fromVal, TypePtr)
+	toVal, err := e.emitExpr(args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	toVal = e.coerce(toVal, TypePtr)
+
+	handle := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
+	setOrThrow := func(ref string) {
+		code := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", code, handle, curluPartURL, ref))
+		bad := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", bad, code))
+		badL := e.freshLabel("resolve.bad")
+		okL := e.freshLabel("resolve.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		e.emitInternalThrow(e.internString("Invalid URL"))
+		e.emitLabel(okL)
+	}
+	setOrThrow(fromVal.Ref) // base first
+	setOrThrow(toVal.Ref)   // curl resolves this against the base
+
+	href, _ := e.curlURLGetPart(handle, curluPartURL)
+	e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+	return Value{Ref: href, Ty: TypePtr}, nil
+}
+
+// emitUrlToHttpOptions implements `url.urlToHttpOptions(url)` (TDD-00165 Stage
+// 4): remaps a WHATWG URL into the option-bag `http.request` accepts
+// (protocol/hostname/hash/search/pathname/path/href/port/auth).
+func (e *Emitter) emitUrlToHttpOptions(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 {
+		return Value{}, fmt.Errorf("%d:%d: url.urlToHttpOptions(url) requires a URL argument", pos.Line, pos.Col)
+	}
+	e.ensureMalloc()
+	objVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !objVal.Ty.IsObject || !objVal.Ty.IsURL {
+		return Value{}, fmt.Errorf("%d:%d: url.urlToHttpOptions expects a WHATWG URL argument", pos.Line, pos.Col)
+	}
+	srcTy := objVal.Ty
+	read := func(name string) Value {
+		idx, fieldTy, _ := srcTy.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, srcTy.StructIR(), objVal.Ref, idx))
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+		return Value{Ref: r, Ty: TypePtr}
+	}
+	protocol := read("protocol")
+	hostname := read("hostname")
+	hash := read("hash")
+	search := read("search")
+	pathname := read("pathname")
+	href := read("href")
+	port := read("port")
+	username := read("username")
+	password := read("password")
+
+	path, err := e.emitStringConcat(pathname, search)
+	if err != nil {
+		return Value{}, err
+	}
+	auth, err := e.emitStrBranch(e.emitStrNonEmpty(username.Ref),
+		func() (string, error) {
+			return e.emitStrBranch(e.emitStrNonEmpty(password.Ref),
+				func() (string, error) {
+					colonPass, err := e.emitStringConcat(Value{Ref: e.internString(":"), Ty: TypePtr}, password)
+					if err != nil {
+						return "", err
+					}
+					v, err := e.emitStringConcat(username, colonPass)
+					if err != nil {
+						return "", err
+					}
+					return v.Ref, nil
+				},
+				func() (string, error) { return username.Ref, nil })
+		},
+		func() (string, error) { return e.internString(""), nil })
+	if err != nil {
+		return Value{}, err
+	}
+
+	optTy := HttpOptionsType()
+	obj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", obj, optTy.StructSize()))
+	optIR := optTy.StructIR()
+	store := func(name, ref string) {
+		idx, fieldTy, _ := optTy.FieldIndex(name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, optIR, obj, idx))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, ref, gep, fieldTy.Align()))
+	}
+	store("protocol", protocol.Ref)
+	store("hostname", hostname.Ref)
+	store("hash", hash.Ref)
+	store("search", search.Ref)
+	store("pathname", pathname.Ref)
+	store("path", path.Ref)
+	store("href", href.Ref)
+	store("port", port.Ref)
+	store("auth", auth)
+	return Value{Ref: obj, Ty: optTy}, nil
+}
+
+// emitStrNonEmpty returns an i1 that is true when the length-prefixed string at
+// `ptr` has a non-NUL first byte (i.e. is non-empty) — used to distinguish an
+// absent URL component (stored as "") from a present one.
+func (e *Emitter) emitStrNonEmpty(ptr string) string {
+	first := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", first, ptr))
+	nonEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", nonEmpty, first))
+	return nonEmpty
+}
+
 // deriveURLFieldsIntoObject reads every component out of an already-parsed
 // CURLU `handle` and stores the derived URL fields (href/protocol/host/…/
 // searchParams) into the URLType() object at `objReg`, then cleans up the

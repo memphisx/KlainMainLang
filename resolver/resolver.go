@@ -481,10 +481,119 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 		}
 		ns := map[string]map[string]string{}
 		builtinMembers := map[string]builtinMemberRef{}
+		// TDD-00165 Stage 3: aliases of a parse-time built-in constructor
+		// (`import { URL as U } from 'url'`) — the rename pass rebuilds `new U(...)`
+		// into the specialized built-in node under the canonical name.
+		parseTimeAliases := map[string]string{}
 		dir := filepath.Dir(path)
 		for _, stmt := range info.prog.Body {
 			imp, ok := stmt.(*ast.ImportDeclaration)
 			if !ok {
+				continue
+			}
+			if reexports, isReexport := globalReexportModules[imp.Source]; isReexport {
+				// TDD-00165: a Web-global-backed module (`url`/`timers`/`perf_hooks`/
+				// `buffer`/`events`). Its *primary* exports are spec-identical
+				// re-exports of an ambient global (erased/renamed to the global,
+				// Stages 1–3); a hybrid module (`url`) also has *module-only function*
+				// members (`url.parse`) that dispatch via the module marker like
+				// `querystring.parse` (Stage 4). Import statements are dropped from the
+				// merged program regardless (see below), so "erase" here means simply
+				// not recording a local binding.
+				marker := virtualBuiltinMarkers[imp.Source]
+				funcs := moduleFunctionMembers[imp.Source]
+				dupCheck := func(local string) error {
+					if _, dup := lookup[local]; dup {
+						return fmt.Errorf("%d:%d: '%s' is already declared in this file", imp.GetPos().Line, imp.GetPos().Col, local)
+					}
+					if _, dup := builtinMembers[local]; dup {
+						return fmt.Errorf("%d:%d: '%s' is already declared in this file", imp.GetPos().Line, imp.GetPos().Col, local)
+					}
+					if _, dup := ns[local]; dup {
+						return fmt.Errorf("%d:%d: '%s' is already declared in this file", imp.GetPos().Line, imp.GetPos().Col, local)
+					}
+					return nil
+				}
+				if imp.Namespace != "" {
+					// A namespace import (`import * as url from 'url'`) is only
+					// meaningful when the module has marker-dispatched function members
+					// — it binds the marker so `url.parse(…)` resolves. Reexport
+					// primaries aren't reachable this way (they're globals, not marker
+					// members); a module with no function members keeps the Stage 1
+					// rejection.
+					if len(funcs) == 0 {
+						var example string
+						for m := range reexports {
+							if example == "" || m < example {
+								example = m
+							}
+						}
+						return nil, fmt.Errorf("%d:%d: a namespace import of '%s' is not yet supported — import its named export (e.g. `import { %s } from '%s'`) or use the global directly (TDD-00165)",
+							imp.GetPos().Line, imp.GetPos().Col, imp.Source, example, imp.Source)
+					}
+					if err := dupCheck(imp.Namespace); err != nil {
+						return nil, err
+					}
+					lookup[imp.Namespace] = marker
+					continue
+				}
+				for _, spec := range imp.Specifiers {
+					if spec.Imported == "default" {
+						if def, hasDefault := defaultReexportName[imp.Source]; hasDefault {
+							// A reexport-primary default (`events` → `EventEmitter`):
+							// fall through to the named-export handling below with the
+							// canonical name.
+							spec = ast.ImportSpecifier{Imported: def, Local: spec.Local}
+						} else if len(funcs) > 0 {
+							// A module-namespace default (`import url from 'url'`): bind
+							// the marker so `url.parse(…)` dispatches, like a namespace.
+							if err := dupCheck(spec.Local); err != nil {
+								return nil, err
+							}
+							lookup[spec.Local] = marker
+							continue
+						} else {
+							return nil, fmt.Errorf("%d:%d: built-in module '%s' has no default export — import its named export (e.g. `import { %s } from '%s'`)",
+								imp.GetPos().Line, imp.GetPos().Col, imp.Source, firstKey(reexports), imp.Source)
+						}
+					}
+					want := spec.Imported
+					if err := dupCheck(spec.Local); err != nil {
+						return nil, err
+					}
+					if funcs[want] {
+						// Stage 4: a module-only function member — dispatch via the
+						// marker, exactly like a named `querystring.parse` import.
+						builtinMembers[spec.Local] = builtinMemberRef{Marker: marker, Member: want}
+						continue
+					}
+					if !reexports[want] {
+						return nil, fmt.Errorf("%d:%d: built-in module '%s' has no exported member '%s'",
+							imp.GetPos().Line, imp.GetPos().Col, imp.Source, spec.Imported)
+					}
+					if spec.Local == want {
+						// Stage 1: the local IS the global name — erase (bind nothing);
+						// the ambient global keeps resolving as before.
+						continue
+					}
+					// Aliased import (local name differs from the global's).
+					if parseTimeReexports[want] {
+						// Stage 3: a parse-time constructor (`URL`/`URLSearchParams`/
+						// `Blob`/`EventEmitter`). The parser produced a generic
+						// `new <alias>(...)`; record the alias so the rename pass
+						// rebuilds it as the specialized built-in node under the
+						// canonical name.
+						parseTimeAliases[spec.Local] = want
+						continue
+					}
+					// Stage 2: a codegen-recognized global (`setTimeout`/`performance`/
+					// `atob`/…) — rename the alias to the canonical global name via the
+					// scope-aware rename pass, so `later(...)` compiles as the global
+					// `setTimeout(...)`. This is the same lookup-table mechanism a named
+					// module-member import uses; the value is a real global name, not a
+					// marker, so it reaches codegen as the bare global.
+					lookup[spec.Local] = want
+				}
 				continue
 			}
 			if marker, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
@@ -568,6 +677,7 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 		var reservedErr error
 		renameFile(info.prog, lookupTable{
 			names: lookup, ns: ns, builtinMembers: builtinMembers,
+			parseTimeAliases:     parseTimeAliases,
 			allowGlobalShadowing: allowGlobalShadowing, reservedErr: &reservedErr,
 			filePath: path,
 		})

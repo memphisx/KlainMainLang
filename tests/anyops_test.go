@@ -22,6 +22,24 @@ console.log(id(7) - "2", id(10) / id(4), id(7) % id(4))
 `, "5\nconcat\nx=5\n1 2\n2.75\n42\n5 2.5 3")
 }
 
+func TestE2EAnyOpsBitwise(t *testing.T) {
+	// Bitwise and shift operators on any-typed operands (a value flowing
+	// through an untyped parameter under -compat=js): ToInt32 both operands,
+	// compute in the 32-bit domain, yield a Number — the same semantics a typed
+	// `number & number` has. Previously rejected as "operator on any/unknown is
+	// not yet supported", the single largest -compat=js Test262 regression
+	// bucket (decodeURI/compound-assignment and friends).
+	assertOutputCompatJS(t, `
+function id(v) { return v }
+console.log(id(6) & id(3))
+console.log(id(5) | id(2))
+console.log(id(6) ^ id(3))
+console.log(id(1) << id(4))
+console.log(id(256) >> id(2))
+console.log(id(-1) >>> id(0))
+`, "2\n7\n5\n16\n64\n4294967295")
+}
+
 func TestE2EAnyOpsNaNAndUndefined(t *testing.T) {
 	assertOutputCompatJS(t, `
 let u

@@ -4,18 +4,18 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 29/30 (~97%) · **Strict Coverage**: 25/30 (~83%).
+**Coverage**: 29/30 (~97%) · **Strict Coverage**: 16/30 (~53%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
 | `+` (concatenation) | ✅ | | • A null operand stringifies as `"null"` (`"x" + null === "xnull"`), matching real JS ([ADR-00165](../adr/ADR-00165.md))<br>• A `number \| null` operand renders `"null"` for the null case (`"x" + n`) — as a parameter, local, object field, or a `T | null`-returning call — not its payload zero ([ADR-00537](../adr/ADR-00537.md)/[ADR-00538](../adr/ADR-00538.md)) |
-| `.length` | ✅ | | |
-| `.slice(start, end?)` | ✅ | | |
-| `.substring(start, end?)` | ✅ | | |
-| `.indexOf(substr)` | ✅ | | |
-| `.includes(substr)` | ✅ | | |
+| `.length` | ✅ | • Byte length, not the JS UTF-16 code-unit count — `'café'.length` is `5` (Node: `4`). | |
+| `.slice(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text. | |
+| `.substring(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text. | |
+| `.indexOf(substr)` | ✅ | • Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`). | |
+| `.includes(substr)` | ✅ | • Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text). | |
 | `.startsWith(prefix)` | ✅ | | |
 | `.endsWith(suffix)` | ✅ | | |
 | `.replace(from, to)` | ✅ | | |
@@ -23,8 +23,8 @@ Format: [Status page format](README.md#status-page-format).
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
 | `.toString()` | ✅ | | • Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks) |
-| `.toUpperCase()` | ✅ | | |
-| `.toLowerCase()` | ✅ | | |
+| `.toUpperCase()` | ✅ | • ASCII-only case mapping (`a`–`z`/`A`–`Z`) — `'café'.toUpperCase()` is `'CAFé'` (Node: `'CAFÉ'`); no Unicode case tables. | |
+| `.toLowerCase()` | ✅ | • ASCII-only case mapping — `'Σ'.toLowerCase()` is `'Σ'` (Node: `'σ'`); non-ASCII bytes pass through unchanged. | |
 | `.repeat(n)` | ✅ | | |
 | `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |
@@ -37,8 +37,8 @@ Format: [Status page format](README.md#status-page-format).
 | `.search(pattern)` | ✅ | | • A plain-string `pattern` is coerced to a `RegExp` as in real JS — metacharacters are interpreted (`"a.b".search(".")` is `0`) ([ADR-00548](../adr/ADR-00548.md))<br>• A `RegExp` `pattern` runs a real PCRE2 search |
 | `.replaceAll()` | ✅ | | • An empty search matches JS's insert-between-every-char behavior — `"abc".replaceAll("", "-")` is `"-a-b-c-"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md)) |
 | `.localeCompare(other)` | ✅ | • Length-aware byte-order comparison (normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL — [TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md)) | |
-| `String.fromCharCode(n)` | ✅ | | |
-| `String.fromCodePoint(n)` | ✅ | | |
+| `String.fromCharCode(n)` | ✅ | • Each argument is truncated to one byte (0–255), not encoded as a UTF-16 code unit — `String.fromCharCode(0x263A)` is `':'` (Node: `'☺'`). | |
+| `String.fromCodePoint(n)` | ✅ | • Shares `fromCharCode`'s one-byte truncation — no astral/surrogate encoding — a code point above `0xFF` is mangled (`String.fromCodePoint(0x263A)` → `':'`, Node: `'☺'`). | |
 | `String.raw` tag | ✅ | | • Interleaves the raw (undecoded) quasi text with the string-coerced interpolations — escape sequences appear verbatim (`` String.raw`a\nb` `` is `a\nb`), byte-for-byte the same as Node. The raw quasis are threaded from the lexer through the `TaggedTemplateExpression` ([ADR-00562](../adr/ADR-00562.md)) |
 
 ## Known limitations

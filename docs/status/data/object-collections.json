@@ -40,6 +40,9 @@
             "status": "implemented",
             "notes": [
               "On a bare `any` value: runtime key enumeration of the D1 dynamic object's bag in insertion order, `[]` for a boxed primitive, TypeError for null/undefined — matching JS ([TDD-00155](../tdd/TDD-00155.md) Stage 1)"
+            ],
+            "caveats": [
+              "Integer-like keys are not reordered ahead of string keys — `Object.keys({b:1,a:2,'2':3,'1':4})` is `['b','a','2','1']` (Node: `['1','2','b','a']`); applies equally to `for...in`, `Object.values`/`entries`, spread, and `JSON.stringify`."
             ]
           },
           {

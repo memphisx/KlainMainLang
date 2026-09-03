@@ -56,8 +56,20 @@ func (e *Emitter) jsCollectCtorParamTypes(prog *ast.Program) error {
 			}
 			if slots[i].IR == "" {
 				slots[i] = t
-			} else if slots[i].IR != t.IR {
-				return fmt.Errorf("%d:%d: constructor argument %d of 'new %s(...)' disagrees with another call site's type — annotate the constructor parameter", a.GetPos().Line, a.GetPos().Col, i+1, nx.ClassName)
+			} else if slots[i].IR != t.IR && !slots[i].IsDynamic {
+				// Call sites disagree on this parameter's type. Under -compat=js
+				// a constructor parameter legitimately receives different types
+				// at different call sites (vanilla JS: `new E('msg')` and
+				// `new E('msg' + n)` both valid) — so widen it to `any` rather
+				// than rejecting. Strict mode has no call-site-inference pass and
+				// no such rejection, and -compat=js must be at least as
+				// permissive as strict: a hard error here made the js lane fail
+				// files the strict lane accepts (e.g. Test262Error, called with
+				// both plain strings and string+number concatenations across the
+				// harness). The any-typed parameter stores through the D1
+				// dynamic model. Once widened it stays `any` (IsDynamic), so a
+				// third disagreeing site doesn't re-trigger.
+				slots[i] = TypeAny
 			}
 		}
 		e.jsCtorParamTy[nx.ClassName] = slots

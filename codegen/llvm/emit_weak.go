@@ -64,6 +64,13 @@ func (e *Emitter) emitNewWeakRefValue(init *ast.NewWeakRefExpression) (Value, er
 	if err != nil {
 		return Value{}, err
 	}
+	// An any/unknown referent under -compat=js may hold an object at runtime;
+	// unbox its payload pointer rather than rejecting statically (a primitive at
+	// runtime is a -compat=js divergence, not invalid IR — strict still rejects
+	// a statically-primitive referent below).
+	if obj.Ty.IsDynamic && e.compatJS() {
+		obj = e.coerce(obj, TypePtr)
+	}
 	if obj.Ty.IR != "ptr" || isStringTy(obj.Ty) {
 		pos := init.GetPos()
 		return Value{}, fmt.Errorf("%d:%d: new WeakRef requires an object referent (not a primitive)", pos.Line, pos.Col)
@@ -126,6 +133,14 @@ func (e *Emitter) weakObjectKey(keyExpr ast.Expression, pos ast.Pos) (string, er
 	kVal, err := e.emitExpr(keyExpr)
 	if err != nil {
 		return "", err
+	}
+	// An any/unknown key under -compat=js may hold an object reference at
+	// runtime; the object-key requirement can't be decided statically, so unbox
+	// the NaN box's payload pointer and proceed. (A primitive value at runtime
+	// is a -compat=js divergence, not invalid IR — strict still rejects a
+	// statically-primitive key below.)
+	if kVal.Ty.IsDynamic && e.compatJS() {
+		return e.coerce(kVal, TypePtr).Ref, nil
 	}
 	if kVal.Ty.IR != "ptr" || isStringTy(kVal.Ty) {
 		return "", fmt.Errorf("%d:%d: a WeakMap/WeakSet key must be an object (not a primitive)", pos.Line, pos.Col)

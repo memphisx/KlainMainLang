@@ -25,7 +25,10 @@
         "rows": [
           {
             "feature": "`JSON.stringify(number)`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "A non-finite float (`Infinity`/`-Infinity`/`NaN`) serializes to its literal spelling (invalid JSON), not `null` as in real JS — `JSON.stringify(1/0)` is `'Infinity'` (Node: `'null'`)."
+            ]
           },
           {
             "feature": "`JSON.stringify(string)`",
@@ -33,7 +36,10 @@
           },
           {
             "feature": "`JSON.stringify(number[])`",
-            "status": "implemented"
+            "status": "implemented",
+            "caveats": [
+              "A non-finite float element serializes to `Infinity`/`NaN` text, not `null` — `JSON.stringify([1, 1/0, 2])` is `'[1,Infinity,2]'` (Node: `'[1,null,2]'`); affects any float array/field."
+            ]
           },
           {
             "feature": "`JSON.stringify(string[])`",

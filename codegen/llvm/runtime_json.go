@@ -34,6 +34,18 @@ func (e *Emitter) ensureJSONStringifyStr() {
 	e.emitGlobal(`
 define ptr @__kml_json_str_str(ptr %s) {
 entry:
+  ; A null string pointer (an absent/null ptr-typed field, e.g. an Error's
+  ; unset code, ADR-00683) would fault at strlen(NULL); serialize it as an
+  ; empty JSON string rather than crashing.
+  %isnull = icmp eq ptr %s, null
+  br i1 %isnull, label %nullstr, label %go
+nullstr:
+  %eb = call ptr @__kml_str_alloc(i64 2)
+  store i8 34, ptr %eb, align 1
+  %eb1 = getelementptr i8, ptr %eb, i64 1
+  store i8 34, ptr %eb1, align 1
+  ret ptr %eb
+go:
   %len = call i64 @strlen(ptr %s)
   %max = mul i64 %len, 2
   %total = add i64 %max, 3
@@ -41,8 +53,8 @@ entry:
   store i8 34, ptr %buf, align 1
   br label %loop
 loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %plain ], [ %i2e, %esc ]
-  %j = phi i64 [ 1, %entry ], [ %j2, %plain ], [ %j3, %esc ]
+  %i = phi i64 [ 0, %go ], [ %i2, %plain ], [ %i2e, %esc ]
+  %j = phi i64 [ 1, %go ], [ %j2, %plain ], [ %j3, %esc ]
   %at_end = icmp eq i64 %i, %len
   br i1 %at_end, label %close, label %body
 body:

@@ -9,8 +9,8 @@
             v-model="query"
             type="text"
             class="km-search__input"
-            placeholder="Search the API reference…"
-            aria-label="Search the API reference"
+            placeholder="Search the docs…"
+            aria-label="Search the documentation"
             @keydown.down.prevent="move(1)"
             @keydown.up.prevent="move(-1)"
             @keydown.enter.prevent="choose(results[active])"
@@ -23,24 +23,26 @@
           <ul v-if="results.length" class="km-search__list">
             <li
               v-for="(r, i) in results"
-              :key="r.surface + '#' + r.id"
+              :key="r.kind + ':' + r.route + '#' + r.hash + ':' + r.name"
               class="km-search__item"
               :class="{ 'km-search__item--active': i === active }"
               @mousedown.prevent="choose(r)"
               @mouseenter="active = i"
             >
               <div class="km-search__row">
-                <span class="km-search__name km-mono">{{ r.name }}</span>
-                <span class="km-search__dot" :class="'km-search__dot--' + r.badge"></span>
-                <span class="km-search__crumb">{{ r.surfaceTitle }}</span>
+                <span class="km-search__tag" :class="'km-search__tag--' + r.kind">{{ KIND_LABEL[r.kind] }}</span>
+                <span class="km-search__name" :class="{ 'km-mono': r.kind === 'api' }">{{ r.name }}</span>
+                <span v-if="r.kind === 'api'" class="km-search__dot" :class="'km-search__dot--' + r.badge"></span>
+                <span class="km-search__crumb">{{ r.title }}</span>
               </div>
               <p v-if="r.desc" class="km-search__desc">{{ r.desc }}</p>
             </li>
           </ul>
           <div v-else-if="query.trim()" class="km-search__empty">No matches for “{{ query.trim() }}”</div>
           <div v-else class="km-search__hint">
-            Search {{ all.length }} API reference entries across {{ surfaceCount }} surfaces — jump straight to a
-            method's signature, caveats, and example. Try <em>readFile</em>, <em>fetch</em>, or <em>toSorted</em>.
+            Search all of the docs — {{ stats.pages }} pages, {{ stats.references }} API surfaces,
+            {{ stats.api }} API entries, and {{ stats.examples }} examples. Try <em>readFile</em>,
+            <em>klain:sync</em>, <em>CLI flags</em>, or <em>load tester</em>.
           </div>
         </div>
       </div>
@@ -51,7 +53,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { surfaces } from 'src/data/reference-index.js'
+import { searchRecords, searchStats } from 'src/data/search-index.js'
 
 const props = defineProps({ modelValue: { type: Boolean, default: false } })
 const emit = defineEmits(['update:modelValue'])
@@ -61,22 +63,13 @@ const query = ref('')
 const active = ref(0)
 const input = ref(null)
 
-// Flatten every surface's entries once — ~500 small records, cheap to scan.
-const all = []
-for (const [surface, data] of Object.entries(surfaces)) {
-  for (const e of data.entries) {
-    all.push({
-      surface,
-      surfaceTitle: data.title,
-      id: e.id,
-      name: e.name,
-      badge: e.badge,
-      desc: (e.description || '').slice(0, 120),
-      hay: (e.name + ' ' + data.title + ' ' + (e.description || '')).toLowerCase()
-    })
-  }
-}
-const surfaceCount = Object.keys(surfaces).length
+const KIND_LABEL = { page: 'Page', reference: 'Reference', api: 'API', example: 'Example' }
+// Kind ordering for the tie-break: a page/surface beats an individual method
+// which beats an example when relevance is otherwise equal.
+const KIND_RANK = { page: 0, reference: 1, api: 2, example: 3 }
+
+const all = searchRecords
+const stats = searchStats
 
 const results = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -88,8 +81,12 @@ const results = computed(() => {
     const score = r.name.toLowerCase() === q ? 0 : inName ? 1 : 2
     scored.push({ r, score })
   }
-  scored.sort((a, b) => a.score - b.score || a.r.name.length - b.r.name.length)
-  return scored.slice(0, 20).map((s) => s.r)
+  scored.sort((a, b) =>
+    a.score - b.score ||
+    (KIND_RANK[a.r.kind] - KIND_RANK[b.r.kind]) ||
+    a.r.name.length - b.r.name.length
+  )
+  return scored.slice(0, 24).map((s) => s.r)
 })
 
 function move (d) {
@@ -99,9 +96,11 @@ function move (d) {
 function choose (r) {
   if (!r) return
   close()
-  router.push({ path: '/docs/reference/' + r.surface, hash: '#' + r.id }).then(() => {
+  const target = r.hash ? { path: r.route, hash: '#' + r.hash } : { path: r.route }
+  router.push(target).then(() => {
+    if (!r.hash) return
     setTimeout(() => {
-      const el = document.getElementById(r.id)
+      const el = document.getElementById(r.hash)
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, 60)
   })
@@ -168,6 +167,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 .km-search__item { padding: 9px 12px; border-radius: 5px; cursor: pointer; }
 .km-search__item--active { background: rgba(198,160,60,0.12); }
 .km-search__row { display: flex; align-items: center; gap: 10px; }
+.km-search__tag {
+  flex: none; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; border: 1px solid var(--km-line); color: #9a9a9a; background: #0d0d0d;
+  min-width: 62px; text-align: center;
+}
+.km-search__tag--page { color: #8fb3e0; border-color: rgba(143,179,224,0.35); }
+.km-search__tag--reference { color: #c6a03c; border-color: rgba(198,160,60,0.4); }
+.km-search__tag--api { color: #9a9a9a; }
+.km-search__tag--example { color: #6fd18a; border-color: rgba(111,209,138,0.35); }
 .km-search__name { color: #eaeaea; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .km-search__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .km-search__dot--exact { background: #6fd18a; }

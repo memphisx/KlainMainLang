@@ -6,11 +6,13 @@
   "type": "module",
   "scripts": {
     "gen:examples": "node scripts/gen-examples.mjs",
+    "gen:conformance": "node scripts/gen-conformance.mjs",
+    "gen": "npm run gen:examples && npm run gen:conformance",
     "check:reference": "node scripts/check-reference.mjs",
-    "dev": "npm run gen:examples && quasar dev",
-    "dev:ssg": "npm run gen:examples && quasar dev -m ssg",
-    "build": "npm run check:reference && npm run gen:examples && quasar build -m ssg",
-    "build:spa": "npm run gen:examples && quasar build"
+    "dev": "npm run gen && quasar dev",
+    "dev:ssg": "npm run gen && quasar dev -m ssg",
+    "build": "npm run check:reference && npm run gen && quasar build -m ssg",
+    "build:spa": "npm run gen && quasar build"
   },
   "dependencies": {
     "@fontsource/inter": "^5.1.0",
@@ -23,6 +25,7 @@
     "vue-router": "^5.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@quasar/app-vite": "^3.8.1",
     "autoprefixer": "^10.4.0",
     "postcss": "^8.4.0",

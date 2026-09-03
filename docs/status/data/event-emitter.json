@@ -78,6 +78,27 @@
             "notes": [
               "Resolved entirely at the `.emit()` call site — no runtime cost when the event name isn't `'error'` beyond the `strcmp` itself"
             ]
+          },
+          {
+            "feature": "`events.once(emitter, name)` (static helper)",
+            "status": "implemented",
+            "caveats": [
+              "Single-value and homogeneous multi-argument events → `Promise<args[]>`; a mixed-type multi-argument event is a clean rejection (homogeneous arrays only), and payload-less events are deferred ([ADR-00675](../adr/ADR-00675.md))"
+            ],
+            "notes": [
+              "Returns a Promise that resolves with the event's argument array the first time it fires; `const arr = await once(ee, 'x')`"
+            ]
+          },
+          {
+            "feature": "`events.on(emitter, name)` (async iterator)",
+            "status": "implemented",
+            "caveats": [
+              "Same payload rules as `once`: single-value / homogeneous multi-argument events; mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections",
+              "The buffer is unbounded (Node's default); iterator `.return()`/`.throw()` unregistering the listener is a deferred follow-up ([ADR-00677](../adr/ADR-00677.md))"
+            ],
+            "notes": [
+              "An async iterator yielding the event's argument array on each emission (`for await (const [x] of on(ee, 'data'))`), buffering events between iterations and parking the consumer when the queue drains; the listener attaches eagerly at the `on(...)` call. Built on the array-yielding generators of [ADR-00676](../adr/ADR-00676.md)"
+            ]
           }
         ]
       }

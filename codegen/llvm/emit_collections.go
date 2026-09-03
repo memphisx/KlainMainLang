@@ -111,20 +111,34 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 		// shape here before forcing the `[K, V]` element hint: every element must
 		// be a 2-element array literal, else the hinted store would miscompile a
 		// scalar as a tuple pointer.
-		for _, el := range lit.Elements {
+		// Reject a genuinely heterogeneous entries literal (`new Map([['a','b'],
+		// [1,1]])` — a mixed-type map that would need any-typed keys/values),
+		// rather than hinting every pair to the first pair's tuple shape and
+		// storing the mismatched scalar raw into a ptr field. The homogeneity
+		// check is against the *first pair's own inferred types*, not the
+		// caller-supplied keyTy/valTy: a caller may normalize those (e.g.
+		// Object.fromEntries forces the key to `string`/ptr and derives the
+		// value from a tuple inference), and comparing the raw element literals
+		// against a normalized type produced false rejections of a uniform
+		// entries array (ADR-00650 over-fired on `Object.fromEntries([['x',10],
+		// ['y',20]])` — the values are all numbers, but the derived valTy
+		// differed from the literal's inferred `i64`).
+		var refKey, refVal Type
+		for i, el := range lit.Elements {
 			pair, isArr := el.(*ast.ArrayLiteral)
 			if !isArr || len(pair.Elements) != 2 {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-element pairs", pos.Line, pos.Col)
 			}
-			// keyTy/valTy were inferred from the first pair (mapKVTypes); a later
-			// pair whose key/value type differs (`new Map([['a','b'],[1,1]])` — a
-			// mixed-type map that would need any-typed keys/values) is rejected
-			// cleanly here, rather than being hinted to the first pair's tuple
-			// shape and storing the mismatched scalar raw into a ptr field.
-			if kt := e.inferExprType(pair.Elements[0]); kt.IR != keyTy.IR && !keyTy.IsArray && !keyTy.IsDynamic && !isNullableScalar(keyTy) {
+			kt := e.inferExprType(pair.Elements[0])
+			vt := e.inferExprType(pair.Elements[1])
+			if i == 0 {
+				refKey, refVal = kt, vt
+				continue
+			}
+			if kt.IR != refKey.IR && !refKey.IsArray && !refKey.IsDynamic && !isNullableScalar(refKey) {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one key type — a heterogeneous-key map is not supported", pair.Elements[0].GetPos().Line, pair.Elements[0].GetPos().Col)
 			}
-			if vt := e.inferExprType(pair.Elements[1]); vt.IR != valTy.IR && !valTy.IsArray && !valTy.IsDynamic && !isNullableScalar(valTy) {
+			if vt.IR != refVal.IR && !refVal.IsArray && !refVal.IsDynamic && !isNullableScalar(refVal) {
 				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one value type — a heterogeneous-value map is not supported", pair.Elements[1].GetPos().Line, pair.Elements[1].GetPos().Col)
 			}
 		}

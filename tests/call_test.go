@@ -795,3 +795,16 @@ try { atob("=abc"); console.log("no throw"); } catch (e) { console.log((e as Err
 console.log(atob("aGVsbG8="))
 `, "InvalidCharacterError\nInvalidCharacterError\nInvalidCharacterError\nhello")
 }
+
+// ADR-00683: JSON.stringify over an allSettled result array (with null
+// object/string fields) no longer segfaults.
+func TestE2EJSONStringifyAllSettledNoCrash(t *testing.T) {
+	assertOutputImports(t, `
+async function main2(): Promise<void> {
+  const a = await Promise.allSettled([Promise.resolve(1), Promise.reject(2)]);
+  const s = JSON.stringify(a);
+  console.log(a[0].status, a[1].status, s.length > 0);
+}
+main2();
+`, "fulfilled rejected true")
+}

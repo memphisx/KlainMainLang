@@ -87,7 +87,7 @@ make ir FILE=examples/basics/basics.ts
 | `make fuzz-codegen [FUZZTIME=30s]` | Fuzz the full parse→codegen→clang→run pipeline (slower per-iteration) |
 | `make fuzz-all` | Run every fuzz target |
 | `make conformance-fetch` | Clone/update the pinned Test262 corpus into `.test262/` (idempotent, gitignored — see [Test262 conformance](#test262-conformance)) |
-| `make conformance` | Regenerate `docs/testing/CONFORMANCE-RESULTS.md` against the full Test262 corpus (fetches first if needed) |
+| `make conformance` | Regenerate the Test262 reports against the full corpus, both compat lanes, into `docs/testing/strict/` and `docs/testing/js/` (fetches first if needed) |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
 ## CLI flags
@@ -166,11 +166,13 @@ compiler. `RegExp`'s pcre2 has none of that drama and just links statically.
 
 ## Test262 conformance
 
-`docs/testing/CONFORMANCE-RESULTS.md` is a generated report, not hand-written — regenerate it, don't edit it. It's produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/ADR-00153.md) for the full design/investigation.
+The conformance reports under [`docs/testing/`](docs/testing/) are generated, not hand-written — regenerate them, don't edit them. They're produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/ADR-00153.md) for the full design/investigation.
+
+Each report is written **once per `-compat` flag**, into its own folder — `docs/testing/strict/` and `docs/testing/js/` — so each flag's history is independently diffable and a regression that only shows up under one flag is a clean per-file delta. Alongside Test262 there are two companion oracles regenerated the same way: `make conformance-node` (Node-core `test/parallel` behavioral suite) and `make conformance-ts` (the TypeScript accept/reject oracle). See [`docs/testing/README.md`](docs/testing/README.md) for the index.
 
 ```sh
 make conformance-fetch   # clone the pinned test262 commit into .test262/ (idempotent, gitignored — ~263MB, not vendored)
-make conformance         # regenerate docs/testing/CONFORMANCE-RESULTS.md (fetches first if needed; ~30s, all CPU cores)
+make conformance         # regenerate docs/testing/{strict,js}/CONFORMANCE-RESULTS.md — both lanes, full corpus (fetches first if needed; ~9 min per lane, all CPU cores)
 ```
 
 Both targets are safe to re-run on a fresh machine (a new dev machine, after `git clone`, or after switching hosts per this project's own "Machine switch" practice) — `make conformance` alone is enough; it fetches on demand. `tools/conformance/fetch.sh` pins an exact commit SHA (test262 has no versioned release tags upstream) so re-running reproduces the identical corpus; `tools/conformance/main.go` walks it directly as a Go library (no dependency on the `klainmain` binary being built first) and needs only `clang` on `PATH`, same as everything else here. `tools/conformance/harness-shim/` holds this repo's own compiler-compatible reimplementation of test262's shared `sta.js`/`assert.js` harness files (the real upstream ones use prototype-based pseudo-classes this compiler's type system can't represent) — every actual test file stays 100% unmodified.
@@ -197,7 +199,7 @@ docs/
   adr/              Architecture Decision Records: one per feature/bugfix, numbered, never renumbered
   tdd/              Technical Design Documents: scoping/design work for big features, referenced from docs/status/
   status/           Implementation status: docs/status/README.md is a scannable index (coverage % + caveats per area), one page per feature area for the full detail. All .md pages are generated from status/data/*.json (make status) — edit the JSON, not the pages
-  testing/          Test262 conformance results — generated, not hand-written; see "Test262 conformance" above
+  testing/          Conformance results — generated, not hand-written; one folder per -compat flag (strict/, js/), each with the Test262 / Node-core / TypeScript-oracle reports; see "Test262 conformance" above
 docker/             Dockerfiles verifying --static (+ fetch, + RegExp) actually runs in a scratch image, and -mm=gc actually runs on Linux/musl
 .github/
   workflows/        GitHub Actions: test + automated SemVer releases (see VERSIONING.md)
@@ -251,8 +253,8 @@ This project is deliberately a different, narrower animal. The honest head-to-he
 | | KlainMainLang (this) | PerryTS |
 |---|---|---|
 | Written in | Go, emitting LLVM IR text | Rust (SWC + LLVM) |
-| Value model | **static** — typed subset; no dynamic value model (`any`/`unknown` are boxed, everything else is statically typed) | **NaN-boxed dynamic** — emulates full JS; optional embedded V8 (`--enable-js-runtime`) for the untyped tail |
-| Numeric types | `number` is a **JS-faithful IEEE-754 double** by default, with opt-in **sized machine types** via JSDoc `/** @type {int8…int64, uint8…uint64, float32} */` for exact width/signedness when you want them | every number is a 64-bit double (NaN-boxed) |
+| Value model | **static by default, NaN-boxed dynamic on demand** — a statically-typed subset for typed code, *plus* a full NaN-boxed dynamic value model for `any`/`unknown` values and for everything under `-compat=js`: runtime property add/delete, a real prototype chain, `Proxy`/`Reflect` (the "D1" object model). Dynamic where you ask for it, static everywhere else | **NaN-boxed dynamic** — dynamic by default; optional embedded V8 (`--enable-js-runtime`) for the untyped tail |
+| Numeric types | a typed `number` is a raw **JS-faithful IEEE-754 double**, with opt-in **sized machine types** via JSDoc `/** @type {int8…int64, uint8…uint64, float32} */` for exact width/signedness; an `any`-typed number is a NaN-boxed double, same representation as PerryTS's | every number is a 64-bit double (NaN-boxed) |
 | Semantics | **opinionated, safer-than-JS by default** (`-compat=strict`), JS-faithful mode opt-in (`-compat=js`) | run all JS/TS faithfully |
 | Memory | **no GC by default** (`-mm=manual`), Boehm GC opt-in (`-mm=gc`) | generational GC by default |
 | Tunable knobs | memory mode, compat mode, crypto/bigint/regex backends, link-only-when-used deps | few knobs, opinionated defaults |

@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. Node's classic `EventEmitter` base class (`require('events')`) — not the same thing as the WHATWG `EventTarget`/`Event`/`CustomEvent` trio tracked in [EVENTS-CANCELLATION.md](EVENTS-CANCELLATION.md). Real Node code uses `EventEmitter` pervasively: `stream.Readable`/`Writable` (see [STREAMS.md](STREAMS.md)'s Node section), `child_process`'s spawned handles, and `net.Server`/sockets all extend it.
 
-**Coverage**: 6/6 (100%) · **Strict Coverage**: 3/6 (50%).
+**Coverage**: 8/8 (100%) · **Strict Coverage**: 3/8 (~38%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -16,3 +16,5 @@ Format: [Status page format](README.md#status-page-format).
 | `.off(event, listener)` / `.removeListener(...)` / `.removeAllListeners(...)` | ✅ | | • `removeAllListeners()` (no arg) clears every event; `removeAllListeners(event)` clears just that one |
 | `.listenerCount(event)` / `.eventNames()` | ✅ | | • `eventNames()` returns registration order (an implementation detail of the underlying map, not a documented ordering guarantee) |
 | `EventEmitter.prototype.emit('error', ...)` special-cases (throws if no `'error'` listener) | ✅ | | • Resolved entirely at the `.emit()` call site — no runtime cost when the event name isn't `'error'` beyond the `strcmp` itself |
+| `events.once(emitter, name)` (static helper) | ✅ | • Single-value and homogeneous multi-argument events → `Promise<args[]>`; a mixed-type multi-argument event is a clean rejection (homogeneous arrays only), and payload-less events are deferred ([ADR-00675](../adr/ADR-00675.md)) | • Returns a Promise that resolves with the event's argument array the first time it fires; `const arr = await once(ee, 'x')` |
+| `events.on(emitter, name)` (async iterator) | ✅ | • Same payload rules as `once`: single-value / homogeneous multi-argument events; mixed-type multi-argument, payload-less, and non-scalar payloads are clean rejections<br>• The buffer is unbounded (Node's default); iterator `.return()`/`.throw()` unregistering the listener is a deferred follow-up ([ADR-00677](../adr/ADR-00677.md)) | • An async iterator yielding the event's argument array on each emission (`for await (const [x] of on(ee, 'data'))`), buffering events between iterations and parking the consumer when the queue drains; the listener attaches eagerly at the `on(...)` call. Built on the array-yielding generators of [ADR-00676](../adr/ADR-00676.md) |
