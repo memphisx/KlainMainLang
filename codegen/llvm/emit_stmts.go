@@ -20,6 +20,9 @@ type namedLabel struct {
 	// labeled `break`/`continue` runs the finallys nested since here (same role
 	// as breakFinallyDepth for unlabeled targets).
 	finallyDepth int
+	// freeScope is len(e.scopes) at this labeled loop's entry — the TDD-00173
+	// analogue of finallyDepth for compiler-inserted frees.
+	freeScope int
 }
 
 // pushPendingLabel registers breakL/continueL under the label set by the
@@ -34,7 +37,7 @@ func (e *Emitter) pushPendingLabel(breakL, continueL string) func() {
 	}
 	name := e.pendingLabel
 	e.pendingLabel = ""
-	e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL, finallyDepth: len(e.pendingFinallys)})
+	e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL, finallyDepth: len(e.pendingFinallys), freeScope: len(e.scopes)})
 	return func() { e.namedLabelStack = e.namedLabelStack[:len(e.namedLabelStack)-1] }
 }
 
@@ -57,7 +60,7 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		if s.Kind == "var" {
 			e.promoteVarToFuncScope(s.Name)
 		}
-		return nil
+		return e.maybeRegisterAutoFree(s)
 	case *ast.VarDeclarationList:
 		for _, d := range s.Decls {
 			if err := e.emitVarDecl(d); err != nil {
@@ -65,6 +68,9 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 			}
 			if d.Kind == "var" {
 				e.promoteVarToFuncScope(d.Name)
+			}
+			if err := e.maybeRegisterAutoFree(d); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -149,7 +155,12 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 			if err := e.emitStmt(child); err != nil {
 				return err
 			}
+			e.emitOwnedFreesAfter(child)
 		}
+		// TDD-00173: this block's own @free/auto obligations fall due at its
+		// fall-through end (exit paths — return/break/continue — already
+		// emitted theirs inline).
+		e.emitFreesAtScopeExit(len(e.scopes))
 		e.popNestedFuncScope()
 		e.popScope()
 		return nil
@@ -211,7 +222,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		// is already stored, so the finally's side effects (which may `await`)
 		// run in order, matching JS (ADR-00612). Previously skipped, so a
 		// `finally` around an async `return` never ran.
-		if err := e.emitPendingFinallys(); err != nil {
+		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", e.coroRetLabel))
@@ -219,7 +230,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	}
 
 	if r.Value == nil {
-		if err := e.emitPendingFinallys(); err != nil {
+		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
 		switch {
@@ -243,7 +254,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if err != nil {
 			return err
 		}
-		if err := e.emitPendingFinallys(); err != nil {
+		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
 		e.emitTerminator(fmt.Sprintf("ret %s %s", nullableScalarStorageIR(e.currentRetType), agg))
@@ -275,7 +286,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			r1 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-			if err := e.emitPendingFinallys(); err != nil {
+			if err := e.emitReturnCleanups(); err != nil {
 				return err
 			}
 			e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", r1))
@@ -288,7 +299,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		if !arrVal.Ty.IsArray {
 			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
-		if err := e.emitPendingFinallys(); err != nil {
+		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
 		e.emitTerminator(fmt.Sprintf("ret {ptr, i64} %s", arrVal.Ref))
@@ -316,7 +327,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	} else if e.currentRetType.IR != "void" && e.currentRetType.IR != "" {
 		val = e.coerce(val, e.currentRetType)
 	}
-	if err := e.emitPendingFinallys(); err != nil {
+	if err := e.emitReturnCleanups(); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("ret %s %s", val.Ty.IR, val.Ref))
@@ -989,9 +1000,11 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 func (e *Emitter) pushBreakTarget(label string) func() {
 	e.breakStack = append(e.breakStack, label)
 	e.breakFinallyDepth = append(e.breakFinallyDepth, len(e.pendingFinallys))
+	e.breakFreeScope = append(e.breakFreeScope, len(e.scopes))
 	return func() {
 		e.breakStack = e.breakStack[:len(e.breakStack)-1]
 		e.breakFinallyDepth = e.breakFinallyDepth[:len(e.breakFinallyDepth)-1]
+		e.breakFreeScope = e.breakFreeScope[:len(e.breakFreeScope)-1]
 	}
 }
 
@@ -999,9 +1012,11 @@ func (e *Emitter) pushBreakTarget(label string) func() {
 func (e *Emitter) pushContinueTarget(label string) func() {
 	e.continueStack = append(e.continueStack, label)
 	e.continueFinallyDepth = append(e.continueFinallyDepth, len(e.pendingFinallys))
+	e.continueFreeScope = append(e.continueFreeScope, len(e.scopes))
 	return func() {
 		e.continueStack = e.continueStack[:len(e.continueStack)-1]
 		e.continueFinallyDepth = e.continueFinallyDepth[:len(e.continueFinallyDepth)-1]
+		e.continueFreeScope = e.continueFreeScope[:len(e.continueFreeScope)-1]
 	}
 }
 
@@ -1037,6 +1052,7 @@ func (e *Emitter) emitBreak(s *ast.BreakStatement) error {
 		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
 			return err
 		}
+		e.emitFreesAbove(lbl.freeScope)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", lbl.breakL))
 		return nil
 	}
@@ -1046,6 +1062,7 @@ func (e *Emitter) emitBreak(s *ast.BreakStatement) error {
 	if err := e.emitFinallysToDepth(e.breakFinallyDepth[len(e.breakFinallyDepth)-1]); err != nil {
 		return err
 	}
+	e.emitFreesAbove(e.breakFreeScope[len(e.breakFreeScope)-1])
 	e.emitTerminator(fmt.Sprintf("br label %%%s", e.breakStack[len(e.breakStack)-1]))
 	return nil
 }
@@ -1062,6 +1079,7 @@ func (e *Emitter) emitContinue(s *ast.ContinueStatement) error {
 		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
 			return err
 		}
+		e.emitFreesAbove(lbl.freeScope)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", lbl.continueL))
 		return nil
 	}
@@ -1071,6 +1089,7 @@ func (e *Emitter) emitContinue(s *ast.ContinueStatement) error {
 	if err := e.emitFinallysToDepth(e.continueFinallyDepth[len(e.continueFinallyDepth)-1]); err != nil {
 		return err
 	}
+	e.emitFreesAbove(e.continueFreeScope[len(e.continueFreeScope)-1])
 	e.emitTerminator(fmt.Sprintf("br label %%%s", e.continueStack[len(e.continueStack)-1]))
 	return nil
 }

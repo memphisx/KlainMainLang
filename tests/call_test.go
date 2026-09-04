@@ -808,3 +808,14 @@ async function main2(): Promise<void> {
 main2();
 `, "fulfilled rejected true")
 }
+
+// ADR-00685: JSON.stringify serializes a non-finite number as null (valid JSON).
+func TestE2EJSONStringifyNonFinite(t *testing.T) {
+	assertOutput(t, `
+console.log(JSON.stringify(1/0));
+console.log(JSON.stringify(0/0));
+const a: number[] = [1, 1/0, 0/0, 2];
+console.log(JSON.stringify(a));
+console.log(JSON.stringify({ x: -1/0, y: 5 }));
+`, "null\nnull\n[1,null,null,2]\n{\"x\":null,\"y\":5}")
+}

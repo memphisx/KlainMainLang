@@ -204,7 +204,7 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.coerce(sr, TypeI64).Ref, lenReg)
+		startN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(sr).Ref, lenReg)
 	} else {
 		startN = "0"
 	}
@@ -214,7 +214,7 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(er, TypeI64).Ref, lenReg)
+		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(er).Ref, lenReg)
 	} else {
 		endN = lenReg
 	}
@@ -266,7 +266,7 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	if err != nil {
 		return Value{}, err
 	}
-	normIdx := e.emitNormalizeSliceIdx(e.coerce(idxRaw, TypeI64).Ref, lenReg)
+	normIdx := e.emitNormalizeSliceIdx(e.arrayIndexToI64(idxRaw).Ref, lenReg)
 
 	// An array-typed result (nested array, TDD-00029) needs a {ptr,i64}
 	// slot, not elemTy.IR's plain "ptr" — the same StructFieldIR convention
@@ -329,7 +329,7 @@ func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	normIdx := e.emitNormalizeSliceIdx(e.coerce(idxRaw, TypeI64).Ref, lenReg)
+	normIdx := e.emitNormalizeSliceIdx(e.arrayIndexToI64(idxRaw).Ref, lenReg)
 
 	valRaw, err := e.emitExpr(args[1])
 	if err != nil {

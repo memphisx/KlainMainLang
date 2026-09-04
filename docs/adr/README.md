@@ -726,3 +726,20 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00681](ADR-00681.md) | object-array `sort(comparator)` was a silent no-op | |
 | [00682](ADR-00682.md) | optional-chaining `a?.m()` didn't short-circuit a method call | |
 | [00683](ADR-00683.md) | `JSON.stringify` segfaulted on null object/string fields | |
+| [00684](ADR-00684.md) | `fs` errors carry `err.code` (`ENOENT`, …) | |
+| [00685](ADR-00685.md) | `JSON.stringify` of a non-finite number serializes as `null` | |
+| [00686](ADR-00686.md) | HOF callback with an untyped array parameter emitted invalid IR | |
+| [00687](ADR-00687.md) | a void-returning predicate emitted invalid IR (`icmp` on `void`) | |
+| [00688](ADR-00688.md) | assigning an incompatible value to a typed array element emitted invalid IR | |
+| [00689](ADR-00689.md) | Promise.any value fidelity and Promise.allSettled result shape | `Extends [ADR-00073](ADR-00073.md), [ADR-00683](ADR-00683.md)`, `Implements [TDD-00016](../tdd/TDD-00016.md)` |
+| [00690](ADR-00690.md) | console/util formatting fidelity — format specifiers, undefined, Map/Set, Buffer | |
+| [00691](ADR-00691.md) | HTTP server response `Date` header and HTTP/1.1 keep-alive | |
+| [00692](ADR-00692.md) | fs.readFileSync on a directory throws EISDIR | |
+| [00693](ADR-00693.md) | AbortSignal default reason and static abort()/any() | Implements [TDD-00081](../tdd/TDD-00081.md) |
+| [00694](ADR-00694.md) | String array indices and slice-method bounds emit valid IR | |
+| [00695](ADR-00695.md) | Untyped replace()/replaceAll() replacer-callback parameters default to the (match, offset, string) signature | |
+| [00696](ADR-00696.md) | util.format `%d` (no float truncation) and `%c` (consume-and-drop) | |
+| [00697](ADR-00697.md) | String-literal-search replace()/replaceAll() function replacer | |
+| [00698](ADR-00698.md) | @free block-exit frees + the conservative escape check | |
+| [00699](ADR-00699.md) | @owned last-use frees — locals and parameters | |
+| [00700](ADR-00700.md) | -mm=auto — implicit auto-free of provably-local values | |

@@ -18,7 +18,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.includes(substr)` | ✅ | • Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text). | |
 | `.startsWith(prefix)` | ✅ | | |
 | `.endsWith(suffix)` | ✅ | | |
-| `.replace(from, to)` | ✅ | | |
+| `.replace(from, to)` | ✅ | | • A function replacer is invoked with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged rather than inserting between positions |
 | `.split(sep)` | ✅ | | • Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
@@ -35,7 +35,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.normalize()` | ❌ | | • Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text |
 | `.match()` / `.matchAll()` | ✅ | • `.matchAll()` returns an eager `string[][]` rather than a lazy iterator ([REGEXP.md](REGEXP.md)) | • PCRE2-backed; `.match()` is real JS-shaped ([REGEXP.md](REGEXP.md)) |
 | `.search(pattern)` | ✅ | | • A plain-string `pattern` is coerced to a `RegExp` as in real JS — metacharacters are interpreted (`"a.b".search(".")` is `0`) ([ADR-00548](../adr/ADR-00548.md))<br>• A `RegExp` `pattern` runs a real PCRE2 search |
-| `.replaceAll()` | ✅ | | • An empty search matches JS's insert-between-every-char behavior — `"abc".replaceAll("", "-")` is `"-a-b-c-"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md)) |
+| `.replaceAll()` | ✅ | | • An empty search matches JS's insert-between-every-char behavior — `"abc".replaceAll("", "-")` is `"-a-b-c-"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md))<br>• A function replacer is invoked once per occurrence with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged |
 | `.localeCompare(other)` | ✅ | • Length-aware byte-order comparison (normalized to exactly `-1`/`0`/`1`, binary-safe past an embedded NUL — [TDD-00120](../tdd/TDD-00120.md)/[ADR-00364](../adr/ADR-00364.md)), not real Unicode collation — no locale/`Intl` infrastructure ([ADR-00028](../adr/ADR-00028.md)) | |
 | `String.fromCharCode(n)` | ✅ | • Each argument is truncated to one byte (0–255), not encoded as a UTF-16 code unit — `String.fromCharCode(0x263A)` is `':'` (Node: `'☺'`). | |
 | `String.fromCodePoint(n)` | ✅ | • Shares `fromCharCode`'s one-byte truncation — no astral/surrogate encoding — a code point above `0xFF` is mangled (`String.fromCodePoint(0x263A)` → `':'`, Node: `'☺'`). | |

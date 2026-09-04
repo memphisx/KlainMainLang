@@ -443,7 +443,16 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				return Value{}, err
 			}
 		}
-		rhs = e.coerce(rhs, elemTy)
+		// coerceChecked (not plain coerce): a value that can't convert to the
+		// element type — e.g. `const a: number[] = []; a[i] = 'str'` — is a clean
+		// compile error, not an aggregate/pointer stored into a scalar slot
+		// (invalid IR: "constant expression type mismatch"). ADR-00688. In
+		// `-compat=js` the element type is `any`, which every value coerces into
+		// (boxes), so this only rejects a genuine strict-mode type mismatch.
+		rhs, err = e.coerceChecked(rhs, elemTy, ex.GetPos(), "array-element assignment")
+		if err != nil {
+			return Value{}, err
+		}
 		e.storeArrayElem(gepReg, elemTy, rhs)
 		return rhs, nil
 	}

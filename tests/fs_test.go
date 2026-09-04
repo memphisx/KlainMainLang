@@ -605,3 +605,19 @@ try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.mes
 `, p, p, dir)
 	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
 }
+
+// ADR-00684: fs errors carry the Node error code, so `e.code === 'ENOENT'`
+// (the canonical fs error idiom) matches.
+func TestE2EFsErrorCode(t *testing.T) {
+	assertOutputImports(t, `
+import { readFileSync } from 'fs'
+function main2(): void {
+  try {
+    readFileSync('/no/such/dir/nope.txt')
+  } catch (e: any) {
+    console.log(e.code, e.code === 'ENOENT')
+  }
+}
+main2()
+`, "ENOENT true")
+}

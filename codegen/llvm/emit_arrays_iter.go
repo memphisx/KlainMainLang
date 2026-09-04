@@ -414,7 +414,7 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 	if err != nil {
 		return Value{}, err
 	}
-	targetN := e.emitNormalizeSliceIdx(e.coerce(targetRaw, TypeI64).Ref, lenReg)
+	targetN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(targetRaw).Ref, lenReg)
 
 	startN := "0"
 	if len(args) >= 2 {
@@ -422,7 +422,7 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+		startN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
 	}
 
 	endN := lenReg
@@ -431,7 +431,7 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, lenReg)
+		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(endRaw).Ref, lenReg)
 	}
 
 	// count = min(max(end - start, 0), len - target) — never reads past

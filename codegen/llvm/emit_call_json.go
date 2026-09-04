@@ -318,6 +318,14 @@ func (e *Emitter) emitJSONStringifyTuple(val Value, ind jsonIndent) (Value, erro
 // emitJSONStringifyObject builds {"k1":v1,"k2":v2,...} inline by walking the
 // known fields of a statically-typed object. Handles nested objects recursively.
 func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, error) {
+	// A Promise.allSettled() settlement object is serialized specially: real JS
+	// gives a fulfilled entry exactly `{status, value}` and a rejected entry
+	// exactly `{status, reason}` — never both keys. The static struct carries
+	// both slots (this compiler has no optional fields), so the applicable key is
+	// chosen at runtime from the `status` discriminant rather than emitting both.
+	if isSettlementType(val.Ty) {
+		return e.emitJSONStringifySettlement(val, ind)
+	}
 	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
 	fields := val.Ty.VisibleFields()
 	for i, field := range fields {
@@ -358,6 +366,109 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		}
 	}
 	return e.jsonAppend(acc, ind.closeBracket("}", len(fields)))
+}
+
+// isSettlementType reports whether ty is a Promise.allSettled() settlement
+// object — an object whose visible fields are exactly status, value, reason (in
+// that order), the shape SettlementType builds. Detected structurally so the
+// JSON path needs no extra Type flag.
+func isSettlementType(ty Type) bool {
+	if !ty.IsObject || ty.IsClass {
+		return false
+	}
+	vf := ty.VisibleFields()
+	if len(vf) != 3 {
+		return false
+	}
+	return vf[0].Name == "status" && vf[1].Name == "value" && vf[2].Name == "reason"
+}
+
+// emitJSONStringifySettlement serializes one Promise.allSettled() settlement
+// object, emitting only the key that applies to its runtime status: `value` for
+// a fulfilled entry, `reason` for a rejected one (never both), matching real JS.
+// The `status` string pointer is compared against the interned "fulfilled"
+// constant (internString dedups, so a fulfilled entry's slot holds that exact
+// pointer) to pick the branch without a string compare.
+func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value, error) {
+	structIR := val.Ty.StructIR()
+	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
+
+	// status key + quoted value (member 0).
+	var err error
+	if acc, err = e.jsonAppend(acc, ind.itemPrefix(0)+`"status"`+ind.colon()); err != nil {
+		return Value{}, err
+	}
+	sIdx, _, _ := val.Ty.FieldIndex("status")
+	sGep := e.freshReg()
+	statusPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sGep, structIR, val.Ref, sIdx))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", statusPtr, sGep))
+	statusJSON, err := e.emitJSONStringifyValue(Value{Ref: statusPtr, Ty: TypePtr}, ind.child())
+	if err != nil {
+		return Value{}, err
+	}
+	if acc, err = e.emitStringConcat(acc, statusJSON); err != nil {
+		return Value{}, err
+	}
+
+	// Runtime discriminant: fulfilled entries carry the interned "fulfilled" ptr.
+	isFul := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isFul, statusPtr, e.internString("fulfilled")))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	fulL := e.freshLabel("json.settle.ful")
+	rejL := e.freshLabel("json.settle.rej")
+	mergeL := e.freshLabel("json.settle.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFul, fulL, rejL))
+
+	// Fulfilled: append "value": <value> only.
+	e.emitLabel(fulL)
+	accF, err := e.jsonAppend(acc, ind.itemPrefix(1)+`"value"`+ind.colon())
+	if err != nil {
+		return Value{}, err
+	}
+	vIdx, vTy, _ := val.Ty.FieldIndex("value")
+	vGep := e.freshReg()
+	vReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, structIR, val.Ref, vIdx))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vReg, StructFieldIR(vTy), vGep, vTy.Align()))
+	vJSON, err := e.emitJSONStringifyValue(Value{Ref: vReg, Ty: vTy}, ind.child())
+	if err != nil {
+		return Value{}, err
+	}
+	if accF, err = e.emitStringConcat(accF, vJSON); err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accF.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	// Rejected: append "reason": <reason> only. The reason slot holds the raw
+	// rejection value's string form (emit_promise.go), so serialize it as a
+	// string rather than as the errorObjType the slot is nominally typed as.
+	e.emitLabel(rejL)
+	accR, err := e.jsonAppend(acc, ind.itemPrefix(1)+`"reason"`+ind.colon())
+	if err != nil {
+		return Value{}, err
+	}
+	rIdx, _, _ := val.Ty.FieldIndex("reason")
+	rGep := e.freshReg()
+	rReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rGep, structIR, val.Ref, rIdx))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", rReg, rGep))
+	rJSON, err := e.emitJSONStringifyValue(Value{Ref: rReg, Ty: TypePtr}, ind.child())
+	if err != nil {
+		return Value{}, err
+	}
+	if accR, err = e.emitStringConcat(accR, rJSON); err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accR.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	return e.jsonAppend(Value{Ref: out, Ty: TypePtr}, ind.closeBracket("}", 2))
 }
 
 // emitJSONStringifyValue returns a ptr string with the JSON encoding of val.
@@ -480,10 +591,35 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 			return Value{Ref: r, Ty: TypePtr}, nil
 		}
 		if val.Ty.Float {
-			// Coercing a float to i64 below would truncate (9.5 -> 9) instead
-			// of formatting it; emitValueToString already does correct %g
-			// formatting for floats, so reuse it instead of a separate helper.
-			return e.emitValueToString(val)
+			// JS serializes a non-finite number (NaN / ±Infinity) as `null`
+			// (ADR-00685); a finite float formats via emitValueToString (%g).
+			// Finiteness test: `x - x == 0` is true only for a finite x
+			// (Inf-Inf and NaN-NaN are both NaN, so != 0).
+			ir := val.Ty.IR
+			diff := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fsub %s %s, %s", diff, ir, val.Ref, val.Ref))
+			fin := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fcmp oeq %s %s, 0.0", fin, ir, diff))
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			finL := e.freshLabel("json.fin")
+			nfL := e.freshLabel("json.nonfin")
+			mL := e.freshLabel("json.finmerge")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fin, finL, nfL))
+			e.emitLabel(finL)
+			sv, err := e.emitValueToString(val)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+			e.emitLabel(nfL)
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("null"), slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+			e.emitLabel(mL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+			return Value{Ref: out, Ty: TypePtr}, nil
 		}
 		e.ensureJSONStringifyNum()
 		coerced := e.coerce(val, TypeI64)

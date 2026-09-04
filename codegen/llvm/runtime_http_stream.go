@@ -27,7 +27,10 @@ func (e *Emitter) ensureHTTPStreamRuntime() {
 	e.ensureStrlen()
 
 	// fcntl is already declared by the http runtime this always rides on.
-	headFmt := e.internString("HTTP/1.1 %lld OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n%s\r\n")
+	// Chunked responses stamp a Date header like the buffered path, but stay
+	// `Connection: close` (the writer closes the fd at stream end).
+	e.ensureHTTPDate()
+	headFmt := e.internString("HTTP/1.1 %lld OK\r\nDate: %s\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n%s\r\n")
 	chunkFmt := e.internString("%llx\r\n")
 	crlf := e.internString("\r\n")
 	terminator := e.internString("0\r\n\r\n")
@@ -37,9 +40,11 @@ func (e *Emitter) ensureHTTPStreamRuntime() {
 define void @__kml_http_send_stream_head(i32 %%connfd, i64 %%status, ptr %%extraHeaders) {
 entry:
   %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
-  %%bufsize = add i64 %%hdrlen, 128
+  %%bufsize = add i64 %%hdrlen, 160
   %%buf = call ptr @malloc(i64 %%bufsize)
-  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%status, ptr %%extraHeaders)
+  %%datebuf = alloca [40 x i8], align 1
+  call void @__kml_http_date(ptr %%datebuf)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, i64 %%status, ptr %%datebuf, ptr %%extraHeaders)
   %%n64 = sext i32 %%n to i64
   %%ign = call i64 @write(i32 %%connfd, ptr %%buf, i64 %%n64)
   call void @free(ptr %%buf)

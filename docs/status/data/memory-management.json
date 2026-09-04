@@ -9,11 +9,11 @@
     },
     {
       "kind": "block",
-      "text": "**Coverage**: 2/3 modes (`manual`, `gc`); `auto` is design-only."
+      "text": "**Coverage**: 3/3 modes (`manual`, `gc`, `auto`)."
     },
     {
       "kind": "block",
-      "text": "**Strict Coverage**: 0/3 — both implemented modes carry a real, disclosed caveat (a non-empty Caveats cell), so neither counts."
+      "text": "**Strict Coverage**: 0/3 — every mode carries a real, disclosed caveat (a non-empty Caveats cell), so none counts."
     },
     {
       "kind": "block",
@@ -55,12 +55,21 @@
           },
           {
             "feature": "`auto`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, reassigned, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String` arguments; fresh-result container methods for initializers) start minimal",
+              "No per-branch last-use placement for `@owned` — a last use inside `if`/loop frees at the join/after the loop; any use inside `try` falls back to block exit",
+              "Thrown paths do not free (a same-function `catch` could resume with the value live) — they leak instead",
+              "`@owned` parameters: direct calls to statically-resolved function declarations only; using such a function as a value is a compile error",
+              "Unsupported in `async`/generator functions (values may live across suspension points)",
+              "`-compat=js` dynamic objects and class instances are never freed (no free routine / methods could retain `this`)"
+            ],
             "notes": [
-              "Not started. Compiler-inserted frees at compile-time-proven-safe points, no runtime collector — sequenced last because a wrong escape analysis is a use-after-free, not just a delayed free",
-              "Staged: Stage 2 is a `/** @free */` annotation plus a conservative local escape check (insert `free()` at every block exit path, reject if the value might escape); Stage 3 is an `@owned` linear-value annotation with real last-use liveness analysis",
-              "`Memory.free(x)` would be a compile error in this mode (the compiler's own inserted frees can't account for a manual free it didn't plan for)",
-              "See [TDD-00001](../tdd/TDD-00001.md)'s Design section for the full staging rationale and why a Rust-style borrow checker was ruled out as disproportionate"
+              "Compiler-inserted frees at compile-time-proven-safe points, no runtime collector ([TDD-00173](../tdd/TDD-00173.md), completing [TDD-00001](../tdd/TDD-00001.md)'s staging): `/** @free */` frees at every declaring-block exit path (fall-through, `return`, `break`, `continue`), `/** @owned */` frees right after the statically-determined last use (on locals and, via a function-level `@owned name` tag, on parameters — call sites must pass a provably-dead value), and every *unannotated* local that passes the same escape check is freed at block exit automatically",
+              "The annotations are honored in **all three modes** — they are compiler-checked, compiler-placed `Memory.free` (under `gc` the emitted free rides the shim as a `GC_free` early-release hint); an annotation the escape check cannot prove safe is a compile error, never a silent no-op",
+              "`Memory.free(x)` is a compile error under `-mm=auto` (the compiler owns every free); in the other modes `Memory.free` on an *annotated* variable is rejected per-variable by the escape check",
+              "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam a future FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)) plugs into once",
+              "Verified by an RSS-bounded churn E2E (~160MB churned, peak RSS asserted <30MB with zero annotations)"
             ]
           }
         ]

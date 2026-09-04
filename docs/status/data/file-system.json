@@ -44,7 +44,7 @@
               "See [ADR-00094](../adr/ADR-00094.md)"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
@@ -55,7 +55,7 @@
               "`data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No third `options` argument — `writeFileSync(p, d, 'utf8')` / `{ flag: 'a' }` are compile errors (`encoding`/`mode`/`flag` unavailable — use `appendFileSync` to append)."
             ]
           },
@@ -67,7 +67,7 @@
               "Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync`"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No third `options` argument (`encoding`/`mode`/`flag` rejected at compile time)."
             ]
           },
@@ -110,7 +110,7 @@
               "Deletes a file. Throws on failure"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
@@ -142,7 +142,7 @@
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "Path only — no `options`; `withFileTypes` (a `Dirent[]`), `recursive`, and `encoding: 'buffer'` are unsupported (always a one-level `string[]`)."
             ]
           },
@@ -154,14 +154,14 @@
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
             "feature": "`fs.copyFileSync(src, dest)`",
             "status": "implemented",
             "caveats": [
-              "Thrown errors carry only a `strerror` message, not Node's `code`/`errno`/`path`/`syscall` — `try { fs.readFileSyncBytes('/nope') } catch (e) { e.code }` yields `undefined`, not `'ENOENT'`.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No `mode` argument — `fs.constants.COPYFILE_EXCL`/`FICLONE` unsupported; always overwrites the destination."
             ],
             "notes": [
@@ -199,8 +199,9 @@
             "feature": "`File` / `FileReader` / `FileSystemFileHandle` (browser-flavored File API)",
             "status": "missing",
             "notes": [
-              "Not planned — these model browser concepts this compiler has no equivalent for"
-            ]
+              "**Differentiator (scoped — [TDD-00172](../tdd/TDD-00172.md)).** Splits in two: the **data layer** (`File extends Blob`, `FileReader.readAsText`/`ArrayBuffer`/`DataURL`) is a thin fs-backed reinterpretation with no UI — path-backed `File`s, reads firing `onload` on the event loop; the **picker layer** (`showOpenFilePicker` → `FileSystemFileHandle`) resolves a path through a pluggable UI backend — a `klain:tui` file-picker widget, a `klain:webview` native dialog, or an explicit-path degradation when headless. Serves interactive native apps (TUI file managers/editors); the data layer is the near-term, standalone-useful piece."
+            ],
+            "notesPlain": true
           }
         ]
       }

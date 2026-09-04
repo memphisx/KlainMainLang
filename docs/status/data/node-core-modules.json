@@ -26,6 +26,9 @@
           {
             "feature": "`querystring`",
             "status": "implemented",
+            "caveats": [
+              "Repeated keys collapse to the last value instead of an array — `.parse('a=1&a=3')` then `.stringify(...)` yields `a=3` (Node: `{a:['1','3']}` → `a=1&a=3`), because the backing `Map<string,string>` holds a single value per key"
+            ],
             "notes": [
               "Surface: `.parse`, `.stringify`",
               "A `Map<string,string>` in, out — the same shape `req.query`/`URLSearchParams` already use",
@@ -150,7 +153,8 @@
               "The callback form fires synchronously, not deferred to the next event-loop tick",
               "No Brotli (`brotliCompress*`) — it would pull in `-lbrotli`, a new system dependency this binding deliberately avoids",
               "No class/stream forms (`createGzip()`, `zlib.Gzip`, …) — the WHATWG `CompressionStream`/`DecompressionStream` cover the streaming case ([STREAMS.md](STREAMS.md))",
-              "`{ level }` is the only supported option and must be a compile-time constant"
+              "`{ level }` is the only supported option and must be a compile-time constant",
+              "A decompressed result needs an explicit `: Buffer` annotation to call `.toString()` — `zlib.gunzipSync(g).toString()` on the unannotated value is a compile error (`a TypedArray has no method 'toString'`), since the return type infers as a bare `Uint8Array`"
             ],
             "notes": [
               "Surface: `gzip`/`gunzip`, `deflate`/`inflate`, `deflateRaw`/`inflateRaw`, `unzip`, each `*Sync` + `(err, result)` callback",

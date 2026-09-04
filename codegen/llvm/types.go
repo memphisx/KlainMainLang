@@ -1343,7 +1343,10 @@ func EventTargetType() Type {
 func AbortSignalType() Type {
 	t := ObjectType([]Field{
 		{Name: "aborted", Ty: TypeBool},
-		{Name: "reason", Ty: TypePtr},
+		// reason is typed as an error object so `signal.reason.name` resolves to
+		// the default "AbortError" DOMException (a custom non-error reason is
+		// still stored, but is read back through the error-object shape).
+		{Name: "reason", Ty: errorObjType},
 		{Name: "listeners", Ty: TypePtr},
 		// deadlineNs: a monotonic-ns deadline for AbortSignal.timeout(ms) (0 =
 		// none). The fetch await loop / event loop fold this in via

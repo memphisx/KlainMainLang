@@ -60,6 +60,9 @@ func (e *Emitter) emitAbortControllerAbort(objExpr ast.Expression, args []ast.Ex
 		}
 		reasonVal = e.coerce(reasonVal, TypePtr)
 		e.storeEventField(sigTy, sigPtr, "reason", "ptr", reasonVal.Ref)
+	} else {
+		// Node defaults a no-argument abort() to an "AbortError" DOMException.
+		e.storeEventField(sigTy, sigPtr, "reason", "ptr", e.buildDefaultAbortReason())
 	}
 
 	// Dispatch an "abort" event to the signal's listeners.
@@ -147,6 +150,136 @@ func (e *Emitter) emitAbortSignalTimeout(args []ast.Expression, pos ast.Pos) (Va
 	e.storeEventField(sigTy, sigReg, "reason", "ptr", "null")
 	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
 	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", deadline)
+	return Value{Ref: sigReg, Ty: sigTy}, nil
+}
+
+// buildDefaultAbortReason builds the "AbortError" DOMException Node uses as the
+// default reason for a no-argument abort() (controller.abort() and the static
+// AbortSignal.abort()). Returns the error-object pointer register.
+func (e *Emitter) buildDefaultAbortReason() string {
+	return e.buildErrorObj(errorKindIDs["DOMException"], e.internString("This operation was aborted"), e.internString("AbortError"))
+}
+
+// emitAbortSignalStaticAbort implements the static `AbortSignal.abort(reason?)`:
+// an already-aborted signal. With no argument the reason defaults to an
+// "AbortError" DOMException, matching Node.
+func (e *Emitter) emitAbortSignalStaticAbort(args []ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureMapStrHelpers()
+	e.ensureMalloc()
+
+	sigTy := AbortSignalType()
+	sigReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", sigReg, sigTy.StructSize()))
+	listenersMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersMap))
+	e.storeEventField(sigTy, sigReg, "aborted", "i1", "1")
+	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
+	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", "0")
+
+	if len(args) >= 1 {
+		reasonVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		reasonVal = e.coerce(reasonVal, TypePtr)
+		e.storeEventField(sigTy, sigReg, "reason", "ptr", reasonVal.Ref)
+	} else {
+		e.storeEventField(sigTy, sigReg, "reason", "ptr", e.buildDefaultAbortReason())
+	}
+	return Value{Ref: sigReg, Ty: sigTy}, nil
+}
+
+// emitAbortSignalAny implements the static `AbortSignal.any(signals)`: a
+// composite signal that is aborted as soon as any input signal is aborted. The
+// input signals' aborted flags are snapshotted at construction; if any is already
+// aborted the composite inherits that signal's reason. Live propagation for
+// sources aborted after construction is a follow-on (needs listener wiring).
+func (e *Emitter) emitAbortSignalAny(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: AbortSignal.any(signals) requires 1 argument", pos.Line, pos.Col)
+	}
+	e.ensureMapStrHelpers()
+	e.ensureMalloc()
+
+	sigTy := AbortSignalType()
+	sigReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", sigReg, sigTy.StructSize()))
+	listenersMap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", listenersMap))
+	e.storeEventField(sigTy, sigReg, "aborted", "i1", "0")
+	e.storeEventField(sigTy, sigReg, "reason", "ptr", "null")
+	e.storeEventField(sigTy, sigReg, "listeners", "ptr", listenersMap)
+	e.storeEventField(sigTy, sigReg, "deadlineNs", "i64", "0")
+
+	// Resolve the input array to (ptr, len) of AbortSignal pointers.
+	ptr, length, _, err := e.resolveArrayForHOF(args[0], pos)
+	if err != nil {
+		return Value{}, err
+	}
+
+	// Loop over the sources; the first already-aborted one latches the composite.
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+
+	condL := e.freshLabel("absany.cond")
+	bodyL := e.freshLabel("absany.body")
+	setL := e.freshLabel("absany.set")
+	nextL := e.freshLabel("absany.next")
+	afterL := e.freshLabel("absany.after")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	// Stop once we run off the end OR the composite is already latched.
+	atEnd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", atEnd, idxVal, length))
+	abrGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", abrGep, sigTy.StructIR(), sigReg))
+	abrNow := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", abrNow, abrGep))
+	abrSet := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", abrSet, abrNow))
+	stop := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", stop, atEnd, abrSet))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", stop, afterL, bodyL))
+
+	e.emitLabel(bodyL)
+	srcGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", srcGep, ptr, idxVal))
+	srcPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcPtr, srcGep))
+	// A null source contributes nothing.
+	srcNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", srcNull, srcPtr))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", srcNull, nextL, setL))
+
+	e.emitLabel(setL)
+	e.ensureSignalAborted()
+	srcAborted := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_signal_aborted(ptr %s)", srcAborted, srcPtr))
+	doSetL := e.freshLabel("absany.doset")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", srcAborted, doSetL, nextL))
+
+	e.emitLabel(doSetL)
+	// Latch aborted and copy the source's reason.
+	e.storeEventField(sigTy, sigReg, "aborted", "i1", "1")
+	srcReasonIdx, _, _ := sigTy.FieldIndex("reason")
+	srcReasonGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcReasonGep, sigTy.StructIR(), srcPtr, srcReasonIdx))
+	srcReason := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcReason, srcReasonGep))
+	e.storeEventField(sigTy, sigReg, "reason", "ptr", srcReason)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
+
+	e.emitLabel(nextL)
+	idxNext := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(afterL)
 	return Value{Ref: sigReg, Ty: sigTy}, nil
 }
 

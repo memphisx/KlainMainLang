@@ -150,7 +150,13 @@ type VarDeclaration struct {
 	Name      string
 	TypeAnnot *TypeAnnotation // nil if absent
 	Init      Expression      // nil if absent
-	pos       Pos
+	// Free/Owned (TDD-00173): `/** @free */` requests a compiler-inserted
+	// free at every exit of the declaring block; `/** @owned */` requests it
+	// at the statically-determined last use instead. Both are gated by the
+	// escape check at codegen time; at most one is ever set.
+	Free  bool
+	Owned bool
+	pos   Pos
 }
 
 func (*VarDeclaration) nodeMarker()   {}
@@ -261,6 +267,10 @@ type Param struct {
 	Rest     bool       // true when declared with ...
 	Default  Expression // non-nil when declared with = expr
 	Optional bool       // true when declared with ?
+	// Owned (TDD-00173): set by a function-level `/** @owned name */` tag —
+	// the callee frees this argument after its last use (escape-checked on
+	// both sides at codegen time).
+	Owned bool
 	// ArrayPattern/ObjectPattern: non-nil exactly when this parameter is a
 	// destructuring pattern (`function f([a, b]: number[])` /
 	// `function f({x, y}: T)`) rather than a plain bindable name — at most

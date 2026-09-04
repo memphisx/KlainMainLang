@@ -84,6 +84,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// own deferred cleanup, from restoring this via plain assignment
 	// instead of defer on a first attempt at this same fix).
 	savedBreakStack := e.breakStack
+	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
+	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
 	savedContinueStack := e.continueStack
 	savedNamedLabelStack := e.namedLabelStack
 	e.breakStack = nil
@@ -124,6 +126,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
+		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
@@ -306,11 +309,24 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 
 	// Emit body statements.
 	e.emitSafepoint() // function-entry preempt check (TDD-00143 Stage 2)
+	// TDD-00173 Stage 3: @owned parameters register their free obligation up
+	// front — early-freed after their last use, function exits as safety net.
+	for _, prm := range decl.Params {
+		if prm.Owned {
+			if err := e.registerOwnedParam(decl, prm); err != nil {
+				return err
+			}
+		}
+	}
 	for _, stmt := range decl.Body.Body {
 		if err := e.emitStmt(stmt); err != nil {
 			return err
 		}
+		e.emitOwnedFreesAfter(stmt)
 	}
+	// TDD-00173: frees owed by function-top-level bindings on the implicit
+	// fall-off-the-end path (explicit returns already emitted theirs).
+	e.emitFreesAbove(0)
 
 	// Add implicit terminator and assemble the function IR.
 	if taskBody {
@@ -1796,6 +1812,8 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// restore, or an *enclosing* loop's own deferred break/continue/label
 	// stack pop panics on a stack it no longer recognizes.
 	savedBreakStack := e.breakStack
+	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
+	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
 	savedContinueStack := e.continueStack
 	savedNamedLabelStack := e.namedLabelStack
 	e.breakStack = nil
@@ -1834,6 +1852,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
+		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
@@ -1965,7 +1984,9 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			if err := e.emitStmt(stmt); err != nil {
 				return err
 			}
+			e.emitOwnedFreesAfter(stmt)
 		}
+		e.emitFreesAbove(0) // TDD-00173: fall-off-the-end frees
 		if af.IsAsync {
 			// Fallthrough (no explicit `return`) resolves to the malloc'd
 			// slot's zero-initialized-by-malloc contents — matching a plain
@@ -2580,6 +2601,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// function expression's own body must not skip the restore, or an
 	// enclosing loop's own deferred stack pop panics.
 	savedBreakStack := e.breakStack
+	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
+	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
 	savedContinueStack := e.continueStack
 	savedNamedLabelStack := e.namedLabelStack
 	e.breakStack = nil
@@ -2615,6 +2638,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	}
 	defer func() {
 		e.breakStack = savedBreakStack
+		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 		e.currentGenerator = savedCurrentGenerator
@@ -2719,7 +2743,9 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if err := e.emitStmt(stmt); err != nil {
 			return Value{}, err
 		}
+		e.emitOwnedFreesAfter(stmt)
 	}
+	e.emitFreesAbove(0) // TDD-00173: fall-off-the-end frees
 	if fe.IsAsync {
 		e.emitInlineAsyncEpilogue()
 	} else if retTy.IR == "void" {
@@ -3291,6 +3317,19 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		switch {
 		case i < len(args):
 			coerced[i] = e.coerce(args[i], params[i])
+			// A fundamentally incompatible argument can't coerce — most commonly
+			// the HOF's 3rd `array` argument ({ptr,i64}) against a *named*
+			// callback's untyped 3rd parameter (which defaults to i64, so the
+			// contextual array hint never reached it): coerce returns the array
+			// unchanged and the emitted call passes an aggregate into a scalar
+			// slot, which is invalid IR. Substitute the parameter's zero value so
+			// the call stays well-typed (the callback sees a 0/empty stand-in for
+			// a parameter it didn't type as an array). ADR-00686 — the same
+			// "always emit a well-typed call" principle as the missing-param and
+			// arity-reconciliation branches here.
+			if !params[i].IsArray && coerced[i].Ty.IsArray {
+				coerced[i] = Value{Ref: zeroRef(params[i]), Ty: params[i]}
+			}
 		case params[i].IsArray:
 			// A missing array parameter: an empty Ref marks it for the
 			// decomposition branches below, which emit an empty `ptr null,

@@ -38,7 +38,14 @@ type regexReplacer struct {
 // replaced).
 func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (regexReplacer, error) {
 	if e.inferExprType(args[1]).IsFunc {
-		cb, err := e.resolveCallback(args[1])
+		// The replacer callback's signature is (match, offset, string): the
+		// first argument is the matched substring (a string), the middle
+		// offset argument is a number, and the last is the whole subject
+		// string. Untyped arrow-function parameters default to `number`
+		// otherwise, which mis-dispatches string methods on `match` and emits
+		// invalid IR (a ptr in a double slot). Seed those defaults with hints
+		// so an untyped `(m) => m.toUpperCase()` types `m` as a string.
+		cb, err := e.resolveCallbackWithHints(args[1], []Type{TypePtr, TypeI64, TypePtr})
 		if err != nil {
 			return regexReplacer{}, err
 		}

@@ -53,7 +53,8 @@
             "status": "implemented",
             "caveats": [
               "A bare `signal.aborted` read reflects a `timeout` only after some await loop has checked it (no background latching); `signal` is wired into `fetch` but not `setTimeout`",
-              "A manual `controller.abort(reason)` with a custom reason still makes the awaited fetch throw an `AbortError` DOMException rather than that reason value; DOMException carries no legacy numeric `.code`"
+              "A manual `controller.abort(reason)` with a custom reason still makes the awaited fetch throw an `AbortError` DOMException rather than that reason value; DOMException carries no legacy numeric `.code`",
+              "`AbortSignal.any(signals)` snapshots the input signals at construction — a source that aborts *after* the composite is built does not yet propagate to it (needs listener-closure wiring)"
             ],
             "notes": [
               "`fetch(url, { signal })` cancellation works — pre-flight, mid-flight, and via **`AbortSignal.timeout(ms)`**, on both the top-level `await` path and the fiber path (a fetch awaited inside an `http.listen` handler): the await loop checks the signal every spin, and the event loop folds the timeout deadline into its `select()` wait so an idle loop wakes at the deadline — then tears the transfer down and throws a **`DOMException`** (`instanceof DOMException` and, since it inherits `Error`, `instanceof Error` both hold), named `AbortError` for a manual abort and `TimeoutError` for a timeout ([ADR-00237](../adr/ADR-00237.md)–[ADR-00240](../adr/ADR-00240.md))",

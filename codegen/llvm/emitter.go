@@ -472,6 +472,11 @@ type Emitter struct {
 	usedFclose                   bool
 	usedFwrite                   bool
 	usedFsThrow                  bool
+	usedErrnoCode                bool
+	usedStatDecl                 bool
+	usedQuerystringParse         bool
+	usedHTTPDate                 bool
+	usedHTTPKeepAlive            bool
 	usedFsReadFile               bool
 	usedFsReadFileRaw            bool
 	usedFsReadStream             bool
@@ -763,6 +768,22 @@ type Emitter struct {
 	// emitContinue and pushBreakTarget / pushContinueTarget.
 	breakFinallyDepth    []int
 	continueFinallyDepth []int
+	// TDD-00173 (-mm=auto / @free / @owned): autoFreePlan is the escape
+	// analysis' verdict per declaration (present+true = flow proven safe);
+	// pendingFrees are the live block-exit free obligations of the function
+	// body being emitted, each tagged with the scope depth it belongs to.
+	// breakFreeScope/continueFreeScope record len(e.scopes) at loop/switch
+	// entry (lockstep with breakStack/continueStack) so break/continue free
+	// exactly the obligations of the scopes they exit.
+	autoFreePlan      map[*ast.VarDeclaration]bool
+	pendingFrees      []pendingFree
+	breakFreeScope    []int
+	continueFreeScope []int
+	// Stage 3 (@owned): the last-use statement per owned binding / per owned
+	// parameter — the early-free point; entries stay on pendingFrees as the
+	// block-exit safety net and are marked emitted once the early free lands.
+	autoOwnedLastUse      map[*ast.VarDeclaration]ast.Statement
+	autoOwnedParamLastUse map[*ast.FunctionDeclaration]map[string]ast.Statement
 	// pendingLabel is set by a LabeledStatement just before emitting its body;
 	// the next loop to start consumes it via pushPendingLabel. Non-loop bodies
 	// leave it unconsumed, so the label is simply never registered.
@@ -853,6 +874,11 @@ func (e *Emitter) UsesDynamicImport() bool { return e.usesDynamicImport }
 func (e *Emitter) SetIslandHash(hash string) { e.islandHash = hash }
 
 func (e *Emitter) isGCMode() bool { return e.memMode == "gc" }
+
+// isAutoMode reports the -mm=auto mode (TDD-00173): plain malloc/free like
+// manual, but the compiler inserts frees at proven-safe points and
+// Memory.free is a compile error (the compiler owns every free).
+func (e *Emitter) isAutoMode() bool { return e.memMode == "auto" }
 
 // SetRegexMode selects the compile-wide RegExp dialect mode (TDD-00067's
 // `-regex=` flag): "pcre" (raw PCRE2, today's behavior), "es-ascii" (Option
@@ -1673,6 +1699,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	if err := e.checkPurity(prog); err != nil {
 		return "", err
 	}
+	// TDD-00173: escape-analyze every @free/@owned annotation (all modes) and,
+	// under -mm=auto, every implicit candidate. Front-end-only; a failed
+	// explicit annotation is a compile error, a failed implicit candidate is
+	// silently skipped.
+	if err := e.planAutoFrees(prog); err != nil {
+		return "", err
+	}
 	// Retained so a `typeof value` type query can resolve the referenced value's
 	// type from its top-level declaration even at eager type-alias registration
 	// (Pass 0), before module globals are bound.
@@ -1967,7 +2000,10 @@ entry:
 		if err := e.emitStmt(stmt); err != nil {
 			return "", err
 		}
+		e.emitOwnedFreesAfter(stmt)
 	}
+	// TDD-00173: frees owed by top-level bindings at the end of main().
+	e.emitFreesAbove(0)
 	// If the program ever constructed an EventSource, prefer the full
 	// __kml_event_loop_run() over the narrower __kml_timer_drain() below —
 	// it already generalizes plain timer draining (see its own doc comment

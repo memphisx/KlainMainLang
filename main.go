@@ -16,7 +16,7 @@ func main() {
 	emitLLVM := flag.Bool("emit-llvm", false, "emit LLVM IR and stop")
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
-	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only) or gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed)")
+	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only), gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed), or auto (the compiler inserts free calls where it can prove them safe — /** @free */ and /** @owned */ annotations plus automatic freeing of provably-local values; Memory.free is a compile error)")
 	dynImport := flag.String("dynamic-import", "eager", "dynamic `import()` `mode`: eager (default — a literal-specifier import resolved at compile time, target runs eagerly, wrapped in a resolved Promise) or lazy (each dynamic-import target compiled to a shared-library island loaded on first use — real laziness; incompatible with --static, produces multiple artifacts)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
@@ -63,12 +63,10 @@ func main() {
 	}
 
 	switch *mm {
-	case "manual", "gc":
+	case "manual", "gc", "auto":
 		// ok
-	case "auto":
-		fatal("-mm=auto is not implemented yet — use -mm=manual or -mm=gc")
 	default:
-		fatal("unrecognized -mm value %q — must be one of: manual, gc (auto is not implemented yet)", *mm)
+		fatal("unrecognized -mm value %q — must be one of: manual, gc, auto", *mm)
 	}
 
 	switch *compat {

@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 6/14 (~43%).
+**Coverage**: 13/14 (~93%) · **Strict Coverage**: 5/14 (~36%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -16,7 +16,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 |---|---|---|---|
 | Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`y`/`d` are accepted but their behavior isn't implemented — see the `u`/`y`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
 | Literal syntax: `/pattern/flags` | ✅ | • `x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap | • Desugars to the same construction at parse time — see [ADR-00114](../adr/ADR-00114.md) |
-| `.source` / `.flags` | ✅ | | • Plain field reads, original constructor arguments verbatim |
+| `.source` / `.flags` | ✅ | • `.flags` returns the constructor's flag string verbatim, not re-sorted into JS's canonical `d,g,i,m,s,u,v,y` order — `new RegExp("x", "ig").flags` is `"ig"` (Node: `"gi"`)<br>• `.source` of an empty pattern is the empty string, not JS's non-empty placeholder — `new RegExp("").source` is `""` (Node: `"(?:)"`) | • Plain field reads, original constructor arguments verbatim |
 | `.global` / `.ignoreCase` / `.multiline` / `.dotAll` | ✅ | | • Decomposed from the flags string once at construction — no method needs to re-parse it |
 | `.lastIndex` | ✅ | | • Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)/[ADR-00526](../adr/ADR-00526.md)<br>• Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all) |
 | `.test(str)` | ✅ | | • A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md) |

@@ -4,15 +4,15 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 14/15 (~93%) · **Strict Coverage**: 8/15 (~53%).
+**Coverage**: 14/15 (~93%) · **Strict Coverage**: 10/15 (~67%).
 
 Format: [Status page format](README.md#status-page-format).
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| `JSON.stringify(number)` | ✅ | • A non-finite float (`Infinity`/`-Infinity`/`NaN`) serializes to its literal spelling (invalid JSON), not `null` as in real JS — `JSON.stringify(1/0)` is `'Infinity'` (Node: `'null'`). | |
+| `JSON.stringify(number)` | ✅ | | |
 | `JSON.stringify(string)` | ✅ | | |
-| `JSON.stringify(number[])` | ✅ | • A non-finite float element serializes to `Infinity`/`NaN` text, not `null` — `JSON.stringify([1, 1/0, 2])` is `'[1,Infinity,2]'` (Node: `'[1,null,2]'`); affects any float array/field. | |
+| `JSON.stringify(number[])` | ✅ | | |
 | `JSON.stringify(string[])` | ✅ | | |
 | `JSON.stringify(object)` | ✅ | | |
 | `JSON.stringify(boolean[])` | ✅ | | |

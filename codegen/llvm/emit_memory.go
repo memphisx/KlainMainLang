@@ -22,6 +22,12 @@ import (
 
 // emitMemoryFree implements Memory.free(x).
 func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if e.isAutoMode() {
+		// TDD-00173: in auto mode the compiler inserts every free itself; a
+		// manual call it cannot plan for would be a double-free waiting to
+		// happen, so it is rejected outright (TDD-00001's exclusivity rule).
+		return Value{}, fmt.Errorf("%d:%d: Memory.free is not allowed under -mm=auto — the compiler inserts frees itself; annotate with /** @free */ or /** @owned */ to control placement", pos.Line, pos.Col)
+	}
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Memory.free takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -36,29 +42,9 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 		if !found {
 			return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
 		}
-		if sym.Ty.IsArray {
-			// Object-reference model (TDD-00127): sym.Ptr is a slot holding a
-			// pointer to the heap {data, len} header. Free the data buffer, then
-			// reset the header to {null, 0} in place so a subsequent read sees an
-			// empty array (length 0, null data) rather than dereferencing freed
-			// memory — matching the pre-header behaviour that zeroed both slots.
-			// The tiny header itself is intentionally left allocated so the slot
-			// stays valid.
-			e.ensureFree()
-			dataSlot, lenSlot := e.arrayDataLenSlots(sym)
-			dataPtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
-			e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", dataPtr))
-			e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataSlot))
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenSlot))
-			return Value{Ty: TypeVoid}, nil
-		}
-		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
-		if err := e.freeResolvedPointer(ptrReg, sym.Ty, pos); err != nil {
+		if err := e.freeSymbol(sym, pos); err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
 		return Value{Ty: TypeVoid}, nil
 	}
 
@@ -79,6 +65,56 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, err
 	}
 	return Value{Ty: TypeVoid}, nil
+}
+
+// freeSymbol frees a named binding's own top-level heap allocation and nulls
+// out the binding's storage. The single chokepoint every free goes through —
+// Memory.free's identifier case, and every compiler-inserted free (@free,
+// @owned, and auto mode's implicit layer, TDD-00173) — so any future
+// death-signal hook (e.g. FinalizationRegistry's pointer-map lookup,
+// TDD-00163 Stage 2) belongs here and fires for all of them at once.
+func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
+	if sym.Ty.IsArray {
+		// Object-reference model (TDD-00127): sym.Ptr is a slot holding a
+		// pointer to the heap {data, len} header. Free the data buffer, then
+		// reset the header to {null, 0} in place so a subsequent read sees an
+		// empty array (length 0, null data) rather than dereferencing freed
+		// memory — matching the pre-header behaviour that zeroed both slots.
+		// The tiny header itself is intentionally left allocated so the slot
+		// stays valid.
+		e.ensureFree()
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		dataPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
+		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", dataPtr))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenSlot))
+		return nil
+	}
+	ptrReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+	if err := e.freeResolvedPointer(ptrReg, sym.Ty, pos); err != nil {
+		return err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
+	return nil
+}
+
+// symbolTypeFreeable reports whether freeSymbol/freeResolvedPointer can free
+// a value of this static type — the type-level half of the @free/@owned
+// eligibility check (TDD-00173), answerable without emitting anything.
+func symbolTypeFreeable(ty Type) bool {
+	switch {
+	case ty.IsArray:
+		return true
+	case ty.IsMap || ty.IsSet, ty.IsFunc:
+		return true
+	case isStringTy(ty) && !ty.IsPromise && !ty.IsDynamic:
+		return true
+	case ty.IsObject || ty.IsPromise || (ty.IR == "ptr" && !ty.IsDynamic && !ty.IsArray):
+		return true
+	}
+	return false
 }
 
 // freeResolvedPointer frees ptrReg — a plain `ptr` register already holding

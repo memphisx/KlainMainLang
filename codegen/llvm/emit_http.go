@@ -1392,6 +1392,24 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, fdPtr))
 	fd32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
+	// Keep-alive idle drain: a connection parked between requests (no bytes of
+	// a next request buffered yet) whose server has since been close()d must
+	// retire itself instead of waiting forever for a request that can never be
+	// dispatched — Node >=19's close() closes idle keep-alive connections.
+	// __kml_http_close pokes every parked fiber so this re-check actually runs.
+	idleTr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idleTr, totalReadA))
+	idleNoBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", idleNoBytes, idleTr))
+	idleLfd := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, ptr @__kml_listen_fd, align 4", idleLfd))
+	idleClosed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i32 %s, 0", idleClosed, idleLfd))
+	idleRetire := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", idleRetire, idleNoBytes, idleClosed))
+	idleContL := e.freshLabel("http.kaidlecont")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", idleRetire, noReqL, idleContL))
+	e.emitLabel(idleContL)
 	capNow0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", capNow0, bufCapA))
 	trNow0 := e.freshReg()
@@ -1919,7 +1937,9 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", strPtr, payloadReg))
 		e.ensureStrlen()
 		uStrLen := e.emitStrLenHeader(strPtr) // TDD-00120: binary-safe
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, strPtr, uStrLen, extraHeadersRef))
+		// The union-body tail always closes (keepalive=0): its runtime string/stream
+		// branch keeps this path simpler than the single-shape buffered path below.
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s, i1 0)", fd32, statusVal.Ref, strPtr, uStrLen, extraHeadersRef))
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		emitConnActiveDecrement()
 		e.emitTerminator("ret void")
@@ -1948,7 +1968,31 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool) 
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		e.emitTerminator("ret void")
 	} else {
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s)", fd32, statusVal.Ref, bodyDataRef, bodyLenRef, extraHeadersRef))
+		// HTTP/1.1 keep-alive (persistent connections). The decision defaults to
+		// keep-alive unless the client sent `Connection: close` or the handler set
+		// it on the response. On keep-alive, send the response WITHOUT closing,
+		// reset the per-request parse state, and loop back to the read loop to
+		// serve the next request on the same socket — the existing yield/resume
+		// machinery parks the fiber until the client's next bytes (or EOF, which
+		// the read loop turns into a clean close via noReqL). On close, the
+		// response write already shut the socket, so just retire the fiber.
+		e.ensureHTTPKeepAliveDecision()
+		kaReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_http_keepalive_decision(ptr %s, ptr %s)", kaReg, headersMapFinal, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s, i1 %s)", fd32, statusVal.Ref, bodyDataRef, bodyLenRef, extraHeadersRef, kaReg))
+		kaContL := e.freshLabel("http.keepalive")
+		kaDoneL := e.freshLabel("http.reqdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", kaReg, kaContL, kaDoneL))
+
+		e.emitLabel(kaContL)
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
+		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", contentLenA))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headersMapA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+
+		e.emitLabel(kaDoneL)
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		emitConnActiveDecrement()
 		e.emitTerminator("ret void")

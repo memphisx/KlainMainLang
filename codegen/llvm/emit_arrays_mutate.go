@@ -177,7 +177,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, curLen)
+	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, curLen)
 
 	// deleteCount defaults to "everything from start to the end", matching
 	// real JS when the argument is omitted; when given, clamp to what's
@@ -319,7 +319,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
 	avail := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, lenReg, startN))
 	delCount := avail

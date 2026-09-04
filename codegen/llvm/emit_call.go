@@ -416,9 +416,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitAbortControllerAbort(mem.Object, ex.Args, ex.GetPos())
 		}
 		// AbortSignal.timeout(ms) — static (TDD-00081 Stage 3c).
-		if mem.Property == "timeout" {
-			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" && !e.isShadowedByLocal(id.Name) {
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" && !e.isShadowedByLocal(id.Name) {
+			switch mem.Property {
+			case "timeout":
 				return e.emitAbortSignalTimeout(ex.Args, ex.GetPos())
+			case "abort":
+				return e.emitAbortSignalStaticAbort(ex.Args, ex.GetPos())
+			case "any":
+				return e.emitAbortSignalAny(ex.Args, ex.GetPos())
 			}
 		}
 		if mem.Property == "send" && e.inferExprType(mem.Object).IsWSConnection {

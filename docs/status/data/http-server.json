@@ -32,7 +32,8 @@
             "status": "implemented",
             "caveats": [
               "V1 subset ([TDD-00131](../tdd/TDD-00131.md) Stage 1): `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter ([ADR-00513](../adr/ADR-00513.md)), `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints ([ADR-00514](../adr/ADR-00514.md)), and `req.method`/`url`/`headers`. The response is **buffered** (flushed after the handler returns, [ADR-00300](../adr/ADR-00300.md)), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` is ever emitted (a large streamed response uses a `ReadableStream` `body` field instead)",
-              "One server per program, shared with the bespoke `http.listen`"
+              "One server per program, shared with the bespoke `http.listen`",
+              "Keep-alive covers the buffered `res.end(…)` path; a chunked/streaming or union-body response still sends `Connection: close` (it does carry `Date`). No HTTP pipelining, and `Keep-Alive: timeout=5` is advertised but not independently enforced by an idle timer"
             ],
             "notes": [
               "Node's `(req, res)` model, portable to Node.js — reuses the same fiber-per-connection accept loop and response writer as the bespoke path; `res` is a `ServerResponse` object whose `{status, body, headers}` the dispatcher reads after the handler ([ADR-00391](../adr/ADR-00391.md))",

@@ -544,6 +544,24 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (ast.Statement, error) {
 		decls = append(decls, d)
 	}
 
+	// TDD-00173: `/** @free */` (block-exit free) / `/** @owned */` (last-use
+	// free) on a binding. Mutually exclusive, and single-declarator only — the
+	// doc comment precedes the statement as a whole, so on `let a = …, b = …`
+	// it would silently annotate only `a`; reject instead of surprising.
+	if doc != nil {
+		hasFree, hasOwned := doc.HasTag("free"), doc.HasTag("owned")
+		if hasFree && hasOwned {
+			return nil, fmt.Errorf("%d:%d: @free and @owned are mutually exclusive on '%s' — @free frees at block exit, @owned at last use; pick one", pos.Line, pos.Col, first.Name)
+		}
+		if hasFree || hasOwned {
+			if len(decls) > 1 {
+				return nil, fmt.Errorf("%d:%d: @free/@owned applies to a single-variable declaration — annotate one variable per declaration statement", pos.Line, pos.Col)
+			}
+			first.Free = hasFree
+			first.Owned = hasOwned
+		}
+	}
+
 	if consumeSemi {
 		p.consumeSemicolon()
 	}
@@ -700,6 +718,32 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 			return nil, fmt.Errorf("%d:%d: @pure cannot be applied to an async or generator function ('%s') — it isn't side-effect-free", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
 		}
 		fd.Pure = true
+	}
+	// TDD-00173: `/** @owned name */` marks a parameter the callee frees after
+	// its last use. Validated here so a typo'd name errors at the declaration,
+	// the same shape as every other JSDoc annotation's validation above.
+	if doc != nil {
+		if owned := doc.OwnedParams(); len(owned) > 0 {
+			if fd.IsAsync || fd.IsGenerator {
+				return nil, fmt.Errorf("%d:%d: @owned cannot be applied to an async or generator function ('%s') — a free across a suspension point is unsupported", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
+			}
+			for _, name := range owned {
+				found := false
+				for i := range fd.Params {
+					if fd.Params[i].Name == name {
+						if fd.Params[i].Rest {
+							return nil, fmt.Errorf("%d:%d: @owned cannot be applied to rest parameter '...%s'", fd.GetPos().Line, fd.GetPos().Col, name)
+						}
+						fd.Params[i].Owned = true
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("%d:%d: @owned names unknown parameter '%s' on function '%s'", fd.GetPos().Line, fd.GetPos().Col, name, fd.Name)
+				}
+			}
+		}
 	}
 	return fd, nil
 }

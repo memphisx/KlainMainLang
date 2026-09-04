@@ -639,6 +639,84 @@ done:
 }`, mmapSharedAnonFlags()))
 }
 
+// ensureHTTPDate declares __kml_http_date(ptr %buf): formats the current wall
+// time into %buf as an RFC 7231 IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT"),
+// the exact shape Node stamps on every response's `Date` header. Uses
+// gmtime()+strftime() (both libc, both platforms); the caller supplies a
+// >=40-byte buffer. The C locale's %a/%b abbreviations are the English
+// day/month names RFC 7231 mandates.
+func (e *Emitter) ensureHTTPDate() {
+	if e.usedHTTPDate {
+		return
+	}
+	e.usedHTTPDate = true
+	e.emitGlobal("declare i64 @time(ptr)")
+	e.emitGlobal("declare ptr @gmtime(ptr noundef)")
+	e.emitGlobal("declare i64 @strftime(ptr noundef, i64 noundef, ptr noundef, ptr noundef)")
+	dateFmt := e.internString("%a, %d %b %Y %H:%M:%S GMT")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_http_date(ptr %%buf) {
+entry:
+  %%tp = alloca i64, align 8
+  %%t = call i64 @time(ptr null)
+  store i64 %%t, ptr %%tp, align 8
+  %%tm = call ptr @gmtime(ptr %%tp)
+  call i64 @strftime(ptr %%buf, i64 40, ptr %s, ptr %%tm)
+  ret void
+}`, dateFmt))
+}
+
+// ensureHTTPKeepAliveDecision declares __kml_http_keepalive_decision(ptr
+// reqHeaders, ptr extraHeaders) -> i1: HTTP/1.1 defaults to a persistent
+// connection, so this returns 1 (keep-alive) unless either the client sent a
+// `Connection: close` request header (reqHeaders is the lowercased-key map the
+// dispatcher already built) or the handler set `Connection: close` on the
+// response (extraHeaders is the already-serialized "Key: Value\r\n" block).
+// strcasestr matches case-insensitively (both a raw `close` token in the
+// request value and a `Connection: close` line in the response block); it is
+// present on glibc and Darwin libc alike.
+func (e *Emitter) ensureHTTPKeepAliveDecision() {
+	if e.usedHTTPKeepAlive {
+		return
+	}
+	e.usedHTTPKeepAlive = true
+	e.ensureMapStrHelpers()
+	e.emitGlobal("declare ptr @strcasestr(ptr noundef, ptr noundef)")
+	connKey := e.internString("connection")
+	closeTok := e.internString("close")
+	connClose := e.internString("connection: close")
+	e.emitGlobal(fmt.Sprintf(`
+define i1 @__kml_http_keepalive_decision(ptr %%reqhdrs, ptr %%extra) {
+entry:
+  ; server.close() already ran (listener gone) → don't hold this connection
+  ; open waiting for a next request that can never be dispatched; Node >=19
+  ; likewise closes idle keep-alive connections on close().
+  %%lfd = load i32, ptr @__kml_listen_fd, align 4
+  %%listening = icmp sge i32 %%lfd, 0
+  br i1 %%listening, label %%chkextra, label %%no
+chkextra:
+  %%exhit = call ptr @strcasestr(ptr %%extra, ptr %s)
+  %%exclose = icmp ne ptr %%exhit, null
+  br i1 %%exclose, label %%no, label %%chkreq
+chkreq:
+  %%hasreq = icmp ne ptr %%reqhdrs, null
+  br i1 %%hasreq, label %%getval, label %%yes
+getval:
+  %%has = call i1 @__kml_map_str_has(ptr %%reqhdrs, ptr %s)
+  br i1 %%has, label %%loadval, label %%yes
+loadval:
+  %%vi = call i64 @__kml_map_str_get(ptr %%reqhdrs, ptr %s)
+  %%vp = inttoptr i64 %%vi to ptr
+  %%cl = call ptr @strcasestr(ptr %%vp, ptr %s)
+  %%clhit = icmp ne ptr %%cl, null
+  br i1 %%clhit, label %%no, label %%yes
+yes:
+  ret i1 1
+no:
+  ret i1 0
+}`, connClose, connKey, connKey, closeTok))
+}
+
 func (e *Emitter) ensureHTTPRuntime() {
 	if e.usedHTTP {
 		return
@@ -989,7 +1067,16 @@ entry:
   ret ptr %s
 }`, swCases.String(), swBlocks.String(), e.internString("OK")))
 
-	respFmt := e.internString("HTTP/1.1 %lld %s\r\nContent-Length: %lld\r\nConnection: close\r\n%s\r\n")
+	// Node stamps a `Date` header on every response and, for HTTP/1.1, keeps the
+	// connection persistent by default. The %s connection line is selected at
+	// runtime from the caller's keepalive flag (see __kml_http_keepalive_decision):
+	// `Connection: keep-alive` + `Keep-Alive: timeout=5` when persistent, plain
+	// `Connection: close` when not. Date and connection line are the two
+	// per-response headers real clients (and Node's own test suite) expect.
+	respFmt := e.internString("HTTP/1.1 %lld %s\r\nDate: %s\r\nContent-Length: %lld\r\n%s%s\r\n")
+	kaLine := e.internString("Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n")
+	closeLine := e.internString("Connection: close\r\n")
+	e.ensureHTTPDate()
 	// When the HTTPS/1.1 path is used, the fd may be a TLS connection: route the
 	// header + body write and the close through the SSL-aware shims (a plain
 	// connection has no registry entry and falls through to raw write/close).
@@ -1002,21 +1089,30 @@ entry:
 		writeBody = "call i64 @__kml_http_conn_send(i32 %connfd, ptr %body, i64 %bodylen)"
 		closeConn = "call void @__kml_http_conn_close(i32 %connfd)"
 	}
+	// The connection is closed here only on the non-keepalive path; a keepalive
+	// response leaves the fd open for the dispatcher's next-request read loop.
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, i64 %%bodylen, ptr %%extraHeaders) {
+define void @__kml_http_send_response(i32 %%connfd, i64 %%status, ptr %%body, i64 %%bodylen, ptr %%extraHeaders, i1 %%keepalive) {
 entry:
   %%reason = call ptr @__kml_http_reason(i64 %%status)
+  %%datebuf = alloca [40 x i8], align 1
+  call void @__kml_http_date(ptr %%datebuf)
+  %%connline = select i1 %%keepalive, ptr %s, ptr %s
   %%hdrlen = call i64 @strlen(ptr %%extraHeaders)
-  %%bufsize1 = add i64 %%hdrlen, 160
+  %%bufsize1 = add i64 %%hdrlen, 256
   %%respbuf = call ptr @malloc(i64 %%bufsize1)
-  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, ptr %%reason, i64 %%bodylen, ptr %%extraHeaders)
+  %%n = call i32 (ptr, ptr, ...) @sprintf(ptr %%respbuf, ptr %s, i64 %%status, ptr %%reason, ptr %%datebuf, i64 %%bodylen, ptr %%connline, ptr %%extraHeaders)
   %%n64 = sext i32 %%n to i64
   %s
   call void @free(ptr %%respbuf)
   %s
+  br i1 %%keepalive, label %%done, label %%doclose
+doclose:
   %s
+  br label %%done
+done:
   ret void
-}`, respFmt, writeHdr, writeBody, closeConn))
+}`, kaLine, closeLine, respFmt, writeHdr, writeBody, closeConn))
 
 	// gc mode: same GC_stackbottom repointing as __kml_http_append_conn's
 	// initial fiber launch, needed here too since this is the *other* place
@@ -2124,6 +2220,11 @@ local:
 doclose:
   call i32 @close(i32 %fd)
   store i32 -1, ptr @__kml_listen_fd, align 4
+  ; Wake every parked fiber once: a connection idle between keep-alive
+  ; requests re-checks the listener on resume and retires itself (Node >=19
+  ; close() closes idle keep-alive connections), so the loop's
+  ; active-connection count can actually drain to zero.
+  store i8 1, ptr @__kml_conn_poke, align 1
   br label %done
 
 done:

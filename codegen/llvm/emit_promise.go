@@ -42,6 +42,28 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 	if elemTy.PromiseType != nil {
 		innerTy = *elemTy.PromiseType
 	}
+	// inferArrayType keys the element type off the *first* array element. When
+	// that first element is a `Promise.reject(...)` its resolved type is `never`
+	// (a rejected promise never yields a value), which carries no value-encoding
+	// information — a later concrete member's value would then be read back with
+	// the wrong shape (e.g. a `double` slot decoded as a raw `i64`). Faithful TS
+	// widens `never` out of the union, so scan the literal for the first concrete
+	// member and adopt its resolved type instead.
+	if innerTy.IsNever || innerTy.IR == "void" {
+		if lit, ok := expr.(*ast.ArrayLiteral); ok {
+			for _, el := range lit.Elements {
+				et := e.inferExprType(el)
+				if !et.IsPromise || et.PromiseType == nil {
+					continue
+				}
+				pt := *et.PromiseType
+				if !pt.IsNever && pt.IR != "void" {
+					innerTy = pt
+					break
+				}
+			}
+		}
+	}
 	return innerTy, nil
 }
 
@@ -625,6 +647,18 @@ func (e *Emitter) emitAggregateErrorThrowFromMembers(ptrReg, lenReg string) {
 	e.emitTerminator("unreachable")
 }
 
+// loadErrorMessage reads an errorObjType instance's `message` string pointer
+// (field index 1). Used by allSettled to report a rejection's raw value string
+// as `reason` rather than the whole synthetic Error wrapper.
+func (e *Emitter) loadErrorMessage(errPtr string) string {
+	idx, _, _ := errorObjType.FieldIndex("message")
+	gep := e.freshReg()
+	msg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errPtr, idx))
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msg, gep))
+	return msg
+}
+
 // emitPromiseAllSettled implements Promise.allSettled(promises).
 func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
@@ -677,8 +711,10 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 			e.emitLabel(failL)
-			errObj := e.buildErrorObj(0, reasonMsg, e.internString("Error"))
-			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", errObj)
+			// The reason is the raw rejection value (a transport-failure message
+			// string here), stored directly — real allSettled reports the thrown
+			// value, not a synthetic Error wrapper around it.
+			settleFail := e.buildSettlement(settleTy, rejectedStr, "null", reasonMsg)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 			e.emitLabel(mergeL)
@@ -726,7 +762,12 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0P, promiseStructIR, ph))
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
-			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), errReg)
+			// The rejection is stored as an Error object; real allSettled reports the
+			// raw thrown value as `reason`. The rejection model wraps every thrown
+			// value in an Error carrying its string form in `.message`, so recover
+			// that string and report it directly instead of the wrapper object.
+			reasonStr := e.loadErrorMessage(errReg)
+			settleFail := e.buildSettlement(settleTy, rejectedStr, innerTy.zeroLiteral(), reasonStr)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(mergeL)
 			merged := e.freshReg()

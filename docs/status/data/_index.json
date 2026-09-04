@@ -375,7 +375,7 @@
           "category": "Memory management",
           "pageFile": "MEMORY-MANAGEMENT.md",
           "coverageOverride": "2/3 modes (`manual`, `gc`)",
-          "caveats": "• `manual` (default) never frees on its own<br>• `auto` (compiler-inserted frees, no runtime collector) is design-only — [TDD-00001](../tdd/TDD-00001.md)"
+          "caveats": "• `manual` (default) never frees on its own<br>• `auto` ships but its escape analysis is deliberately conservative — unprovable values still leak ([TDD-00173](../tdd/TDD-00173.md))"
         },
         {
           "category": "Compatibility mode (`-compat`)",
@@ -452,10 +452,6 @@
         "168": {
           "title": "`async_hooks` — `AsyncLocalStorage`",
           "notes": "Context propagation over the existing fiber model — the store lives in the coroutine task struct, so cross-`await` propagation is nearly free; low-level `createHook`/async-id lifecycle is a documented out-of-scope faithful impossibility"
-        },
-        "1": {
-          "title": "Memory Management (`manual`/`gc`/`auto`)",
-          "notes": "`manual`+`gc` ship; compiler-inserted-free `auto` is design-only — see [Cross-Cutting](#cross-cutting)"
         },
         "3": {
           "title": "Alternative fetch backend (Go helper vs libcurl)",
@@ -631,7 +627,7 @@
         },
         "163": {
           "title": "`FinalizationRegistry` — mode-dependent finalization + leak diagnostics",
-          "notes": "The `WeakRef` companion, reimagined per memory mode rather than ported: `-mm=gc` gives real Boehm-finalizer semantics; `-mm=manual` gives *deterministic* finalization at the `Memory.free()` point plus an `atexit` survivor-flush (deterministic destructors the GC world can't offer); `-finalizers=report` turns the registry into a labeled **leak detector** for the leak-by-default model (registered-but-never-freed reported at exit by held value). One API, honest per-mode timing (the spec's best-effort clause permits all of it), staying useful into the future `auto` mode ([00134](../tdd/TDD-00134.md)/[00135](../tdd/TDD-00135.md)). Turns a half-missing competitor feature into a memory-management + debugging tool. Not started — Stage 2 (manual-mode firing) is the highest-value first step"
+          "notes": "The `WeakRef` companion, reimagined per memory mode rather than ported: `-mm=gc` gives real Boehm-finalizer semantics; `-mm=manual` gives *deterministic* finalization at the `Memory.free()` point plus an `atexit` survivor-flush (deterministic destructors the GC world can't offer); `-finalizers=report` turns the registry into a labeled **leak detector** for the leak-by-default model (registered-but-never-freed reported at exit by held value). One API, honest per-mode timing (the spec's best-effort clause permits all of it), staying useful under `-mm=auto` too (compiler-inserted frees are the same death signal — they route through the shared `freeSymbol` chokepoint, [TDD-00173](../tdd/TDD-00173.md); unprovable registrations flush at `atexit` since `auto` has no collector). Turns a half-missing competitor feature into a memory-management + debugging tool. Not started — Stage 2 (manual-mode firing) is the highest-value first step"
         },
         "164": {
           "title": "General C FFI — AOT `node:ffi` (`dlopen` + static signatures + callback trampolines)",
@@ -660,6 +656,10 @@
         "171": {
           "title": "Geolocation API (native reinterpretation)",
           "notes": "The W3C `navigator.geolocation` shape backed by tiered native sources — V1 is IP-based geolocation over the existing `fetch` stack (zero new dep, matches a headless server), with `enableHighAccuracy` selecting OS services (Linux GeoClue / macOS CoreLocation) and serial-NMEA GPS as opt-in follow-ons; `KML_GEOLOCATION` override for pinning/CI"
+        },
+        "172": {
+          "title": "File API family (fs-backed data + UI-abstracted picker)",
+          "notes": "`File`/`FileReader` as a thin fs-backed reinterpretation (no UI, near-term), plus `showOpenFilePicker`/`FileSystemFileHandle` behind a pluggable UI-backend seam — `klain:tui` picker widget, `klain:webview` native dialog, explicit-path degradation headless. Ties into the interactive-native-app direction"
         }
       }
     },

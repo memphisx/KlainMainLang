@@ -114,7 +114,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 
 | Count | Skip reason |
 |---|---|
-| 117 | requires Node common harness (common.skipIfInspectorDisabled) |
+| 117 | no V8 inspector — a compiled native binary has none (like Node's --without-inspector build) |
 | 81 | Node-internal harness file require('internal/test/binding') |
 | 66 | uses Function.prototype.call (dynamic dispatch, not targeted) |
 | 61 | requires Node common harness (common.invalidArgTypeHelper) |

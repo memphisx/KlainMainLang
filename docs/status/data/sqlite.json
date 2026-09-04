@@ -99,7 +99,8 @@
             "feature": "`stmt.columns()`",
             "status": "implemented",
             "caveats": [
-              "`name` and declared `type` are populated; origin `column`/`table`/`database` read `null` (they need `SQLITE_ENABLE_COLUMN_METADATA`, absent from the system libsqlite3)"
+              "`name` and declared `type` are populated; origin `column`/`table`/`database` read `null` (they need `SQLITE_ENABLE_COLUMN_METADATA`, absent from the system libsqlite3)",
+              "The origin fields actually surface as `\"\"`, not `null`: `columns()[0].column` → `\"\"` (Node, on a libsqlite3 built with column metadata: `\"id\"`/`\"main\"`/`\"t\"`)"
             ]
           },
           {

@@ -910,6 +910,8 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// assignment isn't safe against an error return partway through body
 	// emission.
 	savedBreakStack := e.breakStack
+	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
+	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
 	savedContinueStack := e.continueStack
 	savedNamedLabelStack := e.namedLabelStack
 	e.breakStack = nil
@@ -925,6 +927,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.blockDone = savedBlockDone
 		e.currentGenerator = savedCurrentGenerator
 		e.breakStack = savedBreakStack
+		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
 		e.continueStack = savedContinueStack
 		e.namedLabelStack = savedNamedLabelStack
 	}()

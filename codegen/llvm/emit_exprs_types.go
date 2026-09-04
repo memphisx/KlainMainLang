@@ -1133,9 +1133,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if mem.Property == "abort" && e.inferExprType(mem.Object).IsAbortController {
 				return TypeVoid
 			}
-			// AbortSignal.timeout(ms) → AbortSignal (Stage 3c).
-			if mem.Property == "timeout" {
-				if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" {
+			// Static AbortSignal.timeout/abort/any → AbortSignal (Stage 3).
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "AbortSignal" {
+				switch mem.Property {
+				case "timeout", "abort", "any":
 					return AbortSignalType()
 				}
 			}
@@ -2923,6 +2924,14 @@ func isPlainStringTy(ty Type) bool {
 func (e *Emitter) toBool(v Value) Value {
 	if v.Ty.IR == "i1" {
 		return v
+	}
+	// A void/undefined/null value is falsy (JS ToBoolean(undefined)===false,
+	// ToBoolean(null)===false). This reaches here from a void-returning
+	// predicate used by filter/some/every/find — a callback with no `return`
+	// statement — where the result carries no value; producing `false` avoids
+	// emitting an `icmp`/`br` against a `void` operand (invalid IR). ADR-00687.
+	if v.Ty.IR == "void" || v.Ty.IR == "" || v.Ty.IsUndefined || v.Ty.IsNull {
+		return Value{Ref: zeroRef(TypeBool), Ty: TypeBool}
 	}
 	// A dynamic value's truthiness is the real JS ToBoolean over the
 	// NaN-boxed word (TDD-00076): false/null/undefined/±0/NaN/"" are false,

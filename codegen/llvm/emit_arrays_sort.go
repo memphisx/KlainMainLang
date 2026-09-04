@@ -243,7 +243,7 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+	startN := e.emitNormalizeSliceIdx(e.arrayIndexToI64(startRaw).Ref, lenReg)
 
 	var endN string
 	if len(args) == 2 {
@@ -251,7 +251,7 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, lenReg)
+		endN = e.emitNormalizeSliceIdx(e.arrayIndexToI64(endRaw).Ref, lenReg)
 	} else {
 		endN = lenReg
 	}

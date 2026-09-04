@@ -76,7 +76,10 @@
           },
           {
             "feature": "`.replace(from, to)`",
-            "status": "implemented"
+            "status": "implemented",
+            "notes": [
+              "A function replacer is invoked with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged rather than inserting between positions"
+            ]
           },
           {
             "feature": "`.split(sep)`",
@@ -196,7 +199,8 @@
             "feature": "`.replaceAll()`",
             "status": "implemented",
             "notes": [
-              "An empty search matches JS's insert-between-every-char behavior — `\"abc\".replaceAll(\"\", \"-\")` is `\"-a-b-c-\"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md))"
+              "An empty search matches JS's insert-between-every-char behavior — `\"abc\".replaceAll(\"\", \"-\")` is `\"-a-b-c-\"` ([ADR-00003](../adr/ADR-00003.md)/[ADR-00547](../adr/ADR-00547.md))",
+              "A function replacer is invoked once per occurrence with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged"
             ]
           },
           {

@@ -973,5 +973,25 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 	return eq
 }
 
+// arrayIndexToI64 normalizes an evaluated bracket-index value to the plain i64
+// the slot GEP and bounds check consume. A numeric or dynamic (NaN-boxed) index
+// rides the ordinary numeric coercion (fptosi / ToNumber). A *string*-typed
+// index — legal in JS, where `x["2"]` addresses the same slot as `x[2]` — must
+// be parsed to its integer value at runtime rather than reinterpreted: leaving
+// the string data pointer where an i64 index is required emitted invalid IR
+// (`icmp uge i64 <ptr>` / a GEP indexed by a pointer constant). strtoll(base 10)
+// consumes the leading integer run (matching the canonical decimal array-index
+// spelling); a non-index string such as "1.1" or "4294967296" resolves to an
+// out-of-range slot and is caught by the same bounds check, never a crash.
+func (e *Emitter) arrayIndexToI64(idxVal Value) Value {
+	if isStringTy(idxVal.Ty) && !idxVal.Ty.IsClass && !idxVal.Ty.IsObject {
+		e.ensureStrtoll()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr null, i32 10)", r, idxVal.Ref))
+		return Value{Ref: r, Ty: TypeI64}
+	}
+	return e.coerce(idxVal, TypeI64)
+}
+
 // emitArrayIndexOf implements arr.indexOf(val): returns the index of the first
 // element equal to val, or -1 if not found.

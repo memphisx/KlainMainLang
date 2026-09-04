@@ -249,6 +249,23 @@ func stripJSDocDecorations(ty string) string {
 	return strings.TrimSpace(ty)
 }
 
+// OwnedParams returns the parameter names declared by `@owned name` tags
+// (TDD-00173) — the named-tag sibling of `@param {T} name`, marking a
+// parameter the callee frees after its last use. A bare `@owned` with no
+// name (the variable-binding form) contributes nothing here.
+func (c *Comment) OwnedParams() []string {
+	var out []string
+	for _, a := range c.Annotations {
+		if a.Tag != "owned" {
+			continue
+		}
+		if name := paramName(a.Text); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // HasTag reports whether c carries a bare annotation tag (e.g. "erased" for
 // `@erased`), regardless of any accompanying value.
 func (c *Comment) HasTag(tag string) bool {

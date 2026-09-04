@@ -1677,3 +1677,35 @@ xs.sort((x, y) => x.k - y.k);
 for (const r of xs) { console.log(r.k); }
 `, "1\n2\n3")
 }
+
+// ADR-00686: a named function callback with an untyped 3rd (array) parameter
+// no longer emits invalid IR (the array was passed into an i64 slot).
+func TestE2EArrayForEachNamedUntypedArrayParam(t *testing.T) {
+	assertOutput(t, `
+var seen = 0;
+function cb(val, idx, obj) { seen = seen + val; }
+[11, 9].forEach(cb);
+console.log(seen);
+`, "20")
+}
+
+// ADR-00687: a void-returning predicate (no `return`) is falsy, not invalid IR.
+func TestE2EArrayFilterVoidPredicate(t *testing.T) {
+	assertOutput(t, `
+function pred(x) { }
+console.log([1, 2, 3].filter(pred).length);
+console.log([1, 2].every(function (x) { }));
+`, "0\nfalse")
+}
+
+// ADR-00688: assigning an incompatible value to a typed array element is a clean
+// compile error, not invalid IR (a ptr-typed constant into a double slot).
+func TestE2EArrayElementAssignTypeMismatchRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+const a: number[] = [1, 2, 3];
+a[0] = "not a number";
+`)
+	if err == nil {
+		t.Fatal("expected a compile error assigning a string to a number[] element")
+	}
+}

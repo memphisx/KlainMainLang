@@ -248,7 +248,7 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 	if err != nil {
 		return "", TypeVoid, err
 	}
-	idxVal = e.coerce(idxVal, TypeI64)
+	idxVal = e.arrayIndexToI64(idxVal)
 
 	oobReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %s", oobReg, idxVal.Ref, lenReg))

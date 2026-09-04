@@ -108,11 +108,15 @@ klainmain [flags] <file.ts>
                 confusing linker error.
   
   -mm <mode>    Memory management mode: manual (default, Memory.free(x)
-                only — see docs/status/MEMORY-MANAGEMENT.md) or gc
+                only — see docs/status/MEMORY-MANAGEMENT.md), gc
                 (Boehm GC: every allocation gets collected automatically,
-                needs bdw-gc/libgc installed — see Requirements above).
-                Works identically on Linux and macOS, no special linker
-                flags needed either way.
+                needs bdw-gc/libgc installed — see Requirements above), or
+                auto (the compiler inserts free calls where its escape
+                analysis proves them safe: /** @free */ block-exit frees,
+                /** @owned */ last-use frees, plus automatic freeing of
+                provably-local unannotated values; Memory.free is a compile
+                error in this mode). Works identically on Linux and macOS,
+                no special linker flags needed either way.
   
   -bigint <lib> BigInt backend library, linked only when a program uses
                 bigint: libtommath (default, public domain) or gmp (LGPL,

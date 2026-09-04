@@ -43,8 +43,10 @@ func (e *Emitter) emitUtilInspect(args []ast.Expression, pos ast.Pos) (Value, er
 }
 
 // emitUtilFormat implements util.format(format, ...args): printf-style
-// substitution over a string-literal format. %s → String(arg), %d/%i → integer,
-// %f → float, %j → JSON.stringify(arg), %o/%O → util.inspect(arg), %% → literal
+// substitution over a string-literal format. %s → String(arg), %d → Number(arg)
+// (as-is, no truncation), %i → integer (truncated), %f → float, %c → consumes
+// its arg and emits nothing (CSS directive), %j → JSON.stringify(arg),
+// %o/%O → util.inspect(arg), %% → literal
 // %. Excess args are appended space-separated; excess specifiers are left
 // literal (matching Node). A non-literal format string is rejected in V1.
 func (e *Emitter) emitUtilFormat(args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -91,7 +93,7 @@ func (e *Emitter) emitUtilFormat(args []ast.Expression, pos ast.Pos) (Value, err
 			i++
 			continue
 		}
-		if verb != 's' && verb != 'd' && verb != 'i' && verb != 'f' && verb != 'j' && verb != 'o' && verb != 'O' {
+		if verb != 's' && verb != 'd' && verb != 'i' && verb != 'f' && verb != 'j' && verb != 'o' && verb != 'O' && verb != 'c' {
 			// Not a recognized specifier — emit the '%' literally.
 			pending = append(pending, '%')
 			continue
@@ -99,6 +101,16 @@ func (e *Emitter) emitUtilFormat(args []ast.Expression, pos ast.Pos) (Value, err
 		if argIdx >= len(args) {
 			// No arg to consume — Node leaves the specifier literal.
 			pending = append(pending, '%', verb)
+			i++
+			continue
+		}
+		if verb == 'c' {
+			// Node's %c is a CSS-styling directive: it consumes its argument
+			// and emits nothing. Evaluate for side effects, then discard.
+			if _, err := e.emitExpr(args[argIdx]); err != nil {
+				return Value{}, err
+			}
+			argIdx++
 			i++
 			continue
 		}
@@ -150,13 +162,23 @@ func (e *Emitter) emitUtilFormatArg(verb byte, arg ast.Expression, pos ast.Pos) 
 			return Value{}, err
 		}
 		return e.emitInspectField(v, 0)
-	case 'd', 'i':
+	case 'i':
+		// %i truncates toward integer.
 		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Value{}, err
 		}
 		iv := e.coerce(v, TypeI64)
 		return e.emitValueToString(iv)
+	case 'd':
+		// %d formats the number as-is — it does NOT truncate a float
+		// (Node: format('%d', 3.7) === '3.7'). Only %i truncates.
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		fv := e.coerce(v, TypeF64)
+		return e.emitValueToString(fv)
 	case 'f':
 		v, err := e.emitExpr(arg)
 		if err != nil {

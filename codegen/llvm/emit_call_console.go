@@ -44,6 +44,16 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 		e.emitConsolePrintVal(Value{Ref: e.internString(""), Ty: TypePtr}, e.internString("%s\n"), fd)
 		return Value{Ty: TypeVoid}, nil
 	}
+	// Node runs util.format over the arguments: when the first argument is a
+	// string it is a printf-style format string, with %s/%d/%i/%f/%j/%o/%O/%c
+	// substituted from the following arguments and %% collapsed to a literal %
+	// (TDD/ADR — console format specifiers). Only a string *literal* first
+	// argument takes this path; a runtime string keeps the plain per-token
+	// rendering. Args left unconsumed after substitution are appended
+	// space-separated, exactly like ordinary console.log arguments.
+	if lit, ok := args[0].(*ast.StringLiteral); ok {
+		return e.emitConsoleFormatLine(lit.Value, args, fd)
+	}
 	for i, arg := range args {
 		term := "\n"
 		if i < len(args)-1 {
@@ -53,6 +63,102 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 			return Value{}, err
 		}
 	}
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitConsoleFormatLine renders a console.* line whose first argument is a
+// string-literal format string: it substitutes %-specifiers from the following
+// arguments (Node's util.format), prints the resulting string, then appends any
+// unconsumed arguments space-separated with the ordinary per-token rendering —
+// so console.log("%s!", "hi") prints `hi!` and console.log("%d", 1, obj) prints
+// `1 <inspected obj>`. Specifiers: %s String(arg), %d/%i integer, %f float, %j
+// JSON, %o/%O util.inspect, %c consumes its arg and emits nothing, %% a literal
+// %. An unmatched specifier (no arg left, or an unknown letter) stays literal.
+func (e *Emitter) emitConsoleFormatLine(f string, args []ast.Expression, fd int) (Value, error) {
+	pos := args[0].GetPos()
+	acc := Value{Ref: e.internString(""), Ty: TypePtr}
+	appendStr := func(s Value) error {
+		r, err := e.emitStringConcat(acc, s)
+		if err != nil {
+			return err
+		}
+		acc = r
+		return nil
+	}
+	argIdx := 1
+	var pending []byte
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		s := string(pending)
+		pending = pending[:0]
+		return appendStr(Value{Ref: e.internString(s), Ty: TypePtr})
+	}
+	for i := 0; i < len(f); i++ {
+		if f[i] != '%' || i+1 >= len(f) {
+			pending = append(pending, f[i])
+			continue
+		}
+		verb := f[i+1]
+		if verb == '%' {
+			pending = append(pending, '%')
+			i++
+			continue
+		}
+		if verb == 'c' {
+			// %c consumes its argument (a CSS string in the browser) and emits
+			// nothing; with no argument left it stays literal.
+			if argIdx < len(args) {
+				argIdx++
+				i++
+			} else {
+				pending = append(pending, '%', 'c')
+				i++
+			}
+			continue
+		}
+		if verb != 's' && verb != 'd' && verb != 'i' && verb != 'f' && verb != 'j' && verb != 'o' && verb != 'O' {
+			pending = append(pending, '%')
+			continue
+		}
+		if argIdx >= len(args) {
+			pending = append(pending, '%', verb)
+			i++
+			continue
+		}
+		if err := flush(); err != nil {
+			return Value{}, err
+		}
+		conv, err := e.emitUtilFormatArg(verb, args[argIdx], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := appendStr(conv); err != nil {
+			return Value{}, err
+		}
+		argIdx++
+		i++
+	}
+	if err := flush(); err != nil {
+		return Value{}, err
+	}
+
+	remaining := args[argIdx:]
+	if len(remaining) == 0 {
+		e.emitConsolePrintVal(acc, e.internString("%s\n"), fd)
+		return Value{Ty: TypeVoid}, nil
+	}
+	// Substituted prefix, no line-ending yet; each leftover argument follows a
+	// separator space and renders with the normal per-token dispatch.
+	e.emitConsolePrintVal(acc, e.internString("%s"), fd)
+	for _, arg := range remaining {
+		e.emitConsolePrintVal(Value{Ref: e.internString(" "), Ty: TypePtr}, e.internString("%s"), fd)
+		if err := e.emitConsolePrintArgToken(arg, fd, ""); err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitConsolePrintVal(Value{Ref: e.internString(""), Ty: TypePtr}, e.internString("%s\n"), fd)
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -84,6 +190,45 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// null-aware, same as a boxed local (TDD-00064 Stage 3).
 	if isNullableScalar(val.Ty) {
 		return e.emitConsoleNullableScalarAgg(val, fd, term)
+	}
+	// A bare `null`/`undefined` value renders its keyword (Node shows
+	// `undefined`, not a blank line). Routed through emitValueToString, which
+	// already distinguishes the two via IsUndefined.
+	if val.Ty.IsNull {
+		strVal, err := e.emitValueToString(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// A Node Buffer prints Node's `<Buffer 68 69>` form, not the `[ 104, 105 ]`
+	// a plain Uint8Array shows — checked before the array branch, since a
+	// Buffer is structurally a Uint8Array (IsArray also set).
+	if val.Ty.IsBuffer {
+		strVal, err := e.emitInspectBuffer(val)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.
+	if val.Ty.IsMap {
+		strVal, err := e.emitInspectMap(val, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
+	}
+	if val.Ty.IsSet {
+		strVal, err := e.emitInspectSet(val, 0)
+		if err != nil {
+			return err
+		}
+		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+		return nil
 	}
 	// A tuple prints as its comma-joined elements (TDD-00066) — checked
 	// before the array rejection, since a tuple is a fixed-shape value with

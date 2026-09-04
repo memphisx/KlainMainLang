@@ -53,6 +53,10 @@
           {
             "feature": "`.source` / `.flags`",
             "status": "implemented",
+            "caveats": [
+              "`.flags` returns the constructor's flag string verbatim, not re-sorted into JS's canonical `d,g,i,m,s,u,v,y` order — `new RegExp(\"x\", \"ig\").flags` is `\"ig\"` (Node: `\"gi\"`)",
+              "`.source` of an empty pattern is the empty string, not JS's non-empty placeholder — `new RegExp(\"\").source` is `\"\"` (Node: `\"(?:)\"`)"
+            ],
             "notes": [
               "Plain field reads, original constructor arguments verbatim"
             ]

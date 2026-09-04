@@ -4,7 +4,57 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"syscall"
 )
+
+// ensureErrnoCode declares __kml_errno_code(i32 errno) -> ptr: maps an errno to
+// the Node error-code NAME string (`ENOENT`, `EISDIR`, …) that `err.code`
+// exposes, or null for an unmapped value. Building the switch from Go's
+// per-platform `syscall` constants keeps the numeric values correct on both
+// Linux and macOS (they differ for e.g. ENAMETOOLONG/ELOOP/ENOTEMPTY).
+func (e *Emitter) ensureErrnoCode() {
+	if e.usedErrnoCode {
+		return
+	}
+	e.usedErrnoCode = true
+	type ec struct {
+		v    int
+		name string
+	}
+	pairs := []ec{
+		{int(syscall.EPERM), "EPERM"}, {int(syscall.ENOENT), "ENOENT"},
+		{int(syscall.EIO), "EIO"}, {int(syscall.EBADF), "EBADF"},
+		{int(syscall.EACCES), "EACCES"}, {int(syscall.EEXIST), "EEXIST"},
+		{int(syscall.ENOTDIR), "ENOTDIR"}, {int(syscall.EISDIR), "EISDIR"},
+		{int(syscall.EINVAL), "EINVAL"}, {int(syscall.EMFILE), "EMFILE"},
+		{int(syscall.ENFILE), "ENFILE"}, {int(syscall.ENOSPC), "ENOSPC"},
+		{int(syscall.EROFS), "EROFS"}, {int(syscall.EBUSY), "EBUSY"},
+		{int(syscall.ENOTEMPTY), "ENOTEMPTY"}, {int(syscall.ELOOP), "ELOOP"},
+		{int(syscall.ENAMETOOLONG), "ENAMETOOLONG"}, {int(syscall.EXDEV), "EXDEV"},
+		{int(syscall.EAGAIN), "EAGAIN"}, {int(syscall.EPIPE), "EPIPE"},
+		{int(syscall.EFBIG), "EFBIG"}, {int(syscall.ENODEV), "ENODEV"},
+		{int(syscall.ESPIPE), "ESPIPE"}, {int(syscall.EMLINK), "EMLINK"},
+	}
+	seen := map[int]bool{}
+	var cases, blocks strings.Builder
+	for _, p := range pairs {
+		if seen[p.v] {
+			continue // some names alias one value (EAGAIN/EWOULDBLOCK) — one label per value
+		}
+		seen[p.v] = true
+		s := e.internString(p.name)
+		lbl := "ec_" + p.name
+		cases.WriteString(fmt.Sprintf("    i32 %d, label %%%s\n", p.v, lbl))
+		blocks.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, s))
+	}
+	e.emitGlobal(fmt.Sprintf(`define ptr @__kml_errno_code(i32 %%e) {
+entry:
+  switch i32 %%e, label %%unknown [
+%s  ]
+%sunknown:
+  ret ptr null
+}`, cases.String(), blocks.String()))
+}
 
 // ensureFsThrow declares __kml_fs_throw: builds "<opDesc> '<path>': <reason>"
 // from the current errno via strerror() and throws it as a KML Error via the
@@ -24,8 +74,15 @@ func (e *Emitter) ensureFsThrow() {
 	accessor := errnoAccessor()
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
+	e.ensureErrnoCode()
 	fmtPtr := e.internString("%s '%s': %s")
 	errNamePtr := e.internString("Error")
+	// The full 6-field errorObjType: kind/message/name PLUS the Node error-code
+	// trio code/errcode/errstr, so `err.code === 'ENOENT'`/'EISDIR' (the
+	// canonical fs idiom) matches, `.errno` carries the raw errno, and `.errstr`
+	// the strerror text. Previously this built a truncated 3-field object (and
+	// under-allocated 24 bytes for the 6-field type), leaving `.code` unset.
+	eIR := errorObjType.StructIR()
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_fs_throw(ptr %%opdesc, ptr %%path) {
 entry:
@@ -41,16 +98,35 @@ entry:
   %%buf = call ptr @__kml_str_alloc(i64 %%bufsize)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%opdesc, ptr %%path, ptr %%errmsg)
   call void @__kml_str_finalize(ptr %%buf)
-  %%errobj = call ptr @malloc(i64 24)
-  %%errobj.kind = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 0
+  %%code = call ptr @__kml_errno_code(i32 %%errno_val)
+  %%errno_d = sitofp i32 %%errno_val to double
+  %%errobj = call ptr @malloc(i64 %d)
+  %%errobj.kind = getelementptr %s, ptr %%errobj, i32 0, i32 0
   store i64 0, ptr %%errobj.kind, align 8
-  %%errobj.msg = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 1
+  %%errobj.msg = getelementptr %s, ptr %%errobj, i32 0, i32 1
   store ptr %%buf, ptr %%errobj.msg, align 8
-  %%errobj.name = getelementptr { i64, ptr, ptr }, ptr %%errobj, i32 0, i32 2
+  %%errobj.name = getelementptr %s, ptr %%errobj, i32 0, i32 2
   store ptr %s, ptr %%errobj.name, align 8
+  %%errobj.code = getelementptr %s, ptr %%errobj, i32 0, i32 3
+  store ptr %%code, ptr %%errobj.code, align 8
+  %%errobj.errcode = getelementptr %s, ptr %%errobj, i32 0, i32 4
+  store double %%errno_d, ptr %%errobj.errcode, align 8
+  %%errobj.errstr = getelementptr %s, ptr %%errobj, i32 0, i32 5
+  store ptr %%errmsg, ptr %%errobj.errstr, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, accessor, fmtPtr, errNamePtr))
+}`, accessor, fmtPtr, errorObjType.StructSize(), eIR, eIR, eIR, errNamePtr, eIR, eIR, eIR))
+}
+
+// ensureStatDecl emits the `declare i32 @stat` exactly once. Shared by
+// ensureFsStat (statSync) and ensureFsReadFileRaw's EISDIR guard so the two
+// callers don't emit competing declarations.
+func (e *Emitter) ensureStatDecl() {
+	if e.usedStatDecl {
+		return
+	}
+	e.usedStatDecl = true
+	e.emitGlobal("declare i32 @stat(ptr noundef, ptr noundef)")
 }
 
 func (e *Emitter) ensureFopen() {
@@ -138,14 +214,52 @@ func (e *Emitter) ensureFsReadFileRaw() {
 	e.ensureMalloc()
 	e.ensureFopen()
 	e.ensureFclose()
+	e.ensureStatDecl()
+	e.ensureErrnoAccessor()
 	e.emitGlobal("declare i32 @fseek(ptr noundef, i64 noundef, i32 noundef)")
 	e.emitGlobal("declare i64 @ftell(ptr noundef)")
 	e.ensureFread()
 	modePtr := e.internString("rb")
 	opDescPtr := e.internString("cannot open file for reading")
+	// EISDIR guard (ADR-00692): fopen(2) happily opens a directory on both Linux
+	// and macOS, after which fread returns garbage/zero bytes. Node instead
+	// throws `EISDIR: illegal operation on a directory, read`. Detect the
+	// directory up front with stat(2) + the host struct-stat mode field, set
+	// errno to EISDIR, and route through the shared __kml_fs_throw so `.code`,
+	// `.errno`, and the Node-shaped message all come from the one code path.
+	L := statLayout()
+	modeLoadTy := fmt.Sprintf("i%d", L.modeBits)
+	modeReg := "%mode_raw"
+	if L.modeBits < 32 {
+		modeReg = "%mode_ext"
+	}
+	modeExtLL := ""
+	if L.modeBits < 32 {
+		modeExtLL = fmt.Sprintf("  %%mode_ext = zext %s %%mode_raw to i32\n", modeLoadTy)
+	}
+	eisdirOpDescPtr := e.internString("read")
 	e.emitGlobal(fmt.Sprintf(`
 define { ptr, i64 } @__kml_fs_read_file_raw(ptr %%path) {
 entry:
+  %%stbuf = alloca [256 x i8], align 8
+  %%statr = call i32 @stat(ptr %%path, ptr %%stbuf)
+  %%statok = icmp eq i32 %%statr, 0
+  br i1 %%statok, label %%checkdir, label %%doopen
+
+checkdir:
+  %%modep = getelementptr i8, ptr %%stbuf, i64 %d
+  %%mode_raw = load %s, ptr %%modep, align 1
+%s  %%fmt = and i32 %s, 61440
+  %%isdir = icmp eq i32 %%fmt, 16384
+  br i1 %%isdir, label %%eisdir, label %%doopen
+
+eisdir:
+  %%eptr = call ptr @%s()
+  store i32 %d, ptr %%eptr, align 4
+  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  unreachable
+
+doopen:
   %%f = call ptr @fopen(ptr %%path, ptr %s)
   %%isnull = icmp eq ptr %%f, null
   br i1 %%isnull, label %%fail, label %%ok
@@ -167,7 +281,7 @@ ok:
   %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
   %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%size, 1
   ret { ptr, i64 } %%r1
-}`, modePtr, opDescPtr))
+}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), int(syscall.EISDIR), eisdirOpDescPtr, modePtr, opDescPtr))
 }
 
 // ensureFsWriteFile declares __kml_fs_write_file: writes (creating or
@@ -731,7 +845,7 @@ func (e *Emitter) ensureFsStat() {
 	e.usedFsStat = true
 	e.ensureFsThrow()
 	e.ensureMalloc()
-	e.emitGlobal("declare i32 @stat(ptr noundef, ptr noundef)")
+	e.ensureStatDecl()
 	opDescPtr := e.internString("cannot stat path")
 	e.emitGlobal(fmt.Sprintf(`
 define %s @__kml_fs_stat(ptr %%path) {

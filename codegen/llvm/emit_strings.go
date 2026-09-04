@@ -725,6 +725,11 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 	if e.inferExprType(args[0]).IsRegExp {
 		return e.emitRegexReplace(objVal, args, pos, false)
 	}
+	// String-literal search with a function replacer: invoke it per match with
+	// (match, offset, string) — ADR-00697.
+	if e.inferExprType(args[1]).IsFunc {
+		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], false, pos)
+	}
 	searchVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -755,6 +760,11 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 	}
 	if e.inferExprType(args[0]).IsRegExp {
 		return e.emitRegexReplace(objVal, args, pos, true)
+	}
+	// String-literal search with a function replacer: invoke it per match with
+	// (match, offset, string) — ADR-00697.
+	if e.inferExprType(args[1]).IsFunc {
+		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], true, pos)
 	}
 	searchVal, err := e.emitExpr(args[0])
 	if err != nil {

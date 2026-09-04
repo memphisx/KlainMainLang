@@ -22,7 +22,7 @@ Format: [Status page format](README.md#status-page-format).
 | `stmt.all<T>(...params)` → `T[]` | ✅ | • Same explicit-row-type requirement as `get<T>` | |
 | `stmt.iterate<T>(...params)` | ✅ | • Materialised eagerly (equivalent to `all<T>()`) so `for…of` works; a lazy `.next()` iterator is a later stage. Same explicit-row-type requirement | |
 | `stmt.run(...params)` → `{ changes, lastInsertRowid }` | ✅ | • `changes`/`lastInsertRowid` are `number`; integers beyond 2^53 lose precision (as they do in Node's default number mode) | |
-| `stmt.columns()` | ✅ | • `name` and declared `type` are populated; origin `column`/`table`/`database` read `null` (they need `SQLITE_ENABLE_COLUMN_METADATA`, absent from the system libsqlite3) | |
+| `stmt.columns()` | ✅ | • `name` and declared `type` are populated; origin `column`/`table`/`database` read `null` (they need `SQLITE_ENABLE_COLUMN_METADATA`, absent from the system libsqlite3)<br>• The origin fields actually surface as `""`, not `null`: `columns()[0].column` → `""` (Node, on a libsqlite3 built with column metadata: `"id"`/`"main"`/`"t"`) | |
 | `stmt.sourceSQL` / `stmt.expandedSQL` | ✅ | | |
 | `stmt.setReadBigInts()` / `stmt.setAllowBareNamedParameters()` | ✅ | • Accepted for API completeness but effectively no-ops: the statically-typed row field governs integer representation (declare a field `bigint` to read one), and bare named parameters are always accepted | |
 | Parameter binding (positional + named) | ✅ | • Positional (`?`) and named (a single object argument → `:name`/`@name`/`$name`, or the bare key). An integral `number` binds as INTEGER, a fractional one as REAL, matching Node | |

@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "6/14", "strictPct": 43 },
+  "coverage": { "loose": "13/14", "loosePct": 93, "strict": "5/14", "strictPct": 36 },
   "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; result arrays narrow a truly-`null` optional capture to `\"\"` and drop the `index`/`input`/`groups` extras; and `matchAll` is eager, not a lazy iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`y`/`d` flags are out of scope for V1.",
   "entries": [
     {

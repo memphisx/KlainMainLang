@@ -5,8 +5,8 @@
   "statusPage": "JSON.md",
   "coverage": {
     "loose": "14/15",
-    "strict": "8/15",
-    "strictPct": 53
+    "strict": "10/15",
+    "strictPct": 67
   },
   "coversRows": "all",
   "lede": "Typed and dynamic JSON. JSON.stringify covers numbers, strings, booleans, uniform arrays, objects, pretty-printing, a class toJSON() override, and whole dynamic trees; JSON.parse projects the parse tree onto a declared target type when one is annotated, and otherwise keeps the tree fully dynamic — objects as runtime property bags, arrays as dynamic arrays — so untyped `const data = JSON.parse(s)` works like JS. A few literal-only argument restrictions remain on the pretty-printer.",

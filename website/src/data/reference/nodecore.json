@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "16/17",
     "loosePct": 94,
-    "strict": "2/17",
-    "strictPct": 12
+    "strict": "1/17",
+    "strictPct": 6
   },
   "lede": "The smaller Node built-ins, grouped here rather than each given a full page. The recurring divergence is that anything nominally async is blocking under the hood — net/tls/dns/dgram fold their file descriptors into one select() loop, so a slow peer stalls it and connect/handshake failures throw a catchable Error rather than emitting an async 'error' event. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, the http/https clients are GET-only over libcurl, and vm stays out of scope behind the same blocker as bare eval().",
   "entries": [
