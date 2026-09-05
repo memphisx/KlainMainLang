@@ -312,3 +312,40 @@ m.set("x", "he\"y");
 console.log(JSON.stringify(m));
 `, "{\"a\":1,\"b\":2.5}\n{\"x\":\"he\\\"y\"}")
 }
+
+func TestE2EJSONStringifyChurnASan(t *testing.T) {
+	// The stringify accumulator loops free intermediate accumulators and
+	// element fragments as they go (__kml_json_concat2) — a round-trip churn
+	// under ASan/UBSan proves no double-free/use-after-free across the
+	// array/object/tuple/bool/float/nullable fragment kinds, and that the
+	// heap-seeded accumulators never free an interned literal.
+	bin := buildBinaryASan(t, `
+interface Rec { id: number; name: string; active: boolean; scores: number[] }
+function build(n: number): Rec[] {
+  const out: Rec[] = []
+  for (let i = 0; i < n; i++) {
+    out.push({ id: i, name: "row-" + i, active: i % 2 === 0, scores: [i, i * 2] })
+  }
+  return out
+}
+const data = build(40)
+let total = 0
+for (let r = 0; r < 5; r++) {
+  const text = JSON.stringify(data)
+  total += text.length
+  const parsed = JSON.parse(text) as Rec[]
+  total += parsed.length
+}
+console.log(total)
+console.log(JSON.stringify({ a: 1.5, b: [true, false], c: "x" }))
+console.log(JSON.stringify(data, null, 2).length)
+`)
+	out, err := exec.Command(bin).CombinedOutput()
+	got := string(out)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, got)
+	}
+	if strings.Contains(got, "AddressSanitizer") || strings.Contains(got, "runtime error") {
+		t.Fatalf("sanitizer error:\n%s", got)
+	}
+}

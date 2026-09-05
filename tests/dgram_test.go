@@ -27,9 +27,9 @@ server.on('message', (msg: Uint8Array, rinfo) => {
 })
 server.bind(8961)
 `
-	startUDPServer(t, src, 8961)
+	port := startUDPServer(t, src, 8961)
 
-	conn, err := net.DialTimeout("udp", "127.0.0.1:8961", 2*time.Second)
+	conn, err := net.DialTimeout("udp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -65,9 +65,10 @@ s.close()
 
 // startUDPServer compiles a dgram server and waits until it responds to a
 // probe datagram before returning; killed via t.Cleanup since it never exits.
-func startUDPServer(t *testing.T, src string, port int) {
+func startUDPServer(t *testing.T, src string, port int) int {
 	t.Helper()
-	binFile := buildBinaryImports(t, src)
+	np := freePort(t)
+	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -77,8 +78,8 @@ func startUDPServer(t *testing.T, src string, port int) {
 		_ = cmd.Wait()
 	})
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(5 * time.Second)
+	addr := fmt.Sprintf("127.0.0.1:%d", np)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("udp", addr, 100*time.Millisecond)
 		if err != nil {
@@ -90,10 +91,11 @@ func startUDPServer(t *testing.T, src string, port int) {
 		buf := make([]byte, 64)
 		if _, err := conn.Read(buf); err == nil {
 			conn.Close()
-			return
+			return np
 		}
 		conn.Close()
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("dgram server never responded on %s", addr)
+	return -1
 }

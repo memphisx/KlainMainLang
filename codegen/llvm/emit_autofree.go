@@ -40,6 +40,10 @@ type pendingFree struct {
 	// follow the last use at the same list level) skip it.
 	lastUse ast.Statement
 	emitted bool
+	// rebindFree: this binding is reassigned via owning-fresh RHS shapes
+	// only (escape_check's rebindOwningRHS) — emitAssign frees the old
+	// value right before each such store.
+	rebindFree bool
 }
 
 // escFreshMethodResults: builtin container methods whose result is a freshly
@@ -66,6 +70,13 @@ var escFreshMethodResults = map[string]bool{
 func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 	explicit := v.Free || v.Owned
 	if !explicit && !e.isAutoMode() {
+		return nil
+	}
+	// TDD-00134 Stage 1: a stack-allocated initializer has no heap
+	// allocation to free — freeing the alloca would corrupt the heap.
+	// (Explicit annotations are never stack-planned, so this only skips
+	// implicit candidates.)
+	if v.Init != nil && e.stackAllocatedLits[v.Init] {
 		return nil
 	}
 	pos := v.GetPos()
@@ -106,7 +117,22 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		return reject("nothing heap-allocated to free for this type")
 	}
 	if !e.autoFreeOwningInit(v.Init, explicit) {
-		return reject("its initializer is not a provably-owned fresh allocation (a bare alias of another value cannot be block-freed)")
+		// Rebind-free upgrade: a churned string binding often starts from an
+		// interned literal (`let s = ""`) that owns nothing. Replace the slot
+		// value with a heap copy so the binding owns its value from the
+		// start — then every rebind (and the block exit) can free
+		// unconditionally. One tiny allocation, only for rebind-planned
+		// string bindings.
+		_, isLit := v.Init.(*ast.StringLiteral)
+		if !(e.autoFreeRebind[v] && isLit && isStringTy(sym.Ty)) {
+			return reject("its initializer is not a provably-owned fresh allocation (a bare alias of another value cannot be block-freed)")
+		}
+		e.ensureStrHeaderRuntime()
+		cur := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, sym.Ptr))
+		cp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", cp, cur))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, sym.Ptr))
 	}
 	e.pendingFrees = append(e.pendingFrees, pendingFree{
 		scopeDepth: len(e.scopes),
@@ -114,8 +140,28 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		sym:        sym,
 		pos:        pos,
 		lastUse:    e.autoOwnedLastUse[v],
+		rebindFree: e.autoFreeRebind[v],
 	})
 	return nil
+}
+
+// maybeFreeOnRebind runs from emitAssign right before the store of a new
+// value into an identifier's slot: if that binding carries a rebind-free
+// obligation (registered above), the value about to be overwritten is freed
+// here — the only point it is still reachable. The RHS has already been
+// evaluated (it may read the old value); matching is by name AND slot
+// pointer so a shadowing inner binding never triggers the outer's free.
+func (e *Emitter) maybeFreeOnRebind(name string, sym Symbol, pos ast.Pos) {
+	if e.blockDone {
+		return
+	}
+	for i := range e.pendingFrees {
+		pf := &e.pendingFrees[i]
+		if pf.rebindFree && !pf.emitted && pf.name == name && pf.sym.Ptr == sym.Ptr {
+			_ = e.freeSymbol(pf.sym, pos)
+			return
+		}
+	}
 }
 
 // registerOwnedParam registers a callee-side @owned parameter's free
@@ -193,9 +239,15 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 		return len(x.Exprs) > 0 // static templates intern like literals
 	case *ast.BinaryExpression:
 		// The type gate already restricted this binding to a freeable type;
-		// a binary initializer of such a type is a concatenation, which
-		// allocates fresh.
-		return true
+		// a `+` initializer of such a type is a concatenation, which
+		// allocates fresh. The value-selecting operators (`??`, `||`, `&&`)
+		// yield one of their OPERANDS — possibly an alias of another binding
+		// or an interned literal — so freeing their result double-frees or
+		// frees non-heap memory (found by the first auto-mode differential
+		// run over the examples corpus: `greet(x) ?? 'default'` aborted at
+		// block exit). Comparisons and arithmetic never pass the freeable
+		// type gate, so `+` is the only owning binary initializer.
+		return x.Op == "+"
 	case *ast.CallExpression:
 		// Builtin container methods with copy-out results, on a receiver the
 		// type system says is a builtin container.
@@ -204,8 +256,9 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 			if rt.IsArray || (isStringTy(rt) && !rt.IsDynamic) || rt.IsMap || rt.IsSet {
 				return true
 			}
-			// JSON.parse always builds a fresh tree.
-			if ns, ok := m.Object.(*ast.Identifier); ok && ns.Name == "JSON" && m.Property == "parse" {
+			// JSON.parse always builds a fresh tree; JSON.stringify a fresh
+			// string.
+			if ns, ok := m.Object.(*ast.Identifier); ok && ns.Name == "JSON" && (m.Property == "parse" || m.Property == "stringify") {
 				return true
 			}
 		}

@@ -245,6 +245,16 @@ func (e *Emitter) reliableGlobalType(v *ast.VarDeclaration) (Type, bool) {
 			}
 		}
 		return Type{}, false
+	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.MemberExpression:
+		// A constant scalar/string expression (gated by promotableInitInPrePass →
+		// constFoldableScalarInit). Its type comes from the same inferExprType call
+		// emitVarDecl's Binary/Unary/Member cases use, so the pre-declared global's
+		// IR can't disagree with the store. Only a simple scalar/string slot is
+		// promoted; anything else stays a local.
+		if ty := e.inferExprType(init); isSimpleGlobalType(ty) {
+			return ty, true
+		}
+		return Type{}, false
 	case *ast.ArrayLiteral:
 		ty := e.inferArrayType(init)
 		if ty.IsArray && ty.ElemType != nil {
@@ -326,6 +336,68 @@ func (e *Emitter) promotableInitInPrePass(expr ast.Expression) bool {
 			}
 		}
 		return true
+	case *ast.BinaryExpression, *ast.UnaryExpression, *ast.MemberExpression:
+		// A constant scalar expression (`4 * Math.PI * Math.PI`, `-Number.EPSILON`,
+		// `A + B` over earlier module globals) — every leaf is a literal, a known
+		// numeric builtin constant, or an already-registered module global, so its
+		// type is context-stable and inferExprType returns the same scalar here as
+		// in emitVarDecl's Binary/Unary/Member cases.
+		return e.constFoldableScalarInit(ex)
+	}
+	return false
+}
+
+// constFoldableScalarInit reports whether an initializer is a compile-time
+// constant scalar/string expression: built only from literals, the numeric
+// builtin constants (`Math.PI`/`Number.EPSILON`/…), the special globals
+// `NaN`/`Infinity`, and already-registered earlier module globals, combined with
+// unary/binary operators. Every leaf resolves identically in the pre-pass and at
+// emit time, so its inferExprType is context-stable — the invariant module-global
+// promotion rests on. (A binding whose value is such an expression, e.g. a
+// top-level `const SOLAR_MASS = 4 * Math.PI * Math.PI`, could not previously be
+// read by a named function because it was never promoted.)
+func (e *Emitter) constFoldableScalarInit(expr ast.Expression) bool {
+	switch ex := expr.(type) {
+	case *ast.NumberLiteral:
+		return !ex.IsBigInt
+	case *ast.StringLiteral, *ast.BooleanLiteral, *ast.TemplateLiteral:
+		return true
+	case *ast.Identifier:
+		if ex.Name == "NaN" || ex.Name == "Infinity" {
+			return true
+		}
+		_, ok := e.moduleGlobals[ex.Name]
+		return ok
+	case *ast.MemberExpression:
+		return numericBuiltinConst(ex)
+	case *ast.UnaryExpression:
+		return e.constFoldableScalarInit(ex.Arg)
+	case *ast.BinaryExpression:
+		return e.constFoldableScalarInit(ex.Left) && e.constFoldableScalarInit(ex.Right)
+	}
+	return false
+}
+
+// numericBuiltinConst reports whether a member expression is one of the constant
+// numeric properties of the `Math`/`Number` builtins — all doubles, so an
+// expression built from them has an unambiguous scalar type.
+func numericBuiltinConst(mem *ast.MemberExpression) bool {
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	switch id.Name {
+	case "Math":
+		switch mem.Property {
+		case "PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT1_2", "SQRT2":
+			return true
+		}
+	case "Number":
+		switch mem.Property {
+		case "EPSILON", "MAX_VALUE", "MIN_VALUE", "MAX_SAFE_INTEGER",
+			"MIN_SAFE_INTEGER", "POSITIVE_INFINITY", "NEGATIVE_INFINITY", "NaN":
+			return true
+		}
 	}
 	return false
 }
@@ -350,7 +422,7 @@ func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
 		// user/generic class — promote it (a module-level `const als = new
 		// AsyncLocalStorage<T>()` read by named functions is the canonical use),
 		// falling through to the inferExprType + single-slot gate below.
-		if ne.ClassName == "AsyncLocalStorage" || ne.ClassName == "AsyncResource" {
+		if ne.ClassName == "AsyncLocalStorage" || ne.ClassName == "AsyncResource" || ne.ClassName == "FinalizationRegistry" {
 			break
 		}
 		_, concrete := e.classes[ne.ClassName]
@@ -481,6 +553,19 @@ func (e *Emitter) storePtrHandleVarDecl(v *ast.VarDeclaration, val Value) {
 }
 
 func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
+	// TDD-00134 Stage 1 (-optimize-memory): a planned declaration's object
+	// literal is emitted into an entry-block alloca. The marker names the
+	// exact literal node so nested literals inside it stay heap-allocated;
+	// emitObjectLiteralWithHint consumes (or, on a path that isn't a plain
+	// fixed-shape struct, clears) it.
+	if e.stackAllocPlan[v] {
+		switch v.Init.(type) {
+		case *ast.ObjectLiteral, *ast.ArrowFunction, *ast.FunctionExpression,
+			*ast.ArrayLiteral, *ast.NewExpression:
+			e.pendingStackAllocLit = v.Init
+			defer func() { e.pendingStackAllocLit = nil }()
+		}
+	}
 	if init, ok := v.Init.(*ast.NewMapExpression); ok {
 		return e.emitMapVarDecl(v, init)
 	}
@@ -890,6 +975,19 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 				ty = AsyncLocalStorageType(elem)
 			} else if init.ClassName == "AsyncResource" {
 				ty = AsyncResourceType() // async_hooks handle (TDD-00168 Stage 4)
+			} else if init.ClassName == "FinalizationRegistry" {
+				// FinalizationRegistry<T> handle (TDD-00163) — held type from
+				// <T> or the callback's parameter, same rule as inferExprType.
+				held := TypeI64
+				if len(init.TypeArgs) == 1 && init.TypeArgs[0] != nil {
+					held = e.resolveType(init.TypeArgs[0])
+				}
+				if len(init.Args) == 1 {
+					if cbTy := e.inferExprType(init.Args[0]); cbTy.IsFunc && len(cbTy.FuncParams) == 1 {
+						held = cbTy.FuncParams[0]
+					}
+				}
+				ty = FinalizationRegistryType(held)
 			} else if info, ok := e.classes[init.ClassName]; ok {
 				ty = info.Ty
 			} else if genDecl, ok := e.genericClasses[init.ClassName]; ok && len(init.TypeArgs) == len(genDecl.TypeParams) {
@@ -924,7 +1022,15 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 	// initializer is still rejected at parse time, and `let` reads before
 	// assignment stay definite-assignment errors.
 	if ty.IsArray {
+		// TDD-00134 Stage 2: `/** @value */` opts this binding into the flat
+		// value-type layout instead of the default pointer-slot array.
+		if v.ValueArr {
+			return e.emitFlatArrayVarDecl(v, ty)
+		}
 		return e.emitArrayVarDecl(v, ty)
+	}
+	if v.ValueArr {
+		return fmt.Errorf("%d:%d: @value applies to an array declaration (e.g. `/** @value */ const ps: Point[] = [...]`)", v.GetPos().Line, v.GetPos().Col)
 	}
 	if ty.IsObject || ty.IsDynamicObject {
 		return e.emitObjectVarDecl(v, ty)

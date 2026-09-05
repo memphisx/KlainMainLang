@@ -341,6 +341,18 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	}
 	// Array element assignment: arr[i] = val  or  arr[i] += val
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
+		// Plain `=` on a growable array supports JS's append-by-index idiom
+		// (`arr[arr.length] = v` extends by one) — see
+		// emitArrayIndexAssignGrow. Flat @value arrays and TypedArrays keep
+		// fixed-bounds semantics; compound ops read the slot first, where
+		// out-of-range is genuinely an error.
+		if ex.Op == "=" {
+			if objTy := e.inferExprType(idxEx.Object); objTy.IsArray && !objTy.IsFlatArray && !objTy.IsTypedArray {
+				if v, handled, err := e.emitArrayIndexAssignGrow(idxEx, ex.Right); handled {
+					return v, err
+				}
+			}
+		}
 		gepReg, elemTy, err := e.emitIndexPtr(idxEx)
 		if err != nil {
 			return Value{}, err
@@ -824,6 +836,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// to the stale pre-promotion slot, leaving the closure's id at its old value.
 	if fresh, ok := e.lookup(ident.Name); ok {
 		sym = fresh
+	}
+	// Rebind-free (-mm=auto): a plan-approved churned binding frees the value
+	// being overwritten — RHS is already evaluated, so this is the last
+	// point the old allocation is reachable.
+	if e.isAutoMode() {
+		e.maybeFreeOnRebind(ident.Name, sym, ex.GetPos())
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, rhs.Ref, sym.Ptr, sym.Ty.Align()))
 	return rhs, nil

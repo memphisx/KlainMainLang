@@ -219,10 +219,17 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 		if !ok {
 			return "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
-		if !sym.Ty.IsArray {
+		if !sym.Ty.IsArray && !sym.Ty.IsFlatArray {
 			return "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
 		elemTy = *sym.Ty.ElemType
+		if sym.Ty.IsFlatArray {
+			// Flat value-type array (TDD-00134 Stage 2): elements are inline
+			// structs — the Inline marker makes the final GEP below stride by
+			// StructSize and tells loadArrayElem/storeArrayElem the slot IS
+			// the value.
+			elemTy = flatElemView(elemTy)
+		}
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtrReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtrReg, dataSlot))
@@ -261,7 +268,11 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 
 	e.emitLabel(okL)
 	gepReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtrReg, idxVal.Ref))
+	gepTy := elemTy.IR
+	if elemTy.Inline {
+		gepTy = elemTy.StructIR()
+	}
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, gepTy, dataPtrReg, idxVal.Ref))
 	return gepReg, elemTy, nil
 }
 
@@ -1061,7 +1072,7 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 				if sym.Ty.IsTuple {
 					return e.countToNumber(Value{Ref: fmt.Sprintf("%d", len(sym.Ty.Fields)), Ty: TypeI64}), nil
 				}
-				if sym.Ty.IsArray {
+				if sym.Ty.IsArray || sym.Ty.IsFlatArray {
 					_, lenSlot := e.arrayDataLenSlots(sym)
 					reg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, lenSlot))

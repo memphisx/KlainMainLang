@@ -33,9 +33,9 @@ const server = net.createServer((socket) => {
 })
 server.listen(8951, () => {})
 `
-	startHTTPServer(t, src, 8951)
+	port := startHTTPServer(t, src, 8951)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8951", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -71,9 +71,9 @@ const server = net.createServer((socket) => {
 })
 server.listen(8956, () => {})
 `
-	startHTTPServer(t, src, 8956)
+	port := startHTTPServer(t, src, 8956)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8956", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -106,10 +106,10 @@ const server = net.createServer((socket) => {
 })
 server.listen(8952, () => {})
 `
-	startHTTPServer(t, src, 8952)
+	port := startHTTPServer(t, src, 8952)
 
 	for i, msg := range []string{"one", "two", "three"} {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:8952", 2*time.Second)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
 		}
@@ -142,9 +142,9 @@ server.on('connection', (socket) => {
 })
 server.listen(8953, () => {})
 `
-	startHTTPServer(t, src, 8953)
+	port := startHTTPServer(t, src, 8953)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8953", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

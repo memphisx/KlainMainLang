@@ -341,3 +341,130 @@ func TestE2EMemoryAutoModeBoundsMemory(t *testing.T) {
 		t.Errorf("peak RSS %d bytes exceeds %d bound — implicit frees may not be happening", peakBytes, boundBytes)
 	}
 }
+
+func TestE2EMemoryAutoNullishInitNotFreed(t *testing.T) {
+	// The value-selecting binary operators (`??`, `||`, `&&`) yield one of
+	// their OPERANDS — an alias of another binding, or an interned literal —
+	// never a fresh allocation, so their result must not be an implicit
+	// auto-free candidate. Before the fix, `greet(x) ?? 'default'` classified
+	// as an owning "concatenation" initializer and the block-exit free
+	// aborted on the interned literal / double-freed the alias (found by the
+	// first auto-mode differential run over the examples corpus). `+` keeps
+	// its owning classification: churn coverage above proves concats free.
+	const src = `
+function greet(name: string): string {
+  return name + '!'
+}
+function run(): void {
+  const a: string = greet('hello') ?? 'default'
+  console.log(a)
+  const b: string = a ?? 'empty'
+  console.log(b)
+}
+run()
+console.log('done')
+`
+	binFile := buildBinaryAuto(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run (crash = a bad auto-free): %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "hello!\nhello!\ndone")
+}
+
+// --- Rebind-free: owning reassignments free the overwritten value ---
+
+// TestE2EMemoryAutoRebindFreeStringChurn: `s += "x"` in a loop churns one
+// fresh buffer per iteration; the implicit layer frees the old value at each
+// rebind (escape_check's rebindOwningRHS), so peak RSS stays bounded. Found
+// as MEM-KILLED (>512MB) in the first benchmark campaign's string_churn.
+func TestE2EMemoryAutoRebindFreeStringChurn(t *testing.T) {
+	const src = `
+function bench(n: number): number {
+  let longest = 0
+  for (let r = 0; r < 30; r++) {
+    let s = ""
+    for (let i = 0; i < n; i++) s += "x"
+    if (s.length > longest) longest = s.length
+  }
+  return longest
+}
+console.log(bench(4000))
+`
+	binFile := buildBinaryAuto(t, src)
+	if _, err := exec.LookPath("/usr/bin/time"); err != nil {
+		t.Skip("/usr/bin/time not found")
+	}
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		args = []string{"-l", binFile}
+	case "linux":
+		args = []string{"-v", binFile}
+	default:
+		t.Skipf("no known /usr/bin/time RSS format for %s", runtime.GOOS)
+	}
+	out, err := exec.Command("/usr/bin/time", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run under /usr/bin/time: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "4000") {
+		t.Fatalf("wrong output:\n%s", out)
+	}
+	peakBytes, ok := parsePeakRSS(string(out))
+	if !ok {
+		t.Skipf("could not parse peak RSS from /usr/bin/time output:\n%s", out)
+	}
+	// ~240MB churned (30×4000 quadratic concats); leak-free peak is ~2MB.
+	const boundBytes = 30_000_000
+	if peakBytes > boundBytes {
+		t.Errorf("peak RSS %d bytes exceeds %d bound — rebind frees may not be happening", peakBytes, boundBytes)
+	}
+}
+
+// TestE2EMemoryAutoRebindFreeCorrectness: the rebind shapes (`+=`, `= a + b`,
+// interpolating template) all free-then-store correctly, the interned-literal
+// init is heap-copied (so the first rebind's free is safe), and an inner
+// shadowing binding never triggers the outer's free.
+func TestE2EMemoryAutoRebindFreeCorrectness(t *testing.T) {
+	const src = `
+let t = "a"
+t = t + "b"
+t += "c"
+t = ` + "`${t}d`" + `
+{
+  let t2 = "x"
+  t2 += "y"
+  console.log(t2)
+}
+console.log(t)
+`
+	binFile := buildBinaryAuto(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run (crash = a bad rebind free): %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "xy\nabcd")
+}
+
+// TestE2EMemoryAutoRebindAliasStillRejected: a plain alias reassignment
+// (`s = other`) keeps disqualifying the binding — freeing at that rebind
+// would free a value another binding still owns.
+func TestE2EMemoryAutoRebindAliasStillRejected(t *testing.T) {
+	const src = `
+function f(): void {
+  let a = "x" + "y"
+  let s = "p" + "q"
+  s = a
+  console.log(s, a)
+}
+f()
+console.log("done")
+`
+	binFile := buildBinaryAuto(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run (crash = alias freed on rebind): %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "xy xy\ndone")
+}

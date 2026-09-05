@@ -199,7 +199,10 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	// Async functions: store result directly in the malloc'd promise slot, branch to async-ret.
 	if e.isAsync {
 		if r.Value != nil && e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
-			val, err := e.emitExpr(r.Value)
+			// The promise's value type is the hint — without it a tuple-typed
+			// `return [a, b]` emits as an ARRAY literal ({ptr,i64} aggregate)
+			// and the store into the ptr result slot is invalid IR.
+			val, err := e.emitExprWithObjectHint(r.Value, e.currentPromiseTy)
 			if err != nil {
 				return err
 			}
@@ -239,6 +242,11 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		case isNullableScalar(e.currentRetType):
 			// `return;` in a `T | null` function yields undefined -> absent.
 			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", nullableScalarStorageIR(e.currentRetType)))
+		case e.currentRetType.IsTuple && e.currentRetType.TupleByVal:
+			// Bare `return;` in a by-value-tuple function: the aggregate's
+			// zero, matching the signature (a plain `ret ptr null` would be
+			// an IR type mismatch against the aggregate return).
+			e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", e.currentRetType.StructIR()))
 		default:
 			// zeroRef gives the type-correct zero (0.0 for a float `number`,
 			// null for a ptr, false for i1) — a bare `ret double 0` is invalid IR.
@@ -259,6 +267,12 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		}
 		e.emitTerminator(fmt.Sprintf("ret %s %s", nullableScalarStorageIR(e.currentRetType), agg))
 		return nil
+	}
+
+	// A by-value small-tuple return (TDD-00134 Stage 3): `return [a, b]`
+	// builds the aggregate with insertvalue — no allocation at all.
+	if e.currentRetType.IsTuple && e.currentRetType.TupleByVal {
+		return e.emitTupleByValReturn(r, e.currentRetType)
 	}
 
 	if e.currentRetType.IsArray {
@@ -663,6 +677,15 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			return e.emitForAwaitOfArrayCore(s, *valsVal.Ty.ElemType, ptrR, lenR, condL, bodyL, incL, endL)
 		}
 		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
+	}
+
+	// A `/** @value */` flat array (TDD-00134 Stage 2): iterate by struct
+	// stride, binding each element's interior pointer (a view).
+	if objTy := e.inferExprType(s.Iterable); objTy.IsFlatArray {
+		if _, ok := s.Iterable.(*ast.Identifier); !ok {
+			return fmt.Errorf("%d:%d: for...of over a @value array requires a named array variable", s.GetPos().Line, s.GetPos().Col)
+		}
+		return e.emitForOfFlatArray(s, objTy, condL, bodyL, incL, endL)
 	}
 
 	// A klain:sync Channel ranges until close (TDD-00143 Stage 3): each

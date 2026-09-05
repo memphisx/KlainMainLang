@@ -25,6 +25,13 @@ func (e *Emitter) emitGlobalGC(args []ast.Expression, pos ast.Pos) (Value, error
 			e.emitGlobal("declare void @GC_gcollect()")
 		}
 		e.emitInstr("call void @GC_gcollect()")
+		// TDD-00163 Stage 3: Boehm queues finalizers at collection but runs
+		// them lazily from later allocations; invoking them here makes
+		// FinalizationRegistry firing observable right after a forced gc().
+		if e.programUsesFinReg {
+			e.ensureGCInvokeFinalizers()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @GC_invoke_finalizers()", e.freshReg()))
+		}
 	}
 	return Value{Ty: TypeVoid}, nil
 }

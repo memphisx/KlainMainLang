@@ -140,6 +140,21 @@ klainmain [flags] <file.ts>
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
 
+  -optimize-memory
+                Allocation optimizations with no semantic change:
+                stack-allocate object literals the escape analysis proves
+                never outlive their block, instead of heap-allocating
+                them. Off by default while the analysis matures. See
+                docs/tdd/TDD-00134.md.
+
+  -finalizers <d>
+                FinalizationRegistry exit diagnostics: off (default) or
+                report — under -mm=manual, print one labeled line per
+                registration still live at exit (its target was never
+                freed: a leak the program already named via the held
+                value) before running its cleanup callback. See
+                docs/tdd/TDD-00163.md.
+
   --emit-window-dts
                 For a klain:webview program, also write a
                 <output>.window.d.ts declaring the window.* functions its
@@ -236,7 +251,7 @@ Makefile            Build, test, and example targets
 
 ## Things this compiler will cheerfully never do
 
-- Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see [`docs/status/MEMORY-MANAGEMENT.md`](docs/status/MEMORY-MANAGEMENT.md)) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm) — see the CLI flags section above.
+- Collect garbage, automatically — *by default*. `manual` mode (the default `-mm` value) never frees anything on its own (the one automatic exception: a `Promise`'s slot gets freed the moment `await` reads it), and `Memory.free(x)` (see [`docs/status/MEMORY-MANAGEMENT.md`](docs/status/MEMORY-MANAGEMENT.md)) is there if you want to free something by hand, C-style footguns and all. Left in `manual` mode, your program's memory footprint is a monotonically increasing function of its runtime: a *feature* for short-lived CLI tools and a *life choice* for anything long-running. If you actually want automatic collection, `-mm=gc` opts into a real one (Boehm), or `-mm=auto` has the compiler insert `free` calls wherever its escape analysis proves them safe (no runtime collector, no dependency — it leaks conservatively where it can't prove safety) — see the CLI flags section above.
 - Grow a real linker. `import`/`export` exist (true per-file scoping, aliasing, and imported files now run their top-level code in dependency order), but there is no separate compilation and no link step: every module you touch gets flattened into one AST and one `main()` behind the scenes. Turtles all the way down, except it's one big turtle.
 - Judge you for using `var`. It even does `var` *properly* now — function-scoped, hoisted, re-declarable — instead of the old cop-out of quietly pretending it was `let`. Personal growth.
 
@@ -260,7 +275,7 @@ This project is deliberately a different, narrower animal. The honest head-to-he
 | Value model | **static by default, NaN-boxed dynamic on demand** — a statically-typed subset for typed code, *plus* a full NaN-boxed dynamic value model for `any`/`unknown` values and for everything under `-compat=js`: runtime property add/delete, a real prototype chain, `Proxy`/`Reflect` (the "D1" object model). Dynamic where you ask for it, static everywhere else | **NaN-boxed dynamic** — dynamic by default; optional embedded V8 (`--enable-js-runtime`) for the untyped tail |
 | Numeric types | a typed `number` is a raw **JS-faithful IEEE-754 double**, with opt-in **sized machine types** via JSDoc `/** @type {int8…int64, uint8…uint64, float32} */` for exact width/signedness; an `any`-typed number is a NaN-boxed double, same representation as PerryTS's | every number is a 64-bit double (NaN-boxed) |
 | Semantics | **opinionated, safer-than-JS by default** (`-compat=strict`), JS-faithful mode opt-in (`-compat=js`) | run all JS/TS faithfully |
-| Memory | **no GC by default** (`-mm=manual`), Boehm GC opt-in (`-mm=gc`) | generational GC by default |
+| Memory | **no GC by default** (`-mm=manual`), Boehm GC (`-mm=gc`) or compiler-inserted frees via escape analysis (`-mm=auto`, no runtime collector) both opt-in | generational GC by default |
 | Tunable knobs | memory mode, compat mode, crypto/bigint/regex backends, link-only-when-used deps | few knobs, opinionated defaults |
 | Targets | POSIX, host arch (CLI tools + Docker microservices + `klain:webview` desktop apps) | ~11 incl. mobile + native GUI |
 | npm packages | none yet | 30–50 reimplemented natively |

@@ -743,3 +743,17 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00698](ADR-00698.md) | @free block-exit frees + the conservative escape check | |
 | [00699](ADR-00699.md) | @owned last-use frees — locals and parameters | |
 | [00700](ADR-00700.md) | -mm=auto — implicit auto-free of provably-local values | |
+| [00701](ADR-00701.md) | FinalizationRegistry — mode-dependent finalization + leak diagnostics | Implements [TDD-00163](../tdd/TDD-00163.md) (Stages 1–4); Extends [ADR-00349](ADR-00349.md) (weak-collection gc plumbing), [ADR-00661](ADR-00661.md) (dynamic-object referent unbox) |
+| [00702](ADR-00702.md) | -optimize-memory — escape analysis → stack allocation (Stage 1) | Implements [TDD-00134](../tdd/TDD-00134.md) (Stage 1); Extends [ADR-00698](ADR-00698.md) (the escape checker) |
+| [00703](ADR-00703.md) | FinalizationRegistry Stage 5 — scope-exit finalization under -mm=auto | Implements [TDD-00163](../tdd/TDD-00163.md) (Stage 5); Extends [ADR-00701](ADR-00701.md), [ADR-00698](ADR-00698.md) |
+| [00704](ADR-00704.md) | -optimize-memory — stack-allocated closure headers and environments | Extends [ADR-00702](ADR-00702.md); Implements [TDD-00134](../tdd/TDD-00134.md) (Stage 1, closure part) |
+| [00705](ADR-00705.md) | -optimize-memory — stack-allocated tuples and class instances (Stage 1 complete) | Extends [ADR-00702](ADR-00702.md), [ADR-00704](ADR-00704.md); Implements [TDD-00134](../tdd/TDD-00134.md) (Stage 1, final part) |
+| [00706](ADR-00706.md) | `/** @value */` flat value-type arrays (AoS inline element layout) | Implements [TDD-00134](../tdd/TDD-00134.md) (Stage 2); relates to [TDD-00127](../tdd/TDD-00127.md) (array reference semantics) |
+| [00707](ADR-00707.md) | -optimize-memory — value-returned small tuples (Stage 3, TDD-00134 complete) | Extends [ADR-00702](ADR-00702.md), [ADR-00704](ADR-00704.md), [ADR-00705](ADR-00705.md); Implements [TDD-00134](../tdd/TDD-00134.md) (Stage 3, final part) |
+| [00708](ADR-00708.md) | TDD-00174 Stage A — dev-default differential mode knobs (+ `??`/`\|\|`/`&&` autofree fix) | Implements [TDD-00174](../tdd/TDD-00174.md) (Stage A); Extends [ADR-00702](ADR-00702.md), [ADR-00704](ADR-00704.md), [ADR-00705](ADR-00705.md) |
+| [00709](ADR-00709.md) | Promote computed constant-scalar top-level bindings to module globals | Extends [ADR-00342](ADR-00342.md) (Implements [TDD-00093](../tdd/TDD-00093.md)) |
+| [00710](ADR-00710.md) | Catch SIGINT in the E2E test binary — sh-`&` shards spawned servers with SIGINT ignored | |
+| [00711](ADR-00711.md) | Hash-indexed Map/Set — replace the linear-scan backing store | |
+| [00712](ADR-00712.md) | Rebind-free — `-mm=auto` frees the overwritten value on owning reassignment | Extends [TDD-00173](../tdd/TDD-00173.md)'s implicit layer |
+| [00713](ADR-00713.md) | JSON.stringify frees its intermediates; stringify result is an owning initializer | |
+| [00714](ADR-00714.md) | Append-by-index — `arr[i] = v` at `i == length` grows the array | |

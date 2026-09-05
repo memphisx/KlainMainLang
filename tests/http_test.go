@@ -20,19 +20,34 @@ import (
 // to accept TCP connections before returning. The process is killed via
 // t.Cleanup regardless of test outcome, since http.listen's own process
 // never exits on its own.
-func startHTTPServer(t *testing.T, src string, port int) {
+// freePort asks the OS for an unused loopback TCP port. Pure test-harness
+// plumbing (Go's net package) — the compiled program still calls the real
+// http.listen(<port>, cb); only the literal it binds is chosen here, a fresh one
+// per server, so parallel test shards never collide on a shared hardcoded port
+// (which used to make the readiness poll connect to another shard's server).
+func freePort(t *testing.T) int {
 	t.Helper()
-	binFile := buildBinaryImports(t, src)
-	cmd := exec.Command(binFile)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start server: %v", err)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	p := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return p
+}
 
-	deadline := time.Now().Add(5 * time.Second)
+// subPort rewrites every occurrence of the placeholder port literal in a source
+// string to the actually-allocated one, so a test keeps a readable literal in
+// its program text while the harness binds a free port underneath.
+func subPort(src string, from, to int) string {
+	return strings.ReplaceAll(src, fmt.Sprintf("%d", from), fmt.Sprintf("%d", to))
+}
+
+// waitListening polls until the server accepts a TCP connection on port. The
+// deadline is generous (15s) so CPU-saturated parallel shards don't trip it.
+func waitListening(t *testing.T, port int) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
@@ -45,13 +60,23 @@ func startHTTPServer(t *testing.T, src string, port int) {
 	t.Fatalf("server never started listening on %s", addr)
 }
 
-// startHTTPServerGC is startHTTPServer's -mm=gc counterpart, for exercising
-// http.listen's concurrent-fiber machinery under the Boehm GC (see
-// docs/adr/ADR-00071.md's GC_stackbottom fix) — skips (via buildBinaryGC)
-// if libgc/bdw-gc isn't installed.
-func startHTTPServerGC(t *testing.T, src string, port int) {
+// startHTTPServer allocates a free port, substitutes it for the placeholder
+// `port` literal in src, starts the server, waits for it to listen, and returns
+// the actual port for the caller's client requests.
+func startHTTPServer(t *testing.T, src string, port int) int {
 	t.Helper()
-	binFile := buildBinaryGCImports(t, src)
+	np := freePort(t)
+	startHTTPServerFixed(t, subPort(src, port, np), np)
+	return np
+}
+
+// startHTTPServerFixed runs src as a background server on exactly `port` (no
+// substitution) and waits for readiness. For tests that need a specific port —
+// e.g. the bind-failure test that starts a second instance on an already-bound
+// port.
+func startHTTPServerFixed(t *testing.T, src string, port int) {
+	t.Helper()
+	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -60,18 +85,27 @@ func startHTTPServerGC(t *testing.T, src string, port int) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
+	waitListening(t, port)
+}
 
-	deadline := time.Now().Add(5 * time.Second)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+// startHTTPServerGC is startHTTPServer's -mm=gc counterpart, for exercising
+// http.listen's concurrent-fiber machinery under the Boehm GC (see
+// docs/adr/ADR-00071.md's GC_stackbottom fix) — skips (via buildBinaryGC)
+// if libgc/bdw-gc isn't installed.
+func startHTTPServerGC(t *testing.T, src string, port int) int {
+	t.Helper()
+	np := freePort(t)
+	binFile := buildBinaryGCImports(t, subPort(src, port, np))
+	cmd := exec.Command(binFile)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start server: %v", err)
 	}
-	t.Fatalf("server never started listening on %s", addr)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitListening(t, np)
+	return np
 }
 
 // waitPortFree polls addr for up to 2s, returning once connections are
@@ -108,32 +142,24 @@ func waitPortFree(addr string) {
 // fork() doesn't change process group by default, every worker it spawns)
 // its own group, separate from the test binary's own — signaling -pgid
 // reaches all of them in one call.
-func startHTTPClusterServer(t *testing.T, src string, port int) {
+func startHTTPClusterServer(t *testing.T, src string, port int) int {
 	t.Helper()
-	binFile := buildBinaryImports(t, src)
+	np := freePort(t)
+	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
 	pgid := cmd.Process.Pid
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", np)
 	t.Cleanup(func() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		waitPortFree(addr)
 	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("server never started listening on %s", addr)
+	waitListening(t, np)
+	return np
 }
 
 // startHTTPClusterServerGC is startHTTPClusterServer's -mm=gc counterpart —
@@ -141,32 +167,24 @@ func startHTTPClusterServer(t *testing.T, src string, port int) {
 // http.listen's clustering fork() (GC_set_handle_fork(1) before GC_INIT()).
 // Skips (via buildBinaryGC) if libgc/bdw-gc isn't installed, same as
 // startHTTPServerGC.
-func startHTTPClusterServerGC(t *testing.T, src string, port int) {
+func startHTTPClusterServerGC(t *testing.T, src string, port int) int {
 	t.Helper()
-	binFile := buildBinaryGCImports(t, src)
+	np := freePort(t)
+	binFile := buildBinaryGCImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
 	pgid := cmd.Process.Pid
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", np)
 	t.Cleanup(func() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		waitPortFree(addr)
 	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("server never started listening on %s", addr)
+	waitListening(t, np)
+	return np
 }
 
 func TestE2EHTTPCreateServerNodeShape(t *testing.T) {
@@ -182,8 +200,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end("part2")
 }).listen(8955)
 `
-	startHTTPServer(t, src, 8955)
-	resp, err := http.Get("http://127.0.0.1:8955/")
+	port := startHTTPServer(t, src, 8955)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -216,8 +234,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end("code=" + code)
 }).listen(8957)
 `
-	startHTTPServer(t, src, 8957)
-	resp, err := http.Get("http://127.0.0.1:8957/")
+	port := startHTTPServer(t, src, 8957)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -246,8 +264,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 }).listen(8959)
 phase = "after"
 `
-	startHTTPServer(t, src, 8959)
-	resp, err := http.Get("http://127.0.0.1:8959/")
+	port := startHTTPServer(t, src, 8959)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -271,8 +289,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end(ok ? "wrote" : "full")
 }).listen(8961)
 `
-	startHTTPServer(t, src, 8961)
-	resp, err := http.Get("http://127.0.0.1:8961/")
+	port := startHTTPServer(t, src, 8961)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -295,8 +313,8 @@ const server = http.createServer((req: IncomingMessage, res: ServerResponse) => 
 })
 server.listen(8973)
 `
-	startHTTPServer(t, src, 8973)
-	resp, err := http.Get("http://127.0.0.1:8973/x")
+	port := startHTTPServer(t, src, 8973)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/x", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -320,8 +338,8 @@ server.on('request', (req, res) => {
 })
 server.listen(8972)
 `
-	startHTTPServer(t, src, 8972)
-	resp, err := http.Get("http://127.0.0.1:8972/y")
+	port := startHTTPServer(t, src, 8972)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/y", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -365,8 +383,8 @@ http.listen(8941, (req: HttpRequest): Res => {
   return { status: 200, body: "hello from KML" }
 })
 `
-	startHTTPServer(t, src, 8941)
-	resp, err := http.Get("http://127.0.0.1:8941/")
+	port := startHTTPServer(t, src, 8941)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -388,8 +406,8 @@ http.listen(8942, (req: HttpRequest): Res => {
   return { status: 200, body: req.method + " " + req.path }
 })
 `
-	startHTTPServer(t, src, 8942)
-	resp, err := http.Get("http://127.0.0.1:8942/some/path")
+	port := startHTTPServer(t, src, 8942)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/some/path", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -410,9 +428,9 @@ http.listen(8943, (req: HttpRequest): Res => {
   return { status: 200, body: "req " + count }
 })
 `
-	startHTTPServer(t, src, 8943)
+	port := startHTTPServer(t, src, 8943)
 	for i := 1; i <= 3; i++ {
-		resp, err := http.Get("http://127.0.0.1:8943/")
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 		if err != nil {
 			t.Fatalf("GET #%d: %v", i, err)
 		}
@@ -436,8 +454,8 @@ http.listen(8944, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 })
 `
-	startHTTPServer(t, src, 8944)
-	resp, err := http.Get("http://127.0.0.1:8944/missing")
+	port := startHTTPServer(t, src, 8944)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/missing", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -463,9 +481,9 @@ http.listen(8945, (req: HttpRequest): Res => {
   return { status: 200, body: "n=" + n }
 })
 `
-	startHTTPServer(t, src, 8945)
+	port := startHTTPServer(t, src, 8945)
 	time.Sleep(200 * time.Millisecond)
-	resp, err := http.Get("http://127.0.0.1:8945/")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -488,8 +506,10 @@ try {
   console.log("caught: " + e.message)
 }
 `
-	startHTTPServer(t, src, 8946)
-	// A second instance on the same port must fail to bind and hit the catch.
+	port := freePort(t)
+	src = subPort(src, 8946, port)
+	startHTTPServerFixed(t, src, port)
+	// A second instance on the SAME port must fail to bind and hit the catch.
 	got := compileAndRunImports(t, src)
 	if got == "" {
 		t.Fatal("expected the second instance's catch block to print something")
@@ -552,9 +572,9 @@ http.listen(8950, (req: HttpRequest): Res => {
   return { status: 200, body: req.path }
 })
 `
-	startHTTPServer(t, src, 8950)
+	port := startHTTPServer(t, src, 8950)
 
-	slowConn, err := net.Dial("tcp", "127.0.0.1:8950")
+	slowConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatalf("slow connection dial: %v", err)
 	}
@@ -566,7 +586,7 @@ http.listen(8950, (req: HttpRequest): Res => {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		resp, err := http.Get("http://127.0.0.1:8950/fast")
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/fast", port))
 		if err != nil {
 			t.Errorf("fast GET: %v", err)
 			return
@@ -609,12 +629,12 @@ http.listen(8951, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 })
 `
-	startHTTPServer(t, src, 8951)
+	port := startHTTPServer(t, src, 8951)
 
 	client := &http.Client{}
 	const n = 30000
 	for i := 1; i <= n; i++ {
-		resp, err := client.Get("http://127.0.0.1:8951/")
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 		if err != nil {
 			t.Fatalf("GET #%d (of %d): %v", i, n, err)
 		}
@@ -655,9 +675,9 @@ http.listen(8951, async (req: HttpRequest): Promise<Res> => {
   return { status: 200, body: r.text() }
 })
 `, upstream.URL)
-	startHTTPServer(t, src, 8951)
+	port := startHTTPServer(t, src, 8951)
 
-	resp, err := http.Get("http://127.0.0.1:8951/hello")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/hello", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -687,12 +707,12 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
   return { status: 200, body: r.text() }
 })
 `, upstream.URL)
-	startHTTPServer(t, src, 8952)
+	port := startHTTPServer(t, src, 8952)
 
 	slowDone := make(chan struct{})
 	go func() {
 		defer close(slowDone)
-		resp, err := http.Get("http://127.0.0.1:8952/slow")
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port))
 		if err != nil {
 			t.Errorf("slow GET: %v", err)
 			return
@@ -707,7 +727,7 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
 	time.Sleep(200 * time.Millisecond) // let the slow request's fetch start first
 
 	fastStart := time.Now()
-	resp, err := http.Get("http://127.0.0.1:8952/fast")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/fast", port))
 	if err != nil {
 		t.Fatalf("fast GET: %v", err)
 	}
@@ -734,8 +754,8 @@ http.listen(8953, (req: HttpRequest): Res => {
   return { status: 200, body: req.headers.get("x-test-header") + "|" + (req.headers.has("nonexistent") ? "1" : "0") }
 })
 `
-	startHTTPServer(t, src, 8953)
-	httpReq, err := http.NewRequest("GET", "http://127.0.0.1:8953/", nil)
+	port := startHTTPServer(t, src, 8953)
+	httpReq, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -761,10 +781,10 @@ http.listen(8954, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + req.query.get("a") + "|" + req.query.get("b") + "|" + (req.query.has("flag") ? "1" : "0") + "|" + req.query.get("flag") }
 })
 `
-	startHTTPServer(t, src, 8954)
+	port := startHTTPServer(t, src, 8954)
 	// "b"'s value is percent-encoded ("two words" / "&") and "flag" is a
 	// bare flag with no "=" — req.path must NOT include any of this.
-	resp, err := http.Get("http://127.0.0.1:8954/some/path?a=1&b=two%20words&flag")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/some/path?a=1&b=two%%20words&flag", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -784,8 +804,8 @@ http.listen(8955, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + (req.query.has("anything") ? "1" : "0") }
 })
 `
-	startHTTPServer(t, src, 8955)
-	resp, err := http.Get("http://127.0.0.1:8955/plain")
+	port := startHTTPServer(t, src, 8955)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/plain", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -804,8 +824,8 @@ http.listen(8956, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
 })
 `
-	startHTTPServer(t, src, 8956)
-	resp, err := http.Post("http://127.0.0.1:8956/", "application/json", strings.NewReader(`{"k":"v"}`))
+	port := startHTTPServer(t, src, 8956)
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/json", strings.NewReader(`{"k":"v"}`))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -824,8 +844,8 @@ http.listen(8957, (req: HttpRequest): Res => {
   return { status: 200, body: "[" + req.body + "]" }
 })
 `
-	startHTTPServer(t, src, 8957)
-	resp, err := http.Get("http://127.0.0.1:8957/")
+	port := startHTTPServer(t, src, 8957)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -850,7 +870,7 @@ http.listen(8958, (req: HttpRequest): Res => {
   return { status: 200, body: "len=" + req.body.length }
 })
 `
-	startHTTPServer(t, src, 8958)
+	port := startHTTPServer(t, src, 8958)
 	const size = 200_000
 	var b strings.Builder
 	b.Grow(size)
@@ -859,7 +879,7 @@ http.listen(8958, (req: HttpRequest): Res => {
 	}
 	largeBody := b.String()
 
-	resp, err := http.Post("http://127.0.0.1:8958/", "text/plain", strings.NewReader(largeBody))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader(largeBody))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -883,7 +903,7 @@ http.listen(8959, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
 })
 `
-	startHTTPServer(t, src, 8959)
+	port := startHTTPServer(t, src, 8959)
 	const size = 100_000
 	var b strings.Builder
 	b.Grow(size)
@@ -892,7 +912,7 @@ http.listen(8959, (req: HttpRequest): Res => {
 	}
 	largeBody := b.String()
 
-	resp, err := http.Post("http://127.0.0.1:8959/", "text/plain", strings.NewReader(largeBody))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader(largeBody))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -925,8 +945,8 @@ http.listen(8960, (req: HttpRequest): Res => {
   return { status: 200, body: "ok", headers: h }
 })
 `
-	startHTTPServer(t, src, 8960)
-	resp, err := http.Get("http://127.0.0.1:8960/")
+	port := startHTTPServer(t, src, 8960)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -954,8 +974,8 @@ http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "plain" }
 })
 `
-	startHTTPServer(t, src, 8961)
-	resp, err := http.Get("http://127.0.0.1:8961/")
+	port := startHTTPServer(t, src, 8961)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -989,9 +1009,9 @@ http.listen(8971, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
 })
 `
-	startHTTPServer(t, src, 8971)
+	port := startHTTPServer(t, src, 8971)
 	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
-	resp, err := http.Post("http://127.0.0.1:8971/", "application/octet-stream", bytes.NewReader(payload))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1014,9 +1034,9 @@ http.listen(8963, (req: HttpRequest): Res => {
   return { status: 200, body: "", bodyBytes: buf }
 })
 `
-	startHTTPServer(t, src, 8963)
+	port := startHTTPServer(t, src, 8963)
 	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
-	resp, err := http.Post("http://127.0.0.1:8963/", "application/octet-stream", bytes.NewReader(payload))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1043,8 +1063,8 @@ http.listen(8964, (req: HttpRequest): Res => {
   return { status: 200, body: "this string is much longer than 3 bytes and must be ignored", bodyBytes: buf }
 })
 `
-	startHTTPServer(t, src, 8964)
-	resp, err := http.Get("http://127.0.0.1:8964/")
+	port := startHTTPServer(t, src, 8964)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -1067,9 +1087,9 @@ http.listen(8965, (req: HttpRequest): Res => {
   return { status: 200, body: "len=" + buf.byteLength }
 })
 `
-	startHTTPServer(t, src, 8965)
+	port := startHTTPServer(t, src, 8965)
 	payload := []byte{0x41, 0x00, 0x42}
-	resp, err := http.Post("http://127.0.0.1:8965/", "application/octet-stream", bytes.NewReader(payload))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1108,7 +1128,7 @@ http.listen(8963, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
 }, { workers: 3 })
 `
-	startHTTPClusterServer(t, src, 8963)
+	port := startHTTPClusterServer(t, src, 8963)
 
 	const n = 40
 	results := make(chan string, n)
@@ -1117,7 +1137,7 @@ http.listen(8963, (req: HttpRequest): Res => {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := http.Get("http://127.0.0.1:8963/")
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 			if err != nil {
 				results <- ""
 				return
@@ -1153,8 +1173,8 @@ http.listen(8964, (req: HttpRequest): Res => {
   return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + cluster.workerId.toString() }
 })
 `
-	startHTTPServer(t, src, 8964)
-	resp, err := http.Get("http://127.0.0.1:8964/")
+	port := startHTTPServer(t, src, 8964)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -1240,9 +1260,9 @@ http.listen(8974, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
 }, { workers: 3 })
 `
-	startHTTPClusterServer(t, src, 8974)
+	port := startHTTPClusterServer(t, src, 8974)
 
-	resp, err := http.Get("http://127.0.0.1:8974/shutdown")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/shutdown", port))
 	if err != nil {
 		t.Fatalf("GET /shutdown: %v", err)
 	}
@@ -1256,7 +1276,7 @@ http.listen(8974, (req: HttpRequest): Res => {
 	// the port should stop accepting well within a few seconds. If cross-worker
 	// close were broken, the two workers that didn't serve /shutdown would keep
 	// the inherited socket open and this loop would never see a refusal.
-	addr := "127.0.0.1:8974"
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -1294,7 +1314,7 @@ http.listen(8966, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() + ":" + total.toString() };
 }, { workers: 3 })
 `
-	startHTTPClusterServerGC(t, src, 8966)
+	port := startHTTPClusterServerGC(t, src, 8966)
 
 	const n = 20
 	// 100,000 iterations * 72 (two concatenated 36-byte segments).
@@ -1306,7 +1326,7 @@ http.listen(8966, (req: HttpRequest): Res => {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := http.Get("http://127.0.0.1:8966/")
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 			if err != nil {
 				results <- ""
 				return
@@ -1349,8 +1369,8 @@ http.listen(8976, (req: HttpRequest): Res => {
   return { status: 200, body: Object.keys(req).join(",") }
 })
 `
-	startHTTPServer(t, src, 8976)
-	resp, err := http.Get("http://127.0.0.1:8976/hi")
+	port := startHTTPServer(t, src, 8976)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/hi", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -1391,9 +1411,9 @@ http.listen(8967, (req: HttpRequest): Res => {
 })
 console.log("after listen returned")
 `
-	cmd, out := startBackgroundServer(t, src, 8967)
+	cmd, out, port := startBackgroundServer(t, src, 8967)
 
-	resp, err := http.Get("http://127.0.0.1:8967/shutdown")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/shutdown", port))
 	if err != nil {
 		t.Fatalf("GET /shutdown: %v", err)
 	}
@@ -1428,9 +1448,9 @@ http.listen(8968, (req: HttpRequest): Res => {
 })
 console.log("after listen returned")
 `
-	cmd, out := startBackgroundServer(t, src, 8968)
+	cmd, out, port := startBackgroundServer(t, src, 8968)
 
-	resp, err := http.Get("http://127.0.0.1:8968/")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
@@ -1462,11 +1482,11 @@ http.listen(8975, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 })
 `
-	startHTTPServer(t, src, 8975)
+	port := startHTTPServer(t, src, 8975)
 
 	// A raw connection that never completes its request — the server fiber parks
 	// mid-read, keeping this connection in the active registry.
-	raw, err := net.DialTimeout("tcp", "127.0.0.1:8975", 2*time.Second)
+	raw, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial raw: %v", err)
 	}
@@ -1480,7 +1500,7 @@ http.listen(8975, (req: HttpRequest): Res => {
 	// don't assert on it — fire it and move on.
 	go func() {
 		c := &http.Client{Timeout: 2 * time.Second}
-		if resp, err := c.Get("http://127.0.0.1:8975/closeall"); err == nil {
+		if resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/closeall", port)); err == nil {
 			resp.Body.Close()
 		}
 	}()
@@ -1550,11 +1570,11 @@ http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "h2:" + req.method + ":" + req.path + ":" + req.body }
 })
 `
-	startHTTPServer(t, src, 8961)
+	port := startHTTPServer(t, src, 8961)
 
 	// h2c GET
 	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
-		"http://127.0.0.1:8961/hello", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("http://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c GET: %v\n%s", err, out)
 	}
@@ -1564,7 +1584,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 
 	// h2c POST with a body
 	out, err = exec.Command("curl", "-s", "--http2-prior-knowledge",
-		"-d", "payload", "http://127.0.0.1:8961/submit", "-w", "|%{http_version}").CombinedOutput()
+		"-d", "payload", fmt.Sprintf("http://127.0.0.1:%d/submit", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c POST: %v\n%s", err, out)
 	}
@@ -1574,7 +1594,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 
 	// HTTP/1.1 on the same server still works
 	out, err = exec.Command("curl", "-s", "--http1.1",
-		"http://127.0.0.1:8961/one", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("http://127.0.0.1:%d/one", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl 1.1: %v\n%s", err, out)
 	}
@@ -1625,9 +1645,9 @@ const server = http2.createServer((req, res) => {
 })
 server.listen(8983)
 `
-	startHTTPServer(t, src, 8983)
+	port := startHTTPServer(t, src, 8983)
 	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
-		"http://127.0.0.1:8983/y", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("http://127.0.0.1:%d/y", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c: %v\n%s", err, out)
 	}
@@ -1655,10 +1675,10 @@ const server = http2.createSecureServer({ cert: cert, key: key }, (req, res) => 
 })
 server.listen(8985)
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8985)
+	port := startHTTPServer(t, src, 8985)
 
 	out, err := exec.Command("curl", "-sk", "--http2",
-		"https://127.0.0.1:8985/hello", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2-tls GET: %v\n%s", err, out)
 	}
@@ -1670,12 +1690,12 @@ server.listen(8985)
 	// (Node's allowHTTP1:false default), so the connection is dropped without a
 	// response. curl exits non-zero; the server must survive to serve h2 again.
 	_, err = exec.Command("curl", "-sk", "--http1.1", "--max-time", "3",
-		"https://127.0.0.1:8985/one").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/one", port)).CombinedOutput()
 	if err == nil {
 		t.Errorf("1.1-only TLS client: want rejection, got success")
 	}
 	out, err = exec.Command("curl", "-sk", "--http2",
-		"https://127.0.0.1:8985/after", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/after", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2-tls after reject: %v\n%s", err, out)
 	}
@@ -1703,11 +1723,11 @@ const server = https.createServer({ cert: cert, key: key }, (req, res) => {
 })
 server.listen(8987)
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8987)
+	port := startHTTPServer(t, src, 8987)
 
 	// A GET — even an h2-capable client negotiates 1.1 (h1-only ALPN).
 	out, err := exec.Command("curl", "-sk", "--http2",
-		"https://127.0.0.1:8987/hello", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl https GET: %v\n%s", err, out)
 	}
@@ -1716,7 +1736,7 @@ server.listen(8987)
 	}
 
 	// A POST body — exercises the Content-Length read loop over the SSL shims.
-	out, err = exec.Command("curl", "-sk", "https://127.0.0.1:8987/echo",
+	out, err = exec.Command("curl", "-sk", fmt.Sprintf("https://127.0.0.1:%d/echo", port),
 		"-d", "payload", "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl https POST: %v\n%s", err, out)
@@ -1744,10 +1764,10 @@ const server = http2.createSecureServer({ cert: cert, key: key, allowHTTP1: true
 })
 server.listen(8988)
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8988)
+	port := startHTTPServer(t, src, 8988)
 
 	out, err := exec.Command("curl", "-sk", "--http2",
-		"https://127.0.0.1:8988/h2", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/h2", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2: %v\n%s", err, out)
 	}
@@ -1756,7 +1776,7 @@ server.listen(8988)
 	}
 
 	out, err = exec.Command("curl", "-sk", "--http1.1",
-		"https://127.0.0.1:8988/one", "-w", "|%{http_version}").CombinedOutput()
+		fmt.Sprintf("https://127.0.0.1:%d/one", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl 1.1 fallback: %v\n%s", err, out)
 	}
@@ -1782,9 +1802,9 @@ server.on('stream', (stream, headers) => {
 })
 server.listen(8984)
 `
-	startHTTPServer(t, src, 8984)
+	port := startHTTPServer(t, src, 8984)
 	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
-		"http://127.0.0.1:8984/abc", "-w", "|%{http_code}|%{http_version}|%header{x-served-by}").CombinedOutput()
+		fmt.Sprintf("http://127.0.0.1:%d/abc", port), "-w", "|%{http_code}|%{http_version}|%header{x-served-by}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c: %v\n%s", err, out)
 	}
@@ -1811,9 +1831,9 @@ server.on('stream', (stream, headers) => {
 })
 server.listen(8985)
 `
-	startHTTPServer(t, src, 8985)
+	port := startHTTPServer(t, src, 8985)
 	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
-		"-d", "payload7", "http://127.0.0.1:8985/up", "-w", "|%{http_version}").CombinedOutput()
+		"-d", "payload7", fmt.Sprintf("http://127.0.0.1:%d/up", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c POST: %v\n%s", err, out)
 	}
@@ -2114,8 +2134,8 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end("nope")
 }).listen(8956)
 `
-	startHTTPServer(t, src, 8956)
-	resp, err := http.Get("http://127.0.0.1:8956/")
+	port := startHTTPServer(t, src, 8956)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

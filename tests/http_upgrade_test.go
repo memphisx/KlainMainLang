@@ -49,9 +49,9 @@ func readUpgradeHandshake(t *testing.T, r *bufio.Reader) {
 
 func TestE2EHTTPUpgradeEventEcho(t *testing.T) {
 	src := fmt.Sprintf(upgradeEchoServer, 8961)
-	startHTTPServer(t, src, 8961)
+	port := startHTTPServer(t, src, 8961)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8961", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -81,9 +81,9 @@ func TestE2EHTTPUpgradeEventEcho(t *testing.T) {
 // A non-upgrade request on the same server still reaches the normal handler.
 func TestE2EHTTPUpgradeCoexistsWithNormalHTTP(t *testing.T) {
 	src := fmt.Sprintf(upgradeEchoServer, 8962)
-	startHTTPServer(t, src, 8962)
+	port := startHTTPServer(t, src, 8962)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8962", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -123,9 +123,9 @@ server.on('upgrade', (req, socket, head) => {
 })
 server.listen(8963)
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8963)
+	port := startHTTPServer(t, src, 8963)
 
-	conn, err := tls.Dial("tcp", "127.0.0.1:8963", &tls.Config{InsecureSkipVerify: true})
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}
@@ -170,9 +170,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8964)
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8964)
+	port := startHTTPServer(t, src, 8964)
 
-	conn, err := tls.Dial("tcp", "127.0.0.1:8964", &tls.Config{InsecureSkipVerify: true})
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}
@@ -212,8 +212,8 @@ server.on('upgrade', (req, socket, head) => {
 })
 server.listen(8965)
 `
-	startHTTPServer(t, src, 8965)
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8965", 2*time.Second)
+	port := startHTTPServer(t, src, 8965)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

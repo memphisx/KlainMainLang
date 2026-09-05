@@ -392,10 +392,11 @@ func (e *Emitter) emitEventEmitterCall(payloadTy Type, listenersMapPtr string, m
 			return Value{}, fmt.Errorf("%d:%d: removeAllListeners() takes at most 1 argument (event?)", pos.Line, pos.Col)
 		}
 		if len(args) == 0 {
-			// No-arg form: literally Map.clear()'s own IR — just reset the
-			// map's size, don't free (same "leak in manual mode" convention
+			// No-arg form: literally Map.clear() — reset size AND the hash
+			// index, don't free (same "leak in manual mode" convention
 			// clear() already uses).
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", listenersMapPtr))
+			e.ensureMapClear()
+			e.emitInstr(fmt.Sprintf("call void @__kml_map_clear(ptr %s)", listenersMapPtr))
 			return chainVal, nil
 		}
 		eventVal, err := e.emitExpr(args[0])

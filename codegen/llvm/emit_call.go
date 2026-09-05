@@ -521,6 +521,17 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if e.inferExprType(mem.Object).IsAsyncLocalStorage {
 			return e.emitAsyncLocalStorageMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
+		if e.inferExprType(mem.Object).IsFinalizationRegistry {
+			return e.emitFinalizationRegistryMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		// `/** @value */` flat array (TDD-00134 Stage 2): push is the one
+		// supported method; everything else needs the pointer-slot layout.
+		if objTy := e.inferExprType(mem.Object); objTy.IsFlatArray {
+			if mem.Property == "push" {
+				return e.emitFlatArrayPush(objTy, mem, ex.Args, ex.GetPos())
+			}
+			return Value{}, fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — '%s' needs a regular (pointer-element) array", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+		}
 		if e.inferExprType(mem.Object).IsAsyncResource {
 			return e.emitAsyncResourceMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 		}
@@ -2000,6 +2011,11 @@ func (e *Emitter) checkSpreadArgs(args []ast.Expression, hasRest bool, regularCo
 }
 
 func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// TDD-00134 Stage 3: the destructuring fast path sets wantTupleAggregate
+	// right before emitting its (outermost) call; grab-and-clear at entry so
+	// a nested call inside an argument expression never sees it.
+	keepTupleAgg := e.wantTupleAggregate
+	e.wantTupleAggregate = false
 	// A may-suspend async function is not called directly — it is spawned as a
 	// coroutine task, returning a pending promise (TDD-00083 Stage 2).
 	if sig.MaySuspend {
@@ -2296,6 +2312,15 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), name, argsStr))
 	retTy := sig.RetType
+	// A by-value small-tuple result (TDD-00134 Stage 3): hand the raw
+	// aggregate to the destructuring fast path (flag kept as its marker);
+	// every other consumer gets it spilled back to the heap-pointer shape.
+	if retTy.IsTuple && retTy.TupleByVal {
+		if keepTupleAgg {
+			return Value{Ref: reg, Ty: retTy}, nil
+		}
+		return e.spillTupleAggregate(reg, retTy), nil
+	}
 	// A non-suspending async fn (didn't take the MaySuspend fiber path above)
 	// now returns a settled task-shaped promise (TDD-00084 Part A) — tag it so
 	// `await`/`.then` take the task path, matching the may-suspend result.

@@ -1,0 +1,7 @@
+# Compiler intermediates emitted next to each source, and the build/results dirs.
+programs/**/*.ll
+programs/**/*.c
+build/
+results/
+# Perry keeps its on-disk cache under node_modules/.cache/perry.
+node_modules/

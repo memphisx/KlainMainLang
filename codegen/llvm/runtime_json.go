@@ -23,6 +23,44 @@ entry:
 }`, fmtName))
 }
 
+// ensureJSONConcat2 declares __kml_json_concat2: concatenate two header
+// strings into a fresh one, conditionally freeing each input. The stringify
+// accumulator loops use it so intermediate accumulators and element
+// fragments are reclaimed as they go, in every memory mode — previously
+// each append leaked its inputs, quadratically (found by the benchmark
+// campaign's json_churn: ~180MB of transient garbage per round).
+func (e *Emitter) ensureJSONConcat2() {
+	if e.usedJSONConcat2 {
+		return
+	}
+	e.usedJSONConcat2 = true
+	e.ensureMemcpy()
+	e.ensureStrHeaderRuntime()
+	e.emitGlobal(`
+define ptr @__kml_json_concat2(ptr %a, ptr %b, i1 %fa, i1 %fb) {
+entry:
+  %la = call i64 @__kml_str_len(ptr %a)
+  %lb = call i64 @__kml_str_len(ptr %b)
+  %n = add i64 %la, %lb
+  %dst = call ptr @__kml_str_alloc(i64 %n)
+  call ptr @memcpy(ptr %dst, ptr %a, i64 %la)
+  %mid = getelementptr i8, ptr %dst, i64 %la
+  %lb1 = add i64 %lb, 1
+  call ptr @memcpy(ptr %mid, ptr %b, i64 %lb1)
+  br i1 %fa, label %freea, label %chkb
+freea:
+  call void @__kml_str_free(ptr %a)
+  br label %chkb
+chkb:
+  br i1 %fb, label %freeb, label %done
+freeb:
+  call void @__kml_str_free(ptr %b)
+  br label %done
+done:
+  ret ptr %dst
+}`)
+}
+
 func (e *Emitter) ensureJSONStringifyStr() {
 	if e.usedJSONStringifyStr {
 		return

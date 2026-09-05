@@ -259,6 +259,12 @@ func (e *Emitter) unboxArrayValue(boxPtr string, elemTy Type) Value {
 // TDD-00029. Use this instead of a raw `load elemTy.IR, ptr gepReg` at any
 // array-element-read call site so nested arrays work for free.
 func (e *Emitter) loadArrayElem(gepReg string, elemTy Type) Value {
+	// Flat-array element (TDD-00134 Stage 2): the slot IS the struct — the
+	// interior pointer is the object value (a view into the buffer).
+	if elemTy.Inline {
+		elemTy.Inline = false
+		return Value{Ref: gepReg, Ty: elemTy}
+	}
 	if elemTy.IsArray {
 		boxPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, gepReg))
@@ -313,6 +319,13 @@ func (e *Emitter) loadArrayElemMaybeNull(slotPtr string, elemTy Type) Value {
 // from before TDD-00029. Use this instead of a raw
 // `store elemTy.IR val.Ref, ptr gepReg` at any array-element-write call site.
 func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
+	// Flat-array element (TDD-00134 Stage 2): copy the value's fields into
+	// the inline slot — value semantics, the @value opt-in's whole point.
+	if elemTy.Inline {
+		e.ensureMemcpy()
+		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", gepReg, val.Ref, elemTy.StructSize()))
+		return
+	}
 	if elemTy.IsArray {
 		box := e.boxArrayValue(val)
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", box, gepReg))
@@ -389,6 +402,9 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			return "", "", fmt.Errorf("%d:%d: spread element must be an array variable", sp.GetPos().Line, sp.GetPos().Col)
 		}
 		sym, found := e.lookup(spId.Name)
+		if found && sym.Ty.IsFlatArray {
+			return "", "", fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — spreading '%s' needs a regular (pointer-element) array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
+		}
 		if !found || !sym.Ty.IsArray {
 			return "", "", fmt.Errorf("%d:%d: '%s' is not an array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
 		}
@@ -590,6 +606,22 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 }
 
 func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
+	// `const [v, err] = f()` on a by-value-tuple function (TDD-00134 Stage 3):
+	// keep the returned aggregate and bind with extractvalue — the
+	// allocation-free path this ABI exists for.
+	if call, ok := s.Init.(*ast.CallExpression); ok {
+		if id, ok := call.Callee.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
+			if sig, found := e.funcs[id.Name]; found && sig.RetType.TupleByVal {
+				e.wantTupleAggregate = true
+				val, err := e.emitCallToFuncSig(id.Name, sig, call.Args, s.GetPos())
+				e.wantTupleAggregate = false
+				if err != nil {
+					return err
+				}
+				return e.unpackTupleAggregate(val.Ref, sig.RetType, s.Elems, s.GetPos())
+			}
+		}
+	}
 	// A tuple source (`const [a, b] = someTuple`, TDD-00066) binds positionally
 	// to the tuple's fields rather than indexing an array backing buffer.
 	if srcTy := e.inferExprType(s.Init); srcTy.IsTuple {
@@ -862,6 +894,9 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 	switch src := init.(type) {
 	case *ast.Identifier:
 		sym, found := e.lookup(src.Name)
+		if found && sym.Ty.IsFlatArray {
+			return "", "", Type{}, fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — destructuring '%s' needs a regular (pointer-element) array", pos.Line, pos.Col, src.Name)
+		}
 		if !found || !sym.Ty.IsArray {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, src.Name)
 		}

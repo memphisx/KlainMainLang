@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
@@ -20,7 +21,7 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end("ok")
 }).listen(8971)
 `
-	startHTTPServer(t, src, 8971)
+	port := startHTTPServer(t, src, 8971)
 
 	// A single Transport so the connection pool can reuse the socket.
 	tr := &http.Transport{}
@@ -28,7 +29,7 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	client := &http.Client{Transport: tr}
 
 	// First request: assert Date + keep-alive headers.
-	resp1, err := client.Get("http://127.0.0.1:8971/first")
+	resp1, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/first", port))
 	if err != nil {
 		t.Fatalf("GET #1: %v", err)
 	}
@@ -50,7 +51,7 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
 	}
-	req2, _ := http.NewRequest("GET", "http://127.0.0.1:8971/second", nil)
+	req2, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/second", port), nil)
 	req2 = req2.WithContext(httptrace.WithClientTrace(req2.Context(), trace))
 	resp2, err := client.Do(req2)
 	if err != nil {
@@ -79,9 +80,9 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end("bye")
 }).listen(8973)
 `
-	startHTTPServer(t, src, 8973)
+	port := startHTTPServer(t, src, 8973)
 
-	req, _ := http.NewRequest("GET", "http://127.0.0.1:8973/", nil)
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
 	req.Close = true // send Connection: close
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

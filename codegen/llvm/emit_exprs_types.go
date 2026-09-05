@@ -478,6 +478,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if isUnconstrainedDynamic(objTy) {
 			return TypeAny
 		}
+		// `/** @value */` flat array: an index read is the element (a view).
+		if objTy.IsFlatArray && objTy.ElemType != nil {
+			return *objTy.ElemType
+		}
 		// String-keyed Map bracket access yields the value type (TDD-00139).
 		if objTy.IsMap && objTy.MapKey != nil && isPlainStringType(*objTy.MapKey) {
 			if objTy.MapVal != nil {
@@ -689,7 +693,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// named `length` is resolved by the field-lookup path further below.)
 		if ex.Property == "length" {
 			ot := e.inferExprType(ex.Object)
-			if ot.IsArray || ot.IsTuple || ot.IsTypedArray || isStringTy(ot) {
+			if ot.IsArray || ot.IsFlatArray || ot.IsTuple || ot.IsTypedArray || isStringTy(ot) {
 				return TypeF64
 			}
 		}
@@ -951,6 +955,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		// new AsyncResource(name?, opts?) → the async_hooks handle (TDD-00168 St 4).
 		if ex.ClassName == "AsyncResource" {
 			return AsyncResourceType()
+		}
+		// new FinalizationRegistry<T>(cb) → the registry handle (TDD-00163).
+		if ex.ClassName == "FinalizationRegistry" {
+			held := TypeI64
+			if len(ex.TypeArgs) == 1 && ex.TypeArgs[0] != nil {
+				held = e.resolveType(ex.TypeArgs[0])
+			}
+			if len(ex.Args) == 1 {
+				if cbTy := e.inferExprType(ex.Args[0]); cbTy.IsFunc && len(cbTy.FuncParams) == 1 {
+					held = cbTy.FuncParams[0]
+				}
+			}
+			return FinalizationRegistryType(held)
 		}
 		if info, ok := e.classes[ex.ClassName]; ok {
 			return info.Ty
@@ -1333,6 +1350,19 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeVoid
 				case "enterWith", "disable":
 					return TypeVoid
+				}
+			}
+			// `/** @value */` flat array: push returns the new length.
+			if objTy := e.inferExprType(mem.Object); objTy.IsFlatArray && mem.Property == "push" {
+				return TypeF64
+			}
+			// FinalizationRegistry method result types (TDD-00163).
+			if objTy := e.inferExprType(mem.Object); objTy.IsFinalizationRegistry {
+				switch mem.Property {
+				case "register":
+					return TypeVoid
+				case "unregister":
+					return TypeBool
 				}
 			}
 			// AsyncResource.runInAsyncScope(fn, …) evaluates to fn's return type.

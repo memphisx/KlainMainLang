@@ -1881,6 +1881,10 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if ex.ClassName == "AsyncLocalStorage" {
 		return e.emitNewAsyncLocalStorage(ex)
 	}
+	// new FinalizationRegistry<T>(cb) — TDD-00163, not a user class.
+	if ex.ClassName == "FinalizationRegistry" {
+		return e.emitNewFinalizationRegistry(ex)
+	}
 	// new AsyncResource(name?, opts?) — async_hooks (TDD-00168 Stage 4).
 	if ex.ClassName == "AsyncResource" {
 		return e.emitNewAsyncResource(ex)
@@ -1922,15 +1926,18 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		}
 	}
 
-	// calloc, not malloc: this compiler doesn't verify every field is
-	// assigned on every path through the constructor (no definite-
-	// assignment check), so an under-assigned field must read back a
-	// deterministic zero rather than malloc garbage — same real bug as
-	// object literals' omitted `?:` fields, found investigating
-	// destructuring defaults, see ADR-00157.
-	e.ensureCalloc()
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, info.Ty.StructSize()))
+	// Zeroing allocation (calloc, or — under -optimize-memory, for a
+	// non-escaping binding of a class whose ctor/methods provably never
+	// leak `this` — an entry-block alloca + zero store): this compiler
+	// doesn't verify every field is assigned on every path through the
+	// constructor (no definite-assignment check), so an under-assigned
+	// field must read back a deterministic zero rather than malloc garbage
+	// — same real bug as object literals' omitted `?:` fields, found
+	// investigating destructuring defaults, see ADR-00157.
+	if e.pendingStackAllocLit != nil && e.pendingStackAllocLit == ast.Expression(ex) && !e.classStackEligible(className, info) {
+		e.pendingStackAllocLit = nil // ineligible class: keep the heap path
+	}
+	dataReg := e.structAlloc(ex, info.Ty)
 
 	tagGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))

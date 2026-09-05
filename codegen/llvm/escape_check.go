@@ -55,9 +55,19 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 	p := &escPlanner{
 		auto:         e.isAutoMode(),
 		plan:         map[*ast.VarDeclaration]bool{},
+		rebinds:      map[*ast.VarDeclaration]bool{},
 		lastUse:      map[*ast.VarDeclaration]ast.Statement{},
 		ownedFns:     map[string]*ast.FunctionDeclaration{},
 		paramLastUse: map[*ast.FunctionDeclaration]map[string]ast.Statement{},
+	}
+	// TDD-00163 Stage 5: a FinalizationRegistry register-TARGET position is
+	// a free-notified retention, not a disqualifying escape (the inserted
+	// free runs the onfree hook, which fires the cleanup and deadens the
+	// cell). Not under -mm=gc — there the death signal is the Boehm
+	// finalizer, and an early free must not race it, so registration keeps
+	// counting as an escape.
+	if !e.isGCMode() {
+		p.finregNames = collectFinRegNames(prog)
 	}
 	// Pre-pass: collect the functions declaring @owned parameters (Stage 3),
 	// analyze each owned param's flow in its own body, and record its
@@ -76,6 +86,7 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 		}
 	}
 	e.autoFreePlan = p.plan
+	e.autoFreeRebind = p.rebinds
 	e.autoOwnedLastUse = p.lastUse
 	e.autoOwnedParamLastUse = p.paramLastUse
 	return nil
@@ -83,7 +94,18 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 
 type escPlanner struct {
 	auto bool
-	plan map[*ast.VarDeclaration]bool
+	// stack (TDD-00134 Stage 1, -optimize-memory): this run plans stack
+	// allocations, not frees — candidacy narrows to implicit let/const object
+	// literals, verdicts land in `plan` all the same, and the finreg
+	// register-target exemption is off (a stack value's scope exit emits no
+	// free, so the registry would never be notified).
+	stack       bool
+	finregNames map[string]bool
+	plan        map[*ast.VarDeclaration]bool
+	// rebinds: plan-approved bindings that are reassigned via owning-fresh
+	// RHS shapes (rebindOwningRHS) — the emitter frees the old value at each
+	// such store. nil for the stack planner (never populated there).
+	rebinds map[*ast.VarDeclaration]bool
 	// lastUse (Stage 3): for an @owned local binding, the last statement in
 	// its declaring list whose subtree mentions it — the free lands right
 	// after that statement instead of at block exit. nil/absent = block-exit
@@ -572,21 +594,64 @@ func (p *escPlanner) walkExpr(expr ast.Expression, suspends bool) error {
 // (checked as potential aliasing sites before the following statements).
 func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expression, following []ast.Statement, suspends bool) error {
 	explicit := d.Free || d.Owned
-	if !explicit && !p.auto {
-		return nil
-	}
-	if !explicit && d.Kind == "var" {
-		// `var` is function-scoped/hoisted — block-exit placement doesn't
-		// match its lifetime; implicit candidates are let/const only.
-		return nil
-	}
-	if suspends {
-		if explicit {
-			return fmt.Errorf("%d:%d: @free/@owned on '%s' inside an async or generator function is unsupported — the value's lifetime spans suspension points", d.GetPos().Line, d.GetPos().Col, d.Name)
+	if p.stack {
+		// Stack-allocation candidacy (TDD-00134 Stage 1): implicit let/const
+		// bindings initialized by an object literal or a closure literal
+		// (arrow / function expression — their {fn,env} header and env are
+		// fixed-size; the shared capture cells stay heap regardless). An
+		// explicit @free/@owned asked for a heap free — honoring that keeps
+		// the annotation's meaning intact, so it is excluded here. Async
+		// closures are excluded: invoking one hands the header/env to a task
+		// that can outlive the block.
+		if explicit || d.Kind == "var" || suspends {
+			return nil
 		}
-		return nil
+		switch init := d.Init.(type) {
+		case *ast.ObjectLiteral:
+		case *ast.ArrowFunction:
+			if init.IsAsync {
+				return nil
+			}
+		case *ast.FunctionExpression:
+			if init.IsAsync || init.IsGenerator {
+				return nil
+			}
+		case *ast.ArrayLiteral:
+			// Only a tuple-annotated literal (`const t: [A, B] = [...]`) —
+			// a fixed-shape struct like an object literal. Plain arrays'
+			// growable data buffers are Stage 2 territory.
+			if d.TypeAnnot == nil || len(d.TypeAnnot.TupleElems) == 0 {
+				return nil
+			}
+		case *ast.NewExpression:
+			// A class instance: flow candidacy here; class-level soundness
+			// (constructor/methods provably never leak `this`) is decided at
+			// emission time where ClassInfo exists — an ineligible class
+			// silently keeps the heap path.
+			if init.ClassName == "" {
+				return nil
+			}
+		default:
+			return nil
+		}
+	} else {
+		if !explicit && !p.auto {
+			return nil
+		}
+		if !explicit && d.Kind == "var" {
+			// `var` is function-scoped/hoisted — block-exit placement doesn't
+			// match its lifetime; implicit candidates are let/const only.
+			return nil
+		}
+		if suspends {
+			if explicit {
+				return fmt.Errorf("%d:%d: @free/@owned on '%s' inside an async or generator function is unsupported — the value's lifetime spans suspension points", d.GetPos().Line, d.GetPos().Col, d.Name)
+			}
+			return nil
+		}
 	}
-	c := &escChecker{name: d.Name}
+	c := &escChecker{name: d.Name, finregNames: p.finregNames,
+		allowRebind: !explicit && p.auto && !p.stack}
 	var v *escViolation
 	for _, init := range siblingInits {
 		if c.aliases(init) {
@@ -611,6 +676,9 @@ func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expre
 		return nil
 	}
 	p.plan[d] = true
+	if c.rebound {
+		p.rebinds[d] = true
+	}
 	if d.Owned {
 		// Stage 3: free right after the last statement that mentions it —
 		// nil (no use, or ambiguous placement) falls back to block exit.
@@ -619,6 +687,27 @@ func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expre
 		}
 	}
 	return nil
+}
+
+// rebindOwningRHS reports whether an assignment's RHS provably produces a
+// fresh owned allocation, so the old value can be freed at the store. `+=`
+// on a freeable type is a concatenation (fresh buffer); `= a + b` likewise;
+// an interpolating template stringifies into a fresh buffer. Everything
+// else (a bare alias, a literal, `??`/`||` value-selection) is not owning.
+func rebindOwningRHS(x *ast.AssignmentExpression) bool {
+	if x.Op == "+=" {
+		return true
+	}
+	if x.Op != "=" {
+		return false
+	}
+	switch r := x.Right.(type) {
+	case *ast.BinaryExpression:
+		return r.Op == "+"
+	case *ast.TemplateLiteral:
+		return len(r.Exprs) > 0
+	}
+	return false
 }
 
 type escViolation struct {
@@ -632,6 +721,22 @@ type escViolation struct {
 // construct not positively recognized is a violation if it mentions the name.
 type escChecker struct {
 	name string
+	// allowRebind: the implicit auto layer may accept owning reassignments
+	// (see rebindOwningRHS) instead of disqualifying; rebound records that
+	// at least one was seen, so the emitter knows to free-on-rebind. Off for
+	// explicit @free/@owned (annotation semantics unchanged) and the stack
+	// planner (a stack value must never be freed).
+	allowRebind bool
+	rebound     bool
+	// finregNames (TDD-00163 Stage 5, free-check only): identifiers proven to
+	// be FinalizationRegistry bindings program-wide. Passing the candidate as
+	// `reg.register`'s TARGET does retain its pointer, but that retention is
+	// free-notified — the inserted free runs the __kml_finreg_onfree hook,
+	// which fires the cleanup callback and marks the cell dead, and a dead
+	// cell's target pointer is only ever compared, never dereferenced. So it
+	// is not a disqualifying escape. nil (the stack planner, gc mode, or no
+	// registries) means no exemption.
+	finregNames map[string]bool
 }
 
 // mentionsExpr / mentionsStmts: does the subtree reference the identifier at
@@ -824,6 +929,17 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		return nil
 	case *ast.AssignmentExpression:
 		if id, ok := x.Left.(*ast.Identifier); ok && id.Name == c.name {
+			// Rebind-free (implicit auto layer only): a reassignment whose
+			// RHS is a provably fresh allocation (`s += ...` → concat; `s = a
+			// + b`; an interpolating template) doesn't escape the old value —
+			// it drops it. The emitter frees the old value right before the
+			// store (emitAssign), so the binding churns without leaking; the
+			// block-exit free then targets whichever value is last. Any other
+			// reassignment shape still disqualifies.
+			if c.allowRebind && rebindOwningRHS(x) {
+				c.rebound = true
+				return c.expr(x.Right)
+			}
 			return &escViolation{reason: "reassigned (the block-exit free would target the wrong value)", pos: x.GetPos()}
 		}
 		// Writes INTO the value (x.f = …, x[i] = …) don't move its own
@@ -933,6 +1049,26 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 
 // call classifies a call's argument and receiver positions.
 func (c *escChecker) call(x *ast.CallExpression) *escViolation {
+	// FinalizationRegistry.register(target, held, token?) with the candidate
+	// exactly in target position (and nowhere else in the call): safe for the
+	// free check — see escChecker.finregNames. held/token positions still
+	// escape (held is read by the callback after the free; a token is
+	// compared by a later unregister).
+	if callee, ok := x.Callee.(*ast.MemberExpression); ok && callee.Property == "register" && len(x.Args) >= 2 && len(x.Args) <= 3 {
+		if recv, ok2 := callee.Object.(*ast.Identifier); ok2 && c.finregNames[recv.Name] && recv.Name != c.name {
+			if id, ok3 := x.Args[0].(*ast.Identifier); ok3 && id.Name == c.name {
+				rest := false
+				for _, a := range x.Args[1:] {
+					if c.mentionsExpr(a) {
+						rest = true
+					}
+				}
+				if !rest {
+					return nil
+				}
+			}
+		}
+	}
 	whitelisted := false
 	switch callee := x.Callee.(type) {
 	case *ast.Identifier:

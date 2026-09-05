@@ -472,8 +472,8 @@ http.listen(18631, (req: HttpRequest) => {
   return { status: 200, body: body };
 });
 `
-	startHTTPServer(t, src, 18631)
-	resp, err := http.Get("http://127.0.0.1:18631/")
+	port := startHTTPServer(t, src, 18631)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -504,8 +504,8 @@ http.listen(18632, (req: HttpRequest) => {
   return { status: 200, body: body };
 });
 `
-	startHTTPServer(t, src, 18632)
-	resp, err := http.Get("http://127.0.0.1:18632/")
+	port := startHTTPServer(t, src, 18632)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -536,9 +536,9 @@ http.listen(18651, async (req: HttpRequest) => {
   return { status: 200, body: await count(req) };
 });
 `
-	startHTTPServer(t, src, 18651)
+	port := startHTTPServer(t, src, 18651)
 	body := bytes.Repeat([]byte("y"), 12*1024*1024)
-	resp, err := http.Post("http://127.0.0.1:18651/", "application/octet-stream", bytes.NewReader(body))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -560,9 +560,9 @@ http.listen(18652, (req: HttpRequest) => {
   return { status: 200, body: req.stream() };
 });
 `
-	startHTTPServer(t, src, 18652)
+	port := startHTTPServer(t, src, 18652)
 	body := bytes.Repeat([]byte("z"), 4*1024*1024)
-	resp, err := http.Post("http://127.0.0.1:18652/", "application/octet-stream", bytes.NewReader(body))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -593,8 +593,8 @@ http.listen(18653, async (req: HttpRequest) => {
   return { status: 200, body: "buffered:" + req.body };
 });
 `
-	startHTTPServer(t, src, 18653)
-	resp, err := http.Post("http://127.0.0.1:18653/plain", "text/plain", strings.NewReader("hello body"))
+	port := startHTTPServer(t, src, 18653)
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/plain", port), "text/plain", strings.NewReader("hello body"))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -603,7 +603,7 @@ http.listen(18653, async (req: HttpRequest) => {
 	if string(got) != "buffered:hello body" {
 		t.Fatalf("buffered = %q", got)
 	}
-	resp2, err := http.Post("http://127.0.0.1:18653/streamed", "text/plain", strings.NewReader("0123456789"))
+	resp2, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/streamed", port), "text/plain", strings.NewReader("0123456789"))
 	if err != nil {
 		t.Fatalf("POST2: %v", err)
 	}
@@ -635,8 +635,8 @@ http.listen(18654, async (req: HttpRequest) => {
   return { status: 200, body: await handle(req) };
 });
 `
-	startHTTPServer(t, src, 18654)
-	resp, err := http.Post("http://127.0.0.1:18654/", "text/plain", strings.NewReader("0123456789"))
+	port := startHTTPServer(t, src, 18654)
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader("0123456789"))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -662,8 +662,8 @@ http.listen(18655, (req: HttpRequest): Res => {
   return { status: 201, body: "plain body" }
 })
 `
-	startHTTPServer(t, src, 18655)
-	resp, err := http.Get("http://127.0.0.1:18655/plain")
+	port := startHTTPServer(t, src, 18655)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/plain", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -688,9 +688,9 @@ http.listen(18656, (req: HttpRequest): Res => {
   return { status: 200, body: "plain" }
 })
 `
-	startHTTPServer(t, src, 18656)
+	port := startHTTPServer(t, src, 18656)
 	payload := bytes.Repeat([]byte("q"), 3*1024*1024)
-	resp, err := http.Post("http://127.0.0.1:18656/stream", "application/octet-stream", bytes.NewReader(payload))
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/stream", port), "application/octet-stream", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -810,8 +810,8 @@ http.listen(18661, (req: HttpRequest) => {
   return { status: 200, body: source.pipeThrough(new CompressionStream("gzip")) };
 });
 `
-	startHTTPServer(t, src, 18661)
-	resp, err := http.Get("http://127.0.0.1:18661/")
+	port := startHTTPServer(t, src, 18661)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

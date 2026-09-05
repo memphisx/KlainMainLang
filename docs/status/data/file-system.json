@@ -175,7 +175,7 @@
             "caveats": [
               "Blocking I/O under the hood — this compiler has no thread pool, so the syscall runs inline; only *delivery* is async (the callback fires right after the op, the Promise is returned already settled). Not a concurrency/performance gain, an API-shape one ([TDD-00107](../tdd/TDD-00107.md)/[ADR-00340](../adr/ADR-00340.md))",
               "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form",
-              "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)"
+              "No `options`/`encoding` argument; no *async* `stat` (the sync `fs.statSync`/`lstatSync` exist — see the row above — but have no callback/Promise form yet)"
             ],
             "notes": [
               "Covers the sync set: `readFile`/`writeFile`/`appendFile`/`unlink`/`mkdir`/`rmdir`/`rename`/`copyFile`/`readdir`. Callback gets `(err[, data])`; the Promise rejects with the same `Error` the sync form throws",

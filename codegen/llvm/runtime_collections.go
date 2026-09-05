@@ -405,14 +405,52 @@ func (e *Emitter) ensureSortTrampolineStr() {
 
 // --- Map / Set helpers ---
 //
-// Map header layout (32 bytes):
-//   +0   i64  size  — current entry count
-//   +8   i64  cap   — capacity (starts at 8)
-//   +16  ptr  keys  — key array  (ptr[] for string keys, i64[] for number keys)
-//   +24  ptr  vals  — value array (i64[])
+// Map header layout (56 bytes):
+//   +0   i64  size   — current entry count
+//   +8   i64  cap    — entry-array capacity (starts at 8)
+//   +16  ptr  keys   — key array  (ptr[] for string keys, i64[] for number keys)
+//   +24  ptr  vals   — value array (i64[])
+//   +32  ptr  idx    — hash index: i64[idxcap], each slot -1 (empty),
+//                      -2 (tombstone), or an index into keys/vals
+//   +48  i64  used   — occupied + tombstone idx slots (rehash trigger)
+//   +40  i64  idxcap — index capacity, power of two (starts 16)
+//
+// keys/vals stay dense and insertion-ordered (JS Map iteration order;
+// keys()/values()/iteration read them directly), while every lookup goes
+// through the open-addressing index — linear probing, xor-fold multiply
+// hash for number keys, FNV-1a for string keys. delete swap-removes the
+// entry (repointing the moved entry's idx slot) and tombstones its own
+// slot; the index rehashes at 3/4 load (occupied+tombstones), which also
+// purges tombstones, so probes always terminate at an empty slot.
 //
 // Set reuses the exact same layout; elements are stored as keys. vals is
 // allocated but ignored. set.values() returns the keys array.
+
+// ensureMapClear declares __kml_map_clear, shared by Map.clear/Set.clear for
+// both key kinds (identical header layout): resets size and the hash index.
+// A bare size=0 store is no longer enough — stale index entries would alias
+// future inserts to old key/value slots.
+func (e *Emitter) ensureMapClear() {
+	if e.usedMapClear {
+		return
+	}
+	e.usedMapClear = true
+	e.ensureMemset()
+	e.emitGlobal(`
+define void @__kml_map_clear(ptr %map) {
+entry:
+  store i64 0, ptr %map, align 8
+  %used_p = getelementptr i8, ptr %map, i64 48
+  store i64 0, ptr %used_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %nb = mul i64 %icap, 8
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %idx = load ptr, ptr %idx_p, align 8
+  call ptr @memset(ptr %idx, i32 255, i64 %nb)
+  ret void
+}`)
+}
 
 func (e *Emitter) ensureMapStrHelpers() {
 	if e.usedMapStrHelpers {
@@ -423,10 +461,12 @@ func (e *Emitter) ensureMapStrHelpers() {
 	e.ensureRealloc()
 	e.ensureStrcmp()
 	e.ensureMemcpy()
+	e.ensureMemset()
+	e.ensureFree()
 	e.emitGlobal(`
 define ptr @__kml_map_str_create() {
 entry:
-  %h = call ptr @malloc(i64 32)
+  %h = call ptr @malloc(i64 56)
   store i64 0, ptr %h, align 8
   %cap_p = getelementptr i8, ptr %h, i64 8
   store i64 8, ptr %cap_p, align 8
@@ -436,37 +476,151 @@ entry:
   %vals = call ptr @malloc(i64 64)
   %vals_p = getelementptr i8, ptr %h, i64 24
   store ptr %vals, ptr %vals_p, align 8
+  %idx = call ptr @malloc(i64 128)
+  call ptr @memset(ptr %idx, i32 255, i64 128)
+  %idx_p = getelementptr i8, ptr %h, i64 32
+  store ptr %idx, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %h, i64 40
+  store i64 16, ptr %icap_p, align 8
+  %used_p = getelementptr i8, ptr %h, i64 48
+  store i64 0, ptr %used_p, align 8
   ret ptr %h
+}
+
+; FNV-1a over the key's bytes.
+define i64 @__kml_map_str_hash(ptr %s) {
+entry:
+  br label %loop
+loop:
+  %h = phi i64 [ -3750763034362895579, %entry ], [ %h2, %body ]
+  %p = phi ptr [ %s, %entry ], [ %p2, %body ]
+  %c = load i8, ptr %p, align 1
+  %isz = icmp eq i8 %c, 0
+  br i1 %isz, label %done, label %body
+body:
+  %cz = zext i8 %c to i64
+  %hx = xor i64 %h, %cz
+  %h2 = mul i64 %hx, 1099511628211
+  %p2 = getelementptr i8, ptr %p, i64 1
+  br label %loop
+done:
+  ret i64 %h
+}
+
+; probe: same contract as __kml_map_num_probe (see there).
+define {i64, i64} @__kml_map_str_probe(ptr %map, ptr %key) {
+entry:
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %idx = load ptr, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %mask = sub i64 %icap, 1
+  %keys_p = getelementptr i8, ptr %map, i64 16
+  %keys = load ptr, ptr %keys_p, align 8
+  %h = call i64 @__kml_map_str_hash(ptr %key)
+  %start = and i64 %h, %mask
+  br label %loop
+loop:
+  %slot = phi i64 [ %start, %entry ], [ %nslot, %next ]
+  %ins = phi i64 [ -1, %entry ], [ %ins_n, %next ]
+  %sl_p = getelementptr i64, ptr %idx, i64 %slot
+  %e = load i64, ptr %sl_p, align 8
+  %isempty = icmp eq i64 %e, -1
+  br i1 %isempty, label %empty, label %chk_tomb
+chk_tomb:
+  %istomb = icmp eq i64 %e, -2
+  br i1 %istomb, label %tomb, label %occ
+occ:
+  %k_p = getelementptr ptr, ptr %keys, i64 %e
+  %k = load ptr, ptr %k_p, align 8
+  %cmp = call i32 @strcmp(ptr %k, ptr %key)
+  %keq = icmp eq i32 %cmp, 0
+  br i1 %keq, label %found, label %occ_next
+found:
+  %r0 = insertvalue {i64, i64} undef, i64 %slot, 0
+  %r1 = insertvalue {i64, i64} %r0, i64 %e, 1
+  ret {i64, i64} %r1
+tomb:
+  %noins = icmp eq i64 %ins, -1
+  %ins_t = select i1 %noins, i64 %slot, i64 %ins
+  br label %next
+occ_next:
+  br label %next
+next:
+  %ins_n = phi i64 [ %ins_t, %tomb ], [ %ins, %occ_next ]
+  %slot1 = add i64 %slot, 1
+  %nslot = and i64 %slot1, %mask
+  br label %loop
+empty:
+  %noins2 = icmp eq i64 %ins, -1
+  %fslot = select i1 %noins2, i64 %slot, i64 %ins
+  %m0 = insertvalue {i64, i64} undef, i64 %fslot, 0
+  %m1 = insertvalue {i64, i64} %m0, i64 -1, 1
+  ret {i64, i64} %m1
 }
 
 define i64 @__kml_map_str_find(ptr %map, ptr %key) {
 entry:
+  %pr = call {i64, i64} @__kml_map_str_probe(ptr %map, ptr %key)
+  %e = extractvalue {i64, i64} %pr, 1
+  ret i64 %e
+}
+
+define void @__kml_map_str_rehash(ptr %map) {
+entry:
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %ncap = mul i64 %icap, 2
+  %nb = mul i64 %ncap, 8
+  %nidx = call ptr @malloc(i64 %nb)
+  call ptr @memset(ptr %nidx, i32 255, i64 %nb)
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %oidx = load ptr, ptr %idx_p, align 8
+  call void @free(ptr %oidx)
+  store ptr %nidx, ptr %idx_p, align 8
+  store i64 %ncap, ptr %icap_p, align 8
+  %mask = sub i64 %ncap, 1
   %size = load i64, ptr %map, align 8
+  %used_p = getelementptr i8, ptr %map, i64 48
+  store i64 %size, ptr %used_p, align 8
   %keys_p = getelementptr i8, ptr %map, i64 16
   %keys = load ptr, ptr %keys_p, align 8
-  br label %scan
-scan:
-  %i = phi i64 [ 0, %entry ], [ %i_next, %cont ]
-  %done = icmp sge i64 %i, %size
-  br i1 %done, label %miss, label %chk
-chk:
-  %kslot = getelementptr ptr, ptr %keys, i64 %i
-  %kptr = load ptr, ptr %kslot, align 8
-  %cmp = call i32 @strcmp(ptr %kptr, ptr %key)
-  %eq = icmp eq i32 %cmp, 0
-  br i1 %eq, label %hit, label %cont
-hit:
-  ret i64 %i
-cont:
-  %i_next = add i64 %i, 1
-  br label %scan
-miss:
-  ret i64 -1
+  br label %outer
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i2, %placed ]
+  %fin = icmp sge i64 %i, %size
+  br i1 %fin, label %done, label %hashk
+hashk:
+  %k_p = getelementptr ptr, ptr %keys, i64 %i
+  %k = load ptr, ptr %k_p, align 8
+  %h = call i64 @__kml_map_str_hash(ptr %k)
+  %st = and i64 %h, %mask
+  br label %ploop
+ploop:
+  %s = phi i64 [ %st, %hashk ], [ %s2, %pnext ]
+  %sp = getelementptr i64, ptr %nidx, i64 %s
+  %ev = load i64, ptr %sp, align 8
+  %isfree = icmp eq i64 %ev, -1
+  br i1 %isfree, label %place, label %pnext
+pnext:
+  %sa = add i64 %s, 1
+  %s2 = and i64 %sa, %mask
+  br label %ploop
+place:
+  store i64 %i, ptr %sp, align 8
+  br label %placed
+placed:
+  %i2 = add i64 %i, 1
+  br label %outer
+done:
+  ret void
 }
 
 define void @__kml_map_str_set(ptr %map, ptr %key, i64 %val) {
 entry:
-  %idx = call i64 @__kml_map_str_find(ptr %map, ptr %key)
+  %pr = call {i64, i64} @__kml_map_str_probe(ptr %map, ptr %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
   %found = icmp sge i64 %idx, 0
   br i1 %found, label %do_update, label %grow_chk
 do_update:
@@ -506,6 +660,28 @@ do_ins:
   store i64 %val, ptr %vs, align 8
   %sz3 = add i64 %sz2, 1
   store i64 %sz3, ptr %map, align 8
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  %olde = load i64, ptr %sl_p, align 8
+  store i64 %sz2, ptr %sl_p, align 8
+  %wasempty = icmp eq i64 %olde, -1
+  %we = zext i1 %wasempty to i64
+  %used_p = getelementptr i8, ptr %map, i64 48
+  %used = load i64, ptr %used_p, align 8
+  %used2 = add i64 %used, %we
+  store i64 %used2, ptr %used_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %up1 = add i64 %used2, 1
+  %lhs = mul i64 %up1, 4
+  %rhs = mul i64 %icap, 3
+  %needreh = icmp sgt i64 %lhs, %rhs
+  br i1 %needreh, label %do_rehash, label %ins_done
+do_rehash:
+  call void @__kml_map_str_rehash(ptr %map)
+  br label %ins_done
+ins_done:
   ret void
 }
 
@@ -533,12 +709,18 @@ entry:
 
 define i1 @__kml_map_str_delete(ptr %map, ptr %key) {
 entry:
-  %idx = call i64 @__kml_map_str_find(ptr %map, ptr %key)
+  %pr = call {i64, i64} @__kml_map_str_probe(ptr %map, ptr %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
   %found = icmp sge i64 %idx, 0
   br i1 %found, label %do_del, label %miss
 miss:
   ret i1 false
 do_del:
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  store i64 -2, ptr %sl_p, align 8
   %size = load i64, ptr %map, align 8
   %last = sub i64 %size, 1
   %is_last = icmp eq i64 %idx, %last
@@ -556,6 +738,11 @@ swap:
   %src_v = getelementptr i64, ptr %va, i64 %last
   %lv = load i64, ptr %src_v, align 8
   store i64 %lv, ptr %dst_v, align 8
+  ; the moved (former last) entry's idx slot still points at %last — repoint it
+  %pr2 = call {i64, i64} @__kml_map_str_probe(ptr %map, ptr %lk)
+  %slot2 = extractvalue {i64, i64} %pr2, 0
+  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
+  store i64 %idx, ptr %sl2_p, align 8
   br label %shrink
 shrink:
   store i64 %last, ptr %map, align 8
@@ -597,10 +784,12 @@ func (e *Emitter) ensureMapNumHelpers() {
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemcpy()
+	e.ensureMemset()
+	e.ensureFree()
 	e.emitGlobal(`
 define ptr @__kml_map_num_create() {
 entry:
-  %h = call ptr @malloc(i64 32)
+  %h = call ptr @malloc(i64 56)
   store i64 0, ptr %h, align 8
   %cap_p = getelementptr i8, ptr %h, i64 8
   store i64 8, ptr %cap_p, align 8
@@ -610,36 +799,137 @@ entry:
   %vals = call ptr @malloc(i64 64)
   %vals_p = getelementptr i8, ptr %h, i64 24
   store ptr %vals, ptr %vals_p, align 8
+  %idx = call ptr @malloc(i64 128)
+  call ptr @memset(ptr %idx, i32 255, i64 128)
+  %idx_p = getelementptr i8, ptr %h, i64 32
+  store ptr %idx, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %h, i64 40
+  store i64 16, ptr %icap_p, align 8
+  %used_p = getelementptr i8, ptr %h, i64 48
+  store i64 0, ptr %used_p, align 8
   ret ptr %h
+}
+
+; probe: returns {idx-slot, entry-index}. entry-index is -1 on miss, in which
+; case idx-slot is where an insert of this key must go (first tombstone on the
+; probe path, else the terminating empty slot).
+define {i64, i64} @__kml_map_num_probe(ptr %map, i64 %key) {
+entry:
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %idx = load ptr, ptr %idx_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %mask = sub i64 %icap, 1
+  %keys_p = getelementptr i8, ptr %map, i64 16
+  %keys = load ptr, ptr %keys_p, align 8
+  %h0 = mul i64 %key, -7046029254386353131
+  %h1 = lshr i64 %h0, 33
+  %h2 = xor i64 %h0, %h1
+  %start = and i64 %h2, %mask
+  br label %loop
+loop:
+  %slot = phi i64 [ %start, %entry ], [ %nslot, %next ]
+  %ins = phi i64 [ -1, %entry ], [ %ins_n, %next ]
+  %sl_p = getelementptr i64, ptr %idx, i64 %slot
+  %e = load i64, ptr %sl_p, align 8
+  %isempty = icmp eq i64 %e, -1
+  br i1 %isempty, label %empty, label %chk_tomb
+chk_tomb:
+  %istomb = icmp eq i64 %e, -2
+  br i1 %istomb, label %tomb, label %occ
+occ:
+  %k_p = getelementptr i64, ptr %keys, i64 %e
+  %k = load i64, ptr %k_p, align 8
+  %keq = icmp eq i64 %k, %key
+  br i1 %keq, label %found, label %occ_next
+found:
+  %r0 = insertvalue {i64, i64} undef, i64 %slot, 0
+  %r1 = insertvalue {i64, i64} %r0, i64 %e, 1
+  ret {i64, i64} %r1
+tomb:
+  %noins = icmp eq i64 %ins, -1
+  %ins_t = select i1 %noins, i64 %slot, i64 %ins
+  br label %next
+occ_next:
+  br label %next
+next:
+  %ins_n = phi i64 [ %ins_t, %tomb ], [ %ins, %occ_next ]
+  %slot1 = add i64 %slot, 1
+  %nslot = and i64 %slot1, %mask
+  br label %loop
+empty:
+  %noins2 = icmp eq i64 %ins, -1
+  %fslot = select i1 %noins2, i64 %slot, i64 %ins
+  %m0 = insertvalue {i64, i64} undef, i64 %fslot, 0
+  %m1 = insertvalue {i64, i64} %m0, i64 -1, 1
+  ret {i64, i64} %m1
 }
 
 define i64 @__kml_map_num_find(ptr %map, i64 %key) {
 entry:
+  %pr = call {i64, i64} @__kml_map_num_probe(ptr %map, i64 %key)
+  %e = extractvalue {i64, i64} %pr, 1
+  ret i64 %e
+}
+
+; rehash: double the index, re-place every live entry, purge tombstones.
+define void @__kml_map_num_rehash(ptr %map) {
+entry:
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %ncap = mul i64 %icap, 2
+  %nb = mul i64 %ncap, 8
+  %nidx = call ptr @malloc(i64 %nb)
+  call ptr @memset(ptr %nidx, i32 255, i64 %nb)
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %oidx = load ptr, ptr %idx_p, align 8
+  call void @free(ptr %oidx)
+  store ptr %nidx, ptr %idx_p, align 8
+  store i64 %ncap, ptr %icap_p, align 8
+  %mask = sub i64 %ncap, 1
   %size = load i64, ptr %map, align 8
+  %used_p = getelementptr i8, ptr %map, i64 48
+  store i64 %size, ptr %used_p, align 8
   %keys_p = getelementptr i8, ptr %map, i64 16
   %keys = load ptr, ptr %keys_p, align 8
-  br label %scan
-scan:
-  %i = phi i64 [ 0, %entry ], [ %i_next, %cont ]
-  %done = icmp sge i64 %i, %size
-  br i1 %done, label %miss, label %chk
-chk:
-  %kslot = getelementptr i64, ptr %keys, i64 %i
-  %kval = load i64, ptr %kslot, align 8
-  %eq = icmp eq i64 %kval, %key
-  br i1 %eq, label %hit, label %cont
-hit:
-  ret i64 %i
-cont:
-  %i_next = add i64 %i, 1
-  br label %scan
-miss:
-  ret i64 -1
+  br label %outer
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i2, %placed ]
+  %fin = icmp sge i64 %i, %size
+  br i1 %fin, label %done, label %hashk
+hashk:
+  %k_p = getelementptr i64, ptr %keys, i64 %i
+  %k = load i64, ptr %k_p, align 8
+  %h0 = mul i64 %k, -7046029254386353131
+  %h1 = lshr i64 %h0, 33
+  %h2 = xor i64 %h0, %h1
+  %st = and i64 %h2, %mask
+  br label %ploop
+ploop:
+  %s = phi i64 [ %st, %hashk ], [ %s2, %pnext ]
+  %sp = getelementptr i64, ptr %nidx, i64 %s
+  %ev = load i64, ptr %sp, align 8
+  %isfree = icmp eq i64 %ev, -1
+  br i1 %isfree, label %place, label %pnext
+pnext:
+  %sa = add i64 %s, 1
+  %s2 = and i64 %sa, %mask
+  br label %ploop
+place:
+  store i64 %i, ptr %sp, align 8
+  br label %placed
+placed:
+  %i2 = add i64 %i, 1
+  br label %outer
+done:
+  ret void
 }
 
 define void @__kml_map_num_set(ptr %map, i64 %key, i64 %val) {
 entry:
-  %idx = call i64 @__kml_map_num_find(ptr %map, i64 %key)
+  %pr = call {i64, i64} @__kml_map_num_probe(ptr %map, i64 %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
   %found = icmp sge i64 %idx, 0
   br i1 %found, label %do_update, label %grow_chk
 do_update:
@@ -679,6 +969,28 @@ do_ins:
   store i64 %val, ptr %vs, align 8
   %sz3 = add i64 %sz2, 1
   store i64 %sz3, ptr %map, align 8
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  %olde = load i64, ptr %sl_p, align 8
+  store i64 %sz2, ptr %sl_p, align 8
+  %wasempty = icmp eq i64 %olde, -1
+  %we = zext i1 %wasempty to i64
+  %used_p = getelementptr i8, ptr %map, i64 48
+  %used = load i64, ptr %used_p, align 8
+  %used2 = add i64 %used, %we
+  store i64 %used2, ptr %used_p, align 8
+  %icap_p = getelementptr i8, ptr %map, i64 40
+  %icap = load i64, ptr %icap_p, align 8
+  %up1 = add i64 %used2, 1
+  %lhs = mul i64 %up1, 4
+  %rhs = mul i64 %icap, 3
+  %needreh = icmp sgt i64 %lhs, %rhs
+  br i1 %needreh, label %do_rehash, label %ins_done
+do_rehash:
+  call void @__kml_map_num_rehash(ptr %map)
+  br label %ins_done
+ins_done:
   ret void
 }
 
@@ -706,12 +1018,18 @@ entry:
 
 define i1 @__kml_map_num_delete(ptr %map, i64 %key) {
 entry:
-  %idx = call i64 @__kml_map_num_find(ptr %map, i64 %key)
+  %pr = call {i64, i64} @__kml_map_num_probe(ptr %map, i64 %key)
+  %slot = extractvalue {i64, i64} %pr, 0
+  %idx = extractvalue {i64, i64} %pr, 1
   %found = icmp sge i64 %idx, 0
   br i1 %found, label %do_del, label %miss
 miss:
   ret i1 false
 do_del:
+  %idxa_p = getelementptr i8, ptr %map, i64 32
+  %idxa = load ptr, ptr %idxa_p, align 8
+  %sl_p = getelementptr i64, ptr %idxa, i64 %slot
+  store i64 -2, ptr %sl_p, align 8
   %size = load i64, ptr %map, align 8
   %last = sub i64 %size, 1
   %is_last = icmp eq i64 %idx, %last
@@ -729,6 +1047,11 @@ swap:
   %src_v = getelementptr i64, ptr %va, i64 %last
   %lv = load i64, ptr %src_v, align 8
   store i64 %lv, ptr %dst_v, align 8
+  ; the moved (former last) entry's idx slot still points at %last — repoint it
+  %pr2 = call {i64, i64} @__kml_map_num_probe(ptr %map, i64 %lk)
+  %slot2 = extractvalue {i64, i64} %pr2, 0
+  %sl2_p = getelementptr i64, ptr %idxa, i64 %slot2
+  store i64 %idx, ptr %sl2_p, align 8
   br label %shrink
 shrink:
   store i64 %last, ptr %map, align 8
@@ -794,12 +1117,19 @@ func (e *Emitter) ensureFrozenSet() {
 	// header keeps its keys/vals arrays (ordinary GC_malloc) reachable, and
 	// realloc'd-on-growth arrays stay reachable through the same scanned header.
 	// Manual mode is unchanged (plain __kml_map_num_create). The header layout
-	// matches __kml_map_num_create's: {size i64, cap i64, keys ptr, vals ptr}.
+	// MUST match __kml_map_num_create's exactly — {size, cap, keys, vals,
+	// idx, idxcap, used}, 56 bytes since the hash index landed; an
+	// out-of-sync copy here means the probe loop reads a garbage idx pointer
+	// on the first field-write check (found as a gc-mode segfault in the
+	// Body constructor of the nbody benchmark, minutes after the index
+	// shipped — this duplicate is the price of the uncollectable-header
+	// special case).
 	create := "  %new = call ptr @__kml_map_num_create()\n"
 	if e.isGCMode() {
 		e.ensureGCUncollectable()
+		e.ensureMemset()
 		create = "" +
-			"  %new = call ptr @GC_malloc_uncollectable(i64 32)\n" +
+			"  %new = call ptr @GC_malloc_uncollectable(i64 56)\n" +
 			"  store i64 0, ptr %new, align 8\n" +
 			"  %cap_p = getelementptr i8, ptr %new, i64 8\n" +
 			"  store i64 8, ptr %cap_p, align 8\n" +
@@ -808,7 +1138,15 @@ func (e *Emitter) ensureFrozenSet() {
 			"  store ptr %keys, ptr %keys_p, align 8\n" +
 			"  %vals = call ptr @malloc(i64 64)\n" +
 			"  %vals_p = getelementptr i8, ptr %new, i64 24\n" +
-			"  store ptr %vals, ptr %vals_p, align 8\n"
+			"  store ptr %vals, ptr %vals_p, align 8\n" +
+			"  %idx = call ptr @malloc(i64 128)\n" +
+			"  call ptr @memset(ptr %idx, i32 255, i64 128)\n" +
+			"  %idx_p = getelementptr i8, ptr %new, i64 32\n" +
+			"  store ptr %idx, ptr %idx_p, align 8\n" +
+			"  %icap_p = getelementptr i8, ptr %new, i64 40\n" +
+			"  store i64 16, ptr %icap_p, align 8\n" +
+			"  %used_p = getelementptr i8, ptr %new, i64 48\n" +
+			"  store i64 0, ptr %used_p, align 8\n"
 	}
 	e.emitGlobal(`
 define ptr @__kml_frozen_set_get() {

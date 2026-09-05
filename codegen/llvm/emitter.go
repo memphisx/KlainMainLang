@@ -691,6 +691,16 @@ type Emitter struct {
 	// the schedule→fire boundary (TDD-00168 Stage 3). Distinct from
 	// usedAsyncLocalStorage (the emit-time ensure guard).
 	programUsesALS bool
+	// programUsesFinReg is a whole-program pre-scan result (set in EmitProgram
+	// before Pass 2): true when the program constructs a FinalizationRegistry
+	// anywhere, so Memory.free sites — possibly emitted before the construction
+	// — include the finalizer-lookup hook (TDD-00163 Stage 2).
+	programUsesFinReg bool
+	usedFinRegHelpers bool   // ensureFinalizationHelpers emit-once guard
+	finregCount       int    // unique-name counter for per-site trampoline/report fns
+	finalizersMode    string // -finalizers: "off" (default) or "report" (leak lines at exit)
+	declaredAtexit    bool   // `declare i32 @atexit(ptr)` emitted (shared with the h2 flush hook)
+	declaredGCInvokeFin bool // `declare i32 @GC_invoke_finalizers()` emitted
 	hasMaySuspend           bool // any async fn classified may-suspend (TDD-00083 Stage 2)
 	usedCbrt                bool
 	usedCtlz32              bool
@@ -715,6 +725,8 @@ type Emitter struct {
 	usedSortClosGlobal      bool
 	usedMapStrHelpers       bool
 	usedMapNumHelpers       bool
+	usedMapClear            bool
+	usedJSONConcat2         bool
 	usedEventEmitterRuntime bool
 	usedStreamRuntime       bool
 	usedWStreamRuntime      bool
@@ -776,6 +788,25 @@ type Emitter struct {
 	// entry (lockstep with breakStack/continueStack) so break/continue free
 	// exactly the obligations of the scopes they exit.
 	autoFreePlan      map[*ast.VarDeclaration]bool
+	autoFreeRebind    map[*ast.VarDeclaration]bool
+	// TDD-00134 Stage 1 (-optimize-memory): declarations whose object-literal
+	// initializer is emitted into an entry-block alloca instead of calloc.
+	// pendingStackAllocLit marks the exact literal node while its declaration
+	// is being emitted; stackAllocatedLits records the literals actually
+	// stack-emitted (so maybeRegisterAutoFree never frees an alloca).
+	optimizeMemory      bool
+	// wantTupleAggregate is the one-shot handshake between the tuple
+	// destructuring fast path and emitCallToFuncSig (TDD-00134 Stage 3):
+	// set right before emitting a direct call to a TupleByVal function,
+	// grab-and-cleared at the call's entry so nested argument calls never
+	// see it; the call then returns the raw aggregate instead of spilling.
+	wantTupleAggregate  bool
+	stackAllocPlan      map[*ast.VarDeclaration]bool
+	pendingStackAllocLit ast.Expression
+	stackAllocatedLits  map[ast.Expression]bool
+	// classStackAudit memoizes classStackEligible per class name (may a
+	// non-escaping instance of it be stack-allocated?).
+	classStackAudit map[string]bool
 	pendingFrees      []pendingFree
 	breakFreeScope    []int
 	continueFreeScope []int
@@ -939,6 +970,15 @@ func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
 // genuine strict-vs-JS tradeoff; global-shadowing (the old -globals flag) is
 // handled resolver-side, so this drives the emitter-side inhabitants.
 func (e *Emitter) SetCompatMode(mode string) { e.compatMode = mode }
+
+// SetOptimizeMemory toggles TDD-00134's allocation optimizations (Stage 1:
+// escape analysis → stack allocation of non-escaping object literals).
+func (e *Emitter) SetOptimizeMemory(on bool) { e.optimizeMemory = on }
+
+// SetFinalizersMode selects the FinalizationRegistry exit diagnostics
+// (TDD-00163 Stage 4): "off" (default) or "report" (one leak line per
+// registration still live at exit under -mm=manual).
+func (e *Emitter) SetFinalizersMode(mode string) { e.finalizersMode = mode }
 
 // SetEmitDecoratorMetadata toggles TypeScript's emitDecoratorMetadata behavior
 // (TDD-00161 Stage 3): design:type/paramtypes/returntype metadata for decorated
@@ -1706,6 +1746,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	if err := e.planAutoFrees(prog); err != nil {
 		return "", err
 	}
+	// TDD-00134 Stage 1: under -optimize-memory, plan the non-escaping object
+	// literals whose declarations become entry-block allocas.
+	if err := e.planStackAllocs(prog); err != nil {
+		return "", err
+	}
 	// Retained so a `typeof value` type query can resolve the referenced value's
 	// type from its top-level declaration even at eager type-alias registration
 	// (Pass 0), before module globals are bound.
@@ -1733,6 +1778,12 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// an `als.run(...)` — possibly from a function body emitted before the
 	// top-level construction — is wrapped to carry the async context to its fire.
 	e.programUsesALS = programUsesAsyncLocalStorage(prog)
+
+	// TDD-00163 Stage 2: does the program construct a FinalizationRegistry
+	// anywhere? A pre-scan for the same emission-order reason as ALS above —
+	// a Memory.free inside a function body can be emitted before the top-level
+	// `new FinalizationRegistry`, and it needs the finalizer-lookup hook.
+	e.programUsesFinReg = programConstructsClass(prog, "FinalizationRegistry")
 
 	// TDD-00158 Stage 2: klain:ws (the WSConnection frame-codec convenience).
 	// The resolver records the import on the merged program; when set, the
@@ -1816,6 +1867,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	// emitter compiles them as coroutine tasks; the rest keep the synchronous
 	// malloc-slot fast path. Must run after registerFunctions (needs e.funcs).
 	e.classifyAsyncSuspension(prog)
+
+	// TDD-00134 Stage 3 (-optimize-memory): mark eligible small-tuple returns
+	// as by-value. After classifyAsyncSuspension (MaySuspend excludes), before
+	// any body or call is emitted (the flag is the ABI both sides read).
+	e.planTupleByValReturns(prog)
 
 	// -compat=js cross-type widening (TDD-00162): compute which untyped top-level
 	// bindings hold multiple scalar kinds *before* registerModuleGlobals, so

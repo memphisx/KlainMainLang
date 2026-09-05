@@ -10,6 +10,16 @@ TEST_TIMEOUT ?= 20m
 EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' ! -name 'standard_decorators.ts' | sort)
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
+# TDD-00174 Stage A mode knobs: `make examples MM=auto OPTMEM=1` compiles the
+# example corpus in that memory mode / with -optimize-memory, turning the
+# whole corpus into a mode-differential lane (outputs must be identical to a
+# default-mode run). MM supports manual/auto (gc needs per-machine libgc and
+# its own suite). memory_free.ts pins manual: Memory.free is a compile error
+# under -mm=auto by design.
+MM ?=
+OPTMEM ?=
+MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
+MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
 .PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
 
@@ -79,8 +89,10 @@ examples: build
 	ok=0; fail=0; \
 	for f in $(EXAMPLES); do \
 		out=$$(dirname $$f)/$$(basename $$f .ts); \
+		flags="$(MODEFLAGS)"; \
+		case $$f in examples/memory/memory_free.ts|examples/finalization/finalization_registry.ts) flags="$(MODEFLAGS_NOMM)";; esac; \
 		printf '%-50s' "  $$f"; \
-		if ./$(BINARY) $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $$flags $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \
@@ -90,7 +102,7 @@ examples: build
 		[ -e "$$f" ] || continue; \
 		out=$$(dirname $$f)/$$(basename $$f .js); \
 		printf '%-50s' "  $$f (-compat=js)"; \
-		if ./$(BINARY) -compat=js $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $(MODEFLAGS) -compat=js $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \
@@ -100,7 +112,7 @@ examples: build
 		[ -e "$$f" ] || continue; \
 		out=$$(dirname $$f)/$$(basename $$f .ts); \
 		printf '%-50s' "  $$f (-decorators=standard)"; \
-		if ./$(BINARY) -decorators=standard $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
+		if ./$(BINARY) $(MODEFLAGS) -decorators=standard $$f 2>/dev/null && $$out </dev/null 2>/dev/null >/dev/null; then \
 			echo "OK"; ok=$$((ok+1)); \
 		else \
 			echo "FAIL"; fail=$$((fail+1)); \

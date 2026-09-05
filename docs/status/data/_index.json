@@ -374,8 +374,8 @@
         {
           "category": "Memory management",
           "pageFile": "MEMORY-MANAGEMENT.md",
-          "coverageOverride": "2/3 modes (`manual`, `gc`)",
-          "caveats": "• `manual` (default) never frees on its own<br>• `auto` ships but its escape analysis is deliberately conservative — unprovable values still leak ([TDD-00173](../tdd/TDD-00173.md))"
+          "coverageOverride": "3/3 modes (`manual`, `gc`, `auto`)",
+          "caveats": "• `manual` (default) never frees on its own<br>• `auto`'s escape analysis is deliberately conservative — a value it can't prove block-local still leaks (the safe fallback, [TDD-00173](../tdd/TDD-00173.md))<br>• `-optimize-memory` (stack allocation + value-returned tuples, [TDD-00134](../tdd/TDD-00134.md)) is off by default while the analysis matures; flipping both to the shipped default is gated on [TDD-00174](../tdd/TDD-00174.md)"
         },
         {
           "category": "Compatibility mode (`-compat`)",
@@ -412,7 +412,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Notes |\n|---|---|\n| Decorators | **Shipped** ([TDD-00161](../tdd/TDD-00161.md) Stages 1-5, [ADR-00641](../adr/ADR-00641.md)–[ADR-00645](../adr/ADR-00645.md)): experimental dialect (class/property/parameter/method), `-emit-decorator-metadata` design:* reflection metadata, and the standard TC39 dialect (`-decorators=standard`, class + method), and factory `@dec(...)` decorators. What remains: class-decorator *replacement* (a documented static-model divergence) and the standard dialect's construction-time decorators (field/accessor + `addInitializer`) |\n| Dynamic `import()` — runtime-variable specifier | Real laziness **shipped** under `-dynamic-import=lazy` (a `.so`/`.dylib` island per literal-specifier target, [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); what remains out of scope is a genuinely *runtime-computed* specifier (`import(expr)`), which whole-program AOT can't resolve — a bounded template-literal form is a possible follow-on, see [TDD-00056](../tdd/TDD-00056.md) |\n| Dynamic property add/delete on *statically-typed* objects | **Shipped for dynamic (`any`-typed) objects and, under `-compat=js`, for untyped literals** ([TDD-00155](../tdd/TDD-00155.md), all stages): runtime add/delete, prototype chains, descriptors, untyped `JSON.parse`, `Proxy` traps + `Reflect` ([ADR-00630](../adr/ADR-00630.md)). Statically-*annotated* structs stay fixed-shape by design (the two-tier decision) — under `-compat=js` untyped literals are dynamic from the start, which supersedes the once-planned widening analysis. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |"
+      "text": "| Feature | Notes |\n|---|---|\n| Decorators | **Shipped** ([TDD-00161](../tdd/TDD-00161.md) Stages 1-5, [ADR-00641](../adr/ADR-00641.md)–[ADR-00645](../adr/ADR-00645.md)): experimental dialect (class/property/parameter/method), `-emit-decorator-metadata` design:* reflection metadata, and the standard TC39 dialect (`-decorators=standard`, class + method), factory `@dec(...)` decorators, and the standard dialect's construction-time decorators (field/accessor + `addInitializer`, [ADR-00647](../adr/ADR-00647.md)–[ADR-00649](../adr/ADR-00649.md)) across every member placement. What remains: class-decorator *replacement* (a documented static-model divergence) and static-field decorators |\n| Dynamic `import()` — runtime-variable specifier | Real laziness **shipped** under `-dynamic-import=lazy` (a `.so`/`.dylib` island per literal-specifier target, [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); what remains out of scope is a genuinely *runtime-computed* specifier (`import(expr)`), which whole-program AOT can't resolve — a bounded template-literal form is a possible follow-on, see [TDD-00056](../tdd/TDD-00056.md) |\n| Dynamic property add/delete on *statically-typed* objects | **Shipped for dynamic (`any`-typed) objects and, under `-compat=js`, for untyped literals** ([TDD-00155](../tdd/TDD-00155.md), all stages): runtime add/delete, prototype chains, descriptors, untyped `JSON.parse`, `Proxy` traps + `Reflect` ([ADR-00630](../adr/ADR-00630.md)). Statically-*annotated* structs stay fixed-shape by design (the two-tier decision) — under `-compat=js` untyped literals are dynamic from the start, which supersedes the once-planned widening analysis. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |"
     },
     {
       "kind": "block",
@@ -449,6 +449,10 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "175": {
+          "title": "Deep reclamation under `-mm=auto` (container elements, object graphs)",
+          "notes": "Staged: type-directed deep free for transitively-owned bindings → fresh-producer inference (`@fresh`) → scoped refcounting for mid-block garbage (the rbtree shape); the main [TDD-00174](../tdd/TDD-00174.md) flip blocker surfaced by the first benchmark campaign"
+        },
         "168": {
           "title": "`async_hooks` — `AsyncLocalStorage`",
           "notes": "Context propagation over the existing fiber model — the store lives in the coroutine task struct, so cross-`await` propagation is nearly free; low-level `createHook`/async-id lifecycle is a documented out-of-scope faithful impossibility"
@@ -567,7 +571,7 @@
         },
         "132": {
           "title": "Node streams as real classes (`class X extends Readable/Writable`)",
-          "notes": "Readable + Writable done; Duplex/Transform (Stage C) and `super(options)` edges deferred"
+          "notes": "Readable/Writable/Duplex/Transform + PassThrough done (options form too); residual `_flush` override and some `super(options)` edges deferred — see the Streams row"
         },
         "143": {
           "title": "`klain:sync` — Go-fidelity goroutine runtime (preemptive M:N, channels, select)",
@@ -579,7 +583,7 @@
         },
         "134": {
           "title": "Escape analysis + value-layout optimizations (`-optimize-memory`)",
-          "notes": "Stack-`alloca` non-escaping allocations, flat value-type arrays, register-returned small tuples"
+          "notes": "Stack-`alloca` non-escaping allocations, flat value-type arrays, register-returned small tuples. **Stage 1 shipped** ([ADR-00702](../adr/ADR-00702.md)): `-optimize-memory` stack-allocates non-escaping object literals via the TDD-00173 escape checker (entry-block alloca + at-site re-zeroing; composes with `-mm=auto` and FinalizationRegistry). Closure headers/envs stack-allocate too ([ADR-00704](../adr/ADR-00704.md) — capture cells stay heap), as do tuple-annotated literals and instances of classes passing a conservative whole-class `this`-audit ([ADR-00705](../adr/ADR-00705.md)) — **Stage 1 complete** across every fixed-size allocation-site kind. **Stage 2 shipped** ([ADR-00706](../adr/ADR-00706.md)): `/** @value */` flat value-type arrays — inline AoS element layout, value-copy writes, interior-pointer-view reads; flag-independent per-binding opt-in. **Stage 3 shipped** ([ADR-00707](../adr/ADR-00707.md)): value-returned small tuples — an eligible ≤2-scalar-field tuple return is a register-passable aggregate, making `const [v, err] = f()` allocation-free. **All stages complete**; default-on is gated by [TDD-00174](../tdd/TDD-00174.md)"
         },
         "135": {
           "title": "Precise/moving GC backend (Immix)",
@@ -627,7 +631,7 @@
         },
         "163": {
           "title": "`FinalizationRegistry` — mode-dependent finalization + leak diagnostics",
-          "notes": "The `WeakRef` companion, reimagined per memory mode rather than ported: `-mm=gc` gives real Boehm-finalizer semantics; `-mm=manual` gives *deterministic* finalization at the `Memory.free()` point plus an `atexit` survivor-flush (deterministic destructors the GC world can't offer); `-finalizers=report` turns the registry into a labeled **leak detector** for the leak-by-default model (registered-but-never-freed reported at exit by held value). One API, honest per-mode timing (the spec's best-effort clause permits all of it), staying useful under `-mm=auto` too (compiler-inserted frees are the same death signal — they route through the shared `freeSymbol` chokepoint, [TDD-00173](../tdd/TDD-00173.md); unprovable registrations flush at `atexit` since `auto` has no collector). Turns a half-missing competitor feature into a memory-management + debugging tool. Not started — Stage 2 (manual-mode firing) is the highest-value first step"
+          "notes": "The `WeakRef` companion, reimagined per memory mode rather than ported: `-mm=gc` gives real Boehm-finalizer semantics; `-mm=manual` gives *deterministic* finalization at the `Memory.free()` point plus an `atexit` survivor-flush (deterministic destructors the GC world can't offer); `-finalizers=report` turns the registry into a labeled **leak detector** for the leak-by-default model (registered-but-never-freed reported at exit by held value). One API, honest per-mode timing (the spec's best-effort clause permits all of it), staying useful under `-mm=auto` too (compiler-inserted frees are the same death signal — they route through the shared `freeSymbol` chokepoint, [TDD-00173](../tdd/TDD-00173.md); unprovable registrations flush at `atexit` since `auto` has no collector). Turns a half-missing competitor feature into a memory-management + debugging tool. **Stages 1–4 shipped** ([ADR-00701](../adr/ADR-00701.md)): manual-mode deterministic firing at `Memory.free` + exit survivor-flush, real Boehm-finalizer firing under `-mm=gc` (with the TLS-root and lazy-invocation gotchas solved), `-finalizers=report` leak lines, tokens/`unregister`, `-compat=js` dynamic targets. **Stage 5 shipped** ([ADR-00703](../adr/ADR-00703.md)): register's target position is a free-notified retention, so under `-mm=auto` (and explicit `@free`/`@owned` in manual mode) a registered target's cleanup fires deterministically at scope exit. All five stages implemented"
         },
         "164": {
           "title": "General C FFI — AOT `node:ffi` (`dlopen` + static signatures + callback trampolines)",
@@ -660,6 +664,10 @@
         "172": {
           "title": "File API family (fs-backed data + UI-abstracted picker)",
           "notes": "`File`/`FileReader` as a thin fs-backed reinterpretation (no UI, near-term), plus `showOpenFilePicker`/`FileSystemFileHandle` behind a pluggable UI-backend seam — `klain:tui` picker widget, `klain:webview` native dialog, explicit-path degradation headless. Ties into the interactive-native-app direction"
+        },
+        "174": {
+          "title": "Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default",
+          "notes": "Two flips: dev-default first (tests/examples/per-delivery checks compile in auto+optimize so every deliverable soaks the escape analysis by construction), shipped CLI default gated on quantified exit criteria — mode-differential lanes over the examples/E2E/conformance corpora, ASan-armed, an escape-shaped fuzz lane, klainload soak, free census"
         }
       }
     },

@@ -186,7 +186,7 @@ http.listen(8952, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + ":" + total };
 })
 `
-	startHTTPServerGC(t, src, 8952)
+	port := startHTTPServerGC(t, src, 8952)
 
 	const n = 6
 	// 200,000 iterations * 72 (two concatenated 36-byte segments).
@@ -199,7 +199,7 @@ http.listen(8952, (req: HttpRequest): Res => {
 		go func(i int) {
 			defer wg.Done()
 			path := fmt.Sprintf("/req%d", i)
-			resp, err := http.Get("http://127.0.0.1:8952" + path)
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d", port) + path)
 			if err != nil {
 				errs[i] = fmt.Errorf("GET %s: %w", path, err)
 				return

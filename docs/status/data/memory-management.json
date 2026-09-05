@@ -57,7 +57,7 @@
             "feature": "`auto`",
             "status": "implemented",
             "caveats": [
-              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, reassigned, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String` arguments; fresh-result container methods for initializers) start minimal",
+              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String` arguments; fresh-result container methods for initializers) start minimal. Reassignment via an owning-fresh RHS (`s += …`, `s = a + b`, an interpolating template) frees the overwritten value at the store; any other reassignment shape still disqualifies the binding",
               "No per-branch last-use placement for `@owned` — a last use inside `if`/loop frees at the join/after the loop; any use inside `try` falls back to block exit",
               "Thrown paths do not free (a same-function `catch` could resume with the value live) — they leak instead",
               "`@owned` parameters: direct calls to statically-resolved function declarations only; using such a function as a value is a compile error",
@@ -68,8 +68,43 @@
               "Compiler-inserted frees at compile-time-proven-safe points, no runtime collector ([TDD-00173](../tdd/TDD-00173.md), completing [TDD-00001](../tdd/TDD-00001.md)'s staging): `/** @free */` frees at every declaring-block exit path (fall-through, `return`, `break`, `continue`), `/** @owned */` frees right after the statically-determined last use (on locals and, via a function-level `@owned name` tag, on parameters — call sites must pass a provably-dead value), and every *unannotated* local that passes the same escape check is freed at block exit automatically",
               "The annotations are honored in **all three modes** — they are compiler-checked, compiler-placed `Memory.free` (under `gc` the emitted free rides the shim as a `GC_free` early-release hint); an annotation the escape check cannot prove safe is a compile error, never a silent no-op",
               "`Memory.free(x)` is a compile error under `-mm=auto` (the compiler owns every free); in the other modes `Memory.free` on an *annotated* variable is rejected per-variable by the escape check",
-              "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam a future FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)) plugs into once",
-              "Verified by an RSS-bounded churn E2E (~160MB churned, peak RSS asserted <30MB with zero annotations)"
+              "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam the FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)) plugs into, so compiler-inserted frees fire cleanup callbacks exactly like explicit ones",
+              "A registered FinalizationRegistry target's auto-free at scope exit fires its cleanup callback deterministically — register's target position is a free-notified retention, not a disqualifying escape ([ADR-00703](../adr/ADR-00703.md))",
+              "Verified by an RSS-bounded churn E2E (~160MB churned, peak RSS asserted <30MB with zero annotations)",
+              "Exercised as a mode-differential dev lane ([TDD-00174](../tdd/TDD-00174.md) Stage A: `make examples MM=auto OPTMEM=1`, `KLAIN_TEST_MM`/`KLAIN_TEST_OPTMEM` E2E). See [ADR-00708](../adr/ADR-00708.md)"
+            ]
+          },
+          {
+            "feature": "`-optimize-memory` (orthogonal to `-mm`)",
+            "status": "implemented",
+            "caveats": [
+              "Stack allocation ([TDD-00134](../tdd/TDD-00134.md) Stage 1) covers non-escaping let/const bindings of object literals, closure literals (non-async), tuple-annotated literals, and class instances — `Map`/`Set` (runtime-created), plain arrays' growable data buffers, and async closures stay heap (Stage 2's flat arrays shipped as the flag-independent `/** @value */` annotation, next row)",
+              "By-value tuple returns (Stage 3) cover ≤2-plain-scalar-field tuples on non-async top-level functions never used as values — larger tuples, aggregate-slot fields (array/nullable/any), async functions, generics, and function values keep the pointer ABI; only the direct `const [v, err] = f()` consumer is allocation-free (any other consumer respills to the heap at the same allocation count as before)",
+              "A class instance stack-allocates only when the whole class passes a conservative `this`-audit — a constructor or any method that returns/stores/passes `this`, extracts a method as a value, captures `this` in a nested closure (even for a field read), or carries decorators keeps every instance of that class heap-bound; so does `return this` method chaining",
+              "Same deliberately-conservative escape analysis as `auto` — anything not provably block-local stays heap; explicit `@free`/`@owned` declarations keep their heap+free meaning",
+              "Off by default while the analysis matures"
+            ],
+            "notes": [
+              "Escape analysis → entry-block `alloca` instead of the heap, no semantic change ([ADR-00702](../adr/ADR-00702.md)); an object literal's zero store happens at the literal site so a loop iteration reusing the slot re-zeroes it (preserving the absent-optional-field guarantee); composes with `-mm=auto` (a stack value is never auto-freed) and with FinalizationRegistry (registered targets stay heap so the free death-signal keeps firing)",
+              "A non-escaping closure's 16-byte `{fn,env}` header and env struct stack-allocate too ([ADR-00704](../adr/ADR-00704.md)); the captured variables' shared cells stay heap regardless, since another capturer may escape",
+              "Tuple-annotated literals and this-clean class instances stack-allocate too ([ADR-00705](../adr/ADR-00705.md)) — vtable dispatch, overrides, and `instanceof` all work on stack instances; Stage 1 covers every fixed-size allocation-site kind the TDD named",
+              "Value-returned small tuples ([ADR-00707](../adr/ADR-00707.md), Stage 3 — TDD-00134 complete): an eligible function returns its tuple as a register-passable struct aggregate; `return [a, b]` builds it with insertvalue and `const [v, err] = f()` destructures with extractvalue — the idiomatic Go-style error pattern is allocation-free end to end. One authoritative ABI record (the registered signature) drives definition, calls, and returns; a function referenced as a value keeps the pointer ABI program-wide (an indirect call knows nothing of the flag)",
+              "Measured on a case clang -O2 cannot elide itself: 2M 32-byte literals printed via `console.log(p)` — peak RSS 542MB → 459MB, the delta being exactly the object allocations"
+            ]
+          },
+          {
+            "feature": "`/** @value */` flat value-type arrays",
+            "status": "implemented",
+            "caveats": [
+              "V1 surface: array-literal construction (no spread elements), index read/write, `.length`, `for...of`, and `.push` — every other array operation (HOFs, `sort`, `slice`, spread, destructuring, other mutators) is a compile-time rejection naming the supported set",
+              "Element type must be a fixed-shape plain object (interface/object-literal shape) — classes, tuples, nested arrays, and dynamic values are rejected",
+              "Function-local bindings only — a `@value` array read by other functions (global promotion) is rejected",
+              "`.push` growth may realloc-move the buffer, invalidating previously-taken element views (`const v = arr[i]`) — the documented Vec/C++-`vector` contract; re-index after a push"
+            ],
+            "notes": [
+              "TDD-00134 Stage 2 ([ADR-00706](../adr/ADR-00706.md)): the annotated binding lays elements out inline in one contiguous buffer (AoS, stride = struct size) instead of the default array-of-pointers — one allocation, cache-friendly, vectorizable; no flag needed, opted into per binding",
+              "Deliberately different aliasing semantics, which is why it is an explicit opt-in and a distinct type (`@value` is mutually exclusive with `@free`/`@owned`): writing a value into a slot copies its fields (later source mutation is invisible), while reading `arr[i]` yields an interior-pointer view — `arr[i].x = 1`, a taken view, and `for...of` bindings all mutate the array in place",
+              "Works in all three `-mm` modes; under `auto` the single buffer is freed through the shared array free path at block exit"
             ]
           }
         ]
@@ -81,7 +116,7 @@
     },
     {
       "kind": "block",
-      "text": "Every heap allocation this compiler emits (arrays growing/`push`ing, object literals, closure environments, string concatenation/slicing/template literals, `Map`/`Set` backing tables, JSON/Date formatting scratch buffers, boxed `any`/`unknown` payloads, …) goes through a plain `malloc`/`realloc` call. In `manual` mode that's never freed except by an explicit `Memory.free(x)` — a complete non-issue for the short-lived CLI processes every example/test compiles to today, but a hard blocker for this project's other stated direction: long-running microservice-style processes fronting `http.listen`. `-mm=gc` is a one-flag opt-in fix for exactly that gap; see the [Roadmap](README.md#roadmap)'s Structural priorities for the current sequencing read."
+      "text": "Every heap allocation this compiler emits (arrays growing/`push`ing, object literals, closure environments, string concatenation/slicing/template literals, `Map`/`Set` backing tables, JSON/Date formatting scratch buffers, boxed `any`/`unknown` payloads, …) goes through a plain `malloc`/`realloc` call. In `manual` mode that's never freed except by an explicit `Memory.free(x)` — a complete non-issue for the short-lived CLI processes every example/test compiles to today, but a hard blocker for this project's other stated direction: long-running microservice-style processes fronting `http.listen`. two modes now address that gap: `-mm=gc` (a real Boehm collector) and `-mm=auto` (the compiler inserts frees where its escape analysis proves them safe, leaking conservatively where it can't — no runtime collector, no dependency). Flipping `auto`+`-optimize-memory` to the shipped default is the long-term direction, gated on [TDD-00174](../tdd/TDD-00174.md)'s maturity criteria."
     }
   ]
 }

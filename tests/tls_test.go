@@ -57,9 +57,9 @@ const server = tls.createServer({ cert: cert, key: key }, (socket) => {
 })
 server.listen(8971, () => {})
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8971)
+	port := startHTTPServer(t, src, 8971)
 
-	conn, err := tls.Dial("tcp", "127.0.0.1:8971", &tls.Config{InsecureSkipVerify: true})
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}
@@ -163,9 +163,9 @@ const server = tls.createServer(opts, (socket) => {
 })
 server.listen(8982, () => {})
 `, certLit, keyLit)
-	startHTTPServer(t, src, 8982)
+	port := startHTTPServer(t, src, 8982)
 
-	conn, err := tls.Dial("tcp", "127.0.0.1:8982", &tls.Config{InsecureSkipVerify: true})
+	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}

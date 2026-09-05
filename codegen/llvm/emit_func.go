@@ -2399,24 +2399,26 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		return Value{}, err
 	}
 
-	// Allocate the 16-byte closure header {ptr funcPtr, ptr envPtr}.
-	e.ensureMalloc()
-	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+	// Allocate the 16-byte closure header {ptr funcPtr, ptr envPtr} and the
+	// env struct — entry-block allocas when this literal is stack-planned
+	// under -optimize-memory (TDD-00134 Stage 1), heap otherwise.
+	var envSizeAll int64
+	var envIRAll string
+	if len(caps) > 0 {
+		envSizeAll, envIRAll = envStructSize(caps), envStructIR(caps)
+	}
+	hdr, env := e.closureAllocs(af, envIRAll, envSizeAll)
 
 	// Store function pointer into header[0].
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", closureName, fpSlot))
 
-	// Allocate and populate the environment (if there are captures).
+	// Populate the environment (if there are captures).
 	epSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, hdr))
 	if len(caps) > 0 {
-		envSize := envStructSize(caps)
-		envIR := envStructIR(caps)
-		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envSize))
+		envIR := envIRAll
 		for i, cap := range caps {
 			cellPtr := cap.Sym.Ptr
 			if !cap.Sym.Boxed {
@@ -2777,10 +2779,14 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	e.currentPromiseTy = savedPromiseTy
 	e.coroRetLabel = savedCoroRetLabel
 
-	// Allocate the {funcPtr, envPtr} closure header.
-	e.ensureMalloc()
-	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+	// Allocate the {funcPtr, envPtr} closure header and env — entry-block
+	// allocas when stack-planned under -optimize-memory, heap otherwise.
+	var envSizeAll int64
+	var envIRAll string
+	if len(caps) > 0 {
+		envSizeAll, envIRAll = envStructSize(caps), envStructIR(caps)
+	}
+	hdr, env := e.closureAllocs(fe, envIRAll, envSizeAll)
 
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
@@ -2789,10 +2795,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	epSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, hdr))
 	if len(caps) > 0 {
-		envSize := envStructSize(caps)
-		envIR := envStructIR(caps)
-		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envSize))
+		envIR := envIRAll
 		for i, cap := range caps {
 			// Self-reference cell (named function expression): holds this
 			// closure's own header pointer. Circular by construction — the

@@ -70,6 +70,9 @@ entry:
   %vals_p = getelementptr i8, ptr %map, i64 24
   %vals = load ptr, ptr %vals_p, align 8
   call void @free(ptr %vals)
+  %idx_p = getelementptr i8, ptr %map, i64 32
+  %idx = load ptr, ptr %idx_p, align 8
+  call void @free(ptr %idx)
   call void @free(ptr %map)
   ret void
 }`)

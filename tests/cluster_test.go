@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -40,8 +41,8 @@ if (cluster.isPrimary) {
   })
 }
 `
-	startHTTPClusterServer(t, src, 8793)
-	resp, err := http.Get("http://127.0.0.1:8793/")
+	port := startHTTPClusterServer(t, src, 8793)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}

@@ -56,11 +56,39 @@ func (ji jsonIndent) closeBracket(bracket string, nItems int) string {
 
 // jsonAppend concatenates a compile-time-constant string onto acc, skipping the
 // concat entirely for the empty string (compact mode's common no-op case).
+// acc is always an owned accumulator (see jsonSeed) and is freed by the
+// concat; the interned fragment is not.
 func (e *Emitter) jsonAppend(acc Value, s string) (Value, error) {
 	if s == "" {
 		return acc, nil
 	}
-	return e.emitStringConcat(acc, Value{Ref: e.internString(s), Ty: TypePtr})
+	return e.jsonConcatFree(acc, Value{Ref: e.internString(s), Ty: TypePtr}, true, false)
+}
+
+// jsonSeed returns a fresh owned heap copy of a constant seed string ("[",
+// "{", …) so every stringify accumulator is uniformly owned — each append
+// (jsonConcatFree) can then free the previous accumulator unconditionally.
+func (e *Emitter) jsonSeed(s string) string {
+	e.ensureStrHeaderRuntime()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, e.internString(s)))
+	return r
+}
+
+// jsonConcatFree concatenates via __kml_json_concat2, freeing the operands
+// the caller owns. Fragment ownership is compile-time-known per call site.
+func (e *Emitter) jsonConcatFree(a, b Value, freeA, freeB bool) (Value, error) {
+	e.ensureJSONConcat2()
+	fa, fb := "false", "false"
+	if freeA {
+		fa = "true"
+	}
+	if freeB {
+		fb = "true"
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_concat2(ptr %s, ptr %s, i1 %s, i1 %s)", r, a.Ref, b.Ref, fa, fb))
+	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
 // emitJSONStringifyArray resolves arrExpr and delegates to
@@ -98,7 +126,7 @@ func (e *Emitter) emitJSONStringifyArrayValue(val Value, ind jsonIndent) (Value,
 func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type, ind jsonIndent) (Value, error) {
 	accAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("["), accAlloca))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("["), accAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -138,7 +166,7 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type,
 	if err != nil {
 		return Value{}, err
 	}
-	firstAcc, err := e.emitStringConcat(firstPre, elemJSONVal)
+	firstAcc, err := e.jsonConcatFree(firstPre, elemJSONVal, true, true)
 	if err != nil {
 		return Value{}, err
 	}
@@ -152,7 +180,7 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type,
 	if err != nil {
 		return Value{}, err
 	}
-	newAcc, err := e.emitStringConcat(withComma, elemJSONVal)
+	newAcc, err := e.jsonConcatFree(withComma, elemJSONVal, true, true)
 	if err != nil {
 		return Value{}, err
 	}
@@ -177,9 +205,9 @@ func (e *Emitter) emitJSONStringifyArrayData(ptrReg, lenReg string, elemTy Type,
 		closeSel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeSel, isEmpty,
 			e.internString("]"), e.internString("\n"+ind.pad()+"]")))
-		return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: closeSel, Ty: TypePtr})
+		return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: closeSel, Ty: TypePtr}, true, false)
 	}
-	return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("]"), Ty: TypePtr})
+	return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("]"), Ty: TypePtr}, true, false)
 }
 
 func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -293,7 +321,7 @@ func (e *Emitter) jsonSpaceUnit(arg ast.Expression, pos ast.Pos) (string, error)
 // emitJSONStringifyTuple builds [v0,v1,...] for a tuple value (TDD-00066),
 // matching real JSON.stringify, which serializes a tuple as a JSON array.
 func (e *Emitter) emitJSONStringifyTuple(val Value, ind jsonIndent) (Value, error) {
-	acc := Value{Ref: e.internString("["), Ty: TypePtr}
+	acc := Value{Ref: e.jsonSeed("["), Ty: TypePtr}
 	structIR := val.Ty.StructIR()
 	n := len(val.Ty.Fields)
 	for i, field := range val.Ty.Fields {
@@ -308,7 +336,7 @@ func (e *Emitter) emitJSONStringifyTuple(val Value, ind jsonIndent) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
-		if acc, err = e.emitStringConcat(acc, jsonVal); err != nil {
+		if acc, err = e.jsonConcatFree(acc, jsonVal, true, true); err != nil {
 			return Value{}, err
 		}
 	}
@@ -326,7 +354,7 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 	if isSettlementType(val.Ty) {
 		return e.emitJSONStringifySettlement(val, ind)
 	}
-	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
+	acc := Value{Ref: e.jsonSeed("{"), Ty: TypePtr}
 	fields := val.Ty.VisibleFields()
 	for i, field := range fields {
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
@@ -360,7 +388,7 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		if err != nil {
 			return Value{}, err
 		}
-		acc, err = e.emitStringConcat(acc, jsonVal)
+		acc, err = e.jsonConcatFree(acc, jsonVal, true, true)
 		if err != nil {
 			return Value{}, err
 		}
@@ -391,7 +419,7 @@ func isSettlementType(ty Type) bool {
 // pointer) to pick the branch without a string compare.
 func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value, error) {
 	structIR := val.Ty.StructIR()
-	acc := Value{Ref: e.internString("{"), Ty: TypePtr}
+	acc := Value{Ref: e.jsonSeed("{"), Ty: TypePtr}
 
 	// status key + quoted value (member 0).
 	var err error
@@ -407,7 +435,7 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	if acc, err = e.emitStringConcat(acc, statusJSON); err != nil {
+	if acc, err = e.jsonConcatFree(acc, statusJSON, true, true); err != nil {
 		return Value{}, err
 	}
 
@@ -436,7 +464,7 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	if accF, err = e.emitStringConcat(accF, vJSON); err != nil {
+	if accF, err = e.jsonConcatFree(accF, vJSON, true, true); err != nil {
 		return Value{}, err
 	}
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accF.Ref, slot))
@@ -459,7 +487,7 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	if accR, err = e.emitStringConcat(accR, rJSON); err != nil {
+	if accR, err = e.jsonConcatFree(accR, rJSON, true, true); err != nil {
 		return Value{}, err
 	}
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accR.Ref, slot))
@@ -495,8 +523,27 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
+		// Fragments are uniformly owned (the accumulator concats free them),
+		// so the absent branch materializes a heap "null" instead of the
+		// interned literal — branchy rather than a select, so the copy only
+		// allocates when actually taken. The present-path payloadJSON is
+		// computed unconditionally either way (as before).
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		pL := e.freshLabel("json.nsc.present")
+		aL := e.freshLabel("json.nsc.absent")
+		mL := e.freshLabel("json.nsc.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, pL, aL))
+		e.emitLabel(pL)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", payloadJSON.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(aL)
+		e.emitInstr(fmt.Sprintf("call void @__kml_str_free(ptr %s)", payloadJSON.Ref))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(mL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadJSON.Ref, e.internString("null")))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	// A user-defined class toJSON() is honored: real JSON.stringify calls
@@ -546,7 +593,7 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		mL := e.freshLabel("json.objmerge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isN, nL, nnL))
 		e.emitLabel(nL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("null"), slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(nnL)
 		ov, err := e.emitJSONStringifyObject(val, ind)
@@ -569,7 +616,12 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		falseStr := e.internString("false")
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, val.Ref, trueStr, falseStr))
-		return Value{Ref: r, Ty: TypePtr}, nil
+		// Uniform fragment ownership: hand back a heap copy so the
+		// accumulator concat can free every fragment unconditionally.
+		e.ensureStrHeaderRuntime()
+		r2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r2, r))
+		return Value{Ref: r2, Ty: TypePtr}, nil
 	case "ptr":
 		e.ensureJSONStringifyStr()
 		r := e.freshReg()
@@ -614,7 +666,7 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(nfL)
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("null"), slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(mL)
 			out := e.freshReg()
@@ -694,7 +746,7 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 
 	accAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("{"), accAlloca))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("{"), accAlloca))
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
@@ -722,17 +774,17 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isFirst, i1))
 	sep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sep, isFirst, e.internString(""), e.internString(",")))
-	acc1, err := e.emitStringConcat(Value{Ref: acc0, Ty: TypePtr}, Value{Ref: sep, Ty: TypePtr})
+	acc1, err := e.jsonConcatFree(Value{Ref: acc0, Ty: TypePtr}, Value{Ref: sep, Ty: TypePtr}, true, false)
 	if err != nil {
 		return Value{}, err
 	}
 	keyJSON := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", keyJSON, key))
-	acc2, err := e.emitStringConcat(acc1, Value{Ref: keyJSON, Ty: TypePtr})
+	acc2, err := e.jsonConcatFree(acc1, Value{Ref: keyJSON, Ty: TypePtr}, true, true)
 	if err != nil {
 		return Value{}, err
 	}
-	acc3, err := e.emitStringConcat(acc2, Value{Ref: e.internString(":"), Ty: TypePtr})
+	acc3, err := e.jsonConcatFree(acc2, Value{Ref: e.internString(":"), Ty: TypePtr}, true, false)
 	if err != nil {
 		return Value{}, err
 	}
@@ -759,7 +811,7 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	acc4, err := e.emitStringConcat(acc3, vJSON)
+	acc4, err := e.jsonConcatFree(acc3, vJSON, true, true)
 	if err != nil {
 		return Value{}, err
 	}
@@ -772,5 +824,5 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	e.emitLabel(doneL)
 	preClose := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
-	return e.emitStringConcat(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("}"), Ty: TypePtr})
+	return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: e.internString("}"), Ty: TypePtr}, true, false)
 }

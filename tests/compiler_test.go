@@ -26,6 +26,25 @@ func parseAndCompile(src string) (string, error) {
 	return em.EmitProgram(prog)
 }
 
+// applyTestModeEnv applies the TDD-00174 Stage-A mode knobs to a generic
+// buildBinary emitter: KLAIN_TEST_MM=manual|auto and KLAIN_TEST_OPTMEM=1 run
+// the whole E2E suite through that memory mode / -optimize-memory, turning it
+// into a mode-differential lane (assertions are unchanged — a mode-sensitive
+// failure IS the finding). gc is deliberately not env-selectable here: it
+// needs extra link flags and per-machine libgc, and has its own suite.
+// Mode-specific helpers (buildBinaryGC, buildBinaryOptimizeMemory, …) keep
+// their explicit pins and never read these.
+func applyTestModeEnv(em *llvm.Emitter) {
+	switch mm := os.Getenv("KLAIN_TEST_MM"); mm {
+	case "", "gc":
+	default:
+		em.SetMemMode(mm)
+	}
+	if os.Getenv("KLAIN_TEST_OPTMEM") == "1" {
+		em.SetOptimizeMemory(true)
+	}
+}
+
 // buildBinary compiles the given TypeScript source to a native binary and
 // returns its path. The test is skipped if clang is not available.
 func buildBinary(t *testing.T, src string) string {
@@ -40,6 +59,7 @@ func buildBinary(t *testing.T, src string) string {
 	}
 
 	em := llvm.NewEmitter()
+	applyTestModeEnv(em)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)

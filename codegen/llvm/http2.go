@@ -103,8 +103,8 @@ declare void @__kml_h2c_pump_tick()
 declare i64 @__kml_h2c_pump_all()
 declare void @__kml_h2c_flush()
 declare void @__kml_h2c_close(ptr)
-declare void @__kml_h2c_destroy(ptr)
-declare i32 @atexit(ptr)`)
+declare void @__kml_h2c_destroy(ptr)`)
+	e.ensureAtexitDecl()
 	e.ensureH2ClientBridge()
 }
 

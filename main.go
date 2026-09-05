@@ -30,6 +30,8 @@ func main() {
 	emitWindowDTS := flag.Bool("emit-window-dts", false, "for a klain:webview program, also write a <output>.window.d.ts declaring the window.* functions its typed bindings expose, so the page-side code gets autocomplete/typechecking on them")
 	emitDecoratorMetadata := flag.Bool("emit-decorator-metadata", false, "with experimental decorators, emit design:type/design:paramtypes/design:returntype reflection metadata for decorated members (readable via Reflect.getMetadata) — mirrors TypeScript's emitDecoratorMetadata")
 	decorators := flag.String("decorators", "experimental", "decorator dialect: experimental (legacy (target, key, descriptor), the default) or standard (TC39 (value, context))")
+	optimizeMemory := flag.Bool("optimize-memory", false, "allocation optimizations with no semantic change: stack-allocate object literals the escape analysis proves never outlive their block, instead of heap-allocating them (less allocator pressure, better cache locality). Off by default while the analysis matures")
+	finalizers := flag.String("finalizers", "off", "FinalizationRegistry exit `diagnostics`: off (default) or report — under -mm=manual, print one line per registration still live at exit (its target was never freed — a labeled leak) before running its cleanup callback")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "usage: klainmain [flags] <file.ts>")
@@ -90,6 +92,13 @@ func main() {
 		fatal("unrecognized -bigint value %q — must be one of: libtommath (default), gmp", *bigint)
 	}
 
+	switch *finalizers {
+	case "off", "report":
+		// ok
+	default:
+		fatal("unrecognized -finalizers value %q — must be one of: off (default), report", *finalizers)
+	}
+
 	switch *cryptoBackend {
 	case "openssl":
 		// ok
@@ -141,6 +150,8 @@ func main() {
 	em.SetCompatMode(*compat)
 	em.SetEmitDecoratorMetadata(*emitDecoratorMetadata)
 	em.SetDecoratorDialect(*decorators)
+	em.SetFinalizersMode(*finalizers)
+	em.SetOptimizeMemory(*optimizeMemory)
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
 		fatal("codegen error: %v", err)
@@ -265,6 +276,8 @@ func main() {
 			iem.SetCompatMode(*compat)
 			iem.SetEmitDecoratorMetadata(*emitDecoratorMetadata)
 			iem.SetDecoratorDialect(*decorators)
+			iem.SetFinalizersMode(*finalizers)
+			iem.SetOptimizeMemory(*optimizeMemory)
 			iem.SetIslandHash(hash)
 			iir, err := iem.EmitProgram(iprog)
 			if err != nil {

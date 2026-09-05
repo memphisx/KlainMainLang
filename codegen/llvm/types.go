@@ -511,6 +511,30 @@ type Type struct {
 	// IsAsyncResource marks an async_hooks AsyncResource handle (TDD-00168
 	// Stage 4): a captured async context replayed by runInAsyncScope.
 	IsAsyncResource bool
+	// IsFinalizationRegistry marks a FinalizationRegistry<T> handle
+	// (TDD-00163); the held-value type T lives in ElemType.
+	IsFinalizationRegistry bool
+	// IsFlatArray marks a `/** @value */` flat value-type array (TDD-00134
+	// Stage 2): elements are laid out INLINE in one contiguous buffer
+	// (stride = ElemType.StructSize()), not as pointers to separate heap
+	// objects. Deliberately NOT IsArray, so every ptr-slot array operation
+	// rejects it instead of corrupting the buffer; the supported surface
+	// (index read/write, .length, for...of, .push) has explicit branches.
+	// Storage matches a named array: a slot pointing at a {data,len} header.
+	IsFlatArray bool
+	// Inline marks an object element VALUE that lives inline inside its
+	// container's buffer (a flat-array element): its Ref is an interior
+	// pointer, loads return that pointer directly, and stores memcpy the
+	// struct bytes instead of storing a pointer word.
+	Inline bool
+	// TupleByVal marks a small tuple RETURN type compiled by value (TDD-00134
+	// Stage 3, -optimize-memory): the function's IR signature returns the
+	// tuple's struct aggregate (register-passable, ≤2 scalar fields) instead
+	// of a pointer to a heap struct. Set only on a FuncSig.RetType copy by
+	// planTupleByValReturns — never on a variable's or field's type — and
+	// cleared on the Value a call site hands downstream (the aggregate is
+	// spilled back to a pointer there unless destructured directly).
+	TupleByVal bool
 	IsNetSocket bool
 	// IsWebSocketServer marks a klain:ws `new WebSocketServer({server})` handle
 	// (TDD-00158 Stage 2). The http server is a process-singleton, so the
@@ -1930,6 +1954,25 @@ func AsyncLocalStorageType(elem Type) Type {
 	return ty
 }
 
+// FlatArrayType is a `/** @value */` flat value-type array of elem (TDD-00134
+// Stage 2) — see Type.IsFlatArray.
+func FlatArrayType(elem Type) Type {
+	el := elem
+	return Type{IR: "ptr", IsFlatArray: true, ElemType: &el}
+}
+
+// FinalizationRegistryType is a FinalizationRegistry<T> handle (TDD-00163): a
+// pointer to the runtime record { ptr closure, ptr trampoline, ptr reportFn }.
+// The held-value type T is carried in ElemType so register(target, held)
+// type-checks its held argument against the cleanup callback's parameter.
+func FinalizationRegistryType(held Type) Type {
+	h := held
+	ty := ObjectType([]Field{{Name: "__finreg", Ty: TypePtr}})
+	ty.IsFinalizationRegistry = true
+	ty.ElemType = &h
+	return ty
+}
+
 // AsyncResourceType is an async_hooks AsyncResource handle (TDD-00168 Stage 4):
 // a pointer to the runtime record { ptr capturedCtx } — the async context head
 // captured at construction and reinstalled by runInAsyncScope.
@@ -2238,6 +2281,12 @@ func (t Type) LLVMRetType() string {
 	}
 	if isNullableScalar(t) {
 		return nullableScalarStorageIR(t)
+	}
+	// A by-value small-tuple return (TDD-00134 Stage 3) is the struct
+	// aggregate itself, register-passable — same pattern as the array
+	// {ptr, i64} above.
+	if t.IsTuple && t.TupleByVal {
+		return t.StructIR()
 	}
 	return t.IR
 }

@@ -156,7 +156,11 @@ type VarDeclaration struct {
 	// escape check at codegen time; at most one is ever set.
 	Free  bool
 	Owned bool
-	pos   Pos
+	// ValueArr (TDD-00134 Stage 2): `/** @value */` requests the flat
+	// value-type array layout — elements stored inline (copies), not as
+	// shared pointers. An explicit aliasing-semantics opt-in.
+	ValueArr bool
+	pos      Pos
 }
 
 func (*VarDeclaration) nodeMarker()   {}

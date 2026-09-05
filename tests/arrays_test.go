@@ -1709,3 +1709,37 @@ a[0] = "not a number";
 		t.Fatal("expected a compile error assigning a string to a number[] element")
 	}
 }
+
+// TestE2EArrayIndexAssignAppend: JS's append-by-index idiom — a plain `=`
+// store at index == length grows the array by one (through the shared
+// header, so aliases observe it); an index past the end still throws (a
+// hole-creating write has no representation in the typed element model);
+// compound ops keep strict bounds (they read the slot first).
+func TestE2EArrayIndexAssignAppend(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = []
+for (let i = 0; i < 5; i++) arr[i] = i * 10
+console.log(arr.length, arr[0], arr[4])
+arr[arr.length] = 50
+console.log(arr.length, arr[5])
+const strs: string[] = []
+strs[0] = "a"
+strs[1] = "b" + "c"
+console.log(strs.join(","))
+function extend(a: number[]): void { a[a.length] = 99 }
+extend(arr)
+console.log(arr.length, arr[6])
+`, "5 0 40\n6 50\na,bc\n7 99")
+}
+
+func TestE2EArrayIndexAssignGapStillThrows(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = []
+try {
+  arr[2] = 1
+} catch (e) {
+  console.log("caught")
+}
+console.log(arr.length)
+`, "caught\n0")
+}

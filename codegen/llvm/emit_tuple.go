@@ -17,16 +17,17 @@ import (
 // expressions against the declared tuple type — element i is stored into field
 // "i". A nullable-scalar element is boxed and a null-valued source lvalue keeps
 // its null-ness, exactly like an object-literal field (storeScalarOrNullableFieldExpr).
-func (e *Emitter) emitTupleLiteral(elems []ast.Expression, ty Type) (Value, error) {
+// lit is the source ArrayLiteral node (used only to match a stack-allocation
+// plan under -optimize-memory, TDD-00134 Stage 1); nil is always safe.
+func (e *Emitter) emitTupleLiteral(lit ast.Expression, elems []ast.Expression, ty Type) (Value, error) {
 	if len(elems) != len(ty.Fields) {
 		return Value{}, fmt.Errorf("a %d-tuple literal must have exactly %d elements, got %d", len(ty.Fields), len(ty.Fields), len(elems))
 	}
-	// calloc, not malloc: an object/tuple struct must read back deterministic
-	// zeros for any slot a store doesn't fully cover — same reasoning as
-	// emitObjectLiteral (ADR-00157).
-	e.ensureCalloc()
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	// Zeroing allocation (calloc, or alloca + zero store when stack-planned):
+	// an object/tuple struct must read back deterministic zeros for any slot
+	// a store doesn't fully cover — same reasoning as emitObjectLiteral
+	// (ADR-00157).
+	dataReg := e.structAlloc(lit, ty)
 	structIR := ty.StructIR()
 	for i, elemExpr := range elems {
 		if _, isSpread := elemExpr.(*ast.SpreadElement); isSpread {

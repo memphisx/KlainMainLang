@@ -3,7 +3,6 @@ package tests
 import (
 	"bytes"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,7 +64,7 @@ func startAndWaitForFile(t *testing.T, binFile, readyPath string) (*exec.Cmd, *s
 		_ = cmd.Wait()
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(readyPath); err == nil {
 			return cmd, out
@@ -83,9 +82,10 @@ func startAndWaitForFile(t *testing.T, binFile, readyPath string) (*exec.Cmd, *s
 // responsible for terminating the process — this is used by tests that send
 // a real signal and assert on how the process reacts, not just that it can
 // be forcibly killed during cleanup.
-func startBackgroundServer(t *testing.T, src string, port int) (*exec.Cmd, *bytes.Buffer) {
+func startBackgroundServer(t *testing.T, src string, port int) (*exec.Cmd, *bytes.Buffer, int) {
 	t.Helper()
-	binFile := buildBinaryImports(t, src)
+	np := freePort(t)
+	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -97,19 +97,8 @@ func startBackgroundServer(t *testing.T, src string, port int) (*exec.Cmd, *byte
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return cmd, &out
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("server never started listening on %s", addr)
-	return nil, nil
+	waitListening(t, np)
+	return cmd, &out, np
 }
 
 // waitExit waits for cmd to exit on its own within timeout, returning the
@@ -159,11 +148,11 @@ http.listen(8231, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
-	cmd, out := startBackgroundServer(t, src, 8231)
+	cmd, out, _ := startBackgroundServer(t, src, 8231)
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("send SIGINT: %v", err)
 	}
-	code := waitExit(t, cmd, out, 5*time.Second)
+	code := waitExit(t, cmd, out, 15*time.Second)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
@@ -183,11 +172,11 @@ http.listen(8232, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
-	cmd, out := startBackgroundServer(t, src, 8232)
+	cmd, out, _ := startBackgroundServer(t, src, 8232)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM: %v", err)
 	}
-	code := waitExit(t, cmd, out, 5*time.Second)
+	code := waitExit(t, cmd, out, 15*time.Second)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
@@ -214,11 +203,11 @@ http.listen(8233, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
-	cmd, out := startBackgroundServer(t, src, 8233)
+	cmd, out, _ := startBackgroundServer(t, src, 8233)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM: %v", err)
 	}
-	code := waitExit(t, cmd, out, 5*time.Second)
+	code := waitExit(t, cmd, out, 15*time.Second)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
@@ -246,7 +235,7 @@ http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 });
 `
-	cmd, out := startBackgroundServer(t, src, 8234)
+	cmd, out, _ := startBackgroundServer(t, src, 8234)
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("send SIGINT: %v", err)
 	}
@@ -255,7 +244,7 @@ http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
 	select {
 	case <-done:
 		// Terminated by the OS's default SIGINT disposition, as expected.
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatalf("process ignored SIGINT with no handler registered — default disposition should still apply; output:\n%s", out.String())
 	}
@@ -281,7 +270,7 @@ setInterval(() => { console.log("tick"); }, 100000);
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("send SIGINT: %v", err)
 	}
-	code := waitExit(t, cmd, out, 5*time.Second)
+	code := waitExit(t, cmd, out, 15*time.Second)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
@@ -313,7 +302,7 @@ setInterval(() => { console.log("tick"); }, 100000);
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("send SIGINT: %v", err)
 	}
-	waitExit(t, cmd, out, 5*time.Second)
+	waitExit(t, cmd, out, 15*time.Second)
 	if strings.Contains(out.String(), "tick") {
 		t.Errorf("100s setInterval fired prematurely after a signal interrupted nanosleep(); output:\n%s", out.String())
 	}

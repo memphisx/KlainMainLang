@@ -84,7 +84,7 @@
               "Nested positions `any[]`/`{ x: any }` are clean compile errors",
               "A *statically-typed* object value boxed into `any` still rejects member access (runtime TypeError) — lifting a static struct into the dynamic view is allocation-site widening, [TDD-00155](../tdd/TDD-00155.md) Stage 6",
               "A dynamic object renders as `[object Object]` through `console.log`/`String()` (no inspect-style `{ a: 1 }` form); a dynamic array renders as its JS join (`1,two`), not `[ 1, 'two' ]`",
-              "`Object.values`/`Object.entries` on a dynamic object are not supported yet (their results need `any[]` elements); `Object.defineProperties` and descriptor-form `Object.assign` are follow-ons",
+              "`Object.defineProperties` (plural) and descriptor-form `Object.assign` are follow-ons",
               "Primitive members through `any` (`x.length` on a boxed string/array) read as `undefined` — no runtime primitive-method dispatch yet"
             ],
             "notes": [

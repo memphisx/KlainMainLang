@@ -560,6 +560,19 @@ func (p *Parser) parseVarDecl(consumeSemi bool) (ast.Statement, error) {
 			first.Free = hasFree
 			first.Owned = hasOwned
 		}
+		// TDD-00134 Stage 2: `/** @value */` opts an array binding into the
+		// flat value-type layout (inline element copies, not shared
+		// pointers). Its element semantics differ from a plain array, so it
+		// is orthogonal to — and incompatible with — @free/@owned in V1.
+		if doc.HasTag("value") {
+			if hasFree || hasOwned {
+				return nil, fmt.Errorf("%d:%d: @value cannot be combined with @free/@owned on '%s'", pos.Line, pos.Col, first.Name)
+			}
+			if len(decls) > 1 {
+				return nil, fmt.Errorf("%d:%d: @value applies to a single-variable declaration — annotate one variable per declaration statement", pos.Line, pos.Col)
+			}
+			first.ValueArr = true
+		}
 	}
 
 	if consumeSemi {

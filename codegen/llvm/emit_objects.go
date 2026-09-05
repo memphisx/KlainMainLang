@@ -98,7 +98,7 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 		return e.emitObjectLiteralWithHint(lit, &hint)
 	}
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsTuple {
-		return e.emitTupleLiteral(lit.Elements, hint)
+		return e.emitTupleLiteral(lit, lit.Elements, hint)
 	}
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsArray {
 		return e.emitArrayLiteralAggregate(lit, hint.ElemType)
@@ -171,9 +171,10 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	// deterministic zero, not whatever garbage malloc happened to hand back
 	// — a real bug found investigating destructuring defaults, see
 	// ADR-00157.
-	e.ensureCalloc()
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	// TDD-00134 Stage 1 (-optimize-memory): a proven-non-escaping literal
+	// becomes an entry-block alloca; structAlloc keeps calloc's zeroing
+	// guarantee either way.
+	dataReg := e.structAlloc(lit, ty)
 	structIR := ty.StructIR()
 
 	storeField := func(name string, val Value) error {
@@ -481,7 +482,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		// A tuple-typed declaration initialized by an array literal
 		// (`const t: [string, number] = ["a", 1]`) builds the tuple struct.
 		if ty.IsTuple {
-			val, err := e.emitTupleLiteral(init.Elements, ty)
+			val, err := e.emitTupleLiteral(init, init.Elements, ty)
 			if err != nil {
 				return err
 			}

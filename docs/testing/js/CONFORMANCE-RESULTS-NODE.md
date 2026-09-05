@@ -67,29 +67,29 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 205 | COMPILE_ERROR: a number has no method '%s' |
 | 205 | COMPILE_ERROR: slice is only supported on strings |
+| 204 | COMPILE_ERROR: a number has no method '%s' |
 | 126 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 123 | COMPILE_ERROR: undefined variable '%s' |
+| 122 | COMPILE_ERROR: undefined variable '%s' |
 | 96 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 51 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 47 | COMPILE_ERROR: unknown class '%s' |
-| 43 | COMPILE_ERROR: no field '%s' |
+| 44 | COMPILE_ERROR: no field '%s' |
 | 43 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 38 | COMPILE_ERROR: undefined function or closure '%s' |
-| 36 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
+| 35 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 26 | COMPILE_ERROR: process has no method '%s' |
 | 25 | COMPILE_ERROR: expected ), got => |
 | 23 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 22 | COMPILE_ERROR: a Request has no method '%s' |
 | 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
+| 21 | COMPILE_ERROR: fs has no method '%s' |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
 | 20 | COMPILE_ERROR: field assignment on non-object |
-| 20 | COMPILE_ERROR: fs has no method '%s' |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |

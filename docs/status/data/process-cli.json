@@ -315,7 +315,7 @@
             "feature": "`child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven)",
             "status": "implemented",
             "caveats": [
-              "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick`, which does not exist yet — see the row above)",
+              "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick` — see the row above)",
               "One listener per event, an arrow/function-expression literal only (the same posture as `Worker`); no `removeListener`",
               "spawn's options support `{ cwd, shell, stdio: 'pipe' }` ([ADR-00433](../adr/ADR-00433.md)) — `cwd` is real (child chdir), `shell` is accepted but **ignored** (commands always exec directly, never via a shell), and `env`/`detached`/stdio arrays are clean rejections; exec/execFile still take no options. `'close'`/`'exit'` receive the exit `code` only (a signal death is folded to `128+signal`, no separate `signal` argument)",
               "Handles and their buffered output are never freed (`-mm=manual`)"

@@ -600,3 +600,90 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }
+
+// emitArrayIndexAssignGrow implements JS's append-by-index idiom for a plain
+// `arr[i] = v` store: an index equal to the current length grows the array by
+// one (the same realloc-append emitPush uses, through the shared header, so
+// every alias observes it), an in-range index stores in place, and an index
+// past the end still throws — a hole-creating write has no representation in
+// the typed element model (real JS would materialize `undefined` holes), so
+// that divergence stays, now scoped to genuine gaps only. Found via PerryTS's
+// own benchmark suite, where `const arr: number[] = []; for (...) arr[i] = v`
+// is the standard population loop. handled=false means the target isn't a
+// resolvable mutable array location (e.g. an rvalue receiver) and the caller
+// should fall back to the fixed-bounds path.
+func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.Expression) (Value, bool, error) {
+	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(idxEx.Object, "indexed assignment", idxEx.GetPos())
+	if err != nil {
+		return Value{}, false, nil
+	}
+
+	idxVal, err := e.emitExpr(idxEx.Index)
+	if err != nil {
+		return Value{}, true, err
+	}
+	idxVal = e.arrayIndexToI64(idxVal)
+
+	// Hint + coerceChecked mirror the fixed-bounds path exactly: the hint
+	// types array/object-literal RHSes against the element type
+	// (TDD-00028), and coerceChecked turns a genuine mismatch (`a[i] =
+	// 'str'` into number[]) into a clean compile error (ADR-00688).
+	val, err := e.emitExprWithObjectHint(rhs, elemTy)
+	if err != nil {
+		return Value{}, true, err
+	}
+	val, err = e.coerceChecked(val, elemTy, idxEx.GetPos(), "array-element assignment")
+	if err != nil {
+		return Value{}, true, err
+	}
+
+	// Load the header AFTER the RHS: evaluating it may itself have grown or
+	// reallocated this array (e.g. `arr[i] = arr.push(0)`).
+	lenReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenPtr))
+
+	past := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", past, idxVal.Ref, lenReg))
+	oobL := e.freshLabel("arridx.oob")
+	inrangeChkL := e.freshLabel("arridx.chk")
+	appendL := e.freshLabel("arridx.append")
+	storeL := e.freshLabel("arridx.store")
+	doneL := e.freshLabel("arridx.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", past, oobL, inrangeChkL))
+
+	e.emitLabel(oobL)
+	e.emitInternalThrow(e.internString("Array index out of bounds"))
+
+	e.emitLabel(inrangeChkL)
+	isAppend := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", isAppend, idxVal.Ref, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAppend, appendL, storeL))
+
+	e.emitLabel(appendL)
+	e.ensureRealloc()
+	curPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
+	newLen := e.freshReg()
+	newBytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newLen, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
+	newPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	slotA := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotA, elemTy.IR, newPtr, idxVal.Ref))
+	e.storeArrayElem(slotA, elemTy, val)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(storeL)
+	curPtr2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr2, ptrPtr))
+	slotB := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotB, elemTy.IR, curPtr2, idxVal.Ref))
+	e.storeArrayElem(slotB, elemTy, val)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
+	return val, true, nil
+}

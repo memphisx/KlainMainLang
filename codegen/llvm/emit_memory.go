@@ -74,7 +74,10 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 // death-signal hook (e.g. FinalizationRegistry's pointer-map lookup,
 // TDD-00163 Stage 2) belongs here and fires for all of them at once.
 func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
-	if sym.Ty.IsArray {
+	if sym.Ty.IsArray || sym.Ty.IsFlatArray {
+		// A flat @value array (TDD-00134 Stage 2) shares the {data, len}
+		// header storage shape and owns exactly one buffer (elements are
+		// inline), so the same free-data-and-reset path is correct for it.
 		// Object-reference model (TDD-00127): sym.Ptr is a slot holding a
 		// pointer to the heap {data, len} header. Free the data buffer, then
 		// reset the header to {null, 0} in place so a subsequent read sees an
@@ -105,7 +108,7 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 // eligibility check (TDD-00173), answerable without emitting anything.
 func symbolTypeFreeable(ty Type) bool {
 	switch {
-	case ty.IsArray:
+	case ty.IsArray, ty.IsFlatArray:
 		return true
 	case ty.IsMap || ty.IsSet, ty.IsFunc:
 		return true
@@ -122,6 +125,15 @@ func symbolTypeFreeable(ty Type) bool {
 // directly-evaluated expression's Value.Ref) — dispatching on ty for
 // anything that needs more than a single free() call.
 func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error {
+	// TDD-00163 Stage 2: when the program constructs a FinalizationRegistry
+	// anywhere (whole-program pre-scan — this free may be emitted first), a
+	// manual-mode free is a death signal: enqueue the cleanup callbacks of
+	// every live registration targeting this pointer before it is freed.
+	// Under -mm=gc the Boehm finalizer is the death signal instead.
+	if e.programUsesFinReg && !e.isGCMode() {
+		e.ensureFinalizationHelpers()
+		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree(ptr %s)", ptrReg))
+	}
 	switch {
 	case ty.IsMap || ty.IsSet:
 		e.ensureMapFree()

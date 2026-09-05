@@ -4,7 +4,12 @@
   "kind": "node",
   "statusPage": "MEMORY-MANAGEMENT.md",
   "coversRows": "all",
-  "coverage": { "loose": "3/3", "loosePct": 100, "strict": "0/3", "strictPct": 0 },
+  "coverage": {
+    "loose": "3/3",
+    "loosePct": 100,
+    "strict": "0/3",
+    "strictPct": 0
+  },
   "lede": "Memory mode is chosen once per compiled binary via the -mm=manual|gc|auto flag, defaulting to manual. The big divergence from a managed runtime: manual mode never frees anything on its own, so a program's footprint grows for its whole run unless it calls Memory.free(x) by hand — fine for short-lived CLI tools, a real concern for long-running servers. gc swaps in the Boehm collector for a one-flag fix; auto has the compiler itself insert frees at points its escape analysis proves safe — no runtime collector, and values it can't prove simply keep leaking.",
   "entries": [
     {
@@ -14,15 +19,23 @@
       "signature": "klainmain -mm=manual program.ts   // default; Memory.free(x): void",
       "badge": "caveats",
       "description": "The default mode: every heap allocation the compiler emits (arrays, object literals, closure environments, string concatenation/slicing/templates, Map/Set backing tables, JSON/Date scratch buffers, boxed any payloads) goes through a plain malloc/realloc and is only released by an explicit Memory.free(x). That call resolves the value's underlying heap pointer — array data pointer, object struct, closure header plus environment, Map/Set backing buffers — and frees it shallowly, never anything reachable through it.",
-      "returns": { "type": "void", "desc": "Memory.free(x) releases x's own top-level allocation(s)." },
+      "returns": {
+        "type": "void",
+        "desc": "Memory.free(x) releases x's own top-level allocation(s)."
+      },
       "exampleKey": "memory/memory_free",
       "snippet": "let big: string = \"hello \" + \"world\"   // concatenation result -> malloc'd\nconsole.log(big.length)   // 11\nMemory.free(big)\nconsole.log(big === null)  // true — the variable's own storage was nulled",
       "differences": [
         "Never frees on its own — a program's footprint grows monotonically with runtime unless the programmer calls `Memory.free(x)` by hand",
         "Same footguns as C, including that a string *literal* is a compile-time global constant, not `malloc`'d, so freeing one crashes exactly like C's `free(\"literal\")`"
       ],
-      "seeAlso": ["memory.gc", "memory.auto"],
-      "spec": { "mdn": "" }
+      "seeAlso": [
+        "memory.gc",
+        "memory.auto"
+      ],
+      "spec": {
+        "mdn": ""
+      }
     },
     {
       "id": "memory.gc",
@@ -31,15 +44,23 @@
       "signature": "klainmain -mm=gc program.ts   // Boehm collector; Memory.free lowers to GC_free",
       "badge": "caveats",
       "description": "Opt-in Boehm-Demers-Weiser collector (libgc): it swaps the declared @malloc/@realloc for @GC_malloc/@GC_realloc and links -lgc, with no per-feature codegen change beyond the allocation call sites, since the collector conservatively scans the native stack, registers, and managed heap for live pointers. Program output is identical to manual mode — gc only changes when memory is reclaimed. Memory.free(x) stays legal and lowers to GC_free, an always-safe early-release hint.",
-      "returns": { "type": "void", "desc": "Same Memory.free(x) surface; here it hints the collector rather than calling libc free()." },
+      "returns": {
+        "type": "void",
+        "desc": "Same Memory.free(x) surface; here it hints the collector rather than calling libc free()."
+      },
       "exampleKey": "memory/memory_gc",
       "snippet": "let s: string = \"abcdefghijklmnopqrstuvwxyz0123456789\" + \"abcdefghijklmnopqrstuvwxyz0123456789\";\ntotal = total + s.length;",
       "differences": [
         "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
         "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it"
       ],
-      "seeAlso": ["memory.manual", "memory.auto"],
-      "spec": { "mdn": "" }
+      "seeAlso": [
+        "memory.manual",
+        "memory.auto"
+      ],
+      "spec": {
+        "mdn": ""
+      }
     },
     {
       "id": "memory.auto",
@@ -54,8 +75,43 @@
         "`-compat=js` dynamic objects and class instances are never freed; `@owned` parameters work on directly-called function declarations only",
         "`Memory.free(x)` is a compile error in this mode (the compiler's own inserted frees can't account for a manual free it didn't plan for)"
       ],
-      "seeAlso": ["memory.manual", "memory.gc"],
-      "spec": { "mdn": "" }
+      "seeAlso": [
+        "memory.manual",
+        "memory.gc"
+      ],
+      "spec": {
+        "mdn": ""
+      }
+    },
+    {
+      "id": "memory.optimize",
+      "name": "-optimize-memory",
+      "statusRow": "-optimize-memory (orthogonal to -mm)",
+      "signature": "klainmain -optimize-memory app.ts",
+      "badge": "caveats",
+      "description": "Allocation optimizations with no semantic change. Stack allocation: object literals, (non-async) closure headers/environments, tuple-annotated literals, and this-clean class instances the escape analysis proves never outlive their block become entry-block allocas instead of heap allocations — less allocator pressure and better cache locality, measured as exactly the object allocations disappearing from peak RSS on allocation-churn loops clang cannot elide itself. By-value tuple returns: an eligible small-tuple-returning function returns a register-passable struct aggregate, so return [a, b] and the Go-style const [v, err] = f() consumer are allocation-free end to end. Composes with every -mm mode; a stack value is never auto-freed and a registered FinalizationRegistry target stays heap so its free death-signal keeps firing.",
+      "differences": [
+        "Stack allocation covers non-escaping object/closure/tuple literals and class instances bound to let/const — Map/Set, plain arrays' data buffers, and async closures stay heap; captured variables' shared cells stay heap regardless",
+        "A class instance stack-allocates only when the whole class passes a conservative this-audit: any method that returns/stores/passes this, captures it in a nested closure, or carries decorators keeps every instance heap-bound (return-this chaining included)",
+        "By-value tuple returns require ≤2 plain scalar fields on a non-async top-level function never used as a value — larger tuples, aggregate-slot fields (array/nullable/any), async functions, generics, and function values keep the pointer ABI; a non-destructuring consumer respills to the heap at the same allocation count as before",
+        "The escape analysis is the same deliberately-conservative pass -mm=auto uses: anything not provably block-local stays heap",
+        "Explicit @free/@owned declarations keep their heap+free meaning; off by default while the analysis matures"
+      ]
+    },
+    {
+      "id": "memory.value-arrays",
+      "name": "/** @value */ flat arrays",
+      "statusRow": "/** @value */ flat value-type arrays",
+      "signature": "/** @value */ const ps: Point[] = [{ x: 1, y: 2 }]",
+      "badge": "caveats",
+      "description": "Opts one array binding into a flat value-type layout: elements are packed inline in a single contiguous buffer (array of structs, stride = the element's struct size) instead of the default array-of-pointers — one allocation, cache-friendly traversal, vectorizable loops. This is a per-binding annotation, not a compiler flag, because it deliberately changes aliasing semantics: writing a value into a slot copies its fields (later mutation of the source object is invisible through the array), while reading arr[i] yields an interior-pointer view, so arr[i].x = 1, a taken const v = arr[i], and for...of bindings all mutate the array in place.",
+      "differences": [
+        "V1 surface is deliberately narrow: array-literal construction (no spread elements), index read/write, .length, for...of, and .push — everything else (map/filter/sort/slice, spread, destructuring, other mutators) is a compile-time rejection naming the supported set",
+        "Element type must be a fixed-shape plain object (interface/object-literal shape); classes, tuples, nested arrays, and dynamic values are rejected",
+        "Function-local bindings only — a @value array read by other functions is rejected",
+        ".push may realloc-move the buffer, invalidating previously-taken element views (the Vec/C++-vector contract) — re-index after a push",
+        "Mutually exclusive with @free/@owned; under -mm=auto the buffer is freed at block exit through the shared array free path"
+      ]
     }
   ]
 }

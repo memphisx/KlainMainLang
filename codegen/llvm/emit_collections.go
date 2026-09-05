@@ -469,7 +469,8 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("%d:%d: map.clear() takes no arguments", pos.Line, pos.Col)
 		}
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", mapPtr))
+		e.ensureMapClear()
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_clear(ptr %s)", mapPtr))
 		return Value{Ty: TypeVoid}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Map method '%s'", pos.Line, pos.Col, method)
@@ -566,7 +567,8 @@ func (e *Emitter) emitSetCall(ty Type, setPtr string, method string, args []ast.
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("%d:%d: set.clear() takes no arguments", pos.Line, pos.Col)
 		}
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", setPtr))
+		e.ensureMapClear()
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_clear(ptr %s)", setPtr))
 		return Value{Ty: TypeVoid}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Set method '%s'", pos.Line, pos.Col, method)

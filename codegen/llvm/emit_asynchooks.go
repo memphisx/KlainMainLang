@@ -61,9 +61,16 @@ func (e *Emitter) wrapTimerClosureWithAsyncCtx(closurePtr string) string {
 // false positive only costs a little dead IR in the timer path, never
 // correctness.
 func programUsesAsyncLocalStorage(prog *ast.Program) bool {
+	return programConstructsClass(prog, "AsyncLocalStorage")
+}
+
+// programConstructsClass reports whether the program contains a `new <cls>`
+// anywhere — the shared whole-program pre-scan behind programUsesAsyncLocal-
+// Storage and the FinalizationRegistry Memory.free hook (TDD-00163 Stage 2).
+func programConstructsClass(prog *ast.Program, cls string) bool {
 	found := false
 	for _, s := range prog.Body {
-		walkStmtForALS(s, &found)
+		walkStmtForNew(cls, s, &found)
 		if found {
 			return true
 		}
@@ -71,147 +78,147 @@ func programUsesAsyncLocalStorage(prog *ast.Program) bool {
 	return false
 }
 
-func walkBlockForALS(b *ast.BlockStatement, found *bool) {
+func walkBlockForNew(cls string, b *ast.BlockStatement, found *bool) {
 	if b == nil || *found {
 		return
 	}
 	for _, s := range b.Body {
-		walkStmtForALS(s, found)
+		walkStmtForNew(cls, s, found)
 		if *found {
 			return
 		}
 	}
 }
 
-func walkStmtForALS(s ast.Statement, found *bool) {
+func walkStmtForNew(cls string, s ast.Statement, found *bool) {
 	if *found || s == nil {
 		return
 	}
 	switch n := s.(type) {
 	case *ast.BlockStatement:
-		walkBlockForALS(n, found)
+		walkBlockForNew(cls, n, found)
 	case *ast.ExpressionStatement:
-		walkExprForALS(n.Expr, found)
+		walkExprForNew(cls, n.Expr, found)
 	case *ast.VarDeclaration:
-		walkExprForALS(n.Init, found)
+		walkExprForNew(cls, n.Init, found)
 	case *ast.VarDeclarationList:
 		for _, d := range n.Decls {
-			walkStmtForALS(d, found)
+			walkStmtForNew(cls, d, found)
 		}
 	case *ast.ReturnStatement:
-		walkExprForALS(n.Value, found)
+		walkExprForNew(cls, n.Value, found)
 	case *ast.ThrowStatement:
-		walkExprForALS(n.Argument, found)
+		walkExprForNew(cls, n.Argument, found)
 	case *ast.IfStatement:
-		walkExprForALS(n.Test, found)
-		walkStmtForALS(n.Consequent, found)
-		walkStmtForALS(n.Alternate, found)
+		walkExprForNew(cls, n.Test, found)
+		walkStmtForNew(cls, n.Consequent, found)
+		walkStmtForNew(cls, n.Alternate, found)
 	case *ast.ForStatement:
-		walkStmtForALS(n.Init, found)
-		walkExprForALS(n.Test, found)
+		walkStmtForNew(cls, n.Init, found)
+		walkExprForNew(cls, n.Test, found)
 		for _, u := range n.Update {
-			walkExprForALS(u, found)
+			walkExprForNew(cls, u, found)
 		}
-		walkStmtForALS(n.Body, found)
+		walkStmtForNew(cls, n.Body, found)
 	case *ast.ForOfStatement:
-		walkExprForALS(n.Iterable, found)
-		walkStmtForALS(n.Body, found)
+		walkExprForNew(cls, n.Iterable, found)
+		walkStmtForNew(cls, n.Body, found)
 	case *ast.ForInStatement:
-		walkStmtForALS(n.Body, found)
+		walkStmtForNew(cls, n.Body, found)
 	case *ast.WhileStatement:
-		walkExprForALS(n.Test, found)
-		walkStmtForALS(n.Body, found)
+		walkExprForNew(cls, n.Test, found)
+		walkStmtForNew(cls, n.Body, found)
 	case *ast.DoWhileStatement:
-		walkStmtForALS(n.Body, found)
-		walkExprForALS(n.Test, found)
+		walkStmtForNew(cls, n.Body, found)
+		walkExprForNew(cls, n.Test, found)
 	case *ast.SwitchStatement:
-		walkExprForALS(n.Discriminant, found)
+		walkExprForNew(cls, n.Discriminant, found)
 		for _, c := range n.Cases {
-			walkExprForALS(c.Test, found)
+			walkExprForNew(cls, c.Test, found)
 			for _, cs := range c.Body {
-				walkStmtForALS(cs, found)
+				walkStmtForNew(cls, cs, found)
 			}
 		}
 	case *ast.TryStatement:
-		walkBlockForALS(n.Body, found)
+		walkBlockForNew(cls, n.Body, found)
 		if n.Catch != nil {
-			walkBlockForALS(n.Catch.Body, found)
+			walkBlockForNew(cls, n.Catch.Body, found)
 		}
-		walkBlockForALS(n.Finally, found)
+		walkBlockForNew(cls, n.Finally, found)
 	case *ast.LabeledStatement:
-		walkStmtForALS(n.Body, found)
+		walkStmtForNew(cls, n.Body, found)
 	case *ast.FunctionDeclaration:
-		walkBlockForALS(n.Body, found)
+		walkBlockForNew(cls, n.Body, found)
 	case *ast.ExportDeclaration:
-		walkStmtForALS(n.Decl, found)
+		walkStmtForNew(cls, n.Decl, found)
 	}
 }
 
-func walkExprForALS(ex ast.Expression, found *bool) {
+func walkExprForNew(cls string, ex ast.Expression, found *bool) {
 	if *found || ex == nil {
 		return
 	}
 	switch n := ex.(type) {
 	case *ast.NewExpression:
-		if n.ClassName == "AsyncLocalStorage" {
+		if n.ClassName == cls {
 			*found = true
 			return
 		}
 		for _, a := range n.Args {
-			walkExprForALS(a, found)
+			walkExprForNew(cls, a, found)
 		}
 	case *ast.CallExpression:
-		walkExprForALS(n.Callee, found)
+		walkExprForNew(cls, n.Callee, found)
 		for _, a := range n.Args {
-			walkExprForALS(a, found)
+			walkExprForNew(cls, a, found)
 		}
 	case *ast.MemberExpression:
-		walkExprForALS(n.Object, found)
+		walkExprForNew(cls, n.Object, found)
 	case *ast.IndexExpression:
-		walkExprForALS(n.Object, found)
-		walkExprForALS(n.Index, found)
+		walkExprForNew(cls, n.Object, found)
+		walkExprForNew(cls, n.Index, found)
 	case *ast.BinaryExpression:
-		walkExprForALS(n.Left, found)
-		walkExprForALS(n.Right, found)
+		walkExprForNew(cls, n.Left, found)
+		walkExprForNew(cls, n.Right, found)
 	case *ast.AssignmentExpression:
-		walkExprForALS(n.Left, found)
-		walkExprForALS(n.Right, found)
+		walkExprForNew(cls, n.Left, found)
+		walkExprForNew(cls, n.Right, found)
 	case *ast.ConditionalExpression:
-		walkExprForALS(n.Test, found)
-		walkExprForALS(n.Consequent, found)
-		walkExprForALS(n.Alternate, found)
+		walkExprForNew(cls, n.Test, found)
+		walkExprForNew(cls, n.Consequent, found)
+		walkExprForNew(cls, n.Alternate, found)
 	case *ast.SequenceExpression:
 		for _, e := range n.Exprs {
-			walkExprForALS(e, found)
+			walkExprForNew(cls, e, found)
 		}
 	case *ast.UnaryExpression:
-		walkExprForALS(n.Arg, found)
+		walkExprForNew(cls, n.Arg, found)
 	case *ast.UpdateExpression:
-		walkExprForALS(n.Arg, found)
+		walkExprForNew(cls, n.Arg, found)
 	case *ast.SpreadElement:
-		walkExprForALS(n.Arg, found)
+		walkExprForNew(cls, n.Arg, found)
 	case *ast.AwaitExpression:
-		walkExprForALS(n.Argument, found)
+		walkExprForNew(cls, n.Argument, found)
 	case *ast.YieldExpression:
-		walkExprForALS(n.Argument, found)
+		walkExprForNew(cls, n.Argument, found)
 	case *ast.ArrayLiteral:
 		for _, e := range n.Elements {
-			walkExprForALS(e, found)
+			walkExprForNew(cls, e, found)
 		}
 	case *ast.ObjectLiteral:
 		for _, p := range n.Properties {
-			walkExprForALS(p.KeyExpr, found)
-			walkExprForALS(p.Value, found)
+			walkExprForNew(cls, p.KeyExpr, found)
+			walkExprForNew(cls, p.Value, found)
 		}
 	case *ast.TemplateLiteral:
 		for _, e := range n.Exprs {
-			walkExprForALS(e, found)
+			walkExprForNew(cls, e, found)
 		}
 	case *ast.ArrowFunction:
-		walkExprForALS(n.Body, found)
-		walkBlockForALS(n.Block, found)
+		walkExprForNew(cls, n.Body, found)
+		walkBlockForNew(cls, n.Block, found)
 	case *ast.FunctionExpression:
-		walkBlockForALS(n.Body, found)
+		walkBlockForNew(cls, n.Body, found)
 	}
 }
 

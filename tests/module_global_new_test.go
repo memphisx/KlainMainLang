@@ -8,6 +8,25 @@ import "testing"
 // single-slot builtin handle (Blob/Date/URL/…) — read from a named or async
 // function (ADR-00342). Scalars/strings/arrays/objects/Map already had this.
 
+// A top-level const whose initializer is a computed constant scalar/string
+// expression — arithmetic over number literals and numeric builtin constants
+// (Math.PI/…), an earlier module global, or constant string concatenation — is
+// promoted to a module global, so a named function can read it. Before ADR-00709
+// only literal-initialized scalars promoted; `const X = 4 * Math.PI * Math.PI`
+// stayed a main()-local and a function referencing it failed to compile with
+// "undefined variable".
+func TestE2EModuleGlobalComputedScalarConst(t *testing.T) {
+	assertOutput(t, `
+const SOLAR_MASS = 4 * Math.PI * Math.PI
+const HALF = SOLAR_MASS / 2
+const LABEL = "mass=" + "x"
+function show(): void {
+  console.log(LABEL + " " + SOLAR_MASS.toFixed(4) + " " + HALF.toFixed(4))
+}
+show()
+`, "mass=x 39.4784 19.7392")
+}
+
 func TestE2EModuleGlobalClassInstance(t *testing.T) {
 	assertOutput(t, `
 class Counter {

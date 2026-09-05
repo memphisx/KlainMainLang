@@ -247,6 +247,20 @@
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ]
+          },
+          {
+            "feature": "`FinalizationRegistry`",
+            "status": "implemented",
+            "caveats": [
+              "`cleanupSome` (non-standard) rejected; aggregate held types (arrays, nullable scalars) rejected — scalars, strings, and objects work",
+              "Same-thread V1: a worker's registrations are flushed only by its own thread, not the process exit hook",
+              "Under `-mm=gc`, firing depends on the target actually being collected (conservative scanning can pin a stack-reachable pointer — same posture as the `WeakRef` tests)"
+            ],
+            "notes": [
+              "Mode-dependent timing, one API ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)): `-mm=manual` fires deterministically at `Memory.free(target)` plus an exit flush for survivors; `-mm=gc` fires via a real Boehm finalizer (observable after `gc()`); `-mm=auto`'s compiler-inserted frees are the same death signal — a registered target's cleanup fires deterministically at its scope exit ([ADR-00703](../adr/ADR-00703.md)), and the same exemption serves explicit `@free`/`@owned` in manual mode. Callbacks run on the microtask drain points, never synchronously at the death site",
+              "`-finalizers=report` prints one labeled leak line per registration never freed at exit (held value + `register()` call site) — the manual-memory leak detector",
+              "`register`/`unregister` with tokens; `-compat=js` dynamic-object targets unbox like WeakMap keys; `held === target` is a compile error when statically obvious"
+            ]
           }
         ]
       }
@@ -433,13 +447,6 @@
             "status": "missing",
             "notes": [
               "Accepted but not implemented → [RegExp](REGEXP.md)"
-            ]
-          },
-          {
-            "feature": "`FinalizationRegistry`",
-            "status": "missing",
-            "notes": [
-              "Not started — `WeakRef` ships; the registry is designed in [TDD-00163](../tdd/TDD-00163.md)"
             ]
           },
           {

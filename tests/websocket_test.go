@@ -144,9 +144,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8975)
 `
-	startHTTPServer(t, src, 8975)
+	port := startHTTPServer(t, src, 8975)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8975", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -178,9 +178,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8976)
 `
-	startHTTPServer(t, src, 8976)
+	port := startHTTPServer(t, src, 8976)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8976", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -214,10 +214,10 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8977)
 `
-	startHTTPServer(t, src, 8977)
+	port := startHTTPServer(t, src, 8977)
 
 	// Plain HTTP request on the same listener must still behave normally.
-	resp, err := http.Get("http://127.0.0.1:8977/hello")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/hello", port))
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -228,7 +228,7 @@ server.listen(8977)
 	}
 
 	// A WebSocket upgrade on the same listener still works too.
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8977", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -256,9 +256,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8978)
 `
-	startHTTPServer(t, src, 8978)
+	port := startHTTPServer(t, src, 8978)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8978", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -284,7 +284,7 @@ server.listen(8978)
 	// The server process itself must still be alive and accepting new
 	// connections after handling the close — a real, confirmed regression
 	// risk given the persistent loop's own cleanup path.
-	conn2, err := net.DialTimeout("tcp", "127.0.0.1:8978", 2*time.Second)
+	conn2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("server did not survive a client close frame: %v", err)
 	}
@@ -316,9 +316,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8979)
 `
-	startHTTPServer(t, src, 8979)
+	port := startHTTPServer(t, src, 8979)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8979", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -368,9 +368,9 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8980)
 `
-	startHTTPServer(t, src, 8980)
+	port := startHTTPServer(t, src, 8980)
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:8980", 2*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -436,7 +436,7 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8981)
 `
-	startHTTPServer(t, serverSrc, 8981)
+	port := startHTTPServer(t, serverSrc, 8981)
 
 	clientSrc := `
 const ws = new WebSocket("ws://127.0.0.1:8981/")
@@ -458,7 +458,7 @@ setTimeout(() => {
   process.exit(1)
 }, 4000)
 `
-	out := runClientWithTimeout(t, clientSrc, 8*time.Second)
+	out := runClientWithTimeout(t, subPort(clientSrc, 8981, port), 8*time.Second)
 	want := "readyState right after construction: 0\nonopen\nonmessage: echo: hello from client\nonclose"
 	if out != want {
 		t.Errorf("client output:\ngot:\n%s\nwant:\n%s", out, want)
@@ -486,7 +486,7 @@ wss.on('connection', (socket: WSConnection) => {
 })
 server.listen(8983)
 `
-	startHTTPServer(t, serverSrc, 8983)
+	port := startHTTPServer(t, serverSrc, 8983)
 
 	clientSrc := `
 const ws = new WebSocket("ws://127.0.0.1:8983/")
@@ -509,7 +509,7 @@ setTimeout(() => {
   process.exit(1)
 }, 4000)
 `
-	out := runClientWithTimeout(t, clientSrc, 8*time.Second)
+	out := runClientWithTimeout(t, subPort(clientSrc, 8983, port), 8*time.Second)
 	want := "isBinary: true\nlen: 4\nbytes: 1,0,2,255"
 	if out != want {
 		t.Errorf("client output:\ngot:\n%s\nwant:\n%s", out, want)
