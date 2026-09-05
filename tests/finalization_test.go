@@ -173,18 +173,31 @@ func TestE2EFinRegGCModeCollectedFires(t *testing.T) {
 	// created in (and escapes) a helper so conservative stack scanning does
 	// not pin it; the WeakRef proves collection actually happened. The
 	// cleanup callback fires on the queue drained after the top-level script.
+	// The orphan is created in a LOOP of decoy iterations, and only the
+	// first is registered/asserted on: with a single straight-line
+	// `const wr = orphan()` the -O2 x86-64 build parks a stale copy of
+	// tmp's pointer in a stack slot the conservative scan keeps finding
+	// (deterministic 10/10 failure on the CI runner and under emulated
+	// linux/amd64 — an unrelated-shape stack clobber between orphan() and
+	// gc() does NOT scrub it, -fno-inline doesn't either, only -O0 does).
+	// Re-running the same call path makes each decoy overwrite the exact
+	// slots the watched iteration spilled into, so at collection time only
+	// the last decoy can be residue-pinned — which the test doesn't assert
+	// on. Verified 5/5 under linux/amd64 emulation, arm64 Linux, and
+	// macOS/M4.
 	const src = `
 interface Box { v: number }
 const reg = new FinalizationRegistry((held: string) => { console.log("collected:", held) })
-function orphan(): WeakRef<Box> {
-  const tmp: Box = { v: 1 }
-  reg.register(tmp, "orphan-box")
+function orphan(i: number): WeakRef<Box> {
+  const tmp: Box = { v: i }
+  if (i === 0) { reg.register(tmp, "orphan-box") }
   return new WeakRef(tmp)
 }
-const wr = orphan()
+const refs: WeakRef<Box>[] = []
+for (let i = 0; i < 8; i++) { refs.push(orphan(i)) }
 gc()
 gc()
-console.log("deref null:", wr.deref() === null)
+console.log("deref null:", refs[0].deref() === null)
 console.log("end")
 `
 	binFile := buildBinaryGC(t, src)

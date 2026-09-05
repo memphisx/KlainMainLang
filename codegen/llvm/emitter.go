@@ -789,6 +789,13 @@ type Emitter struct {
 	// exactly the obligations of the scopes they exit.
 	autoFreePlan      map[*ast.VarDeclaration]bool
 	autoFreeRebind    map[*ast.VarDeclaration]bool
+	// TDD-00175 Stage 1: bindings the interior-alias analysis additionally
+	// proved transitively owned (deep-free candidates), and the memo table /
+	// counter for the synthesized per-type recursive frees
+	// (emit_free_deep.go).
+	autoFreeDeep map[*ast.VarDeclaration]bool
+	deepFreeFns  map[string]string
+	deepFreeCtr  int
 	// TDD-00134 Stage 1 (-optimize-memory): declarations whose object-literal
 	// initializer is emitted into an entry-block alloca instead of calloc.
 	// pendingStackAllocLit marks the exact literal node while its declaration

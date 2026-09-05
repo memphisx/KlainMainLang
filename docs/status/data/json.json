@@ -96,7 +96,7 @@
             "feature": "`JSON.parse(s)` → top-level `T[]` (incl. object & nested arrays)",
             "status": "implemented",
             "caveats": [
-              "A bare reassignment into a **member or element** target (`obj.items = JSON.parse(...)`, `grid[i] = JSON.parse(...)`) isn't projected — assign into a declared variable or object field first; a typed var-decl and a declared-variable reassignment (`let xs: T[] = …; xs = JSON.parse(...)`) both project ([ADR-00571](../adr/ADR-00571.md))"
+              "A bare reassignment into a **member or element** target (`obj.items = JSON.parse(...)`, `grid[i] = JSON.parse(...)`) isn't projected from declaration context — but writing the target type on the call (`obj.items = JSON.parse(...) as Item[]`) projects anywhere ([ADR-00715](../adr/ADR-00715.md)); a typed var-decl and a declared-variable reassignment (`let xs: T[] = …; xs = JSON.parse(...)`) both project ([ADR-00571](../adr/ADR-00571.md))"
             ],
             "notes": [
               "Projects the tree's array node into the standard `{ptr,i64}` aggregate, reusing the array-literal build path ([ADR-00224](../adr/ADR-00224.md))",
@@ -117,7 +117,7 @@
             "feature": "`JSON.parse(s)` → `any`/`unknown` (dynamic shape)",
             "status": "implemented",
             "caveats": [
-              "The result is a dynamic tree — statically-typed operations on it (arithmetic on elements, passing into typed slots) hit the normal `any` limits until narrowed"
+              "The result is a dynamic tree — statically-typed operations on it (arithmetic on elements, passing into typed slots) hit the normal `any` limits until narrowed; `JSON.parse(s) as T` narrows at the source, routing through the typed projection instead ([ADR-00715](../adr/ADR-00715.md))"
             ],
             "notes": [
               "Untyped/`any`-annotated `JSON.parse` keeps the whole tree as dynamic values ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/ADR-00622.md)): objects become runtime property bags, arrays dynamic arrays (`.length`, index reads/writes with JS extension semantics, `for...in`), scalars their runtime tags — `data.server.ports[0]` just works. A bare `const data = JSON.parse(s)` with no annotation is this dynamic parse, matching JS",

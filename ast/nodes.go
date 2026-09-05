@@ -819,7 +819,15 @@ type CallExpression struct {
 	// ADR-00473); nil for ordinary calls. Consumed by the generic-function
 	// dispatch; ignored (erased) on non-generic callees.
 	TypeArgs []*TypeAnnotation
-	pos      Pos
+	// AssertedType carries the `as T` written directly on this call
+	// (`JSON.parse(s) as Rec[]`) for the few calls whose result type is
+	// otherwise `any` and where the assertion supplies the projection target
+	// exactly as a declaration annotation would. The parser attaches it only
+	// on those call shapes (JSON.parse, `.json()`); everywhere else `as`
+	// stays erased (ADR-00371). Stored as a field rather than a wrapper node
+	// so the many AST walkers need no new case.
+	AssertedType *TypeAnnotation
+	pos          Pos
 }
 
 func (*CallExpression) nodeMarker()   {}

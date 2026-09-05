@@ -44,6 +44,10 @@ var escCallWhitelist = map[string]bool{
 	"console.log": true, "console.error": true, "console.warn": true,
 	"console.info": true, "console.debug": true,
 	"String": true,
+	// JSON.parse copies every string/lexeme out of its argument into fresh
+	// mallocs (json_parse.c) and JSON.stringify only reads its argument into
+	// a fresh output buffer — neither retains any pointer after returning.
+	"JSON.parse": true, "JSON.stringify": true,
 }
 
 // planAutoFrees walks the whole program and records, for every variable the
@@ -55,6 +59,7 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 	p := &escPlanner{
 		auto:         e.isAutoMode(),
 		plan:         map[*ast.VarDeclaration]bool{},
+		deeps:        map[*ast.VarDeclaration]bool{},
 		rebinds:      map[*ast.VarDeclaration]bool{},
 		lastUse:      map[*ast.VarDeclaration]ast.Statement{},
 		ownedFns:     map[string]*ast.FunctionDeclaration{},
@@ -86,6 +91,7 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 		}
 	}
 	e.autoFreePlan = p.plan
+	e.autoFreeDeep = p.deeps
 	e.autoFreeRebind = p.rebinds
 	e.autoOwnedLastUse = p.lastUse
 	e.autoOwnedParamLastUse = p.paramLastUse
@@ -102,6 +108,12 @@ type escPlanner struct {
 	stack       bool
 	finregNames map[string]bool
 	plan        map[*ast.VarDeclaration]bool
+	// deeps (TDD-00175 Stage 1): plan-approved bindings that additionally
+	// pass the interior-alias check (escChecker.interior) — no pointer
+	// reachable *through* the value is extracted into anything that could
+	// outlive the block, so the whole graph may be deep-freed. Failing this
+	// stricter pass just leaves the shallow verdict (today's behavior).
+	deeps map[*ast.VarDeclaration]bool
 	// rebinds: plan-approved bindings that are reassigned via owning-fresh
 	// RHS shapes (rebindOwningRHS) — the emitter frees the old value at each
 	// such store. nil for the stack planner (never populated there).
@@ -679,6 +691,22 @@ func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expre
 	if c.rebound {
 		p.rebinds[d] = true
 	}
+	// TDD-00175 Stage 1: a plan-approved implicit binding gets a second,
+	// stricter pass for deep-free candidacy — same walk, interior mode on.
+	// Any violation (or a rebind) just leaves the shallow verdict.
+	if p.auto && !p.stack && !explicit && !c.rebound {
+		c2 := &escChecker{name: d.Name, finregNames: p.finregNames, interior: true}
+		ok := true
+		for _, init := range siblingInits {
+			if c2.aliases(init) || c2.expr(init) != nil {
+				ok = false
+				break
+			}
+		}
+		if ok && c2.stmts(following) == nil {
+			p.deeps[d] = true
+		}
+	}
 	if d.Owned {
 		// Stage 3: free right after the last statement that mentions it —
 		// nil (no use, or ambiguous placement) falls back to block exit.
@@ -721,6 +749,13 @@ type escViolation struct {
 // construct not positively recognized is a violation if it mentions the name.
 type escChecker struct {
 	name string
+	// interior (TDD-00175 Stage 1): also flag any *interior* pointer
+	// extraction — a member/index chain rooted at the candidate leaking into
+	// a binding, return, store, or non-whitelisted call — since a deep free
+	// invalidates the whole graph, not just the top pointer. Scalar-shaped
+	// terminals (`.length`, `.size`) and read-and-consume positions
+	// (arithmetic, comparisons, template interpolation) stay safe.
+	interior bool
 	// allowRebind: the implicit auto layer may accept owning reassignments
 	// (see rebindOwningRHS) instead of disqualifying; rebound records that
 	// at least one was seen, so the emitter knows to free-on-rebind. Off for
@@ -777,6 +812,60 @@ func (c *escChecker) aliases(expr ast.Expression) bool {
 	return false
 }
 
+// leaks reports whether evaluating expr can yield a pointer the planned free
+// will invalidate: the candidate's own top-level pointer always, and — in
+// interior mode — any pointer reachable through it.
+func (c *escChecker) leaks(expr ast.Expression) bool {
+	if c.aliases(expr) {
+		return true
+	}
+	return c.interior && c.interiorAlias(expr)
+}
+
+// interiorAlias reports whether expr can yield an interior pointer of the
+// candidate's graph: a member/index chain rooted at the candidate, except
+// the scalar-shaped terminals (`.length`, `.size`). Without type information
+// this is deliberately conservative — `x[0].id` (a scalar field) flags the
+// same as `x[0].name` (a string field); rejection only preserves today's
+// shallow verdict.
+func (c *escChecker) interiorAlias(expr ast.Expression) bool {
+	switch x := expr.(type) {
+	case *ast.MemberExpression:
+		if x.Property == "length" || x.Property == "size" {
+			return false
+		}
+		return c.rootedAt(x.Object)
+	case *ast.IndexExpression:
+		return c.rootedAt(x.Object)
+	case *ast.ConditionalExpression:
+		return c.interiorAlias(x.Consequent) || c.interiorAlias(x.Alternate)
+	case *ast.AssignmentExpression:
+		return c.interiorAlias(x.Right)
+	case *ast.SequenceExpression:
+		if len(x.Exprs) > 0 {
+			return c.interiorAlias(x.Exprs[len(x.Exprs)-1])
+		}
+	}
+	return false
+}
+
+// rootedAt: is expr the candidate identifier itself, or a member/index chain
+// whose base is?
+func (c *escChecker) rootedAt(expr ast.Expression) bool {
+	for {
+		switch x := expr.(type) {
+		case *ast.Identifier:
+			return x.Name == c.name
+		case *ast.MemberExpression:
+			expr = x.Object
+		case *ast.IndexExpression:
+			expr = x.Object
+		default:
+			return false
+		}
+	}
+}
+
 func (c *escChecker) stmts(list []ast.Statement) *escViolation {
 	for _, s := range list {
 		if v := c.stmt(s); v != nil {
@@ -797,7 +886,7 @@ func (c *escChecker) stmt(stmt ast.Statement) *escViolation {
 			// scope tracking this pass doesn't do. Conservative: reject.
 			return &escViolation{reason: fmt.Sprintf("shadowed by a redeclaration of '%s'", c.name), pos: s.GetPos()}
 		}
-		if c.aliases(s.Init) {
+		if c.leaks(s.Init) {
 			return &escViolation{reason: fmt.Sprintf("aliased by declaration of '%s'", s.Name), pos: s.GetPos()}
 		}
 		return c.expr(s.Init)
@@ -810,12 +899,12 @@ func (c *escChecker) stmt(stmt ast.Statement) *escViolation {
 	case *ast.ExpressionStatement:
 		return c.expr(s.Expr)
 	case *ast.ReturnStatement:
-		if c.aliases(s.Value) {
+		if c.leaks(s.Value) {
 			return &escViolation{reason: "returned from the enclosing function", pos: s.GetPos()}
 		}
 		return c.expr(s.Value)
 	case *ast.ThrowStatement:
-		if c.aliases(s.Argument) {
+		if c.leaks(s.Argument) {
 			return &escViolation{reason: "thrown", pos: s.GetPos()}
 		}
 		return c.expr(s.Argument)
@@ -848,7 +937,12 @@ func (c *escChecker) stmt(stmt ast.Statement) *escViolation {
 		return c.stmts(s.Body.Body)
 	case *ast.ForOfStatement:
 		// Iterating x copies each element out of the buffer — a safe read
-		// even when the iterable IS x.
+		// even when the iterable IS x. In interior mode the loop variable IS
+		// an interior pointer for object/nested-array elements, and its own
+		// flow isn't tracked — conservative: no deep free.
+		if c.interior && c.aliases(s.Iterable) {
+			return &escViolation{reason: "iterated (the loop variable aliases interior values)", pos: s.GetPos()}
+		}
 		if !c.aliases(s.Iterable) {
 			if v := c.expr(s.Iterable); v != nil {
 				return v
@@ -856,6 +950,9 @@ func (c *escChecker) stmt(stmt ast.Statement) *escViolation {
 		}
 		return c.stmts(s.Body.Body)
 	case *ast.ForInStatement:
+		if c.interior && c.aliases(s.Object) {
+			return &escViolation{reason: "iterated (the loop variable aliases interior values)", pos: s.GetPos()}
+		}
 		if !c.aliases(s.Object) {
 			if v := c.expr(s.Object); v != nil {
 				return v
@@ -944,12 +1041,28 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		}
 		// Writes INTO the value (x.f = …, x[i] = …) don't move its own
 		// pointer; the left side only needs its sub-expressions scanned.
+		// In interior mode a store into the graph could plant an alias of
+		// another binding (which the deep free would then free from under
+		// it) or drop an owned interior value mid-block — conservative: no
+		// deep free for a mutated graph.
+		if c.interior {
+			if _, isIdent := x.Left.(*ast.Identifier); !isIdent && c.rootedAt(x.Left) {
+				return &escViolation{reason: "mutated through a field/element store", pos: x.GetPos()}
+			}
+		}
 		if v := c.expr(x.Left); v != nil {
 			return v
 		}
 		if root, ok := rootIdent(x.Left); !ok || root != c.name {
 			if c.aliases(x.Right) {
 				return &escViolation{reason: "stored via assignment", pos: x.GetPos()}
+			}
+			// Interior chains are dangerous only where the pointer itself is
+			// stored — a plain `=`. A compound op (`+=` etc.) stores the
+			// *consumed* result (a fresh concat / a scalar), never the chain
+			// pointer, so `total += x[0].n` stays deep-eligible.
+			if c.interior && x.Op == "=" && c.interiorAlias(x.Right) {
+				return &escViolation{reason: "an interior value stored via assignment", pos: x.GetPos()}
 			}
 		}
 		return c.expr(x.Right)
@@ -991,7 +1104,7 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		}
 	case *ast.ArrayLiteral:
 		for _, el := range x.Elements {
-			if c.aliases(el) {
+			if c.leaks(el) {
 				return &escViolation{reason: "stored in an array literal", pos: x.GetPos()}
 			}
 			if v := c.expr(el); v != nil {
@@ -1000,7 +1113,7 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		}
 	case *ast.ObjectLiteral:
 		for _, pr := range x.Properties {
-			if c.aliases(pr.Value) {
+			if c.leaks(pr.Value) {
 				return &escViolation{reason: "stored in an object literal", pos: x.GetPos()}
 			}
 			if v := c.expr(pr.Value); v != nil {
@@ -1008,7 +1121,7 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 			}
 		}
 	case *ast.SpreadElement:
-		if c.aliases(x.Arg) {
+		if c.leaks(x.Arg) {
 			return &escViolation{reason: "spread", pos: x.GetPos()}
 		}
 		return c.expr(x.Arg)
@@ -1019,7 +1132,7 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 			}
 		}
 	case *ast.YieldExpression:
-		if c.aliases(x.Argument) {
+		if c.leaks(x.Argument) {
 			return &escViolation{reason: "yielded", pos: x.GetPos()}
 		}
 		return c.expr(x.Argument)
@@ -1089,7 +1202,13 @@ func (c *escChecker) call(x *ast.CallExpression) *escViolation {
 		// they never retain the receiver's top-level pointer. The emit-time
 		// type gate restricts registration to those builtin types (class
 		// instances, whose methods could store `this`, are excluded there),
-		// so receiver position is safe here.
+		// so receiver position is safe here. In interior mode a method on
+		// the candidate (or anything reachable through it) can extract or
+		// mutate interior pointers (`x.slice()` shares elements, `x.push(y)`
+		// plants an alias) — conservative: no deep free.
+		if c.interior && c.rootedAt(callee.Object) {
+			return &escViolation{reason: "a method call on the value may extract or mutate interior pointers", pos: x.GetPos()}
+		}
 		if v := c.expr(callee.Object); v != nil {
 			return v
 		}
@@ -1099,7 +1218,7 @@ func (c *escChecker) call(x *ast.CallExpression) *escViolation {
 		}
 	}
 	for _, a := range x.Args {
-		if c.aliases(a) && !whitelisted {
+		if c.leaks(a) && !whitelisted {
 			return &escViolation{reason: "passed as a call argument (the callee may retain it)", pos: x.GetPos()}
 		}
 		if v := c.expr(a); v != nil {

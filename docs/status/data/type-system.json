@@ -333,7 +333,7 @@
             "feature": "Type assertions (`x as T`, `as const`, `satisfies T`, `<T>x`)",
             "status": "implemented",
             "caveats": [
-              "**Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect ([ADR-00371](../adr/ADR-00371.md))"
+              "**Erased, not enforcing** — the assertion is accepted and dropped: the value is unchanged and keeps its *own* inferred type, so `as T` does not re-type the expression (a sound cross-representation reinterpret isn't modeled). This matches TS's runtime erasure but not its static narrowing/widening; a cast the code *relies on* for typing won't take effect ([ADR-00371](../adr/ADR-00371.md)). One carve-out: `as T` directly on `JSON.parse(...)`/`.json()` **does** supply the projection target under `-compat=strict`, exactly as a declaration annotation would ([ADR-00715](../adr/ADR-00715.md)); the general `any as T` question is [TDD-00176](../tdd/TDD-00176.md)"
             ],
             "notes": [
               "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity; the old-style prefix `<T>expr` form parses in the unary position and is erased identically ([ADR-00451](../adr/ADR-00451.md))"

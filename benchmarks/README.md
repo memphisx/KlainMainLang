@@ -186,3 +186,14 @@ else Linux `DISPLAY`/`WAYLAND_DISPLAY` (macOS: logged-in session) → GUI, else 
   folding them into the self-hosted tool's runner abstraction).
 - **Ongoing**: a leak/soak variant asserting bounded RSS after warmup, feeding
   the `-mm=auto` default-flip maturity gate (TDD-00174).
+- **Deferred — the rest of the Perceus suite**: `perceus/` currently ports only
+  `rbtree`, the flagship reuse-in-place benchmark. The canonical Perceus/Koka
+  set is five — `rbtree`, `rbtree-ck` (shared subtrees), `deriv`, `nqueens`,
+  `cfold` (`binarytrees` is already covered under `clbg/`). The remaining four
+  are deliberately deferred to land **with the TDD-00175 Stage 3/4 work**
+  (scoped reference counting + reuse-in-place): today they would only show the
+  auto-mode class-graph leak, and `rbtree-ck`'s whole point (subtree sharing) is
+  unmeasurable until scoped RC exists. Port them (deterministic checksum +
+  `BENCH_SCALE`, matching the existing programs) as part of that deliverable.
+  Sources: Perceus paper (xnning.github.io/papers/perceus.pdf) and Koka's
+  `test/bench/koka/`.

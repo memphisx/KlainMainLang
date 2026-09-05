@@ -637,6 +637,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for _, ta := range e.TypeArgs {
 			rewriteType(ta, sc, lu)
 		}
+		// A carried `as T` (`JSON.parse(s) as Rec[]`) references user types
+		// exactly like a declaration annotation — same rewrite, else the
+		// asserted name misses the interface table at codegen.
+		if e.AssertedType != nil {
+			rewriteType(e.AssertedType, sc, lu)
+		}
 		for i := range e.Args {
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}

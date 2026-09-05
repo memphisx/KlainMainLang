@@ -52,7 +52,8 @@
       "snippet": "let s: string = \"abcdefghijklmnopqrstuvwxyz0123456789\" + \"abcdefghijklmnopqrstuvwxyz0123456789\";\ntotal = total + s.length;",
       "differences": [
         "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
-        "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it"
+        "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it",
+        "Collection is conservative and optimizer-dependent: on x86-64 -O2 builds a referent created and orphaned in straight-line code can stay pinned by a stale stack-slot copy, so its WeakRef/FinalizationRegistry death signal may never fire; referents churning through reused code paths collect normally"
       ],
       "seeAlso": [
         "memory.manual",
@@ -70,7 +71,8 @@
       "badge": "caveats",
       "description": "Compiler-inserted frees at compile-time-proven-safe points, with no runtime collector. /** @free */ frees a binding at every exit of its declaring block; /** @owned */ frees right after the statically-determined last use (on locals, and on parameters via a function-level '@owned name' tag — the callee frees its argument, and every call site must pass a value the caller provably no longer uses). Every unannotated local that passes the same conservative escape check is freed at block exit automatically. The annotations are honored in all three modes — they are compiler-checked, compiler-placed Memory.free — and an annotation the analysis cannot prove safe is a compile error, never a silent no-op. Memory.free(x) itself is a compile error in this mode: the compiler owns every free.",
       "differences": [
-        "The escape analysis is deliberately very conservative — a value that is returned, stored, aliased, spread, passed to a non-whitelisted call, captured by a closure, or reassigned is never freed (it leaks, as in manual mode)",
+        "The escape analysis is deliberately very conservative — a value that is returned, stored, aliased, spread, passed to a non-whitelisted call, captured by a closure, or reassigned (outside the owning-fresh rebind shapes) is never freed (it leaks, as in manual mode)",
+        "Frees are shallow (the binding's own top-level allocation), except transitively-owned typed `JSON.parse`/`res.json()` trees, which are freed deep — row structs, strings, and nested array buffers reclaimed at block exit; extracting an interior pointer into a binding, mutating, iterating, or calling a method on the tree downgrades it back to the shallow free",
         "Unsupported in async/generator functions (values may live across suspension points); thrown paths leak rather than free",
         "`-compat=js` dynamic objects and class instances are never freed; `@owned` parameters work on directly-called function declarations only",
         "`Memory.free(x)` is a compile error in this mode (the compiler's own inserted frees can't account for a manual free it didn't plan for)"

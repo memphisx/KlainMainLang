@@ -306,7 +306,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// result is a dynamic (`any`) tree — tag-10 objects / tag-11
 				// arrays / boxed scalars (TDD-00155 Stage 2). A typed target
 				// (declared annotation) routes through emitDeclJSONProjection
-				// with the real target type instead of reaching here.
+				// with the real target type instead of reaching here; an
+				// `as T` written on the call supplies the target the same way.
+				if ty, ok := e.callAssertedTargetTy(ex); ok {
+					return e.emitJSONParse(ex.Args, ty, ex.GetPos())
+				}
 				return e.emitJSONParse(ex.Args, TypeAny, ex.GetPos())
 			}
 		}
@@ -364,6 +368,15 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			objVal, err := e.emitExpr(mem.Object)
 			if err != nil {
 				return Value{}, err
+			}
+			if ty, ok := e.callAssertedTargetTy(ex); ok && mem.Property == "json" {
+				// `res.json() as T` supplies the projection target exactly
+				// as a declaration annotation would (emitResponseJSON).
+				bodyVal, err := e.emitResponseBody(objVal, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitJSONParseValue(bodyVal, ty, ex.GetPos())
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}

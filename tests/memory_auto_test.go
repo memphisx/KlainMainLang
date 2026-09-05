@@ -67,6 +67,8 @@ func buildBinaryAuto(t *testing.T, src string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
+	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
+	clangArgs = appendDynJSON(t, em, dir, clangArgs)
 	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
@@ -467,4 +469,144 @@ console.log("done")
 		t.Fatalf("run (crash = alias freed on rebind): %v", err)
 	}
 	compareLines(t, strings.TrimRight(string(out), "\n"), "xy xy\ndone")
+}
+
+// --- TDD-00175 Stage 1: type-directed deep free for typed JSON.parse trees ---
+
+// TestE2EMemoryAutoDeepFreeParity: a typed parse tree with nested arrays,
+// missing fields (heap-dup'd defaults) and null string fields — auto mode's
+// deep free must never change observable output vs manual mode, and the run
+// must not crash (a bad deep free aborts or corrupts).
+func TestE2EMemoryAutoDeepFreeParity(t *testing.T) {
+	const src = `
+interface Row { id: number; name: string; scores: number[] }
+function churn(rounds: number): number {
+  let total = 0
+  for (let r = 0; r < rounds; r++) {
+    const parsed = JSON.parse('[{"id":1,"name":"a","scores":[1,2,3]},{"id":2,"scores":[]},{"id":3,"name":null,"scores":[9]}]') as Row[]
+    total += parsed.length
+    total += parsed[0].scores[2]
+    total += parsed[1].name.length
+  }
+  return total
+}
+console.log(churn(200))
+`
+	runOne := func(bin string) string {
+		out, err := exec.Command(bin).Output()
+		if err != nil {
+			t.Fatalf("run %s (crash = bad deep free): %v", bin, err)
+		}
+		return strings.TrimRight(string(out), "\n")
+	}
+	want := runOne(buildBinary(t, src))
+	got := runOne(buildBinaryAuto(t, src))
+	if got != want {
+		t.Errorf("auto-mode output %q differs from manual %q", got, want)
+	}
+}
+
+// TestE2EMemoryAutoDeepFreeBoundsMemory: json_churn's shape — each round
+// parses a typed tree of objects with string + nested-number-array fields
+// and reads only .length; the deep free must reclaim the whole graph, not
+// just the top-level buffer, keeping peak RSS bounded.
+func TestE2EMemoryAutoDeepFreeBoundsMemory(t *testing.T) {
+	const src = `
+interface Row { id: number; name: string; scores: number[] }
+function build(n: number): Row[] {
+  const out: Row[] = []
+  for (let i = 0; i < n; i++) {
+    out.push({ id: i, name: "row-" + i, scores: [i, i * 2, i * 3] })
+  }
+  return out
+}
+function churn(rounds: number): number {
+  const data = build(500)
+  let total = 0
+  for (let r = 0; r < rounds; r++) {
+    const text = JSON.stringify(data)
+    const parsed = JSON.parse(text) as Row[]
+    total += parsed.length
+  }
+  return total
+}
+console.log(churn(150))
+`
+	binFile := buildBinaryAuto(t, src)
+	if _, err := exec.LookPath("/usr/bin/time"); err != nil {
+		t.Skip("/usr/bin/time not found")
+	}
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		args = []string{"-l", binFile}
+	case "linux":
+		args = []string{"-v", binFile}
+	default:
+		t.Skipf("no known /usr/bin/time RSS format for %s", runtime.GOOS)
+	}
+	out, err := exec.Command("/usr/bin/time", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run under /usr/bin/time: %v\n%s", err, out)
+	}
+	peakBytes, ok := parsePeakRSS(string(out))
+	if !ok {
+		t.Skipf("could not parse peak RSS from /usr/bin/time output:\n%s", out)
+	}
+	// ~30KB of graph per round x 150 rounds ≈ 4.5MB churned through the
+	// trees alone (strings + structs + buffers); shallow-free-only leaked
+	// all of it. Generous headroom over the runtime floor.
+	const boundBytes = 100_000_000
+	if peakBytes > boundBytes {
+		t.Errorf("peak RSS %d bytes exceeds %d bound — deep frees may not be happening", peakBytes, boundBytes)
+	}
+}
+
+// TestE2EMemoryAutoDeepFreeInteriorExtractionRejected: extracting an
+// interior pointer (`parsed[0]` into a binding) must downgrade the binding
+// to today's shallow free — the emitted IR carries no synthesized deep-free
+// routine, and the program still runs correctly.
+func TestE2EMemoryAutoDeepFreeInteriorExtractionRejected(t *testing.T) {
+	const src = `
+interface Row { id: number; name: string }
+function f(): number {
+  const parsed = JSON.parse('[{"id":1,"name":"a"}]') as Row[]
+  const first = parsed[0]
+  return first.id + parsed.length
+}
+console.log(f())
+`
+	ir, err := emitAutoImports(t, src)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if strings.Contains(ir, "__kml_deep_free") {
+		t.Errorf("interior extraction must reject deep free; IR contains a synthesized deep-free routine")
+	}
+	out, err := exec.Command(buildBinaryAuto(t, src)).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(out), "\n"), "2")
+}
+
+// TestE2EMemoryAutoDeepFreeAdmitsLengthOnlyUse: the json_churn shape itself
+// (.length is the only read) must be admitted — the IR carries the
+// synthesized routines.
+func TestE2EMemoryAutoDeepFreeAdmitsLengthOnlyUse(t *testing.T) {
+	const src = `
+interface Row { id: number; name: string; scores: number[] }
+function f(): number {
+  const parsed = JSON.parse('[{"id":1,"name":"a","scores":[1]}]') as Row[]
+  return parsed.length
+}
+console.log(f())
+`
+	ir, err := emitAutoImports(t, src)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if !strings.Contains(ir, "__kml_deep_free") {
+		t.Errorf("length-only use of a typed parse tree must be deep-freed; no synthesized routine in IR")
+	}
 }

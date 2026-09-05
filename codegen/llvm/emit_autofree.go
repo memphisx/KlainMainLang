@@ -44,6 +44,10 @@ type pendingFree struct {
 	// only (escape_check's rebindOwningRHS) — emitAssign frees the old
 	// value right before each such store.
 	rebindFree bool
+	// deep (TDD-00175 Stage 1): the binding transitively owns its graph —
+	// the drain calls the synthesized recursive free (emit_free_deep.go)
+	// instead of the shallow freeSymbol.
+	deep bool
 }
 
 // escFreshMethodResults: builtin container methods whose result is a freshly
@@ -141,6 +145,7 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		pos:        pos,
 		lastUse:    e.autoOwnedLastUse[v],
 		rebindFree: e.autoFreeRebind[v],
+		deep:       e.deepFreeSym(v, sym.Ty),
 	})
 	return nil
 }
@@ -158,7 +163,7 @@ func (e *Emitter) maybeFreeOnRebind(name string, sym Symbol, pos ast.Pos) {
 	for i := range e.pendingFrees {
 		pf := &e.pendingFrees[i]
 		if pf.rebindFree && !pf.emitted && pf.name == name && pf.sym.Ptr == sym.Ptr {
-			_ = e.freeSymbol(pf.sym, pos)
+			_ = e.freePending(*pf)
 			return
 		}
 	}
@@ -203,7 +208,7 @@ func (e *Emitter) emitOwnedFreesAfter(stmt ast.Statement) {
 			continue
 		}
 		if !e.blockDone {
-			_ = e.freeSymbol(pf.sym, pf.pos)
+			_ = e.freePending(*pf)
 		}
 		pf.emitted = true
 	}
@@ -251,15 +256,20 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 	case *ast.CallExpression:
 		// Builtin container methods with copy-out results, on a receiver the
 		// type system says is a builtin container.
-		if m, ok := x.Callee.(*ast.MemberExpression); ok && escFreshMethodResults[m.Property] {
-			rt := e.inferExprType(m.Object)
-			if rt.IsArray || (isStringTy(rt) && !rt.IsDynamic) || rt.IsMap || rt.IsSet {
+		if m, ok := x.Callee.(*ast.MemberExpression); ok {
+			// JSON.parse always builds a fresh tree; JSON.stringify a fresh
+			// string. Checked before the fresh-method-result map, whose keys
+			// deliberately don't include "parse"/"stringify" (they aren't
+			// container methods) — nesting this inside that map lookup made
+			// it dead code, so typed JSON.parse results were never freed.
+			if ns, ok := m.Object.(*ast.Identifier); ok && ns.Name == "JSON" && !e.isShadowedByLocal(ns.Name) && (m.Property == "parse" || m.Property == "stringify") {
 				return true
 			}
-			// JSON.parse always builds a fresh tree; JSON.stringify a fresh
-			// string.
-			if ns, ok := m.Object.(*ast.Identifier); ok && ns.Name == "JSON" && (m.Property == "parse" || m.Property == "stringify") {
-				return true
+			if escFreshMethodResults[m.Property] {
+				rt := e.inferExprType(m.Object)
+				if rt.IsArray || (isStringTy(rt) && !rt.IsDynamic) || rt.IsMap || rt.IsSet {
+					return true
+				}
 			}
 		}
 		return false
@@ -293,7 +303,7 @@ func (e *Emitter) emitFreesAbove(minDepth int) {
 		}
 		// freeSymbol's only error path is an unfreeable type, which
 		// registration already excluded.
-		_ = e.freeSymbol(pf.sym, pf.pos)
+		_ = e.freePending(pf)
 	}
 }
 
@@ -305,7 +315,7 @@ func (e *Emitter) emitFreesAtScopeExit(depth int) {
 	for _, pf := range e.pendingFrees {
 		if pf.scopeDepth == depth {
 			if !e.blockDone && !pf.emitted {
-				_ = e.freeSymbol(pf.sym, pf.pos)
+				_ = e.freePending(pf)
 			}
 			continue
 		}

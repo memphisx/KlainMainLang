@@ -206,6 +206,17 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
 		return r1
 	case isStringTy(ty):
+		// Under -mm=auto the projected tree may be deep-freed (TDD-00175
+		// Stage 1), and __kml_str_free on an interned global corrupts the
+		// heap — so an absent string field defaults to a fresh heap copy of
+		// "" there. Every present string is already a heap dup
+		// (__kml_json_string_dup), making the whole tree uniformly owned.
+		if e.isAutoMode() {
+			e.ensureStrHeaderRuntime()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, e.internString("")))
+			return r
+		}
 		return e.internString("")
 	default:
 		return zeroRef(ty)

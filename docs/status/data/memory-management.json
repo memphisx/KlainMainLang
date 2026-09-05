@@ -45,7 +45,8 @@
             "status": "implemented",
             "caveats": [
               "Requires `bdw-gc`/`libgc` installed at build time (`brew install bdw-gc` / `apt-get install libgc-dev` / `apk add gc-dev`) — this compiler's only non-libc external dependency, and only for binaries compiled with `-mm=gc`",
-              "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it"
+              "Strictly safer for long-running processes than `manual`, but the default hasn't been flipped to it",
+              "Collection is conservative (Boehm) and optimizer-dependent: on x86-64 `-O2` builds, a referent created and orphaned in straight-line code can stay pinned indefinitely by a stale stack-slot copy — WeakRef/FinalizationRegistry death signals for it never fire ([ADR-00717](../adr/ADR-00717.md)); referents churning through reused code paths (the real-workload shape) collect normally"
             ],
             "notes": [
               "Boehm–Demers–Weiser collector (`libgc`): swaps the declared `@malloc`/`@realloc` for `@GC_malloc`/`@GC_realloc` and links `-lgc` — no per-feature codegen change beyond the allocation call sites, since the collector conservatively scans the native stack/registers/managed heap for live pointers",
@@ -57,7 +58,8 @@
             "feature": "`auto`",
             "status": "implemented",
             "caveats": [
-              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String` arguments; fresh-result container methods for initializers) start minimal. Reassignment via an owning-fresh RHS (`s += …`, `s = a + b`, an interpolating template) frees the overwritten value at the store; any other reassignment shape still disqualifies the binding",
+              "The escape analysis is deliberately very conservative: a value that is returned, stored, aliased, spread, passed to any non-whitelisted call, captured by a closure, or alive across `await` is never freed (it leaks, as in `manual`) — the whitelists (`console.log`/`String`/`JSON.parse`/`JSON.stringify` arguments; fresh-result container methods and `JSON.parse`/`JSON.stringify` for initializers) start minimal. Reassignment via an owning-fresh RHS (`s += …`, `s = a + b`, an interpolating template) frees the overwritten value at the store; any other reassignment shape still disqualifies the binding",
+              "Deep (recursive) reclamation covers **typed `JSON.parse`/`res.json()` trees only** ([TDD-00175](../tdd/TDD-00175.md) Stage 1, [ADR-00716](../adr/ADR-00716.md)) — graphs built from literals or user calls, mid-block garbage (rbtree-class), and closure graphs still leak beyond the top-level free (Stages 2–3); an interior-pointer extraction into a plain-`=` binding, a graph mutation, iteration, or a method call on the tree downgrades that binding to the shallow free",
               "No per-branch last-use placement for `@owned` — a last use inside `if`/loop frees at the join/after the loop; any use inside `try` falls back to block exit",
               "Thrown paths do not free (a same-function `catch` could resume with the value live) — they leak instead",
               "`@owned` parameters: direct calls to statically-resolved function declarations only; using such a function as a value is a compile error",
@@ -70,6 +72,7 @@
               "`Memory.free(x)` is a compile error under `-mm=auto` (the compiler owns every free); in the other modes `Memory.free` on an *annotated* variable is rejected per-variable by the escape check",
               "All frees route through the single `freeSymbol` chokepoint `Memory.free` uses (shallow, per-type) — the seam the FinalizationRegistry death-signal hook ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)) plugs into, so compiler-inserted frees fire cleanup callbacks exactly like explicit ones",
               "A registered FinalizationRegistry target's auto-free at scope exit fires its cleanup callback deterministically — register's target position is a free-notified retention, not a disqualifying escape ([ADR-00703](../adr/ADR-00703.md))",
+              "Transitively-owned typed `JSON.parse`/`res.json()` trees are freed **deep** — a synthesized per-type recursive routine releases the row structs, their strings, and nested array buffers at block exit ([TDD-00175](../tdd/TDD-00175.md) Stage 1, [ADR-00716](../adr/ADR-00716.md)); interior-safe reads (`.length`, compound-op consumption like `total += x[0].n`) keep eligibility",
               "Verified by an RSS-bounded churn E2E (~160MB churned, peak RSS asserted <30MB with zero annotations)",
               "Exercised as a mode-differential dev lane ([TDD-00174](../tdd/TDD-00174.md) Stage A: `make examples MM=auto OPTMEM=1`, `KLAIN_TEST_MM`/`KLAIN_TEST_OPTMEM` E2E). See [ADR-00708](../adr/ADR-00708.md)"
             ]

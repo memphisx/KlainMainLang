@@ -451,7 +451,7 @@
       "editorial": {
         "175": {
           "title": "Deep reclamation under `-mm=auto` (container elements, object graphs)",
-          "notes": "Staged: type-directed deep free for transitively-owned bindings → fresh-producer inference (`@fresh`) → scoped refcounting for mid-block garbage (the rbtree shape); the main [TDD-00174](../tdd/TDD-00174.md) flip blocker surfaced by the first benchmark campaign"
+          "notes": "Staged: type-directed deep free for transitively-owned bindings (**Stage 1 shipped** — typed `JSON.parse`/`res.json()` trees, [ADR-00716](../adr/ADR-00716.md)) → fresh-producer inference (`@fresh`) → scoped refcounting for mid-block garbage (the rbtree shape); the main [TDD-00174](../tdd/TDD-00174.md) flip blocker surfaced by the first benchmark campaign"
         },
         "168": {
           "title": "`async_hooks` — `AsyncLocalStorage`",
@@ -668,6 +668,10 @@
         "174": {
           "title": "Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default",
           "notes": "Two flips: dev-default first (tests/examples/per-delivery checks compile in auto+optimize so every deliverable soaks the escape analysis by construction), shipped CLI default gated on quantified exit criteria — mode-differential lanes over the examples/E2E/conformance corpora, ASan-armed, an escape-shaped fuzz lane, klainload soak, free census"
+        },
+        "176": {
+          "title": "General `as T` on dynamic values — projection, rejection, or erasure?",
+          "notes": "The design question [ADR-00715](../adr/ADR-00715.md)'s narrow carve-out defers: whether strict-mode `any as T` should emit a runtime dynamic→concrete projection, become a clean rejection, or stay erased with per-shape carve-outs; the scalar unbox subset is the likely first slice"
         }
       }
     },

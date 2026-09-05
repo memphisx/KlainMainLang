@@ -56,12 +56,26 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		// (a sound reinterpret across differing representations isn't modeled
 		// here). The syntax is consumed and dropped so real TS compiles; the
 		// assertion has no static effect (ADR-00371).
+		//
+		// One carve-out: `as T` written directly on a call whose result is
+		// otherwise `any` and whose emission consults a target type —
+		// `JSON.parse(s) as Rec[]`, `res.json() as Rec` — is kept on the call
+		// node (CallExpression.AssertedType), supplying the projection target
+		// exactly as `const p: Rec[] = JSON.parse(s)` would. That matches the
+		// assertion's real static effect in TypeScript (narrowing `any` to T).
+		// `satisfies` never narrows in TS and stays fully erased.
 		if kw.Literal == "as" && p.check(lexer.CONST) {
 			p.advance() // `as const`
 			continue
 		}
-		if _, terr := p.parseTypeAnnotation("as"); terr != nil {
+		ta, terr := p.parseTypeAnnotation("as")
+		if terr != nil {
 			return nil, terr
+		}
+		if kw.Literal == "as" {
+			if ce := assertableCall(left); ce != nil {
+				ce.AssertedType = ta // chained `as A as B`: the outermost wins
+			}
 		}
 	}
 
@@ -576,4 +590,34 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			return expr, nil
 		}
 	}
+}
+
+// assertableCall returns the CallExpression an `expr as T` assertion may
+// attach its type to (CallExpression.AssertedType): a `JSON.parse(...)` call
+// or a `.json()` method call — the call shapes whose result is otherwise
+// `any` and whose emission consults a target type. `await` is looked
+// through, since it is identity over these synchronous calls
+// (`await res.json() as T`). Anything else returns nil and the assertion
+// stays erased (ADR-00371). Whether the attachment is actually honored is
+// decided at emission time (compat mode, receiver type); the parser only
+// recognizes the shape.
+func assertableCall(expr ast.Expression) *ast.CallExpression {
+	if aw, ok := expr.(*ast.AwaitExpression); ok {
+		expr = aw.Argument
+	}
+	ce, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return nil
+	}
+	mem, ok := ce.Callee.(*ast.MemberExpression)
+	if !ok {
+		return nil
+	}
+	if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && mem.Property == "parse" {
+		return ce
+	}
+	if mem.Property == "json" {
+		return ce
+	}
+	return nil
 }

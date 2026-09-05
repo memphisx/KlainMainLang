@@ -71,3 +71,48 @@ console.log(a < b);
 console.log(1 < 2);
 `, "false\ntrue")
 }
+
+// --- `as T` on JSON.parse / .json() supplies the projection target ---
+// The one carve-out from full assertion erasure: `JSON.parse(s) as T`
+// projects into T exactly as `const p: T = JSON.parse(s)` does, matching
+// the assertion's real static effect in TypeScript (narrowing `any` to T).
+
+func TestE2EAsCastJSONParseObject(t *testing.T) {
+	assertOutput(t, `
+interface Rec { id: number; name: string; scores: number[] }
+const one = JSON.parse('{"id":1,"name":"a","scores":[5,6]}') as Rec
+console.log(one.name)
+console.log(one.scores[1])
+`, "a\n6")
+}
+
+func TestE2EAsCastJSONParseArray(t *testing.T) {
+	assertOutput(t, `
+interface Rec { id: number; name: string }
+const parsed = JSON.parse('[{"id":1,"name":"a"},{"id":2,"name":"b"}]') as Rec[]
+console.log(parsed.length)
+console.log(parsed[1].name)
+`, "2\nb")
+}
+
+func TestE2EAsCastJSONParseMemberTarget(t *testing.T) {
+	// The declaration-context caveat (ADR-00571: member/element assignment
+	// targets aren't projected) doesn't apply to the asserted form — the
+	// type rides on the call itself.
+	assertOutput(t, `
+interface Item { id: number; label: string }
+interface Holder { items: Item[] }
+const h: Holder = { items: [] }
+h.items = JSON.parse('[{"id":7,"label":"x"}]') as Item[]
+console.log(h.items[0].label)
+`, "x")
+}
+
+func TestE2EAsCastJSONParseSatisfiesStaysErased(t *testing.T) {
+	// `satisfies` never narrows in TypeScript — the result stays a dynamic
+	// tree, observable through the dynamic printer's formatting.
+	assertOutput(t, `
+const v = JSON.parse('{"a":1}') satisfies object
+console.log(typeof v)
+`, "object")
+}

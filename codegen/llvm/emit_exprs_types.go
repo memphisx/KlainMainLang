@@ -1634,7 +1634,11 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "parse":
 					// Context-free JSON.parse is untyped dynamic parse
 					// (TDD-00155 Stage 2); a typed declaration context never
-					// consults this default (emitDeclJSONProjection).
+					// consults this default (emitDeclJSONProjection), and an
+					// `as T` on the call supplies the type the same way.
+					if ty, ok := e.callAssertedTargetTy(ex); ok {
+						return ty
+					}
 					return TypeAny
 				}
 			}
@@ -2408,6 +2412,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					// No declaration context here to parse into (that's
 					// handled separately, see emitResponseJSON) — TypePtr
 					// matches bare JSON.parse's own default-context type.
+					// An `as T` on the call supplies the target instead.
+					if ty, ok := e.callAssertedTargetTy(ex); ok {
+						return ty
+					}
 					return TypePtr
 				}
 			case "arrayBuffer":

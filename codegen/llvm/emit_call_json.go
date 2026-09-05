@@ -7,6 +7,27 @@ import (
 	"strings"
 )
 
+// callAssertedTargetTy resolves the `as T` a call carries
+// (CallExpression.AssertedType, attached by the parser on JSON.parse /
+// `.json()` shapes only) into the projection target type the call should
+// deserialize into — the assertion's real static effect in TypeScript
+// (narrowing JSON.parse's `any` to T). Honored under `-compat=strict` only:
+// `-compat=js`'s whole identity is the dynamic-tree path, and its
+// declarations are any-backed anyway. A target the projection cannot
+// deserialize into (class, union/any, function) is declined here — the call
+// keeps its default dynamic-tree behavior rather than erroring, matching
+// erased-assertion semantics for the shapes the carve-out doesn't cover.
+func (e *Emitter) callAssertedTargetTy(ce *ast.CallExpression) (Type, bool) {
+	if ce.AssertedType == nil || e.compatJS() {
+		return Type{}, false
+	}
+	ty := e.resolveType(ce.AssertedType)
+	if ty.IsDynamic || ty.IsClass || ty.IsFunc || ty.IR == "void" {
+		return Type{}, false
+	}
+	return ty, true
+}
+
 // jsonIndent carries JSON.stringify's pretty-print state (TDD-00077 Track S).
 // An empty unit means compact mode — byte-identical to the pre-pretty output —
 // so an absent `space` argument leaves every existing call path unchanged.

@@ -757,3 +757,6 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00712](ADR-00712.md) | Rebind-free — `-mm=auto` frees the overwritten value on owning reassignment | Extends [TDD-00173](../tdd/TDD-00173.md)'s implicit layer |
 | [00713](ADR-00713.md) | JSON.stringify frees its intermediates; stringify result is an owning initializer | |
 | [00714](ADR-00714.md) | Append-by-index — `arr[i] = v` at `i == length` grows the array | |
+| [00715](ADR-00715.md) | `as T` on `JSON.parse` / `.json()` supplies the projection target | Extends [ADR-00371](ADR-00371.md) (a scoped carve-out from full assertion erasure); softens the [ADR-00571](ADR-00571.md) member-target caveat |
+| [00716](ADR-00716.md) | Deep free for transitively-owned typed JSON.parse trees (`-mm=auto`) | Implements [TDD-00175](../tdd/TDD-00175.md) (Stage 1); builds on [ADR-00712](ADR-00712.md) (rebind-free), [ADR-00715](ADR-00715.md) (`as T` projection targets) |
+| [00717](ADR-00717.md) | x86-64 conservative-scan pinning in the gc-mode collection tests | Extends [ADR-00701](ADR-00701.md) (FinalizationRegistry), [TDD-00112](../tdd/TDD-00112.md) (weak collections) |

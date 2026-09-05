@@ -90,17 +90,17 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 21 | RUN_TIMEOUT |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
-| 20 | RUN_TIMEOUT |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
 | 16 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
-| 16 | RUNTIME_NONZERO_EXIT:  |
 | 15 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
+| 15 | RUNTIME_NONZERO_EXIT:  |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
