@@ -3,7 +3,7 @@
 # Desktop — `klain:webview`
 
 Native desktop windows over the **system** browser engine (WKWebView on macOS,
-WebKitGTK on Linux) via the vendored [webview/webview](https://github.com/webview/webview)
+WebKitGTK on Linux, Edge WebView2 on Windows) via the vendored [webview/webview](https://github.com/webview/webview)
 C++ library — the Tauri architecture with this compiler as the backend. A
 compiled binary opens a window, renders an HTML/CSS/JS UI (any SPA that builds
 to static assets), and its buttons call straight into typed native functions.
@@ -16,7 +16,9 @@ Design: [TDD-00142](../tdd/TDD-00142.md). Implementation:
 [ADR-00440](../adr/ADR-00440.md) (Stage 4 — packaging),
 [ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md) (Stage 5–6 —
 typed bind, `bindings`, `--emit-window-dts`),
-[ADR-00443](../adr/ADR-00443.md) (Stage 7 — SPA embedding).
+[ADR-00443](../adr/ADR-00443.md) (Stage 7 — SPA embedding),
+[ADR-00725](../adr/ADR-00725.md)/[ADR-00726](../adr/ADR-00726.md) (Windows —
+WebView2 backend, GUI-subsystem `-package`).
 
 `import { Webview } from 'klain:webview'`
 
@@ -46,7 +48,7 @@ below exclude every row from Strict.
 | `--emit-window-dts` | ✅ | Writes `<output>.window.d.ts` declaring `interface Window { … }` from the typed bindings — page-side autocomplete + the audit surface for the allowlist ([ADR-00442](../adr/ADR-00442.md)) |
 | `new Webview({ serve: "./dist" })` | ✅ | Embeds a built SPA/SSG directory into the binary at compile time (`.incbin`) and serves it from an in-binary static server on an ephemeral loopback port, then navigates — a **single-file** desktop app, no external `dist/` ([ADR-00443](../adr/ADR-00443.md)) |
 | `klain:assets` `embedDir(path)` + `.get(path)` | ✅ | Embed a directory at compile time; `.get(path): ArrayBuffer` reads an embedded file byte-exact (binary-safe) over the static blob, no copy ([ADR-00443](../adr/ADR-00443.md)) |
-| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md)) |
+| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher, or re-links it on Windows as a GUI-subsystem `<name>\<name>.exe` with icon + `VERSIONINFO` resources; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md), [ADR-00726](../adr/ADR-00726.md)) |
 
 ## Loading patterns
 
@@ -88,7 +90,14 @@ below exclude every row from Strict.
   path is resolved at *compile* time (relative to the compiler's CWD).
 - **Platform**: macOS needs zero extra deps (WebKit.framework ships with the
   OS); Linux needs the WebKitGTK dev packages at build time — see README
-  Requirements. Windows is out of scope.
+  Requirements. Windows needs the WebView2 SDK header from MSYS2
+  (`mingw-w64-ucrt-x86_64-webview2-loader`) at build time and nothing at run
+  time beyond the Edge WebView2 runtime that ships with Windows 10/11 — no
+  loader DLL beside the app ([ADR-00725](../adr/ADR-00725.md)). On Windows a
+  navigation issued before `run()` is deferred to the loop start so an `init`
+  registered after `html()`/`navigate()` still runs first, the order WebKit
+  gives; the Edge runtime prints one `Failed to unregister class` log line on
+  stderr at exit.
 - **Verified on macOS (Apple Silicon M4)** — window creation, method surface,
   the page→native→terminate roundtrip, both example apps, the Stage 3 page-tick
   pump + async-bind roundtrips (gated windowed smoke tests), Stage 4 packaging
@@ -99,4 +108,8 @@ below exclude every row from Strict.
   renders the embedded page with no `dist/` on disk). **Linux:
   compile-tier only** — the vendored binding compiles and links against
   `webkit2gtk-4.1` (Docker `ubuntu:24.04`, no display; CI links it too), but a
-  windowed run on Linux is not yet exercised.
+  windowed run on Linux is not yet exercised. **Verified on Windows 11 (x86-64,
+  WebView2)** — the same windowed smoke runs as macOS (round trip, page-tick
+  pump, async/typed/async-typed bind, `serve`, `init` after `html`), all four
+  examples, and `-package` producing a GUI-subsystem exe with resources
+  ([ADR-00725](../adr/ADR-00725.md), [ADR-00726](../adr/ADR-00726.md)).

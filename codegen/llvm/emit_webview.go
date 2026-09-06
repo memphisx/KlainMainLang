@@ -126,7 +126,7 @@ func (e *Emitter) emitNewWebview(ex *ast.NewWebviewExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 64)", urlBuf))
 		fmtStr := e.internString("http://127.0.0.1:%d/")
 		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i32 %s)", urlBuf, fmtStr, port))
-		e.emitInstr(fmt.Sprintf("call void @webview_navigate(ptr %s, ptr %s)", w, urlBuf))
+		e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, ptr %s)", webviewNavigateSym(), w, urlBuf))
 	}
 
 	return Value{Ref: handle, Ty: WebviewType()}, nil
@@ -173,8 +173,8 @@ func (e *Emitter) emitWebviewMethod(objExpr ast.Expression, method string, args 
 
 	// One-string-argument window mutators.
 	strMut := map[string]string{
-		"navigate": "webview_navigate",
-		"html":     "webview_set_html",
+		"navigate": webviewNavigateSym(),
+		"html":     webviewSetHTMLSym(),
 		"setTitle": "webview_set_title",
 		"init":     "webview_init",
 		"unbind":   "webview_unbind",

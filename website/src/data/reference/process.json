@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "13/32",
-    "strictPct": 41
+    "strict": "12/32",
+    "strictPct": 38
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
@@ -278,9 +278,12 @@
       "id": "process.kill",
       "name": "process.kill(pid, signal?)",
       "statusRow": "process.kill(pid, signal?)",
-      "signature": "process.kill(pid: number, signal?: number): void",
-      "badge": "exact",
-      "description": "Sends signal (defaults to 15/SIGTERM, matching real Node) to pid via POSIX kill(). Throws a catchable Error if the target doesn't exist or the signal can't be sent; signal 0 is the standard POSIX existence check and delivers nothing.",
+      "signature": "process.kill(pid: number, signal?: number | string): void",
+      "badge": "caveats",
+      "description": "Sends signal (defaults to 15/SIGTERM, matching real Node) to pid via POSIX kill(). The signal may be a name ('SIGTERM', 'SIGINT', …) as in Node — a literal resolves at compile time against the host's signal table, a dynamic string at run time, an unknown literal is a compile error. Throws a catchable Error if the target doesn't exist or the signal can't be sent; signal 0 is the standard POSIX existence check and delivers nothing. On Windows every signal except 0 terminates the target unconditionally (exit code 1), as in Node.",
+      "differences": [
+        "The thrown message carries the signal number (`kill(pid=…, signal=15)`), not the name Node prints."
+      ],
       "returns": {
         "type": "void",
         "desc": "Nothing."
@@ -423,18 +426,18 @@
     },
     {
       "id": "process.signals",
-      "name": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler)",
-      "statusRow": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler) (signal handlers)",
-      "signature": "process.on('SIGINT' | 'SIGTERM' | 'SIGWINCH', handler: () => void)",
+      "name": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK', handler)",
+      "statusRow": "process.on('SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK', handler) (signal handlers)",
+      "signature": "process.on('SIGINT' | 'SIGTERM' | 'SIGWINCH' | 'SIGBREAK', handler: () => void)",
       "badge": "caveats",
-      "description": "Lets a running program intercept a signal — SIGINT/SIGTERM to shut down gracefully instead of dying immediately, or SIGWINCH (terminal resize) to re-read process.stdout.columns/.rows and repaint a TUI.",
+      "description": "Lets a running program intercept a signal — SIGINT/SIGTERM to shut down gracefully instead of dying immediately, SIGWINCH (terminal resize) to re-read process.stdout.columns/.rows and repaint a TUI, or SIGBREAK (Ctrl+Break at a Windows console). On Windows, as in Node, SIGINT fires on Ctrl+C, SIGBREAK on Ctrl+Break, and a SIGTERM listener is accepted but never fires.",
       "returns": {
         "type": "void",
         "desc": "Registers the handler."
       },
       "differences": [
-        "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context.",
-        "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`.",
+        "The handler runs from ordinary control flow at the top of the event loop's iteration, never from real async signal context (on Windows the console callback queues the signal and the loop's next wait, at most 50 ms away, delivers it on the main thread).",
+        "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`/`'SIGBREAK'`.",
         "Handler must be a zero-argument `() => void` closure; one handler slot per signal (re-registering overwrites).",
         "Only fires while a `http.listen`- or timer-driven event loop is actively iterating; a plain synchronous script has no loop to check from."
       ],
@@ -563,7 +566,7 @@
       "statusRow": "process.version / process.versions",
       "signature": "process.version: string; process.versions: object",
       "badge": "caveats",
-      "description": "process.version = \"v22.11.0\"; process.versions is a real object (JSON.stringify/field access/Object.keys all work), matching Node v22.11.0's node/v8 verbatim, plus a klain key for this compiler's version.",
+      "description": "process.version = \"v22.11.0\"; process.versions is a real object (JSON.stringify/field access/Object.keys all work), matching Node v22.11.0's node/v8 verbatim, plus a klain key for this compiler's version — stamped at link time from the release tag (the same value `klainmain --version` prints).",
       "returns": {
         "type": "string | object",
         "desc": "Version string / versions object."

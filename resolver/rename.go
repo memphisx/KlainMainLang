@@ -32,7 +32,15 @@ import (
 // deliberately separate from the file-level lookup table: a name found here
 // means "do not rewrite," full stop, regardless of what the lookup table
 // says.
-type scope struct{ frames []map[string]bool }
+type scope struct {
+	frames []map[string]bool
+	// funcDepth counts the function-like bodies (declarations, arrow and
+	// function expressions, methods) the walk is inside; 0 means file top
+	// level, where a nested `var` names the file's own top-level variable
+	// (JS function scoping) rather than a new block binding — see
+	// rewriteStmt's VarDeclaration case (ADR-00728).
+	funcDepth int
+}
 
 func newScope() *scope { return &scope{} }
 
@@ -179,6 +187,8 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu lookupTable) {
 // already carrying its TypeParams — see rewriteClassDecl).
 func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) {
 	sc.push()
+	sc.funcDepth++
+	defer func() { sc.funcDepth-- }()
 	for _, tp := range f.TypeParams {
 		sc.bind(tp)
 	}
@@ -382,6 +392,28 @@ func rewriteBlock(b *ast.BlockStatement, sc *scope, lu lookupTable) {
 // — TDD-00094; its body's own top-level references still get renamed). The other
 // declaration kinds (Class/Interface/Enum/TypeAlias/Import/Export) only appear at
 // Program top level and are handled solely by rewriteTopLevelStmt.
+// renameTopLevelVarRedeclaration handles a `var` nested in a block at file
+// top level (a `for (var i …)` init, an `if` body …) whose name is one of the
+// file's own top-level declarations: JS `var` is function-scoped, so it is
+// the *same* variable as the top-level one, which the rename pass mangles
+// per file. Left bound as a block-local, the loop would read and write an
+// unmangled `i` while the top-level `i` — and everything after the loop —
+// used the mangled one: two variables, and the Test262 `S12.14_A11` loops
+// (`var c=0; for (var c=0; c<10;) { … c+=1 … }`) never terminated
+// (ADR-00728). Reports whether it rewrote the declaration; the caller then
+// skips the block binding so the loop body resolves the mangled name too.
+func renameTopLevelVarRedeclaration(v *ast.VarDeclaration, sc *scope, lu lookupTable) bool {
+	if v.Kind != "var" || v.Name == "" || sc.funcDepth != 0 || len(sc.frames) == 0 || sc.bound(v.Name) {
+		return false
+	}
+	m, ok := lu.names[v.Name]
+	if !ok {
+		return false
+	}
+	v.Name = m
+	return true
+}
+
 func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	switch s := stmt.(type) {
 	case *ast.FunctionDeclaration:
@@ -397,8 +429,10 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
-		sc.bind(s.Name)
-		lu.checkBinding(s.Name, s.GetPos())
+		if !renameTopLevelVarRedeclaration(s, sc, lu) {
+			sc.bind(s.Name)
+			lu.checkBinding(s.Name, s.GetPos())
+		}
 	case *ast.VarDeclarationList:
 		for _, d := range s.Decls {
 			if d.TypeAnnot != nil {
@@ -407,8 +441,10 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			if d.Init != nil {
 				d.Init = rewriteExpr(d.Init, sc, lu)
 			}
-			sc.bind(d.Name)
-			lu.checkBinding(d.Name, d.GetPos())
+			if !renameTopLevelVarRedeclaration(d, sc, lu) {
+				sc.bind(d.Name)
+				lu.checkBinding(d.Name, d.GetPos())
+			}
 		}
 	case *ast.ArrayDestructuring:
 		if s.Init != nil {
@@ -688,6 +724,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 	case *ast.ArrowFunction:
 		sc.push()
+		sc.funcDepth++
 		bindParams(e.Params, sc, lu, e.GetPos())
 		rewritePatternDefaults(e.Params, sc, lu)
 		for i := range e.Params {
@@ -707,12 +744,14 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		if e.Block != nil {
 			rewriteBlock(e.Block, sc, lu)
 		}
+		sc.funcDepth--
 		sc.pop()
 	case *ast.FunctionExpression:
 		// Same treatment as ArrowFunction — the body's identifiers must be
 		// rewritten against the lookup table so they match mangled names
 		// registered in the emitter's scope stack.
 		sc.push()
+		sc.funcDepth++
 		// Bind the function expression's own name in its scope *before* the body
 		// is rewritten, so self-references stay unmangled even when a top-level
 		// function of the same name exists. Without this, the body's `N` would be
@@ -735,6 +774,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			rewriteType(e.RetType, sc, lu)
 		}
 		rewriteBlock(e.Body, sc, lu)
+		sc.funcDepth--
 		sc.pop()
 	case *ast.TemplateLiteral:
 		for i := range e.Exprs {

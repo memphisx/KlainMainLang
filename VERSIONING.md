@@ -39,6 +39,15 @@ The very first commit is tagged `v0.1.0` by hand — a one-time manual step, sin
 
 go-semantic-release (not the original JS `semantic-release`) was chosen specifically to keep the release pipeline Go-only — no Node.js/npm needed anywhere in CI, consistent with this project's own reason for being written in Go rather than a C/C++-toolchain language in the first place.
 
+## Where the version lives
+
+The git tag is the only place a version is ever *typed*; everything else derives from it (TDD-00179 / ADR-00732):
+
+- **Release pipeline** — after `go-semantic-release` computes the tag, the release job cross-compiles one binary per platform whose test lane passed with `go build -ldflags "-X KlainMainLang/codegen/llvm.KlainVersion=<version>"`, and attaches them to the GitHub Release as `klainmain-v<version>-<platform>` plus `checksums.txt`. A platform whose lane was red is simply absent from that release until a later release is green there.
+- **`klainmain --version`** prints `klainmain <version> <os>/<arch>`.
+- **`process.versions.klain`** in every compiled program is the same value, baked in at compile time.
+- **Local builds** — `make build` stamps `git describe --tags --always --dirty` (e.g. `0.63.0-3-gabc1234-dirty`); `make dist` cross-compiles the same five binaries into `dist/`; a bare `go build` reports `0.0.0-dev`, deliberately not a real version.
+
 ### Gotcha: `allow-initial-development-versions`
 
 By default, go-semantic-release forces a MAJOR bump to `1.0.0` on the very next release once any tag exists, regardless of commit type — its `applyChange` logic explicitly does `if !allowInitialDevelopmentVersions && version.Major() == 0 { change.Major = true }`. `.github/workflows/release.yml` sets `allow-initial-development-versions: 'true'` on the `go-semantic-release/action@v1` step specifically to suppress this and stay on normal PATCH/MINOR bumps below `1.0.0`.

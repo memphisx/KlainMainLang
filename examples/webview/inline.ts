@@ -4,6 +4,7 @@
 // read with fs.readdirSync. Native pushes results back into the page with eval.
 //
 // Build:  klainmain examples/webview/inline.ts && ./examples/webview/inline
+// Windows: klainmain examples/webview/inline.ts && examples/webview/inline.exe (WebView2; see README)
 // (macOS: zero extra deps; Linux: WebKitGTK dev packages — see README.)
 
 import { Webview } from 'klain:webview'

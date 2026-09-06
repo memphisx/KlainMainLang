@@ -596,8 +596,19 @@ static void trace_set(const char *tag, const unsigned char *set, int nfds) {
 	fprintf(stderr, "]");
 }
 
+// Signal wake-up (win32proc.c, ADR-00728): while a console control handler
+// is installed, a blocking wait is taken in slices and a raised flag ends it
+// with EINTR, the way a POSIX signal interrupts select().
+extern int __kml_win_sig_installed;
+int __kml_win_sig_deliver(void);
+static int kml_sig_interrupted(void) {
+	if (__kml_win_sig_deliver()) { errno = L_EINTR; return 1; }
+	return 0;
+}
+
 int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *eset, kml_timeval *tv) {
 	if (nfds > KFD_MAX) nfds = KFD_MAX;
+	if (kml_sig_interrupted()) return -1;
 	if (io_trace()) {
 		fprintf(stderr, "[io] select nfds=%d", nfds);
 		trace_set("r", rset, nfds); trace_set("w", wset, nfds); trace_set("x", eset, nfds);
@@ -641,6 +652,7 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		}
 		if (ready) slice = 0;
 		else if (have_plain && (slice < 0 || slice > 10)) slice = 10;
+		else if (__kml_win_sig_installed && (slice < 0 || slice > 50)) slice = 50;
 		if (npfd > 0) {
 			// Winsock select rather than WSAPoll: WSAPoll never reports a failed
 			// non-blocking connect (a long-standing Windows defect), so a refused
@@ -670,6 +682,7 @@ int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *es
 		} else if (!ready && slice != 0) {
 			Sleep((DWORD)(slice < 0 ? 10 : slice));
 		}
+		if (!ready && kml_sig_interrupted()) return -1;
 		if (ready || (deadline_ms >= 0 && (int64_t)GetTickCount64() >= deadline_ms)) {
 			if (io_trace()) {
 				fprintf(stderr, "[io] select ->%d", ready);

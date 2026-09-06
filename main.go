@@ -21,11 +21,11 @@ func main() {
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
 	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms) or commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency). Both give identical Web Crypto semantics")
-	pkg := flag.Bool("package", false, "after compiling, also build a double-clickable desktop app around the binary: a .app bundle on macOS, a .desktop launcher on Linux. Intended for webview GUI programs — the bundle is what gives a window proper foreground activation. The standalone binary is still produced too")
+	pkg := flag.Bool("package", false, "after compiling, also build a double-clickable desktop app around the binary: a .app bundle on macOS, a .desktop launcher on Linux, a GUI-subsystem <name>\\<name>.exe with icon and version resources on Windows. Intended for webview GUI programs — the bundle is what gives a window proper foreground activation (and, on Windows, no console window beside it). The standalone binary is still produced too")
 	appName := flag.String("app-name", "", "display `name` for -package (default: the output binary's name). Sets the .app folder name and the app's shown name")
 	appID := flag.String("app-id", "", "bundle `identifier` for -package, e.g. com.example.myapp (default: com.klain.<name>). Becomes the macOS Info.plist CFBundleIdentifier")
 	appVersion := flag.String("app-version", "1.0.0", "app `version` string for -package (macOS CFBundleShortVersionString/CFBundleVersion)")
-	appIcon := flag.String("app-icon", "", "`path` to an app icon for -package: a .icns (used as-is) or .png (converted to .icns on macOS) on macOS; a .png or .svg on Linux. If omitted, the platform's generic app icon is used")
+	appIcon := flag.String("app-icon", "", "`path` to an app icon for -package: a .icns (used as-is) or .png (converted to .icns on macOS) on macOS; a .png or .svg on Linux; an .ico, or a .png of at most 256x256 (wrapped into an .ico), on Windows. If omitted, the platform's generic app icon is used")
 	emitWindowDTS := flag.Bool("emit-window-dts", false, "for a klain:webview program, also write a <output>.window.d.ts declaring the window.* functions its typed bindings expose, so the page-side code gets autocomplete/typechecking on them")
 	emitDecoratorMetadata := flag.Bool("emit-decorator-metadata", false, "with experimental decorators, emit design:type/design:paramtypes/design:returntype reflection metadata for decorated members (readable via Reflect.getMetadata) — mirrors TypeScript's emitDecoratorMetadata")
 	decorators := flag.String("decorators", "experimental", "decorator dialect: experimental (legacy (target, key, descriptor), the default) or standard (TC39 (value, context))")
@@ -52,7 +52,13 @@ func main() {
 			fmt.Fprintln(out)
 		})
 	}
+	showVersion := flag.Bool("version", false, "print the compiler's version (stamped from the release tag by the release pipeline; a git describe for a `make build`; 0.0.0-dev for a plain `go build`) and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("klainmain %s %s/%s\n", llvm.KlainVersion, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 
 	if flag.NArg() < 1 {
 		flag.Usage()
@@ -340,8 +346,8 @@ func main() {
 	// -static is; a non-webview program is only a warning (a .app can wrap any
 	// GUI binary).
 	if *pkg {
-		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-			fatal("-package is only supported on macOS and Linux (this run is on %s)", runtime.GOOS)
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
+			fatal("-package is only supported on macOS, Linux and Windows (this run is on %s)", runtime.GOOS)
 		}
 		if !em.UsesWebview() {
 			fmt.Fprintf(os.Stderr, "klainmain: warning: -package on a program that doesn't open a webview window; bundling anyway\n")
@@ -350,7 +356,23 @@ func main() {
 		if oerr != nil {
 			fatal("%v", oerr)
 		}
-		artifact, perr := packageApp(outBin, opts)
+		// Windows re-links the program as a GUI-subsystem executable with its
+		// resources (ADR-00726): the same argv as the link above, a different
+		// output, plus the packager's extra arguments.
+		relink := func(extra []string, out string) error {
+			args := append([]string{}, clangArgs...)
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-o" {
+					args[i+1] = out
+				}
+			}
+			args = append(args, extra...)
+			cmd := llvm.ClangCommand(args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd.Run()
+		}
+		artifact, perr := packageApp(outBin, opts, relink)
 		if perr != nil {
 			fatal("package: %v", perr)
 		}

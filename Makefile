@@ -21,14 +21,30 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
+.PHONY: all build dist install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
 
 ## all: build the compiler
 all: build
 
 ## build: compile KlainMainLang to ./klainmain
+# VERSION: what `klainmain --version` and process.versions.klain report. The
+# release workflow stamps the release tag; a local build stamps `git describe`
+# (e.g. 0.63.0-3-gabc1234-dirty) so no checkout ships as "0.0.0-dev" by accident.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
+LDFLAGS_VERSION := -X KlainMainLang/codegen/llvm.KlainVersion=$(VERSION)
+
 build:
-	$(GO) build -o $(BINARY) .
+	$(GO) build -ldflags "$(LDFLAGS_VERSION)" -o $(BINARY) .
+
+## dist: cross-compile the release binaries for every supported platform into dist/ (the same command the release workflow runs, minus the per-platform test gate)
+dist:
+	@mkdir -p dist
+	@for t in linux/amd64/linux-x64 linux/arm64/linux-arm64 darwin/amd64/macos-x64 darwin/arm64/macos-arm64 windows/amd64/windows-x64.exe; do \
+	  goos=$${t%%/*}; rest=$${t#*/}; goarch=$${rest%%/*}; name=$${rest#*/}; \
+	  echo "  $$goos/$$goarch -> dist/$(BINARY)-v$(VERSION)-$$name"; \
+	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w $(LDFLAGS_VERSION)" -o dist/$(BINARY)-v$(VERSION)-$$name . || exit 1; \
+	done
+	@cd dist && (sha256sum $(BINARY)-* 2>/dev/null || shasum -a 256 $(BINARY)-*) | sed 's/ \*/  /' > checksums.txt && cat checksums.txt
 
 ## install: install KlainMainLang to GOPATH/bin
 install:

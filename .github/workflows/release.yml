@@ -8,9 +8,40 @@ permissions:
   contents: write
 
 jobs:
+  # One lane per supported platform, all in parallel, none stopping the others
+  # (TDD-00179). A lane is a pure gate: it builds, vets and runs the suite, and
+  # on success publishes a tiny "gate" artifact naming its platform. The
+  # release job attaches a binary for exactly the platforms whose gate exists —
+  # a red lane drops that platform from the release until a fix lands, it does
+  # not block the others.
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50 # kill a genuine hang instead of burning the default 6h
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - name: macos-x64
+            os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - name: macos-arm64
+            os: macos-15
+            goos: darwin
+            goarch: arm64
+          - name: windows-x64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
     steps:
       - uses: actions/checkout@v7
 
@@ -19,25 +50,144 @@ jobs:
           go-version-file: go.mod
           cache: false # stdlib-only project, no go.sum to key the module cache on
 
+      # --- Linux (x64 and arm64): clang + the optional libraries the suite links against ---
       - name: Install clang + libcurl (fetch examples link against it) + libgc (-mm=gc tests link against it) + libtommath (default bigint backend links against it) + libpcre2 (RegExp tests link -lpcre2-8) + libssl (default crypto.subtle backend links -lcrypto) + libnghttp2 (HTTP/2 server path links -lnghttp2) + gtk3/webkit2gtk-4.1 (klain:webview compile-tier tests link against it; headless so the window never opens)
+        if: matrix.goos == 'linux'
         run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
+      # --- macOS (Intel and Apple Silicon): Apple's clang is the compiler; curl and WebKit ship with the OS ---
+      - name: Install the optional libraries via Homebrew (pcre2, libtommath, openssl@3, nghttp2, bdw-gc) and expose keg-only openssl@3 to clang
+        if: matrix.goos == 'darwin'
+        run: |
+          brew install pcre2 libtommath openssl@3 nghttp2 bdw-gc
+          prefix="$(brew --prefix)"
+          ssl="$(brew --prefix openssl@3)"
+          echo "PKG_CONFIG_PATH=$ssl/lib/pkgconfig:$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CPATH=$ssl/include:$prefix/include" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$ssl/lib:$prefix/lib" >> "$GITHUB_ENV"
+
+      # --- Windows: the mingw-w64 UCRT toolchain from MSYS2, as the README's Windows section installs it ---
+      - name: Install the MSYS2 UCRT64 toolchain + the optional libraries (curl/sqlite3/pcre2/libtommath/openssl/nghttp2/gc/zlib) + the WebView2 SDK header (klain:webview compile tier; the windowed smoke tests stay gated) + clang/lld/llvm-rc
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-llvm
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-pcre2
+            mingw-w64-ucrt-x86_64-libtommath
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-nghttp2
+            mingw-w64-ucrt-x86_64-gc
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-webview2-loader
+
+      - name: Put the UCRT64 toolchain and MSYS2's coreutils on PATH, and point the compiler at the sysroot
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $root = (msys2 -c 'cygpath -w /').Trim()
+          "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$root\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "KLAIN_SYSROOT=$root\ucrt64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # --- The gate itself ---
       - run: go build .
       - run: go vet ./...
-      - run: make status-check # docs/status pages must match their data/ JSON source
-      - run: go test -timeout 40m ./... # serial E2E suite on a 2-core runner; 20m started timing out as it grew
-      - run: make examples
+      - name: docs/status pages must match their data/ JSON source (reference lane only)
+        if: matrix.name == 'linux-x64'
+        run: make status-check
+      - run: go test -timeout 50m ./...
+      - name: Compile and run every example (POSIX lanes; the example runner is a POSIX Makefile recipe)
+        if: matrix.goos != 'windows'
+        run: make examples
 
+      - name: Publish this platform's pass gate
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p gate
+          echo "${{ matrix.goos }} ${{ matrix.goarch }} ${{ matrix.name }}" > "gate/${{ matrix.name }}"
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-${{ matrix.name }}
+          path: gate/${{ matrix.name }}
+          retention-days: 1
+
+  # Runs even when some lanes failed: cuts the release if at least one lane is
+  # green, and attaches a binary for each green platform, cross-compiled here
+  # (the compiler is pure Go) once the tag is known so the version can be
+  # stamped into it.
   release:
     needs: test
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # go-semantic-release needs full tag history, not a shallow clone
 
-      - uses: go-semantic-release/action@v1
+      - name: Collect the platform gates
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-*
+          path: gates
+          merge-multiple: true
+
+      - name: Decide which platforms passed
+        id: gates
+        shell: bash
+        run: |
+          passed=$(ls gates 2>/dev/null | sort | tr '\n' ' ')
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+          all="linux-x64 linux-arm64 macos-x64 macos-arm64 windows-x64"
+          for p in $all; do
+            if [ -f "gates/$p" ]; then echo "PASS  $p"; else echo "FAIL  $p (no binary will be attached for it)"; fi
+          done
+          if [ -z "$passed" ]; then echo "::warning::no platform passed its tests — no release"; fi
+
+      - name: Compute the next version and create the tag + GitHub Release
+        if: steps.gates.outputs.passed != ''
+        id: semrel
+        uses: go-semantic-release/action@v1
         with:
           allow-initial-development-versions: 'true'
+          custom-arguments: --allow-no-changes # a push with no feat/fix commits yields an empty version, not a failure
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v7
+        if: steps.gates.outputs.passed != '' && steps.semrel.outputs.version != ''
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross-compile a version-stamped binary for each platform that passed
+        if: steps.gates.outputs.passed != '' && steps.semrel.outputs.version != ''
+        shell: bash
+        run: |
+          v="${{ steps.semrel.outputs.version }}"
+          mkdir -p dist
+          for p in ${{ steps.gates.outputs.passed }}; do
+            read -r goos goarch name < "gates/$p"
+            out="dist/klainmain-v$v-$name"
+            [ "$goos" = windows ] && out="$out.exe"
+            echo "building $out"
+            GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X KlainMainLang/codegen/llvm.KlainVersion=$v" -o "$out" .
+          done
+          (cd dist && sha256sum klainmain-* > checksums.txt && cat checksums.txt)
+
+      - name: Attach the binaries to the release
+        if: steps.gates.outputs.passed != '' && steps.semrel.outputs.version != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v${{ steps.semrel.outputs.version }}" dist/* --clobber

@@ -7,6 +7,7 @@
 // for your framework's build output.
 //
 // Build: klainmain examples/webview/spa.ts && ./examples/webview/spa
+// Windows: klainmain examples/webview/spa.ts && examples/webview/spa.exe (WebView2; see README)
 //
 // Production note: a robust app posts an *ephemeral* port (listen on 0) back
 // from the worker via postMessage before navigating. This example uses a fixed

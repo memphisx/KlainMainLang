@@ -1,6 +1,9 @@
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+)
 
 // runtime_webview.go — the extern declarations for the webview/webview C API
 // (TDD-00142), plus the thread-safe eval dispatch trampoline. The
@@ -83,6 +86,11 @@ func (e *Emitter) ensureWebviewRuntime() {
 	e.emitGlobal(`declare void @webview_bind(ptr, ptr, ptr, ptr)`)
 	e.emitGlobal(`declare void @webview_unbind(ptr, ptr)`)
 	e.emitGlobal(`declare void @webview_return(ptr, ptr, i32, ptr)`)
+	if runtime.GOOS == "windows" {
+		// The deferring navigation shims (webview_win32.go).
+		e.emitGlobal(`declare void @__kml_wv_navigate(ptr, ptr)`)
+		e.emitGlobal(`declare void @__kml_wv_set_html(ptr, ptr)`)
+	}
 
 	// The eval-dispatch trampoline: webview_dispatch(w, fn, arg) runs fn(w, arg)
 	// on the GUI thread, so routing every eval through it makes w.eval()

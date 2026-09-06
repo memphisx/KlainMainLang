@@ -42,6 +42,10 @@ func resolvePackageOpts(outBin, name, id, version, icon string) (packageOpts, er
 	}
 	if opts.AppName == "" {
 		opts.AppName = filepath.Base(outBin)
+		if runtime.GOOS == "windows" {
+			// "app.exe" → "app": the artifact is <AppName>\<AppName>.exe.
+			opts.AppName = strings.TrimSuffix(opts.AppName, filepath.Ext(opts.AppName))
+		}
 	}
 	if opts.Version == "" {
 		opts.Version = "1.0.0"
@@ -60,6 +64,8 @@ func resolvePackageOpts(outBin, name, id, version, icon string) (packageOpts, er
 			accepted = []string{".icns", ".png"}
 		case "linux":
 			accepted = []string{".png", ".svg"}
+		case "windows":
+			accepted = []string{".ico", ".png"}
 		}
 		if !contains(accepted, ext) {
 			return opts, fmt.Errorf("-app-icon: %s is not a supported icon type on %s (accepted: %s)",
@@ -95,15 +101,19 @@ func contains(xs []string, x string) bool {
 }
 
 // packageApp builds the platform bundle around an already-compiled binary and
-// returns the path to the produced artifact. Dispatches on host GOOS.
-func packageApp(outBin string, opts packageOpts) (string, error) {
+// returns the path to the produced artifact. Dispatches on host GOOS. relink
+// re-runs the program's link step (Windows re-links as a GUI-subsystem
+// executable with resources, ADR-00726); the bundle writers ignore it.
+func packageApp(outBin string, opts packageOpts, relink relinkFunc) (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		return writeMacAppBundle(outBin, opts)
 	case "linux":
 		return writeLinuxDesktop(outBin, opts)
+	case "windows":
+		return writeWindowsApp(outBin, opts, relink)
 	default:
-		return "", fmt.Errorf("-package is only supported on macOS and Linux (this run is on %s) — there is no bundle format to emit on this platform", runtime.GOOS)
+		return "", fmt.Errorf("-package is only supported on macOS, Linux and Windows (this run is on %s) — there is no bundle format to emit on this platform", runtime.GOOS)
 	}
 }
 

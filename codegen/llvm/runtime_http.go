@@ -1325,13 +1325,13 @@ sigtermcall:
 checksigwinch:
   %sigwinchp = load volatile i8, ptr @__kml_sigwinch_pending, align 1
   %sigwinchset = icmp ne i8 %sigwinchp, 0
-  br i1 %sigwinchset, label %sigwinchfire, label %timerscan
+  br i1 %sigwinchset, label %sigwinchfire, label %checksigbreak
 
 sigwinchfire:
   store volatile i8 0, ptr @__kml_sigwinch_pending, align 1
   %sigwinchclos = load ptr, ptr @__kml_sigwinch_closure, align 8
   %hassigwinch = icmp ne ptr %sigwinchclos, null
-  br i1 %hassigwinch, label %sigwinchcall, label %timerscan
+  br i1 %hassigwinch, label %sigwinchcall, label %checksigbreak
 
 sigwinchcall:
   %sigwinchfp_p = getelementptr { ptr, ptr }, ptr %sigwinchclos, i32 0, i32 0
@@ -1339,6 +1339,25 @@ sigwinchcall:
   %sigwinchfp = load ptr, ptr %sigwinchfp_p, align 8
   %sigwinchep = load ptr, ptr %sigwinchep_p, align 8
   call void %sigwinchfp(ptr %sigwinchep)
+  br label %checksigbreak
+
+checksigbreak:
+  %sigbreakp = load volatile i8, ptr @__kml_sigbreak_pending, align 1
+  %sigbreakset = icmp ne i8 %sigbreakp, 0
+  br i1 %sigbreakset, label %sigbreakfire, label %timerscan
+
+sigbreakfire:
+  store volatile i8 0, ptr @__kml_sigbreak_pending, align 1
+  %sigbreakclos = load ptr, ptr @__kml_sigbreak_closure, align 8
+  %hassigbreak = icmp ne ptr %sigbreakclos, null
+  br i1 %hassigbreak, label %sigbreakcall, label %timerscan
+
+sigbreakcall:
+  %sigbreakfp_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 0
+  %sigbreakep_p = getelementptr { ptr, ptr }, ptr %sigbreakclos, i32 0, i32 1
+  %sigbreakfp = load ptr, ptr %sigbreakfp_p, align 8
+  %sigbreakep = load ptr, ptr %sigbreakep_p, align 8
+  call void %sigbreakfp(ptr %sigbreakep)
   br label %timerscan
 
 timerscan:

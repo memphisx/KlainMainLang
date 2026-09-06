@@ -960,6 +960,23 @@ func (e *Emitter) ensureExecvDecl() {
 	}
 }
 
+// ensureAtoiDecl / ensureReadlinkDecl: one declaration each, shared by the
+// cluster, fs and process runtimes (ADR-00728) — they used to declare these
+// independently and collided when two of those modules met in one program.
+func (e *Emitter) ensureAtoiDecl() {
+	if !e.usedAtoiDecl {
+		e.emitGlobal("declare i32 @atoi(ptr noundef)")
+		e.usedAtoiDecl = true
+	}
+}
+
+func (e *Emitter) ensureReadlinkDecl() {
+	if !e.usedReadlinkDecl {
+		e.emitGlobal("declare i64 @readlink(ptr noundef, ptr noundef, i64 noundef)")
+		e.usedReadlinkDecl = true
+	}
+}
+
 func (e *Emitter) ensureExecvpDecl() {
 	if !e.usedExecvpDecl {
 		e.emitGlobal("declare i32 @execvp(ptr noundef, ptr noundef)")

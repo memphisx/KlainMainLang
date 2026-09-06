@@ -933,7 +933,7 @@ func (e *Emitter) ensureFsPathOps() {
 	e.emitGlobal("declare ptr @realpath(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @mkdtemp(ptr noundef)")
 	e.emitGlobal("declare i32 @symlink(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i64 @readlink(ptr noundef, ptr noundef, i64 noundef)")
+	e.ensureReadlinkDecl()
 	e.emitGlobal("declare i32 @chmod(ptr noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @truncate(ptr noundef, i64 noundef)")
 	realpathDesc := e.internString("cannot resolve path")

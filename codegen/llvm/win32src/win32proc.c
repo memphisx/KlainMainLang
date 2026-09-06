@@ -290,21 +290,59 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, int64_t off) {
 typedef void (*kml_sighandler)(int);
 static kml_sighandler kml_sig_handlers[32];
 
+// Signal wake-up (ADR-00728). A POSIX signal interrupts select()/nanosleep()
+// (EINTR), which is how the reactor notices a pending SIGINT while blocked;
+// a console control handler runs on its own thread and interrupts nothing.
+// The handler therefore raises this flag, and the shim's select()/nanosleep()
+// wait in slices while a handler is installed, returning EINTR once it is
+// set — the same shape the IR already handles on POSIX.
+volatile long __kml_win_sig_wake;
+int __kml_win_sig_installed;
+static volatile long kml_sig_queued[32];
+static DWORD kml_sig_thread; // the thread that installed the handlers: the main thread
+
+// Node's mapping (libuv): Ctrl+C → SIGINT (2), Ctrl+Break → SIGBREAK (21),
+// close/logoff/shutdown → SIGHUP (1). An event with no listener returns
+// FALSE so the console's default action (terminate) applies, as in Node.
+//
+// The IR's handler records the signal in a *thread-local* pending flag the
+// reactor polls, which a POSIX kernel sets on the main thread by running the
+// handler there. This callback runs on a console-owned thread, where that
+// flag would land in the wrong TLS; so the event is only queued here and
+// delivered — the handler actually called — on the installing thread the
+// next time it waits (__kml_win_sig_deliver from select()/nanosleep()).
 static BOOL WINAPI kml_ctrl_handler(DWORD ev) {
-	if ((ev == CTRL_C_EVENT || ev == CTRL_BREAK_EVENT) && kml_sig_handlers[2]) { kml_sig_handlers[2](2); return TRUE; }
-	if (ev == CTRL_CLOSE_EVENT && kml_sig_handlers[1]) { kml_sig_handlers[1](1); return TRUE; }
-	return FALSE;
+	int sig = ev == CTRL_C_EVENT ? 2 : ev == CTRL_BREAK_EVENT ? 21 : (ev == CTRL_CLOSE_EVENT || ev == CTRL_LOGOFF_EVENT || ev == CTRL_SHUTDOWN_EVENT) ? 1 : 0;
+	if (!sig || !kml_sig_handlers[sig]) return FALSE;
+	InterlockedExchange(&kml_sig_queued[sig], 1);
+	InterlockedExchange(&__kml_win_sig_wake, 1);
+	if (sig == 1) Sleep(3000); // give the program's SIGHUP listener its chance before the system ends the process
+	return TRUE;
 }
 
-// The handler runs on the console's own thread; the IR's handler only sets
-// a volatile flag the reactor polls, so that is safe.
+// __kml_win_sig_deliver runs the queued signals' handlers when called on the
+// installing thread; returns the number delivered (0 on any other thread or
+// with nothing queued). The waits in select()/nanosleep() call it and report
+// EINTR when it delivered, as the POSIX shape the IR already handles.
+int __kml_win_sig_deliver(void) {
+	if (!__kml_win_sig_installed || GetCurrentThreadId() != kml_sig_thread) return 0;
+	if (!InterlockedExchange(&__kml_win_sig_wake, 0)) return 0;
+	int n = 0;
+	for (int s = 0; s < 32; s++) {
+		if (InterlockedExchange(&kml_sig_queued[s], 0) && kml_sig_handlers[s]) { kml_sig_handlers[s](s); n++; }
+	}
+	return n;
+}
+
 void *signal(int sig, void *handler) {
 	if (sig < 0 || sig >= 32) return (void *)(intptr_t)-1;
 	void *prev = (void *)kml_sig_handlers[sig];
 	kml_sig_handlers[sig] = (kml_sighandler)handler;
-	if (sig == 2 || sig == 1) {
+	if (sig == 2 || sig == 1 || sig == 21) {
 		static int installed;
 		if (!installed) { SetConsoleCtrlHandler(kml_ctrl_handler, TRUE); installed = 1; }
+		kml_sig_thread = GetCurrentThreadId();
+		__kml_win_sig_installed = 1;
 	}
 	return prev;
 }

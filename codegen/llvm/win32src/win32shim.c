@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
+#include <errno.h>
 #include <fenv.h>
 #include <math.h>
 #include <stdarg.h>
@@ -64,12 +65,29 @@ int clock_gettime(int clk, kml_timespec *ts) {
 	return 0;
 }
 
+// Signal wake-up (win32proc.c, ADR-00728): with a console control handler
+// installed, the sleep is taken in slices and a raised flag ends it early
+// with EINTR and the remaining time in rem, as a POSIX signal would.
+extern int __kml_win_sig_installed;
+int __kml_win_sig_deliver(void);
 int nanosleep(const kml_timespec *req, kml_timespec *rem) {
-	(void)rem;
 	int64_t ms = req->sec * 1000 + (req->nsec + 999999) / 1000000;
 	if (ms < 0) ms = 0;
-	Sleep((DWORD)ms);
-	return 0;
+	if (!__kml_win_sig_installed) { Sleep((DWORD)ms); return 0; }
+	ULONGLONG deadline = GetTickCount64() + (ULONGLONG)ms;
+	for (;;) {
+		if (__kml_win_sig_deliver()) {
+			ULONGLONG now = GetTickCount64();
+			int64_t left = deadline > now ? (int64_t)(deadline - now) : 0;
+			if (rem) { rem->sec = left / 1000; rem->nsec = (left % 1000) * 1000000; }
+			errno = EINTR;
+			return -1;
+		}
+		ULONGLONG now = GetTickCount64();
+		if (now >= deadline) return 0;
+		ULONGLONG left = deadline - now;
+		Sleep((DWORD)(left > 50 ? 50 : left));
+	}
 }
 
 // ---- stdio extensions ----------------------------------------------------

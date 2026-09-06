@@ -140,9 +140,13 @@
             "feature": "`process.kill(pid, signal?)`",
             "status": "implemented",
             "notes": [
-              "Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX \"does this process exist\" check and never actually delivers a signal. See [ADR-00026](../adr/ADR-00026.md)."
+              "Sends `signal` (defaults to `15`/`SIGTERM`, matching real Node) to `pid` via POSIX `kill()`. Throws a catchable `Error` if the target process doesn't exist or the signal can't be sent; signal `0` is the standard POSIX \"does this process exist\" check and never actually delivers a signal. See [ADR-00026](../adr/ADR-00026.md).",
+              "The signal may be a name (`'SIGTERM'`, `'SIGINT'`, …) as in Node — a literal resolves at compile time against the host's `os.constants.signals` table, a dynamic string at run time; an unknown literal name is a compile error, the counterpart of Node's `ERR_UNKNOWN_SIGNAL` ([ADR-00729](../adr/ADR-00729.md))",
+              "On Windows every signal except `0` terminates the target unconditionally (libuv's `TerminateProcess`), exit code 1 — a `SIGTERM` listener in the target never runs, as in Node ([ADR-00728](../adr/ADR-00728.md))"
             ],
-            "caveats": []
+            "caveats": [
+              "The thrown message carries the signal number (`kill(pid=…, signal=15)`), not the name Node prints"
+            ]
           },
           {
             "feature": "`process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline)",
@@ -171,12 +175,12 @@
             "feature": "`process.stdin.setRawMode(enabled)` (raw terminal input)",
             "status": "implemented",
             "caveats": [
-              "A no-op when fd 0 is not a terminal (`tcgetattr` fails) — guard on `process.stdin.isTTY` first, as every TUI does",
+              "A no-op when fd 0 is not a terminal (`tcgetattr` fails; on Windows, `GetConsoleMode` fails) — guard on `process.stdin.isTTY` first, as every TUI does",
               "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
               "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable"
             ],
             "notes": [
-              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md))",
+              "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md)); on Windows the same shim uses the console-mode API (line input/echo/processed input off, VT input on, so arrow keys arrive as ESC `[` A there too) — verified in the suite under a ConPTY pseudo-console ([ADR-00727](../adr/ADR-00727.md))",
               "Pair with `process.stdin.on('data')` (event-driven, the Node-idiomatic raw loop) or with `klain:tty` `readByte`/`readKey` (synchronous)"
             ]
           },
@@ -204,11 +208,12 @@
             ]
           },
           {
-            "feature": "`process.on('SIGINT'/'SIGTERM'/'SIGWINCH', handler)` (signal handlers)",
+            "feature": "`process.on('SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK', handler)` (signal handlers)",
             "status": "implemented",
             "caveats": [
-              "The handler runs from ordinary control flow at the top of the event loop's own iteration, never from real async signal context",
-              "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'` (dynamic event names are a clean compile error, matching `Object.hasOwn`'s dynamic-key rejection)",
+              "The handler runs from ordinary control flow at the top of the event loop's own iteration, never from real async signal context (on Windows the console control callback queues the signal and the loop's next wait, at most 50 ms away, delivers it on the main thread — [ADR-00728](../adr/ADR-00728.md))",
+              "Event name must be a compile-time string literal, exactly `'SIGINT'`/`'SIGTERM'`/`'SIGWINCH'`/`'SIGBREAK'` (dynamic event names are a clean compile error, matching `Object.hasOwn`'s dynamic-key rejection)",
+              "Windows, as in Node: `'SIGINT'` fires on Ctrl+C, `'SIGBREAK'` on Ctrl+Break, `'SIGTERM'` is accepted but never fires (`process.kill` terminates unconditionally); `'SIGBREAK'` is accepted on POSIX hosts and never raised there",
               "Handler must be a zero-argument `() => void` closure, same shape `setTimeout`'s own callback requires",
               "One handler slot per signal — registering the same signal twice overwrites the previous handler",
               "Only fires while a `http.listen`-driven or timer-driven event loop is actively iterating; a plain synchronous script with neither has no loop to check from"
@@ -276,7 +281,8 @@
               "`node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred ([TDD-00136](../tdd/TDD-00136.md))"
             ],
             "notes": [
-              "`process.version` = `\"v22.11.0\"`; `process.versions` is a real object (`JSON.stringify`/field access/`Object.keys` all work), matching Node v22.11.0's `node`/`v8` verbatim ([ADR-00396](../adr/ADR-00396.md))"
+              "`process.version` = `\"v22.11.0\"`; `process.versions` is a real object (`JSON.stringify`/field access/`Object.keys` all work), matching Node v22.11.0's `node`/`v8` verbatim ([ADR-00396](../adr/ADR-00396.md))",
+              "`versions.klain` is the compiler's own version, stamped at link time from the release tag by the release pipeline (`klainmain --version` prints the same value; a `make build` stamps `git describe`, a bare `go build` reports `0.0.0-dev`) — [ADR-00732](../adr/ADR-00732.md)"
             ]
           },
           {

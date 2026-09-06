@@ -28,7 +28,12 @@ var webviewSource string
 
 // WebviewSource returns the amalgamated webview/webview C++ source (the header,
 // compiled directly as the translation unit — see the file comment).
-func WebviewSource() string { return webviewSource }
+func WebviewSource() string {
+	if runtime.GOOS == "windows" {
+		return webviewSource + webviewWin32Deferral
+	}
+	return webviewSource
+}
 
 // LocateWebview returns the clang cflags/libs needed to compile and link the
 // webview binding on the host platform, following crypto.go's LocateCrypto
@@ -37,12 +42,19 @@ func WebviewSource() string { return webviewSource }
 //   - darwin: WKWebView lives in WebKit.framework, which ships with the OS —
 //     zero install step. CoreGraphics is linked explicitly for CGRect/CGSize.
 //     -lc++ pulls in the C++ runtime for the amalgamated C++ source.
+//
 //   - linux: pkg-config probe for gtk4 + webkitgtk-6.0, falling back to
 //     gtk+-3.0 + webkit2gtk-4.1 (both API generations are supported upstream).
 //     -lstdc++ for the C++ runtime. A clean error naming the dev packages if
 //     neither generation resolves.
 //
-// Windows is out of scope (TDD-00020), rejected loudly here.
+//   - windows: the upstream WebView2 backend (ADR-00725). The Edge WebView2
+//     runtime ships with Windows 10/11; the build needs only the SDK header
+//     (`WebView2.h`, MSYS2's `mingw-w64-ucrt-x86_64-webview2-loader` package)
+//     since the binding's built-in loader locates the runtime itself — no
+//     WebView2Loader.dll beside the binary. The link line is the system
+//     libraries the header names for MSVC via #pragma comment, which the
+//     mingw driver does not honour, plus -lstdc++ for the C++ runtime.
 func LocateWebview() (cflags, libs []string, err error) {
 	switch runtime.GOOS {
 	case "darwin":
@@ -58,8 +70,10 @@ func LocateWebview() (cflags, libs []string, err error) {
 			}
 		}
 		return nil, nil, fmt.Errorf("webview: no supported WebKitGTK found — install the dev packages (Debian/Ubuntu: `libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`)")
+	case "windows":
+		return locateWebviewWindows()
 	default:
-		return nil, nil, fmt.Errorf("webview: unsupported platform %q (POSIX only — macOS/Linux)", runtime.GOOS)
+		return nil, nil, fmt.Errorf("webview: unsupported platform %q (macOS, Linux, Windows)", runtime.GOOS)
 	}
 }
 

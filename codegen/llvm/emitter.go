@@ -26,6 +26,11 @@ type Symbol struct {
 	Ty      Type
 	Boxed   bool // true once Ptr points to a heap cell shared with closures that capture it
 	IsConst bool // true for a `const`-declared binding; checked by emitAssign to reject plain `=` reassignment
+	// IsCapture marks a closure body's binding for a cell captured from an
+	// enclosing function — visible in the closure's own frame but not one of
+	// its `var`s, so a `var` of the same name there is a fresh local, not a
+	// re-declaration (varRedeclarationTarget).
+	IsCapture bool
 	// NullableBoxed marks a binding whose storage is the presence-flagged
 	// { i1, T } nullable-scalar aggregate (TDD-00064 Option A), as opposed to a
 	// bare scalar slot. Only local variable declarations set it so far; a
@@ -65,6 +70,10 @@ func (s Symbol) isNullableScalarLocal() bool {
 
 type scope struct {
 	syms map[string]Symbol
+	// top marks the program's own frame (created once in NewEmitter): the
+	// one function scope whose `var` bindings live in moduleGlobals rather
+	// than in syms, which the `var` re-declaration check must consult.
+	top bool
 }
 
 // Emitter walks an AST and produces LLVM IR text.
@@ -518,6 +527,10 @@ type Emitter struct {
 	usedHTTPCThunk               bool
 	usedHTTPCBegin               bool
 	usedExecvDecl                bool
+	usedAtoiDecl                 bool
+	usedReadlinkDecl             bool
+	usedSignalFromName           bool
+	usedSignalSigbreak           bool
 	usedExecvpDecl               bool
 	usedExitRawDecl              bool
 	usedForkDecl                 bool
@@ -896,7 +909,31 @@ func NewEmitter() *Emitter {
 		currentRetType:          TypeI32, // main returns i32
 	}
 	e.pushScope()
+	e.scopes[0].top = true
 	return e
+}
+
+// varRedeclarationTarget reports the binding a `var name` re-declaration
+// refers to, when there is one: JS `var` is function-scoped, so a second
+// `var x` in the same function (a `for (var i …)` after an earlier `var i`,
+// or two such loops in a row — the Test262 `S12.14_A11` shape) names the
+// existing variable and its initializer is an assignment, not a new
+// binding that shadows the first (ADR-00728). Only the current function's
+// own frame counts: a closure's captured cells (IsCapture) and an outer
+// function's variables are not re-declared by an inner `var`.
+func (e *Emitter) varRedeclarationTarget(name string) (Symbol, bool) {
+	if len(e.scopes) == 0 {
+		return Symbol{}, false
+	}
+	if sym, ok := e.scopes[0].syms[name]; ok && !sym.IsCapture {
+		return sym, true
+	}
+	if e.scopes[0].top {
+		if sym, ok := e.moduleGlobals[name]; ok {
+			return sym, true
+		}
+	}
+	return Symbol{}, false
 }
 
 // SetMemMode selects the compile-wide memory-management mode ("manual", the

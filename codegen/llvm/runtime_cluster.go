@@ -42,14 +42,14 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.ensureGetenv()
 
 	e.ensureSetenvDecl()
-	e.emitGlobal("declare i32 @atoi(ptr noundef)")
+	e.ensureAtoiDecl()
 	e.ensureExecvDecl()
 	e.ensureExitRawDecl()
 	e.ensureWaitpidDecl()
 	if runtime.GOOS == "darwin" {
 		e.emitGlobal("declare i32 @_NSGetExecutablePath(ptr noundef, ptr noundef)")
 	} else {
-		e.emitGlobal("declare i64 @readlink(ptr noundef, ptr noundef, i64 noundef)")
+		e.ensureReadlinkDecl()
 	}
 
 	e.emitGlobal("@__kml_cluster_next_id = internal global i64 1, align 8")

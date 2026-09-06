@@ -149,8 +149,8 @@ static void kml_embed_handle(int fd, const void *blob) {
   char hdr[512];
   if (kml_embed_resolve(blob, p, rlen, &data, &dlen, &ctype)) {
     int hn = snprintf(hdr, sizeof(hdr),
-      "HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
-      "Connection: close\r\n\r\n", kml_ctype_str(ctype), dlen);
+      "HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %lld\r\n"
+      "Connection: close\r\n\r\n", kml_ctype_str(ctype), (long long)dlen);
     send(fd, hdr, (size_t)hn, 0);
     if (!head && dlen > 0) {
       int64_t off = 0;

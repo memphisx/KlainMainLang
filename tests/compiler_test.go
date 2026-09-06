@@ -67,7 +67,7 @@ func buildBinary(t *testing.T, src string) string {
 
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -418,7 +418,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	shimFile := filepath.Join(dir, "gcshim.c")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -490,7 +490,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	}
 
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -601,7 +601,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 
 	llFile := filepath.Join(dir, "prog.ll")
 	shimFile := filepath.Join(dir, "gcshim.c")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -748,7 +748,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	asanOptFile := filepath.Join(dir, "asan_options.c")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -822,7 +822,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	llFile := filepath.Join(dir, "prog.ll")
 	shimFile := filepath.Join(dir, "gcshim.c")
 	asanOptFile := filepath.Join(dir, "asan_options.c")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
@@ -932,7 +932,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	}
 
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -998,7 +998,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -1094,7 +1094,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	}
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -1153,7 +1153,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	}
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -1211,7 +1211,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	}
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -1250,7 +1250,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	}
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
@@ -1319,7 +1319,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	}
 	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
-	binFile := filepath.Join(dir, "prog")
+	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}

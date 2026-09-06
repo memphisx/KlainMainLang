@@ -7,6 +7,7 @@
 // produces static assets works: `quasar build` (SPA or SSG), `vite build`, etc.
 //
 // Build:  klainmain examples/webview/embedded.ts && ./examples/webview/embedded
+// Windows: klainmain examples/webview/embedded.ts && examples/webview/embedded.exe (WebView2; see README)
 // (move or delete examples/webview/dist/ afterward to prove it's embedded.)
 //
 // For lower-level control, `import { embedDir } from 'klain:assets'` gives an

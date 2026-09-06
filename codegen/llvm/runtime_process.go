@@ -3,6 +3,8 @@ package llvm
 import (
 	"fmt"
 	"runtime"
+	"sort"
+	"strings"
 )
 
 // stdinGlobalName returns the actual external symbol backing C's `stdin`
@@ -559,7 +561,7 @@ ok:
 	}
 	// Linux and other /proc-bearing systems.
 	e.emitGlobal(`@__kml_procself_exe = private unnamed_addr constant [15 x i8] c"/proc/self/exe\00"`)
-	e.emitGlobal("declare i64 @readlink(ptr, ptr, i64)")
+	e.ensureReadlinkDecl()
 	e.emitGlobal(`
 define ptr @__kml_execpath() {
 entry:
@@ -674,6 +676,48 @@ ok:
 // on BSD/Darwin) to always return EINTR on a signal regardless of
 // SA_RESTART, so signal()'s restart semantics don't matter for this
 // design's correctness.
+// signalNumbers is the host's signal-name table for process.kill(pid, name)
+// (ADR-00728): the names Node's os.constants.signals exposes on that host,
+// with the numbers the host's kill() takes — Linux's on Linux (and on
+// Windows, where the shim accepts Linux numbers; SIGBREAK is libuv's 21),
+// Darwin's on macOS. Node rejects a name outside the host's table with
+// ERR_UNKNOWN_SIGNAL, which the compile-time rejection / runtime -1 mirror.
+var signalNumbers = func() map[string]int {
+	switch runtime.GOOS {
+	case "windows":
+		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGILL": 4, "SIGABRT": 6, "SIGFPE": 8, "SIGKILL": 9, "SIGSEGV": 11, "SIGTERM": 15, "SIGBREAK": 21, "SIGWINCH": 28}
+	case "darwin":
+		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGILL": 4, "SIGTRAP": 5, "SIGABRT": 6, "SIGEMT": 7, "SIGFPE": 8, "SIGKILL": 9, "SIGBUS": 10, "SIGSEGV": 11, "SIGSYS": 12, "SIGPIPE": 13, "SIGALRM": 14, "SIGTERM": 15, "SIGURG": 16, "SIGSTOP": 17, "SIGTSTP": 18, "SIGCONT": 19, "SIGCHLD": 20, "SIGTTIN": 21, "SIGTTOU": 22, "SIGIO": 23, "SIGXCPU": 24, "SIGXFSZ": 25, "SIGVTALRM": 26, "SIGPROF": 27, "SIGWINCH": 28, "SIGINFO": 29, "SIGUSR1": 30, "SIGUSR2": 31}
+	default:
+		return map[string]int{"SIGHUP": 1, "SIGINT": 2, "SIGQUIT": 3, "SIGILL": 4, "SIGTRAP": 5, "SIGABRT": 6, "SIGBUS": 7, "SIGFPE": 8, "SIGKILL": 9, "SIGUSR1": 10, "SIGSEGV": 11, "SIGUSR2": 12, "SIGPIPE": 13, "SIGALRM": 14, "SIGTERM": 15, "SIGCHLD": 17, "SIGCONT": 18, "SIGSTOP": 19, "SIGTSTP": 20, "SIGTTIN": 21, "SIGTTOU": 22, "SIGURG": 23, "SIGXCPU": 24, "SIGXFSZ": 25, "SIGVTALRM": 26, "SIGPROF": 27, "SIGWINCH": 28, "SIGIO": 29, "SIGPWR": 30, "SIGSYS": 31}
+	}
+}()
+
+// ensureSignalFromName defines __kml_signal_from_name(ptr name) -> i64: the
+// runtime lookup for a non-literal signal name in process.kill, over the same
+// host table; -1 for an unknown name (kill() then fails with EINVAL and the
+// existing throw path reports it).
+func (e *Emitter) ensureSignalFromName() {
+	if e.usedSignalFromName {
+		return
+	}
+	e.usedSignalFromName = true
+	e.ensureStrcmp()
+	names := make([]string, 0, len(signalNumbers))
+	for n := range signalNumbers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("\ndefine i64 @__kml_signal_from_name(ptr %name) {\nentry:\n  br label %c0\n")
+	for i, n := range names {
+		ptr := e.internString(n)
+		fmt.Fprintf(&b, "c%d:\n  %%r%d = call i32 @strcmp(ptr %%name, ptr %s)\n  %%eq%d = icmp eq i32 %%r%d, 0\n  br i1 %%eq%d, label %%hit%d, label %%c%d\nhit%d:\n  ret i64 %d\n", i, i, ptr, i, i, i, i, i+1, i, signalNumbers[n])
+	}
+	fmt.Fprintf(&b, "c%d:\n  ret i64 -1\n}", len(names))
+	e.emitGlobal(b.String())
+}
+
 func (e *Emitter) ensureSignalHandlerRuntime() {
 	if e.usedSignalHandler {
 		return
@@ -685,9 +729,14 @@ func (e *Emitter) ensureSignalHandlerRuntime() {
 	// TDD-00031: SIGWINCH (terminal resize) is a third literal on the same
 	// flag/closure machinery — SIGWINCH is signal 28 on both Linux and Darwin.
 	e.emitGlobal("@__kml_sigwinch_pending = internal thread_local global i8 0")
+	// SIGBREAK (ADR-00728): Ctrl+Break at a Windows console, libuv's signal
+	// 21 there; a listener is accepted on every host, as in Node, and only a
+	// Windows build ever sets the flag (ensureSignalRegisteredSigbreak).
+	e.emitGlobal("@__kml_sigbreak_pending = internal thread_local global i8 0")
 	e.emitGlobal("@__kml_sigint_closure = internal thread_local global ptr null")
 	e.emitGlobal("@__kml_sigterm_closure = internal thread_local global ptr null")
 	e.emitGlobal("@__kml_sigwinch_closure = internal thread_local global ptr null")
+	e.emitGlobal("@__kml_sigbreak_closure = internal thread_local global ptr null")
 	e.emitGlobal(`
 define void @__kml_sig_handler(i32 %signum) {
 entry:
@@ -708,15 +757,38 @@ setterm:
 
 checkwinch:
   %iswinch = icmp eq i32 %signum, 28
-  br i1 %iswinch, label %setwinch, label %done
+  br i1 %iswinch, label %setwinch, label %checkbreak
 
 setwinch:
   store volatile i8 1, ptr @__kml_sigwinch_pending
   ret void
 
+checkbreak:
+  %isbreak = icmp eq i32 %signum, 21
+  br i1 %isbreak, label %setbreak, label %done
+
+setbreak:
+  store volatile i8 1, ptr @__kml_sigbreak_pending
+  ret void
+
 done:
   ret void
 }`)
+}
+
+// ensureSignalRegisteredSigbreak installs __kml_sig_handler for SIGBREAK
+// (Ctrl+Break, libuv's signal 21) on Windows only — on POSIX hosts 21 is
+// SIGTTIN and Node never raises SIGBREAK there, so the listener is merely
+// accepted (ADR-00728).
+func (e *Emitter) ensureSignalRegisteredSigbreak() {
+	if e.usedSignalSigbreak {
+		return
+	}
+	e.usedSignalSigbreak = true
+	e.ensureSignalHandlerRuntime()
+	if runtime.GOOS == "windows" {
+		e.emitInstr("call ptr @signal(i32 21, ptr @__kml_sig_handler)")
+	}
 }
 
 // ensureSignalRegisteredSigint / ensureSignalRegisteredSigterm each call

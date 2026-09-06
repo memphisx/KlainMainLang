@@ -6,6 +6,9 @@
 /klainmain
 /klainmain.exe
 
+# Release binaries built by the release workflow / a local `make dist`
+/dist/
+
 # Conformance runner binary (built by `make conformance*` from tools/conformance)
 /conformance
 /conformance.exe

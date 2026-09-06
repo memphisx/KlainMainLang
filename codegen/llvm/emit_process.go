@@ -495,7 +495,7 @@ func (e *Emitter) emitProcessVersions(pos ast.Pos) (Value, error) {
 	props := []ast.ObjectProperty{
 		{Key: "node", Value: ast.NewStringLiteral(nodeCompatVersion, pos)},
 		{Key: "v8", Value: ast.NewStringLiteral(nodeCompatV8, pos)},
-		{Key: "klain", Value: ast.NewStringLiteral(klainVersion, pos)},
+		{Key: "klain", Value: ast.NewStringLiteral(KlainVersion, pos)},
 	}
 	return e.emitObjectLiteral(ast.NewObjectLiteral(props, pos))
 }
@@ -588,6 +588,15 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		}
 		e.ensureSignalRegisteredSigwinch()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigwinch_closure", closurePtr))
+	case "SIGBREAK":
+		// Ctrl+Break at a Windows console (ADR-00728). Node accepts the
+		// listener on every host and only Windows ever fires it.
+		closurePtr, err := e.timerCallbackPtr(args[1], "process.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureSignalRegisteredSigbreak()
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sigbreak_closure", closurePtr))
 	case "exit":
 		// The 'exit' listener receives the exit code: (code: number) => void.
 		// The param is a `number` (float64, TDD-00123) — the runtime's
@@ -643,7 +652,7 @@ func (e *Emitter) emitProcessOn(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.ensureProcessWarningHandler()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_process_warning_handler, align 8", cb.hdrPtr))
 	default:
-		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'SIGWINCH'/'exit'/'uncaughtException'/'warning' (got %q)", pos.Line, pos.Col, eventLit.Value)
+		return Value{}, fmt.Errorf("%d:%d: process.on supports 'SIGINT'/'SIGTERM'/'SIGWINCH'/'SIGBREAK'/'exit'/'uncaughtException'/'warning' (got %q)", pos.Line, pos.Col, eventLit.Value)
 	}
 	return Value{Ty: TypeVoid}, nil
 }
@@ -664,12 +673,31 @@ func (e *Emitter) emitProcessKill(args []ast.Expression, pos ast.Pos) (Value, er
 
 	sigRef := "15"
 	if len(args) == 2 {
-		sigVal, err := e.emitExpr(args[1])
-		if err != nil {
-			return Value{}, err
+		// Node's canonical form is the signal *name* (`process.kill(pid,
+		// 'SIGTERM')`); a number is accepted too. A literal name resolves at
+		// compile time; a dynamic string goes through the runtime table
+		// (ADR-00728). Unknown names throw, as Node's ERR_UNKNOWN_SIGNAL does.
+		if lit, ok := args[1].(*ast.StringLiteral); ok {
+			n, known := signalNumbers[lit.Value]
+			if !known {
+				return Value{}, fmt.Errorf("%d:%d: process.kill: unknown signal %q", pos.Line, pos.Col, lit.Value)
+			}
+			sigRef = fmt.Sprint(n)
+		} else {
+			sigVal, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			if isStringTy(sigVal.Ty) {
+				e.ensureSignalFromName()
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_signal_from_name(ptr %s)", r, sigVal.Ref))
+				sigRef = r
+			} else {
+				sigVal = e.coerce(sigVal, TypeI64)
+				sigRef = sigVal.Ref
+			}
 		}
-		sigVal = e.coerce(sigVal, TypeI64)
-		sigRef = sigVal.Ref
 	}
 
 	e.ensureProcessKill()

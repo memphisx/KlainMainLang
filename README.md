@@ -15,7 +15,7 @@ Broad strokes:
 - **The language itself is basically all there.** Classes, generics, closures, `async`/`await`, the whole type-system circus (unions, generics with constraints, mapped and conditional types) — if it's core TypeScript, it probably compiles. Even the once-hard dynamic corners are in now: `Proxy`/`Reflect`, a real prototype-chain object model, and decorators (both the experimental and standard dialects, including factory `@dec(...)` calls — class-decorator *replacement* is the corner still open). The main holdout left is `eval`.
 - **You can write a real server.** Both the bespoke `http.listen` and a real `http.createServer` speak HTTP/1.1 and HTTP/2 (h2c) out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
 - **The browser-shaped APIs that make sense off the browser all work.** `fetch`, `URL`, `WebSocket`, Web Crypto, Streams, `AbortController`, timers. The actually-browser-only stuff (DOM, Canvas, WebGL) is out, on purpose.
-- **You can ship a desktop app, too.** `import { Webview } from 'klain:webview'` opens a real window over the system browser engine and calls straight into typed native code; `new Webview({ serve: './dist' })` embeds a built SPA/SSG (React/Vue/Svelte/Quasar) into the binary and serves it from an in-binary server — a single-file desktop app, packaged to a `.app`/`.desktop` with `-package`. macOS-verified; Linux is compile-tier.
+- **You can ship a desktop app, too.** `import { Webview } from 'klain:webview'` opens a real window over the system browser engine and calls straight into typed native code; `new Webview({ serve: './dist' })` embeds a built SPA/SSG (React/Vue/Svelte/Quasar) into the binary and serves it from an in-binary server — a single-file desktop app, packaged to a `.app`/`.desktop`/GUI `.exe` with `-package`. macOS- and Windows-verified; Linux is compile-tier.
 - **It fuzzes itself.** The lexer, the parser, and the whole parse-to-binary pipeline all have fuzz targets (`make fuzz` / `fuzz-codegen` / `fuzz-all`) — the codegen one drives real source all the way through `clang` and runs the result.
 - **What'll bite you.** A bare `: number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, just like JS) — reach for a JSDoc `int8…uint64` width when you mean exact machine integers. Concurrency is cooperative (one fiber at a time per thread, no preemption). The object model is two-tier: a statically-typed object is a fixed-shape struct (you can't bolt a new property onto it at runtime), while an `any`-typed value — or anything under `-compat=js` — gets the full dynamic bag (runtime property add/delete, prototype chain, `Proxy`). All deliberate. `docs/status/` has the honest corner-cases for everything above.
 
@@ -36,7 +36,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - a crypto backend library, needed only if the compiled program uses `crypto.subtle` — OpenSSL 3's libcrypto by default (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`), or Apple CommonCrypto + Security.framework with `-crypto=commoncrypto` (macOS only, ships with the OS — no install at all). Same conditional-linking convention: a program without `crypto.subtle` stays plain-libc (`crypto.getRandomValues`/`randomUUID` use the OS CSPRNG directly, no library). See [docs/tdd/TDD-00104.md](docs/tdd/TDD-00104.md)
 - OpenSSL 3's **libssl**, needed only if the compiled program uses the `tls` module (`tls.connect`/`tls.createServer`) or a `WebSocket` (its URL scheme — `ws://` vs `wss://` — is a runtime value, so any WebSocket program links libssl) — ships alongside libcrypto (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`). `tls` is OpenSSL-only (`-crypto=commoncrypto` is rejected for it). Same conditional-linking convention: a program that doesn't use `tls` never links libssl. See [docs/tdd/TDD-00109.md](docs/tdd/TDD-00109.md)
 - **libnghttp2**, needed if the compiled program calls `http.listen` — the server transparently accepts cleartext HTTP/2 (h2c) via nghttp2's session API, so every `http.listen` program links `-lnghttp2` (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). Same conditional-linking convention: a program without `http.listen` never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
-- a **system webview**, needed only if the compiled program constructs a `Webview` (`import { Webview } from 'klain:webview'`) — the desktop-window module compiles a vendored C++ binding over the OS browser engine. **macOS needs nothing** (WebKit.framework ships with the OS). Linux needs the WebKitGTK dev packages at build time (`apt-get install libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`) and the matching shared libs at run time. Windows is out of scope. Same conditional-linking convention: a program without a `Webview` never links it. `new Webview({ serve: './dist' })` (or `import { embedDir } from 'klain:assets'`) embeds a built SPA/SSG directory into the binary and serves it from an in-binary static server — a single-file desktop app with no external `dist/`. See [docs/status/DESKTOP-WEBVIEW.md](docs/status/DESKTOP-WEBVIEW.md)
+- a **system webview**, needed only if the compiled program constructs a `Webview` (`import { Webview } from 'klain:webview'`) — the desktop-window module compiles a vendored C++ binding over the OS browser engine. **macOS needs nothing** (WebKit.framework ships with the OS). Linux needs the WebKitGTK dev packages at build time (`apt-get install libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`) and the matching shared libs at run time. Windows needs only the WebView2 SDK header at build time (`pacman -S mingw-w64-ucrt-x86_64-webview2-loader`); it renders with the Edge WebView2 runtime that is part of Windows 10/11, and nothing ships beside the app. Same conditional-linking convention: a program without a `Webview` never links it. `new Webview({ serve: './dist' })` (or `import { embedDir } from 'klain:assets'`) embeds a built SPA/SSG directory into the binary and serves it from an in-binary static server — a single-file desktop app with no external `dist/`. See [docs/status/DESKTOP-WEBVIEW.md](docs/status/DESKTOP-WEBVIEW.md)
 
 ### Windows
 
@@ -46,22 +46,38 @@ Windows 11 x86-64 is supported through the mingw-w64 UCRT toolchain from MSYS2 (
 2. Go 1.26+ (`winget install GoLang.Go`).
 3. LLVM 15+ (`winget install LLVM.LLVM`) — `clang` and `lld`. The compiler drives this clang with `--target=x86_64-w64-mingw32 --sysroot=C:\msys64\ucrt64`; set `KLAIN_SYSROOT` if MSYS2 lives elsewhere.
 4. GNU Make (`winget install GnuWin32.Make`, or MSYS2's `make`).
-5. MSYS2 (`winget install MSYS2.MSYS2`), then in an MSYS2 shell: `pacman -S mingw-w64-ucrt-x86_64-toolchain` for the C runtime headers and libraries, and `pacman -S mingw-w64-ucrt-x86_64-{curl,sqlite3,pcre2,libtommath,openssl,nghttp2,gc,zlib}` for the optional libraries listed above.
+5. MSYS2 (`winget install MSYS2.MSYS2`), then in an MSYS2 shell: `pacman -S mingw-w64-ucrt-x86_64-toolchain` for the C runtime headers and libraries, and `pacman -S mingw-w64-ucrt-x86_64-{curl,sqlite3,pcre2,libtommath,openssl,nghttp2,gc,zlib}` for the optional libraries listed above (plus `mingw-w64-ucrt-x86_64-webview2-loader` for `klain:webview`).
 
 PATH matters on Windows: put `C:\msys64\ucrt64\bin` *ahead of* Git for Windows' `mingw64\bin` (Git's own `curl` has no HTTP/2, and compiled programs find the optional libraries' DLLs there at run time), and add `C:\msys64\usr\bin` for the coreutils (`echo`, `printf`, `sh`) the child_process tests spawn. A freshly installed tool is often visible only to terminals opened afterwards — or after a sign-out — on Windows. If a traffic-filtering product such as AdGuard is running, exclude `127.0.0.1` from it (or pause it) before running the test suite: it resets loopback TLS handshakes, answers HTTP/2 prefaces itself, and cuts large request bodies, which shows up as failing network tests that pass the moment it is off.
 
-What differs on Windows, by design (Node behaves the same way there): `process.platform` is `win32`, `os.EOL` is `\r\n`, `os.homedir()`/`os.tmpdir()` read `USERPROFILE`/`TEMP`, `fs.chmod` only toggles the read-only attribute, `fs.symlink` needs Developer Mode or an elevated token, `process.on('SIGTERM')` listeners are accepted but never fire, and the `process.getuid` family does not exist. Known gaps: `path` is still POSIX-shaped (no `path.win32` default yet), `cluster`/`http.listen({ workers })` share one listening socket across workers instead of Node's round-robin from the primary, `--static`, `-package`, `Webview`, and `-crypto=commoncrypto` stay out of scope, and there is no ASan/UBSan runtime for the mingw target in LLVM's Windows build.
+What differs on Windows, by design (Node behaves the same way there): `process.platform` is `win32`, `os.EOL` is `\r\n`, `os.homedir()`/`os.tmpdir()` read `USERPROFILE`/`TEMP`, `fs.chmod` only toggles the read-only attribute, `fs.symlink` needs Developer Mode or an elevated token, `process.on('SIGINT')` fires on Ctrl+C and `process.on('SIGBREAK')` on Ctrl+Break while `process.on('SIGTERM')` listeners are accepted but never fire (`process.kill` terminates unconditionally), and the `process.getuid` family does not exist. `-package` produces a GUI-subsystem `<name>\<name>.exe` with icon and version resources beside the console build. Known gaps: `cluster`/`http.listen({ workers })` share one listening socket across workers instead of Node's round-robin from the primary, `--static` and `-crypto=commoncrypto` stay out of scope, and there is no ASan/UBSan runtime for the mingw target in LLVM's Windows build.
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
 - **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See `docs/adr/README.md` for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
 - **Valgrind** — `apt-get install valgrind` on Debian/Ubuntu. **On Apple Silicon (arm64) macOS, Valgrind has historically had no official upstream support** — `brew install valgrind` may fail outright or install a build that doesn't actually work; confirm directly before relying on it there rather than assuming parity with the Linux box. ASan/UBSan (above) work identically on both platforms and should be the default tool; reach for Valgrind only for the specific class of bug (e.g. conservative-GC-adjacent memory questions) where its instruction-level, allocator-agnostic instrumentation is worth the extra setup friction — and expect some false-positive "uninitialized value" noise from Boehm GC's own conservative stack scanning under Memcheck, a known pattern for conservative collectors, generally addressed with suppressions rather than code changes.
 
+## Install
+
+Every release ships a prebuilt `klainmain` for each platform whose test suite passed for that version — Linux x64/arm64, macOS x64/arm64 (Apple Silicon), Windows x64 — as `klainmain-v<version>-<platform>[.exe]` plus a `checksums.txt` on the [GitHub Releases](https://github.com/memphisx/KlainMainLang/releases) page. A platform whose lane was red is left out of that release and comes back with the next release that is green there (the install script says so if it cannot find your platform). The binary is the compiler only: it drives `clang` and links against the libraries in the Requirements section, which you install with the OS package manager.
+
+```sh
+# Linux / macOS → ~/.local/bin/klainmain (no sudo)
+curl -fsSL https://raw.githubusercontent.com/memphisx/KlainMainLang/main/install.sh | sh
+```
+
+```powershell
+# Windows → %LOCALAPPDATA%\Programs\klainmain\klainmain.exe (no elevation; added to the user PATH)
+irm https://raw.githubusercontent.com/memphisx/KlainMainLang/main/install.ps1 | iex
+```
+
+Both scripts verify the SHA-256 from `checksums.txt`, print `klainmain --version` when done, and honour `KLAINMAIN_VERSION=v0.64.0` (a specific release instead of the latest) and `KLAINMAIN_INSTALL_DIR` (another directory). `klainmain --version` prints the version stamped from the release tag; `process.versions.klain` in a compiled program is the same value.
+
 ## Quick start
 
 ```sh
 # Build the compiler
-make build          # produces ./klainmain
+make build          # produces ./klainmain (stamped with `git describe`; `make dist` cross-compiles every platform into dist/)
 
 # Compile a TypeScript file to a native binary (does NOT run it)
 ./klainmain examples/basics/basics.ts
@@ -85,7 +101,8 @@ make ir FILE=examples/basics/basics.ts
 
 | Target | Description |
 |---|---|
-| `make build` | Compile the KlainMainLang compiler to `./klainmain` |
+| `make build` | Compile the KlainMainLang compiler to `./klainmain` (version stamped from `git describe`) |
+| `make dist` | Cross-compile the release binaries for all five platforms into `dist/` with `checksums.txt` (what the release workflow does, minus the per-platform test gate) |
 | `make install` | Install to `$GOPATH/bin` |
 | `make test` | Run Go unit tests |
 | `make test-par` | Same tests, sharded across `SHARDS` (default 4) parallel processes for a faster local pre-check — ~1.5–2× (the E2E suite is subprocess/IO-bound, so more shards just thrash); any failure is re-run serially so a parallel-unsafe test doesn't flake the run. `make test` stays the source of truth |
@@ -178,10 +195,13 @@ klainmain [flags] <file.ts>
 
   --package     After compiling, also build a double-clickable desktop app
                 around the binary: a .app bundle on macOS, a .desktop launcher
-                on Linux. For klain:webview GUI programs. The standalone binary
+                on Linux, a GUI-subsystem <name>\<name>.exe with icon and
+                version resources on Windows (no console window beside the
+                webview). For klain:webview GUI programs. The standalone binary
                 is still produced too. Metadata via --app-name / --app-id /
                 --app-version / --app-icon (a .icns or .png on macOS; .png/.svg
-                on Linux). Targets the host platform (no cross-packaging).
+                on Linux; .ico or a .png up to 256x256 on Windows). Targets the
+                host platform (no cross-packaging).
 ```
 
 Run `klainmain` with no file (or `klainmain --help`) to print this list with

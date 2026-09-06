@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -121,7 +124,7 @@ func TestPackageBundleStructure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := packageApp(bin, opts)
+	artifact, err := packageApp(bin, opts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +157,112 @@ func TestPackageBundleStructure(t *testing.T) {
 		}
 		if !strings.Contains(string(entry), "Type=Application") || !strings.Contains(string(entry), `Exec="/`) {
 			t.Errorf("bad .desktop:\n%s", entry)
+		}
+	}
+}
+
+// --- Windows (ADR-00726): pure builders, run on every host ---
+
+func TestVersionQuad(t *testing.T) {
+	cases := map[string]string{
+		"1.0.0": "1,0,0,0", "2.3": "2,3,0,0", "1.2.3.4": "1,2,3,4", "1.2.3.4.5": "1,2,3,4",
+		"1.2.3-beta": "1,2,3,0", "v1": "0,0,0,0", "": "0,0,0,0", "70000.1": "0,0,0,0",
+	}
+	for in, want := range cases {
+		if got := versionQuad(in); got != want {
+			t.Errorf("versionQuad(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBuildWindowsRC(t *testing.T) {
+	opts := packageOpts{AppName: `Tom "the" App`, AppID: "com.klain.tom", Version: "2.1.0"}
+	rc := buildWindowsRC(opts, `C:\x\app.ico`)
+	for _, want := range []string{
+		`1 ICON "C:/x/app.ico"`, "1 VERSIONINFO", "FILEVERSION 2,1,0,0", "PRODUCTVERSION 2,1,0,0",
+		`VALUE "FileDescription", "Tom ""the"" App"`, `VALUE "OriginalFilename", "Tom ""the"" App.exe"`,
+		`VALUE "FileVersion", "2.1.0"`, `VALUE "Translation", 0x409, 1200`,
+	} {
+		if !strings.Contains(rc, want) {
+			t.Errorf(".rc missing %q\n%s", want, rc)
+		}
+	}
+	if strings.Contains(buildWindowsRC(opts, ""), "ICON") {
+		t.Errorf("ICON statement must be omitted when there is no icon")
+	}
+	if got := rcQuote(`a\b`); got != `"a\\b"` {
+		t.Errorf("rcQuote backslash: %s", got)
+	}
+}
+
+func TestPngToICO(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	ico, err := pngToICO(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ICONDIR (6) + one ICONDIRENTRY (16) + the PNG verbatim.
+	if len(ico) != 22+buf.Len() || !bytes.Equal(ico[22:], buf.Bytes()) {
+		t.Fatalf("ico layout wrong: %d bytes for a %d-byte PNG", len(ico), buf.Len())
+	}
+	if ico[2] != 1 || ico[4] != 1 || ico[6] != 1 || ico[7] != 1 {
+		t.Errorf("ICONDIR/ENTRY header wrong: % x", ico[:22])
+	}
+	buf.Reset()
+	_ = png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 300, 300)))
+	if _, err := pngToICO(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "256x256") {
+		t.Errorf("expected the 256x256 ceiling error, got %v", err)
+	}
+	if _, err := pngToICO([]byte("not a png")); err == nil {
+		t.Errorf("expected a decode error for non-PNG data")
+	}
+}
+
+// TestPackageWindowsAppStructure packages a stub through a fake relink and
+// asserts the artifact layout and link arguments — no clang, runs only where
+// packageApp dispatches to the Windows writer.
+func TestPackageWindowsAppStructure(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skipf("Windows packaging dispatch (this is %s)", runtime.GOOS)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "stub.exe")
+	if err := os.WriteFile(bin, []byte("MZ"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := resolvePackageOpts(bin, "", "", "3.4.5", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.AppName != "stub" {
+		t.Fatalf("AppName default = %q, want stub (extension stripped)", opts.AppName)
+	}
+	var gotExtra []string
+	var gotOut string
+	relink := func(extra []string, out string) error {
+		gotExtra, gotOut = extra, out
+		return os.WriteFile(out, []byte("MZ"), 0755)
+	}
+	artifact, err := packageApp(bin, opts, relink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "stub", "stub.exe"); artifact != want || gotOut != want {
+		t.Fatalf("artifact = %q (relink out %q), want %q", artifact, gotOut, want)
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		t.Fatalf("artifact missing: %v", err)
+	}
+	if !contains(gotExtra, "-Wl,--subsystem,windows") {
+		t.Errorf("relink args lack the GUI subsystem switch: %v", gotExtra)
+	}
+	// The sidecar resources are cleaned up after the link.
+	for _, side := range []string{"app.rc", "app.res", "app.ico"} {
+		if _, err := os.Stat(filepath.Join(dir, "stub", side)); err == nil {
+			t.Errorf("sidecar %s left behind", side)
 		}
 	}
 }

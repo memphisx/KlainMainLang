@@ -10,6 +10,7 @@
 // `home`, `listDir`, `readText`, `readImage`.
 //
 // Build:  klainmain examples/webview/explorer.ts && ./examples/webview/explorer
+// Windows: klainmain examples/webview/explorer.ts && examples/webview/explorer.exe (WebView2; see README)
 // (macOS: zero extra deps; Linux: WebKitGTK dev packages — see README.)
 //
 // `serve` embeds ./file-explorer/dist into the binary at compile time and

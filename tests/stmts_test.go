@@ -505,3 +505,39 @@ const h = ([[a], [b, c]]: number[][]): number => a + b + c
 console.log(h([[1], [2, 3]]))
 `, "7\n6")
 }
+
+// A `var` re-declared in a nested block (a for-init, an if body) is the same
+// function-scoped variable, not a shadowing block binding — at file top level
+// (where the resolver mangles the first declaration) and inside a function
+// (where the emitter would otherwise allocate a second slot). The Test262
+// `S12.14_A11_T2` loops spun forever on the top-level form (ADR-00730).
+func TestE2EVarRedeclarationInForInitIsSameVariable(t *testing.T) {
+	assertOutputImports(t, `
+var c = 0
+for (var c = 0; c < 3;) { c += 1 }
+console.log("top " + c)
+var d = 0
+for (var d = 0; d < 10;) {
+  try { throw "x" } catch (e) { d += 1; continue }
+}
+console.log("catch " + d)
+var e6 = 0, fin = 0
+for (var e6 = 0; e6 < 10;) {
+  try { e6 += 1; throw "ex" } finally { fin = 1; continue }
+}
+console.log("finally " + e6 + " " + fin)
+var i = 0
+for (var i = 0; i < 2; i++) {}
+for (var i = 0; i < 5; i++) {}
+console.log("twice " + i)
+if (true) { var z = 7 }
+var z = z + 1
+console.log("if " + z)
+function f(): number {
+  var k = 1
+  for (var k = 0; k < 4;) { k += 1 }
+  return k
+}
+console.log("fn " + f())
+`, "top 3\ncatch 10\nfinally 10 1\ntwice 5\nif 8\nfn 4")
+}

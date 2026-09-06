@@ -1,16 +1,22 @@
 package llvm
 
 // Version constants surfaced through process.version / process.versions
-// (TDD-00136).
+// (TDD-00136), and the compiler's own version (TDD-00179).
+
+// KlainVersion is this compiler's own version — printed by `klainmain
+// --version` and baked into every compiled program as
+// process.versions.klain. It is a variable, not a constant, because the
+// release pipeline stamps it at link time from the release tag:
+//
+//	go build -ldflags "-X KlainMainLang/codegen/llvm.KlainVersion=1.2.3"
+//
+// `make build` stamps a `git describe` of the checkout the same way; a plain
+// `go build` keeps the default below, which is deliberately not a real
+// version so a stray unstamped binary is recognisable. Tests never assert a
+// literal value (they read this variable).
+var KlainVersion = "0.0.0-dev"
 
 const (
-	// klainVersion is this compiler's own version — surfaced as
-	// process.versions.klain. This constant is the single source of truth (no
-	// build-time injection yet). Each release bumps the minor (0.51 → 0.52), so
-	// this is set to the next release's version since the change ships in it. A
-	// better versioning scheme is planned once the project reaches 1.0.
-	klainVersion = "0.52.0"
-
 	// nodeCompatVersion / nodeCompatV8 are the Node.js release this compiler's
 	// API fidelity is measured against: the Node test/parallel corpus is
 	// pinned to it (tools/conformance/fetch.sh NODE_TAG), so it is the honest

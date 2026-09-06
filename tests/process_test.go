@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"KlainMainLang/codegen/llvm"
 )
 
 // --- process.argv / process.exit / process.env ---
@@ -314,6 +316,41 @@ func TestE2EProcessKillWrongArgCountRejected(t *testing.T) {
 	}
 }
 
+// process.kill's canonical Node form names the signal ('SIGTERM'); a literal
+// resolves at compile time, a dynamic string through the runtime table, and
+// an unknown literal is rejected as Node's ERR_UNKNOWN_SIGNAL is (ADR-00729).
+func TestE2EProcessKillSignalNameLiteral(t *testing.T) {
+	assertOutput(t, `
+try {
+    process.kill(999999999, 'SIGTERM')
+    console.log("should not print")
+} catch (e) {
+    console.log(e.message.startsWith("kill(pid=999999999, signal=15): "))
+}
+`, "true")
+}
+
+func TestE2EProcessKillSignalNameDynamic(t *testing.T) {
+	assertOutput(t, `
+const names = ['SIGINT', 'SIGKILL']
+for (const n of names) {
+  try {
+    process.kill(999999999, n)
+    console.log("should not print")
+  } catch (e) {
+    console.log(e.message.split(":")[0])
+  }
+}
+`, "kill(pid=999999999, signal=2)\nkill(pid=999999999, signal=9)")
+}
+
+func TestE2EProcessKillUnknownSignalNameRejected(t *testing.T) {
+	_, err := parseAndCompile(`process.kill(1, 'SIGNOPE')`)
+	if err == nil || !strings.Contains(err.Error(), "unknown signal") {
+		t.Fatalf("expected an unknown-signal rejection, got: %v", err)
+	}
+}
+
 // --- process.stdout.write / process.stderr.write ---
 
 func TestE2EProcessStdoutWriteNoAutoNewline(t *testing.T) {
@@ -583,12 +620,16 @@ func TestE2EProcessVersion(t *testing.T) {
 }
 
 func TestE2EProcessVersionsObject(t *testing.T) {
+	// versions.klain is whatever the compiler was stamped with (the release
+	// tag in CI, a git describe under `make build`, 0.0.0-dev for a bare
+	// `go build`), so the expectation reads the variable, never a literal.
+	k := llvm.KlainVersion
 	assertOutput(t, `
 console.log(process.versions.node);
 console.log(process.versions.v8);
 console.log(process.versions.klain);
 console.log(JSON.stringify(process.versions));
-`, "22.11.0\n12.4.254.21-node.21\n0.52.0\n{\"node\":\"22.11.0\",\"v8\":\"12.4.254.21-node.21\",\"klain\":\"0.52.0\"}")
+`, "22.11.0\n12.4.254.21-node.21\n"+k+"\n{\"node\":\"22.11.0\",\"v8\":\"12.4.254.21-node.21\",\"klain\":\""+k+"\"}")
 }
 
 // TDD-00131: process.on('warning', h) fires h with the warning as an Error

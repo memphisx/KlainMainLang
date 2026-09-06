@@ -51,9 +51,33 @@ func (e *Emitter) lookupNamedLabel(name string) (namedLabel, bool) {
 	return namedLabel{}, false
 }
 
+// emitVarRedeclaration handles `var name = init` when name is already one of
+// the current function's own variables (varRedeclarationTarget): JS treats
+// the second `var` as the same binding, so the initializer becomes a plain
+// assignment and no new (shadowing) slot is created. Reports whether the
+// declaration was consumed this way. `let`/`const` and destructuring
+// declarations are never re-declarations.
+func (e *Emitter) emitVarRedeclaration(v *ast.VarDeclaration) (bool, error) {
+	if v.Kind != "var" || v.Name == "" {
+		return false, nil
+	}
+	if _, ok := e.varRedeclarationTarget(v.Name); !ok {
+		return false, nil
+	}
+	if v.Init == nil {
+		return true, nil // `var x;` again: no effect
+	}
+	pos := v.GetPos()
+	_, err := e.emitExpr(ast.NewAssignmentExpression("=", ast.NewIdentifier(v.Name, pos), v.Init, pos))
+	return true, err
+}
+
 func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:
+		if done, err := e.emitVarRedeclaration(s); done || err != nil {
+			return err
+		}
 		if err := e.emitVarDecl(s); err != nil {
 			return err
 		}
@@ -63,6 +87,11 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		return e.maybeRegisterAutoFree(s)
 	case *ast.VarDeclarationList:
 		for _, d := range s.Decls {
+			if done, err := e.emitVarRedeclaration(d); err != nil {
+				return err
+			} else if done {
+				continue
+			}
 			if err := e.emitVarDecl(d); err != nil {
 				return err
 			}

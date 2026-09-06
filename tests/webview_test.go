@@ -1,6 +1,10 @@
 package tests
 
 import (
+	"bytes"
+	"debug/pe"
+	"image"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,6 +363,140 @@ func runWebviewWindow(t *testing.T, src string, needles ...string) {
 	for _, n := range needles {
 		if !strings.Contains(got, n) {
 			t.Fatalf("windowed run missing %q; output:\n%s", n, got)
+		}
+	}
+}
+
+// TestE2EWebviewInitAfterHTMLSmoke locks in the navigation ordering the module
+// promises on every host (ADR-00725): an `init` script registered *after*
+// `html()`/`navigate()` (or after the constructor's own `serve` navigation)
+// still runs at document creation. WebKit gives this for free because nothing
+// loads before the run loop; WebView2 starts loading immediately, so the
+// Windows build defers navigation through webview_dispatch. Gated like the
+// other windowed runs.
+func TestE2EWebviewInitAfterHTMLSmoke(t *testing.T) {
+	if os.Getenv("KML_WEBVIEW_SMOKE") != "1" {
+		t.Skip("windowed smoke test — set KML_WEBVIEW_SMOKE=1 to run")
+	}
+	src := `
+import { Webview } from 'klain:webview'
+const w = new Webview({ title: "Order", width: 320, height: 200 })
+w.html("<!doctype html><html><body>order</body></html>")
+w.bind("finish", (args: string): string => {
+  console.log("native got: " + args)
+  w.terminate()
+  return "null"
+})
+w.init("window.addEventListener('load', () => { window.finish('after-html'); });")
+w.run()
+console.log("run returned")
+`
+	runWebviewWindow(t, src, "native got: [\"after-html\"]", "run returned")
+}
+
+// TestWebviewWindowsMissingSDKMessage asserts the Windows build inputs probe
+// names the MSYS2 package when WebView2.h is absent from the sysroot
+// (ADR-00725), instead of clang's bare "file not found".
+func TestWebviewWindowsMissingSDKMessage(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: the WebView2 SDK probe")
+	}
+	t.Setenv("KLAIN_SYSROOT", t.TempDir())
+	_, _, err := llvm.LocateWebview()
+	if err == nil || !strings.Contains(err.Error(), "webview2-loader") {
+		t.Fatalf("expected an error naming the webview2-loader package, got: %v", err)
+	}
+}
+
+// TestE2EWebviewWindowsNoLoaderDLL asserts a Windows webview binary is
+// self-contained: the binding's built-in loader finds the Edge WebView2
+// runtime itself, so the executable must not import WebView2Loader.dll (a DLL
+// that would otherwise have to ship beside every app) — ADR-00725.
+func TestE2EWebviewWindowsNoLoaderDLL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: PE import check")
+	}
+	bin := buildBinaryImports(t, `
+import { Webview } from 'klain:webview'
+const w = new Webview({ title: "T" })
+w.html("<h1>x</h1>")
+w.terminate()
+`)
+	f, err := pe.Open(bin)
+	if err != nil {
+		t.Fatalf("open PE: %v", err)
+	}
+	defer f.Close()
+	libs, err := f.ImportedLibraries()
+	if err != nil {
+		t.Fatalf("imports: %v", err)
+	}
+	for _, l := range libs {
+		if strings.EqualFold(l, "WebView2Loader.dll") {
+			t.Fatalf("binary imports WebView2Loader.dll; the built-in loader should make it self-contained (imports: %v)", libs)
+		}
+	}
+}
+
+// TestE2EPackageWindowsGUIExe drives the CLI's -package on Windows
+// (ADR-00726): the artifact is <AppName>\<AppName>.exe, linked for the GUI
+// subsystem (no console window beside the webview) and carrying the icon and
+// VERSIONINFO resources; the standalone console binary stays beside it.
+func TestE2EPackageWindowsGUIExe(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: the GUI-subsystem packager")
+	}
+	if _, _, err := llvm.LocateWebview(); err != nil {
+		t.Skipf("webview: %v", err)
+	}
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	src := filepath.Join(dir, "main.ts")
+	if err := os.WriteFile(src, []byte(`
+import { Webview } from 'klain:webview'
+const w = new Webview({ title: "Packaged" })
+w.html("<h1>x</h1>")
+w.terminate()
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	icon := filepath.Join(dir, "icon.png")
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 32, 32))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(icon, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(cli, "-package", "-app-name", "Smoke App", "-app-version", "2.1.0", "-app-icon", icon, "-o", filepath.Join(dir, "app.exe"), src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("klainmain -package: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "warning: could not") {
+		t.Fatalf("packager fell back on a warning:\n%s", out)
+	}
+	exe := filepath.Join(dir, "Smoke App", "Smoke App.exe")
+	f, err := pe.Open(exe)
+	if err != nil {
+		t.Fatalf("packaged exe missing or not a PE: %v\n%s", err, out)
+	}
+	defer f.Close()
+	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
+	if !ok {
+		t.Fatalf("not a PE32+ image")
+	}
+	if oh.Subsystem != pe.IMAGE_SUBSYSTEM_WINDOWS_GUI {
+		t.Errorf("subsystem = %d, want IMAGE_SUBSYSTEM_WINDOWS_GUI (%d)", oh.Subsystem, pe.IMAGE_SUBSYSTEM_WINDOWS_GUI)
+	}
+	if f.Section(".rsrc") == nil {
+		t.Errorf("packaged exe has no .rsrc section (icon/version resources missing)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app.exe")); err != nil {
+		t.Errorf("standalone console binary missing: %v", err)
+	}
+	for _, side := range []string{"app.rc", "app.res", "app.ico"} {
+		if _, err := os.Stat(filepath.Join(dir, "Smoke App", side)); err == nil {
+			t.Errorf("sidecar %s left behind", side)
 		}
 	}
 }
