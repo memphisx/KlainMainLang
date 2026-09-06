@@ -169,23 +169,21 @@ static int ks_idle;          /* # of Ms parked waiting for work */
 static _Atomic long ks_live; /* # of live (non-dead) goroutines */
 
 static pthread_once_t ks_once = PTHREAD_ONCE_INIT;
-#ifdef _WIN32
-/* TDD-00177 Stage 5: a goroutine is a Win32 fiber here and, being stolen
- * between Ms, resumes on a different thread than it left. The optimizer
- * may cache a thread-local's address across the swapcontext call inside
- * such a switch, which would then name the *previous* thread's slot; an
- * out-of-line accessor per access keeps every read on the current thread.
- * (On Linux/macOS the plain thread-locals below are unchanged.) */
-static _Thread_local ks_m *ks_curm_tls;
-static _Thread_local ks_g *ks_curg_tls;
+/* A goroutine, being stolen between Ms, resumes on a different thread than
+ * it left. The optimizer may cache a thread-local's address across the
+ * context switch inside such a swap, which would then name the *previous*
+ * thread's slot; an out-of-line accessor per access keeps every read on the
+ * current thread. First needed on Windows (TDD-00177 Stage 5, fibers), then
+ * found to be the same fault on Linux aarch64 (ADR-00733: the TLS address
+ * is an adrp/tprel sequence the optimizer hoists, where x86-64's %fs-relative
+ * access and Darwin's tlv_get_addr call never were), so it applies on every
+ * host now. */
+static _Thread_local ks_m *ks_curm_tls; /* NULL on the main/non-M thread */
+static _Thread_local ks_g *ks_curg_tls; /* NULL when not running a G */
 static __attribute__((noinline)) ks_m **ks_curm_p(void) { return &ks_curm_tls; }
 static __attribute__((noinline)) ks_g **ks_curg_p(void) { return &ks_curg_tls; }
 #define ks_curm (*ks_curm_p())
 #define ks_curg (*ks_curg_p())
-#else
-static _Thread_local ks_m *ks_curm; /* NULL on the main/non-M thread */
-static _Thread_local ks_g *ks_curg; /* NULL when not running a G */
-#endif
 
 /* ------------------------------------------------------------------ *
  *  Run-queue plumbing                                                  *

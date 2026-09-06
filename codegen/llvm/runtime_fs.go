@@ -134,7 +134,36 @@ func (e *Emitter) ensureStatDecl() {
 		return
 	}
 	e.usedStatDecl = true
-	e.emitGlobal("declare i32 @stat(ptr noundef, ptr noundef)")
+	e.emitFSDecl("stat", "i32", []string{"ptr", "ptr"})
+}
+
+// emitFSDecl declares a libc file-metadata entry point. On Intel macOS the
+// plain `stat`/`lstat`/`fstat`/`opendir`/`readdir` symbols are the legacy
+// 32-bit-inode variants with a different struct layout; the 64-bit-inode
+// layout this compiler's stat/dirent code was written against (verified on
+// Apple Silicon, where it is the only one) is exported there under
+// `<name>$INODE64`. To keep every call site as it is, an *internal* function
+// of the plain name wraps the `$INODE64` export on darwin/amd64; everywhere
+// else this is the plain declaration (ADR-00733). Unverified on Intel
+// hardware as of writing — the macOS x64 CI lane is its test.
+func (e *Emitter) emitFSDecl(name, ret string, params []string) {
+	sig := strings.Join(params, " noundef, ") + " noundef"
+	if !(runtime.GOOS == "darwin" && runtime.GOARCH == "amd64") {
+		e.emitGlobal(fmt.Sprintf("declare %s @%s(%s)", ret, name, sig))
+		return
+	}
+	var args, fparams []string
+	for i, p := range params {
+		fparams = append(fparams, fmt.Sprintf("%s %%a%d", p, i))
+		args = append(args, fmt.Sprintf("%s %%a%d", p, i))
+	}
+	e.emitGlobal(fmt.Sprintf("declare %s @\"%s$INODE64\"(%s)", ret, name, sig))
+	e.emitGlobal(fmt.Sprintf(`
+define internal %s @%s(%s) {
+entry:
+  %%r = call %s @"%s$INODE64"(%s)
+  ret %s %%r
+}`, ret, name, strings.Join(fparams, ", "), ret, name, strings.Join(args, ", "), ret))
 }
 
 func (e *Emitter) ensureFopen() {
@@ -623,8 +652,8 @@ func (e *Emitter) ensureFsReaddir() {
 	e.ensureRealloc()
 	e.ensureStrcmp()
 	e.ensureStrHeaderRuntime() // TDD-00120: entry names are header-copied strings
-	e.emitGlobal("declare ptr @opendir(ptr noundef)")
-	e.emitGlobal("declare ptr @readdir(ptr noundef)")
+	e.emitFSDecl("opendir", "ptr", []string{"ptr"})
+	e.emitFSDecl("readdir", "ptr", []string{"ptr"})
 	e.emitGlobal("declare i32 @closedir(ptr noundef)")
 	e.emitGlobal("declare ptr @strdup(ptr noundef)")
 	opDescPtr := e.internString("cannot open directory")
@@ -899,7 +928,7 @@ func (e *Emitter) ensureFsLstat() {
 	}
 	e.usedFsLstat = true
 	e.ensureFsThrow()
-	e.emitGlobal("declare i32 @lstat(ptr noundef, ptr noundef)")
+	e.emitFSDecl("lstat", "i32", []string{"ptr", "ptr"})
 	opDescPtr := e.internString("cannot lstat path")
 	e.emitGlobal(fmt.Sprintf(`
 define %s @__kml_fs_lstat(ptr %%path) {
@@ -1172,7 +1201,7 @@ func (e *Emitter) ensureFsFdOps() {
 	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
 	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
 	e.emitGlobal("declare i64 @lseek(i32 noundef, i64 noundef, i32 noundef)")
-	e.emitGlobal("declare i32 @fstat(i32 noundef, ptr noundef)")
+	e.emitFSDecl("fstat", "i32", []string{"i32", "ptr"})
 	openDesc := e.internString("cannot open path")
 	fdDesc := e.internString("fd operation failed")
 	e.emitGlobal(fmt.Sprintf(`

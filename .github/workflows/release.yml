@@ -89,6 +89,18 @@ jobs:
             mingw-w64-ucrt-x86_64-zlib
             mingw-w64-ucrt-x86_64-webview2-loader
 
+      # The suite writes and runs a fresh .exe per test; Defender's real-time
+      # scan of each one roughly doubled the run on the development box before
+      # the same exclusions were added there (TDD-00177's install record).
+      - name: Exclude the checkout and the temp directory from Defender's real-time scanning
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Temp"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\klainmain"
+
       - name: Put the UCRT64 toolchain and MSYS2's coreutils on PATH, and point the compiler at the sysroot
         if: matrix.goos == 'windows'
         shell: pwsh

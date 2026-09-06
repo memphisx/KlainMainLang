@@ -194,7 +194,7 @@ fail:
 	// fscanf is unique here.
 	e.ensureFopen()
 	e.ensureFclose()
-	e.emitGlobal("declare i32 @fscanf(ptr, ptr, ...)")
+	e.ensureFscanfDecl()
 	e.emitGlobal(`@.kml_statm_path = private unnamed_addr constant [18 x i8] c"/proc/self/statm\00\00"`)
 	e.emitGlobal(`@.kml_statm_mode = private unnamed_addr constant [2 x i8] c"r\00"`)
 	e.emitGlobal(`@.kml_statm_fmt = private unnamed_addr constant [9 x i8] c"%*ld %ld\00"`)
@@ -963,6 +963,15 @@ func (e *Emitter) ensureExecvDecl() {
 // ensureAtoiDecl / ensureReadlinkDecl: one declaration each, shared by the
 // cluster, fs and process runtimes (ADR-00728) — they used to declare these
 // independently and collided when two of those modules met in one program.
+// ensureFscanfDecl: one declaration shared by the RSS reader and os.cpus()'s
+// cpufreq reader (ADR-00733).
+func (e *Emitter) ensureFscanfDecl() {
+	if !e.usedFscanfDecl {
+		e.emitGlobal("declare i32 @fscanf(ptr, ptr, ...)")
+		e.usedFscanfDecl = true
+	}
+}
+
 func (e *Emitter) ensureAtoiDecl() {
 	if !e.usedAtoiDecl {
 		e.emitGlobal("declare i32 @atoi(ptr noundef)")

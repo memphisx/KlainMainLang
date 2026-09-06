@@ -10,7 +10,7 @@
     "strict": "5/7",
     "strictPct": 71
   },
-  "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable) and Darwin times.irq is 0 — both exactly what real Node reports on that hardware; os.EOL is always \"\\n\" because this compiler is POSIX-only with no Windows target.",
+  "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable), cpufreq's scaling_max_freq or 0 on Linux (VMs and containers have no cpufreq), and Darwin times.irq is 0 — all exactly what real Node reports on that hardware; os.EOL is \"\\n\" on POSIX hosts and \"\\r\\n\" on Windows.",
   "entries": [
     {
       "id": "os.platform",

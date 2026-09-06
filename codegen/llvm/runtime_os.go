@@ -200,15 +200,22 @@ func (e *Emitter) ensureOSCpusLinux() {
 
 	f := newCPUInfoFieldIndexes()
 
+	e.ensureStrlen()
+	e.ensureOSCpufreqKHz()
 	cpuinfoPathPtr := e.internString("/proc/cpuinfo")
 	statPathPtr := e.internString("/proc/stat")
 	modelNamePtr := e.internString("model name")
-	cpuMHzPtr := e.internString("cpu MHz")
 	processorMarkerPtr := e.internString("processor\t:")
 	modelScanFmtPtr := e.internString(": %[^\n]")
-	mhzScanFmtPtr := e.internString(": %lf")
 	statScanFmtPtr := e.internString("%*s %lld %lld %lld %lld %lld %lld")
 	unknownModelPtr := e.internString("unknown")
+	// aarch64: /proc/cpuinfo carries "CPU part\t: 0xd0c" per core instead of a
+	// model name; libuv's table (src/unix/linux.c) maps the part code to the
+	// core's name, looked up as "<code>\n" so "0xc0" cannot match "0xc07".
+	cpuPartMarkerPtr := e.internString("CPU part\t:")
+	partScanFmtPtr := e.internString(": %15s")
+	nameScanFmtPtr := e.internString("%[^\n]")
+	armPartTablePtr := e.internString(armPartTable)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "\ndefine {ptr, i64} @__kml_os_cpus_linux() {\n")
@@ -244,7 +251,34 @@ func (e *Emitter) ensureOSCpusLinux() {
 	fmt.Fprintf(&b, "  %%model_at = call ptr @strstr(ptr %%block, ptr %s)\n", modelNamePtr)
 	fmt.Fprintf(&b, "  %%model_isnull = icmp eq ptr %%model_at, null\n")
 	fmt.Fprintf(&b, "  br i1 %%model_isnull, label %%model_fallback, label %%model_found\n")
+	// No "model name" line (aarch64): libuv resolves the "CPU part" code
+	// through its table of ARM part numbers, else "unknown" (ADR-00733).
 	fmt.Fprintf(&b, "model_fallback:\n")
+	fmt.Fprintf(&b, "  %%part_at = call ptr @strstr(ptr %%block, ptr %s)\n", cpuPartMarkerPtr)
+	fmt.Fprintf(&b, "  %%part_isnull = icmp eq ptr %%part_at, null\n")
+	fmt.Fprintf(&b, "  br i1 %%part_isnull, label %%model_unknown, label %%part_found\n")
+	fmt.Fprintf(&b, "part_found:\n")
+	fmt.Fprintf(&b, "  %%part_colon = call ptr @strchr(ptr %%part_at, i32 58)\n")
+	fmt.Fprintf(&b, "  %%partbuf = call ptr @malloc(i64 32)\n")
+	fmt.Fprintf(&b, "  %%prc = call i32 (ptr, ptr, ...) @sscanf(ptr %%part_colon, ptr %s, ptr %%partbuf)\n", partScanFmtPtr)
+	fmt.Fprintf(&b, "  %%part_len = call i64 @strlen(ptr %%partbuf)\n")
+	fmt.Fprintf(&b, "  %%part_nl = getelementptr i8, ptr %%partbuf, i64 %%part_len\n")
+	fmt.Fprintf(&b, "  store i8 10, ptr %%part_nl, align 1\n")
+	fmt.Fprintf(&b, "  %%part_nl1 = getelementptr i8, ptr %%part_nl, i64 1\n")
+	fmt.Fprintf(&b, "  store i8 0, ptr %%part_nl1, align 1\n")
+	fmt.Fprintf(&b, "  %%tbl_at = call ptr @strstr(ptr %s, ptr %%partbuf)\n", armPartTablePtr)
+	fmt.Fprintf(&b, "  %%tbl_isnull = icmp eq ptr %%tbl_at, null\n")
+	fmt.Fprintf(&b, "  br i1 %%tbl_isnull, label %%model_unknown, label %%part_named\n")
+	fmt.Fprintf(&b, "part_named:\n")
+	fmt.Fprintf(&b, "  %%part_len1 = add i64 %%part_len, 1\n")
+	fmt.Fprintf(&b, "  %%name_at = getelementptr i8, ptr %%tbl_at, i64 %%part_len1\n")
+	fmt.Fprintf(&b, "  %%namebuf = call ptr @malloc(i64 64)\n")
+	fmt.Fprintf(&b, "  %%nrc = call i32 (ptr, ptr, ...) @sscanf(ptr %%name_at, ptr %s, ptr %%namebuf)\n", nameScanFmtPtr)
+	fmt.Fprintf(&b, "  %%name_hdr = call ptr @__kml_str_from_cstr(ptr %%namebuf)\n")
+	fmt.Fprintf(&b, "  %%model_slot2 = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.modelIdx)
+	fmt.Fprintf(&b, "  store ptr %%name_hdr, ptr %%model_slot2, align 8\n")
+	fmt.Fprintf(&b, "  br label %%speed\n")
+	fmt.Fprintf(&b, "model_unknown:\n")
 	fmt.Fprintf(&b, "  %%model_slot0 = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.modelIdx)
 	fmt.Fprintf(&b, "  store ptr %s, ptr %%model_slot0, align 8\n", unknownModelPtr)
 	fmt.Fprintf(&b, "  br label %%speed\n")
@@ -257,21 +291,13 @@ func (e *Emitter) ensureOSCpusLinux() {
 	fmt.Fprintf(&b, "  store ptr %%model_hdr, ptr %%model_slot1, align 8\n")
 	fmt.Fprintf(&b, "  br label %%speed\n")
 
-	// speed
+	// speed: libuv (Node 22's) reads /sys/devices/system/cpu/cpuN/cpufreq/
+	// scaling_max_freq (kHz) and reports 0 where cpufreq is absent — most VMs
+	// and containers, on every architecture; /proc/cpuinfo's "cpu MHz" is no
+	// longer consulted (ADR-00733).
 	fmt.Fprintf(&b, "speed:\n")
-	fmt.Fprintf(&b, "  %%mhz_at = call ptr @strstr(ptr %%block, ptr %s)\n", cpuMHzPtr)
-	fmt.Fprintf(&b, "  %%mhz_isnull = icmp eq ptr %%mhz_at, null\n")
-	fmt.Fprintf(&b, "  br i1 %%mhz_isnull, label %%speed_fallback, label %%speed_found\n")
-	fmt.Fprintf(&b, "speed_fallback:\n")
-	fmt.Fprintf(&b, "  %%speed_slot0 = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.speedIdx)
-	fmt.Fprintf(&b, "  store i64 0, ptr %%speed_slot0, align 8\n")
-	fmt.Fprintf(&b, "  br label %%nextblock\n")
-	fmt.Fprintf(&b, "speed_found:\n")
-	fmt.Fprintf(&b, "  %%mhz_colon = call ptr @strchr(ptr %%mhz_at, i32 58)\n")
-	fmt.Fprintf(&b, "  %%mhzval_p = alloca double, align 8\n")
-	fmt.Fprintf(&b, "  %%src = call i32 (ptr, ptr, ...) @sscanf(ptr %%mhz_colon, ptr %s, ptr %%mhzval_p)\n", mhzScanFmtPtr)
-	fmt.Fprintf(&b, "  %%mhzval = load double, ptr %%mhzval_p, align 8\n")
-	fmt.Fprintf(&b, "  %%mhzint = fptosi double %%mhzval to i64\n")
+	fmt.Fprintf(&b, "  %%khz = call i64 @__kml_os_cpufreq_khz(i64 %%i)\n")
+	fmt.Fprintf(&b, "  %%mhzint = sdiv i64 %%khz, 1000\n")
 	fmt.Fprintf(&b, "  %%speed_slot1 = getelementptr %s, ptr %%entry_obj, i32 0, i32 %d\n", f.infoStructIR, f.speedIdx)
 	fmt.Fprintf(&b, "  store i64 %%mhzint, ptr %%speed_slot1, align 8\n")
 	fmt.Fprintf(&b, "  br label %%nextblock\n")
@@ -338,6 +364,56 @@ func (e *Emitter) ensureOSCpusLinux() {
 	fmt.Fprintf(&b, "  ret {ptr, i64} %%r1\n")
 	fmt.Fprintf(&b, "}")
 	e.emitGlobal(b.String())
+}
+
+// armPartTable is libuv's ARM part-code table (src/unix/linux.c, v1.x),
+// "<code>\n<name>\n" per entry, searched with the code plus its newline.
+const armPartTable = "0x811\nARM810\n0x920\nARM920\n0x922\nARM922\n0x926\nARM926\n0x940\nARM940\n0x946\nARM946\n" +
+	"0x966\nARM966\n0xa20\nARM1020\n0xa22\nARM1022\n0xa26\nARM1026\n0xb02\nARM11 MPCore\n0xb36\nARM1136\n" +
+	"0xb56\nARM1156\n0xb76\nARM1176\n0xc05\nCortex-A5\n0xc07\nCortex-A7\n0xc08\nCortex-A8\n0xc09\nCortex-A9\n" +
+	"0xc0d\nCortex-A17\n0xc0f\nCortex-A15\n0xc0e\nCortex-A17\n0xc14\nCortex-R4\n0xc15\nCortex-R5\n0xc17\nCortex-R7\n" +
+	"0xc18\nCortex-R8\n0xc20\nCortex-M0\n0xc21\nCortex-M1\n0xc23\nCortex-M3\n0xc24\nCortex-M4\n0xc27\nCortex-M7\n" +
+	"0xc60\nCortex-M0+\n0xd01\nCortex-A32\n0xd03\nCortex-A53\n0xd04\nCortex-A35\n0xd05\nCortex-A55\n0xd06\nCortex-A65\n" +
+	"0xd07\nCortex-A57\n0xd08\nCortex-A72\n0xd09\nCortex-A73\n0xd0a\nCortex-A75\n0xd0b\nCortex-A76\n0xd0c\nNeoverse-N1\n" +
+	"0xd0d\nCortex-A77\n0xd0e\nCortex-A76AE\n0xd13\nCortex-R52\n0xd20\nCortex-M23\n0xd21\nCortex-M33\n0xd41\nCortex-A78\n" +
+	"0xd42\nCortex-A78AE\n0xd4a\nNeoverse-E1\n0xd4b\nCortex-A78C\n0xd4f\nNeoverse-V2\n"
+
+// ensureOSCpufreqKHz declares __kml_os_cpufreq_khz(i64 cpu) -> i64: the
+// value of /sys/devices/system/cpu/cpu<N>/cpufreq/scaling_max_freq, or 0
+// when the file is absent or unreadable (libuv's behaviour; ADR-00733).
+func (e *Emitter) ensureOSCpufreqKHz() {
+	if e.usedOSCpufreqKHz {
+		return
+	}
+	e.usedOSCpufreqKHz = true
+	e.ensureFopen()
+	e.ensureFclose()
+	e.ensureSprintf()
+	e.ensureFscanfDecl()
+	pathFmtPtr := e.internString("/sys/devices/system/cpu/cpu%lld/cpufreq/scaling_max_freq")
+	modePtr := e.internString("r")
+	scanFmtPtr := e.internString("%lld")
+	e.emitGlobal(fmt.Sprintf(`
+define i64 @__kml_os_cpufreq_khz(i64 %%cpu) {
+entry:
+  %%path = alloca [96 x i8], align 1
+  %%path0 = getelementptr [96 x i8], ptr %%path, i32 0, i32 0
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%path0, ptr %s, i64 %%cpu)
+  %%f = call ptr @fopen(ptr %%path0, ptr %s)
+  %%isnull = icmp eq ptr %%f, null
+  br i1 %%isnull, label %%none, label %%read
+read:
+  %%val_p = alloca i64, align 8
+  store i64 0, ptr %%val_p, align 8
+  %%rc = call i32 (ptr, ptr, ...) @fscanf(ptr %%f, ptr %s, ptr %%val_p)
+  call i32 @fclose(ptr %%f)
+  %%ok = icmp eq i32 %%rc, 1
+  %%val = load i64, ptr %%val_p, align 8
+  %%res = select i1 %%ok, i64 %%val, i64 0
+  ret i64 %%res
+none:
+  ret i64 0
+}`, pathFmtPtr, modePtr, scanFmtPtr))
 }
 
 // ensureOSCpusDarwin declares __kml_os_cpus_darwin — UNVERIFIED on real

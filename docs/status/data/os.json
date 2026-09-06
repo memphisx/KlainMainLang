@@ -64,7 +64,7 @@
               "Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `\"Apple M4 Pro\"`, live tick counters)",
               "Darwin `speed`: `hw.cpufrequency` is unavailable on Apple Silicon (M-series removed the fixed-clock model), so a fixed `2400` MHz nominal is reported there — byte-for-byte what real Node/libuv reports on the same hardware; an Intel Mac's real value flows through unchanged ([ADR-00569](../adr/ADR-00569.md))",
               "Darwin `times.irq` is always `0` — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice); real Node reports `irq: 0` on Darwin too, so this is parity, not a gap",
-              "Linux `speed` reflects the CPU's current/scaled frequency (from `/proc/cpuinfo`'s `cpu MHz`), not a rated base/max clock — matches what libuv/real Node reports on Linux"
+              "Linux `speed` is cpufreq's `scaling_max_freq` (`/sys/devices/system/cpu/cpuN/cpufreq/`, kHz → MHz) and `0` where cpufreq is absent — VMs and containers included — exactly what Node 22's libuv reports; `/proc/cpuinfo`'s `cpu MHz` is no longer consulted. On aarch64, with no `model name` line, `model` comes from the `CPU part` code through libuv's ARM part table (`Neoverse-N1`, `Cortex-A72`, …), else `unknown` ([ADR-00733](../adr/ADR-00733.md))"
             ]
           },
           {

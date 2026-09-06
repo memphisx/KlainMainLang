@@ -531,6 +531,8 @@ type Emitter struct {
 	usedReadlinkDecl             bool
 	usedSignalFromName           bool
 	usedSignalSigbreak           bool
+	usedOSCpufreqKHz             bool
+	usedFscanfDecl               bool
 	usedExecvpDecl               bool
 	usedExitRawDecl              bool
 	usedForkDecl                 bool
