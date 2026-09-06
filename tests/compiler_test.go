@@ -90,6 +90,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -262,6 +263,23 @@ func appendURLPattern(t *testing.T, em *llvm.Emitter, dir string, clangArgs []st
 	return append(clangArgs, upFile)
 }
 
+// appendPathWin32 compiles the path.win32 sidecar (__kml_path_win32_* ABI,
+// libc only) into the clang invocation when the program used a win32-
+// flavoured path call — every bare `path.X` on Windows, or an explicit
+// `path.win32.X` anywhere — mirroring main.go so the test build and the real
+// build can't drift (TDD-00178).
+func appendPathWin32(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesPathWin32() {
+		return clangArgs
+	}
+	pwFile := filepath.Join(dir, "pathwin32.c")
+	if err := os.WriteFile(pwFile, []byte(llvm.PathWin32Source()), 0644); err != nil {
+		t.Fatalf("write path.win32 source: %v", err)
+	}
+	return append(clangArgs, pwFile)
+}
+
 // appendDtoa compiles the JS-faithful float formatter C file (__kml_dtoa, libc
 // only) into the clang invocation when the program printed a float, mirroring
 // main.go so the test build and the real build can't drift (TDD-00080).
@@ -425,6 +443,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -494,6 +513,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
@@ -606,6 +626,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -750,6 +771,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -832,6 +854,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -930,6 +953,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -995,6 +1019,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1090,6 +1115,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1148,6 +1174,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1313,6 +1340,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
+	clangArgs = appendPathWin32(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)

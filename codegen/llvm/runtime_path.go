@@ -1,6 +1,6 @@
-// runtime_path.go — C-runtime helpers backing Node's `path` module
-// (emit_path.go). POSIX-only (this compiler doesn't cross-compile — see
-// PATH.md), all pure string manipulation on top of libc, no new dependency.
+// runtime_path.go — IR runtime helpers backing the posix flavour of Node's
+// `path` module (emit_path.go); the win32 flavour is the C sidecar behind
+// path_win32.go (TDD-00178). Pure string manipulation on top of libc.
 package llvm
 
 // ensurePathNormalize declares the segment-normalization machinery shared by

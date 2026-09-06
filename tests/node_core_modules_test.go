@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -456,9 +457,21 @@ console.log(url.format(url.parse("http://h/p?a=1")))
 }
 
 // --- TDD-00165 Stage 4 (ADR-00671): the file-URL pair fileURLToPath /
-// pathToFileURL (POSIX). ---
+// pathToFileURL. On Windows (TDD-00178 / ADR-00722) they follow Node's win32
+// halves: drive-letter and UNC forms, `\` separators. ---
 
 func TestE2EFileURLToPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assertOutputImports(t, `
+import { fileURLToPath } from 'url'
+console.log(fileURLToPath("file:///C:/foo/bar"))
+console.log(fileURLToPath("file:///C:/foo%20bar/baz.txt"))
+console.log(fileURLToPath("file://server/share/x/y"))
+try { fileURLToPath("file:///foo/bar") } catch (e) { console.log("threw:", e.message) }
+try { fileURLToPath("file:///C:/foo%2Fbar") } catch (e) { console.log("threw:", e.message) }
+`, "C:\\foo\\bar\nC:\\foo bar\\baz.txt\n\\\\server\\share\\x\\y\nthrew: File URL path must be absolute\nthrew: File URL path must not include encoded \\ or / characters")
+		return
+	}
 	assertOutputImports(t, `
 import { fileURLToPath } from 'url'
 console.log(fileURLToPath("file:///foo/bar"))
@@ -473,6 +486,19 @@ try { fileURLToPath("https://x.com/p") } catch (e) { console.log("threw:", e.mes
 }
 
 func TestE2EPathToFileURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// A rooted-but-driveless path takes process.cwd()'s drive (path.resolve).
+		assertOutputImports(t, `
+import { pathToFileURL } from 'url'
+const drive = process.cwd().slice(0, 2)
+const u = pathToFileURL("/foo/bar")
+console.log(u.protocol)
+console.log(u.href === "file:///" + drive + "/foo/bar")
+console.log(pathToFileURL("C:\\Users\\me\\a.txt").href)
+console.log(pathToFileURL("\\\\server\\share\\x y").href)
+`, "file:\ntrue\nfile:///C:/Users/me/a.txt\nfile://server/share/x%20y")
+		return
+	}
 	assertOutputImports(t, `
 import { pathToFileURL } from 'url'
 const u = pathToFileURL("/foo/bar")
@@ -482,6 +508,13 @@ console.log(u.href)
 }
 
 func TestE2EPathToFileURLEncodesSpecials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assertOutputImports(t, `
+import { pathToFileURL } from 'url'
+console.log(pathToFileURL("D:\\foo bar\\baz#1").href)
+`, "file:///D:/foo%20bar/baz%231")
+		return
+	}
 	assertOutputImports(t, `
 import { pathToFileURL } from 'url'
 console.log(pathToFileURL("/foo bar/baz#1").href)
@@ -489,6 +522,14 @@ console.log(pathToFileURL("/foo bar/baz#1").href)
 }
 
 func TestE2EFileURLRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assertOutputImports(t, `
+import { fileURLToPath, pathToFileURL } from 'url'
+console.log(fileURLToPath(pathToFileURL("C:\\a\\b c\\d#e")))
+console.log(fileURLToPath(pathToFileURL("\\\\srv\\share\\p q")))
+`, "C:\\a\\b c\\d#e\n\\\\srv\\share\\p q")
+		return
+	}
 	assertOutputImports(t, `
 import { fileURLToPath, pathToFileURL } from 'url'
 console.log(fileURLToPath(pathToFileURL("/a/b c/d#e")))

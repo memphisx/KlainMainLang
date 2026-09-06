@@ -23,37 +23,38 @@
       "lanes": {
         "js": {
           "overall": {
-            "pass": 6668,
+            "pass": 6669,
             "total": 53578
           },
           "inScope": {
-            "pass": 5738,
+            "pass": 5739,
             "total": 34334
           },
           "byPhase": {
-            "clang": 311,
-            "compile": 44222,
+            "clang": 318,
+            "codegen-hang": 3,
+            "compile": 44215,
             "neg-accepted": 847,
-            "run-timeout": 10,
-            "runtime": 1420,
+            "run-timeout": 8,
+            "runtime": 1418,
             "strict-reject": 100
           }
         },
         "strict": {
           "overall": {
-            "pass": 6254,
+            "pass": 6265,
             "total": 53578
           },
           "inScope": {
-            "pass": 5378,
+            "pass": 5387,
             "total": 34334
           },
           "byPhase": {
-            "clang": 285,
-            "compile": 44809,
+            "clang": 288,
+            "compile": 44804,
             "neg-accepted": 832,
-            "run-timeout": 4,
-            "runtime": 868,
+            "run-timeout": 2,
+            "runtime": 861,
             "strict-reject": 526
           }
         }

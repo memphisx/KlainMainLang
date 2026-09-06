@@ -1,6 +1,9 @@
 // emit_path.go — Node's `path` module: join, resolve, dirname, basename,
-// extname, parse, format, isAbsolute, sep, delimiter. POSIX-only (this
-// compiler doesn't cross-compile — see docs/status/PATH.md).
+// extname, parse, format, isAbsolute, sep, delimiter. Two flavours
+// (TDD-00178): the posix algorithms live here and in runtime_path.go as
+// hand-written IR; the win32 algorithms are the C sidecar behind
+// path_win32.go. A bare `path.X` is the host's flavour, `path.posix.X` and
+// `path.win32.X` name one explicitly — pathFlavorOf() resolves the object.
 package llvm
 
 import (
@@ -29,7 +32,10 @@ func (e *Emitter) emitPathStartsWithSlash(v Value) string {
 // the result is absolute is decided by the *first* argument alone (not the
 // concatenated raw string), so an empty first segment can't accidentally
 // manufacture a leading '/' that wasn't really there.
-func (e *Emitter) emitPathJoin(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathJoin(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if f == pathWin32 {
+		return e.emitPathWin32Variadic("join", args, pos)
+	}
 	if len(args) == 0 {
 		return Value{Ref: e.internString("."), Ty: TypePtr}, nil
 	}
@@ -75,7 +81,10 @@ func (e *Emitter) emitPathJoin(args []ast.Expression, pos ast.Pos) (Value, error
 // count is already known to the compiler. The accumulated raw path is
 // always absolute by construction, so is_absolute is unconditionally true
 // for the final normalize call.
-func (e *Emitter) emitPathResolve(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathResolve(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if f == pathWin32 {
+		return e.emitPathWin32Variadic("resolve", args, pos)
+	}
 	e.ensureProcessCwd()
 	accPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accPtr))
@@ -126,7 +135,7 @@ func (e *Emitter) emitPathResolve(args []ast.Expression, pos ast.Pos) (Value, er
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
-func (e *Emitter) emitPathDirname(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathDirname(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.dirname takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -135,13 +144,19 @@ func (e *Emitter) emitPathDirname(args []ast.Expression, pos ast.Pos) (Value, er
 		return Value{}, err
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
+	if f == pathWin32 {
+		e.ensurePathWin32()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_dirname(ptr %s)", r, pathVal.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
 	e.ensurePathDirname()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_dirname(ptr %s)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
-func (e *Emitter) emitPathBasename(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathBasename(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: path.basename takes 1 or 2 arguments (path, ext?)", pos.Line, pos.Col)
 	}
@@ -159,13 +174,19 @@ func (e *Emitter) emitPathBasename(args []ast.Expression, pos ast.Pos) (Value, e
 		extVal = e.coerce(extVal, TypePtr)
 		extRef = extVal.Ref
 	}
+	if f == pathWin32 {
+		e.ensurePathWin32()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_basename(ptr %s, ptr %s)", r, pathVal.Ref, extRef))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
 	e.ensurePathBasename()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_basename(ptr %s, ptr %s)", r, pathVal.Ref, extRef))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
-func (e *Emitter) emitPathExtname(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathExtname(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.extname takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -174,13 +195,19 @@ func (e *Emitter) emitPathExtname(args []ast.Expression, pos ast.Pos) (Value, er
 		return Value{}, err
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
+	if f == pathWin32 {
+		e.ensurePathWin32()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_extname(ptr %s)", r, pathVal.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
+	}
 	e.ensurePathExtname()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_extname(ptr %s)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
-func (e *Emitter) emitPathIsAbsolute(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathIsAbsolute(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.isAbsolute takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -189,6 +216,14 @@ func (e *Emitter) emitPathIsAbsolute(args []ast.Expression, pos ast.Pos) (Value,
 		return Value{}, err
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
+	if f == pathWin32 {
+		e.ensurePathWin32()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_path_win32_is_absolute(ptr %s)", r, pathVal.Ref))
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+		return Value{Ref: b, Ty: TypeBool}, nil
+	}
 	isSlash := e.emitPathStartsWithSlash(pathVal)
 	return Value{Ref: isSlash, Ty: TypeBool}, nil
 }
@@ -197,7 +232,7 @@ func (e *Emitter) emitPathIsAbsolute(args []ast.Expression, pos ast.Pos) (Value,
 // name is computed by reusing __kml_path_basename's own ext-stripping
 // argument, passing extname(p) as the ext to strip — equivalent to "base
 // minus its extension" without a separate substring routine.
-func (e *Emitter) emitPathParse(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathParse(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.parse takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -207,6 +242,9 @@ func (e *Emitter) emitPathParse(args []ast.Expression, pos ast.Pos) (Value, erro
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
 
+	if f == pathWin32 {
+		return e.emitPathWin32Parse(pathVal)
+	}
 	e.ensurePathDirname()
 	e.ensurePathBasename()
 	e.ensurePathExtname()
@@ -254,7 +292,7 @@ func (e *Emitter) emitPathParse(args []ast.Expression, pos ast.Pos) (Value, erro
 // empty; the result is just base when dir is also empty; dir and base are
 // joined directly (no separator) when dir equals root (e.g. "/" + "foo" is
 // "/foo", not "//foo"), otherwise joined with '/'.
-func (e *Emitter) emitPathFormat(args []ast.Expression, pos ast.Pos) (Value, error) {
+func (e *Emitter) emitPathFormat(f pathFlavor, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: path.format takes exactly 1 argument", pos.Line, pos.Col)
 	}
@@ -296,6 +334,12 @@ func (e *Emitter) emitPathFormat(args []ast.Expression, pos ast.Pos) (Value, err
 	nameV, err := readField("name")
 	if err != nil {
 		return Value{}, err
+	}
+	if f == pathWin32 {
+		e.ensurePathWin32()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_format(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)", r, rootV.Ref, dirV.Ref, baseV.Ref, extV.Ref, nameV.Ref))
+		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 
 	e.ensureStrlen()

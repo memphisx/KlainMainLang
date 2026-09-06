@@ -77,7 +77,7 @@ import path from 'path'
 console.log(path.join("a", "b", "c.txt"))
 console.log(path.extname("file.ts"))
 `,
-	}, "main.ts", "a/b/c.txt\n.ts")
+	}, "main.ts", pathHost("a/b/c.txt", "a\\b\\c.txt")+"\n.ts") // bare `path` is the host's flavour (TDD-00178)
 }
 
 // TestE2EImportGatedLocalShadowNoLongerMiscompiles is the direct regression

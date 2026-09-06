@@ -451,7 +451,7 @@
       "editorial": {
         "177": {
           "title": "Windows support — mingw-w64 toolchain, Win32-native platform layer",
-          "notes": "Stages 0–5 shipped ([ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md)): the full E2E suite, the examples, and TLS/HTTP2/wss servers run on Windows 11 x86-64 with the documented skips (signals, POSIX-only tools, sanitizers, symlinks without Developer Mode). Open: `path` defaulting to `path.win32`, cluster round-robin scheduling (workers share one listening socket instead), an IOCP reactor, `--static`/`-package` on Windows, CI"
+          "notes": "Stages 0–5 shipped ([ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md)): the full E2E suite, the examples, and TLS/HTTP2/wss servers run on Windows 11 x86-64 with the documented skips (signals, POSIX-only tools, sanitizers, symlinks without Developer Mode). `path` defaulting to `path.win32` shipped separately ([TDD-00178](../tdd/TDD-00178.md)). Open: cluster round-robin scheduling (workers share one listening socket instead), an IOCP reactor, `--static`/`-package` on Windows, CI"
         },
         "175": {
           "title": "Deep reclamation under `-mm=auto` (container elements, object graphs)",
@@ -468,10 +468,6 @@
         "11": {
           "title": "IndexedDB-compatible storage API",
           "notes": "Real IDB shape over a pluggable backend — Roadmap's [Later](#later--differentiator-features-deliberately-deprioritized) tier"
-        },
-        "20": {
-          "title": "Windows support",
-          "notes": "Lowest priority anywhere here — reference doc only"
         },
         "22": {
           "title": "Best-effort vanilla-JS compatibility (opt-in)",

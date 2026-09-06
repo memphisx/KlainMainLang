@@ -35,9 +35,16 @@ console.log(os.EOL === "\n")`, "true")
 }
 
 func TestE2EOSHomedirMatchesEnvHOME(t *testing.T) {
+	// Node: HOME on POSIX, USERPROFILE on Windows. (A PowerShell-launched
+	// `go test` has no HOME at all; comparing against a missing env value
+	// once crashed — ADR-00724.)
+	homeVar := "HOME"
+	if runtime.GOOS == "windows" {
+		homeVar = "USERPROFILE"
+	}
 	assertOutputImports(t, `
 import os from 'os'
-console.log(os.homedir() === process.env.HOME)
+console.log(os.homedir() === process.env.`+homeVar+`)
 `, "true")
 }
 

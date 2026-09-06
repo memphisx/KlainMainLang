@@ -228,7 +228,11 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"path": {
 		"join": true, "resolve": true, "dirname": true, "basename": true,
 		"extname": true, "isAbsolute": true, "parse": true, "format": true,
+		"normalize": true, "relative": true, "toNamespacedPath": true,
 		"sep": true, "delimiter": true,
+		// TDD-00178: the explicit flavour objects (Node exposes both on every
+		// platform; bare `path` is the host's flavour).
+		"posix": true, "win32": true,
 	},
 	"os": {
 		"platform": true, "homedir": true, "tmpdir": true, "hostname": true,

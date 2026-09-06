@@ -762,3 +762,8 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00717](ADR-00717.md) | x86-64 conservative-scan pinning in the gc-mode collection tests | Extends [ADR-00701](ADR-00701.md) (FinalizationRegistry), [TDD-00112](../tdd/TDD-00112.md) (weak collections) |
 | [00718](ADR-00718.md) | Windows Stage 0 — mingw-w64 clang target, stdio binary mode, memmem, LLP64 helper audit | Implements [TDD-00177](../tdd/TDD-00177.md) (Stage 0) |
 | [00719](ADR-00719.md) | Windows Stages 1–4 — libc shim, fd/select reactor, fibers, fs, processes, signals | Implements [TDD-00177](../tdd/TDD-00177.md) (Stages 1–4); extends [ADR-00718](ADR-00718.md) (Stage 0) |
+| [00720](ADR-00720.md) | Linux TUI build break after the Windows port, and the Pages workflow's path filter | Extends [ADR-00719](ADR-00719.md) (Windows Stages 1–4) |
+| [00721](ADR-00721.md) | TCP_NODELAY on accepted `http.listen` sockets | Extends [ADR-00720](ADR-00720.md) (Linux TUI build break; recorded this as a deferred side effect) |
+| [00722](ADR-00722.md) | `path.win32` — per-host `path` flavour, explicit `path.posix`/`path.win32`, Windows file URLs | Implements [TDD-00178](../tdd/TDD-00178.md); extends [ADR-00719](ADR-00719.md) (Windows Stages 1–4, the open Stage 1 item), [ADR-00671](ADR-00671.md) (file-URL pair, POSIX) |
+| [00723](ADR-00723.md) | `path.normalize` / `relative` / `toNamespacedPath` in both flavours | Implements [TDD-00178](../tdd/TDD-00178.md) (open question 1); extends [ADR-00722](ADR-00722.md) |
+| [00724](ADR-00724.md) | String comparison against a missing value (`process.env.X === "a"`) segfaulted | Extends [ADR-00722](ADR-00722.md) (found while running the Windows suite for it); relates to [ADR-00487](ADR-00487.md) (`process.env` semantics) |

@@ -432,6 +432,23 @@ console.log(typeof a === "bigint")
 
 // --- process.env write (ADR-00333) ---
 
+// A missing env value is the null pointer that stands for undefined; comparing
+// it with a string used to dereference it (ADR-00724). JS semantics: equal only
+// to undefined/null, never to a string, and every ordering compare is false.
+func TestE2EProcessEnvMissingCompare(t *testing.T) {
+	assertOutput(t, `
+console.log("a" === process.env.KML_DEFINITELY_UNSET_VAR)
+console.log(process.env.KML_DEFINITELY_UNSET_VAR === "a")
+console.log(process.env.KML_DEFINITELY_UNSET_VAR !== "a")
+console.log(process.env.KML_DEFINITELY_UNSET_VAR === undefined)
+console.log(process.env.KML_DEFINITELY_UNSET_VAR === process.env.KML_ALSO_UNSET)
+console.log(process.env.KML_DEFINITELY_UNSET_VAR < "a")
+console.log(process.env.KML_DEFINITELY_UNSET_VAR >= "a")
+const h = process.env.KML_DEFINITELY_UNSET_VAR
+console.log(h === "x")
+`, "false\nfalse\ntrue\ntrue\ntrue\nfalse\nfalse\nfalse")
+}
+
 func TestE2EProcessEnvWrite(t *testing.T) {
 	assertOutput(t, `
 process.env.KML_TEST_VAR = "hello"

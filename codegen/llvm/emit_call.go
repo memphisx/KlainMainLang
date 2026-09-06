@@ -902,24 +902,31 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				}
 			}
 		}
-		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
+		// path.X (host flavour), path.posix.X, path.win32.X — TDD-00178.
+		if pf, ok := pathFlavorOf(mem.Object); ok {
 			switch mem.Property {
 			case "join":
-				return e.emitPathJoin(ex.Args, ex.GetPos())
+				return e.emitPathJoin(pf, ex.Args, ex.GetPos())
 			case "resolve":
-				return e.emitPathResolve(ex.Args, ex.GetPos())
+				return e.emitPathResolve(pf, ex.Args, ex.GetPos())
 			case "dirname":
-				return e.emitPathDirname(ex.Args, ex.GetPos())
+				return e.emitPathDirname(pf, ex.Args, ex.GetPos())
 			case "basename":
-				return e.emitPathBasename(ex.Args, ex.GetPos())
+				return e.emitPathBasename(pf, ex.Args, ex.GetPos())
 			case "extname":
-				return e.emitPathExtname(ex.Args, ex.GetPos())
+				return e.emitPathExtname(pf, ex.Args, ex.GetPos())
 			case "isAbsolute":
-				return e.emitPathIsAbsolute(ex.Args, ex.GetPos())
+				return e.emitPathIsAbsolute(pf, ex.Args, ex.GetPos())
 			case "parse":
-				return e.emitPathParse(ex.Args, ex.GetPos())
+				return e.emitPathParse(pf, ex.Args, ex.GetPos())
 			case "format":
-				return e.emitPathFormat(ex.Args, ex.GetPos())
+				return e.emitPathFormat(pf, ex.Args, ex.GetPos())
+			case "normalize":
+				return e.emitPathNormalize(pf, ex.Args, ex.GetPos())
+			case "relative":
+				return e.emitPathRelative(pf, ex.Args, ex.GetPos())
+			case "toNamespacedPath":
+				return e.emitPathToNamespacedPath(pf, ex.Args, ex.GetPos())
 			}
 		}
 		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {

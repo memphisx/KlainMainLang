@@ -170,15 +170,47 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 	case "==", "===", "!=", "!==", "<", ">", "<=", ">=":
 		// Binary-safe: __kml_str_cmp uses the header lengths + memcmp, so an
 		// embedded NUL no longer stops the comparison early (TDD-00120 Stage 2).
+		//
+		// Null-aware (ADR-00724): a string-typed operand can be the null
+		// pointer that stands for `undefined` (a missing process.env entry,
+		// an absent optional). JS semantics: undefined equals only undefined,
+		// and every ordering comparison against undefined is false (NaN).
+		// Nulls are swapped for "" before the compare so it never
+		// dereferences one; the null flags then decide the result.
 		e.ensureStrHeaderRuntime()
+		lNull := e.freshReg()
+		rNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", lNull, left.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", rNull, right.Ref))
+		empty := e.internString("")
+		lSafe := e.freshReg()
+		rSafe := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", lSafe, lNull, empty, left.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", rSafe, rNull, empty, right.Ref))
 		cmp := e.freshReg()
-		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, left.Ref, right.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, lSafe, rSafe))
+		anyNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", anyNull, lNull, rNull))
+		bothNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bothNull, lNull, rNull))
 		iop := map[string]string{
 			"==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
 			"<": "slt", ">": "sgt", "<=": "sle", ">=": "sge",
 		}[op]
-		e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", result, iop, cmp))
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", raw, iop, cmp))
+		result := e.freshReg()
+		switch op {
+		case "==", "===":
+			// both null → true; one null → false; else the compare.
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i1 %s, i1 %s", result, anyNull, bothNull, raw))
+		case "!=", "!==":
+			notBoth := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notBoth, bothNull))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i1 %s, i1 %s", result, anyNull, notBoth, raw))
+		default:
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i1 false, i1 %s", result, anyNull, raw))
+		}
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported for strings", pos.Line, pos.Col, op)

@@ -414,6 +414,21 @@ func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, 
 		urlStr = e.coerce(objVal, TypePtr)
 	}
 
+	// Windows (ADR-00722): libcurl refuses `file://server/...`, so the UNC host
+	// is split off before parsing and rejoined by the sidecar below.
+	uncHostRef := ""
+	if hostPathFlavor() == pathWin32 {
+		e.ensurePathWin32()
+		hostSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hostSlot))
+		split := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_split_file_host(ptr %s, ptr %s)", split, urlStr.Ref, hostSlot))
+		urlStr = Value{Ref: split, Ty: TypePtr}
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, hostSlot))
+		uncHostRef = h
+	}
+
 	handle := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
 	setCode := e.freshReg()
@@ -442,6 +457,40 @@ func (e *Emitter) emitFileURLToPath(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitInternalThrow(e.internString("The URL must be of scheme file"))
 	e.emitLabel(fileL)
 
+	if hostPathFlavor() == pathWin32 {
+		// Windows (TDD-00178 / ADR-00722): Node's getPathFromURLWin32 — the
+		// still-encoded pathname and the hostname go to the win32 sidecar, which
+		// rejects an encoded `/` or ``, flips separators, percent-decodes, and
+		// either prefixes `\host` or requires a drive letter.
+		e.ensurePathWin32()
+		hostReg := uncHostRef
+		rawReg, _ := e.curlURLGetPart(handle, curluPartPath)
+		e.emitInstr(fmt.Sprintf("call void @curl_url_cleanup(ptr %s)", handle))
+		errSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", errSlot))
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_from_file_url(ptr %s, ptr %s, ptr %s)", res, hostReg, rawReg, errSlot))
+		code := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", code, errSlot))
+		isEnc := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 1", isEnc, code))
+		encL := e.freshLabel("f2p.encsep")
+		notEncL := e.freshLabel("f2p.notenc")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEnc, encL, notEncL))
+		e.emitLabel(encL)
+		e.emitInternalThrow(e.internString("File URL path must not include encoded \\ or / characters"))
+		e.emitLabel(notEncL)
+		isRel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 2", isRel, code))
+		relL := e.freshLabel("f2p.relative")
+		doneL := e.freshLabel("f2p.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRel, relL, doneL))
+		e.emitLabel(relL)
+		e.emitInternalThrow(e.internString("File URL path must be absolute"))
+		e.emitLabel(doneL)
+		return Value{Ref: res, Ty: TypePtr}, nil
+	}
+
 	// The decoded path is the filesystem path (POSIX).
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
@@ -467,19 +516,61 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 	e.ensureMapStrHelpers()
 	e.ensureHTTPParseQuery()
 
-	// Resolve to an absolute, normalized path (path.resolve semantics).
-	abs, err := e.emitPathResolve(args[:1], pos)
-	if err != nil {
-		return Value{}, err
+	// Resolve to an absolute, normalized path (path.resolve semantics). On
+	// Windows (TDD-00178 / ADR-00722) the input is evaluated once and both the
+	// raw string (a UNC path keeps its host) and the resolved path go to the
+	// win32 sidecar, which hands back a `/`-separated, rooted pathname
+	// (`/C:/foo/bar`) plus the URL host — Node's pathToFileURL on win32.
+	hostRef := e.internString("")
+	var abs Value
+	if hostPathFlavor() == pathWin32 {
+		raw, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		raw = e.coerce(raw, TypePtr)
+		e.ensurePathWin32()
+		e.ensureProcessCwd()
+		e.ensureExceptionHelpers()
+		arr := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca [1 x ptr], align 8", arr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", raw.Ref, arr))
+		cwd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_process_cwd()", cwd))
+		resolved := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_resolve(i64 1, ptr %s, ptr %s, i32 1)", resolved, arr, cwd))
+		hostSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hostSlot))
+		pn := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_path_win32_to_file_url(ptr %s, ptr %s, ptr %s)", pn, raw.Ref, resolved, hostSlot))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, pn))
+		badL := e.freshLabel("p2f.badunc")
+		okL := e.freshLabel("p2f.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, badL, okL))
+		e.emitLabel(badL)
+		e.emitInternalThrow(e.internString("Missing UNC resource path"))
+		e.emitLabel(okL)
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, hostSlot))
+		hostRef = h
+		abs = Value{Ref: pn, Ty: TypePtr}
+	} else {
+		var err error
+		abs, err = e.emitPathResolve(pathPosix, args[:1], pos)
+		if err != nil {
+			return Value{}, err
+		}
+		abs = e.coerce(abs, TypePtr)
 	}
-	abs = e.coerce(abs, TypePtr)
 
 	handle := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_url()", handle))
-	// scheme=file, empty host (→ the `file://` authority), then the path with
-	// percent-encoding (so a space/`#`/`?` in the path stays part of the path).
+	// scheme=file, the host (empty → the `file://` authority; a UNC server on
+	// Windows), then the path with percent-encoding (so a space/`#`/`?` in the
+	// path stays part of the path).
 	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartScheme, e.internString("file")))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, e.internString("")))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 0)", e.freshReg(), handle, curluPartHost, hostRef))
 	e.emitInstr(fmt.Sprintf("%s = call i32 @curl_url_set(ptr %s, i32 %d, ptr %s, i32 %d)", e.freshReg(), handle, curluPartPath, abs.Ref, curluURLEncode))
 
 	urlTy := URLType()
@@ -487,6 +578,45 @@ func (e *Emitter) emitPathToFileURL(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", objReg, urlTy.StructSize()))
 	if err := e.deriveURLFieldsIntoObject(handle, objReg); err != nil {
 		return Value{}, err
+	}
+	if hostPathFlavor() == pathWin32 {
+		// libcurl serializes a `file:` URL without its host, so a UNC input's
+		// href would come back as `file:///share/p`. Node's is
+		// `file://server/share/p`: rebuild href from the derived host and
+		// (percent-encoded) pathname when a host is present.
+		e.ensureStrlen()
+		field := func(name string) (gep string, ty Type) {
+			idx, fieldTy, _ := urlTy.FieldIndex(name)
+			g := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, urlTy.StructIR(), objReg, idx))
+			return g, fieldTy
+		}
+		hostGep, hostTy := field("host")
+		hostVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", hostVal, hostTy.IR, hostGep, hostTy.Align()))
+		hostLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", hostLen, hostVal))
+		hasHost := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", hasHost, hostLen))
+		fixL := e.freshLabel("p2f.unchref")
+		doneL := e.freshLabel("p2f.hrefdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasHost, fixL, doneL))
+		e.emitLabel(fixL)
+		pathGep, pathTy := field("pathname")
+		pathVal := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", pathVal, pathTy.IR, pathGep, pathTy.Align()))
+		a, err := e.emitStringConcat(Value{Ref: e.internString("file://"), Ty: TypePtr}, Value{Ref: hostVal, Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		href, err := e.emitStringConcat(a, Value{Ref: pathVal, Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		hrefGep, hrefTy := field("href")
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", hrefTy.IR, href.Ref, hrefGep, hrefTy.Align()))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
 	}
 	return Value{Ref: objReg, Ty: urlTy}, nil
 }

@@ -5,12 +5,12 @@
   "statusPage": "PATH.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "8/8",
+    "loose": "10/10",
     "loosePct": 100,
-    "strict": "6/8",
-    "strictPct": 75
+    "strict": "7/10",
+    "strictPct": 70
   },
-  "lede": "Node's `path` module for portable filesystem path manipulation, import-gated as a virtual built-in (`import path from 'path'`). The whole module is POSIX-only — this compiler doesn't cross-compile, so `sep` is always `/` and `delimiter` always `:`, and no Windows `\\`/`;` forms are ever emitted. Everything else — join, resolve, dirname, basename, extname, parse/format, isAbsolute — matches real Node's algorithms, including its asymmetric `basename` extension-stripping rule.",
+  "lede": "Node's `path` module for portable filesystem path manipulation, import-gated as a virtual built-in (`import path from 'path'`). Both of Node's flavours exist on every host: a bare `path` is the host's flavour (`path.win32` on Windows — backslashes, `;`, drive letters, UNC roots — and `path.posix` on Linux/macOS), while `path.posix.*` and `path.win32.*` name one explicitly. join, resolve, dirname, basename, extname, parse/format and isAbsolute follow real Node's algorithms in both flavours, including its asymmetric `basename` extension-stripping rule; the win32 flavour is a C port of Node's own `lib/path.js`.",
   "entries": [
     {
       "id": "path.join",
@@ -18,7 +18,7 @@
       "statusRow": "path.join(...segments)",
       "signature": "join(...segments: string[]): string",
       "badge": "exact",
-      "description": "Joins segments with `/`, then normalizes the result: collapses repeated slashes, drops `.` segments, and resolves `..` against segments already seen in the same call.",
+      "description": "Joins segments with the flavour's separator, then normalizes the result: collapses repeated separators, drops `.` segments, and resolves `..` against segments already seen in the same call. The win32 flavour accepts mixed `/` and `\\`, keeps UNC and drive roots intact, and never lets `..` escape a drive root.",
       "returns": {
         "type": "string",
         "desc": "The joined, normalized path."
@@ -38,7 +38,7 @@
       "statusRow": "path.resolve(...segments)",
       "signature": "resolve(...segments: string[]): string",
       "badge": "exact",
-      "description": "Absolute-always: starts from `process.cwd()`, walks segments left to right, any segment starting with `/` resets the accumulator (discarding everything before it, including cwd) — equivalent to real Node's right-to-left \"stop at the last absolute segment\" algorithm.",
+      "description": "Absolute-always: starts from `process.cwd()` and keeps only the last absolute segment and what follows it, as in real Node. The win32 flavour also tracks the drive: a segment rooted on another drive wins, a drive-relative segment (`C:x`) resolves against that drive's own current directory, and a rooted-but-driveless segment (`\\abs`) takes `cwd`'s drive.",
       "returns": {
         "type": "string",
         "desc": "An absolute path."
@@ -140,7 +140,7 @@
       "statusRow": "path.isAbsolute(p)",
       "signature": "isAbsolute(p: string): boolean",
       "badge": "exact",
-      "description": "True when the path is absolute — `p[0] === '/'`.",
+      "description": "True when the path is absolute: `p[0] === '/'` for posix; for win32 a leading `/` or `\\` (including UNC) or a drive letter followed by a separator, so drive-relative `C:x` is not absolute.",
       "returns": {
         "type": "boolean",
         "desc": "Whether the path is absolute."
@@ -159,18 +159,57 @@
       "name": "path.sep / path.delimiter",
       "statusRow": "path.sep / path.delimiter",
       "signature": "path.sep: string; path.delimiter: string",
-      "badge": "caveats",
-      "description": "The path-segment separator and the PATH-style delimiter, as compile-time constants.",
+      "badge": "exact",
+      "description": "The path-segment separator and the PATH-style delimiter, as compile-time constants for the host's flavour: `/` and `:` on Linux/macOS, `\\` and `;` on Windows.",
       "exampleKey": "path/path",
-      "snippet": "console.log(path.sep)       // /\nconsole.log(path.delimiter) // :",
-      "differences": [
-        "POSIX-only (this compiler doesn't cross-compile) — the compile-time constants `/` and `:`, never the Windows `\\`/`;` forms"
-      ],
+      "snippet": "console.log(path.sep)       // / (\\ on Windows)\nconsole.log(path.delimiter) // : (; on Windows)\nconsole.log(path.win32.sep) // \\ on every host",
       "seeAlso": [
         "path.join"
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/path.html#pathsep"
+      }
+    },
+    {
+      "id": "path.posixwin32",
+      "name": "path.posix / path.win32",
+      "statusRow": "path.posix / path.win32",
+      "signature": "path.posix: PathFlavour; path.win32: PathFlavour",
+      "badge": "caveats",
+      "description": "The two flavour objects Node exposes on every platform. Each carries the same method set as `path` — join, resolve, dirname, basename, extname, isAbsolute, parse, format, sep, delimiter — with posix or Windows semantics regardless of the host. A bare `path` dispatches to the host's flavour.",
+      "exampleKey": "path/path_win32",
+      "snippet": "console.log(path.win32.join('C:\\\\Users', 'me', '..', 'you')) // C:\\Users\\you\nconsole.log(path.win32.resolve('C:\\\\home', 'D:\\\\x', 'y'))    // D:\\x\\y\nconsole.log(path.posix.join('/a', 'b', '../c'))            // /a/c",
+      "differences": [
+        "The flavour objects are dispatch targets, not first-class values — call `path.win32.join(...)` or import the object by name (`import { win32 } from 'path'`); binding it to a variable first is not supported.",
+        "`normalize`, `relative`, `toNamespacedPath` and `matchesGlob` are missing from both flavours."
+      ],
+      "seeAlso": [
+        "path.join",
+        "path.sepdelimiter"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathwin32"
+      }
+    },
+    {
+      "id": "path.normalizerelative",
+      "name": "path.normalize(p) / path.relative(from, to) / path.toNamespacedPath(p)",
+      "statusRow": "path.normalize(p) / path.relative(from, to) / path.toNamespacedPath(p)",
+      "signature": "normalize(p: string): string; relative(from: string, to: string): string; toNamespacedPath(p: string): string",
+      "badge": "exact",
+      "description": "`normalize` resolves `.`/`..` and repeated separators and keeps a trailing separator. `relative` resolves both ends against `process.cwd()` and walks up with `..`; the win32 flavour compares case-insensitively and returns `to` outright across drives or UNC shares. `toNamespacedPath` is the identity for posix and the resolved `\\\\?\\C:\\…` / `\\\\?\\UNC\\…` long-path form for win32. All three exist in both flavours.",
+      "returns": {
+        "type": "string",
+        "desc": "The normalized, relative, or namespaced path."
+      },
+      "exampleKey": "path/path_win32",
+      "snippet": "console.log(path.posix.normalize('/a/../b/./c/'))          // /b/c/\nconsole.log(path.posix.relative('/a/b', '/a/c'))           // ../c\nconsole.log(path.win32.relative('C:\\\\a\\\\b\\\\c\\\\d', 'C:\\\\a\\\\b')) // ..\\..\nconsole.log(path.win32.toNamespacedPath('\\\\\\\\srv\\\\sh\\\\x')) // \\\\?\\UNC\\srv\\sh\\x",
+      "seeAlso": [
+        "path.resolve",
+        "path.posixwin32"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/path.html#pathrelativefrom-to"
       }
     }
   ]

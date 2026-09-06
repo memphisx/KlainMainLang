@@ -861,6 +861,16 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return TypeI64
 			}
 		}
+		// path.posix.sep / path.win32.sep (TDD-00178): a two-level member whose
+		// object is itself a member of the path marker.
+		if _, ok := ex.Object.(*ast.MemberExpression); ok {
+			if _, isPath := pathFlavorOf(ex.Object); isPath {
+				switch ex.Property {
+				case "sep", "delimiter":
+					return TypePtr
+				}
+			}
+		}
 		if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
 			switch id.Name {
 			case "Math":
@@ -1753,9 +1763,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return BigIntType()
 				}
 			}
-			if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "path__kml_builtin" {
+			if _, ok2 := pathFlavorOf(mem.Object); ok2 {
 				switch mem.Property {
-				case "join", "resolve", "dirname", "basename", "extname", "format":
+				case "join", "resolve", "dirname", "basename", "extname", "format", "normalize", "relative", "toNamespacedPath":
 					return TypePtr
 				case "isAbsolute":
 					return TypeBool

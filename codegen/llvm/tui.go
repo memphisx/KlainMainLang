@@ -55,6 +55,8 @@ static void kmltui_console_vt(void){ HANDLE h=(HANDLE)_get_osfhandle(1); DWORD m
 #else
 #include <unistd.h>
 #include <sys/ioctl.h>
+static int termcols(void){ struct winsize ws; if(ioctl(1,TIOCGWINSZ,&ws)==0&&ws.ws_col>0)return ws.ws_col; return 80; }
+static int termrows(void){ struct winsize ws; if(ioctl(1,TIOCGWINSZ,&ws)==0&&ws.ws_row>0)return ws.ws_row; return 24; }
 static void kmltui_console_vt(void){}
 #endif
 

@@ -788,6 +788,13 @@ define void @__kml_reactor_thread_lock() {
 	e.emitGlobal("declare i32 @bind(i32 noundef, ptr noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @listen(i32 noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @accept(i32 noundef, ptr noundef, ptr noundef)")
+	// Node's http.Server enables TCP_NODELAY on every accepted socket
+	// (`noDelay` defaults to true), so a response written as separate header
+	// and body writes goes out without waiting for the peer's delayed ACK.
+	// A constant global rather than an alloca: doaccept sits inside the
+	// event-loop body, and a loop-body alloca is the stack leak this very
+	// server once had (TestE2EHTTPListenManyRequestsDoesNotLeakStack).
+	e.emitGlobal("@__kml_http_nodelay_one = internal constant i32 1, align 4")
 	e.ensureReadDecl()
 	e.ensureWriteDecl()
 	e.ensureCloseDecl()
@@ -2002,6 +2009,9 @@ checkisset:
 doaccept:
   %newfd = call i32 @accept(i32 %listenfd, ptr null, ptr null)
   %acceptok = icmp sge i32 %newfd, 0
+  ; IPPROTO_TCP(6)/TCP_NODELAY(1) are the same values on Linux, macOS and
+  ; Winsock. Harmless on a failed accept (newfd < 0 -> EBADF, ignored).
+  call i32 @setsockopt(i32 %newfd, i32 6, i32 1, ptr @__kml_http_nodelay_one, i32 4)
   br i1 %acceptok, label %` + h2tlsAcceptTarget + `, label %scanconn
 ` + h2tlsBranch + `
 setnonblock:

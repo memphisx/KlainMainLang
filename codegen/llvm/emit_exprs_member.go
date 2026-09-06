@@ -826,12 +826,14 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if e.inferExprType(ex.Object).IsClusterWorker {
 		return e.emitClusterWorkerMember(ex.Object, ex.Property, ex.GetPos())
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "path__kml_builtin" {
+	// path.sep / path.delimiter per flavour (TDD-00178): the host's for a
+	// bare `path`, or the one `path.posix` / `path.win32` names.
+	if pf, ok := pathFlavorOf(ex.Object); ok {
 		switch ex.Property {
 		case "sep":
-			return Value{Ref: e.internString("/"), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(pathFlavorSep(pf)), Ty: TypePtr}, nil
 		case "delimiter":
-			return Value{Ref: e.internString(":"), Ty: TypePtr}, nil
+			return Value{Ref: e.internString(pathFlavorDelimiter(pf)), Ty: TypePtr}, nil
 		}
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {

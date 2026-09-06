@@ -125,6 +125,8 @@ type Emitter struct {
 	declaredBigInt        bool            // the __kml_bigint_* declares have been emitted once
 	usesJSONParse         bool            // set the first time JSON.parse/Response.json() is emitted (drives json_parse.c compile+link in main.go — TDD-00077 Track P)
 	declaredJSONParseTree bool            // the __kml_json_* parse-tree declares have been emitted once
+	usesPathWin32         bool            // set the first time a win32-flavoured path call is emitted (drives path_win32.c compile+link — TDD-00178)
+	declaredPathWin32     bool            // the __kml_path_win32_* declares have been emitted once
 	usesURLPattern        bool            // set the first time a URLPattern is constructed (drives urlpattern.c compile+link in main.go — TDD-00100)
 	declaredURLPattern    bool            // the __kml_urlpattern_* declares have been emitted once
 	usesFloatFmt          bool            // set the first time a float is printed (drives dtoa.c compile+link in main.go — TDD-00080)
