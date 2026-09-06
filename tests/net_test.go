@@ -211,7 +211,7 @@ sock.on('data', (chunk: Uint8Array) => {
 // ADR-00588: net.connect({ path }) connects to a Unix-domain socket. A Go-side
 // AF_UNIX echo server drives the compiled klain client.
 func TestE2ENetConnectUnixSocket(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "kml.sock")
+	sockPath := filepath.Join(tempDir(t), "kml.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

@@ -136,7 +136,12 @@ console.log(f())
 // computes its shape purely and registerModuleGlobals forces the monomorphized
 // class's registration, so a named function's method call/field read resolves.
 func TestE2EModuleGlobalGenericClassInstance(t *testing.T) {
-	assertOutput(t, `
+	// Through the real pipeline (resolver included): a top-level function named
+	// like a libc symbol (`read`) only gets its file-private mangled name from
+	// the resolver, and the parser-direct harness would hand the linker a bare
+	// `read` that collides with the C runtime (a hard duplicate-symbol error on
+	// Windows, a silent libc interposition elsewhere).
+	assertOutputImports(t, `
 class Box<T> {
   v: T
   constructor(x: T) { this.v = x }

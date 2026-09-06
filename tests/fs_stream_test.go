@@ -13,7 +13,7 @@ import (
 // read→write pipe round-trips. Consumed via for-await or .on('data')/.on('end').
 
 func TestE2EFsCreateWriteStream(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "w.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -31,7 +31,7 @@ main()
 }
 
 func TestE2EFsCreateReadStreamForAwait(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "r.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -47,7 +47,7 @@ main()
 }
 
 func TestE2EFsCreateReadStreamOnData(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "r.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -66,7 +66,7 @@ main()
 
 // A large file split across highWaterMark-sized chunks accumulates correctly.
 func TestE2EFsCreateReadStreamMultiChunk(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "big.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -89,7 +89,7 @@ main()
 
 // createReadStream(a).pipe(createWriteStream(b)) copies the file.
 func TestE2EFsStreamPipe(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := filepath.Join(dir, "src.txt")
 	dst := filepath.Join(dir, "dst.txt")
 	code := fmt.Sprintf(`
@@ -106,7 +106,7 @@ main()
 }
 
 func TestE2EFsCreateWriteStreamAppend(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "a.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'

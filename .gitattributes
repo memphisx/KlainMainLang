@@ -1,0 +1,8 @@
+# Normalize line endings: golden-output tests and the .ts examples compare
+# bytes, so a CRLF checkout (Windows default core.autocrlf=true) breaks them.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -15,7 +15,11 @@
 // offsets: next_in +0, avail_in +8 (i32), next_out +24, avail_out +32 (i32).
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+	"strings"
+)
 
 const zctxStructIR = "{ ptr, ptr, i64, i64 }"
 
@@ -65,7 +69,7 @@ func (e *Emitter) ensureZlibOneshot() {
 	e.ensureFree()
 	e.ensureZlibExterns()
 
-	e.emitGlobal(`
+	e.emitGlobal(zsFix(`
 define { ptr, i64 } @__kml_zlib_oneshot(ptr %data, i64 %len, i64 %mode, i64 %wbits, i64 %level) {
 entry:
   %strm = call ptr @calloc(i64 1, i64 112)
@@ -186,7 +190,7 @@ doneend:
   %r0 = insertvalue { ptr, i64 } undef, ptr %outr, 0
   %r1 = insertvalue { ptr, i64 } %r0, i64 %totr, 1
   ret { ptr, i64 } %r1
-}`)
+}`))
 }
 
 func (e *Emitter) ensureZlibStreamRuntime() {
@@ -208,7 +212,7 @@ func (e *Emitter) ensureZlibStreamRuntime() {
 
 	// __kml_zs_init(mode, windowBits) -> zctx (readable patched in by the
 	// construction site). Returns null when zlib rejects the init.
-	e.emitGlobal(fmt.Sprintf(`
+	e.emitGlobal(zsFix(fmt.Sprintf(`
 define ptr @__kml_zs_init(i64 %%mode, i64 %%wbits) {
 entry:
   %%strm = call ptr @calloc(i64 1, i64 112)
@@ -239,11 +243,11 @@ ok:
   %%f3 = getelementptr %s, ptr %%ctx, i32 0, i32 3
   store i64 0, ptr %%f3, align 8
   ret ptr %%ctx
-}`, zc, zc, zc, zc))
+}`, zc, zc, zc, zc)))
 
 	// __kml_zs_pump(zctx, flushFlag): run deflate/inflate over the current
 	// input until it is consumed, enqueuing every produced output block.
-	e.emitGlobal(fmt.Sprintf(`
+	e.emitGlobal(zsFix(fmt.Sprintf(`
 define void @__kml_zs_pump(ptr %%ctx, i32 %%flush) {
 entry:
   %%f0 = getelementptr %s, ptr %%ctx, i32 0, i32 0
@@ -315,7 +319,7 @@ cont:
   br i1 %%more, label %%loop, label %%ret
 ret:
   ret void
-}`, zc, zc, zc, zc, zlibErrMsg, errName))
+}`, zc, zc, zc, zc, zlibErrMsg, errName)))
 
 	// The %kml.ts-compatible transform / flush closures.
 	e.emitGlobal(fmt.Sprintf(`
@@ -361,4 +365,22 @@ endinf:
   %%ign2 = call i32 @inflateEnd(ptr %%strm)
   ret ptr null
 }`, zc, zc, zc, zc))
+}
+
+// zsFix rewrites the z_stream offsets and sizeof baked into the templates
+// above for the host: zlib's uLong is 32-bit on Windows (LLP64), which
+// moves next_out/avail_out from 24/32 to 16/24 and shrinks the struct from
+// 112 to 88 bytes (measured against the mingw-w64 zlib.h, ADR-00719). The
+// LP64 numbers stay in the templates as written.
+func zsFix(ir string) string {
+	if runtime.GOOS != "windows" {
+		return ir
+	}
+	r := strings.NewReplacer(
+		"ptr %strm, i64 24", "ptr %strm, i64 16",
+		"ptr %strm, i64 32", "ptr %strm, i64 24",
+		"calloc(i64 1, i64 112)", "calloc(i64 1, i64 88)",
+		"i32 112)", "i32 88)",
+	)
+	return r.Replace(ir)
 }

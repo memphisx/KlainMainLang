@@ -2,7 +2,6 @@ package tests
 
 import "testing"
 
-
 // --- interface extends merging + constructor types (ADR-00452) ---
 
 func TestE2EInterfaceExtendsMergesBaseFields(t *testing.T) {

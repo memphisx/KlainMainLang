@@ -8,6 +8,7 @@
  * Allocation goes through plain malloc, so under -mm=gc it is transparently
  * routed to the collector by the shim's global malloc override.
  */
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,19 +17,19 @@
  * base+8, so KML string ops read the true length via ptr-8. The codec encoders
  * (hex/base64/latin1 -> string) return one of these; the decoders (-> byte
  * buffer) keep plain malloc. */
-static char *kml_str_hdr_alloc(long len) {
+static char *kml_str_hdr_alloc(int64_t len) {
 	char *base = (char *)malloc((size_t)(8 + len + 1));
 	if (!base) return base;
-	*(long *)base = len;
+	*(int64_t *)base = len;
 	return base + 8;
 }
 
 /* ---- hex ---- */
 
-char *__kml_buf_hex_enc(const unsigned char *src, long long n) {
+char *__kml_buf_hex_enc(const unsigned char *src, int64_t n) {
 	static const char digits[] = "0123456789abcdef";
 	char *out = kml_str_hdr_alloc(n * 2);
-	for (long long i = 0; i < n; i++) {
+	for (int64_t i = 0; i < n; i++) {
 		out[i * 2] = digits[src[i] >> 4];
 		out[i * 2 + 1] = digits[src[i] & 0xF];
 	}
@@ -45,10 +46,10 @@ static int hexval(char c) {
 
 /* Node semantics: decoding stops at the first non-hex pair (and a trailing
  * lone digit is dropped). Returns the byte count; *out receives the buffer. */
-long long __kml_buf_hex_dec(const char *s, unsigned char **out) {
+int64_t __kml_buf_hex_dec(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
 	unsigned char *buf = (unsigned char *)malloc(sl / 2 + 1);
-	long long n = 0;
+	int64_t n = 0;
 	for (size_t i = 0; i + 1 < sl; i += 2) {
 		int hi = hexval(s[i]), lo = hexval(s[i + 1]);
 		if (hi < 0 || lo < 0) break;
@@ -60,14 +61,14 @@ long long __kml_buf_hex_dec(const char *s, unsigned char **out) {
 
 /* ---- base64 / base64url ---- */
 
-char *__kml_buf_b64_enc(const unsigned char *src, long long n, int urlsafe) {
+char *__kml_buf_b64_enc(const unsigned char *src, int64_t n, int urlsafe) {
 	static const char std_al[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	static const char url_al[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 	const char *al = urlsafe ? url_al : std_al;
-	long long groups = (n + 2) / 3;
+	int64_t groups = (n + 2) / 3;
 	char *out = kml_str_hdr_alloc(groups * 4);
-	long long o = 0;
-	for (long long i = 0; i < n; i += 3) {
+	int64_t o = 0;
+	for (int64_t i = 0; i < n; i += 3) {
 		unsigned v = (unsigned)src[i] << 16;
 		if (i + 1 < n) v |= (unsigned)src[i + 1] << 8;
 		if (i + 2 < n) v |= (unsigned)src[i + 2];
@@ -93,10 +94,10 @@ static int b64val(char c) {
 
 /* Lenient like Node: non-alphabet bytes (whitespace, '=') are skipped;
  * both the standard and url-safe alphabets are accepted. */
-long long __kml_buf_b64_dec(const char *s, unsigned char **out) {
+int64_t __kml_buf_b64_dec(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
 	unsigned char *buf = (unsigned char *)malloc(sl / 4 * 3 + 3);
-	long long n = 0;
+	int64_t n = 0;
 	unsigned acc = 0;
 	int bits = 0;
 	for (size_t i = 0; i < sl; i++) {
@@ -117,10 +118,10 @@ long long __kml_buf_b64_dec(const char *s, unsigned char **out) {
 
 /* bytes -> UTF-8 string: 0x00–0x7F pass through, 0x80–0xFF become the
  * 2-byte UTF-8 encoding of U+0080–U+00FF. */
-char *__kml_buf_latin1_str(const unsigned char *src, long long n) {
+char *__kml_buf_latin1_str(const unsigned char *src, int64_t n) {
 	char *out = kml_str_hdr_alloc(n * 2); /* max; actual length set below */
-	long long o = 0;
-	for (long long i = 0; i < n; i++) {
+	int64_t o = 0;
+	for (int64_t i = 0; i < n; i++) {
 		unsigned char b = src[i];
 		if (b < 0x80) {
 			out[o++] = (char)b;
@@ -130,16 +131,16 @@ char *__kml_buf_latin1_str(const unsigned char *src, long long n) {
 		}
 	}
 	out[o] = 0;
-	*(long *)(out - 8) = o; /* TDD-00120: actual UTF-8 length */
+	*(int64_t *)(out - 8) = o; /* TDD-00120: actual UTF-8 length */
 	return out;
 }
 
 /* UTF-8 string -> bytes: each codepoint keeps its low 8 bits (Node's
  * latin1-write masking). Invalid sequences fall back byte-wise. */
-long long __kml_buf_latin1_bytes(const char *s, unsigned char **out) {
+int64_t __kml_buf_latin1_bytes(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
 	unsigned char *buf = (unsigned char *)malloc(sl + 1);
-	long long n = 0;
+	int64_t n = 0;
 	for (size_t i = 0; i < sl;) {
 		unsigned char c = (unsigned char)s[i];
 		unsigned cp = c;
@@ -165,24 +166,24 @@ long long __kml_buf_latin1_bytes(const char *s, unsigned char **out) {
  * base64 the DER in 64-char lines between -----BEGIN <label>-----/
  * -----END <label>----- with a trailing newline — Node's own PEM shape.
  * Returns a length-prefixed kml string. */
-char *__kml_pem_from_der(const unsigned char *der, long long n, const char *label) {
+char *__kml_pem_from_der(const unsigned char *der, int64_t n, const char *label) {
 	char *b64 = __kml_buf_b64_enc(der, n, 0);
-	long long bl = *(long *)(b64 - 8);
-	long long lines = (bl + 63) / 64;
-	long long ll = (long long)strlen(label);
+	int64_t bl = *(int64_t *)(b64 - 8);
+	int64_t lines = (bl + 63) / 64;
+	int64_t ll = (int64_t)strlen(label);
 	/* "-----BEGIN -----\n" = 17 + label; "-----END -----\n" = 15 + label */
-	long long total = 17 + ll + bl + lines + 15 + ll;
+	int64_t total = 17 + ll + bl + lines + 15 + ll;
 	char *out = kml_str_hdr_alloc(total);
-	long long o = 0;
+	int64_t o = 0;
 	o += sprintf(out + o, "-----BEGIN %s-----\n", label);
-	for (long long i = 0; i < bl; i += 64) {
-		long long chunk = bl - i < 64 ? bl - i : 64;
+	for (int64_t i = 0; i < bl; i += 64) {
+		int64_t chunk = bl - i < 64 ? bl - i : 64;
 		memcpy(out + o, b64 + i, (size_t)chunk);
 		o += chunk;
 		out[o++] = '\n';
 	}
 	o += sprintf(out + o, "-----END %s-----\n", label);
-	*(long *)(out - 8) = o;
+	*(int64_t *)(out - 8) = o;
 	out[o] = 0;
 	return out;
 }

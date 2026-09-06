@@ -362,7 +362,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	sjRet := e.freshReg()
 	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sjRet, jmpbuf))
+	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, setjmpCall(jmpbuf)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
 

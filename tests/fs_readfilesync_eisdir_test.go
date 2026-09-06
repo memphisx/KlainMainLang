@@ -11,7 +11,7 @@ import (
 // bytes; the fix guards the read path with stat(2) up front, sets errno to
 // EISDIR, and routes through the shared fs error path so `.code === 'EISDIR'`.
 func TestE2EFsReadFileSyncOnDirectoryThrowsEISDIR(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := fmt.Sprintf(`
 import fs from 'fs'
 try {
@@ -27,7 +27,7 @@ try {
 // The thrown value is a catchable Error carrying the EISDIR code AND a
 // non-empty message — the full 6-field error object, not a bare code.
 func TestE2EFsReadFileSyncOnDirectoryErrorShape(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := fmt.Sprintf(`
 import fs from 'fs'
 try {

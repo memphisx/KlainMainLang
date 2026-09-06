@@ -49,7 +49,6 @@ console.log(util.hidden());
 	}
 }
 
-
 // --- TDD-00148: namespaces V2 ---
 
 func TestE2ENamespaceV2ModuleSynonymAndMembers(t *testing.T) {

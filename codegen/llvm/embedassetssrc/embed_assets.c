@@ -17,11 +17,15 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <pthread.h>
+#ifdef _WIN32
+#include "kml_posix_compat.h"
+#else
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#endif
 
 /* Packed blob layout (little-endian, offsets from blob base):
  *   header:  char magic[4] = "KMLA"; uint32 version; uint32 count; uint32 rsvd;
@@ -56,23 +60,23 @@ static const char *kml_ctype_str(uint32_t c) {
 /* __kml_embed_lookup: binary-search the blob's manifest for an exact path
  * (path and path_len need not be NUL-terminated). Returns 1 and fills the out
  * pointers (data, len, ctype) on hit, else 0. */
-int __kml_embed_lookup(const void *blob, const char *path, long path_len,
-                       const unsigned char **data, long *len, uint32_t *ctype) {
+int __kml_embed_lookup(const void *blob, const char *path, int64_t path_len,
+                       const unsigned char **data, int64_t *len, uint32_t *ctype) {
   const unsigned char *base = (const unsigned char *)blob;
   uint32_t count;
   memcpy(&count, base + 8, 4);
   const kml_embed_entry *ents = (const kml_embed_entry *)(base + 16);
-  long lo = 0, hi = (long)count - 1;
+  int64_t lo = 0, hi = (int64_t)count - 1;
   while (lo <= hi) {
-    long mid = (lo + hi) / 2;
+    int64_t mid = (lo + hi) / 2;
     const kml_embed_entry *e = &ents[mid];
     const char *ep = (const char *)(base + e->path_off);
-    long n = e->path_len < (uint32_t)path_len ? (long)e->path_len : path_len;
+    int64_t n = e->path_len < (uint32_t)path_len ? (int64_t)e->path_len : path_len;
     int cmp = memcmp(ep, path, (size_t)n);
-    if (cmp == 0) cmp = (int)((long)e->path_len - path_len);
+    if (cmp == 0) cmp = (int)((int64_t)e->path_len - path_len);
     if (cmp == 0) {
       *data = base + e->data_off;
-      *len = (long)e->data_len;
+      *len = (int64_t)e->data_len;
       *ctype = e->ctype;
       return 1;
     }
@@ -85,9 +89,9 @@ int __kml_embed_lookup(const void *blob, const char *path, long path_len,
  * Returns the data pointer (into the static blob, no copy) and sets *out_len, or
  * NULL if the path isn't embedded. */
 const unsigned char *__kml_embed_get(const void *blob, const char *path,
-                                     long path_len, long *out_len) {
+                                     int64_t path_len, int64_t *out_len) {
   const unsigned char *data = 0;
-  long len = 0;
+  int64_t len = 0;
   uint32_t ctype = 0;
   if (__kml_embed_lookup(blob, path, path_len, &data, &len, &ctype)) {
     *out_len = len;
@@ -99,8 +103,8 @@ const unsigned char *__kml_embed_get(const void *blob, const char *path,
 
 /* Resolve a request path to an asset, applying the SPA/SSG fallback rule.
  * `rel` points at the request path (without query), rlen its length. */
-static int kml_embed_resolve(const void *blob, const char *rel, long rlen,
-                             const unsigned char **data, long *len, uint32_t *ctype) {
+static int kml_embed_resolve(const void *blob, const char *rel, int64_t rlen,
+                             const unsigned char **data, int64_t *len, uint32_t *ctype) {
   char buf[2048];
   /* "/" -> "/index.html" */
   if (rlen == 1 && rel[0] == '/') {
@@ -109,9 +113,9 @@ static int kml_embed_resolve(const void *blob, const char *rel, long rlen,
   /* exact */
   if (__kml_embed_lookup(blob, rel, rlen, data, len, ctype)) return 1;
   /* trailing slash -> +index.html; else try /index.html appended */
-  if (rlen > 0 && rlen < (long)sizeof(buf) - 12) {
+  if (rlen > 0 && rlen < (int64_t)sizeof(buf) - 12) {
     memcpy(buf, rel, (size_t)rlen);
-    long m = rlen;
+    int64_t m = rlen;
     if (buf[m - 1] != '/') buf[m++] = '/';
     memcpy(buf + m, "index.html", 10);
     m += 10;
@@ -124,7 +128,7 @@ static int kml_embed_resolve(const void *blob, const char *rel, long rlen,
 
 static void kml_embed_handle(int fd, const void *blob) {
   char req[4096];
-  long n = (long)recv(fd, req, sizeof(req) - 1, 0);
+  int64_t n = (int64_t)recv(fd, req, sizeof(req) - 1, 0);
   if (n <= 0) { close(fd); return; }
   req[n] = 0;
   /* Parse "GET /path HTTP/1.x" (also accept HEAD). */
@@ -139,9 +143,9 @@ static void kml_embed_handle(int fd, const void *blob) {
   /* strip query string */
   char *q = strchr(p, '?');
   if (q) *q = 0;
-  long rlen = (long)strlen(p);
+  int64_t rlen = (int64_t)strlen(p);
 
-  const unsigned char *data = 0; long dlen = 0; uint32_t ctype = 0;
+  const unsigned char *data = 0; int64_t dlen = 0; uint32_t ctype = 0;
   char hdr[512];
   if (kml_embed_resolve(blob, p, rlen, &data, &dlen, &ctype)) {
     int hn = snprintf(hdr, sizeof(hdr),
@@ -149,9 +153,9 @@ static void kml_embed_handle(int fd, const void *blob) {
       "Connection: close\r\n\r\n", kml_ctype_str(ctype), dlen);
     send(fd, hdr, (size_t)hn, 0);
     if (!head && dlen > 0) {
-      long off = 0;
+      int64_t off = 0;
       while (off < dlen) {
-        long w = (long)send(fd, data + off, (size_t)(dlen - off), 0);
+        int64_t w = (int64_t)send(fd, data + off, (size_t)(dlen - off), 0);
         if (w <= 0) break;
         off += w;
       }

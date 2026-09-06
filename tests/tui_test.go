@@ -52,9 +52,9 @@ leave()
 	}{
 		{"alt-screen enter", "\x1b[?1049h"},
 		{"cursor hidden", "\x1b[?25l"},
-		{"rounded border top-left", "╭"},   // ╭
+		{"rounded border top-left", "╭"},     // ╭
 		{"rounded border bottom-right", "╯"}, // ╯
-		{"horizontal border", "─"},          // ─
+		{"horizontal border", "─"},           // ─
 		{"title text", "Hello TUI"},
 		{"green fg SGR", "\x1b[32m"},
 		{"bold SGR", "\x1b[1m"},

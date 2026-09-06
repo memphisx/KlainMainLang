@@ -1,6 +1,6 @@
 package llvm
 
-import ()
+import "runtime"
 
 // ensureExceptionHelpers hand-writes @__kml_throw's uncaught-error path
 // against errorObjType's layout directly ({ i64 kind, ptr message, ptr name
@@ -18,7 +18,9 @@ func (e *Emitter) ensureExceptionHelpers() {
 	e.ensureMalloc()
 
 	e.emitGlobal(`@__kml_thrown  = internal thread_local global ptr null, align 8`)
-	e.emitGlobal(`@__kml_jmp_stk = internal thread_local global [64 x [64 x i64]] zeroinitializer, align 8`)
+	// align 16: Win64 _setjmp saves XMM registers with aligned stores, so every
+	// 512-byte slot (a multiple of 16) must start 16-aligned; 8 faults there.
+	e.emitGlobal(`@__kml_jmp_stk = internal thread_local global [64 x [64 x i64]] zeroinitializer, align 16`)
 	e.emitGlobal(`@__kml_jmp_top = internal thread_local global i32 0, align 4`)
 	// The jmpbuf stack is indirected through @__kml_cur_jmp_stk (default: the
 	// thread's own @__kml_jmp_stk) so each coroutine task can swap in its own
@@ -31,7 +33,11 @@ func (e *Emitter) ensureExceptionHelpers() {
 	// resolve null to @__kml_jmp_stk at load time instead.
 	e.emitGlobal(`@__kml_cur_jmp_stk = internal thread_local global ptr null, align 8`)
 	e.emitGlobal(`@.kml_unc_fmt  = private unnamed_addr constant [14 x i8] c"Uncaught: %s\0A\00", align 1`)
-	e.emitGlobal(`declare i32 @setjmp(ptr) returns_twice`)
+	if runtime.GOOS == "windows" {
+		e.emitGlobal(`declare i32 @_setjmp(ptr, ptr) returns_twice`)
+	} else {
+		e.emitGlobal(`declare i32 @setjmp(ptr) returns_twice`)
+	}
 	e.emitGlobal(`declare void @longjmp(ptr, i32) noreturn`)
 	e.ensureExit()
 
@@ -101,4 +107,18 @@ jump:
   call void @longjmp(ptr %slot, i32 1)
   unreachable
 }`)
+}
+
+// setjmpCall returns the IR call that saves a catch frame into buf. On
+// mingw-w64 x86-64, C's setjmp is a macro for _setjmp(buf, NULL): the second
+// argument is the frame pointer longjmp will SEH-unwind to, and NULL tells
+// it to skip unwinding entirely. Calling a bare one-argument setjmp leaves
+// that register holding garbage, and the matching longjmp faults with
+// STATUS_BAD_STACK (0xC0000028) — every throw/catch test on Windows
+// (TDD-00177 Stage 0). Elsewhere it is the libc symbol as before.
+func setjmpCall(buf string) string {
+	if runtime.GOOS == "windows" {
+		return "call i32 @_setjmp(ptr " + buf + ", ptr null)"
+	}
+	return "call i32 @setjmp(ptr " + buf + ")"
 }

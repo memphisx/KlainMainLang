@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -809,6 +810,11 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			case "send":
 				return e.emitProcessSend(ex.Args, ex.GetPos())
 			case "getuid", "geteuid", "getgid", "getegid":
+				if runtime.GOOS == "windows" {
+					// Node has no process.getuid/getgid family on Windows (they are
+					// undefined there); reject at compile time (TDD-00177).
+					return Value{}, fmt.Errorf("%d:%d: process.%s is not available on Windows (Node defines it only on POSIX)", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
+				}
 				if len(ex.Args) != 0 {
 					return Value{}, fmt.Errorf("%d:%d: process.%s takes no arguments", ex.GetPos().Line, ex.GetPos().Col, mem.Property)
 				}

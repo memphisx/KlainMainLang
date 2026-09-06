@@ -253,7 +253,7 @@ console.log(Symbol.keyFor(c) === null);
 `, "true\nfalse\napp.key\ntrue")
 }
 
-// Template literal types (`` `a-${T}` ``) parse and resolve to `string` — the
+// Template literal types (“ `a-${T}` “) parse and resolve to `string` — the
 // literal pattern isn't narrowed/enforced, the same simplification
 // string-literal types use (ADR-00561). No-substitution, multi-substitution,
 // and array-of forms all work.

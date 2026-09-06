@@ -10,7 +10,7 @@ const t: [string, number] = ["hello", 42]
 console.log(t[0])
 console.log(t[1])
 console.log(JSON.stringify(t))
-console.log(` + "`${t}`" + `)
+console.log(`+"`${t}`"+`)
 `, "hello\n42\n"+`["hello",42]`+"\nhello,42")
 }
 

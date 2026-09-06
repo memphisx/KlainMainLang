@@ -216,3 +216,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00174](TDD-00174.md) | Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default | Partially Implemented | [ADR-00708](../adr/ADR-00708.md) | |
 | [00175](TDD-00175.md) | Deep reclamation — container elements and object graphs under `-mm=auto` | Partially Implemented | [ADR-00716](../adr/ADR-00716.md) | |
 | [00176](TDD-00176.md) | General `as T` on dynamic values — projection, rejection, or erasure? | Not Started | | |
+| [00177](TDD-00177.md) | Windows support — toolchain, C runtime target, and Node-faithful platform semantics | Partially Implemented | [ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md) | |

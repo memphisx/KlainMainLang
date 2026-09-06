@@ -6,8 +6,8 @@
 //
 //   void* __kml_tls_client_connect(int fd, const char* host,
 //                                  int reject_unauthorized, char** errout);
-//   long  __kml_tls_read (void* ssl, void* buf, long n);   //  >0 bytes · 0 close · <0 none
-//   long  __kml_tls_write(void* ssl, const void* buf, long n);
+//   int64_t  __kml_tls_read (void* ssl, void* buf, int64_t n);   //  >0 bytes · 0 close · <0 none
+//   int64_t  __kml_tls_write(void* ssl, const void* buf, int64_t n);
 //   void  __kml_tls_free (void* ssl);
 //
 // The TCP connect is done by the caller (the net client path); this wraps the
@@ -15,16 +15,37 @@
 // net.connect's blocking connect) — the fd is switched to non-blocking by the
 // caller only after this returns.
 
+#include <stdint.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifdef _WIN32
+#include "kml_posix_compat.h"
+#else
+#include <fcntl.h>
 #include <poll.h>
+#endif
+
+// OpenSSL's socket BIO talks Winsock directly, so on Windows it needs the
+// SOCKET behind this project's fd number (TDD-00177 Stage 2 fd table), not
+// the fd itself. The fd is kept alongside (app data) for the poll() waits,
+// which do speak fd numbers.
+#ifdef _WIN32
+intptr_t __kml_win_fd_socket(int fd);
+static void tls_attach_fd(SSL *ssl, int fd) {
+	SSL_set_app_data(ssl, (void *)(intptr_t)fd);
+	SSL_set_fd(ssl, (int)__kml_win_fd_socket(fd));
+}
+static int tls_fd(SSL *ssl) { return (int)(intptr_t)SSL_get_app_data(ssl); }
+#else
+static void tls_attach_fd(SSL *ssl, int fd) { SSL_set_fd(ssl, fd); }
+static int tls_fd(SSL *ssl) { return SSL_get_fd(ssl); }
+#endif
 
 static SSL_CTX *g_ctx = NULL;
 
@@ -62,7 +83,7 @@ void *__kml_tls_client_connect(int fd, const char *host, int reject_unauthorized
 		if (errout) *errout = dup_err("TLS: SSL_new failed");
 		return NULL;
 	}
-	SSL_set_fd(ssl, fd);
+	tls_attach_fd(ssl, fd);
 	// SNI — send the server name in the handshake (many hosts require it).
 	SSL_set_tlsext_host_name(ssl, host);
 	if (reject_unauthorized) {
@@ -86,15 +107,20 @@ void *__kml_tls_client_connect(int fd, const char *host, int reject_unauthorized
 // __kml_tls_read: >0 = bytes read; 0 = clean TLS close_notify; <0 = no data now
 // (WANT_READ/WANT_WRITE) or a fatal error — the net dispatch treats <0 like a
 // non-blocking EAGAIN and moves on.
-long __kml_tls_read(void *ssl, void *buf, long n) {
+int64_t __kml_tls_read(void *ssl, void *buf, int64_t n) {
 	int r = SSL_read((SSL *)ssl, buf, (int)n);
 	if (r > 0) return r;
 	int e = SSL_get_error((SSL *)ssl, r);
 	if (e == SSL_ERROR_ZERO_RETURN) return 0;
+	// Report "no data yet" through errno explicitly: on Linux the socket
+	// BIO's own recv leaves EAGAIN there, but on Windows OpenSSL talks
+	// Winsock directly and never touches the CRT errno the caller checks.
+	if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) errno = EAGAIN;
+	else errno = 0;
 	return -1;
 }
 
-long __kml_tls_write(void *ssl, const void *buf, long n) {
+int64_t __kml_tls_write(void *ssl, const void *buf, int64_t n) {
 	int r = SSL_write((SSL *)ssl, buf, (int)n);
 	return r > 0 ? r : -1;
 }
@@ -105,7 +131,7 @@ long __kml_tls_write(void *ssl, const void *buf, long n) {
 // TLS layer has no data yet (SSL_ERROR_WANT_READ/WRITE), so the connection
 // fiber's existing EAGAIN-yield path applies unchanged; -1 with errno==0 on a
 // fatal error (treated by the dispatcher like a peer close).
-long __kml_tls_read_nb(void *ssl, void *buf, long n) {
+int64_t __kml_tls_read_nb(void *ssl, void *buf, int64_t n) {
 	int r = SSL_read((SSL *)ssl, buf, (int)n);
 	if (r > 0) return r;
 	int e = SSL_get_error((SSL *)ssl, r);
@@ -124,10 +150,10 @@ long __kml_tls_read_nb(void *ssl, void *buf, long n) {
 // succeeds in full — this preserves that contract over TLS, where a partial /
 // WANT_WRITE result on a non-blocking fd would otherwise silently truncate the
 // response. Returns the number of bytes written, or -1 on a fatal error.
-long __kml_tls_write_all(void *ssl, const void *buf, long n) {
+int64_t __kml_tls_write_all(void *ssl, const void *buf, int64_t n) {
 	const unsigned char *p = (const unsigned char *)buf;
-	long off = 0;
-	int fd = SSL_get_fd((SSL *)ssl);
+	int64_t off = 0;
+	int fd = tls_fd((SSL *)ssl);
 	while (off < n) {
 		int r = SSL_write((SSL *)ssl, p + off, (int)(n - off));
 		if (r > 0) { off += r; continue; }
@@ -270,7 +296,7 @@ void *__kml_tls_server_accept(void *ctx, int fd) {
 	if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
 	SSL *ssl = SSL_new((SSL_CTX *)ctx);
 	if (!ssl) return NULL;
-	SSL_set_fd(ssl, fd);
+	tls_attach_fd(ssl, fd);
 	if (SSL_accept(ssl) != 1) {
 		SSL_free(ssl);
 		return NULL;

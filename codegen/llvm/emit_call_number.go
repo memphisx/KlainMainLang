@@ -210,6 +210,7 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
+	strVal = e.nullSafeParseInput(strVal)
 	radixRef := ""
 	autoRadixReg := "" // non-empty only in the omitted-radix (auto-detect) path
 	if len(args) == 2 {
@@ -280,6 +281,7 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
+	strVal = e.nullSafeParseInput(strVal)
 	// A no-conversion input must give NaN (real JS), not strtod's bare 0 —
 	// endptr stays at the start of the string exactly in that case. Via
 	// __kml_strtod_parsefloat so a non-JS infinity spelling ("inf"/"infinity"/
@@ -298,4 +300,21 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", result, noDigits, r))
 	return Value{Ref: result, Ty: TypeF64}, nil
+}
+
+// nullSafeParseInput returns the C string parseInt/parseFloat should scan:
+// the value itself, or the literal "null" when the pointer is null at run
+// time — what a dynamic null/undefined stringifies to under JS's ToString,
+// which both functions then reject as NaN. strtoll on a null pointer is
+// undefined behaviour that LLVM lowers to a crash on Linux and a self-loop
+// on Windows (found by Test262's parseInt(null) case on the Windows port).
+func (e *Emitter) nullSafeParseInput(v Value) Value {
+	if v.Ty.IR != "ptr" {
+		return v
+	}
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	safe := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), v.Ref))
+	return Value{Ref: safe, Ty: v.Ty}
 }

@@ -717,3 +717,13 @@ const b = Array.of('x', 'y');
 console.log(b[1]);
 `, "4\ny")
 }
+
+// A dynamic null reaching an untyped (string-keyed) Set must not be hashed
+// as a C string: found by Test262's Set.prototype.has cases on the Windows
+// port, where LLVM lowered the null read to a self-loop (a crash on Linux).
+func TestE2ESetHasNullOnEmptySet(t *testing.T) {
+	assertOutput(t, `
+const s = new Set()
+console.log(s.has(null))
+`, "false")
+}

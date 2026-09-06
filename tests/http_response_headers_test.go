@@ -74,6 +74,7 @@ http.createServer((req: IncomingMessage, res: ServerResponse) => {
 // `Connection: close` is honored: the server closes after one response and
 // labels it `Connection: close` (ADR-00691).
 func TestE2EHTTPResponseConnectionClose(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	src := `
 import http from 'http'
 http.createServer((req: IncomingMessage, res: ServerResponse) => {

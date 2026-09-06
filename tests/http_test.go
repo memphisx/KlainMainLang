@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -147,14 +147,13 @@ func startHTTPClusterServer(t *testing.T, src string, port int) int {
 	np := freePort(t)
 	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	pgid := cmd.Process.Pid
 	addr := fmt.Sprintf("127.0.0.1:%d", np)
 	t.Cleanup(func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		killProcGroup(cmd)
 		_ = cmd.Wait()
 		waitPortFree(addr)
 	})
@@ -172,14 +171,13 @@ func startHTTPClusterServerGC(t *testing.T, src string, port int) int {
 	np := freePort(t)
 	binFile := buildBinaryGCImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	pgid := cmd.Process.Pid
 	addr := fmt.Sprintf("127.0.0.1:%d", np)
 	t.Cleanup(func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		killProcGroup(cmd)
 		_ = cmd.Wait()
 		waitPortFree(addr)
 	})
@@ -1121,6 +1119,7 @@ http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", 
 // time gives the kernel no real distribution pressure — the same worker
 // could plausibly win every sequential accept() race.
 func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
+	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -1196,6 +1195,7 @@ http.listen(8964, (req: HttpRequest): Res => {
 // not a TTY) rather than checking against a real terminal, since the bug
 // only manifested in the piped/non-TTY case.
 func TestE2EHTTPListenClusteringFlushesStdoutBeforeFork(t *testing.T) {
+	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -1206,16 +1206,15 @@ http.listen(8965, (req: HttpRequest): Res => {
 `
 	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	pgid := cmd.Process.Pid
 	addr := "127.0.0.1:8965"
 	t.Cleanup(func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		killProcGroup(cmd)
 		_ = cmd.Wait()
 		waitPortFree(addr)
 	})
@@ -1302,6 +1301,7 @@ http.listen(8974, (req: HttpRequest): Res => {
 // one distinct worker PID answering is the evidence clustering itself
 // still works under -mm=gc.
 func TestE2EHTTPListenClusteringGCModeMultipleWorkerPIDs(t *testing.T) {
+	skipClusterDistributionOnWindows(t, "expects several worker PIDs / one banner")
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -1471,6 +1471,7 @@ console.log("after listen returned")
 // raw client's next read returns EOF promptly. Without the force-close it would
 // sit parked until the read deadline.
 func TestE2EHTTPCloseAllConnectionsTerminatesInFlight(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -1560,6 +1561,7 @@ http.close(1)`)
 // Uses curl --http2-prior-knowledge (skipped if curl is absent), the same
 // posture the tls tests take toward an external client.
 func TestE2EHTTPListenHTTP2Cleartext(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not found in PATH")
 	}
@@ -1631,6 +1633,7 @@ server.listen(0, mustCall(() => {
 }
 
 func TestE2EHTTP2ModuleCreateServer(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00139 Stage 1: the explicit http2 module's createServer — shares the
 	// http server core, which speaks h2c (prior-knowledge cleartext HTTP/2) on
 	// the same port. Verified with curl forcing HTTP/2.
@@ -1657,6 +1660,7 @@ server.listen(8983)
 }
 
 func TestE2EHTTP2SecureServer(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00111 Stage 3b: http2.createSecureServer — h2 over TLS. The accepted
 	// fd is TLS-handshaken, ALPN selects h2, and the connection drives the same
 	// nghttp2 session as h2c but over the SSL read/write shims. curl --http2
@@ -1705,6 +1709,7 @@ server.listen(8985)
 }
 
 func TestE2EHTTPSServer(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00111: https.createServer — HTTPS/1.1 over TLS. The accepted fd is
 	// TLS-handshaken; the h1-only ALPN forces even an h2-capable client to 1.1,
 	// and the connection is served by the ordinary fiber dispatcher whose socket
@@ -1747,6 +1752,7 @@ server.listen(8987)
 }
 
 func TestE2EHTTP2SecureServerAllowHTTP1(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00111: http2.createSecureServer({ allowHTTP1: true }) serves both an
 	// ALPN-negotiated h2 client (nghttp2 inline drive) and a 1.1 client (routed
 	// into the fiber conn table over the SSL shims) on the same TLS port.
@@ -1786,6 +1792,7 @@ server.listen(8988)
 }
 
 func TestE2EHTTP2StreamsAPI(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00139 Stage 2: the core streams API — server.on('stream', (stream,
 	// headers)), pseudo-header reads via Map bracket access, stream.respond
 	// with :status + a response header, stream.end body — verified over real
@@ -1814,6 +1821,7 @@ server.listen(8984)
 }
 
 func TestE2EHTTP2StreamsRequestBody(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// stream.on('data'/'end'): the request body delivered as one chunk.
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not found in PATH")
@@ -1858,6 +1866,7 @@ console.log("done")
 }
 
 func TestE2EHTTP2ClientSession(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// TDD-00139 Stage 3: http2.connect + session.request against the same
 	// process's http2 server — the dominant corpus shape. Response headers
 	// (:status + custom), body via 'data'/'end', clean close of both ends,
@@ -1895,6 +1904,7 @@ server.listen(0, mustCall(() => {
 }
 
 func TestE2EHTTP2ClientRequestHeaders(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	// Extra literal request headers reach the server's headers map.
 	src := `
 import http2 from 'http2'
@@ -2215,5 +2225,48 @@ server.listen(0, () => {
 	out := compileAndRunImports(t, src)
 	if !strings.Contains(out, "status 200") {
 		t.Errorf("requireHostHeader form failed: %q", out)
+	}
+}
+
+// skipIfLoopbackH2PrefaceIntercepted probes whether a plain TCP connection
+// over loopback can carry the HTTP/2 client preface end to end. On some
+// Windows hosts a security product intercepts loopback connections that
+// begin with "PRI * HTTP/2.0" and answers with its own GOAWAY; Node's own
+// http2.connect fails there identically (ERR_HTTP2_ERROR), so an in-process
+// h2 client/server pair cannot be exercised on such a box. The probe is pure
+// Go, so it reports the host's behaviour, not the compiler's.
+func skipIfLoopbackTrafficFiltered(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return
+	}
+	defer ln.Close()
+	preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	got := make(chan []byte, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			got <- nil
+			return
+		}
+		defer c.Close()
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, len(preface))
+		n, _ := io.ReadFull(c, buf)
+		got <- buf[:n]
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		return
+	}
+	_, _ = c.Write(preface)
+	seen := <-got
+	c.Close()
+	if string(seen) != string(preface) {
+		t.Skip("loopback traffic is filtered on this host (a traffic-filtering product such as AdGuard answers HTTP/2 prefaces and breaks TLS handshakes; Node's http2.connect fails here too) — exclude localhost from the filter to run this")
 	}
 }

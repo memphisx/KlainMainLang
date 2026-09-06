@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -137,7 +136,7 @@ func yogaCSources() ([]CSource, error) {
 		obj := filepath.Join(objDir, name+".o")
 		src := filepath.Join(includeRoot, filepath.FromSlash(rel))
 		if fi, serr := os.Stat(obj); serr != nil || fi.Size() == 0 {
-			cmd := exec.Command("clang", "-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
+			cmd := ClangCommand("-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
 			if out, cerr := cmd.CombinedOutput(); cerr != nil {
 				return nil, fmt.Errorf("yoga: compiling %s: %v\n%s", rel, cerr, out)
 			}

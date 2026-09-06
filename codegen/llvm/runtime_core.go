@@ -162,6 +162,11 @@ func (e *Emitter) ensureCurrentRSS() {
 		return
 	}
 	e.usedCurrentRSS = true
+	if runtime.GOOS == "windows" {
+		// Defined by win32shim.c over GetProcessMemoryInfo (WorkingSetSize).
+		e.emitGlobal("declare i64 @__kml_current_rss_bytes()")
+		return
+	}
 	if runtime.GOOS == "darwin" {
 		e.emitGlobal("@mach_task_self_ = external global i32")
 		e.emitGlobal("declare i32 @task_info(i32, i32, ptr, ptr)")
@@ -364,7 +369,6 @@ func (e *Emitter) ensureStrncasecmp() {
 		e.usedStrncasecmp = true
 	}
 }
-
 
 func (e *Emitter) ensureAtoll() {
 	if !e.usedAtoll {
@@ -915,6 +919,8 @@ func errnoAccessor() string {
 	switch runtime.GOOS {
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		return "__error"
+	case "windows":
+		return "_errno"
 	default:
 		return "__errno_location"
 	}

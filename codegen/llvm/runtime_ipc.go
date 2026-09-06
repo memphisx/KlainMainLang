@@ -75,25 +75,12 @@ setnull:
   %%pfd = load i32, ptr %%p0_p, align 4
   %%cfd = load i32, ptr %%p1_p, align 4
 
-  %%pid = call i32 @fork()
-  %%ischild = icmp eq i32 %%pid, 0
-  br i1 %%ischild, label %%child, label %%parent
-child:
-  call i32 @close(i32 %%pfd)
-  %%numbuf = alloca [16 x i8], align 1
-  %%numptr = getelementptr [16 x i8], ptr %%numbuf, i32 0, i32 0
-  %%cfd64 = sext i32 %%cfd to i64
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%numptr, ptr %s, i64 %%cfd64)
-  call i32 @setenv(ptr %s, ptr %%numptr, i32 1)
-  call i32 @execv(ptr %%argv0, ptr %%argv)
-  call void @_exit(i32 127)
-  unreachable
-parent:
+%sparent:
   call i32 @close(i32 %%cfd)
   %%pid64 = zext i32 %%pid to i64
   %%cp = call ptr @__kml_cp_wrap_ipc(i64 %%pid64, i32 %%pfd)
   ret ptr %%cp
-}`, e.internString("%lld"), chanEnv))
+}`, e.cpForkIR(e.internString("%lld"), chanEnv)))
 
 	// __kml_cp_wrap_ipc(pid, fd): build + register a ChildProcess handle
 	// around an already-created IPC socket (parent end): inherited stdio (no

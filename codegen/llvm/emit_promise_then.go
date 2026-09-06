@@ -101,7 +101,7 @@ func (e *Emitter) emitPromiseThen(objExpr ast.Expression, kind string, args []as
 				return Value{}, err
 			}
 			onF = v.Ref
-			if t, ok := e.callbackReturnType(args[0]); ok {
+			if t, ok := e.callbackReturnType(args[0], innerTy); ok {
 				retTy = t
 			}
 		} else {
@@ -254,7 +254,7 @@ entry:
   %%prom_p = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1
   %%prom = load ptr, ptr %%prom_p, align 8
   %%jb = call ptr @__kml_push_jmpbuf()
-  %%sj = call i32 @setjmp(ptr %%jb)
+  %%sj = %s
   %%threw = icmp ne i32 %%sj, 0
   br i1 %%threw, label %%catch, label %%try
 try:
@@ -281,6 +281,7 @@ catch:
   call void @__kml_promise_settle(ptr %%prom, i64 2)
   ret void
 }`,
+		setjmpCall("%jb"),
 		respTy.StructSize(),
 		fieldStore("status", "double", "%statusd", 8),
 		fieldStore("ok", "i1", "%ok", 1),

@@ -65,7 +65,7 @@ func buildBinary(t *testing.T, src string) string {
 		t.Fatalf("codegen: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 
@@ -93,7 +93,7 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -277,7 +277,6 @@ func appendDtoa(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 	return append(clangArgs, dtoaFile)
 }
 
-
 // appendSpawnSync compiles the blocking child_process *Sync C file
 // (__kml_cp_spawn_sync, libc only) into the clang invocation when used,
 // mirroring main.go so the test build and the real build can't drift.
@@ -398,7 +397,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 		t.Fatalf("codegen: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	shimFile := filepath.Join(dir, "gcshim.c")
 	binFile := filepath.Join(dir, "prog")
@@ -430,7 +429,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
 			t.Skip("libgc/bdw-gc not installed")
@@ -454,7 +453,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 		t.Skip("clang not found in PATH")
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -503,7 +502,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 	}
 	clangArgs = appendEmbedBlobs(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -562,7 +561,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 		t.Skip("clang not found in PATH")
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -611,7 +610,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
 			t.Skip("libgc/bdw-gc not installed")
@@ -666,7 +665,7 @@ func compileAndRunExpectExitImports(t *testing.T, src string) (string, int) {
 // run.
 func parseAndCompileImports(t *testing.T, src string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -712,6 +711,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
+	skipSanitizersOnWindows(t)
 
 	prog, err := parser.Parse(src)
 	if err != nil {
@@ -724,7 +724,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		t.Fatalf("codegen: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	asanOptFile := filepath.Join(dir, "asan_options.c")
 	binFile := filepath.Join(dir, "prog")
@@ -753,7 +753,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -782,6 +782,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
+	skipSanitizersOnWindows(t)
 
 	prog, err := parser.Parse(src)
 	if err != nil {
@@ -795,7 +796,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 		t.Fatalf("codegen: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	shimFile := filepath.Join(dir, "gcshim.c")
 	asanOptFile := filepath.Join(dir, "asan_options.c")
@@ -835,7 +836,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
 	clangArgs = appendHTTP2Backend(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
 			t.Skip("libgc/bdw-gc not installed")
@@ -849,7 +850,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 // "math.ts") into a fresh temp directory and returns the directory.
 func writeMultiFile(t *testing.T, files map[string]string) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for name, content := range files {
 		p := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
@@ -932,7 +933,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -997,7 +998,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -1066,7 +1067,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -1092,7 +1093,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -1124,7 +1125,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -1150,7 +1151,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -1181,7 +1182,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -1193,7 +1194,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	if out, err := exec.Command("clang", clangArgs...).CombinedOutput(); err != nil {
+	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	result, err := exec.Command(binFile).Output()
@@ -1220,7 +1221,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -1232,7 +1233,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	if out, err := exec.Command("clang", clangArgs...).CombinedOutput(); err != nil {
+	if out, err := llvm.ClangCommand(clangArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	result, err := exec.Command(binFile).Output()
@@ -1289,7 +1290,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -1315,7 +1316,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if bigintUsed {
 			t.Skipf("bigint backend %q may not be installed: clang: %v\n%s", em.BigIntBackend(), err, out)
@@ -1434,5 +1435,49 @@ func compareLines(t *testing.T, got, want string) {
 		if g != w {
 			t.Errorf("line %d: got %q, want %q", i+1, g, w)
 		}
+	}
+}
+
+// tempDir is tempDir(t) with forward slashes. Tests splice the path into
+// TypeScript string literals ("%s"), where a Windows backslash would start an
+// escape sequence; forward slashes are accepted by every fs API on Windows
+// (as they are by Node), and on Linux/macOS this is the identity.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	return filepath.ToSlash(t.TempDir())
+}
+
+// skipPOSIXToolsOnWindows marks a test whose *expectations* are POSIX-shaped
+// — absolute /bin paths, `cwd: "/"` or "/tmp", sh arithmetic, death by
+// SIGKILL — rather than a compiler feature. Node on Windows fails the same
+// programs the same way, so they are skipped there with the reason rather
+// than rewritten (TDD-00177, per-test Windows expectations vs skips).
+func skipPOSIXToolsOnWindows(t *testing.T, why string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-specific expectation, not portable to Windows: " + why)
+	}
+}
+
+// skipSanitizersOnWindows: LLVM's Windows release ships the ASan/UBSan
+// runtime only for the MSVC target; the mingw-w64 target this port builds
+// for has none, so -fsanitize builds cannot link there (TDD-00177).
+func skipSanitizersOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("no ASan/UBSan runtime for the mingw-w64 target in LLVM's Windows build")
+	}
+}
+
+// skipClusterDistributionOnWindows: on Windows a cluster's workers are
+// re-spawned processes sharing one inherited listening socket, and the
+// kernel hands connections to whichever worker is in accept() — in practice
+// mostly one — where Linux's fork model distributes and Node's Windows
+// cluster round-robins from the primary. Documented gap in TDD-00177; the
+// re-spawn model also re-runs top-level code per worker.
+func skipClusterDistributionOnWindows(t *testing.T, why string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("cluster worker distribution is shared-accept on Windows (documented TDD-00177 gap): " + why)
 	}
 }

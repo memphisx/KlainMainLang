@@ -182,15 +182,8 @@ func (e *Emitter) emitCPExecSync(args []ast.Expression, pos ast.Pos) (Value, err
 	}
 	cmdVal = e.coerce(cmdVal, TypePtr)
 	e.ensureMalloc()
-	argvPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", argvPtr))
-	s0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", s0, argvPtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("-c"), s0))
-	s1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", s1, argvPtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cmdVal.Ref, s1))
-	raw := e.cpSpawnSyncCall(e.internString("/bin/sh"), argvPtr, "2", cwdRef)
+	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
+	raw := e.cpSpawnSyncCall(shFile, argvPtr, shArgc, cwdRef)
 	return Value{Ref: e.cpSpawnSyncField(raw, 1, "ptr"), Ty: TypePtr}, nil
 }
 
@@ -408,16 +401,9 @@ func (e *Emitter) emitCPExec(args []ast.Expression, pos ast.Pos) (Value, error) 
 		return Value{}, err
 	}
 	cmdVal = e.coerce(cmdVal, TypePtr)
-	// argv = ["-c", command]; file = "/bin/sh"
-	argvPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", argvPtr))
-	s0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", s0, argvPtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("-c"), s0))
-	s1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", s1, argvPtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cmdVal.Ref, s1))
-	cp := e.cpSpawnCall(e.internString("/bin/sh"), argvPtr, "2", 1, "null")
+	// argv = ["-c", command] via /bin/sh, or cmd.exe /d /s /c on Windows
+	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
+	cp := e.cpSpawnCall(shFile, argvPtr, shArgc, 1, "null")
 	if err := e.cpStoreExecCallback(cp, args[1], pos, "exec"); err != nil {
 		return Value{}, err
 	}

@@ -22,6 +22,8 @@ func (e *Emitter) ensureErrnoCode() {
 		name string
 	}
 	pairs := []ec{
+		// Windows: Go's syscall.E* are synthetic values there, and the shim
+		// (win32io.c / win32fs.c) sets errno to Linux numbers — use those.
 		{int(syscall.EPERM), "EPERM"}, {int(syscall.ENOENT), "ENOENT"},
 		{int(syscall.EIO), "EIO"}, {int(syscall.EBADF), "EBADF"},
 		{int(syscall.EACCES), "EACCES"}, {int(syscall.EEXIST), "EEXIST"},
@@ -34,6 +36,12 @@ func (e *Emitter) ensureErrnoCode() {
 		{int(syscall.EAGAIN), "EAGAIN"}, {int(syscall.EPIPE), "EPIPE"},
 		{int(syscall.EFBIG), "EFBIG"}, {int(syscall.ENODEV), "ENODEV"},
 		{int(syscall.ESPIPE), "ESPIPE"}, {int(syscall.EMLINK), "EMLINK"},
+	}
+	if runtime.GOOS == "windows" {
+		pairs = pairs[:0]
+		for _, p := range linuxErrnoPairs {
+			pairs = append(pairs, ec{p[0].(int), p[1].(string)})
+		}
 	}
 	seen := map[int]bool{}
 	var cases, blocks strings.Builder
@@ -281,7 +289,7 @@ ok:
   %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
   %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%size, 1
   ret { ptr, i64 } %%r1
-}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), int(syscall.EISDIR), eisdirOpDescPtr, modePtr, opDescPtr))
+}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), errnoEISDIR(), eisdirOpDescPtr, modePtr, opDescPtr))
 }
 
 // ensureFsWriteFile declares __kml_fs_write_file: writes (creating or
@@ -588,6 +596,9 @@ ok:
 // Both numbers assume a 64-bit build, which is this project's only target
 // per its own stated scope.
 func direntNameOffset() int {
+	if runtime.GOOS == "windows" {
+		return 8 // mingw-w64 dirent: d_ino u32, d_reclen u16, d_namlen u16, d_name
+	}
 	if runtime.GOOS == "darwin" {
 		return 21
 	}
@@ -691,7 +702,6 @@ done:
 }`, opDescPtr, direntNameOffset(), dotPtr, dotdotPtr))
 }
 
-
 // statLayout returns the host libc's struct stat field offsets and load widths
 // for the full Stats surface (ADR-00565). struct stat has no portable layout,
 // so these are per-OS/arch constants — the same approach direntNameOffset
@@ -729,6 +739,24 @@ type statFieldLayout struct {
 }
 
 func statLayout() statFieldLayout {
+	if runtime.GOOS == "windows" {
+		// win32fs.c writes the glibc x86-64 layout and puts birthtime (real on
+		// Windows, as in Node) in the struct's reserved tail.
+		return statFieldLayout{
+			devOff: 0, devBits: 64,
+			inoOff: 8, inoBits: 64,
+			nlinkOff: 16, nlinkBits: 64,
+			modeOff: 24, modeBits: 32,
+			uidOff: 28, gidOff: 32,
+			rdevOff: 40, rdevBits: 64,
+			sizeOff: 48, blocksOff: 64,
+			blksizeOff: 56, blksizeBits: 64,
+			atimeSec: 72, atimeNsec: 80,
+			mtimeSec: 88, mtimeNsec: 96,
+			ctimeSec: 104, ctimeNsec: 112,
+			birthSec: 120, birthNsec: 128,
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		return statFieldLayout{
 			devOff: 0, devBits: 32,
@@ -1111,7 +1139,6 @@ done:
 }`, nameOff, rmDesc))
 }
 
-
 // openFlagBits maps a Node open-flags string to the host's O_* bit mask —
 // per-OS constants (Darwin and glibc disagree on everything past
 // O_RDONLY/O_WRONLY/O_RDWR), resolved at compile time from the literal
@@ -1203,4 +1230,27 @@ fail:
   unreachable
 ok:
 %s}`, openDesc, fdDesc, statResultIR, fdDesc, statBodyLL(statLayout())))
+}
+
+// linuxErrnoPairs is the errno→code table for Windows, where the shim sets
+// Linux errno values (TDD-00177): Go's syscall.E* constants on windows are
+// synthetic and would never match.
+var linuxErrnoPairs = [][2]interface{}{
+	{1, "EPERM"}, {2, "ENOENT"}, {5, "EIO"}, {9, "EBADF"}, {13, "EACCES"},
+	{17, "EEXIST"}, {20, "ENOTDIR"}, {21, "EISDIR"}, {22, "EINVAL"}, {24, "EMFILE"},
+	{23, "ENFILE"}, {28, "ENOSPC"}, {30, "EROFS"}, {16, "EBUSY"}, {39, "ENOTEMPTY"},
+	{40, "ELOOP"}, {36, "ENAMETOOLONG"}, {18, "EXDEV"}, {11, "EAGAIN"}, {32, "EPIPE"},
+	{27, "EFBIG"}, {19, "ENODEV"}, {29, "ESPIPE"}, {31, "EMLINK"},
+	{98, "EADDRINUSE"}, {104, "ECONNRESET"}, {107, "ENOTCONN"}, {110, "ETIMEDOUT"}, {111, "ECONNREFUSED"},
+}
+
+// errnoEISDIR is the EISDIR value the emitted IR stores before throwing on
+// a directory read: the host's on Linux/macOS, and the Linux number on
+// Windows (Go's syscall.EISDIR there is synthetic; the shim speaks Linux
+// errno — TDD-00177).
+func errnoEISDIR() int {
+	if runtime.GOOS == "windows" {
+		return 21
+	}
+	return int(syscall.EISDIR)
 }

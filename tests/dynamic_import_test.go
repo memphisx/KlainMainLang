@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"KlainMainLang/codegen/llvm"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 func buildCLI(t *testing.T) string {
 	t.Helper()
 	root := findRepoRoot(t)
-	bin := filepath.Join(t.TempDir(), "klainmain")
+	bin := filepath.Join(tempDir(t), "klainmain"+llvm.HostExeSuffix())
 	cmd := exec.Command("go", "build", "-o", bin, ".")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -52,7 +53,7 @@ func findRepoRoot(t *testing.T) string {
 // through the result object.
 func TestE2EDynamicImportLazy(t *testing.T) {
 	cli := buildCLI(t)
-	dir := t.TempDir()
+	dir := tempDir(t)
 	writeFile(t, filepath.Join(dir, "mod.ts"),
 		"export const answer: number = 42;\nexport const greeting: string = \"kalimera\";\nconsole.log(\"island top-level\");\n")
 	writeFile(t, filepath.Join(dir, "entry.ts"),
@@ -85,7 +86,7 @@ func TestE2EDynamicImportLazy(t *testing.T) {
 // is a clean compile error, not a silent gap.
 func TestE2EDynamicImportNonLiteralRejected(t *testing.T) {
 	cli := buildCLI(t)
-	dir := t.TempDir()
+	dir := tempDir(t)
 	writeFile(t, filepath.Join(dir, "entry.ts"),
 		"const p = \"./mod\";\nasync function main(): Promise<void> { await import(p); }\nmain();\n")
 	compile := exec.Command(cli, "-dynamic-import=lazy", filepath.Join(dir, "entry.ts"))

@@ -289,7 +289,7 @@ entry:
   %%args = load ptr, ptr %%args_p, align 8
   ; task-level catch-all: a throw the body doesn't catch rejects the promise
   %%jb = call ptr @__kml_push_jmpbuf()
-  %%sj = call i32 @setjmp(ptr %%jb)
+  %%sj = %s
   %%threw = icmp ne i32 %%sj, 0
   br i1 %%threw, label %%rejected, label %%run
 run:
@@ -301,7 +301,7 @@ rejected:
   %%err = load ptr, ptr @__kml_thrown, align 8
   call void @__kml_task_reject(ptr %%t, ptr %%err)
   ret void
-}`, taskStructIR, taskFn, taskStructIR, taskArgs))
+}`, taskStructIR, taskFn, taskStructIR, taskArgs, setjmpCall("%jb")))
 
 	// @__kml_task_reject(ptr %task, ptr %err): mark the task's promise rejected
 	// (resolved = 2, v0 = error object), wake a parked waiter, and swap out — the

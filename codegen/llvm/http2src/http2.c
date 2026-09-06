@@ -15,12 +15,16 @@
 #include <nghttp2/nghttp2.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <errno.h>
+#ifdef _WIN32
+#include "kml_posix_compat.h"
+#else
+#include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <errno.h>
+#endif
 
 // --- IR-side symbols (emitted by the compiler when UsesHTTP2) ---------------
 // A string-keyed Map<string,string> built with the same runtime the 1.1 path
@@ -52,8 +56,8 @@ typedef struct {
 typedef struct {
 	nghttp2_session *session;
 	int fd;
-	long (*rd)(void *io, void *buf, size_t n);  // transport read  (NULL => raw fd)
-	long (*wr)(void *io, const void *buf, size_t n); // transport write
+	int64_t (*rd)(void *io, void *buf, size_t n);  // transport read  (NULL => raw fd)
+	int64_t (*wr)(void *io, const void *buf, size_t n); // transport write
 	void *io;                                    // transport handle (SSL*) or NULL
 } h2_conn;
 
@@ -246,8 +250,8 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id,
 // for h2-over-TLS pass the SSL* and the SSL read/write shims. Sends the initial
 // SETTINGS frame. Returns the h2_conn* or NULL.
 void *__kml_h2_session_server_new(int fd, void *io,
-                                  long (*rd)(void *, void *, size_t),
-                                  long (*wr)(void *, const void *, size_t)) {
+                                  int64_t (*rd)(void *, void *, size_t),
+                                  int64_t (*wr)(void *, const void *, size_t)) {
 	h2_conn *c = calloc(1, sizeof(h2_conn));
 	if (!c) return NULL;
 	c->fd = fd;
@@ -271,14 +275,14 @@ void *__kml_h2_session_server_new(int fd, void *io,
 	return c;
 }
 
-static long conn_read(h2_conn *c, void *buf, size_t n) {
+static int64_t conn_read(h2_conn *c, void *buf, size_t n) {
 	if (c->rd) return c->rd(c->io, buf, n);
-	return (long)read(c->fd, buf, n);
+	return (int64_t)read(c->fd, buf, n);
 }
 
-static long conn_write(h2_conn *c, const void *buf, size_t n) {
+static int64_t conn_write(h2_conn *c, const void *buf, size_t n) {
 	if (c->wr) return c->wr(c->io, buf, n);
-	return (long)write(c->fd, buf, n);
+	return (int64_t)write(c->fd, buf, n);
 }
 
 // __kml_h2_session_feed hands the session bytes the caller already read (e.g.
@@ -319,7 +323,7 @@ int __kml_h2_session_recv(void *sess) {
 		__kml_h2c_pump_all();
 	}
 	uint8_t buf[16384];
-	long n = conn_read(c, buf, sizeof(buf));
+	int64_t n = conn_read(c, buf, sizeof(buf));
 	if (n == 0) return -1; // peer closed
 	if (n < 0) return 0;   // no data right now (non-blocking) — not an error
 	ssize_t rv = nghttp2_session_mem_recv(c->session, buf, (size_t)n);
@@ -336,7 +340,7 @@ int __kml_h2_session_send(void *sess) {
 		ssize_t len = nghttp2_session_mem_send(c->session, &data);
 		if (len < 0) return -1;
 		if (len == 0) break;
-		long w = conn_write(c, data, (size_t)len);
+		int64_t w = conn_write(c, data, (size_t)len);
 		if (w < 0) return -1;
 	}
 	return 0;
@@ -375,8 +379,10 @@ void __kml_h2_session_del(void *sess) {
 // a pump fire the __kml_h2c_on_* IR bridge. Request bodies are V1-out (GET-
 // shaped requests: HEADERS with END_STREAM at submit).
 // ===========================================================================
+#ifndef _WIN32
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 #include <errno.h>
 
 extern void __kml_h2c_on_header(void *ctx, const char *name, const char *value);
@@ -550,13 +556,13 @@ static void h2c_pump_one(h2c_sess *s) {
 		ssize_t len = nghttp2_session_mem_send(s->session, &data);
 		if (len < 0) { s->dead = 1; return; }
 		if (len == 0) break;
-		long w = (long)write(s->fd, data, (size_t)len);
+		int64_t w = (int64_t)write(s->fd, data, (size_t)len);
 		if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) { s->dead = 1; return; }
 		if (w < 0) break;
 	}
 	for (;;) {
 		uint8_t buf[16384];
-		long n = (long)read(s->fd, buf, sizeof(buf));
+		int64_t n = (int64_t)read(s->fd, buf, sizeof(buf));
 		if (n == 0) { s->dead = 1; return; } /* peer closed */
 		if (n < 0) break;                    /* EAGAIN — nothing more now */
 		if (nghttp2_session_mem_recv(s->session, buf, (size_t)n) < 0) {

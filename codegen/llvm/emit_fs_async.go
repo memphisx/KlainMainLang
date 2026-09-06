@@ -69,7 +69,7 @@ func (e *Emitter) emitFsGuarded(tryBody func() error, catchBody func(errPtr stri
 	sj := e.freshReg()
 	thr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sj, jb))
+	e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(jb)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", thr, catchL, tryL))
 

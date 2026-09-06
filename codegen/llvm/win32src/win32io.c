@@ -1,0 +1,842 @@
+// Windows I/O layer (TDD-00177 Stage 2). Compiled alongside win32shim.c
+// into the cached shim object every Windows clang invocation links.
+//
+// The emitted IR is written against a small-integer file-descriptor world:
+// sockets, pipes, files and stdio are all `int fd`s driven by read/write/
+// close/fcntl, and the reactor waits on them with select() over a 1024-bit
+// fd_set bitmap. This file provides exactly that surface on Windows:
+//
+//   * files and pipes are real CRT fds (below 512); sockets get fd numbers
+//     from this layer's own range (512..895) with the SOCKET kept in a side
+//     table, so the CRT never wraps a socket handle — see the fd table below;
+//   * the side table also records a per-fd non-blocking flag, so read/write/
+//     close/fcntl dispatch to Winsock for sockets and Win32 pipe calls
+//     otherwise;
+//   * select() is implemented as a readiness poll: Winsock select over the
+//     socket subset (not WSAPoll, which never reports a failed connect),
+//     PeekNamedPipe/WaitForSingleObject over the pipe and console subset, iterating in short slices until something is ready or the
+//     timeout lapses (the "hybrid" reactor TDD-00177 open question 1
+//     recommends first; a completion-port reactor can replace it later
+//     without touching the IR);
+//   * getcontext/makecontext/swapcontext are provided over Win32 Fibers.
+//
+// Constants come in as the *Linux* values the IR's Go-side helpers emit
+// (httpSockConstants, httpNonblockFlag, httpEagainErrno, the fs open-flag
+// map) and are translated here, so the emitters need no Windows cases for
+// this layer. errno is likewise set to the Linux numbers the IR compares
+// against (EAGAIN 11, EINPROGRESS 115, ECONNRESET 104, ...).
+//
+// Winsock is bound through GetProcAddress rather than <winsock2.h>: this
+// file *defines* socket/bind/select/... under their POSIX names and
+// signatures, which would conflict with the header's prototypes.
+// NO_OLDNAMES keeps io.h from declaring read/write/close/open/dup2 with the
+// CRT's int-sized prototypes, which this file redefines POSIX-shaped.
+#define NO_OLDNAMES 1
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int close(int fd); // defined below; dup2 needs it first
+static int io_trace(void); // defined with read() below
+unsigned short htons(unsigned short v); // defined below
+
+// ---- Linux ABI constants the IR uses -------------------------------------
+enum {
+	L_EAGAIN = 11, L_EINTR = 4, L_EBADF = 9, L_EINVAL = 22, L_EPIPE = 32,
+	L_ECONNRESET = 104, L_ECONNREFUSED = 111, L_EINPROGRESS = 115,
+	L_EADDRINUSE = 98, L_ENOTSOCK = 88, L_ETIMEDOUT = 110, L_ENOTCONN = 107,
+	L_EACCES = 13, L_ENOENT = 2, L_EEXIST = 17, L_EISDIR = 21, L_ENOTDIR = 20,
+	L_EMFILE = 24, L_ENOSYS = 38,
+	L_F_GETFL = 3, L_F_SETFL = 4, L_O_NONBLOCK = 0x800,
+	L_SOL_SOCKET = 1, L_SO_REUSEADDR = 2, L_SO_KEEPALIVE = 9, L_SO_BROADCAST = 6,
+	L_SO_REUSEPORT = 15, L_SO_ERROR = 4,
+	L_O_CREAT = 0x40, L_O_EXCL = 0x80, L_O_TRUNC = 0x200, L_O_APPEND = 0x400,
+};
+
+// ---- Winsock, bound by hand -------------------------------------------------
+#define KFD_MAX 1024
+typedef uintptr_t ws_SOCKET;
+#define WS_INVALID ((ws_SOCKET)~(uintptr_t)0)
+#define WS_ERROR (-1)
+#define WS_SOL_SOCKET 0xffff
+#define WS_SO_REUSEADDR 0x0004
+#define WS_SO_KEEPALIVE 0x0008
+#define WS_SO_BROADCAST 0x0020
+#define WS_SO_ERROR 0x1007
+#define WS_SO_EXCLUSIVEADDRUSE ((int)(~WS_SO_REUSEADDR))
+#define WS_FIONBIO 0x8004667eUL
+#define WS_POLLRDNORM 0x0100
+#define WS_POLLWRNORM 0x0010
+#define WS_POLLERR 0x0001
+#define WS_POLLHUP 0x0002
+#define WS_POLLNVAL 0x0004
+// WSAE* error codes come from winerror.h (pulled in by windows.h).
+
+typedef struct { ws_SOCKET fd; short events; short revents; } ws_pollfd;
+typedef struct ws_addrinfo {
+	int ai_flags, ai_family, ai_socktype, ai_protocol;
+	size_t ai_addrlen;
+	char *ai_canonname;
+	void *ai_addr;
+	struct ws_addrinfo *ai_next;
+} ws_addrinfo;
+typedef struct { WORD wVersion, wHighVersion; char pad[400]; } ws_WSADATA;
+
+static int (WINAPI *p_WSAStartup)(WORD, ws_WSADATA *);
+static int (WINAPI *p_WSAGetLastError)(void);
+static ws_SOCKET (WINAPI *p_socket)(int, int, int);
+static int (WINAPI *p_bind)(ws_SOCKET, const void *, int);
+static int (WINAPI *p_listen)(ws_SOCKET, int);
+static ws_SOCKET (WINAPI *p_accept)(ws_SOCKET, void *, int *);
+static int (WINAPI *p_connect)(ws_SOCKET, const void *, int);
+static int (WINAPI *p_recv)(ws_SOCKET, char *, int, int);
+static int (WINAPI *p_send)(ws_SOCKET, const char *, int, int);
+static int (WINAPI *p_recvfrom)(ws_SOCKET, char *, int, int, void *, int *);
+static int (WINAPI *p_sendto)(ws_SOCKET, const char *, int, int, const void *, int);
+static int (WINAPI *p_closesocket)(ws_SOCKET);
+static int (WINAPI *p_shutdown)(ws_SOCKET, int);
+static int (WINAPI *p_setsockopt)(ws_SOCKET, int, int, const char *, int);
+static int (WINAPI *p_getsockopt)(ws_SOCKET, int, int, char *, int *);
+static int (WINAPI *p_getsockname)(ws_SOCKET, void *, int *);
+static int (WINAPI *p_getpeername)(ws_SOCKET, void *, int *);
+static int (WINAPI *p_ioctlsocket)(ws_SOCKET, long, unsigned long *);
+static int (WINAPI *p_WSAPoll)(ws_pollfd *, unsigned long, int);
+// Winsock's select() reads fd_count and never assumes FD_SETSIZE, so a
+// wider array is fine; declared big enough for every fd this layer can hold.
+typedef struct { unsigned int fd_count; ws_SOCKET fd_array[KFD_MAX]; } ws_big_fd_set;
+typedef struct { int32_t tv_sec; int32_t tv_usec; } ws_timeval;
+static int (WINAPI *p_select)(int, ws_big_fd_set *, ws_big_fd_set *, ws_big_fd_set *, const ws_timeval *);
+static int (WINAPI *p_getaddrinfo)(const char *, const char *, const ws_addrinfo *, ws_addrinfo **);
+static void (WINAPI *p_freeaddrinfo)(ws_addrinfo *);
+static int (WINAPI *p_inet_pton)(int, const char *, void *);
+static const char *(WINAPI *p_inet_ntop)(int, const void *, char *, size_t);
+static int (WINAPI *p_gethostname)(char *, int);
+static unsigned short (WINAPI *p_htons)(unsigned short);
+static unsigned short (WINAPI *p_ntohs)(unsigned short);
+
+void ws_init(void) {
+	static int done;
+	if (done) return;
+	done = 1;
+	HMODULE m = LoadLibraryA("ws2_32.dll");
+	if (!m) return;
+#define B(n) *(FARPROC *)&p_##n = GetProcAddress(m, #n)
+	B(WSAStartup); B(WSAGetLastError); B(socket); B(bind); B(listen); B(accept);
+	B(connect); B(recv); B(send); B(recvfrom); B(sendto); B(closesocket);
+	B(shutdown); B(setsockopt); B(getsockopt); B(getsockname); B(getpeername);
+	B(ioctlsocket); B(WSAPoll); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
+	B(inet_ntop); B(gethostname); B(htons); B(ntohs);
+#undef B
+	ws_WSADATA d;
+	if (p_WSAStartup) p_WSAStartup(0x0202, &d);
+}
+__attribute__((constructor)) static void kml_win_io_init(void) { ws_init(); }
+
+// ---- fd side table ---------------------------------------------------------
+// Three fd ranges share the IR's 1024-slot bitmap:
+//   [0, 512)      CRT fds: files, pipes, stdio — the CRT owns the handle;
+//   [512, 896)    sockets this layer created — the SOCKET lives in
+//                 kfd_sock_handle and the CRT never sees it (a CRT fd wrapped
+//                 around a socket would CloseHandle it behind Winsock's back
+//                 on _close, which raises under a debugger and skips the
+//                 socket's own teardown);
+//   [896, 1024)   foreign sockets owned by a library (libcurl) that select()
+//                 must still wait on — see curl_multi_fdset below.
+enum { KFD_PLAIN = 0, KFD_SOCKET = 1, KFD_PIPE = 2, KFD_FOREIGN = 3 };
+#define KFD_SOCK_BASE 512
+#define KFD_FOREIGN_BASE 896
+unsigned char kfd_kind[KFD_MAX];      // shared with win32proc.c
+unsigned char kfd_nonblock[KFD_MAX];
+static ws_SOCKET kfd_sock_handle[KFD_MAX];
+// Set once a socket has reported a connection reset: Linux returns
+// ECONNRESET from one recv and end-of-file from the next, and the reactor's
+// close-on-EOF path depends on that; Winsock keeps returning the error.
+static unsigned char kfd_reset[KFD_MAX];
+// Set by win32proc.c once a socket has been handed to a child process. The
+// child's inherited handle refers to the same socket object, and closesocket
+// tears that object down for everyone — so the parent releases only its own
+// handle (CloseHandle) when it closes such an fd.
+unsigned char kfd_inherited[KFD_MAX];
+
+// kfd_adopt_socket places socket handle s at exactly fd (used for a socket
+// inherited from a parent under an agreed fd number); -1 if the slot is
+// outside the socket range or taken.
+int kfd_adopt_socket(HANDLE s, int fd) {
+	if (fd < KFD_SOCK_BASE || fd >= KFD_FOREIGN_BASE || kfd_kind[fd] != KFD_PLAIN) { errno = L_EINVAL; return -1; }
+	kfd_kind[fd] = KFD_SOCKET;
+	kfd_nonblock[fd] = 0;
+	kfd_reset[fd] = 0;
+	kfd_sock_handle[fd] = (ws_SOCKET)s;
+	return fd;
+}
+
+int kfd_register(HANDLE h, int kind) {
+	if (kind == KFD_SOCKET) {
+		for (int fd = KFD_SOCK_BASE; fd < KFD_FOREIGN_BASE; fd++) {
+			if (kfd_kind[fd] == KFD_PLAIN) return kfd_adopt_socket(h, fd);
+		}
+		errno = L_EMFILE;
+		return -1;
+	}
+	// CRT range: _setmaxstdio raises the default 512-fd ceiling once so the
+	// CRT can hand out every slot below KFD_SOCK_BASE.
+	static int raised;
+	if (!raised) { _setmaxstdio(KFD_SOCK_BASE); raised = 1; }
+	int fd = _open_osfhandle((intptr_t)h, 0);
+	if (fd < 0 || fd >= KFD_SOCK_BASE) {
+		if (fd >= 0) _close(fd);
+		errno = L_EMFILE;
+		return -1;
+	}
+	kfd_kind[fd] = (unsigned char)kind;
+	kfd_nonblock[fd] = 0;
+	return fd;
+}
+static inline int kfd_is(int fd, int kind) {
+	return fd >= 0 && fd < KFD_MAX && kfd_kind[fd] == kind;
+}
+static inline ws_SOCKET kfd_sock(int fd) {
+	if (kfd_kind[fd] == KFD_SOCKET || kfd_kind[fd] == KFD_FOREIGN) return kfd_sock_handle[fd];
+	return (ws_SOCKET)_get_osfhandle(fd);
+}
+// The Winsock SOCKET behind fd, for code that must hand a real socket to a
+// library speaking Winsock itself (OpenSSL's socket BIO in tls.c).
+intptr_t __kml_win_fd_socket(int fd) {
+	if (fd < 0 || fd >= KFD_MAX) return -1;
+	return (intptr_t)kfd_sock(fd);
+}
+// kfd_handle: the OS handle behind any fd (win32proc.c duplicates it for a
+// child's stdio or an inherited IPC socket).
+HANDLE kfd_handle(int fd) {
+	if (fd < 0 || fd >= KFD_MAX) return INVALID_HANDLE_VALUE;
+	if (kfd_kind[fd] == KFD_SOCKET || kfd_kind[fd] == KFD_FOREIGN) return (HANDLE)kfd_sock_handle[fd];
+	return (HANDLE)_get_osfhandle(fd);
+}
+
+static int map_wsa_errno(int e) {
+	switch (e) {
+	case WSAEWOULDBLOCK: return L_EAGAIN;
+	case WSAEINPROGRESS: return L_EINPROGRESS;
+	case WSAECONNRESET: case WSAECONNABORTED: return L_ECONNRESET;
+	case WSAECONNREFUSED: return L_ECONNREFUSED;
+	case WSAEADDRINUSE: return L_EADDRINUSE;
+	case WSAETIMEDOUT: return L_ETIMEDOUT;
+	case WSAENOTCONN: case WSAESHUTDOWN: return L_ENOTCONN;
+	case WSAENOTSOCK: return L_ENOTSOCK;
+	case WSAEINTR: return L_EINTR;
+	default: return L_EINVAL;
+	}
+}
+static int set_wsa_errno(void) {
+	errno = map_wsa_errno(p_WSAGetLastError ? p_WSAGetLastError() : 0);
+	return -1;
+}
+
+// ---- sockets -------------------------------------------------------------------
+// Linux AF_INET6 is 10; Winsock's is 23. AF_INET/AF_UNIX match.
+static int map_af(int af) { return af == 10 ? 23 : af; }
+
+int socket(int domain, int type, int protocol) {
+	ws_init();
+	domain = map_af(domain);
+	if (!p_socket) { errno = L_ENOSYS; return -1; }
+	ws_SOCKET s = p_socket(domain, type, protocol);
+	if (s == WS_INVALID) return set_wsa_errno();
+	// Sockets must not be inherited by child processes (Node's CLOEXEC
+	// discipline) so a spawned child never holds a listener open.
+	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+	int fd = kfd_register((HANDLE)s, KFD_SOCKET);
+	if (fd < 0) p_closesocket(s);
+	return fd;
+}
+
+int bind(int fd, const void *addr, int len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	return p_bind(kfd_sock(fd), addr, len) == 0 ? 0 : set_wsa_errno();
+}
+int listen(int fd, int backlog) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	return p_listen(kfd_sock(fd), backlog) == 0 ? 0 : set_wsa_errno();
+}
+int accept(int fd, void *addr, int *len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	ws_SOCKET s = p_accept(kfd_sock(fd), addr, len);
+	if (s == WS_INVALID) return set_wsa_errno();
+	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+	int nfd = kfd_register((HANDLE)s, KFD_SOCKET);
+	if (io_trace()) {
+		struct { uint16_t fam, port; uint32_t addr; char z[8]; } pa = {0}, la = {0};
+		int pl = sizeof pa, ll = sizeof la;
+		p_getpeername(s, &pa, &pl);
+		p_getsockname(s, &la, &ll);
+		fprintf(stderr, "[io] accept fd=%d -> fd=%d sock=%llu peer=%u local=%u\n", fd, nfd, (unsigned long long)s, (unsigned)htons(pa.port), (unsigned)htons(la.port));
+	}
+	if (nfd < 0) p_closesocket(s);
+	return nfd;
+}
+int connect(int fd, const void *addr, int len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	if (p_connect(kfd_sock(fd), addr, len) == 0) {
+		if (io_trace()) {
+			struct { uint16_t fam, port; uint32_t a; char z[8]; } la = {0};
+			int ll = sizeof la;
+			p_getsockname(kfd_sock(fd), &la, &ll);
+			fprintf(stderr, "[io] connect fd=%d sock=%llu -> 0 local=%u\n", fd, (unsigned long long)kfd_sock(fd), (unsigned)htons(la.port));
+		}
+		return 0;
+	}
+	int e = p_WSAGetLastError();
+	if (io_trace()) fprintf(stderr, "[io] connect fd=%d -> -1 (wsa %d)\n", fd, e);
+	// A non-blocking connect reports WOULDBLOCK on Windows; POSIX callers
+	// expect EINPROGRESS and then wait for writability.
+	errno = e == WSAEWOULDBLOCK ? L_EINPROGRESS : map_wsa_errno(e);
+	return -1;
+}
+int shutdown(int fd, int how) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	if (io_trace()) fprintf(stderr, "[io] shutdown fd=%d how=%d\n", fd, how);
+	return p_shutdown(kfd_sock(fd), how) == 0 ? 0 : set_wsa_errno();
+}
+int getsockname(int fd, void *addr, int *len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	return p_getsockname(kfd_sock(fd), addr, len) == 0 ? 0 : set_wsa_errno();
+}
+int getpeername(int fd, void *addr, int *len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	return p_getpeername(kfd_sock(fd), addr, len) == 0 ? 0 : set_wsa_errno();
+}
+
+int setsockopt(int fd, int level, int opt, const void *val, int len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	if (level == L_SOL_SOCKET) {
+		level = WS_SOL_SOCKET;
+		switch (opt) {
+		case L_SO_REUSEADDR:
+			// Node sets SO_EXCLUSIVEADDRUSE on Windows: Winsock's
+			// SO_REUSEADDR would let a second server hijack the port
+			// (no EADDRINUSE), which is not the Linux/Node contract.
+			opt = WS_SO_EXCLUSIVEADDRUSE;
+			break;
+		case L_SO_REUSEPORT: {
+			// No SO_REUSEPORT on Windows. The IR asks for it so several cluster
+			// workers can bind one port; Winsock's SO_REUSEADDR is the option
+			// that permits that (the kernel hands new connections to the last
+			// binder rather than balancing — TDD-00177 records the RR gap). It
+			// conflicts with the EXCLUSIVEADDRUSE set for SO_REUSEADDR above,
+			// so that is cleared first.
+			int off = 0, on = 1;
+			p_setsockopt(kfd_sock(fd), WS_SOL_SOCKET, WS_SO_EXCLUSIVEADDRUSE, (const char *)&off, sizeof off);
+			return p_setsockopt(kfd_sock(fd), WS_SOL_SOCKET, WS_SO_REUSEADDR, (const char *)&on, sizeof on) == 0 ? 0 : set_wsa_errno();
+		}
+		case L_SO_KEEPALIVE: opt = WS_SO_KEEPALIVE; break;
+		case L_SO_BROADCAST: opt = WS_SO_BROADCAST; break;
+		default: break;
+		}
+	}
+	return p_setsockopt(kfd_sock(fd), level, opt, (const char *)val, len) == 0 ? 0 : set_wsa_errno();
+}
+int getsockopt(int fd, int level, int opt, void *val, int *len) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	if (level == L_SOL_SOCKET) {
+		level = WS_SOL_SOCKET;
+		if (opt == L_SO_ERROR) opt = WS_SO_ERROR;
+	}
+	int r = p_getsockopt(kfd_sock(fd), level, opt, (char *)val, len);
+	if (r != 0) return set_wsa_errno();
+	if (level == WS_SOL_SOCKET && opt == WS_SO_ERROR && val && *len >= 4) {
+		*(int *)val = *(int *)val ? map_wsa_errno(*(int *)val) : 0;
+	}
+	return 0;
+}
+
+int64_t recvfrom(int fd, void *buf, size_t n, int flags, void *addr, int *alen) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	int r = p_recvfrom(kfd_sock(fd), (char *)buf, (int)n, flags, addr, alen);
+	return r == WS_ERROR ? set_wsa_errno() : r;
+}
+int64_t sendto(int fd, const void *buf, size_t n, int flags, const void *addr, int alen) {
+	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	int r = p_sendto(kfd_sock(fd), (const char *)buf, (int)n, flags, addr, alen);
+	return r == WS_ERROR ? set_wsa_errno() : r;
+}
+
+unsigned short htons(unsigned short v) { return (unsigned short)((v << 8) | (v >> 8)); }
+unsigned short ntohs(unsigned short v) { return htons(v); }
+int inet_pton(int af, const char *src, void *dst) {
+	ws_init();
+	if (af == 2) {
+		// Winsock accepts leading zeros in dotted quads ("01.2.3.4"); glibc
+		// and Node's own net.isIPv4 reject them. Match the strict form.
+		int digits = 0, octets = 0;
+		for (const char *p = src; ; p++) {
+			if (*p >= '0' && *p <= '9') {
+				if (digits == 1 && p[-1] == '0') return 0;
+				if (++digits > 3) return 0;
+			} else if (*p == '.' || *p == 0) {
+				if (digits == 0) return 0;
+				octets++; digits = 0;
+				if (*p == 0) break;
+			} else return 0;
+		}
+		if (octets != 4) return 0;
+	}
+	return p_inet_pton ? p_inet_pton(map_af(af), src, dst) : -1;
+}
+const char *inet_ntop(int af, const void *src, char *dst, size_t size) {
+	ws_init();
+	return p_inet_ntop ? p_inet_ntop(map_af(af), src, dst, size) : NULL;
+}
+int gethostname(char *buf, size_t len) {
+	ws_init();
+	return p_gethostname ? p_gethostname(buf, (int)len) : -1;
+}
+int getaddrinfo(const char *node, const char *svc, const void *hints, void **res) {
+	ws_init();
+	if (!p_getaddrinfo) return -1;
+	return p_getaddrinfo(node, svc, (const ws_addrinfo *)hints, (ws_addrinfo **)res);
+}
+void freeaddrinfo(void *ai) { if (p_freeaddrinfo) p_freeaddrinfo((ws_addrinfo *)ai); }
+
+// ---- pipes ---------------------------------------------------------------------
+int pipe(int fds[2]) {
+	HANDLE r, w;
+	SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, FALSE };
+	if (!CreatePipe(&r, &w, &sa, 0)) { errno = L_EMFILE; return -1; }
+	int rfd = kfd_register(r, KFD_PIPE);
+	if (rfd < 0) { CloseHandle(r); CloseHandle(w); return -1; }
+	int wfd = kfd_register(w, KFD_PIPE);
+	if (wfd < 0) { _close(rfd); CloseHandle(w); return -1; }
+	fds[0] = rfd;
+	fds[1] = wfd;
+	return 0;
+}
+
+int dup2(int oldfd, int newfd) {
+	if (oldfd < 0 || oldfd >= KFD_MAX || newfd < 0 || newfd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (kfd_kind[oldfd] == KFD_SOCKET) {
+		// Socket slots are this layer's own; only a socket-range target works.
+		if (newfd == oldfd) return newfd;
+		if (kfd_kind[newfd] != KFD_PLAIN) close(newfd);
+		return kfd_adopt_socket((HANDLE)kfd_sock_handle[oldfd], newfd);
+	}
+	if (_dup2(oldfd, newfd) != 0) { errno = L_EBADF; return -1; }
+	kfd_kind[newfd] = kfd_kind[oldfd];
+	kfd_nonblock[newfd] = kfd_nonblock[oldfd];
+	return newfd;
+}
+
+// ---- read / write / close / fcntl ----------------------------------------------
+static int pipe_readable(HANDLE h, DWORD *avail) {
+	DWORD n = 0;
+	if (!PeekNamedPipe(h, NULL, 0, NULL, &n, NULL)) return -1; // broken pipe → EOF
+	if (avail) *avail = n;
+	return n > 0;
+}
+
+// KML_IO_TRACE=1 in the environment logs every read/select decision to
+// stderr — the one debugging aid this layer keeps, since a reactor that
+// blocks or spins is otherwise opaque from outside.
+static int io_trace(void) {
+	static int t = -1;
+	if (t < 0) { char b[4]; t = GetEnvironmentVariableA("KML_IO_TRACE", b, sizeof b) > 0; }
+	return t;
+}
+
+int64_t read(int fd, void *buf, size_t n) {
+	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (io_trace()) fprintf(stderr, "[io] read fd=%d kind=%d nonblock=%d n=%zu sock=%llu\n", fd, kfd_kind[fd], kfd_nonblock[fd], n, (unsigned long long)kfd_sock(fd));
+	if (kfd_kind[fd] == KFD_SOCKET) {
+		if (kfd_reset[fd]) return 0; // the EOF that follows a reported reset
+		int r = p_recv(kfd_sock(fd), (char *)buf, (int)n, 0);
+		if (io_trace()) {
+			fprintf(stderr, "[io]   recv -> %d (wsa %d)", r, r == WS_ERROR && p_WSAGetLastError ? p_WSAGetLastError() : 0);
+			if (r > 0) { fprintf(stderr, " bytes="); for (int i = 0; i < r && i < 24; i++) fprintf(stderr, "%02x", ((unsigned char *)buf)[i]); }
+			fprintf(stderr, "\n");
+			if (r == 0) {
+				// EOF: report whether every other socket in the table is still a
+				// live handle (a closed one answers WSAENOTSOCK to getsockname).
+				for (int o = KFD_SOCK_BASE; o < KFD_FOREIGN_BASE; o++) {
+					if (kfd_kind[o] != KFD_SOCKET) continue;
+					struct { uint16_t fam, port; uint32_t a; char z[8]; } la = {0};
+					int ll = sizeof la;
+					int rc = p_getsockname(kfd_sock_handle[o], &la, &ll);
+					fprintf(stderr, "[io]     fd=%d sock=%llu getsockname=%d port=%u\n", o, (unsigned long long)kfd_sock_handle[o], rc, (unsigned)htons(la.port));
+				}
+			}
+		}
+		if (r == WS_ERROR) {
+			int e = p_WSAGetLastError();
+			if (e == WSAECONNRESET || e == WSAECONNABORTED) kfd_reset[fd] = 1;
+			errno = map_wsa_errno(e);
+			return -1;
+		}
+		return r;
+	}
+	if (kfd_kind[fd] == KFD_PIPE && kfd_nonblock[fd]) {
+		int st = pipe_readable((HANDLE)_get_osfhandle(fd), NULL);
+		if (st < 0) return 0;               // writer gone: EOF
+		if (st == 0) { errno = L_EAGAIN; return -1; }
+	}
+	int r = _read(fd, buf, (unsigned)n);
+	if (r < 0) {
+		// A pipe whose writer closed reports ERROR_BROKEN_PIPE, which is EOF.
+		if (kfd_kind[fd] == KFD_PIPE && GetLastError() == ERROR_BROKEN_PIPE) return 0;
+		errno = L_EBADF;
+	}
+	return r;
+}
+
+int64_t write(int fd, const void *buf, size_t n) {
+	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (kfd_kind[fd] == KFD_SOCKET) {
+		int r = p_send(kfd_sock(fd), (const char *)buf, (int)n, 0);
+		if (io_trace()) fprintf(stderr, "[io] write fd=%d n=%zu -> %d (wsa %d)\n", fd, n, r, r == WS_ERROR && p_WSAGetLastError ? p_WSAGetLastError() : 0);
+		return r == WS_ERROR ? set_wsa_errno() : r;
+	}
+	int r = _write(fd, buf, (unsigned)n);
+	if (r < 0) errno = GetLastError() == ERROR_NO_DATA ? L_EPIPE : L_EBADF;
+	return r;
+}
+
+int close(int fd) {
+	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (io_trace()) fprintf(stderr, "[io] close fd=%d kind=%d\n", fd, kfd_kind[fd]);
+	if (kfd_kind[fd] == KFD_SOCKET) {
+		// A socket fd never touches the CRT: closesocket does the whole
+		// teardown and the slot simply returns to the pool. A connected
+		// socket gets shutdown(SD_SEND) first so the peer sees a FIN: a bare
+		// closesocket on Windows can turn into a reset (the Go HTTP client
+		// reported "connection forcibly closed" on a Connection: close
+		// response), where Linux's close() sends FIN.
+		ws_SOCKET s = kfd_sock(fd);
+		int inherited = kfd_inherited[fd];
+		kfd_kind[fd] = KFD_PLAIN;
+		kfd_nonblock[fd] = 0;
+		kfd_reset[fd] = 0;
+		kfd_inherited[fd] = 0;
+		kfd_sock_handle[fd] = 0;
+		if (inherited) {
+			// A child holds this socket too: drop this process's handle only.
+			return CloseHandle((HANDLE)s) ? 0 : (errno = L_EBADF, -1);
+		}
+		p_shutdown(s, 1 /* SD_SEND */);
+		return p_closesocket(s) == 0 ? 0 : set_wsa_errno();
+	}
+	if (kfd_kind[fd] == KFD_FOREIGN) { errno = L_EBADF; return -1; } // not ours to close
+	kfd_kind[fd] = KFD_PLAIN;
+	kfd_nonblock[fd] = 0;
+	return _close(fd) == 0 ? 0 : (errno = L_EBADF, -1);
+}
+
+int fcntl(int fd, int cmd, ...) {
+	if (fd < 0 || fd >= KFD_MAX) { errno = L_EBADF; return -1; }
+	if (cmd == L_F_GETFL) return kfd_nonblock[fd] ? L_O_NONBLOCK : 0;
+	if (cmd == L_F_SETFL) {
+		va_list ap;
+		va_start(ap, cmd);
+		int flags = va_arg(ap, int);
+		va_end(ap);
+		int nb = (flags & L_O_NONBLOCK) != 0;
+		kfd_nonblock[fd] = (unsigned char)nb;
+		if (io_trace()) fprintf(stderr, "[io] fcntl fd=%d kind=%d nonblock=%d\n", fd, kfd_kind[fd], nb);
+		if (kfd_kind[fd] == KFD_SOCKET) {
+			unsigned long v = (unsigned long)nb;
+			if (p_ioctlsocket(kfd_sock(fd), (long)WS_FIONBIO, &v) != 0) return set_wsa_errno();
+		}
+		// Pipes and the console emulate non-blocking in read() above.
+		return 0;
+	}
+	errno = L_EINVAL;
+	return -1;
+}
+
+// ---- select over the IR's 1024-bit fd_set bitmap -----------------------------
+typedef struct { int64_t sec; int64_t usec; } kml_timeval;
+
+static inline int fd_isset(const unsigned char *set, int fd) {
+	return set && (set[fd >> 3] >> (fd & 7)) & 1;
+}
+
+// Readiness of a non-socket fd for reading: pipes via PeekNamedPipe, the
+// console (and any other waitable handle) via a zero-timeout wait, regular
+// files are always ready. Returns 1 ready, 0 not, -1 hangup (readable EOF).
+static int plain_readable(int fd) {
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE) return 0; // closed fd: never ready (POSIX would EBADF)
+	DWORD type = GetFileType(h);
+	if (type == FILE_TYPE_PIPE) {
+		DWORD avail;
+		int st = pipe_readable(h, &avail);
+		return st < 0 ? -1 : st;
+	}
+	if (type == FILE_TYPE_CHAR) {
+		DWORD mode;
+		if (GetConsoleMode(h, &mode)) {
+			// A console: WaitForSingleObject signals on any input record,
+			// including key-ups a subsequent read would discard; that only
+			// costs a spurious EAGAIN, never a lost byte.
+			return WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+		}
+		return 1; // NUL or another character device: read returns EOF at once
+	}
+	return 1;
+}
+
+static void trace_set(const char *tag, const unsigned char *set, int nfds) {
+	if (!set) return;
+	fprintf(stderr, " %s[", tag);
+	for (int fd = 0; fd < nfds; fd++) if ((set[fd >> 3] >> (fd & 7)) & 1) fprintf(stderr, "%d,", fd);
+	fprintf(stderr, "]");
+}
+
+int select(int nfds, unsigned char *rset, unsigned char *wset, unsigned char *eset, kml_timeval *tv) {
+	if (nfds > KFD_MAX) nfds = KFD_MAX;
+	if (io_trace()) {
+		fprintf(stderr, "[io] select nfds=%d", nfds);
+		trace_set("r", rset, nfds); trace_set("w", wset, nfds); trace_set("x", eset, nfds);
+		fprintf(stderr, " timeout=%lld\n", tv ? (long long)(tv->sec * 1000 + tv->usec / 1000) : -1LL);
+	}
+	int64_t deadline_ms = -1;
+	if (tv) {
+		int64_t ms = tv->sec * 1000 + (tv->usec + 999) / 1000;
+		deadline_ms = (int64_t)GetTickCount64() + (ms < 0 ? 0 : ms);
+	}
+	ws_pollfd pfds[KFD_MAX];
+	int pfd_fd[KFD_MAX];
+	unsigned char rout[128], wout[128], eout[128];
+	for (;;) {
+		memset(rout, 0, sizeof rout); memset(wout, 0, sizeof wout); memset(eout, 0, sizeof eout);
+		int ready = 0, npfd = 0, have_plain = 0;
+		for (int fd = 0; fd < nfds; fd++) {
+			int r = fd_isset(rset, fd), w = fd_isset(wset, fd), x = fd_isset(eset, fd);
+			if (!r && !w && !x) continue;
+			if (kfd_kind[fd] == KFD_SOCKET || kfd_kind[fd] == KFD_FOREIGN) {
+				pfds[npfd].fd = kfd_sock(fd);
+				pfds[npfd].events = (short)((r ? WS_POLLRDNORM : 0) | (w ? WS_POLLWRNORM : 0));
+				pfds[npfd].revents = 0;
+				pfd_fd[npfd++] = fd;
+				continue;
+			}
+			have_plain = 1;
+			if (r) {
+				int st = plain_readable(fd);
+				if (st != 0) { rout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+			}
+			if (w) { wout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; } // pipes/files: writable
+		}
+		// Socket subset: block here only when nothing else can become ready
+		// on its own; otherwise poll in short slices so pipe/console
+		// readiness is noticed within one slice.
+		int slice;
+		if (deadline_ms < 0) slice = -1; else {
+			int64_t left = deadline_ms - (int64_t)GetTickCount64();
+			slice = left < 0 ? 0 : (int)(left > 0x7fffffff ? 0x7fffffff : left);
+		}
+		if (ready) slice = 0;
+		else if (have_plain && (slice < 0 || slice > 10)) slice = 10;
+		if (npfd > 0) {
+			// Winsock select rather than WSAPoll: WSAPoll never reports a failed
+			// non-blocking connect (a long-standing Windows defect), so a refused
+			// connection would sit until the caller's own timeout. select()
+			// reports it in the except set; POSIX callers expect "writable, then
+			// SO_ERROR says why", so an excepted socket is reported writable too.
+			static ws_big_fd_set sr, sw, sx;
+			sr.fd_count = sw.fd_count = sx.fd_count = 0;
+			for (int i = 0; i < npfd; i++) {
+				if (pfds[i].events & WS_POLLRDNORM) sr.fd_array[sr.fd_count++] = pfds[i].fd;
+				if (pfds[i].events & WS_POLLWRNORM) { sw.fd_array[sw.fd_count++] = pfds[i].fd; sx.fd_array[sx.fd_count++] = pfds[i].fd; }
+			}
+			ws_timeval stv = { slice / 1000, (slice % 1000) * 1000 };
+			int pr = p_select(0, sr.fd_count ? &sr : NULL, sw.fd_count ? &sw : NULL, sx.fd_count ? &sx : NULL, slice < 0 ? NULL : &stv);
+			if (pr == WS_ERROR) return set_wsa_errno();
+			for (int i = 0; i < npfd; i++) {
+				int fd = pfd_fd[i];
+				ws_SOCKET s = pfds[i].fd;
+				int rd = 0, wr = 0, ex = 0;
+				for (unsigned int k = 0; k < sr.fd_count; k++) if (sr.fd_array[k] == s) { rd = 1; break; }
+				for (unsigned int k = 0; k < sw.fd_count; k++) if (sw.fd_array[k] == s) { wr = 1; break; }
+				for (unsigned int k = 0; k < sx.fd_count; k++) if (sx.fd_array[k] == s) { ex = 1; break; }
+				if (rd && fd_isset(rset, fd)) { rout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+				if ((wr || ex) && fd_isset(wset, fd)) { wout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+				if (ex && fd_isset(eset, fd)) { eout[fd >> 3] |= (unsigned char)(1u << (fd & 7)); ready++; }
+			}
+		} else if (!ready && slice != 0) {
+			Sleep((DWORD)(slice < 0 ? 10 : slice));
+		}
+		if (ready || (deadline_ms >= 0 && (int64_t)GetTickCount64() >= deadline_ms)) {
+			if (io_trace()) {
+				fprintf(stderr, "[io] select ->%d", ready);
+				trace_set("r", rout, nfds); trace_set("w", wout, nfds); trace_set("x", eout, nfds);
+				fprintf(stderr, "\n");
+			}
+			if (rset) memcpy(rset, rout, 128);
+			if (wset) memcpy(wset, wout, 128);
+			if (eset) memcpy(eset, eout, 128);
+			return ready;
+		}
+	}
+}
+
+// poll() for the embedded C helpers (http2.c / tls.c wait on one socket).
+struct kml_pollfd { int fd; short events; short revents; };
+int poll(struct kml_pollfd *fds, unsigned long n, int timeout) {
+	unsigned char r[128] = {0}, w[128] = {0};
+	int maxfd = 0;
+	for (unsigned long i = 0; i < n; i++) {
+		int fd = fds[i].fd;
+		if (fd < 0 || fd >= KFD_MAX) continue;
+		if (fds[i].events & 0x0001) r[fd >> 3] |= (unsigned char)(1u << (fd & 7)); // POLLIN
+		if (fds[i].events & 0x0004) w[fd >> 3] |= (unsigned char)(1u << (fd & 7)); // POLLOUT
+		if (fd + 1 > maxfd) maxfd = fd + 1;
+	}
+	kml_timeval tv = { timeout / 1000, (timeout % 1000) * 1000 };
+	int rc = select(maxfd, r, w, NULL, timeout < 0 ? NULL : &tv);
+	if (rc < 0) return -1;
+	int count = 0;
+	for (unsigned long i = 0; i < n; i++) {
+		int fd = fds[i].fd;
+		fds[i].revents = 0;
+		if (fd < 0 || fd >= KFD_MAX) continue;
+		if (fd_isset(r, fd)) fds[i].revents |= 0x0001;
+		if (fd_isset(w, fd)) fds[i].revents |= 0x0004;
+		if (fds[i].revents) count++;
+	}
+	return count;
+}
+
+
+// ---- fibers over Win32 Fibers ------------------------------------------------
+// The IR allocates ucontextLayout() bytes per context and stores ss_sp /
+// ss_size / uc_link at the offsets that function returns; on Windows those
+// are the fields of this struct (see ucontextLayout's windows case).
+typedef struct kml_ucontext {
+	void *fiber;       // 0
+	void *ss_sp;       // 8  (IR-allocated stack; unused — Win32 owns fiber stacks)
+	int64_t ss_size;   // 16
+	struct kml_ucontext *uc_link; // 24
+	void (*fn)(void);  // 32
+	int64_t argc;      // 40
+} kml_ucontext;
+
+// A finished fiber, deleted on the next switch. Thread-local: the goroutine
+// scheduler (klainsync.c) runs a fiber scheduler on every M thread.
+static _Thread_local void *g_fiber_to_delete;
+
+static void ensure_thread_is_fiber(void) {
+	if (!IsThreadAFiber()) ConvertThreadToFiber(NULL);
+}
+
+static void CALLBACK kml_fiber_tramp(void *arg) {
+	kml_ucontext *ctx = (kml_ucontext *)arg;
+	ctx->fn();
+	// Like makecontext's uc_link: when fn returns, resume the linked context.
+	// The fiber cannot delete itself; leave it for the next switch to reap.
+	g_fiber_to_delete = GetCurrentFiber();
+	kml_ucontext *next = ctx->uc_link;
+	if (next && next->fiber) SwitchToFiber(next->fiber);
+	// No link: nothing to return to — the thread ends here, as it would on
+	// POSIX when a context with a null uc_link finishes.
+	ExitThread(0);
+}
+
+static void reap_finished_fiber(void) {
+	if (g_fiber_to_delete && g_fiber_to_delete != GetCurrentFiber()) {
+		DeleteFiber(g_fiber_to_delete);
+		g_fiber_to_delete = NULL;
+	}
+}
+
+int getcontext(kml_ucontext *ctx) {
+	ensure_thread_is_fiber();
+	ctx->fiber = GetCurrentFiber();
+	return 0;
+}
+
+void makecontext(kml_ucontext *ctx, void (*fn)(void), int argc, ...) {
+	(void)argc;
+	ctx->fn = fn;
+	ctx->argc = argc;
+	SIZE_T reserve = ctx->ss_size > 0 ? (SIZE_T)ctx->ss_size : (SIZE_T)(1024 * 1024);
+	ctx->fiber = CreateFiberEx(64 * 1024, reserve, 0, kml_fiber_tramp, ctx);
+}
+
+int swapcontext(kml_ucontext *from, kml_ucontext *to) {
+	ensure_thread_is_fiber();
+	from->fiber = GetCurrentFiber();
+	if (!to->fiber) { errno = L_EINVAL; return -1; }
+	SwitchToFiber(to->fiber);
+	// Back on `from`: reap whatever finished while we were away.
+	reap_finished_fiber();
+	return 0;
+}
+
+
+// ---- misc ---------------------------------------------------------------------
+int usleep(unsigned usec) { Sleep((usec + 999) / 1000); return 0; }
+
+// ---- libcurl fd_set bridge ---------------------------------------------------
+// The reactor merges libcurl's transfers into its select() by calling
+// curl_multi_fdset with the IR's 128-byte fd bitmaps. On Windows libcurl
+// fills *Winsock* fd_sets — { u_int count; SOCKET array[64] }, 516 bytes of
+// raw socket handles — so that call would overflow the bitmaps and report
+// nothing the bitmap select could use. This definition shadows libcurl's
+// export (the linker prefers an object's symbol over the import library),
+// calls the real one through the already-loaded DLL, and hands each of
+// curl's sockets a stable fd number in the foreign range that select()
+// resolves back to the SOCKET. The mapping is rebuilt on every call, so a
+// socket curl closed is dropped one reactor iteration later at worst.
+typedef struct { unsigned int fd_count; ws_SOCKET fd_array[64]; } ws_fd_set;
+static int (*p_curl_multi_fdset)(void *, ws_fd_set *, ws_fd_set *, ws_fd_set *, int *);
+
+static int foreign_fd_for(ws_SOCKET s, unsigned char *seen) {
+	int free_fd = -1;
+	for (int fd = KFD_FOREIGN_BASE; fd < KFD_MAX; fd++) {
+		if (kfd_kind[fd] == KFD_FOREIGN && kfd_sock_handle[fd] == s) { seen[fd] = 1; return fd; }
+		if (kfd_kind[fd] != KFD_FOREIGN && free_fd < 0) free_fd = fd;
+	}
+	if (free_fd < 0) return -1;
+	kfd_kind[free_fd] = KFD_FOREIGN;
+	kfd_sock_handle[free_fd] = s;
+	seen[free_fd] = 1;
+	return free_fd;
+}
+
+static void bridge_set(const ws_fd_set *src, unsigned char *dst, int *maxfd, unsigned char *seen) {
+	for (unsigned int i = 0; i < src->fd_count && i < 64; i++) {
+		int fd = foreign_fd_for(src->fd_array[i], seen);
+		if (fd < 0) continue;
+		dst[fd >> 3] |= (unsigned char)(1u << (fd & 7));
+		if (fd > *maxfd) *maxfd = fd;
+	}
+}
+
+int curl_multi_fdset(void *multi, unsigned char *rset, unsigned char *wset, unsigned char *eset, int *maxfd) {
+	if (!p_curl_multi_fdset) {
+		HMODULE m = GetModuleHandleA("libcurl-4.dll");
+		if (!m) m = GetModuleHandleA("libcurl.dll");
+		if (m) *(FARPROC *)&p_curl_multi_fdset = GetProcAddress(m, "curl_multi_fdset");
+		if (!p_curl_multi_fdset) return 1; // CURLM_BAD_HANDLE
+	}
+	ws_fd_set r = {0}, w = {0}, x = {0};
+	int real_max = -1;
+	int rc = p_curl_multi_fdset(multi, &r, &w, &x, &real_max);
+	if (rc != 0) return rc;
+	unsigned char seen[KFD_MAX] = {0};
+	int mx = -1;
+	if (rset) bridge_set(&r, rset, &mx, seen);
+	if (wset) bridge_set(&w, wset, &mx, seen);
+	if (eset) bridge_set(&x, eset, &mx, seen);
+	for (int fd = KFD_FOREIGN_BASE; fd < KFD_MAX; fd++) {
+		if (kfd_kind[fd] == KFD_FOREIGN && !seen[fd]) { kfd_kind[fd] = KFD_PLAIN; kfd_sock_handle[fd] = 0; }
+	}
+	// Preserve the reactor's "-1 means curl has nothing to wait on" contract.
+	if (maxfd) *maxfd = mx;
+	return 0;
+}

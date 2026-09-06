@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 )
 
@@ -330,7 +331,7 @@ es.onerror = (ev) => {
 };
 setTimeout(() => {
   es.close();
-}, 200);
+}, ` + eventSourceRefusedGraceMs() + `);
 `
 	assertOutput(t, src, "error")
 }
@@ -491,4 +492,17 @@ es.onmessage = (ev) => {
 };
 `, srv.URL)
 	assertOutput(t, src, "first\nreplayed-abc123")
+}
+
+// eventSourceRefusedGraceMs is how long TestE2EEventSourceOnErrorFires keeps
+// the source open before closing it. A refused loopback connect is reported
+// within a few ms on Linux/macOS; on Windows libcurl's connect path notices
+// it only after ~2s (WSAPoll does not report failed connects, so curl falls
+// back to its own timeout — TDD-00177). The event still fires; only the
+// latency differs, so the grace period is the platform-specific part.
+func eventSourceRefusedGraceMs() string {
+	if runtime.GOOS == "windows" {
+		return "4000"
+	}
+	return "200"
 }

@@ -25,7 +25,7 @@ import (
 // -mm=auto and returns the IR or the codegen error.
 func emitAutoImports(t *testing.T, src string) (string, error) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -56,7 +56,7 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -69,7 +69,7 @@ func buildBinaryAuto(t *testing.T, src string) string {
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}

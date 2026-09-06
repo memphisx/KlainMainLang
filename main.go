@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -171,6 +170,7 @@ func main() {
 	outBin := *output
 	if outBin == "" {
 		outBin = strings.TrimSuffix(inFile, filepath.Ext(inFile))
+		outBin += llvm.HostExeSuffix()
 	}
 
 	clangArgs := []string{"-O2", llFile}
@@ -239,7 +239,7 @@ func main() {
 		}
 		clangArgs = append(clangArgs, asmPath)
 	}
-	cmd := exec.Command("clang", clangArgs...)
+	cmd := llvm.ClangCommand(clangArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -259,6 +259,9 @@ func main() {
 			fatal("cannot create island directory %s: %v", islandDir, err)
 		}
 		soExt := ".so"
+		if runtime.GOOS == "windows" {
+			soExt = ".dll"
+		}
 		if runtime.GOOS == "darwin" {
 			soExt = ".dylib"
 		}
@@ -308,7 +311,7 @@ func main() {
 				iArgs = append(iArgs, cs.CFlags...)
 				iArgs = append(iArgs, cs.Libs...)
 			}
-			icmd := exec.Command("clang", iArgs...)
+			icmd := llvm.ClangCommand(iArgs...)
 			icmd.Stdout = os.Stdout
 			icmd.Stderr = os.Stderr
 			if err := icmd.Run(); err != nil {

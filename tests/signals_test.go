@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -138,6 +139,7 @@ func waitExit(t *testing.T, cmd *exec.Cmd, out fmt.Stringer, timeout time.Durati
 // registered handler ever running.
 
 func TestE2ESignalSigintGracefulShutdown(t *testing.T) {
+	skipSignalDeliveryOnWindows(t)
 	src := `
 import http from 'klain:http'
 process.on('SIGINT', () => {
@@ -162,6 +164,7 @@ http.listen(8231, (req: HttpRequest): { status: number; body: string } => {
 }
 
 func TestE2ESignalSigtermGracefulShutdown(t *testing.T) {
+	skipSignalDeliveryOnWindows(t)
 	src := `
 import http from 'klain:http'
 process.on('SIGTERM', () => {
@@ -189,6 +192,7 @@ http.listen(8232, (req: HttpRequest): { status: number; body: string } => {
 // for one signal doesn't accidentally also intercept the other — SIGTERM
 // still reaches its own, distinct handler when both are registered.
 func TestE2ESignalBothRegisteredIndependently(t *testing.T) {
+	skipSignalDeliveryOnWindows(t)
 	src := `
 import http from 'klain:http'
 process.on('SIGINT', () => {
@@ -229,6 +233,7 @@ http.listen(8233, (req: HttpRequest): { status: number; body: string } => {
 // side of that: the process still terminates on SIGINT via the OS's own
 // default action, same as before this feature existed.
 func TestE2ESignalNoHandlerDefaultDisposition(t *testing.T) {
+	skipSignalDeliveryOnWindows(t)
 	src := `
 import http from 'klain:http'
 http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
@@ -256,7 +261,8 @@ http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
 // rather than __kml_event_loop_run (runtime_http.go), a separate loop that
 // needed the identical signal-check block inserted.
 func TestE2ESignalSetIntervalOnlyGracefulShutdown(t *testing.T) {
-	readyPath := filepath.Join(t.TempDir(), "ready")
+	skipSignalDeliveryOnWindows(t)
+	readyPath := filepath.Join(tempDir(t), "ready")
 	binFile := buildBinaryImports(t, fmt.Sprintf(`
 import fs from 'fs'
 process.on('SIGINT', () => {
@@ -288,7 +294,8 @@ setInterval(() => { console.log("tick"); }, 100000);
 // 100-second interval must NOT fire just because a SIGINT arrives right
 // after the process is up and its nanosleep-based wait has started.
 func TestE2ETimerNotPrematurelyFiredBySignal(t *testing.T) {
-	readyPath := filepath.Join(t.TempDir(), "ready")
+	skipSignalDeliveryOnWindows(t)
+	readyPath := filepath.Join(tempDir(t), "ready")
 	binFile := buildBinaryImports(t, fmt.Sprintf(`
 import fs from 'fs'
 process.on('SIGINT', () => {
@@ -335,5 +342,17 @@ process.on('beforeExit', () => { console.log("x"); });
 	}
 	if !strings.Contains(err.Error(), "SIGINT") {
 		t.Errorf("error = %q, want it to mention the supported event names", err.Error())
+	}
+}
+
+// skipSignalDeliveryOnWindows: Go's os.Process.Signal cannot deliver SIGINT
+// or SIGTERM on Windows ("not supported by windows"), so these tests cannot
+// drive the console-control-handler path from the harness. The path itself
+// (SetConsoleCtrlHandler in the Windows shim, TDD-00177 Stage 4) is
+// exercised manually with Ctrl+C at a console.
+func skipSignalDeliveryOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Process.Signal cannot send SIGINT/SIGTERM on Windows")
 	}
 }

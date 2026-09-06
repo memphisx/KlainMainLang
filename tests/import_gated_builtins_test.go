@@ -2,6 +2,7 @@ package tests
 
 import (
 	"strings"
+	"runtime"
 	"testing"
 )
 
@@ -178,6 +179,10 @@ unlinkSync("kml_test_named_fn.txt")
 }
 
 func TestE2EImportGatedNamedImportValueMemberWorks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assertMultiFileOutput(t, map[string]string{"main.ts": "import { EOL } from 'os'\nconsole.log(EOL === \"\\r\\n\")\n"}, "main.ts", "true")
+		return
+	}
 	// os.EOL isn't a method — a named import of a plain-value member (not
 	// just a callable one) needs the same synthesized-member-access
 	// treatment, exercised separately from the function-member case above.

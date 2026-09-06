@@ -760,3 +760,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00715](ADR-00715.md) | `as T` on `JSON.parse` / `.json()` supplies the projection target | Extends [ADR-00371](ADR-00371.md) (a scoped carve-out from full assertion erasure); softens the [ADR-00571](ADR-00571.md) member-target caveat |
 | [00716](ADR-00716.md) | Deep free for transitively-owned typed JSON.parse trees (`-mm=auto`) | Implements [TDD-00175](../tdd/TDD-00175.md) (Stage 1); builds on [ADR-00712](ADR-00712.md) (rebind-free), [ADR-00715](ADR-00715.md) (`as T` projection targets) |
 | [00717](ADR-00717.md) | x86-64 conservative-scan pinning in the gc-mode collection tests | Extends [ADR-00701](ADR-00701.md) (FinalizationRegistry), [TDD-00112](../tdd/TDD-00112.md) (weak collections) |
+| [00718](ADR-00718.md) | Windows Stage 0 — mingw-w64 clang target, stdio binary mode, memmem, LLP64 helper audit | Implements [TDD-00177](../tdd/TDD-00177.md) (Stage 0) |
+| [00719](ADR-00719.md) | Windows Stages 1–4 — libc shim, fd/select reactor, fibers, fs, processes, signals | Implements [TDD-00177](../tdd/TDD-00177.md) (Stages 1–4); extends [ADR-00718](ADR-00718.md) (Stage 0) |

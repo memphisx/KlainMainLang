@@ -374,6 +374,7 @@ handledone:
   %pending = load ptr, ptr %privslot, align 8
 
   store i64 0, ptr %statusslot, align 8
+  store i64 0, ptr %statusslot, align 8 ; LLP64: getinfo writes a 32-bit long
   call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easyh, i32 2097154, ptr %statusslot)
   %status = load i64, ptr %statusslot, align 8
 
@@ -655,6 +656,7 @@ fromeasy:
   %easy_p = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 0
   %easy = load ptr, ptr %easy_p, align 8
   store i64 0, ptr %statusslot, align 8
+  store i64 0, ptr %statusslot, align 8 ; LLP64: getinfo writes a 32-bit long
   call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %easy, i32 2097154, ptr %statusslot)
   %st1 = load i64, ptr %statusslot, align 8
   ret i64 %st1
@@ -1107,7 +1109,6 @@ finish:
 }`))
 }
 
-
 // ensureFetchHeadersMap declares __kml_fetch_headers_map (ADR-00490):
 // lazily parses a Response's captured raw header text (the hbuf reachable
 // from the body buffer's slot 4) into a Map<string,string> with
@@ -1251,7 +1252,6 @@ ret:
   ret ptr %map
 }`)
 }
-
 
 // ensureXHRHeadersAll declares __kml_xhr_headers_all (ADR-00490):
 // serializes a parsed response-header map into the "name: value\r\n"

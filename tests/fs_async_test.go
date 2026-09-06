@@ -13,7 +13,7 @@ import (
 // (the throwing sync helper) is caught and re-surfaced as `err` / a rejection.
 
 func TestE2EFsAsyncCallbackRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "cb.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -40,7 +40,7 @@ fs.readFile("/definitely/does/not/exist/kml-fs-async.txt", (err, data: string) =
 }
 
 func TestE2EFsPromisesAwaitRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "p.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -73,7 +73,7 @@ main()
 }
 
 func TestE2EFsPromisesReaddir(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	a := filepath.Join(dir, "one.txt")
 	b := filepath.Join(dir, "two.txt")
 	src := fmt.Sprintf(`
@@ -90,7 +90,7 @@ main()
 }
 
 func TestE2EFsPromisesNamedImport(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "np.txt")
 	src := fmt.Sprintf(`
 import { readFile, writeFile, unlink } from 'fs/promises'

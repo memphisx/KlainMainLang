@@ -24,6 +24,9 @@ import (
 // etimedoutErrno is ETIMEDOUT's per-OS value (Darwin 60, Linux 110) — same
 // per-OS-constant pattern as sigBlockFlag/httpNonblockFlag.
 func etimedoutErrno() int {
+	if runtime.GOOS == "windows" {
+		return 138 // mingw-w64 errno.h / winpthreads ETIMEDOUT
+	}
 	if runtime.GOOS == "darwin" {
 		return 60
 	}

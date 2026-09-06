@@ -1101,6 +1101,17 @@ console.log(parseInt("0x"), parseInt("0X"), parseInt("0xG"), parseInt("0xff", 16
 `, "255 31 -16 26 10\n77 8 10 5 0\nNaN NaN NaN 255 10")
 }
 
+// parseInt/parseFloat of null or undefined are NaN in real JS (ToString
+// gives "null"/"undefined"); a null pointer used to reach strtoll, undefined
+// behaviour that LLVM lowered to a crash on Linux and a self-loop on Windows
+// (Test262 parseInt S15.1.2.2_A1_T3, found on the Windows port).
+func TestE2EParseIntNullUndefinedIsNaN(t *testing.T) {
+	assertOutput(t, `
+const u = undefined
+console.log(parseInt(null), parseInt(u), parseFloat(null), parseFloat(u), parseInt("7"), parseFloat("2.5"))
+`, "NaN NaN NaN NaN 7 2.5")
+}
+
 // TestE2ENumberParseFloatInfinitySpelling confirms JS's rule that the only
 // accepted string infinity spelling is the exact word "Infinity" (optionally
 // signed) — C strtod's extra spellings ("inf"/"infinity"/case variants) are

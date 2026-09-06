@@ -4,12 +4,15 @@
 
 # Main binary (go build)
 /klainmain
+/klainmain.exe
 
 # Conformance runner binary (built by `make conformance*` from tools/conformance)
 /conformance
+/conformance.exe
 
 # make examples' local httpbin-lite fixture server binary
 /.httpbin-lite
+/.httpbin-lite.exe
 # The httpbin-lite fixture is now compiled from tools/httpbin-lite/httpbin.ts
 # by this project's own compiler; that leaves the usual sidecar artifacts +
 # the local binary next to the source. Keep the source, ignore the rest.
@@ -70,3 +73,7 @@ examples/**
 # not also swallow new source files under tools/conformance/.
 /.conformance-out/
 /tools/conformance/conformance
+/tools/conformance/conformance.exe
+
+# PerryTS `perry setup windows` drops its xwin-fetched CRT/SDK cache wherever it is run
+/.xwin-cache/

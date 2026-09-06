@@ -92,7 +92,7 @@ func buildBinaryOptimizeMemory(t *testing.T, src, mm string) string {
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog")
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -103,7 +103,7 @@ func buildBinaryOptimizeMemory(t *testing.T, src, mm string) string {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}

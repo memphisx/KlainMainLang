@@ -855,8 +855,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "os__kml_builtin" {
 		switch ex.Property {
 		case "EOL":
-			// Always "\n" — this compiler is POSIX-only (no Windows target,
-			// TDD-00020 not started), so there's no real "\r\n" case.
+			// "\r\n" on Windows, "\n" elsewhere — a compile-time constant like
+			// process.platform (TDD-00177 Stage 1).
+			if runtime.GOOS == "windows" {
+				return Value{Ref: e.internString("\r\n"), Ty: TypePtr}, nil
+			}
 			return Value{Ref: e.internString("\n"), Ty: TypePtr}, nil
 		}
 	}

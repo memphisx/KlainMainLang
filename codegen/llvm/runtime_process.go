@@ -17,6 +17,9 @@ func stdinGlobalName() string {
 	if runtime.GOOS == "darwin" {
 		return "__stdinp"
 	}
+	if runtime.GOOS == "windows" {
+		return "__kml_win_stdin" // defined by win32shim.c
+	}
 	return "stdin"
 }
 
@@ -164,24 +167,7 @@ setnull:
   %readfd = load i32, ptr %readfdp, align 4
   %writefd = load i32, ptr %writefdp, align 4
 
-  %pid = call i32 @fork()
-  %ischild = icmp eq i32 %pid, 0
-  br i1 %ischild, label %child, label %parent
-
-child:
-  call i32 @close(i32 %readfd)
-  call i32 @dup2(i32 %writefd, i32 1)
-  call i32 @close(i32 %writefd)
-  %hascwd = icmp ne ptr %cwd, null
-  br i1 %hascwd, label %dochdir, label %doexec
-dochdir:
-  call i32 @chdir(ptr %cwd)
-  br label %doexec
-doexec:
-  call i32 @execvp(ptr %file, ptr %argv)
-  call void @_exit(i32 127)
-  unreachable
-
+` + e.execSyncForkIR() + `
 parent:
   call i32 @close(i32 %writefd)
   %bufslot = call ptr @malloc(i64 24)

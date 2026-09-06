@@ -22,7 +22,12 @@ func (e *Emitter) emitOSHomedir(args []ast.Expression, pos ast.Pos) (Value, erro
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.homedir() takes no arguments", pos.Line, pos.Col)
 	}
-	val := e.emitGetenvCall(e.internString("HOME"))
+	// Node: HOME on POSIX, USERPROFILE on Windows (TDD-00177 Stage 1).
+	homeVar := "HOME"
+	if runtime.GOOS == "windows" {
+		homeVar = "USERPROFILE"
+	}
+	val := e.emitGetenvCall(e.internString(homeVar))
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
 	failL := e.freshLabel("os.homedir.fail")
@@ -39,6 +44,21 @@ func (e *Emitter) emitOSHomedir(args []ast.Expression, pos ast.Pos) (Value, erro
 func (e *Emitter) emitOSTmpdir(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.tmpdir() takes no arguments", pos.Line, pos.Col)
+	}
+	if runtime.GOOS == "windows" {
+		// Node on Windows: TEMP, then TMP, then <SystemRoot>	emp — the last
+		// is the literal fallback here (TDD-00177 Stage 1).
+		temp := e.emitGetenvCall(e.internString("TEMP"))
+		tmp := e.emitGetenvCall(e.internString("TMP"))
+		tempNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", tempNull, temp.Ref))
+		tmpNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", tmpNull, tmp.Ref))
+		second := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", second, tmpNull, e.internString(`C:\Windows\temp`), tmp.Ref))
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", result, tempNull, second, temp.Ref))
+		return Value{Ref: result, Ty: TypePtr}, nil
 	}
 	val := e.emitGetenvCall(e.internString("TMPDIR"))
 	isNull := e.freshReg()
@@ -168,7 +188,10 @@ func (e *Emitter) emitOSCpus(args []ast.Expression, pos ast.Pos) (Value, error) 
 		return Value{}, fmt.Errorf("%d:%d: os.cpus() takes no arguments", pos.Line, pos.Col)
 	}
 	result := e.freshReg()
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "windows" {
+		e.ensureOSCpusWin()
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_os_cpus_win()", result))
+	} else if runtime.GOOS == "darwin" {
 		e.ensureOSCpusDarwin()
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_os_cpus_darwin()", result))
 	} else {

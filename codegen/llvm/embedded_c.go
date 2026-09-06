@@ -86,6 +86,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		var libs []string
 		if runtime.GOOS != "darwin" {
 			libs = []string{"-ldl"}
+			if runtime.GOOS == "windows" {
+				libs = nil // LoadLibrary lives in kernel32; there is no libdl
+			}
 		}
 		out = append(out, CSource{"dynimport", DynImportShimSource(), nil, libs, ""})
 	}

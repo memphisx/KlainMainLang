@@ -3,7 +3,7 @@
 # KlainMainLang — Implementation Status
 
 > TypeScript → native compiler written in Go. Emits LLVM IR text, compiled with `clang -O2`.
-> Targets whatever architecture the host clang defaults to (arm64 on Apple Silicon, x86-64 on Linux, etc.).
+> Targets whatever architecture the host clang defaults to (arm64 on Apple Silicon, x86-64 on Linux, etc.); Windows x86-64 is supported through the mingw-w64 UCRT toolchain (TDD-00177 — see the README's Windows section for the install list and the remaining gaps).
 > `number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, `1 / 0` → `Infinity`); `int8..int64`/`uint8..uint64`/`float32` are the integer/width escape hatch — see [TYPE-SYSTEM.md](TYPE-SYSTEM.md).
 > Multi-file compilation exists (named `import`/`export` plus static CommonJS `require`, V1 scope — see [MODULES.md](MODULES.md)); the entry file's top-level statements still all run in one `main()`, and imported files may only contain declarations.
 > No garbage collector by default — every heap allocation is `malloc`'d and (almost) never `free`d in `manual` mode. `-mm=gc` opts into a real one (Boehm). See [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md).
@@ -215,6 +215,7 @@ Listed below is **every not-yet-done TDD** (Not Started, In Progress, or Partial
 | [00174](../tdd/TDD-00174.md) Maturity gate for flipping `-mm=auto` (+ `-optimize-memory`) to default | Partially Implemented | Two flips: dev-default first (tests/examples/per-delivery checks compile in auto+optimize so every deliverable soaks the escape analysis by construction), shipped CLI default gated on quantified exit criteria — mode-differential lanes over the examples/E2E/conformance corpora, ASan-armed, an escape-shaped fuzz lane, klainload soak, free census |
 | [00175](../tdd/TDD-00175.md) Deep reclamation under `-mm=auto` (container elements, object graphs) | Partially Implemented | Staged: type-directed deep free for transitively-owned bindings (**Stage 1 shipped** — typed `JSON.parse`/`res.json()` trees, [ADR-00716](../adr/ADR-00716.md)) → fresh-producer inference (`@fresh`) → scoped refcounting for mid-block garbage (the rbtree shape); the main [TDD-00174](../tdd/TDD-00174.md) flip blocker surfaced by the first benchmark campaign |
 | [00176](../tdd/TDD-00176.md) General `as T` on dynamic values — projection, rejection, or erasure? | Not Started | The design question [ADR-00715](../adr/ADR-00715.md)'s narrow carve-out defers: whether strict-mode `any as T` should emit a runtime dynamic→concrete projection, become a clean rejection, or stay erased with per-shape carve-outs; the scalar unbox subset is the likely first slice |
+| [00177](../tdd/TDD-00177.md) Windows support — mingw-w64 toolchain, Win32-native platform layer | Partially Implemented | Stages 0–5 shipped ([ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md)): the full E2E suite, the examples, and TLS/HTTP2/wss servers run on Windows 11 x86-64 with the documented skips (signals, POSIX-only tools, sanitizers, symlinks without Developer Mode). Open: `path` defaulting to `path.win32`, cluster round-robin scheduling (workers share one listening socket instead), an IOCP reactor, `--static`/`-package` on Windows, CI |
 
 ---
 

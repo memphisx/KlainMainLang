@@ -14,6 +14,8 @@
 // (emit_strings.go); hand-written runtime IR calls @__kml_str_alloc directly.
 package llvm
 
+import "runtime"
+
 func (e *Emitter) ensureStrHeaderRuntime() {
 	if e.usedStrHeaderRuntime {
 		return
@@ -24,7 +26,7 @@ func (e *Emitter) ensureStrHeaderRuntime() {
 	e.ensureStrlen()
 	e.ensureMemcpy()
 	e.ensureMemcmp() // shared decl (emit_buffer.go) — avoid a duplicate memcmp
-	e.emitGlobal("declare ptr @memmem(ptr noundef, i64 noundef, ptr noundef, i64 noundef)")
+	e.ensureMemmem()
 	// TDD-00120 Stage 2 binary-safe primitives. __kml_str_cmp is a strcmp-shaped
 	// (<0/0/>0) lexicographic compare using the header lengths + memcmp, so an
 	// embedded NUL no longer stops the comparison early. __kml_str_indexof is a
@@ -112,8 +114,13 @@ entry:
 }
 define ptr @__kml_argv_headerize(i64 %argc, ptr %argv) {
 entry:
-  %bytes = mul i64 %argc, 8
+  ; argc+1 slots: the array is also handed to execv(), which needs the
+  ; trailing NULL (a missing terminator read past the end on every host).
+  %argc1 = add i64 %argc, 1
+  %bytes = mul i64 %argc1, 8
   %arr = call ptr @malloc(i64 %bytes)
+  %endp = getelementptr ptr, ptr %arr, i64 %argc
+  store ptr null, ptr %endp, align 8
   %ip = alloca i64, align 8
   store i64 0, ptr %ip, align 8
   br label %loop
@@ -132,5 +139,49 @@ body:
   br label %loop
 done:
   ret ptr %arr
+}`)
+}
+
+// ensureMemmem declares memmem, or on Windows defines it: memmem is a
+// GNU/BSD extension absent from every Windows C runtime (UCRT included), and
+// __kml_str_indexof is the one consumer. A byte-loop definition in IR keeps
+// the Windows build free of an extra C shim file (TDD-00177 Stage 0).
+func (e *Emitter) ensureMemmem() {
+	if e.usedMemmem {
+		return
+	}
+	e.usedMemmem = true
+	if runtime.GOOS != "windows" {
+		e.emitGlobal("declare ptr @memmem(ptr noundef, i64 noundef, ptr noundef, i64 noundef)")
+		return
+	}
+	e.ensureMemcmp()
+	e.emitGlobal(`
+define ptr @memmem(ptr %hay, i64 %hlen, ptr %needle, i64 %nlen) {
+entry:
+  %empty = icmp eq i64 %nlen, 0
+  br i1 %empty, label %found0, label %check
+found0:
+  ret ptr %hay
+check:
+  %toolong = icmp ugt i64 %nlen, %hlen
+  br i1 %toolong, label %notfound, label %loop
+loop:
+  %i = phi i64 [ 0, %check ], [ %inext, %next ]
+  %last = sub i64 %hlen, %nlen
+  %done = icmp ugt i64 %i, %last
+  br i1 %done, label %notfound, label %cmp
+cmp:
+  %p = getelementptr i8, ptr %hay, i64 %i
+  %c = call i32 @memcmp(ptr %p, ptr %needle, i64 %nlen)
+  %eq = icmp eq i32 %c, 0
+  br i1 %eq, label %found, label %next
+next:
+  %inext = add i64 %i, 1
+  br label %loop
+found:
+  ret ptr %p
+notfound:
+  ret ptr null
 }`)
 }

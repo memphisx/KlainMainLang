@@ -113,7 +113,7 @@ func buildBinaryFinalizersReport(t *testing.T, src string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -137,7 +137,7 @@ func buildBinaryFinalizersReport(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
@@ -220,7 +220,7 @@ func buildBinaryFinRegAuto(t *testing.T, src string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	dir := t.TempDir()
+	dir := tempDir(t)
 	srcFile := filepath.Join(dir, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -244,7 +244,7 @@ func buildBinaryFinRegAuto(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, "-l"+lib)
 	}
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}

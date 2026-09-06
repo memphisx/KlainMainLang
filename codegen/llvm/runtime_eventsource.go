@@ -732,6 +732,7 @@ statuslive:
   %%easy_live = load ptr, ptr %%easy_p_live, align 8
   %%statusslot = alloca i64, align 8
   store i64 0, ptr %%statusslot, align 8
+  store i64 0, ptr %%statusslot, align 8 ; LLP64: getinfo writes a 32-bit long
   call i32 (ptr, i32, ...) @curl_easy_getinfo(ptr %%easy_live, i32 2097154, ptr %%statusslot)
   %%statusval_live = load i64, ptr %%statusslot, align 8
   br label %%mergestatus

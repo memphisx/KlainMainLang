@@ -533,30 +533,7 @@ setnull:
   %%errr = load i32, ptr %%errr_p, align 4
   %%errw = load i32, ptr %%errw_p, align 4
 
-  %%pid = call i32 @fork()
-  %%ischild = icmp eq i32 %%pid, 0
-  br i1 %%ischild, label %%child, label %%parent
-child:
-  ; optional working directory (ADR-00433)
-  %%hascwd = icmp ne ptr %%cwd, null
-  br i1 %%hascwd, label %%dochdir, label %%setupfds
-dochdir:
-  call i32 @chdir(ptr %%cwd)
-  br label %%setupfds
-setupfds:
-  call i32 @dup2(i32 %%inr, i32 0)
-  call i32 @dup2(i32 %%outw, i32 1)
-  call i32 @dup2(i32 %%errw, i32 2)
-  call i32 @close(i32 %%inr)
-  call i32 @close(i32 %%inw)
-  call i32 @close(i32 %%outr)
-  call i32 @close(i32 %%outw)
-  call i32 @close(i32 %%errr)
-  call i32 @close(i32 %%errw)
-  call i32 @execvp(ptr %%file, ptr %%argv)
-  call void @_exit(i32 127)
-  unreachable
-parent:
+%sparent:
   call i32 @close(i32 %%inr)
   call i32 @close(i32 %%outw)
   call i32 @close(i32 %%errw)
@@ -593,7 +570,7 @@ allocbufs:
 reg:
   call void @__kml_cp_register(ptr %%cp)
   ret ptr %%cp
-}`, nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp))
+}`, e.cpSpawnForkIR(), nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp))
 
 	// stdin write / end
 	e.emitGlobal(fmt.Sprintf(`

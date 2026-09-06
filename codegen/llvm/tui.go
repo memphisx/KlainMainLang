@@ -33,13 +33,30 @@ func (e *Emitter) UsesTui() bool { return e.usedTui }
 // the C++ Yoga objects without itself being C++.
 func TuiSource() string {
 	return `#include <yoga/Yoga.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <math.h>
 #include <stdarg.h>
+#ifdef _WIN32
+/* TDD-00177 Stage 5: console screen-buffer size instead of TIOCGWINSZ;
+   write(1, ...) comes from the Windows shim. VT output processing is
+   enabled on entry so the escape sequences below render on a console. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+/* io.h declares the CRT's int-shaped write(); bind the Windows shim's POSIX-shaped one under a private name. */
+int64_t kmltui_write(int fd, const void *buf, size_t n) __asm__("write");
+#define write kmltui_write
+static int termcols(void){ CONSOLE_SCREEN_BUFFER_INFO i; if(GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(1),&i)) return i.srWindow.Right-i.srWindow.Left+1; return 80; }
+static int termrows(void){ CONSOLE_SCREEN_BUFFER_INFO i; if(GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(1),&i)) return i.srWindow.Bottom-i.srWindow.Top+1; return 24; }
+static void kmltui_console_vt(void){ HANDLE h=(HANDLE)_get_osfhandle(1); DWORD m; if(GetConsoleMode(h,&m)) SetConsoleMode(h, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING); }
+#else
+#include <unistd.h>
 #include <sys/ioctl.h>
+static void kmltui_console_vt(void){}
+#endif
 
 /* ---- node model ------------------------------------------------------- */
 
@@ -498,8 +515,6 @@ static void paint_node(TuiNode *t, int ox, int oy) {
   for (int i=0;i<t->nkids;i++) paint_node(t->kids[i], x, y);
 }
 
-static int termcols(void){ struct winsize ws; if(ioctl(1,TIOCGWINSZ,&ws)==0&&ws.ws_col>0)return ws.ws_col; return 80; }
-static int termrows(void){ struct winsize ws; if(ioctl(1,TIOCGWINSZ,&ws)==0&&ws.ws_row>0)return ws.ws_row; return 24; }
 
 void __kml_tui_enter(void) { const char *s = "\x1b[?1049h\x1b[?25l\x1b[2J"; if(write(1,s,strlen(s))<0){} free(g_front); g_front=NULL; }
 void __kml_tui_leave(void) { const char *s = "\x1b[?25h\x1b[?1049l"; if(write(1,s,strlen(s))<0){} free(g_front); g_front=NULL; g_cols=g_rows=0; }

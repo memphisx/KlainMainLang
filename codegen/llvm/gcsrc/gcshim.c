@@ -128,7 +128,9 @@ static void __kml_gc_ctor(void) {
 	// registration might be unavailable; not needed here, since both of this
 	// project's target platforms, Linux glibc and Darwin/BSD libc, ship
 	// standard POSIX pthread_atfork.)
+#ifndef _WIN32
 	GC_set_handle_fork(1);
+#endif // no fork() on Windows: Boehm aborts on the request there (TDD-00177)
 	GC_INIT();
 	ctorDone = 1;
 }

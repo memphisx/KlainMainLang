@@ -26,6 +26,10 @@ console.log(os.platform())`, want)
 }
 
 func TestE2EOSEOL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		assertOutputImports(t, "import os from 'os'\nconsole.log(os.EOL === \"\\r\\n\")", "true")
+		return
+	}
 	assertOutputImports(t, `import os from 'os'
 console.log(os.EOL === "\n")`, "true")
 }

@@ -168,7 +168,7 @@ tryresolve:`
 
 extractaddr:
   %res = load ptr, ptr %resslot, align 8
-  %ai_addr_p = getelementptr i8, ptr %res, i64 24
+  %ai_addr_p = getelementptr i8, ptr %res, i64 ` + fmt.Sprintf("%d", dnsAiAddrOffset()) + `
   %ai_addr = load ptr, ptr %ai_addr_p, align 8
   %sin_addr_p = getelementptr i8, ptr %ai_addr, i64 4
   call ptr @memcpy(ptr %ipbuf, ptr %sin_addr_p, i64 4)

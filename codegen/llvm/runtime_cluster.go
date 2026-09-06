@@ -31,6 +31,9 @@ func (e *Emitter) ensureClusterRuntime() {
 	e.usedClusterRuntime = true
 	e.ensureHTTPClusterFork() // declares @__kml_cluster_worker_id + fork()
 	e.ensureCPForkRuntime()   // socketpair + __kml_cp_wrap_ipc (worker IPC channel)
+	if runtime.GOOS == "windows" {
+		e.ensureUnsetenv() // clusterForkIR clears the worker env vars after spawning
+	}
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureMemset()
@@ -149,24 +152,7 @@ entry:
   %%p1_p = getelementptr [2 x i32], ptr %%sv, i32 0, i32 1
   %%pfd = load i32, ptr %%p0_p, align 4
   %%cfd = load i32, ptr %%p1_p, align 4
-  %%pid = call i32 @fork()
-  %%ischild = icmp eq i32 %%pid, 0
-  br i1 %%ischild, label %%child, label %%parent
-child:
-  call i32 @close(i32 %%pfd)
-  %%idbuf = call ptr @malloc(i64 24)
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%idbuf, ptr %s, i64 %%id)
-  call i32 @setenv(ptr %s, ptr %%idbuf, i32 1)
-  %%fdbuf = call ptr @malloc(i64 24)
-  %%cfd64 = sext i32 %%cfd to i64
-  call i32 (ptr, ptr, ...) @sprintf(ptr %%fdbuf, ptr %s, i64 %%cfd64)
-  call i32 @setenv(ptr %s, ptr %%fdbuf, i32 1)
-  %%exe = call ptr @__kml_cluster_self_exe()
-  %%argv = load ptr, ptr @__argv_ptr, align 8
-  call i32 @execv(ptr %%exe, ptr %%argv)
-  call void @_exit(i32 127)
-  unreachable
-parent:
+%sparent:
   call i32 @close(i32 %%cfd)
   %%pid64 = sext i32 %%pid to i64
   call void @__kml_cluster_register_pid(i64 %%pid64)
@@ -181,7 +167,7 @@ parent:
   %%wcp = getelementptr %s, ptr %%w, i32 0, i32 2
   store ptr %%cp, ptr %%wcp, align 8
   ret ptr %%w
-}`, idFmt, envName, idFmt, chanEnvName, clusterWorkerIR, clusterWorkerIR, clusterWorkerIR))
+}`, e.clusterForkIR(idFmt, envName, idFmt, chanEnvName), clusterWorkerIR, clusterWorkerIR, clusterWorkerIR))
 
 	// __kml_cluster_wait_all(): the primary blocks until every forked worker
 	// exits (keeping the primary alive while workers serve, like Node). A

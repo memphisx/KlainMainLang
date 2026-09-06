@@ -10,6 +10,7 @@
 // for typed/dynamic projection (P3/P4) build on this same node shape and ABI —
 // P1 builds and validates the tree; it does not yet read it for projection.
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,7 +32,7 @@ typedef struct KmlJsonNode {
     double num_val;            // KJSON_NUMBER (parsed)
     char *num_lexeme;          // KJSON_NUMBER raw token (for exact integer projection, P3)
     char *str_val;             // KJSON_STRING (decoded, NUL-terminated)
-    long len;                  // KJSON_ARRAY item count / KJSON_OBJECT pair count
+    int64_t len;                  // KJSON_ARRAY item count / KJSON_OBJECT pair count
     struct KmlJsonNode **items; // KJSON_ARRAY
     char **keys;               // KJSON_OBJECT keys (decoded)
     struct KmlJsonNode **vals; // KJSON_OBJECT values
@@ -66,7 +67,7 @@ static void skip_ws(Parser *ps) {
 }
 
 // append_utf8 encodes a Unicode code point as UTF-8 into buf at *outlen.
-static void append_utf8(char *buf, long *outlen, unsigned int cp) {
+static void append_utf8(char *buf, int64_t *outlen, unsigned int cp) {
     if (cp < 0x80) {
         buf[(*outlen)++] = (char)cp;
     } else if (cp < 0x800) {
@@ -116,13 +117,13 @@ static char *parse_string_raw(Parser *ps) {
     ps->p++; // opening quote
     // The decoded form is never longer than the remaining raw bytes; over-
     // allocate once (plus 3 slack for a 4-byte UTF-8 write, plus NUL).
-    long cap = (long)(ps->end - ps->p) + 4;
+    int64_t cap = (int64_t)(ps->end - ps->p) + 4;
     char *out = (char *)malloc(cap);
     if (!out) {
         ps->ok = 0;
         return NULL;
     }
-    long outlen = 0;
+    int64_t outlen = 0;
     while (ps->p < ps->end) {
         char c = *ps->p;
         if (c == '"') {
@@ -214,7 +215,7 @@ static KmlJsonNode *parse_number(Parser *ps) {
         if (ps->p >= ps->end || *ps->p < '0' || *ps->p > '9') { ps->ok = 0; return NULL; }
         while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ps->p++;
     }
-    long n = (long)(ps->p - start);
+    int64_t n = (int64_t)(ps->p - start);
     char *lex = (char *)malloc(n + 1);
     if (!lex) { ps->ok = 0; return NULL; }
     memcpy(lex, start, n);
@@ -228,7 +229,7 @@ static KmlJsonNode *parse_number(Parser *ps) {
 
 // match_literal checks for lit at the cursor and advances past it on success.
 static int match_literal(Parser *ps, const char *lit) {
-    long n = (long)strlen(lit);
+    int64_t n = (int64_t)strlen(lit);
     if (ps->end - ps->p < n) return 0;
     if (memcmp(ps->p, lit, n) != 0) return 0;
     ps->p += n;
@@ -241,7 +242,7 @@ static KmlJsonNode *parse_array(Parser *ps) {
     if (!node) { ps->ok = 0; return NULL; }
     skip_ws(ps);
     if (ps->p < ps->end && *ps->p == ']') { ps->p++; return node; }
-    long cap = 8;
+    int64_t cap = 8;
     node->items = (KmlJsonNode **)malloc(sizeof(KmlJsonNode *) * cap);
     if (!node->items) { ps->ok = 0; __kml_json_free(node); return NULL; }
     for (;;) {
@@ -269,7 +270,7 @@ static KmlJsonNode *parse_object(Parser *ps) {
     if (!node) { ps->ok = 0; return NULL; }
     skip_ws(ps);
     if (ps->p < ps->end && *ps->p == '}') { ps->p++; return node; }
-    long cap = 8;
+    int64_t cap = 8;
     node->keys = (char **)malloc(sizeof(char *) * cap);
     node->vals = (KmlJsonNode **)malloc(sizeof(KmlJsonNode *) * cap);
     if (!node->keys || !node->vals) { ps->ok = 0; __kml_json_free(node); return NULL; }
@@ -341,7 +342,7 @@ static KmlJsonNode *parse_value(Parser *ps) {
 // node, or NULL on malformed input with *err_pos set to the offending byte
 // offset (used to build the SyntaxError message). Trailing non-whitespace after
 // the root value is an error.
-KmlJsonNode *__kml_json_parse(const char *text, long *err_pos) {
+KmlJsonNode *__kml_json_parse(const char *text, int64_t *err_pos) {
     Parser ps;
     ps.p = text;
     ps.end = text + strlen(text);
@@ -353,7 +354,7 @@ KmlJsonNode *__kml_json_parse(const char *text, long *err_pos) {
         if (ps.p != ps.end) ps.ok = 0; // trailing junk
     }
     if (!ps.ok) {
-        if (err_pos) *err_pos = (long)(ps.p - text);
+        if (err_pos) *err_pos = (int64_t)(ps.p - text);
         __kml_json_free(root);
         return NULL;
     }
@@ -375,9 +376,9 @@ const char *__kml_json_num_lexeme(const KmlJsonNode *n) {
     return (n && n->kind == KJSON_NUMBER && n->num_lexeme) ? n->num_lexeme : "0";
 }
 
-long __kml_json_len(const KmlJsonNode *n) { return n ? n->len : 0; }
+int64_t __kml_json_len(const KmlJsonNode *n) { return n ? n->len : 0; }
 
-KmlJsonNode *__kml_json_item(const KmlJsonNode *n, long i) {
+KmlJsonNode *__kml_json_item(const KmlJsonNode *n, int64_t i) {
     if (!n || n->kind != KJSON_ARRAY || i < 0 || i >= n->len) return NULL;
     return n->items[i];
 }
@@ -386,12 +387,12 @@ KmlJsonNode *__kml_json_item(const KmlJsonNode *n, long i) {
 // (the projected string must outlive the tree). A non-string node yields "".
 char *__kml_json_string_dup(const KmlJsonNode *n) {
     const char *s = (n && n->kind == KJSON_STRING && n->str_val) ? n->str_val : "";
-    long len = (long)strlen(s);
+    int64_t len = (int64_t)strlen(s);
     /* TDD-00120: length-prefixed heap string — [i64 len][bytes][\0], value ptr
        at base+8, so KML string ops can read the true length via ptr-8. */
     char *base = (char *)malloc(8 + len + 1);
     if (!base) return base;
-    *(long *)base = len;
+    *(int64_t *)base = len;
     char *out = base + 8;
     memcpy(out, s, len + 1);
     return out;
@@ -400,12 +401,12 @@ char *__kml_json_string_dup(const KmlJsonNode *n) {
 // __kml_json_key / __kml_json_val expose an object node's i-th pair for the
 // dynamic-tree conversion (TDD-00155 Stage 2): the key is transient (the
 // caller's bag-set copies it before the tree is freed).
-const char *__kml_json_key(const KmlJsonNode *n, long i) {
+const char *__kml_json_key(const KmlJsonNode *n, int64_t i) {
     if (!n || n->kind != KJSON_OBJECT || i < 0 || i >= n->len) return "";
     return n->keys[i];
 }
 
-KmlJsonNode *__kml_json_val(const KmlJsonNode *n, long i) {
+KmlJsonNode *__kml_json_val(const KmlJsonNode *n, int64_t i) {
     if (!n || n->kind != KJSON_OBJECT || i < 0 || i >= n->len) return NULL;
     return n->vals[i];
 }
@@ -414,7 +415,7 @@ KmlJsonNode *__kml_json_val(const KmlJsonNode *n, long i) {
 // or n isn't an object. Scans backward so a duplicate key is last-wins (JS).
 KmlJsonNode *__kml_json_get(const KmlJsonNode *n, const char *key) {
     if (!n || n->kind != KJSON_OBJECT) return NULL;
-    for (long i = n->len - 1; i >= 0; i--) {
+    for (int64_t i = n->len - 1; i >= 0; i--) {
         if (strcmp(n->keys[i], key) == 0) return n->vals[i];
     }
     return NULL;
@@ -431,11 +432,11 @@ void __kml_json_free(KmlJsonNode *n) {
         free(n->num_lexeme);
         break;
     case KJSON_ARRAY:
-        for (long i = 0; i < n->len; i++) __kml_json_free(n->items[i]);
+        for (int64_t i = 0; i < n->len; i++) __kml_json_free(n->items[i]);
         free(n->items);
         break;
     case KJSON_OBJECT:
-        for (long i = 0; i < n->len; i++) {
+        for (int64_t i = 0; i < n->len; i++) {
             free(n->keys[i]);
             __kml_json_free(n->vals[i]);
         }

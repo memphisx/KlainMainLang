@@ -449,7 +449,11 @@ func TestE2ECryptoSubtleDestructuredAlias(t *testing.T) {
 	// (ADR-00435): the local is a compile-time subtle alias usable inside
 	// function bodies too; the chained globalThis.crypto.subtle form works
 	// directly.
-	assertOutput(t, `
+	// Through the real pipeline: a top-level `main` only gets its file-private
+	// mangled name from the resolver; the parser-direct harness would emit it
+	// bare and collide with the program entry point (an IR error the old skip
+	// condition mistook for a missing crypto backend).
+	assertOutputImports(t, `
 const { subtle } = globalThis.crypto
 async function main() {
   const data = new TextEncoder().encode("thessaloniki")

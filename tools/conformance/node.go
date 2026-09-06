@@ -1090,7 +1090,7 @@ func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, strin
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var clangOut bytes.Buffer
-	clangCmd := killableCommand(cctx, "clang", clangArgs...)
+	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
 	if err := clangCmd.Run(); err != nil {

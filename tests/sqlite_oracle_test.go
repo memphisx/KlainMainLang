@@ -36,7 +36,7 @@ func assertMatchesNode(t *testing.T, tsSrc, mjsSrc string) {
 
 	ours := strings.TrimRight(compileAndRunImports(t, tsSrc), "\n")
 
-	dir := t.TempDir()
+	dir := tempDir(t)
 	mjs := filepath.Join(dir, "prog.mjs")
 	if err := os.WriteFile(mjs, []byte(mjsSrc), 0644); err != nil {
 		t.Fatalf("write mjs: %v", err)

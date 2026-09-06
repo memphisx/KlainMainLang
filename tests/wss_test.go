@@ -88,7 +88,7 @@ func newWSSEchoServer(t *testing.T) (port, certFile string) {
 
 	// Write the server's self-signed cert to a temp file for the client to trust.
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	cf := filepath.Join(t.TempDir(), "ca.pem")
+	cf := filepath.Join(tempDir(t), "ca.pem")
 	if err := os.WriteFile(cf, certPEM, 0644); err != nil {
 		t.Fatalf("write ca: %v", err)
 	}

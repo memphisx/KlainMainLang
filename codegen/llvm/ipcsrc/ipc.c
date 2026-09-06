@@ -11,6 +11,7 @@
 // malloc'd NUL-terminated C strings; the IR caller copies them into
 // length-prefixed kml strings.
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -18,18 +19,18 @@
 
 typedef struct {
     char *data;
-    long len, cap;
+    int64_t len, cap;
 } KmlIpcChan;
 
 void *__kml_ipc_chan_new(void) {
     return calloc(1, sizeof(KmlIpcChan));
 }
 
-void __kml_ipc_feed(void *chanv, const char *src, long n) {
+void __kml_ipc_feed(void *chanv, const char *src, int64_t n) {
     KmlIpcChan *ch = (KmlIpcChan *)chanv;
     if (ch->len + n + 1 > ch->cap) {
-        long need = ch->len + n + 1;
-        long cap = ch->cap < 64 ? 64 : ch->cap;
+        int64_t need = ch->len + n + 1;
+        int64_t cap = ch->cap < 64 ? 64 : ch->cap;
         while (cap < need) cap *= 2;
         ch->data = realloc(ch->data, cap);
         ch->cap = cap;
@@ -42,11 +43,11 @@ void __kml_ipc_feed(void *chanv, const char *src, long n) {
 // Decode a JSON string token (must start with '"'); returns malloc'd payload
 // or NULL on malformed input. Handles \" \\ \/ \b \f \n \r \t and \uXXXX
 // (BMP only; a surrogate pair decodes to UTF-8).
-static char *ipc_unquote(const char *s, long n) {
+static char *ipc_unquote(const char *s, int64_t n) {
     if (n < 2 || s[0] != '"') return NULL;
     char *out = malloc(n); // decoded is never longer than input
-    long o = 0;
-    long i = 1;
+    int64_t o = 0;
+    int64_t i = 1;
     while (i < n) {
         char c = s[i];
         if (c == '"') { out[o] = 0; return out; }
@@ -119,7 +120,7 @@ char *__kml_ipc_take(void *chanv) {
     if (!ch->data) return NULL;
     char *nl = memchr(ch->data, '\n', ch->len);
     if (!nl) return NULL;
-    long linelen = nl - ch->data;
+    int64_t linelen = nl - ch->data;
     char *msg = ipc_unquote(ch->data, linelen);
     if (!msg) {
         // Malformed line: deliver its raw bytes rather than dropping it.
@@ -127,7 +128,7 @@ char *__kml_ipc_take(void *chanv) {
         memcpy(msg, ch->data, linelen);
         msg[linelen] = 0;
     }
-    long rest = ch->len - linelen - 1;
+    int64_t rest = ch->len - linelen - 1;
     memmove(ch->data, nl + 1, rest);
     ch->len = rest;
     ch->data[ch->len] = 0;
@@ -135,12 +136,12 @@ char *__kml_ipc_take(void *chanv) {
 }
 
 // JSON-quote s and write "<quoted>\n" to fd. Returns 1 on a full write.
-long __kml_ipc_send(long fd, const char *s) {
-    long n = (long)strlen(s);
+int64_t __kml_ipc_send(int64_t fd, const char *s) {
+    int64_t n = (int64_t)strlen(s);
     char *buf = malloc(n * 6 + 4);
-    long o = 0;
+    int64_t o = 0;
     buf[o++] = '"';
-    for (long i = 0; i < n; i++) {
+    for (int64_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         switch (c) {
         case '"': buf[o++] = '\\'; buf[o++] = '"'; break;
@@ -155,9 +156,9 @@ long __kml_ipc_send(long fd, const char *s) {
     }
     buf[o++] = '"';
     buf[o++] = '\n';
-    long w = 0;
+    int64_t w = 0;
     while (w < o) {
-        long r = (long)write((int)fd, buf + w, o - w);
+        int64_t r = (int64_t)write((int)fd, buf + w, o - w);
         if (r <= 0) break;
         w += r;
     }

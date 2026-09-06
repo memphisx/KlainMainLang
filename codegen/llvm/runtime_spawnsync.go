@@ -21,33 +21,47 @@ func (e *Emitter) ensureSpawnSyncRuntime() {
 // runtime_strheader.go ([i64 len][bytes][NUL], value ptr = base+8).
 func SpawnSyncSource() string {
 	return `#include <errno.h>
-#include <poll.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+/* TDD-00177 Stage 4: the fd/poll/waitpid surface comes from the Windows
+   shim; the child is started by __kml_win_spawn (CreateProcessW) instead
+   of fork+exec, with the same pipe ends as its stdout/stderr. */
+#include "kml_posix_compat.h"
+int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd);
+int waitpid(int pid, int *status, int options);
+#define WIFEXITED(s) (((s) & 0x7f) == 0)
+#define WEXITSTATUS(s) (((s) >> 8) & 0xff)
+#define WIFSIGNALED(s) (((s) & 0x7f) != 0)
+#define WTERMSIG(s) ((s) & 0x7f)
+#else
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 /* Length-prefixed string alloc matching __kml_str_alloc's layout. */
-static char *kmlss_str(const char *buf, long n) {
+static char *kmlss_str(const char *buf, int64_t n) {
   char *b = (char *)malloc(n + 9);
-  *(long *)b = n;
+  *(int64_t *)b = n;
   if (n > 0) memcpy(b + 8, buf, n);
   b[8 + n] = 0;
   return b + 8;
 }
 
 typedef struct {
-  long status; /* exit code; 128+signal when signal-terminated; -1 on spawn failure */
+  int64_t status; /* exit code; 128+signal when signal-terminated; -1 on spawn failure */
   char *out;   /* captured stdout, length-prefixed */
   char *err;   /* captured stderr, length-prefixed */
-  long pid;
+  int64_t pid;
 } kmlss_result;
 
-typedef struct { char *buf; long len, cap; } kmlss_acc;
+typedef struct { char *buf; int64_t len, cap; } kmlss_acc;
 
-static void kmlss_push(kmlss_acc *a, const char *p, long n) {
+static void kmlss_push(kmlss_acc *a, const char *p, int64_t n) {
   if (a->len + n > a->cap) {
-    long nc = a->cap ? a->cap * 2 : 4096;
+    int64_t nc = a->cap ? a->cap * 2 : 4096;
     while (nc < a->len + n) nc *= 2;
     a->buf = (char *)realloc(a->buf, nc);
     a->cap = nc;
@@ -56,7 +70,7 @@ static void kmlss_push(kmlss_acc *a, const char *p, long n) {
   a->len += n;
 }
 
-void *__kml_cp_spawn_sync(const char *file, char **args, long argn, const char *cwd) {
+void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const char *cwd) {
   kmlss_result *r = (kmlss_result *)calloc(1, sizeof(kmlss_result));
   int outp[2], errp[2];
   if (pipe(outp) != 0 || pipe(errp) != 0) {
@@ -65,6 +79,21 @@ void *__kml_cp_spawn_sync(const char *file, char **args, long argn, const char *
     r->err = kmlss_str("", 0);
     return r;
   }
+#ifdef _WIN32
+  char **argv = (char **)malloc((argn + 2) * sizeof(char *));
+  argv[0] = (char *)file;
+  for (int64_t i = 0; i < argn; i++) argv[i + 1] = args[i];
+  argv[argn + 1] = NULL;
+  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1);
+  free(argv);
+  if (pid < 0) {
+    close(outp[0]); close(outp[1]); close(errp[0]); close(errp[1]);
+    r->status = -1;
+    r->out = kmlss_str("", 0);
+    r->err = kmlss_str("", 0);
+    return r;
+  }
+#else
   pid_t pid = fork();
   if (pid < 0) {
     r->status = -1;
@@ -80,11 +109,12 @@ void *__kml_cp_spawn_sync(const char *file, char **args, long argn, const char *
     close(errp[0]); close(errp[1]);
     char **argv = (char **)malloc((argn + 2) * sizeof(char *));
     argv[0] = (char *)file;
-    for (long i = 0; i < argn; i++) argv[i + 1] = args[i];
+    for (int64_t i = 0; i < argn; i++) argv[i + 1] = args[i];
     argv[argn + 1] = NULL;
     execvp(file, argv);
     _exit(127); /* Node's exec-failure convention */
   }
+#endif
   close(outp[1]);
   close(errp[1]);
   kmlss_acc oa = {0, 0, 0}, ea = {0, 0, 0};
@@ -101,7 +131,7 @@ void *__kml_cp_spawn_sync(const char *file, char **args, long argn, const char *
     for (int i = 0; i < 2; i++) {
       if (fds[i].fd < 0) continue;
       if (fds[i].revents & (POLLIN | POLLHUP)) {
-        long n = read(fds[i].fd, tmp, sizeof tmp);
+        int64_t n = read(fds[i].fd, tmp, sizeof tmp);
         if (n > 0) {
           kmlss_push(i == 0 ? &oa : &ea, tmp, n);
         } else {
@@ -121,7 +151,7 @@ void *__kml_cp_spawn_sync(const char *file, char **args, long argn, const char *
   r->err = kmlss_str(ea.buf ? ea.buf : "", ea.len);
   free(oa.buf);
   free(ea.buf);
-  r->pid = (long)pid;
+  r->pid = (int64_t)pid;
   return r;
 }
 `

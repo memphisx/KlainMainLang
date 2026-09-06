@@ -487,10 +487,16 @@ entry:
   ret ptr %h
 }
 
-; FNV-1a over the key's bytes.
+; FNV-1a over the key's bytes. A null key (a dynamic null/undefined reaching a
+; string-keyed map, e.g. new Set().has(null)) hashes as the empty string
+; instead of reading address 0 — a load LLVM treats as unreachable and lowers
+; to a crash on Linux and a self-loop on Windows.
 define i64 @__kml_map_str_hash(ptr %s) {
 entry:
-  br label %loop
+  %isnull = icmp eq ptr %s, null
+  br i1 %isnull, label %nullkey, label %loop
+nullkey:
+  ret i64 -3750763034362895579
 loop:
   %h = phi i64 [ -3750763034362895579, %entry ], [ %h2, %body ]
   %p = phi ptr [ %s, %entry ], [ %p2, %body ]
@@ -533,6 +539,16 @@ chk_tomb:
 occ:
   %k_p = getelementptr ptr, ptr %keys, i64 %e
   %k = load ptr, ptr %k_p, align 8
+  ; Null-safe compare: a null key equals only another null key (see the
+  ; hash above); strcmp itself must never see one.
+  %k_null = icmp eq ptr %k, null
+  %key_null = icmp eq ptr %key, null
+  %any_null = or i1 %k_null, %key_null
+  br i1 %any_null, label %occ_nullcmp, label %occ_strcmp
+occ_nullcmp:
+  %both_null = and i1 %k_null, %key_null
+  br i1 %both_null, label %found, label %occ_next
+occ_strcmp:
   %cmp = call i32 @strcmp(ptr %k, ptr %key)
   %keq = icmp eq i32 %cmp, 0
   br i1 %keq, label %found, label %occ_next

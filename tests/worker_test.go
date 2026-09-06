@@ -222,7 +222,7 @@ func assertMultiFileOutputGC(t *testing.T, files map[string]string, entryName, w
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
-	out, err := exec.Command("clang", clangArgs...).CombinedOutput()
+	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "library not found for -lgc") || strings.Contains(string(out), "cannot find -lgc") {
 			t.Skipf("bdw-gc not installed: %v", err)

@@ -109,6 +109,7 @@ func TestE2EHTTPUpgradeCoexistsWithNormalHTTP(t *testing.T) {
 // The socket is TLS-backed, so socket.write goes through SSL with no extra
 // code — the whole point of TDD-00158.
 func TestE2EHTTPSUpgradeEventEchoTLS(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
 	certLit, keyLit := genSelfSignedPEM(t)
 	src := fmt.Sprintf(`
 import https from 'https'

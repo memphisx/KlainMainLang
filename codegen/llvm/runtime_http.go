@@ -135,6 +135,10 @@ func httpEagainErrno() int {
 // laid out next in memory (which is exactly what the observed symptoms —
 // connection resets, hangs — looked like).
 func ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
+	if runtime.GOOS == "windows" {
+		// win32io.c's kml_ucontext: {fiber, ss_sp, ss_size, uc_link, fn, argc}.
+		return 64, 8, 16, 24
+	}
 	if runtime.GOOS == "darwin" {
 		return 880, 8, 16, 32
 	}
@@ -573,6 +577,7 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	e.ensureFflushDecl()
 	e.ensureMmapDecl()
 	e.emitGlobal("@__kml_cluster_worker_id = internal global i64 0, align 8")
+	e.ensureHTTPClusterSeed()
 	// TDD-00117: shared close flags. Null until __kml_http_cluster_fork mmaps a
 	// MAP_SHARED region (only when it actually forks workers); every worker's
 	// event loop polls it. Two i64 words: [0] set by http.close() (close the
@@ -583,7 +588,7 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_cluster_fork(i64 %%numWorkers) {
 entry:
-  %%ip = alloca i64, align 8
+%s  %%ip = alloca i64, align 8
   store i64 1, ptr %%ip, align 8
   %%needsfork = icmp sgt i64 %%numWorkers, 1
   br i1 %%needsfork, label %%mkflag, label %%done
@@ -610,33 +615,14 @@ forkloop:
   br i1 %%cont, label %%doforkw, label %%done
 
 doforkw:
-  ; fflush(NULL) (flushes every open output stream, including stdout) right
-  ; before fork() is required, not optional: fork() copies libc's stdio
-  ; buffers verbatim, so any console.log output still sitting unflushed in
-  ; stdout's buffer at fork time (the common case once stdout isn't a TTY —
-  ; e.g. piped to a container's log collector, this project's own
-  ; microservice target) would otherwise get flushed independently by every
-  ; worker that inherits the copy, printing the same line once per worker
-  ; instead of once. Found via this feature's own example
-  ; (examples/http/http_cluster.ts) printing its startup banner N times
-  ; instead of once when piped (not run at a real terminal).
-  call i32 @fflush(ptr null)
-  %%pid = call i32 @fork()
-  %%ischild = icmp eq i32 %%pid, 0
-  br i1 %%ischild, label %%child, label %%parentnext
-
-child:
-  store i64 %%i, ptr @__kml_cluster_worker_id, align 8
-  br label %%done
-
-parentnext:
+%sparentnext:
   %%inext = add i64 %%i, 1
   store i64 %%inext, ptr %%ip, align 8
   br label %%forkloop
 
 done:
   ret void
-}`, mmapSharedAnonFlags()))
+}`, e.httpClusterEntryIR(), mmapSharedAnonFlags(), e.httpClusterForkIR()))
 }
 
 // ensureHTTPDate declares __kml_http_date(ptr %buf): formats the current wall
@@ -810,7 +796,7 @@ define void @__kml_reactor_thread_lock() {
 	e.ensureFcntlDecl()
 	e.ensureForkDecl()
 
-	e.emitGlobal("@__kml_listen_fd = internal thread_local global i32 -1, align 4")
+	e.ensureListenFdGlobal()
 	e.emitGlobal("@__kml_listen_dispatch = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal thread_local global ptr null, align 8")
 	// @__kml_listen_ws_handler (TDD-00039 Stage 1): the optional `ws`
@@ -834,7 +820,7 @@ define void @__kml_reactor_thread_lock() {
 	e.emitGlobal(fmt.Sprintf(`
 define i32 @__kml_http_bind_and_listen(i32 %%port) {
 entry:
-  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
+%s  %%fd = call i32 @socket(i32 2, i32 1, i32 0)
   %%fdok = icmp sge i32 %%fd, 0
   br i1 %%fdok, label %%setopt, label %%failnofd
 
@@ -897,7 +883,7 @@ failwithfd:
 failnofd:
   call void @__kml_http_throw(ptr %s)
   unreachable
-}`, solSocket, soReuseAddr, solSocket, httpReusePortConst(), fam0, fam1, httpNonblockFlag(),
+}`, e.httpListenInheritIR(), solSocket, soReuseAddr, solSocket, httpReusePortConst(), fam0, fam1, httpNonblockFlag(),
 		e.internString("http.listen: failed to bind or listen"),
 		e.internString("http.listen: failed to create socket")))
 
@@ -1827,6 +1813,7 @@ fdfolddone:
 
 cmtofold:
   store i64 -1, ptr %cmtoslot, align 8
+  store i64 0, ptr %cmtoslot, align 8 ; LLP64: curl writes a 32-bit long
   call i32 @curl_multi_timeout(ptr %curlmulti, ptr %cmtoslot)
   %cmtoms = load i64, ptr %cmtoslot, align 8
   %hascmto = icmp sge i64 %cmtoms, 0

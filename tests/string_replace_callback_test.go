@@ -30,13 +30,13 @@ console.log("hello".replace(/l/g, (m) => m.toUpperCase()))
 
 func TestE2EReplaceCallbackUntypedMatchAndOffset(t *testing.T) {
 	assertOutput(t, `
-console.log("hello".replace(/l/g, (m, o) => ` + "`" + `${m}@${o}` + "`" + `))
+console.log("hello".replace(/l/g, (m, o) => `+"`"+`${m}@${o}`+"`"+`))
 `, "hel@2l@3o")
 }
 
 func TestE2EReplaceCallbackUntypedAllThreeParams(t *testing.T) {
 	assertOutput(t, `
-console.log("a1b2".replace(/[0-9]/g, (m, o, s) => ` + "`" + `[${m}/${o}/${s.length}]` + "`" + `))
+console.log("a1b2".replace(/[0-9]/g, (m, o, s) => `+"`"+`[${m}/${o}/${s.length}]`+"`"+`))
 `, "a[1/1/4]b[2/3/4]")
 }
 

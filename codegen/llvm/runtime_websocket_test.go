@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -35,13 +36,20 @@ func buildAndRunIR(t *testing.T, globals, mainIR string) string {
 	if err := os.WriteFile(llFile, []byte(ir.String()), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	out, err := exec.Command("clang", "-O1", llFile, "-o", binFile).CombinedOutput()
+	out, err := ClangCommand("-O1", llFile, "-o", binFile).CombinedOutput()
 	if err != nil {
 		t.Fatalf("clang: %v\n%s\n--- IR ---\n%s", err, out, ir.String())
 	}
 	runOut, err := exec.Command(binFile).CombinedOutput()
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, runOut)
+	}
+	// This harness hand-writes its own main(), so the emitter's Windows
+	// prologue (stdio to binary mode, see EmitProgram) never runs; the UCRT's
+	// text-mode stdout then writes "\r\n". Normalize here rather than
+	// teaching every hand-written main about _setmode.
+	if runtime.GOOS == "windows" {
+		return strings.ReplaceAll(string(runOut), "\r\n", "\n")
 	}
 	return string(runOut)
 }

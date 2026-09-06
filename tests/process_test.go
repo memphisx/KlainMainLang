@@ -100,6 +100,7 @@ console.log(line2 === null)
 // external-network tests which stay in examples/, not here.
 
 func TestE2EExecFileSyncCapturesStdout(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
 	assertOutput(t, `
 const args: string[] = ["hello", "world"]
 const out: string = process.execFileSync("/bin/echo", args)
@@ -108,6 +109,7 @@ console.log(out)
 }
 
 func TestE2EExecFileSyncNoArgs(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
 	assertOutput(t, `
 const out: string = process.execFileSync("/bin/echo")
 console.log(out.length)
@@ -116,6 +118,7 @@ console.log(out.length)
 
 // ADR-00589: the { cwd } option runs the child in a different directory.
 func TestE2EExecFileSyncCwd(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "pwd with cwd /")
 	assertOutput(t, `
 const out: string = process.execFileSync("pwd", [], { cwd: "/" })
 console.log(out.trim())
@@ -131,6 +134,7 @@ console.log(out)
 }
 
 func TestE2EExecFileSyncDoesNotInvokeAShell(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/echo absolute path")
 	// Real execFileSync semantics: argv is passed straight to execvp, no
 	// shell involved — shell metacharacters must come back out verbatim,
 	// not get expanded/interpreted.
@@ -142,6 +146,7 @@ console.log(out)
 }
 
 func TestE2EExecFileSyncNonZeroExitThrows(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/usr/bin/false absolute path")
 	assertOutput(t, `
 try {
     process.execFileSync("/usr/bin/false")
@@ -153,6 +158,7 @@ try {
 }
 
 func TestE2EExecFileSyncSignalDeathThrows(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/sh killed by SIGKILL")
 	assertOutput(t, `
 const args: string[] = ["-c", "kill -9 $$"]
 try {
@@ -176,6 +182,7 @@ try {
 }
 
 func TestE2EExecFileSyncLargeOutputGrowsBuffer(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/sh for-loop with seq")
 	// Forces output past a single pipe read (and the growable buffer's
 	// initial capacity), exercising the realloc-doubling path.
 	assertOutput(t, `
@@ -205,7 +212,7 @@ process.execFileSync("/bin/echo", args)
 // --- process.cwd/chdir/pid/platform/kill ---
 
 func TestE2EProcessCwdAndChdir(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	// Resolve symlinks the same way the OS's own getcwd() would (macOS's
 	// /tmp is itself a symlink to /private/tmp) so the comparison is exact,
 	// not just "close enough".
@@ -502,6 +509,12 @@ throw new Error("boom")
 // absolute, symlink-resolved path — always absolute like Node's, and a
 // length-prefixed string so `.length` works (ADR-00395).
 func TestE2EProcessExecPath(t *testing.T) {
+	// An absolute path: "/…" on POSIX, "C:…" on Windows (Node reports the
+	// .exe path there).
+	if runtime.GOOS == "windows" {
+		assertOutput(t, `console.log(process.execPath.length > 2 && process.execPath.charAt(1) === ":")`, "true")
+		return
+	}
 	assertOutput(t, `console.log(process.execPath.length > 0 && process.execPath.startsWith("/"))`, "true")
 }
 
@@ -583,6 +596,9 @@ console.log(!process.stdin.isTTY)
 }
 
 func TestE2EProcessGetUIDFamily(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process.getuid family does not exist in Node on Windows; the compiler rejects it there")
+	}
 	// POSIX credential reads (ADR-00428) — non-negative numbers, and the
 	// effective ids match the real ones under a normal (non-setuid) run.
 	assertOutput(t, `

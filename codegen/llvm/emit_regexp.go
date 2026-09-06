@@ -209,6 +209,14 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 			return Value{}, err
 		}
 		flagsVal = e.coerce(flagsVal, TypePtr)
+		// `new RegExp(p, undefined)` means no flags (real JS: undefined flags
+		// is the empty string). A null pointer reaching the flag validator is
+		// undefined behaviour — a crash on Linux, a self-loop on Windows.
+		flagsNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", flagsNull, flagsVal.Ref))
+		flagsSafe := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", flagsSafe, flagsNull, e.internString(""), flagsVal.Ref))
+		flagsVal = Value{Ref: flagsSafe, Ty: TypePtr}
 	} else {
 		flagsVal = Value{Ref: e.internString(""), Ty: TypePtr}
 	}

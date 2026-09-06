@@ -1022,7 +1022,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		bodyStartL := e.freshLabel("gen.body")
 		catchAllL := e.freshLabel("gen.catchall")
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", outerJb))
-		e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sj, outerJb))
+		e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(outerJb)))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchAllL, bodyStartL))
 

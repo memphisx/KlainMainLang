@@ -38,10 +38,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
+#ifdef _WIN32
+/* TDD-00177 Stage 5: goroutine stacks from VirtualAlloc, ucontext and
+   sysconf from the Windows shim (kml_posix_compat.h), threads from
+   winpthreads. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include "kml_posix_compat.h"
+#else
+#include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
+#endif
 
 /* ------------------------------------------------------------------ *
  *  GC glue — weakly bound so manual-mode builds (which never link      *
@@ -160,8 +169,23 @@ static int ks_idle;          /* # of Ms parked waiting for work */
 static _Atomic long ks_live; /* # of live (non-dead) goroutines */
 
 static pthread_once_t ks_once = PTHREAD_ONCE_INIT;
+#ifdef _WIN32
+/* TDD-00177 Stage 5: a goroutine is a Win32 fiber here and, being stolen
+ * between Ms, resumes on a different thread than it left. The optimizer
+ * may cache a thread-local's address across the swapcontext call inside
+ * such a switch, which would then name the *previous* thread's slot; an
+ * out-of-line accessor per access keeps every read on the current thread.
+ * (On Linux/macOS the plain thread-locals below are unchanged.) */
+static _Thread_local ks_m *ks_curm_tls;
+static _Thread_local ks_g *ks_curg_tls;
+static __attribute__((noinline)) ks_m **ks_curm_p(void) { return &ks_curm_tls; }
+static __attribute__((noinline)) ks_g **ks_curg_p(void) { return &ks_curg_tls; }
+#define ks_curm (*ks_curm_p())
+#define ks_curg (*ks_curg_p())
+#else
 static _Thread_local ks_m *ks_curm; /* NULL on the main/non-M thread */
 static _Thread_local ks_g *ks_curg; /* NULL when not running a G */
+#endif
 
 /* ------------------------------------------------------------------ *
  *  Run-queue plumbing                                                  *
@@ -424,9 +448,14 @@ static ks_g *ks_g_new(void (*fn)(void *), void *env) {
      * Very deep recursion in a goroutine is undefined behaviour, documented
      * like the other fibers. */
     size_t total = ks_stack_bytes;
+#ifdef _WIN32
+    void *base = VirtualAlloc(NULL, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (base == NULL) {
+#else
     void *base = mmap(NULL, total, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) {
+#endif
         fprintf(stderr, "klain:sync: goroutine stack mmap failed\n");
         abort();
     }
@@ -447,7 +476,11 @@ static void ks_g_free(ks_g *g) {
 #ifdef KLAINSYNC_GC
     GC_remove_roots(g->stack, (char *)g->stack + g->stacksize);
 #endif
+#ifdef _WIN32
+    VirtualFree(g->stack_alloc, 0, MEM_RELEASE);
+#else
     munmap(g->stack_alloc, g->alloc_size);
+#endif
     KS_CTLFREE(g);
 }
 

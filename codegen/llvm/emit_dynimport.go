@@ -30,20 +30,36 @@ func IslandHash(absPath string) string {
 // `__kml_dynmod_<hash>_init` to run the target's top-level exactly once. Linked
 // only under -dynamic-import=lazy when the program uses import().
 func DynImportShimSource() string {
-	return `#include <dlfcn.h>
-#include <stdio.h>
+	return `#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(__APPLE__)
+#if defined(_WIN32)
+/* TDD-00177 Stage 5: islands are DLLs beside the executable, loaded with
+   LoadLibrary; GetModuleFileName locates the executable. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define KML_ISLAND_EXT ".dll"
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+static void *dlopen(const char *p, int f) { (void)f; return (void *)LoadLibraryA(p); }
+static void *dlsym(void *h, const char *s) { return (void *)GetProcAddress((HMODULE)h, s); }
+static const char *dlerror(void) { static char b[64]; snprintf(b, sizeof b, "error %lu", (unsigned long)GetLastError()); return b; }
+#elif defined(__APPLE__)
+#include <dlfcn.h>
 #include <mach-o/dyld.h>
 #define KML_ISLAND_EXT ".dylib"
 #else
+#include <dlfcn.h>
 #include <unistd.h>
 #define KML_ISLAND_EXT ".so"
 #endif
 
 static int kml_self_path(char *buf, unsigned long cap) {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+  DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)cap);
+  if (n == 0 || n >= cap) return -1;
+  return 0;
+#elif defined(__APPLE__)
   unsigned int size = (unsigned int)cap;
   if (_NSGetExecutablePath(buf, &size) != 0) return -1;
   return 0;

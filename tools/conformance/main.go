@@ -24,7 +24,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"KlainMainLang/codegen/llvm"
@@ -514,11 +513,11 @@ func loadHarness(dir string, names []string) (string, error) {
 // pipe wait. Unix-only attrs, fine on this project's Linux+macOS targets.
 func killableCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
 			// Negative pid ⇒ signal the entire process group.
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return killProcGroup(cmd)
 		}
 		return nil
 	}
@@ -533,7 +532,7 @@ func killableCommand(ctx context.Context, name string, args ...string) *exec.Cmd
 // parser was never exercised against before.
 func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID int, timeout time.Duration) (res result) {
 	rel, _ := filepath.Rel(testDir, path)
-	res.Path = rel
+	res.Path = filepath.ToSlash(rel) // report paths stay slash-separated on every host
 	res.Category = strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
 
 	defer func() {
@@ -682,7 +681,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var clangOut bytes.Buffer
-	clangCmd := killableCommand(cctx, "clang", clangArgs...)
+	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
 	if err := clangCmd.Run(); err != nil {

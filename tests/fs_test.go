@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 // --- fs (readFileSync/writeFileSync/appendFileSync/existsSync/unlinkSync) ---
 
 func TestE2EFsWriteReadAppendUnlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -30,7 +31,7 @@ console.log(fs.existsSync(path))
 }
 
 func TestE2EFsWriteFileSyncOverwritesExistingContent(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -42,7 +43,7 @@ console.log(fs.readFileSync(%q))
 }
 
 func TestE2EFsReadFileSyncUntypedInference(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -135,7 +136,7 @@ fs.readFileSync("a", "b")`)
 // (byte 2 of 6), so an off-by-one in the length threading can't hide behind
 // a null-at-the-end body.
 func TestE2EFsReadFileSyncBytesPreservesEmbeddedNullByte(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "binary.bin")
 	if err := os.WriteFile(path, []byte{'h', 'i', 0, 'b', 'y', 'e'}, 0o644); err != nil {
 		t.Fatalf("os.WriteFile: %v", err)
@@ -178,7 +179,7 @@ fs.readFileSyncBytes("a", "b")`)
 // (real Go) to confirm the bytes on disk are exactly right, not just what
 // this compiler's own readFileSyncBytes reports.
 func TestE2EFsWriteFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -198,7 +199,7 @@ fs.writeFileSync(%q, arr)
 }
 
 func TestE2EFsAppendFileSyncUint8ArrayRoundTripsEmbeddedNullByte(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -223,7 +224,7 @@ fs.appendFileSync(%q, arr)
 // the tests above already cover) — data written through a Uint8Array view
 // but passed to writeFileSync as the underlying ArrayBuffer itself.
 func TestE2EFsWriteFileSyncArrayBufferRoundTripsEmbeddedNullByte(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "out.bin")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -251,7 +252,7 @@ fs.writeFileSync(%q, buf)
 // string argument) is completely unaffected by the new ArrayBuffer/
 // TypedArray branch added alongside it.
 func TestE2EFsWriteFileSyncStringPathUnchanged(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "test.txt")
 	src := fmt.Sprintf(`
 import fs from 'fs'
@@ -267,8 +268,8 @@ console.log(fs.readFileSync(path))
 // --- fs.mkdirSync / renameSync / copyFileSync / readdirSync ---
 
 func TestE2EFsMkdirSyncCreatesDirectory(t *testing.T) {
-	dir := t.TempDir()
-	sub := filepath.Join(dir, "newdir")
+	dir := tempDir(t)
+	sub := dir + "/newdir" // not filepath.Join: it re-backslashes on Windows, and sub is spliced into a TS literal
 	src := fmt.Sprintf(`
 import fs from 'fs'
 console.log(fs.existsSync(%q))
@@ -279,8 +280,8 @@ console.log(fs.existsSync(%q))
 }
 
 func TestE2EFsMkdirSyncAlreadyExistsThrows(t *testing.T) {
-	dir := t.TempDir()
-	sub := filepath.Join(dir, "newdir")
+	dir := tempDir(t)
+	sub := dir + "/newdir" // not filepath.Join: it re-backslashes on Windows, and sub is spliced into a TS literal
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatalf("os.Mkdir(%q): %v", sub, err)
 	}
@@ -305,7 +306,7 @@ fs.mkdirSync()`)
 }
 
 func TestE2EFsRmdirSyncRemovesEmptyDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	sub := filepath.Join(dir, "toremove")
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatalf("os.Mkdir(%q): %v", sub, err)
@@ -321,7 +322,7 @@ console.log(fs.existsSync(%q))
 
 func TestE2EFsRmdirSyncRecursive(t *testing.T) {
 	// ADR-00578: fs.rmdirSync(path, { recursive: true }) removes the whole tree.
-	dir := t.TempDir()
+	dir := tempDir(t)
 	root := filepath.Join(dir, "tree")
 	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o755); err != nil {
 		t.Fatalf("os.MkdirAll: %v", err)
@@ -339,7 +340,7 @@ console.log(fs.existsSync(%q))
 }
 
 func TestE2EFsRmdirSyncNonEmptyThrows(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	sub := filepath.Join(dir, "nonempty")
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatalf("os.Mkdir(%q): %v", sub, err)
@@ -368,7 +369,7 @@ fs.rmdirSync()`)
 }
 
 func TestE2EFsRenameSyncMovesFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	oldPath := filepath.Join(dir, "old.txt")
 	newPath := filepath.Join(dir, "new.txt")
 	src := fmt.Sprintf(`
@@ -383,7 +384,7 @@ console.log(fs.readFileSync(%q))
 }
 
 func TestE2EFsRenameSyncNonexistentThrows(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	oldPath := filepath.Join(dir, "does-not-exist.txt")
 	newPath := filepath.Join(dir, "new.txt")
 	src := fmt.Sprintf(`
@@ -407,7 +408,7 @@ fs.renameSync("a")`)
 }
 
 func TestE2EFsCopyFileSyncCopiesContent(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := filepath.Join(dir, "src.txt")
 	dest := filepath.Join(dir, "dest.txt")
 	code := fmt.Sprintf(`
@@ -428,7 +429,7 @@ console.log(fs.readFileSync(%q))
 // can't survive the strlen-based string write path), and the destination is
 // verified via real Go os.ReadFile, not this compiler's own readers.
 func TestE2EFsCopyFileSyncPreservesEmbeddedNullByte(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := filepath.Join(dir, "src.bin")
 	dest := filepath.Join(dir, "dest.bin")
 	want := []byte{'h', 'i', 0, 'b', 'y', 'e'}
@@ -459,7 +460,7 @@ fs.copyFileSync("a")`)
 }
 
 func TestE2EFsReaddirSyncListsEntriesExcludingDotAndDotDot(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 			t.Fatalf("os.WriteFile: %v", err)
@@ -478,7 +479,7 @@ for (const e of entries) {
 }
 
 func TestE2EFsReaddirSyncEmptyDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	src := fmt.Sprintf(`
 import fs from 'fs'
 const entries: string[] = fs.readdirSync(%q)
@@ -512,7 +513,7 @@ fs.readdirSync()`)
 // shared catchable fs error. Verified on Mac (Linux offsets differ and are
 // encoded per-platform in statLayout).
 func TestE2EFsStatSync(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	file := dir + "/probe.txt"
 	src := fmt.Sprintf(`
 import * as fs from 'fs'
@@ -532,7 +533,7 @@ try { fs.statSync("%s/absent") } catch (e) { console.log("caught:", e.message.in
 // dev + atimeMs/ctimeMs beyond the original size/mtimeMs. Verified on Mac
 // (Linux offsets differ and are encoded per-platform in statLayout).
 func TestE2EFsStatFullSurface(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	file := dir + "/probe.txt"
 	src := fmt.Sprintf(`
 import * as fs from 'fs'
@@ -556,10 +557,21 @@ console.log(st.size)
 // rmSync (recursive + force). Mac-verified; Linux shares the libc calls but
 // the stat offsets carry ADR-00495's Linux-unverified caveat.
 func TestE2EFsPathOps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Creating a symlink needs Developer Mode or an elevated token on
+		// Windows (Node throws EPERM otherwise, exactly as this compiler does);
+		// probe from Go and skip when the box can't, rather than fail.
+		probe := tempDir(t)
+		if err := os.Symlink(probe, filepath.Join(probe, "probe-link")); err != nil {
+			t.Skip("symlink creation not permitted on this Windows box (needs Developer Mode or admin)")
+		}
+	}
 	assertOutputImports(t, `
 import * as fs from 'fs'
-const tmp = fs.mkdtempSync('/tmp/kmlops-')
-console.log(tmp.indexOf('/tmp/kmlops-') === 0)
+import os from 'os'
+const base = os.tmpdir() + '/kmlops-'
+const tmp = fs.mkdtempSync(base)
+console.log(tmp.indexOf(base) === 0)
 fs.writeFileSync(tmp + '/a.txt', 'data')
 fs.symlinkSync(tmp + '/a.txt', tmp + '/link')
 console.log(fs.readlinkSync(tmp + '/link') === tmp + '/a.txt')
@@ -575,9 +587,9 @@ fs.mkdirSync(tmp + '/sub/deep', { recursive: true })
 fs.writeFileSync(tmp + '/sub/deep/f.txt', 'x')
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(fs.existsSync(tmp))
-fs.rmSync('/tmp/kml-definitely-absent-xyz', { force: true })
+fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz', { force: true })
 console.log("force-ok")
-try { fs.rmSync('/tmp/kml-definitely-absent-xyz') } catch (e) { console.log("caught:", e.message.indexOf("cannot remove") > -1) }
+try { fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz') } catch (e) { console.log("caught:", e.message.indexOf("cannot remove") > -1) }
 `, "true\ntrue\ntrue\nfalse\n4\ntrue\n2\nfalse\nforce-ok\ncaught: true")
 }
 
@@ -585,7 +597,7 @@ try { fs.rmSync('/tmp/kml-definitely-absent-xyz') } catch (e) { console.log("cau
 // writeSync (string data) / readSync (Uint8Array, offset/length/position) /
 // fstatSync / closeSync.
 func TestE2EFsFdOps(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	p := dir + "/fd.txt"
 	src := fmt.Sprintf(`
 import * as fs from 'fs'

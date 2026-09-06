@@ -142,22 +142,108 @@ func (e *Emitter) emitTtyModuleCall(member string, args []ast.Expression, pos as
 // readKey's returned string uses the length-prefixed layout every runtime
 // string producer here shares ([i64 len][bytes][NUL], value ptr = base+8).
 func TTYShimSource() string {
-	return `#include <termios.h>
+	return `#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+/* TDD-00177 Stage 5: the console-mode API is what Node's tty uses on
+   Windows (uv_tty_set_mode / GetConsoleScreenBufferInfo). Raw mode clears
+   line input, echo, and processed input (so Ctrl+C arrives as a byte, like
+   ISIG off); ENABLE_VIRTUAL_TERMINAL_INPUT makes arrow keys arrive as the
+   same ESC [ A sequences a POSIX terminal sends, so readKey sees one shape
+   everywhere. Output processing (VT sequences) is enabled on stdout for
+   the same reason. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#define KMLTTY_WIN 1
+#else
+#include <termios.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <string.h>
+#endif
 
 /* Length-prefixed string alloc matching __kml_str_alloc's layout. */
-static char *kmltty_str(const char *buf, long n) {
+static char *kmltty_str(const char *buf, int64_t n) {
   char *b = (char *)malloc(n + 9);
-  *(long *)b = n;
+  *(int64_t *)b = n;
   if (n > 0) memcpy(b + 8, buf, n);
   b[8 + n] = 0;
   return b + 8;
 }
 
+#ifdef KMLTTY_WIN
+static DWORD kmltty_saved_in, kmltty_saved_out;
+static int kmltty_saved_valid = 0;
+void __kml_tty_set_raw(int enabled) {
+  HANDLE hin = GetStdHandle(STD_INPUT_HANDLE), hout = GetStdHandle(STD_OUTPUT_HANDLE);
+  DWORD in, out;
+  if (enabled) {
+    if (!GetConsoleMode(hin, &in)) return;
+    if (!kmltty_saved_valid) {
+      kmltty_saved_in = in;
+      kmltty_saved_out = GetConsoleMode(hout, &out) ? out : 0;
+      kmltty_saved_valid = 1;
+    }
+    DWORD raw = in & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+    raw |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+    SetConsoleMode(hin, raw);
+    if (GetConsoleMode(hout, &out)) SetConsoleMode(hout, out | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+  } else if (kmltty_saved_valid) {
+    SetConsoleMode(hin, kmltty_saved_in);
+    if (kmltty_saved_out) SetConsoleMode(hout, kmltty_saved_out);
+  }
+}
+int __kml_tty_cols(int fd) {
+  CONSOLE_SCREEN_BUFFER_INFO i;
+  if (GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(fd), &i)) return i.srWindow.Right - i.srWindow.Left + 1;
+  return 80; /* not a console (Node yields undefined) */
+}
+int __kml_tty_rows(int fd) {
+  CONSOLE_SCREEN_BUFFER_INFO i;
+  if (GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(fd), &i)) return i.srWindow.Bottom - i.srWindow.Top + 1;
+  return 24;
+}
+int __kml_tty_read_byte(void) {
+  unsigned char c; DWORD n = 0;
+  if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), &c, 1, &n, NULL) || n == 0) return -1;
+  return (int)c;
+}
+/* A key is "available" only for a key-down record; the console also queues
+   key-ups, focus and resize records that a ReadFile would not return, so
+   those are drained rather than treated as input. */
+static int kmltty_key_ready(HANDLE hin) {
+  for (;;) {
+    DWORD n = 0;
+    if (!GetNumberOfConsoleInputEvents(hin, &n) || n == 0) return 0;
+    INPUT_RECORD recs[32];
+    DWORD got = 0;
+    if (!PeekConsoleInputW(hin, recs, n < 32 ? n : 32, &got) || got == 0) return 0;
+    for (DWORD k = 0; k < got; k++) {
+      if (recs[k].EventType == KEY_EVENT && recs[k].Event.KeyEvent.bKeyDown && recs[k].Event.KeyEvent.uChar.UnicodeChar != 0) return 1;
+    }
+    /* nothing readable in this batch: consume it and look again */
+    ReadConsoleInputW(hin, recs, got, &got);
+  }
+}
+char *__kml_tty_read_key(int timeout_ms) {
+  HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode;
+  int is_console = GetConsoleMode(hin, &mode) != 0;
+  if (timeout_ms >= 0 && is_console) {
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_ms;
+    while (!kmltty_key_ready(hin)) {
+      ULONGLONG now = GetTickCount64();
+      if (now >= deadline) return kmltty_str("", 0);
+      WaitForSingleObject(hin, (DWORD)(deadline - now));
+    }
+  }
+  char buf[32]; DWORD n = 0;
+  if (!ReadFile(hin, buf, sizeof(buf) - 1, &n, NULL) || n == 0) return kmltty_str("", 0);
+  return kmltty_str(buf, (int64_t)n);
+}
+#else
 /* Terminal state captured on the first raw-mode enable, restored on disable. */
 static struct termios kmltty_saved;
 static int kmltty_saved_valid = 0;
@@ -218,7 +304,8 @@ char *__kml_tty_read_key(int timeout_ms) {
   char buf[32];
   ssize_t n = read(0, buf, sizeof(buf) - 1);
   if (n <= 0) return kmltty_str("", 0);
-  return kmltty_str(buf, (long)n);
+  return kmltty_str(buf, (int64_t)n);
 }
+#endif
 `
 }

@@ -103,6 +103,7 @@ console.log("first")
 }
 
 func TestE2EChildProcessLargeOutput(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "sh for-loop with seq via exec")
 	// Output larger than one 4096-byte read chunk must be fully captured.
 	assertOutputImports(t, `
 import { exec } from 'child_process'
@@ -136,6 +137,7 @@ console.log("badstatus", bad.status)
 }
 
 func TestE2EChildProcessExecSyncAndExecFileSync(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "sh arithmetic via execSync")
 	// execSync runs through /bin/sh -c; execFileSync execvp's with no shell.
 	// Both return captured stdout as a string.
 	assertOutputImports(t, `
@@ -146,6 +148,7 @@ console.log("execfile", execFileSync("printf", ["%s-%s", "a", "b"]))
 }
 
 func TestE2EChildProcessSpawnSyncLargeInterleavedOutput(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "/bin/sh -c for-loop with seq")
 	// Both pipes are poll-multiplexed: a child writing well past the pipe
 	// buffer on stdout AND stderr must not deadlock, and both captures must be
 	// complete.
@@ -158,6 +161,7 @@ console.log("errlines:", r.stderr.split("\n").length - 1)
 }
 
 func TestE2EChildProcessSyncOptionsCwdEncoding(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "pwd with cwd /")
 	// { cwd } chdir's the child before exec; encoding: 'utf8' is accepted
 	// (results are already strings); other options are clean rejections.
 	assertOutputImports(t, `
@@ -216,6 +220,7 @@ console.log(process.send("x"))
 }
 
 func TestE2EChildProcessSpawnOptions(t *testing.T) {
+	skipPOSIXToolsOnWindows(t, "pwd with cwd /tmp")
 	// spawn's options argument (ADR-00433): `cwd` is wired through (the
 	// child chdirs before exec — /tmp resolves to /private/tmp on darwin);
 	// a variable-bound `{ shell: isWindows }` object (the corpus idiom) is

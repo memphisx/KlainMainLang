@@ -815,3 +815,13 @@ func TestE2ERegExpUTF16IndexMode(t *testing.T) {
 		})
 	}
 }
+
+// new RegExp(p, undefined) is a flagless RegExp in real JS; the undefined
+// used to reach the flag validator as a null C string (Test262
+// S15.10.4.1_A4_T2, found on the Windows port).
+func TestE2ERegExpUndefinedFlags(t *testing.T) {
+	assertOutput(t, `
+const r = new RegExp("a+", undefined)
+console.log(r.flags === "", r.multiline, r.test("caab"))
+`, "true false true")
+}

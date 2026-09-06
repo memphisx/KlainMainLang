@@ -104,7 +104,7 @@ func (e *Emitter) emitSettledAsyncPrologue() {
 	sj := e.freshReg()
 	threw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @setjmp(ptr %s)", sj, jb))
+	e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(jb)))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, e.asyncCatchLabel, bodyL))
 	e.emitLabel(bodyL)
