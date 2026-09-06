@@ -50,6 +50,18 @@ enum {
 	L_ENOSYS = 38,
 	L_O_CREAT = 0x40, L_O_EXCL = 0x80, L_O_TRUNC = 0x200, L_O_APPEND = 0x400,
 	L_O_DIRECTORY = 0x10000,
+};
+/* Linux mode bits (what the IR's stat layout carries). Some mingw-w64 header
+ * sets pull in <sys/stat.h> through <windows.h> and #define these names to
+ * the CRT's own values (0xF000, …), which turned this enum into a syntax
+ * error on the CI toolchain; the macros are dropped first (ADR-00734). */
+#undef S_IFMT
+#undef S_IFDIR
+#undef S_IFREG
+#undef S_IFLNK
+#undef S_IFCHR
+#undef S_IFIFO
+enum {
 	S_IFMT = 0170000, S_IFDIR = 0040000, S_IFREG = 0100000, S_IFLNK = 0120000,
 	S_IFCHR = 0020000, S_IFIFO = 0010000,
 };

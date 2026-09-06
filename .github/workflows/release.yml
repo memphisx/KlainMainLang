@@ -17,7 +17,7 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90 # the Intel macOS runner needs ~75 min for suite + examples; a genuine hang is caught by go test's own 50 min timeout
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +113,12 @@ jobs:
       # --- The gate itself ---
       - run: go build .
       - run: go vet ./...
+      # One real compile before the suite: a broken platform layer (the Win32
+      # shim failing against a new header set, ADR-00734) fails here in seconds
+      # instead of as 386 link errors fifty minutes later.
+      - name: Smoke-compile and run one program
+        shell: bash
+        run: ./klainmain examples/basics/basics.ts && ./examples/basics/basics
       - name: docs/status pages must match their data/ JSON source (reference lane only)
         if: matrix.name == 'linux-x64'
         run: make status-check
