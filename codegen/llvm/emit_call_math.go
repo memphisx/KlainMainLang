@@ -458,6 +458,21 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 
 func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
 	switch runtime.GOOS {
+	case "windows":
+		// rand_s() — UCRT, backed by the system CSPRNG (RtlGenRandom), no seeding.
+		// The C89 fallback below is unusable here: UCRT RAND_MAX is 32767, so
+		// rand()/2147483647 never exceeds ~1.5e-5.
+		e.ensureRandS()
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", slot))
+		raw := e.freshReg()
+		asFloat := e.freshReg()
+		result := e.freshReg()
+		e.emitInstr(fmt.Sprintf("call i32 @rand_s(ptr %s)", slot))
+		e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s", raw, slot))
+		e.emitInstr(fmt.Sprintf("%s = uitofp i32 %s to double", asFloat, raw))
+		e.emitInstr(fmt.Sprintf("%s = fdiv double %s, 4294967296.0", result, asFloat))
+		return Value{Ref: result, Ty: TypeF64}, nil
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		// arc4random() — cryptographic quality, no seeding required (BSD/macOS).
 		e.ensureArc4Random()

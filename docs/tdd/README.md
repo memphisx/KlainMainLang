@@ -1,3 +1,4 @@
+| [00180](TDD-00180.md) | Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped | Not Started | [ADR-00735](../adr/ADR-00735.md) | Answers TDD-00177 open question 6: toolchain held, semantic gaps ranked, fd-table redesign recommended |
 # Technical Design Documents (TDDs)
 
 This folder tracks scoping/design work done *before* a feature is implemented — the problem, the design options considered, tradeoffs, and prerequisites. `STATUS.md` was growing a "Design Notes"/"Scoping" section directly inline for every not-yet-built feature, which made it harder to scan for actual implementation status; those sections now live here instead, with `STATUS.md` linking to them.

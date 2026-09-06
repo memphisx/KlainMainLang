@@ -111,7 +111,7 @@ jobs:
           "KLAIN_SYSROOT=$root\ucrt64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # --- The gate itself ---
-      - run: go build .
+      - run: go build -o klainmain${{ runner.os == 'Windows' && '.exe' || '' }} .
       - run: go vet ./...
       # One real compile before the suite: a broken platform layer (the Win32
       # shim failing against a new header set, ADR-00734) fails here in seconds

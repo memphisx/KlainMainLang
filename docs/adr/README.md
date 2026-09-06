@@ -1,3 +1,4 @@
+| [00735](ADR-00735.md) | `Math.random()` on Windows never exceeded 1.5e-5 — UCRT `RAND_MAX` vs the glibc divisor; `rand_s()` backend | Extends [ADR-00719](ADR-00719.md) (the Windows platform layer), [ADR-00718](ADR-00718.md) (the mingw/UCRT toolchain) |
 # Architecture Decision Records
 
 This folder tracks every non-trivial implementation decision, feature addition, and bug fix made in KlainMainLang from this point forward. Every new feature and every bug fix requires an ADR — see below for the required sections.

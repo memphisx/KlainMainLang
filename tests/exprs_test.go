@@ -1567,3 +1567,22 @@ const a: C | null = new C();
 console.log(a?.m());
 `, "7")
 }
+
+// ADR-00735: Math.random() must cover [0,1) on every host. On Windows the
+// C89 rand() fallback capped every sample at ~1.5e-5 (UCRT RAND_MAX is
+// 32767 against a 2^31-1 divisor); 2000 samples with a max below 0.5 has
+// probability 2^-2000 for a correct generator.
+func TestE2EMathRandomSpreadsAcrossUnitInterval(t *testing.T) {
+	out := compileAndRun(t, `
+let max = 0, min = 1
+for (let i = 0; i < 2000; i++) {
+    const r = Math.random()
+    if (r > max) max = r
+    if (r < min) min = r
+}
+console.log(max > 0.5, min < 0.5, min >= 0, max < 1)
+`)
+	if out != "true true true true" {
+		t.Fatalf("Math.random() distribution: got %q", out)
+	}
+}

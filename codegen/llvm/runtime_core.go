@@ -615,6 +615,14 @@ func (e *Emitter) ensureArc4Random() {
 	}
 }
 
+// ensureRandS declares UCRT rand_s (Windows Math.random backend).
+func (e *Emitter) ensureRandS() {
+	if !e.usedArc4Random {
+		e.emitGlobal("declare i32 @rand_s(ptr)")
+		e.usedArc4Random = true
+	}
+}
+
 // ensureRandRandom emits a self-contained @__klain_math_random helper in LLVM IR
 // that uses C89 rand()/srand()/time() — available on every libc — as the portable
 // fallback for Math.random() on non-BSD platforms.
