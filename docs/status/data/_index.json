@@ -449,6 +449,10 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "180": {
+          "title": "Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped",
+          "notes": "Subsystem-by-subsystem audit of the shipped Win32 layer against libuv/Node Windows behaviour: the mingw toolchain decision held; the structural debt is the CRT fd table (blocking stdin/pipe reads, 10 ms poll slices, socket cap — recommends an owned handle table before IOCP), plus ranked incremental gaps in console encoding, `child_process` shell/quoting, fs sharing/`\\\\?\\` paths, errno tables, and Winsock option translation, security-flavoured rows first"
+        },
         "177": {
           "title": "Windows support — mingw-w64 toolchain, Win32-native platform layer",
           "notes": "Stages 0–5 shipped ([ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md)): the full E2E suite, the examples, and TLS/HTTP2/wss servers run on Windows 11 x86-64 with the documented skips (signals, POSIX-only tools, sanitizers, symlinks without Developer Mode). `path` defaulting to `path.win32` shipped separately ([TDD-00178](../tdd/TDD-00178.md)). `klain:webview` (Edge WebView2) and `-package` (GUI-subsystem exe) followed ([ADR-00725](../adr/ADR-00725.md), [ADR-00726](../adr/ADR-00726.md)). Open: cluster round-robin scheduling (workers share one listening socket instead), an IOCP reactor, `--static` on Windows, CI"

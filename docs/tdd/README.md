@@ -220,3 +220,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00177](TDD-00177.md) | Windows support — toolchain, C runtime target, and Node-faithful platform semantics | Partially Implemented | [ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md), [ADR-00725](../adr/ADR-00725.md), [ADR-00727](../adr/ADR-00727.md), [ADR-00728](../adr/ADR-00728.md) | |
 | [00178](TDD-00178.md) | `path.win32` — Windows path semantics, per-host default, and explicit `path.posix`/`path.win32` | Implemented | [ADR-00722](../adr/ADR-00722.md), [ADR-00723](../adr/ADR-00723.md) | |
 | [00179](TDD-00179.md) | Multi-platform CI, per-platform release binaries, version stamping, installers | Implemented | [ADR-00732](../adr/ADR-00732.md) | |
+| [00180](TDD-00180.md) | Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped | Not Started | | |
