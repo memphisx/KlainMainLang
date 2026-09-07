@@ -437,22 +437,23 @@ entry:
 }`)
 }
 
-// ensureFsUnlink declares __kml_fs_unlink: deletes a file via the portable
-// ANSI C remove() (simpler than POSIX unlink() for this purpose, and
-// available identically on every target this compiler supports). Throws on
-// failure.
+// ensureFsUnlink declares __kml_fs_unlink: deletes a file via POSIX
+// unlink() (libc on POSIX hosts, the Win32 layer's on Windows). Not ANSI C
+// remove(): remove() also deletes an empty directory, where Node's
+// fs.unlinkSync throws (EISDIR on Linux, EPERM on macOS/Windows) —
+// ADR-00736. Throws on failure.
 func (e *Emitter) ensureFsUnlink() {
 	if e.usedFsUnlink {
 		return
 	}
 	e.usedFsUnlink = true
 	e.ensureFsThrow()
-	e.emitGlobal("declare i32 @remove(ptr noundef)")
+	e.emitGlobal("declare i32 @unlink(ptr noundef)")
 	opDescPtr := e.internString("cannot delete file")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_fs_unlink(ptr %%path) {
 entry:
-  %%r = call i32 @remove(ptr %%path)
+  %%r = call i32 @unlink(ptr %%path)
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 
@@ -1094,6 +1095,9 @@ func (e *Emitter) ensureFsRm() {
 	e.ensureFsThrow()
 	e.ensureFsUnlink()
 	e.ensureFsRmdir() // owns the `rmdir` decl
+	// rm's first attempt stays ANSI C remove() (file or empty directory in
+	// one call); unlinkSync no longer declares it (ADR-00736).
+	e.emitGlobal("declare i32 @remove(ptr noundef)")
 	e.ensureFsReaddir()
 	e.ensureFsExists()
 	e.ensureMalloc()

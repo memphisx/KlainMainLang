@@ -107,7 +107,8 @@
             "feature": "`fs.unlinkSync(path)`",
             "status": "implemented",
             "notes": [
-              "Deletes a file. Throws on failure"
+              "Deletes a file. Throws on failure",
+              "A directory throws as Node does per host (`EISDIR` on Linux, `EPERM` on macOS/Windows) instead of being silently removed ([ADR-00736](../adr/ADR-00736.md))"
             ],
             "caveats": [
               "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."

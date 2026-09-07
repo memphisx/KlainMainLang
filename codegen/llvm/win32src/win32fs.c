@@ -81,8 +81,11 @@ static int win_errno(DWORD e) {
 	switch (e) {
 	case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_NAME:
 	case ERROR_BAD_NETPATH: case ERROR_INVALID_DRIVE: return L_ENOENT;
-	case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION:
+	case ERROR_ACCESS_DENIED: case ERROR_LOCK_VIOLATION:
 	case ERROR_CURRENT_DIRECTORY: return L_EACCES;
+	// libuv maps a sharing violation to EBUSY, not EACCES — Node reports an
+	// open-elsewhere file as "resource busy or locked".
+	case ERROR_SHARING_VIOLATION: return L_EBUSY;
 	case ERROR_PRIVILEGE_NOT_HELD: return L_EPERM;
 	case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return L_EEXIST;
 	case ERROR_DIR_NOT_EMPTY: return L_ENOTEMPTY;
@@ -395,7 +398,9 @@ int rmdir(const char *path) {
 static int unlink_w(wchar_t *w) {
 	DWORD a = GetFileAttributesW(w);
 	if (a == INVALID_FILE_ATTRIBUTES) return fail();
-	if ((a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT)) { errno = L_EISDIR; return -1; }
+	// Node on Windows reports EPERM for unlink of a directory (libuv's
+	// fs__unlink), not Linux's EISDIR; macOS Node reports EPERM too.
+	if ((a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT)) { errno = L_EPERM; return -1; }
 	if (a & FILE_ATTRIBUTE_DIRECTORY) return RemoveDirectoryW(w) ? 0 : fail(); // a junction/dir symlink
 	if (a & FILE_ATTRIBUTE_READONLY) {
 		// Node/libuv clears read-only before unlinking, so unlink of a
@@ -439,9 +444,9 @@ int access(const char *path, int mode) {
 	DWORD a = GetFileAttributesW(w);
 	free(w);
 	if (a == INVALID_FILE_ATTRIBUTES) return fail();
-	// W_OK (2) against a read-only file fails; R_OK/X_OK/F_OK succeed if it
-	// exists — libuv's uv_fs_access does exactly this.
-	if ((mode & 2) && (a & FILE_ATTRIBUTE_READONLY) && !(a & FILE_ATTRIBUTE_DIRECTORY)) { errno = L_EACCES; return -1; }
+	// W_OK (2) against a read-only file fails with EPERM (libuv's fs__access
+	// sets UV_EPERM, not EACCES); R_OK/X_OK/F_OK succeed if it exists.
+	if ((mode & 2) && (a & FILE_ATTRIBUTE_READONLY) && !(a & FILE_ATTRIBUTE_DIRECTORY)) { errno = L_EPERM; return -1; }
 	return 0;
 }
 
