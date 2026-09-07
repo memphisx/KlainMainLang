@@ -1274,7 +1274,17 @@ var linuxErrnoPairs = [][2]interface{}{
 	{23, "ENFILE"}, {28, "ENOSPC"}, {30, "EROFS"}, {16, "EBUSY"}, {39, "ENOTEMPTY"},
 	{40, "ELOOP"}, {36, "ENAMETOOLONG"}, {18, "EXDEV"}, {11, "EAGAIN"}, {32, "EPIPE"},
 	{27, "EFBIG"}, {19, "ENODEV"}, {29, "ESPIPE"}, {31, "EMLINK"},
-	{98, "EADDRINUSE"}, {104, "ECONNRESET"}, {107, "ENOTCONN"}, {110, "ETIMEDOUT"}, {111, "ECONNREFUSED"},
+	{12, "ENOMEM"}, {14, "EFAULT"}, {38, "ENOSYS"}, {115, "EINPROGRESS"},
+	// Socket codes the expanded WSA→errno table can now produce (ADR-00742),
+	// so err.code on a network error matches Node on Windows.
+	{98, "EADDRINUSE"}, {99, "EADDRNOTAVAIL"}, {100, "ENETDOWN"},
+	{101, "ENETUNREACH"}, {102, "ENETRESET"}, {103, "ECONNABORTED"},
+	{104, "ECONNRESET"}, {105, "ENOBUFS"}, {106, "EISCONN"}, {107, "ENOTCONN"},
+	{108, "ESHUTDOWN"}, {110, "ETIMEDOUT"}, {111, "ECONNREFUSED"},
+	{112, "EHOSTDOWN"}, {113, "EHOSTUNREACH"}, {114, "EALREADY"},
+	{88, "ENOTSOCK"}, {89, "EDESTADDRREQ"}, {90, "EMSGSIZE"}, {91, "EPROTOTYPE"},
+	{92, "ENOPROTOOPT"}, {93, "EPROTONOSUPPORT"}, {95, "EOPNOTSUPP"},
+	{97, "EAFNOSUPPORT"},
 }
 
 // errnoEISDIR is the EISDIR value the emitted IR stores before throwing on

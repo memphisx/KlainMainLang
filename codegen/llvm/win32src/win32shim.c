@@ -10,6 +10,7 @@
 // through this file.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h> // CommandLineToArgvW, for UTF-8 process.argv
 #include <bcrypt.h>
 #include <errno.h>
 #include <fenv.h>
@@ -20,6 +21,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <io.h>
+
+// ---- argv (UTF-8) -----------------------------------------------------
+// The CRT's argv is decoded in the ANSI code page, so a non-ASCII argument
+// arrives as '?'. Node reads GetCommandLineW and hands UTF-8 through; do the
+// same (ADR-00745). Returns a malloc'd NULL-terminated char** of UTF-8
+// arguments and writes the count to *out_argc; NULL on failure so the caller
+// falls back to the CRT argv. argv[0] is the program, as CommandLineToArgvW
+// gives it.
+char **__kml_win_argv(int *out_argc) {
+	int argc = 0;
+	wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+	if (!wargv) return NULL;
+	char **argv = (char **)malloc(((size_t)argc + 1) * sizeof(char *));
+	if (!argv) { LocalFree(wargv); return NULL; }
+	for (int i = 0; i < argc; i++) {
+		int n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0, NULL, NULL);
+		argv[i] = (char *)malloc(n > 0 ? (size_t)n : 1);
+		if (argv[i] && n > 0) WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, argv[i], n, NULL, NULL);
+		else if (argv[i]) argv[i][0] = 0;
+	}
+	argv[argc] = NULL;
+	LocalFree(wargv);
+	if (out_argc) *out_argc = argc;
+	return argv;
+}
 
 // ---- stdin handle -----------------------------------------------------
 // The IR loads a `FILE*` from a global (glibc: `stdin`, macOS: `__stdinp`);
@@ -35,6 +61,19 @@ __attribute__((constructor)) static void kml_win_shim_init(void) {
 	// harness, a supervisor). Node's own startup disables the same boxes.
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+	// Enable VT/ANSI output processing on the console at startup, as Node
+	// does, so `console.log('\x1b[31m…')` renders colour instead of printing
+	// the escape literally — without the program having to enter raw mode
+	// first (ADR-00744). Harmless when stdout/stderr is a pipe or file
+	// (GetConsoleMode fails and it is skipped). ENABLE_VIRTUAL_TERMINAL_
+	// PROCESSING is 0x0004.
+	for (DWORD which = STD_OUTPUT_HANDLE; ; which = STD_ERROR_HANDLE) {
+		HANDLE h = GetStdHandle(which);
+		DWORD m;
+		if (h && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &m))
+			SetConsoleMode(h, m | 0x0004);
+		if (which == STD_ERROR_HANDLE) break;
+	}
 }
 
 // ---- time --------------------------------------------------------------

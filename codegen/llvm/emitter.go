@@ -2036,12 +2036,35 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
 	e.emitGlobal("@__argv_len = internal global i64 0, align 8")
 	argc64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %%argc to i64", argc64))
+	argvSrc := "%argv"
+	if runtime.GOOS == "windows" {
+		// The CRT's argv is ANSI-code-page decoded, so a non-ASCII argument
+		// arrives as '?'. Reconstruct it as UTF-8 from GetCommandLineW at
+		// startup, as Node does (ADR-00745). Falls back to the CRT argv/argc
+		// if the shim returns null.
+		e.emitGlobal("declare ptr @__kml_win_argv(ptr)")
+		acAlloca := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", acAlloca))
+		wargv := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_win_argv(ptr %s)", wargv, acAlloca))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, wargv))
+		argvSel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %%argv, ptr %s", argvSel, isNull, wargv))
+		wac := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", wac, acAlloca))
+		wac64 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", wac64, wac))
+		argcSel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", argcSel, isNull, argc64, wac64))
+		argc64, argvSrc = argcSel, argvSel
+	}
 	// TDD-00120: the OS argv[] entries are foreign char* with no length header;
 	// copy them into length-prefixed strings so process.argv[i] behaves like every
 	// other string (its .length reads the header, not strlen).
 	e.ensureStrHeaderRuntime()
 	argvHdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_argv_headerize(i64 %s, ptr %%argv)", argvHdr, argc64))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_argv_headerize(i64 %s, ptr %s)", argvHdr, argc64, argvSrc))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__argv_ptr, align 8", argvHdr))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__argv_len, align 8", argc64))
 

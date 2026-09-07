@@ -54,6 +54,15 @@ enum {
 	L_EADDRINUSE = 98, L_ENOTSOCK = 88, L_ETIMEDOUT = 110, L_ENOTCONN = 107,
 	L_EACCES = 13, L_ENOENT = 2, L_EEXIST = 17, L_EISDIR = 21, L_ENOTDIR = 20,
 	L_EMFILE = 24, L_ENOSYS = 38,
+	// Socket errno values (Linux asm-generic) the WSA table maps onto, so
+	// err.code on a compiled program matches Node's (ADR-00742).
+	L_EFAULT = 14, L_EDESTADDRREQ = 89, L_EMSGSIZE = 90, L_EPROTOTYPE = 91,
+	L_ENOPROTOOPT = 92, L_EPROTONOSUPPORT = 93, L_EOPNOTSUPP = 95,
+	L_EAFNOSUPPORT = 97, L_EADDRNOTAVAIL = 99, L_ENETDOWN = 100,
+	L_ENETUNREACH = 101, L_ENETRESET = 102, L_ECONNABORTED = 103,
+	L_ENOBUFS = 105, L_EISCONN = 106, L_ESHUTDOWN = 108, L_EHOSTDOWN = 112,
+	L_EHOSTUNREACH = 113, L_ENOMEM = 12, L_EALREADY = 114, L_ELOOP = 40,
+	L_ENAMETOOLONG = 36, L_ENOTEMPTY = 39, L_ECANCELED = 125,
 	L_F_GETFL = 3, L_F_SETFL = 4, L_O_NONBLOCK = 0x800,
 	L_SOL_SOCKET = 1, L_SO_REUSEADDR = 2, L_SO_KEEPALIVE = 9, L_SO_BROADCAST = 6,
 	L_SO_REUSEPORT = 15, L_SO_ERROR = 4,
@@ -222,15 +231,45 @@ HANDLE kfd_handle(int fd) {
 
 static int map_wsa_errno(int e) {
 	switch (e) {
+	// Mirrors libuv's uv_translate_sys_error, mapped to Linux errno numbers
+	// (the ABI the IR and the errno→code table use). An unmapped WSA error
+	// used to fall to EINVAL, so EHOSTUNREACH/ENETUNREACH/EACCES/… all
+	// surfaced as "invalid argument"; each now carries its true code
+	// (ADR-00742).
 	case WSAEWOULDBLOCK: return L_EAGAIN;
 	case WSAEINPROGRESS: return L_EINPROGRESS;
-	case WSAECONNRESET: case WSAECONNABORTED: return L_ECONNRESET;
+	case WSAEALREADY: return L_EALREADY;
+	case WSAECONNRESET: return L_ECONNRESET;
+	case WSAECONNABORTED: return L_ECONNABORTED;
 	case WSAECONNREFUSED: return L_ECONNREFUSED;
 	case WSAEADDRINUSE: return L_EADDRINUSE;
+	case WSAEADDRNOTAVAIL: return L_EADDRNOTAVAIL;
 	case WSAETIMEDOUT: return L_ETIMEDOUT;
-	case WSAENOTCONN: case WSAESHUTDOWN: return L_ENOTCONN;
+	case WSAENOTCONN: return L_ENOTCONN;
+	case WSAESHUTDOWN: return L_ESHUTDOWN;
 	case WSAENOTSOCK: return L_ENOTSOCK;
 	case WSAEINTR: return L_EINTR;
+	case WSAEACCES: return L_EACCES;
+	case WSAEFAULT: return L_EFAULT;
+	case WSAEMFILE: return L_EMFILE;
+	case WSAEMSGSIZE: return L_EMSGSIZE;
+	case WSAENOBUFS: return L_ENOBUFS;
+	case WSAEISCONN: return L_EISCONN;
+	case WSAEDESTADDRREQ: return L_EDESTADDRREQ;
+	case WSAEHOSTUNREACH: return L_EHOSTUNREACH;
+	case WSAEHOSTDOWN: return L_EHOSTDOWN;
+	case WSAENETUNREACH: return L_ENETUNREACH;
+	case WSAENETDOWN: return L_ENETDOWN;
+	case WSAENETRESET: return L_ENETRESET;
+	case WSAEPROTOTYPE: return L_EPROTOTYPE;
+	case WSAENOPROTOOPT: return L_ENOPROTOOPT;
+	case WSAEPROTONOSUPPORT: return L_EPROTONOSUPPORT;
+	case WSAEOPNOTSUPP: return L_EOPNOTSUPP;
+	case WSAEAFNOSUPPORT: return L_EAFNOSUPPORT;
+	case WSAENAMETOOLONG: return L_ENAMETOOLONG;
+	case WSAELOOP: return L_ELOOP;
+	case WSAENOTEMPTY: return L_ENOTEMPTY;
+	case WSAEINVAL: return L_EINVAL;
 	default: return L_EINVAL;
 	}
 }
@@ -249,6 +288,14 @@ int socket(int domain, int type, int protocol) {
 	if (!p_socket) { errno = L_ENOSYS; return -1; }
 	ws_SOCKET s = p_socket(domain, type, protocol);
 	if (s == WS_INVALID) return set_wsa_errno();
+	// Windows defaults an IPv6 socket to IPV6_V6ONLY=1, so a `::` listener
+	// refuses IPv4 clients; libuv/Node clear it for dual-stack by default
+	// (ADR-00742). A program that wants v6-only can still set it via
+	// setsockopt afterwards. IPPROTO_IPV6=41, IPV6_V6ONLY=27 (ws2ipdef.h).
+	if (domain == 23 && p_setsockopt) {
+		DWORD v6only = 0;
+		p_setsockopt(s, 41, 27, (const char *)&v6only, sizeof v6only);
+	}
 	// Sockets must not be inherited by child processes (Node's CLOEXEC
 	// discipline) so a spawned child never holds a listener open.
 	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);

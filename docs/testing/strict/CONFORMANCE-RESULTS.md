@@ -31,8 +31,8 @@ Where each failing file died in the pipeline. Near-misses (already compiled and 
 
 | Failing files | Phase |
 |---|---|
-| 868 | runtime (ran, wrong result — near-miss) |
-| 287 | clang (invalid IR — codegen bug) |
+| 867 | runtime (ran, wrong result — near-miss) |
+| 288 | clang (invalid IR — codegen bug) |
 | 3 | codegen (in-process hang — emitter/parser spin) |
 | 832 | wrongly-accepted (negative test compiled/ran) |
 | 526 | strict typed-rejection (recoverable under -compat=js) |
@@ -121,7 +121,7 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 2418 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
 | 1465 | compile | COMPILE_ERROR: unexpected character '%s' | `built-ins/Function/prototype/toString/unicode.js` |
 | 1402 | compile | COMPILE_ERROR: Object.defineProperty requires a dynamic (any-typed) object | `annexB/built-ins/RegExp/prototype/Symbol.split/Symbol.match-getter-recompiles-source.js` |
-| 861 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
+| 860 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/RegExp/RegExp-control-escape-russian-letter.js` |
 | 826 | neg-accepted | expected a parse-phase rejection but this compiled | `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` |
 | 721 | compile | COMPILE_ERROR: '%s' is only valid inside a method or constructor body | `built-ins/Array/from/Array.from_forwards-length-for-array-likes.js` |
 | 659 | compile | COMPILE_ERROR: Reflect has no method '%s' | `annexB/built-ins/Date/prototype/getYear/not-a-constructor.js` |

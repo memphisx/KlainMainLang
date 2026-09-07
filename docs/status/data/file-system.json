@@ -98,6 +98,9 @@
           {
             "feature": "`fs.openSync` / `closeSync` / `readSync` / `writeSync` / `fstatSync`",
             "status": "implemented",
+            "notes": [
+              "On Windows, files open through `CreateFileW` with `FILE_SHARE_DELETE`, so a file this process holds open can still be unlinked or renamed (matching POSIX/Node); `a`/`a+` use a kernel append (`FILE_APPEND_DATA`), not a CRT seek-then-write ([ADR-00743](../adr/ADR-00743.md))"
+            ],
             "caveats": [
               "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names",
               "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer` ([ADR-00498](../adr/ADR-00498.md))"

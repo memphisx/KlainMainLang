@@ -82,7 +82,7 @@ func win32LinkArgs(args []string) []string {
 	}
 	// winpthread: the IR uses pthread mutexes/condvars (Atomics, workers) and
 	// glibc no longer needs -lpthread for them, so the emitters never add it.
-	extra := []string{"-lbcrypt", "-lpsapi", "-lwinpthread"}
+	extra := []string{"-lbcrypt", "-lpsapi", "-lwinpthread", "-lshell32"}
 	if objs, err := win32ShimObjects(); err == nil {
 		extra = append(objs, extra...)
 	} else {

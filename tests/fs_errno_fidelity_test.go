@@ -51,16 +51,12 @@ console.log(fs.existsSync(tmp))
 `, want+"\nfalse")
 }
 
-// unlink of a file the program itself holds open: succeeds on POSIX; on
-// Windows the open CRT fd lacks FILE_SHARE_DELETE, so DeleteFileW fails with
-// a sharing violation, which Node surfaces as EBUSY (not EACCES). When
-// FILE_SHARE_DELETE lands (TDD-00180 §4, first row) the Windows expectation
-// here becomes 'unlinked' too — update this test alongside that change.
+// unlink of a file the program itself holds open succeeds on every host: on
+// Windows too, now that open()/fopen() include FILE_SHARE_DELETE in the
+// share mode (ADR-00743) — matching POSIX and Node, where an open file can
+// be unlinked and the name disappears while the fd stays valid.
 func TestE2EFsUnlinkSyncOpenFileSharingViolation(t *testing.T) {
 	want := "unlinked"
-	if runtime.GOOS == "windows" {
-		want = "EBUSY"
-	}
 	assertOutputImports(t, `
 import * as fs from 'fs'
 import os from 'os'

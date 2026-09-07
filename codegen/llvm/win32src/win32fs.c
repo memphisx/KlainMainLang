@@ -22,6 +22,17 @@
 //
 // No <stdio.h>/<io.h> here: those declare fopen/ftell/fseek/open with
 // CRT-sized prototypes, and this file redefines them 64-bit/POSIX-shaped.
+//
+// NO_OLDNAMES: this file exports POSIX names (mkdir/getcwd/chdir/rmdir/
+// unlink/...) with our own signatures. Newer mingw-w64 header sets (the CI
+// runner's, ADR-00734/00737/00741) declare the CRT "old name" aliases
+// (`int mkdir(const char*)`, `char *getcwd(char*,int)`) whose signatures
+// differ from ours — a hard "conflicting types" error under a strict-enough
+// clang. Suppressing the old-name aliases here (exactly as win32proc.c
+// does, which is why it never hit this) removes that whole class of
+// conflict; stat/fstat are not old-name-gated and are handled by the
+// asm-symbol aliases below.
+#define NO_OLDNAMES 1
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winioctl.h>
@@ -33,14 +44,25 @@
 
 // CRT pieces used without their headers.
 typedef struct _iobuf FILE;
-__declspec(dllimport) FILE *_wfopen(const wchar_t *, const wchar_t *);
 __declspec(dllimport) int fclose(FILE *);
 __declspec(dllimport) int _fseeki64(FILE *, int64_t, int);
 __declspec(dllimport) int64_t _ftelli64(FILE *);
-__declspec(dllimport) int _wopen(const wchar_t *, int, ...);
 __declspec(dllimport) intptr_t _get_osfhandle(int);
+// open()/fopen() go through CreateFileW (below) so the share mode includes
+// FILE_SHARE_DELETE — the CRT's _wopen/_wfopen omit it, which blocks
+// unlinking or renaming a file this process holds open (ADR-00743). The
+// kernel HANDLE is then wrapped into a CRT fd / FILE* so the rest of the
+// read/write/seek path is unchanged.
+__declspec(dllimport) int _open_osfhandle(intptr_t, int);
+__declspec(dllimport) FILE *_fdopen(int, const char *);
+__declspec(dllimport) int _close(int);
 __declspec(dllimport) int *_errno(void);
 #define errno (*_errno())
+// _open_osfhandle flags.
+#define CRT_O_RDONLY 0x0000
+#define CRT_O_APPEND 0x0008
+#define CRT_O_TEXT   0x4000
+#define CRT_O_BINARY 0x8000
 
 enum {
 	L_EPERM = 1, L_ENOENT = 2, L_EIO = 5, L_EBADF = 9, L_EACCES = 13,
@@ -280,16 +302,38 @@ static int is_dir_path(const wchar_t *w) {
 	return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// open_shared opens a file via CreateFileW with FILE_SHARE_DELETE in the
+// share mode and returns a CRT fd wrapping the kernel handle, so the file
+// can be unlinked/renamed while this fd is open (ADR-00743). Returns -1
+// with errno set. Shared by open() and fopen().
+static int open_shared(const wchar_t *w, int flags, int mode) {
+	int acc = flags & 3;
+	DWORD access = acc == 0 ? GENERIC_READ : acc == 1 ? GENERIC_WRITE : (GENERIC_READ | GENERIC_WRITE);
+	if (flags & L_O_APPEND) {
+		// Kernel append (FILE_APPEND_DATA), not the CRT's seek-then-write.
+		access = (access & ~(DWORD)GENERIC_WRITE) | FILE_APPEND_DATA;
+	}
+	DWORD disp;
+	if (flags & L_O_CREAT) {
+		if (flags & L_O_EXCL) disp = CREATE_NEW;
+		else if (flags & L_O_TRUNC) disp = CREATE_ALWAYS;
+		else disp = OPEN_ALWAYS;
+	} else {
+		disp = (flags & L_O_TRUNC) ? TRUNCATE_EXISTING : OPEN_EXISTING;
+	}
+	DWORD attr = ((flags & L_O_CREAT) && !(mode & 0200)) ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL;
+	HANDLE h = CreateFileW(w, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                       NULL, disp, attr, NULL);
+	if (h == INVALID_HANDLE_VALUE) { errno = win_errno(GetLastError()); return -1; }
+	int osf = CRT_O_BINARY | ((acc == 0) ? CRT_O_RDONLY : 0) | ((flags & L_O_APPEND) ? CRT_O_APPEND : 0);
+	int fd = _open_osfhandle((intptr_t)h, osf);
+	if (fd < 0) { CloseHandle(h); errno = L_EMFILE; return -1; }
+	return fd;
+}
+
 int open(const char *path, int flags, ...) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
-	int acc = flags & 3;
-	int wf = acc == 0 ? WIN_O_RDONLY : acc == 1 ? WIN_O_WRONLY : WIN_O_RDWR;
-	if (flags & L_O_CREAT) wf |= WIN_O_CREAT;
-	if (flags & L_O_EXCL) wf |= WIN_O_EXCL;
-	if (flags & L_O_TRUNC) wf |= WIN_O_TRUNC;
-	if (flags & L_O_APPEND) wf |= WIN_O_APPEND;
-	wf |= WIN_O_BINARY;
 	int mode = 0;
 	if (flags & L_O_CREAT) {
 		va_list ap;
@@ -297,7 +341,6 @@ int open(const char *path, int flags, ...) {
 		mode = va_arg(ap, int);
 		va_end(ap);
 	}
-	int pmode = (mode & 0200) ? (WIN_S_IREAD | WIN_S_IWRITE) : WIN_S_IREAD;
 	if (is_dir_path(w)) {
 		// Node: opening a directory for reading is EISDIR (libuv maps the
 		// CreateFile refusal to that, matching POSIX read attempts).
@@ -305,18 +348,8 @@ int open(const char *path, int flags, ...) {
 		errno = L_EISDIR;
 		return -1;
 	}
-	int fd = _wopen(w, wf, pmode);
-	DWORD err = GetLastError();
+	int fd = open_shared(w, flags, mode);
 	free_keep_err(w);
-	if (fd < 0) {
-		switch (errno) {
-		case 2: errno = L_ENOENT; break;
-		case 17: errno = L_EEXIST; break;
-		case 13: errno = err == ERROR_ACCESS_DENIED ? L_EACCES : L_EACCES; break;
-		case 24: errno = L_EMFILE; break;
-		default: errno = win_errno(err); break;
-		}
-	}
 	return fd;
 }
 
@@ -324,17 +357,23 @@ FILE *fopen(const char *path, const char *mode) {
 	wchar_t *w = to_wide(path);
 	if (!w) return NULL;
 	if (is_dir_path(w)) { free_keep_err(w); errno = L_EISDIR; return NULL; }
-	// Force binary: "r" → "rb", "w+" → "w+b" (a 'b' already present is kept).
-	wchar_t wm[8];
-	size_t n = 0;
-	int hasb = 0;
-	for (const char *p = mode; *p && n < 6; p++) { wm[n++] = (wchar_t)*p; if (*p == 'b') hasb = 1; }
-	if (!hasb) wm[n++] = L'b';
-	wm[n] = 0;
-	FILE *f = _wfopen(w, wm);
-	DWORD err = GetLastError();
+	// Translate the stdio mode to O_* flags + an fdopen mode. Always binary
+	// (Node's fs is byte-exact).
+	int flags, plus = 0;
+	for (const char *p = mode; *p; p++) if (*p == '+') plus = 1;
+	switch (mode[0]) {
+	case 'r': flags = plus ? WIN_O_RDWR : WIN_O_RDONLY; break;
+	case 'w': flags = (plus ? WIN_O_RDWR : WIN_O_WRONLY) | L_O_CREAT | L_O_TRUNC; break;
+	case 'a': flags = (plus ? WIN_O_RDWR : WIN_O_WRONLY) | L_O_CREAT | L_O_APPEND; break;
+	default: free_keep_err(w); errno = L_EINVAL; return NULL;
+	}
+	int fd = open_shared(w, flags, WIN_S_IREAD | WIN_S_IWRITE);
 	free_keep_err(w);
-	if (!f) errno = err ? win_errno(err) : L_ENOENT;
+	if (fd < 0) return NULL;
+	const char *fm = plus ? (mode[0] == 'r' ? "r+b" : mode[0] == 'w' ? "w+b" : "a+b")
+	                      : (mode[0] == 'r' ? "rb" : mode[0] == 'w' ? "wb" : "ab");
+	FILE *f = _fdopen(fd, fm);
+	if (!f) { _close(fd); errno = L_EINVAL; return NULL; }
 	return f;
 }
 

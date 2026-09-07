@@ -5,6 +5,12 @@
     <p class="km-doc__lede">
       Build the compiler, point it at a <code>.ts</code> file, and run the native binary it writes.
     </p>
+    <p class="km-doc__note">
+      Prefer not to build it yourself? Grab a prebuilt <code>klainmain</code> with the one-line
+      installer on the <router-link to="/docs/install">Installation</router-link> page, then skip
+      straight to <a href="#compile-and-run-a-file">Compile and run a file</a> — you'll still need
+      <code>clang</code> on <code>PATH</code>.
+    </p>
 
     <h2>Requirements</h2>
     <ul>
@@ -16,7 +22,7 @@
     <h2>Build the compiler</h2>
     <CodeBlock lang="bash" terminal label="shell" :code="buildCode" />
 
-    <h2>Compile and run a file</h2>
+    <h2 id="compile-and-run-a-file">Compile and run a file</h2>
     <p>Compiling produces a native binary next to the source — it does <em>not</em> run it.</p>
     <CodeBlock lang="bash" terminal label="shell" :code="runCode" />
 
