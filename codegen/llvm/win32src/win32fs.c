@@ -273,6 +273,8 @@ static int is_reparse_link(HANDLE h) {
 	return tag.ReparseTag == IO_REPARSE_TAG_SYMLINK || tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT;
 }
 
+static char *reparse_target_utf8(HANDLE h); // defined with readlink below
+
 static int stat_handle(HANDLE h, kml_stat *st, int as_link) {
 	BY_HANDLE_FILE_INFORMATION bi;
 	if (!GetFileInformationByHandle(h, &bi)) return fail();
@@ -291,6 +293,15 @@ static int stat_handle(HANDLE h, kml_stat *st, int as_link) {
 	st->st_ino = ((uint64_t)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
 	st->st_nlink = bi.nNumberOfLinks;
 	st->st_size = (mode & S_IFMT) == S_IFDIR ? 0 : (int64_t)(((uint64_t)bi.nFileSizeHigh << 32) | bi.nFileSizeLow);
+	// A symlink's size is the byte length of its target path (POSIX semantics,
+	// matching libuv/Node), not the reparse point's on-disk size (which is 0
+	// via BY_HANDLE_FILE_INFORMATION). Read the same target readlink returns so
+	// lstat(link).size === readlinkSync(link).length (ADR-00769).
+	if ((mode & S_IFMT) == S_IFLNK) {
+		char *tgt = reparse_target_utf8(h);
+		st->st_size = tgt ? (int64_t)strlen(tgt) : 0;
+		if (tgt) free(tgt);
+	}
 	st->st_blksize = 4096;
 	st->st_blocks = (st->st_size + 511) / 512;
 	filetime_to_ts(&bi.ftLastAccessTime, &st->atime_sec, &st->atime_nsec);
@@ -333,6 +344,53 @@ int kml_win_fstat(int fd, kml_stat *st) {
 	HANDLE h = (HANDLE)_get_osfhandle(fd);
 	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
 	return stat_handle(h, st, 0);
+}
+
+// utimes(path, times): set access/modify times. `times` is two {int64 sec,
+// int64 usec} pairs (atime, mtime) — the timeval shape the IR builds. Windows
+// has no utimes; convert each Unix time to a FILETIME (100ns since 1601, the
+// 116444736000000000 offset) and SetFileTime. Opened with FILE_WRITE_ATTRIBUTES
+// + backup semantics so directories work too. asm alias per ADR-00737.
+int kml_win_utimes(const char *path, const void *times) __asm__("utimes");
+int kml_win_utimes(const char *path, const void *times) {
+	const int64_t *tv = (const int64_t *)times;
+	wchar_t *w = to_wide(path);
+	if (!w) return -1;
+	HANDLE h = CreateFileW(w, FILE_WRITE_ATTRIBUTES,
+	                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	free_keep_err(w);
+	if (h == INVALID_HANDLE_VALUE) return fail();
+	ULONGLONG au = (ULONGLONG)(tv[0] * 10000000LL + tv[1] * 10LL + 116444736000000000LL);
+	ULONGLONG mu = (ULONGLONG)(tv[2] * 10000000LL + tv[3] * 10LL + 116444736000000000LL);
+	FILETIME aft, mft;
+	aft.dwLowDateTime = (DWORD)au; aft.dwHighDateTime = (DWORD)(au >> 32);
+	mft.dwLowDateTime = (DWORD)mu; mft.dwHighDateTime = (DWORD)(mu >> 32);
+	int r = SetFileTime(h, NULL, &aft, &mft) ? 0 : fail();
+	CloseHandle(h);
+	return r;
+}
+
+// fsync(fd): Node's fs.fsyncSync — flush buffered writes to disk. The POSIX
+// name is defined via an asm alias (ADR-00737 convention) so no mingw header
+// prototype can collide; FlushFileBuffers is the Win32 equivalent.
+int kml_win_fsync(int fd) __asm__("fsync");
+int kml_win_fsync(int fd) {
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	if (!FlushFileBuffers(h)) return fail();
+	return 0;
+}
+
+// ftruncate(fd, len): resize an open file, mirroring truncate(path,len) above
+// (SetFilePointerEx + SetEndOfFile). Growing zero-fills, as on POSIX.
+int kml_win_ftruncate(int fd, int64_t len) __asm__("ftruncate");
+int kml_win_ftruncate(int fd, int64_t len) {
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	LARGE_INTEGER li; li.QuadPart = len;
+	if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN) || !SetEndOfFile(h)) return fail();
+	return 0;
 }
 
 // ---- open / fopen ---------------------------------------------------------------------
@@ -422,7 +480,15 @@ int64_t ftell(FILE *f) { return _ftelli64(f); }
 
 // ---- directories -----------------------------------------------------------------------
 // struct dirent as the IR reads it (direntNameOffset() == 8 on Windows).
-typedef struct { uint32_t d_ino; uint16_t d_reclen; uint16_t d_namlen; char d_name[1024]; } kml_dirent;
+// d_type sits at offset 8 (after d_namlen), so d_name is at offset 9 — see
+// direntNameOffset()/direntTypeOffset() in runtime_fs.go. mingw's own dirent
+// has no d_type, so fs.readdirSync(withFileTypes) reads this field, which
+// readdir() fills from the Win32 FindFirstFile attributes (ADR-00752).
+typedef struct { uint32_t d_ino; uint16_t d_reclen; uint16_t d_namlen; uint8_t d_type; char d_name[1024]; } kml_dirent;
+// POSIX DT_* values the IR maps to S_IFMT bits.
+#define KML_DT_DIR 4
+#define KML_DT_REG 8
+#define KML_DT_LNK 10
 typedef struct { HANDLE h; WIN32_FIND_DATAW fd; int pending; int done; kml_dirent ent; } kml_dir;
 
 void *opendir(const char *path) {
@@ -463,6 +529,10 @@ void *readdir(void *dp) {
 	to_utf8_into(d->fd.cFileName, d->ent.d_name, sizeof d->ent.d_name);
 	d->ent.d_namlen = (uint16_t)strlen(d->ent.d_name);
 	d->ent.d_reclen = (uint16_t)sizeof d->ent;
+	DWORD a = d->fd.dwFileAttributes;
+	if (a & FILE_ATTRIBUTE_REPARSE_POINT) d->ent.d_type = KML_DT_LNK;
+	else if (a & FILE_ATTRIBUTE_DIRECTORY) d->ent.d_type = KML_DT_DIR;
+	else d->ent.d_type = KML_DT_REG;
 	return &d->ent;
 }
 
@@ -636,6 +706,33 @@ typedef struct {
 	} u;
 } kml_reparse;
 
+// reparse_target_utf8 reads an open reparse-point handle's link target as a
+// malloc'd UTF-8 string, preferring the PrintName (the user-facing form Node's
+// readlink returns), falling back to the SubstituteName with its "\??\" NT
+// prefix stripped. NULL on failure (not a reparse point, or an unhandled tag).
+// Shared by readlink and lstat's S_IFLNK size (ADR-00769).
+static char *reparse_target_utf8(HANDLE h) {
+	char raw[16 * 1024];
+	DWORD got = 0;
+	if (!DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, raw, sizeof raw, &got, NULL)) return NULL;
+	kml_reparse *rp = (kml_reparse *)raw;
+	const WCHAR *name; USHORT nlen;
+	if (rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+		name = rp->u.sym.PathBuffer + rp->u.sym.PrintNameOffset / 2; nlen = rp->u.sym.PrintNameLength / 2;
+		if (nlen == 0) { name = rp->u.sym.PathBuffer + rp->u.sym.SubstituteNameOffset / 2; nlen = rp->u.sym.SubstituteNameLength / 2; }
+	} else if (rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
+		name = rp->u.mnt.PathBuffer + rp->u.mnt.PrintNameOffset / 2; nlen = rp->u.mnt.PrintNameLength / 2;
+		if (nlen == 0) { name = rp->u.mnt.PathBuffer + rp->u.mnt.SubstituteNameOffset / 2; nlen = rp->u.mnt.SubstituteNameLength / 2; }
+	} else return NULL;
+	wchar_t tmp[32768];
+	if (nlen >= 32768) nlen = 32767;
+	memcpy(tmp, name, nlen * sizeof(wchar_t));
+	tmp[nlen] = 0;
+	const wchar_t *p = tmp;
+	if (wcsncmp(p, L"\\??\\", 4) == 0) p += 4;
+	return to_utf8(p);
+}
+
 int64_t readlink(const char *path, char *buf, size_t cap) {
 	// process.execPath: the IR asks for /proc/self/exe on every host.
 	if (strcmp(path, "/proc/self/exe") == 0) {
@@ -655,28 +752,9 @@ int64_t readlink(const char *path, char *buf, size_t cap) {
 	HANDLE h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
 	free_keep_err(w);
 	if (h == INVALID_HANDLE_VALUE) return fail();
-	char raw[16 * 1024];
-	DWORD got = 0;
-	BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, raw, sizeof raw, &got, NULL);
+	char *u = reparse_target_utf8(h);
 	CloseHandle(h);
-	if (!ok) { errno = L_EINVAL; return -1; } // not a link
-	kml_reparse *rp = (kml_reparse *)raw;
-	const WCHAR *name; USHORT nlen;
-	if (rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
-		name = rp->u.sym.PathBuffer + rp->u.sym.PrintNameOffset / 2; nlen = rp->u.sym.PrintNameLength / 2;
-		if (nlen == 0) { name = rp->u.sym.PathBuffer + rp->u.sym.SubstituteNameOffset / 2; nlen = rp->u.sym.SubstituteNameLength / 2; }
-	} else if (rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
-		name = rp->u.mnt.PathBuffer + rp->u.mnt.PrintNameOffset / 2; nlen = rp->u.mnt.PrintNameLength / 2;
-		if (nlen == 0) { name = rp->u.mnt.PathBuffer + rp->u.mnt.SubstituteNameOffset / 2; nlen = rp->u.mnt.SubstituteNameLength / 2; }
-	} else { errno = L_EINVAL; return -1; }
-	wchar_t tmp[32768];
-	if (nlen >= 32768) nlen = 32767;
-	memcpy(tmp, name, nlen * sizeof(wchar_t));
-	tmp[nlen] = 0;
-	const wchar_t *p = tmp;
-	if (wcsncmp(p, L"\\??\\", 4) == 0) p += 4;
-	char *u = to_utf8(p);
-	if (!u) { errno = L_EINVAL; return -1; }
+	if (!u) { errno = L_EINVAL; return -1; } // not a link
 	size_t len = strlen(u);
 	if (len > cap) len = cap;
 	memcpy(buf, u, len);
@@ -713,6 +791,22 @@ int symlink(const char *target, const char *path) {
 	free_keep_err(wt); free_keep_err(wp);
 	if (ok) return 0;
 	errno = err == ERROR_PRIVILEGE_NOT_HELD ? L_EPERM : win_errno(err);
+	return -1;
+}
+
+// link(existing, path): a hard link, mirroring POSIX link(oldpath, newpath).
+// CreateHardLinkW takes (newLink, existingFile), the reverse order. The asm
+// alias keeps the symbol collision-proof against mingw header drift
+// (ADR-00737), like fsync/ftruncate above.
+int kml_win_link(const char *existing, const char *path) __asm__("link");
+int kml_win_link(const char *existing, const char *path) {
+	wchar_t *we = to_wide(existing), *wp = to_wide(path);
+	if (!we || !wp) { free_keep_err(we); free_keep_err(wp); return -1; }
+	BOOL ok = CreateHardLinkW(wp, we, NULL);
+	DWORD err = GetLastError();
+	free_keep_err(we); free_keep_err(wp);
+	if (ok) return 0;
+	errno = win_errno(err);
 	return -1;
 }
 

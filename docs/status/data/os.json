@@ -79,7 +79,7 @@
             "feature": "`os.EOL`",
             "status": "implemented",
             "notes": [
-              "Always `\"\\n\"` — this compiler is POSIX-only (no Windows target), so there's no real `\"\\r\\n\"` case"
+              "`\"\\r\\n\"` on Windows, `\"\\n\"` on POSIX — matching Node, resolved as a compile-time constant baked to the build host ([TDD-00177](../tdd/TDD-00177.md) Stage 1), since this compiler targets the host it runs on rather than cross-compiling"
             ]
           }
         ]

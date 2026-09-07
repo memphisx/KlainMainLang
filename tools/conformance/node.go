@@ -1081,11 +1081,11 @@ func compileAndRun(src, workDir, tag string, timeout time.Duration) (bool, strin
 		clangArgs = append(clangArgs, cFile)
 		clangArgs = append(clangArgs, cs.CFlags...)
 		for _, lib := range cs.Libs {
-			clangArgs = append(clangArgs, "-l"+lib)
+			clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 		}
 	}
 	for _, lib := range prog.linkLibs {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	cctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

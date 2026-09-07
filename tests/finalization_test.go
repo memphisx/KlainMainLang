@@ -135,7 +135,7 @@ func buildBinaryFinalizersReport(t *testing.T, src string) string {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {
@@ -242,7 +242,7 @@ func buildBinaryFinRegAuto(t *testing.T, src string) string {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
 	if err != nil {

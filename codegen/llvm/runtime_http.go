@@ -1538,6 +1538,8 @@ ccdone:
   %sdkeep = call i1 @__kml_stdin_keepalive()
   ; fork IPC (child side): an open channel with a 'message' listener.
   %ipcckeep = call i1 @__kml_ipcc_keepalive()
+  ; fs.watch: an open FSWatcher keeps this loop alive (TDD-00181).
+  %fwkeep = call i1 @__kml_fswatch_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1549,7 +1551,8 @@ ccdone:
   %anywork6c = or i1 %anywork6b, %netkeep
   %anywork6d = or i1 %anywork6c, %dgkeep
   %anywork6e = or i1 %anywork6d, %sdkeep
-  %anywork = or i1 %anywork6e, %ipcckeep
+  %anywork6f = or i1 %anywork6e, %ipcckeep
+  %anywork = or i1 %anywork6f, %fwkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1708,6 +1711,9 @@ wscsetdone:
   store i1 %cpfz1, ptr %forcezero, align 1
   ; fork IPC (child side): add the channel fd while open.
   call i1 @__kml_ipcc_fdset_add(ptr %fdset, ptr %maxfd)
+  ; fs.watch: add the inotify/kqueue fd (or Windows wakeup socket) while any
+  ; FSWatcher is open (TDD-00181).
+  call i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd)
   ; readline: add stdin (fd 0) while an interface is open.
   %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
   %rlfz0 = load i1, ptr %forcezero, align 1
@@ -1867,6 +1873,23 @@ cmstore:
   br label %cmtodone
 
 cmtodone:
+  ; Fold the soonest spawn timeout deadline (ADR-00764) into the extra-
+  ; deadline slot so a silent slow child is still killed on time even when no
+  ; other timer/fd bounds the select() wait — the same shape as the curl and
+  ; EventSource-reconnect folds above.
+  %cptons = call i64 @__kml_cp_next_timeout_ns()
+  %cptohas = icmp ne i64 %cptons, 0
+  br i1 %cptohas, label %cptofold, label %cptodone
+cptofold:
+  %cptocur = load i64, ptr %cmdlabs, align 8
+  %cptoempty = icmp eq i64 %cptocur, 0
+  %cptosoon = icmp slt i64 %cptons, %cptocur
+  %cptotake = or i1 %cptoempty, %cptosoon
+  br i1 %cptotake, label %cptostore, label %cptodone
+cptostore:
+  store i64 %cptons, ptr %cmdlabs, align 8
+  br label %cptodone
+cptodone:
   ; Never block in select() while microtask reactions are queued (TDD-00097
   ; Stage 5): a connection fiber that ran earlier in THIS iteration may have
   ; enqueued stream/pipe reactions — checked here, immediately before the
@@ -1982,6 +2005,8 @@ afterselectok:
   call void @__kml_cp_dispatch()
   ; fork IPC (child side): drain the channel and fire 'message' listeners.
   call void @__kml_ipcc_dispatch()
+  ; fs.watch: read pending file-change events and fire watcher listeners.
+  call void @__kml_fswatch_dispatch()
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
   ; process.stdin: drain stdin and emit 'data'/'end' events.

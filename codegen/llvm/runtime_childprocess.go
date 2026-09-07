@@ -15,7 +15,11 @@
 // single (err, stdout, stderr) callback fires on child exit.
 package llvm
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+	"strings"
+)
 
 // %kml.cp layout (fields, all 8-byte-slotted except the three i32 fds):
 //
@@ -33,7 +37,22 @@ import "fmt"
 // 14 ptr stdoutAccum {ptr,i64,i64} · 15 ptr stderrAccum · 16 ptr execCallback
 // 17 i32 ipcFd (0 none · >0 open · -1 closed — TDD-00141 fork channel)
 // 18 ptr 'message' listener · 19 ptr ipc channel (C-side line buffer)
-const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr }"
+// 20 i64 spawn errno · 21 i64 recorded .kill() signal (Windows exit shape)
+// 22 i64 timeout deadline (absolute monotonic ns, 0 = none — ADR-00764)
+// 23 i64 killSignal for the timeout kill (default 15 = SIGTERM)
+// 24 i64 unref flag (1 = child.unref()'d — does not keep the loop alive, ADR-00767)
+// Field 20 (i64) is the spawn-failure errno: 0 when the child started, else
+// the errno the exec failed with (ENOENT for a missing command).
+// __kml_cp_finalize fires 'error' instead of 'exit' when it is set
+// (ADR-00754). calloc zeroes it, so an unset field means "started fine".
+// Field 21 (i64) is the signal number a `.kill(sig)` recorded, 0 otherwise.
+// POSIX recovers a signalled death from the wait status directly (WIFSIGNALED),
+// so this field only feeds the Windows `'exit'`/`'close'` `(code, signal)`
+// shape, where TerminateProcess leaves no signalled bit to read (TDD-00184).
+const cpStructIR = "{ i64, i32, i32, i32, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr, i32, ptr, ptr, i64, i64, i64, i64, i64 }"
+
+// cpStructBytes is the calloc size for cpStructIR (25 × 8).
+const cpStructBytes = 200
 
 func (e *Emitter) ensureChildProcRuntime() {
 	if e.usedChildProcRuntime {
@@ -49,6 +68,8 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureStrlen()
 	e.ensureExceptionHelpers()
 	e.ensureWorkerFdSetbit() // shared @__kml_worker_fd_setbit
+	e.ensureTimerRuntime()   // @__kml_monotonic_ns for the spawn `timeout` deadline
+	e.ensureCPKill()         // @kill — the timeout fire and child.kill share it
 
 	e.emitGlobal("declare i32 @pipe(ptr noundef)")
 	e.ensureForkDecl()
@@ -61,6 +82,24 @@ func (e *Emitter) ensureChildProcRuntime() {
 	e.ensureWriteDecl()
 	e.ensureWaitpidDecl()
 	e.ensureFcntlDecl()
+	e.ensureErrnoAccessor() // the spawn-fail status pipe reports the child's errno
+	if runtime.GOOS == "windows" {
+		// win32proc.c exposes CreateProcessW's failure as a Linux-ABI errno
+		// (0 on success) so the spawn 'error' event fires (ADR-00754).
+		e.emitGlobal("declare i32 @__kml_win_spawn_failed(i32 noundef)")
+		// Full 32-bit exit code; the POSIX wait word carries only 8 (ADR-00759).
+		e.emitGlobal("declare i32 @__kml_win_exit_code(i32 noundef)")
+	} else {
+		// A custom spawn env replaces the child's by pointing environ at it
+		// before execvp (ADR-00762). Windows passes the block to CreateProcessW.
+		e.emitGlobal("@environ = external global ptr")
+		// detached: setsid() in the forked child (ADR-00765). Windows uses
+		// DETACHED_PROCESS in the shim instead.
+		e.emitGlobal("declare i32 @setsid()")
+		// stdio: 'ignore' dup2's /dev/null onto the fd in the child (ADR-00766).
+		e.ensureOpenDecl()
+		e.emitGlobal(`@.kml_cp_devnull = private unnamed_addr constant [10 x i8] c"/dev/null\00"`)
+	}
 
 	e.emitGlobal("@__kml_cp_data = internal global ptr null, align 8")
 	e.emitGlobal("@__kml_cp_len = internal global i64 0, align 8")
@@ -171,7 +210,7 @@ ret:
 	// __kml_cp_finalize(cp): both stdio pipes are at EOF — reap (WNOHANG) and,
 	// once reaped, store the exit code and fire the terminal listeners /
 	// buffered callback, then mark the handle finalized (state 2).
-	e.emitGlobal(fmt.Sprintf(`
+	finalizeIR := fmt.Sprintf(`
 define void @__kml_cp_finalize(ptr %%cp) {
 entry:
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
@@ -196,9 +235,28 @@ signaled:
   br label %%store
 store:
   %%codev = phi i32 [ %%code, %%exited ], [ %%sigcode, %%signaled ]
+  ; The plain exit code (0 on a signalled death) drives the streaming
+  ; 'exit'/'close' (code, signal) shape; %%codev keeps the folded 128+sig
+  ; value the buffered exec path / field-5 exitCode still expect (TDD-00184).
+  %%plaincode = phi i32 [ %%code, %%exited ], [ 0, %%signaled ]
   %%code64 = zext i32 %%codev to i64
   %%ec_p = getelementptr %s, ptr %%cp, i32 0, i32 5
   store i64 %%code64, ptr %%ec_p, align 8
+  ; ---- streaming 'exit'/'close' (code, signal) shape (TDD-00184) ----
+  ; __kml_cp_event_flags decides present/signum per platform: POSIX from the
+  ; wait status (WIFSIGNALED/WTERMSIG), Windows from the recorded .kill() signal
+  ; (field 21) since TerminateProcess leaves no signalled bit. code is null
+  ; (present=false) means the listener sees 0, or null if it typed number|null.
+  %%ks_p = getelementptr %s, ptr %%cp, i32 0, i32 21
+  %%ks = load i64, ptr %%ks_p, align 8
+  %%evflags = call { i1, i32 } @__kml_cp_event_flags(i32 %%st, i64 %%ks)
+  %%evpresent = extractvalue { i1, i32 } %%evflags, 0
+  %%evsig = extractvalue { i1, i32 } %%evflags, 1
+  %%evsig64 = zext i32 %%evsig to i64
+  %%evsigname = call ptr @__kml_cp_signal_name(i64 %%evsig64)
+  %%plaincode64 = zext i32 %%plaincode to i64
+  %%evcode_sel = select i1 %%evpresent, i64 %%plaincode64, i64 0
+  %%evcode_d = sitofp i64 %%evcode_sel to double
   %%st_p = getelementptr %s, ptr %%cp, i32 0, i32 4
   store i64 2, ptr %%st_p, align 8
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
@@ -207,7 +265,29 @@ store:
   %%buffered = icmp ne i64 %%modebuf, 0
   br i1 %%buffered, label %%bufcb, label %%streamcb
 streamcb:
-  ; fire 'exit'(code) then 'close'(code)
+  ; A failed *spawn* (field 20 != 0) emits 'error' (with an Error) and 'close',
+  ; but not 'exit' — Node's ChildProcess semantics (ADR-00754).
+  %%sf20_p = getelementptr %s, ptr %%cp, i32 0, i32 20
+  %%sf20 = load i64, ptr %%sf20_p, align 8
+  %%spawnfailed = icmp ne i64 %%sf20, 0
+  br i1 %%spawnfailed, label %%errevt, label %%normexit
+errevt:
+  %%errL_p = getelementptr %s, ptr %%cp, i32 0, i32 12
+  %%errL = load ptr, ptr %%errL_p, align 8
+  %%hasErr = icmp ne ptr %%errL, null
+  br i1 %%hasErr, label %%callerr, label %%aftexit
+callerr:
+  %%serrobj = call ptr @__kml_cp_spawn_errobj(i64 %%sf20)
+  %%efp3_p = getelementptr { ptr, ptr }, ptr %%errL, i32 0, i32 0
+  %%efp3 = load ptr, ptr %%efp3_p, align 8
+  %%eep3_p = getelementptr { ptr, ptr }, ptr %%errL, i32 0, i32 1
+  %%eep3 = load ptr, ptr %%eep3_p, align 8
+  call void %%efp3(ptr %%eep3, ptr %%serrobj)
+  br label %%aftexit
+normexit:
+  ; fire 'exit'(code, signal) then 'close'(code, signal) — the stored listener
+  ; is a fixed-ABI adapter void(ptr env, i1 present, double code, ptr signal)
+  ; that forwards to the user closure with its own arity (TDD-00184).
   %%exitL_p = getelementptr %s, ptr %%cp, i32 0, i32 11
   %%exitL = load ptr, ptr %%exitL_p, align 8
   %%hasExit = icmp ne ptr %%exitL, null
@@ -217,8 +297,7 @@ callexit:
   %%xfp = load ptr, ptr %%xfp_p, align 8
   %%xep_p = getelementptr { ptr, ptr }, ptr %%exitL, i32 0, i32 1
   %%xep = load ptr, ptr %%xep_p, align 8
-  %%xcode_d = sitofp i64 %%code64 to double
-  call void %%xfp(ptr %%xep, double %%xcode_d)
+  call void %%xfp(ptr %%xep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
   br label %%aftexit
 aftexit:
   %%closeL_p = getelementptr %s, ptr %%cp, i32 0, i32 10
@@ -230,8 +309,7 @@ callclose:
   %%cfp = load ptr, ptr %%cfp_p, align 8
   %%cep_p = getelementptr { ptr, ptr }, ptr %%closeL, i32 0, i32 1
   %%cep = load ptr, ptr %%cep_p, align 8
-  %%ccode_d = sitofp i64 %%code64 to double
-  call void %%cfp(ptr %%cep, double %%ccode_d)
+  call void %%cfp(ptr %%cep, i1 %%evpresent, double %%evcode_d, ptr %%evsigname)
   br label %%ret
 bufcb:
   %%cb_p = getelementptr %s, ptr %%cp, i32 0, i32 16
@@ -269,7 +347,27 @@ callcb:
   br label %%ret
 ret:
   ret void
-}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, errName))
+}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, errName)
+	if runtime.GOOS == "windows" {
+		// Windows exit codes are full 32-bit; recover the wide value the POSIX
+		// 8-bit wait status dropped, falling back for foreign pids (ADR-00759).
+		finalizeIR = strings.Replace(finalizeIR,
+			`exited:
+  %c0 = lshr i32 %st, 8
+  %code = and i32 %c0, 255
+  br label %store`,
+			`exited:
+  %c0 = lshr i32 %st, 8
+  %fb = and i32 %c0, 255
+  %wc = call i32 @__kml_win_exit_code(i32 %pid)
+  %wok = icmp sge i32 %wc, 0
+  %code = select i1 %wok, i32 %wc, i32 %fb
+  br label %store`, 1)
+	}
+	e.emitGlobal(finalizeIR)
+
+	e.emitCPEventFlags()
+	e.emitCPSignalName()
 
 	// small helpers for the buffered path
 	emptyStr := e.internString("")
@@ -309,6 +407,38 @@ entry:
   ret ptr %%buf
 }`, fmtExec))
 
+	// __kml_cp_spawn_errobj(errno): builds the Error a failed *spawn* emits
+	// through the 'error' event (ADR-00754) — message "spawn <reason>" from
+	// strerror(errno), a full 6-field errorObjType so the listener can read
+	// .message/.name safely. (The Node .code/.errno/.syscall props are not
+	// attached, same boundary as the fs errors.)
+	e.ensureStrerror()
+	fmtSpawn := e.internString("spawn %s")
+	spawnErrName := e.internString("Error")
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_cp_spawn_errobj(i64 %%errno) {
+entry:
+  %%e32 = trunc i64 %%errno to i32
+  %%reason = call ptr @strerror(i32 %%e32)
+  %%buf = call ptr @__kml_str_alloc(i64 128)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%reason)
+  call void @__kml_str_finalize(ptr %%buf)
+  %%obj = call ptr @malloc(i64 %d)
+  %%k = getelementptr %s, ptr %%obj, i32 0, i32 0
+  store i64 0, ptr %%k, align 8
+  %%m = getelementptr %s, ptr %%obj, i32 0, i32 1
+  store ptr %%buf, ptr %%m, align 8
+  %%nm = getelementptr %s, ptr %%obj, i32 0, i32 2
+  store ptr %s, ptr %%nm, align 8
+  %%c = getelementptr %s, ptr %%obj, i32 0, i32 3
+  store ptr null, ptr %%c, align 8
+  %%ec = getelementptr %s, ptr %%obj, i32 0, i32 4
+  store double 0.0, ptr %%ec, align 8
+  %%es = getelementptr %s, ptr %%obj, i32 0, i32 5
+  store ptr null, ptr %%es, align 8
+  ret ptr %%obj
+}`, fmtSpawn, errorObjType.StructSize(), errorObjType.StructIR(), errorObjType.StructIR(), errorObjType.StructIR(), spawnErrName, errorObjType.StructIR(), errorObjType.StructIR(), errorObjType.StructIR()))
+
 	// __kml_cp_dispatch(): drain + finalize every live child. Called by the
 	// event loop after select().
 	e.emitGlobal(fmt.Sprintf(`
@@ -331,6 +461,30 @@ body:
   %%live = icmp slt i64 %%st, 2
   br i1 %%live, label %%drain, label %%next
 drain:
+  ; spawn timeout: kill the child once its deadline passes (ADR-00764). The
+  ; kill's signal is recorded in field 21 so the subsequent reap fires the
+  ; faithful ('exit', null, '<signal>') the (code, signal) shape reports.
+  %%tdl_p = getelementptr %s, ptr %%cp, i32 0, i32 22
+  %%tdl = load i64, ptr %%tdl_p, align 8
+  %%hastdl = icmp ne i64 %%tdl, 0
+  br i1 %%hastdl, label %%tchk, label %%tafter
+tchk:
+  %%nowtt = call i64 @__kml_monotonic_ns()
+  %%tdue = icmp sge i64 %%nowtt, %%tdl
+  br i1 %%tdue, label %%tfire, label %%tafter
+tfire:
+  store i64 0, ptr %%tdl_p, align 8
+  %%tpid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
+  %%tpid = load i64, ptr %%tpid_p, align 8
+  %%tpid32 = trunc i64 %%tpid to i32
+  %%tks_p = getelementptr %s, ptr %%cp, i32 0, i32 23
+  %%tks = load i64, ptr %%tks_p, align 8
+  %%tks32 = trunc i64 %%tks to i32
+  %%trk_p = getelementptr %s, ptr %%cp, i32 0, i32 21
+  store i64 %%tks, ptr %%trk_p, align 8
+  call i32 @kill(i32 %%tpid32, i32 %%tks32)
+  br label %%tafter
+tafter:
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
   %%mode = load i64, ptr %%mode_p, align 8
   %%fd2 = getelementptr %s, ptr %%cp, i32 0, i32 2
@@ -371,7 +525,55 @@ next:
   br label %%loop
 done:
   ret void
-}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp))
+}`, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp, cp))
+
+	// __kml_cp_next_timeout_ns(): the soonest spawn-`timeout` deadline (absolute
+	// monotonic ns) among live children, or 0 if none — folded into the event
+	// loop's select() wait so a silent slow child is still killed on time
+	// (ADR-00764; the same shape as __kml_eventsource_next_reconnect_ms).
+	e.emitGlobal(fmt.Sprintf(`
+define i64 @__kml_cp_next_timeout_ns() {
+entry:
+  %%len = load i64, ptr @__kml_cp_len, align 8
+  %%data = load ptr, ptr @__kml_cp_data, align 8
+  %%best = alloca i64, align 8
+  store i64 0, ptr %%best, align 8
+  %%i = alloca i64, align 8
+  store i64 0, ptr %%i, align 8
+  br label %%loop
+loop:
+  %%iv = load i64, ptr %%i, align 8
+  %%inb = icmp slt i64 %%iv, %%len
+  br i1 %%inb, label %%body, label %%done
+body:
+  %%slot = getelementptr ptr, ptr %%data, i64 %%iv
+  %%cp = load ptr, ptr %%slot, align 8
+  %%st_p = getelementptr %s, ptr %%cp, i32 0, i32 4
+  %%st = load i64, ptr %%st_p, align 8
+  %%live = icmp slt i64 %%st, 2
+  br i1 %%live, label %%chk, label %%next
+chk:
+  %%dl_p = getelementptr %s, ptr %%cp, i32 0, i32 22
+  %%dl = load i64, ptr %%dl_p, align 8
+  %%has = icmp ne i64 %%dl, 0
+  br i1 %%has, label %%consider, label %%next
+consider:
+  %%cur = load i64, ptr %%best, align 8
+  %%none = icmp eq i64 %%cur, 0
+  %%sooner = icmp slt i64 %%dl, %%cur
+  %%take = or i1 %%none, %%sooner
+  br i1 %%take, label %%takeit, label %%next
+takeit:
+  store i64 %%dl, ptr %%best, align 8
+  br label %%next
+next:
+  %%inext = add i64 %%iv, 1
+  store i64 %%inext, ptr %%i, align 8
+  br label %%loop
+done:
+  %%r = load i64, ptr %%best, align 8
+  ret i64 %%r
+}`, cp, cp))
 
 	// __kml_cp_fdset_add(fdset, maxfd): add every live child's read fds; force
 	// a zero select() timeout when a child has both pipes at EOF but is not
@@ -459,7 +661,13 @@ body:
   %%st_p = getelementptr %s, ptr %%cp, i32 0, i32 4
   %%st = load i64, ptr %%st_p, align 8
   %%live = icmp slt i64 %%st, 2
-  br i1 %%live, label %%yes, label %%next
+  br i1 %%live, label %%chkref, label %%next
+chkref:
+  ; an unref()'d child (field 24) does not hold the loop open (ADR-00767).
+  %%ur_p = getelementptr %s, ptr %%cp, i32 0, i32 24
+  %%ur = load i64, ptr %%ur_p, align 8
+  %%refd = icmp eq i64 %%ur, 0
+  br i1 %%refd, label %%yes, label %%next
 next:
   %%inext = add i64 %%iv, 1
   store i64 %%inext, ptr %%i, align 8
@@ -468,7 +676,7 @@ yes:
   ret i1 1
 no:
   ret i1 0
-}`, cp))
+}`, cp, cp))
 
 	// __kml_cp_register(cp): append to the process-wide handle registry.
 	e.emitGlobal(`
@@ -501,7 +709,7 @@ store:
 	// pipes; returns the ChildProcess handle. The two read fds are made
 	// non-blocking; buffered mode pre-allocates the accumulators.
 	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd) {
+define ptr @__kml_cp_spawn(ptr %%file, ptr %%argsdata, i64 %%argslen, i64 %%mode, ptr %%cwd, ptr %%env, i64 %%timeout_ms, i64 %%killsig) {
 entry:
   %%argvlen = add i64 %%argslen, 2
   %%argvbytes = mul i64 %%argvlen, 8
@@ -537,31 +745,81 @@ setnull:
   %%outw = load i32, ptr %%outw_p, align 4
   %%errr = load i32, ptr %%errr_p, align 4
   %%errw = load i32, ptr %%errw_p, align 4
-
+%s
 %sparent:
+  ; Per-fd stdio (mode bits 4-9, ADR-00766): pipe (0) keeps the pipe as today;
+  ; inherit (1)/ignore (2) close the unused ends and store -1 so the drain and
+  ; child.stdin.write paths skip that fd (the child got the inherited fd or
+  ; /dev/null instead — see cpSpawnForkIR).
+  %%psm_in0 = lshr i64 %%mode, 4
+  %%psm_in = and i64 %%psm_in0, 3
+  %%psm_out0 = lshr i64 %%mode, 6
+  %%psm_out = and i64 %%psm_out0, 3
+  %%psm_err0 = lshr i64 %%mode, 8
+  %%psm_err = and i64 %%psm_err0, 3
   call i32 @close(i32 %%inr)
+  %%pin_pipe = icmp eq i64 %%psm_in, 0
+  br i1 %%pin_pipe, label %%in_keep, label %%in_close
+in_close:
+  call i32 @close(i32 %%inw)
+  br label %%in_done
+in_keep:
+  br label %%in_done
+in_done:
+  %%inw_val = phi i32 [ %%inw, %%in_keep ], [ -1, %%in_close ]
+  %%pout_pipe = icmp eq i64 %%psm_out, 0
+  br i1 %%pout_pipe, label %%out_pipe, label %%out_close
+out_pipe:
   call i32 @close(i32 %%outw)
-  call i32 @close(i32 %%errw)
-  ; make the two read ends non-blocking
   %%ofl = call i32 (i32, i32, ...) @fcntl(i32 %%outr, i32 3)
   %%ofln = or i32 %%ofl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%outr, i32 4, i32 %%ofln)
+  br label %%out_done
+out_close:
+  call i32 @close(i32 %%outw)
+  call i32 @close(i32 %%outr)
+  br label %%out_done
+out_done:
+  %%outr_val = phi i32 [ %%outr, %%out_pipe ], [ -1, %%out_close ]
+  %%perr_pipe = icmp eq i64 %%psm_err, 0
+  br i1 %%perr_pipe, label %%err_pipe, label %%err_close
+err_pipe:
+  call i32 @close(i32 %%errw)
   %%efl = call i32 (i32, i32, ...) @fcntl(i32 %%errr, i32 3)
   %%efln = or i32 %%efl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%errr, i32 4, i32 %%efln)
+  br label %%err_done
+err_close:
+  call i32 @close(i32 %%errw)
+  call i32 @close(i32 %%errr)
+  br label %%err_done
+err_done:
+  %%errr_val = phi i32 [ %%errr, %%err_pipe ], [ -1, %%err_close ]
 
-  %%cp = call ptr @calloc(i64 1, i64 160)
+  %%cp = call ptr @calloc(i64 1, i64 200)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   %%pid64 = zext i32 %%pid to i64
   store i64 %%pid64, ptr %%pid_p, align 8
   %%sin_p = getelementptr %s, ptr %%cp, i32 0, i32 1
-  store i32 %%inw, ptr %%sin_p, align 4
+  store i32 %%inw_val, ptr %%sin_p, align 4
   %%sout_p = getelementptr %s, ptr %%cp, i32 0, i32 2
-  store i32 %%outr, ptr %%sout_p, align 4
+  store i32 %%outr_val, ptr %%sout_p, align 4
   %%serr_p = getelementptr %s, ptr %%cp, i32 0, i32 3
-  store i32 %%errr, ptr %%serr_p, align 4
+  store i32 %%errr_val, ptr %%serr_p, align 4
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
   store i64 %%mode, ptr %%mode_p, align 8
+  ; spawn timeout: store the absolute deadline (now + timeout_ms) and the
+  ; kill signal so the event-loop dispatch can kill a slow child (ADR-00764).
+  ; timeout_ms 0 → no deadline.
+  %%hasto = icmp ne i64 %%timeout_ms, 0
+  %%tonow = call i64 @__kml_monotonic_ns()
+  %%toms_ns = mul i64 %%timeout_ms, 1000000
+  %%todl0 = add i64 %%tonow, %%toms_ns
+  %%todl = select i1 %%hasto, i64 %%todl0, i64 0
+  %%todl_p = getelementptr %s, ptr %%cp, i32 0, i32 22
+  store i64 %%todl, ptr %%todl_p, align 8
+  %%toks_p = getelementptr %s, ptr %%cp, i32 0, i32 23
+  store i64 %%killsig, ptr %%toks_p, align 8
   %%modebufa = and i64 %%mode, 1
   %%buffered = icmp ne i64 %%modebufa, 0
   br i1 %%buffered, label %%allocbufs, label %%reg
@@ -574,9 +832,10 @@ allocbufs:
   store ptr %%eacc, ptr %%eacc_p, align 8
   br label %%reg
 reg:
+%s
   call void @__kml_cp_register(ptr %%cp)
   ret ptr %%cp
-}`, e.cpSpawnForkIR(), nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp))
+}`, e.cpSpawnStatusSetupIR(), e.cpSpawnForkIR(), nonblock, nonblock, cp, cp, cp, cp, cp, cp, cp, cp, cp, e.cpSpawnFailDetectIR(cp)))
 
 	// stdin write / end
 	e.emitGlobal(fmt.Sprintf(`
@@ -605,4 +864,97 @@ cl:
 ret:
   ret void
 }`, cp, cp))
+}
+
+// emitCPEventFlags emits __kml_cp_event_flags(i32 status, i64 killsig) which
+// decides the streaming 'exit'/'close' (code, signal) shape's present-bit and
+// signal number (TDD-00184). POSIX reads the wait status directly — WIFSIGNALED
+// is (status & 0x7f) != 0 and WTERMSIG is those low 7 bits. Windows has no
+// signalled bit (TerminateProcess just sets an exit code), so it uses the signal
+// a .kill() recorded (field 21); a normally-exited child recorded none (0).
+// Returned as a register aggregate { i1 present, i32 signum } — present=true and
+// signum=0 for a normal exit, present=false and signum=<sig> for a signalled one.
+func (e *Emitter) emitCPEventFlags() {
+	if runtime.GOOS == "windows" {
+		e.emitGlobal(`
+define { i1, i32 } @__kml_cp_event_flags(i32 %status, i64 %killsig) {
+entry:
+  %present = icmp eq i64 %killsig, 0
+  %sig32 = trunc i64 %killsig to i32
+  %a = insertvalue { i1, i32 } undef, i1 %present, 0
+  %b = insertvalue { i1, i32 } %a, i32 %sig32, 1
+  ret { i1, i32 } %b
+}`)
+		return
+	}
+	e.emitGlobal(`
+define { i1, i32 } @__kml_cp_event_flags(i32 %status, i64 %killsig) {
+entry:
+  %low = and i32 %status, 127
+  %present = icmp eq i32 %low, 0
+  %signum = select i1 %present, i32 0, i32 %low
+  %a = insertvalue { i1, i32 } undef, i1 %present, 0
+  %b = insertvalue { i1, i32 } %a, i32 %signum, 1
+  ret { i1, i32 } %b
+}`)
+}
+
+// emitCPSignalName emits __kml_cp_signal_name(i64 n) → the Node signal-name
+// string for signal number n, or null for an unmapped number (TDD-00184). The
+// numbering is the host platform's (native compile: the binary runs where it was
+// built) — signals 1–6, 8, 9, 11, 13–15 share numbers across Linux/macOS, while
+// SIGBUS/SIGUSR1/SIGUSR2 differ, so those three are resolved per GOOS. Windows'
+// synthetic signals reuse the Linux-style numbers our .kill() records.
+func (e *Emitter) emitCPSignalName() {
+	var cases, arms strings.Builder
+	for _, s := range cpSignalTable() {
+		lbl := fmt.Sprintf("s%d", s.num)
+		cases.WriteString(fmt.Sprintf("    i64 %d, label %%%s\n", s.num, lbl))
+		arms.WriteString(fmt.Sprintf("%s:\n  ret ptr %s\n", lbl, e.internString(s.name)))	}
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_cp_signal_name(i64 %%n) {
+entry:
+  switch i64 %%n, label %%none [
+%s  ]
+%snone:
+  ret ptr null
+}`, cases.String(), arms.String()))
+}
+
+// cpSignalEntry maps a Node signal name to the host platform's signal number.
+type cpSignalEntry struct {
+	num  int
+	name string
+}
+
+// cpSignalTable returns the number↔name mapping for the signals a child is
+// realistically terminated by, using the host platform's numbering (native
+// compile: the binary runs where it was built). Signals 1–6, 8, 9, 11, 13–15
+// share numbers across Linux/macOS; SIGBUS/SIGUSR1/SIGUSR2 differ, so those are
+// resolved per GOOS. Windows reuses the Linux-style numbers our .kill() records.
+// Shared by __kml_cp_signal_name (number→name for the exit event) and
+// child.kill (name→number). TDD-00184.
+func cpSignalTable() []cpSignalEntry {
+	t := []cpSignalEntry{
+		{1, "SIGHUP"}, {2, "SIGINT"}, {3, "SIGQUIT"}, {4, "SIGILL"},
+		{5, "SIGTRAP"}, {6, "SIGABRT"}, {8, "SIGFPE"}, {9, "SIGKILL"},
+		{11, "SIGSEGV"}, {13, "SIGPIPE"}, {14, "SIGALRM"}, {15, "SIGTERM"},
+	}
+	if runtime.GOOS == "darwin" {
+		t = append(t, cpSignalEntry{10, "SIGBUS"}, cpSignalEntry{30, "SIGUSR1"}, cpSignalEntry{31, "SIGUSR2"})
+	} else {
+		t = append(t, cpSignalEntry{7, "SIGBUS"}, cpSignalEntry{10, "SIGUSR1"}, cpSignalEntry{12, "SIGUSR2"})
+	}
+	return t
+}
+
+// cpSignalNumber resolves a Node signal name (e.g. "SIGTERM") to the host's
+// signal number for child.kill(signal). TDD-00184.
+func cpSignalNumber(name string) (int, bool) {
+	for _, s := range cpSignalTable() {
+		if s.name == name {
+			return s.num, true
+		}
+	}
+	return 0, false
 }

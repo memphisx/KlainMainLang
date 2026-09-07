@@ -92,7 +92,7 @@ entry:
   %%fl = call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 3)
   %%fln = or i32 %%fl, %d
   call i32 (i32, i32, ...) @fcntl(i32 %%pfd, i32 4, i32 %%fln)
-  %%cp = call ptr @calloc(i64 1, i64 160)
+  %%cp = call ptr @calloc(i64 1, i64 200)
   %%pid_p = getelementptr %s, ptr %%cp, i32 0, i32 0
   store i64 %%pid64, ptr %%pid_p, align 8
   ; stdio is inherited — no pipes on the handle

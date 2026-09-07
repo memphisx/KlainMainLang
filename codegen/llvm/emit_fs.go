@@ -307,8 +307,12 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 // own readdir() returns them (unspecified/filesystem-dependent — matching
 // real Node's own readdirSync, which makes no ordering guarantee either).
 func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync takes (path[, { withFileTypes: true }])", pos.Line, pos.Col)
+	}
+	withTypes, err := readdirWithFileTypes(args, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -318,8 +322,31 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 
 	e.ensureFsReaddir()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir(ptr %s)", r, pathVal.Ref))
+	if withTypes {
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir(ptr %s, i1 true)", r, pathVal.Ref))
+		return Value{Ref: r, Ty: ArrayOf(DirentType())}, nil
+	}
+	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir(ptr %s, i1 false)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: ArrayOf(TypePtr)}, nil
+}
+
+// readdirWithFileTypes parses fs.readdirSync's optional second argument. Only
+// the literal `{ withFileTypes: true }` is understood (matching mkdirSync's
+// `{ recursive: true }` handling); anything else is a clean rejection. Used
+// by both the emitter and inferExprType so the two stay in lockstep.
+func readdirWithFileTypes(args []ast.Expression, pos ast.Pos) (bool, error) {
+	if len(args) < 2 {
+		return false, nil
+	}
+	ol, ok := args[1].(*ast.ObjectLiteral)
+	if !ok || len(ol.Properties) != 1 || ol.Properties[0].Key != "withFileTypes" {
+		return false, fmt.Errorf("%d:%d: fs.readdirSync options support only `{ withFileTypes: true }`", pos.Line, pos.Col)
+	}
+	b, ok := ol.Properties[0].Value.(*ast.BooleanLiteral)
+	if !ok || !b.Value {
+		return false, fmt.Errorf("%d:%d: fs.readdirSync options support only `{ withFileTypes: true }`", pos.Line, pos.Col)
+	}
+	return true, nil
 }
 
 // emitFsStatSync implements fs.statSync(path) (ADR-00495): __kml_fs_stat
@@ -410,7 +437,7 @@ func (e *Emitter) buildStatsObject(trip string) Value {
 func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	argN := map[string][2]int{
 		"realpathSync": {1, 1}, "mkdtempSync": {1, 1}, "readlinkSync": {1, 1},
-		"symlinkSync": {2, 2}, "chmodSync": {2, 2}, "truncateSync": {1, 2}, "accessSync": {1, 2},
+		"symlinkSync": {2, 2}, "linkSync": {2, 2}, "chmodSync": {2, 2}, "truncateSync": {1, 2}, "accessSync": {1, 2},
 	}[method]
 	if len(args) < argN[0] || len(args) > argN[1] {
 		return Value{}, fmt.Errorf("%d:%d: fs.%s: wrong argument count", pos.Line, pos.Col, method)
@@ -432,13 +459,14 @@ func (e *Emitter) emitFsPathOp(method string, args []ast.Expression, pos ast.Pos
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, raw))
 		return Value{Ref: r, Ty: TypePtr}, nil
-	case "symlinkSync":
+	case "symlinkSync", "linkSync":
 		p1, err := e.emitExpr(args[1])
 		if err != nil {
 			return Value{}, err
 		}
 		p1 = e.coerce(p1, TypePtr)
-		e.emitInstr(fmt.Sprintf("call void @__kml_fs_symlink(ptr %s, ptr %s)", p0.Ref, p1.Ref))
+		fn := map[string]string{"symlinkSync": "symlink", "linkSync": "link"}[method]
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_%s(ptr %s, ptr %s)", fn, p0.Ref, p1.Ref))
 		return Value{Ty: TypeVoid}, nil
 	case "chmodSync", "truncateSync", "accessSync":
 		numRef := "0"
@@ -553,6 +581,194 @@ func (e *Emitter) emitFsCloseSync(args []ast.Expression, pos ast.Pos) (Value, er
 	f32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", f32, fd.Ref))
 	e.emitInstr(fmt.Sprintf("call i32 @close(i32 %s)", f32))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// isCallbackLiteral reports whether an argument is an arrow/function-expression
+// literal (the listener posture fs.watch/ChildProcess accept).
+func isCallbackLiteral(x ast.Expression) bool {
+	switch x.(type) {
+	case *ast.ArrowFunction, *ast.FunctionExpression:
+		return true
+	}
+	return false
+}
+
+// emitFsWatch implements fs.watch(path[, listener]) (TDD-00181): returns an
+// FSWatcher. The optional trailing listener is Node's fs.watch(path, cb)
+// overload — registered as both the 'change' and 'rename' handler (Node
+// delivers every event to it). An options object is accepted but only its
+// listener-less form here; { persistent, recursive, encoding } are parsed
+// lightly and mostly deferred (Stage-1 caveat).
+func (e *Emitter) emitFsWatch(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.watch takes (path[, options][, listener])", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	e.ensureFsWatchRuntime()
+	w := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_watch(ptr %s)", w, pathVal.Ref))
+	wv := Value{Ref: w, Ty: FSWatcherType()}
+	// fs.watch(path, listener): the last arg, if an arrow/function literal,
+	// is registered as both 'change' and 'rename' (Node hands it every event).
+	last := args[len(args)-1]
+	if len(args) >= 2 && isCallbackLiteral(last) {
+		cb, err := e.cpArrowClosure(last, []Type{TypePtr, TypePtr}, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_fswatch_on(ptr %s, i64 0, ptr %s)", w, cb))
+		e.emitInstr(fmt.Sprintf("call void @__kml_fswatch_on(ptr %s, i64 1, ptr %s)", w, cb))
+	}
+	return wv, nil
+}
+
+// emitFSWatcherMethod handles watcher.on('change'|'rename', cb) and
+// watcher.close().
+func (e *Emitter) emitFSWatcherMethod(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	objVal, err := e.emitExpr(objExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	switch method {
+	case "on":
+		evt, err := stringLiteralArg(args, 0, "FSWatcher.on", pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if len(args) != 2 {
+			return Value{}, fmt.Errorf("%d:%d: FSWatcher.on takes (event, listener)", pos.Line, pos.Col)
+		}
+		isRename := "0"
+		switch evt {
+		case "change":
+		case "rename":
+			isRename = "1"
+		default:
+			return Value{}, fmt.Errorf("%d:%d: FSWatcher.on supports 'change' and 'rename' (got '%s')", pos.Line, pos.Col, evt)
+		}
+		cb, err := e.cpArrowClosure(args[1], []Type{TypePtr, TypePtr}, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_fswatch_on(ptr %s, i64 %s, ptr %s)", objVal.Ref, isRename, cb))
+		return Value{Ty: TypeVoid}, nil
+	case "close":
+		e.emitInstr(fmt.Sprintf("call void @__kml_fswatch_close(ptr %s)", objVal.Ref))
+		return Value{Ty: TypeVoid}, nil
+	}
+	return Value{}, fmt.Errorf("%d:%d: an FSWatcher has no method '%s'", pos.Line, pos.Col, method)
+}
+
+// emitFsUtimesSync implements fs.utimesSync(path, atime, mtime): set the
+// access and modification times. atime/mtime are seconds (a number, as in
+// Node) or a Date (its epoch, converted from milliseconds). Sub-second
+// precision is carried as microseconds. On POSIX this is utimes(2); on
+// Windows a SetFileTime shim (win32fs.c).
+func (e *Emitter) emitFsUtimesSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.utimesSync takes (path, atime, mtime)", pos.Line, pos.Col)
+	}
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+	// A [4 x i64] holding two timeval-shaped {sec, usec} pairs (atime, mtime);
+	// 16-byte stride matches struct timeval on every 64-bit target here.
+	buf := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [4 x i64], align 8", buf))
+	for i, arg := range args[1:] {
+		secRef, usecRef, err := e.emitSecondsToTimeval(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		secSlot := e.freshReg()
+		usecSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr [4 x i64], ptr %s, i32 0, i32 %d", secSlot, buf, i*2))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", secRef, secSlot))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr [4 x i64], ptr %s, i32 0, i32 %d", usecSlot, buf, i*2+1))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", usecRef, usecSlot))
+	}
+	e.ensureFsUtimes()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_utimes(ptr %s, ptr %s)", pathVal.Ref, buf))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitSecondsToTimeval turns a utimesSync time argument into (sec, usec) i64
+// registers. A Date is milliseconds since the epoch (divided to seconds); any
+// other value is already in seconds (Node's number form). The fractional part
+// becomes microseconds.
+func (e *Emitter) emitSecondsToTimeval(arg ast.Expression) (secRef, usecRef string, err error) {
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return "", "", err
+	}
+	var secF string
+	if e.inferExprType(arg).IsDate {
+		ms := e.coerce(v, TypeI64)
+		msF := e.freshReg()
+		secF = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", msF, ms.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fdiv double %s, 1.000000e+03", secF, msF))
+	} else {
+		secF = e.coerce(v, TypeF64).Ref
+	}
+	sec := e.freshReg()
+	secBack := e.freshReg()
+	frac := e.freshReg()
+	usF := e.freshReg()
+	usec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", sec, secF))
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", secBack, sec))
+	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", frac, secF, secBack))
+	e.emitInstr(fmt.Sprintf("%s = fmul double %s, 1.000000e+06", usF, frac))
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", usec, usF))
+	return sec, usec, nil
+}
+
+// emitFsFsyncSync implements fs.fsyncSync(fd): flush an open fd to disk,
+// throwing on error (EBADF etc.). fdatasyncSync maps to the same helper —
+// the data-only optimization is not observable in the file's contents.
+func (e *Emitter) emitFsFsyncSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: fs.fsyncSync takes exactly 1 argument (fd)", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	e.ensureFsFdOps()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_fsync(i64 %s)", fd.Ref))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitFsFtruncateSync implements fs.ftruncateSync(fd[, len]) — resize an open
+// fd (len defaults to 0, as in Node), throwing on error.
+func (e *Emitter) emitFsFtruncateSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.ftruncateSync takes (fd[, len])", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	lenRef := "0"
+	if len(args) == 2 {
+		lv, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		lenRef = e.coerce(lv, TypeI64).Ref
+	}
+	e.ensureFsFdOps()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_ftruncate(i64 %s, i64 %s)", fd.Ref, lenRef))
 	return Value{Ty: TypeVoid}, nil
 }
 

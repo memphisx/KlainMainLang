@@ -289,11 +289,11 @@ const gallery = [
     cta: 'Read the guide'
   },
   {
-    to: '/docs/examples/tui/files', img: filesImg, tag: 'Terminal UI',
+    to: '/docs/guides/tui/live-dashboard', img: filesImg, tag: 'Terminal UI',
     alt: 'A two-pane terminal file browser with a preview pane',
     title: 'A two-pane file browser',
     body: 'A nested layout with a live preview pane, driven by fs and path — the same immediate-mode loop, a richer view.',
-    cta: 'See the example'
+    cta: 'Read the guide'
   }
 ]
 

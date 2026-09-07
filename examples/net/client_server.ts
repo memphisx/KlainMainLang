@@ -21,6 +21,10 @@ server.listen(0, () => {
   // net.connect also takes an options object { port, host }.
   const client = net.connect({ port: port, host: "127.0.0.1" }, () => {
     client.setNoDelay(true);
+    // setKeepAlive(enable, initialDelay): keep the connection alive and set
+    // the idle time (ms) before the first keepalive probe — a real setsockopt
+    // (TCP_KEEPIDLE; SIO_KEEPALIVE_VALS on Windows).
+    client.setKeepAlive(true, 10000);
     client.write("hello");
   });
   client.on('data', (chunk: Uint8Array) => {

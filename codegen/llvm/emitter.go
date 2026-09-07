@@ -360,6 +360,7 @@ type Emitter struct {
 	// entry function is being emitted (gates parentPort/workerData).
 	usedConnPokeGlobal     bool
 	usedChildProcRuntime   bool
+	usedFsWatchRuntime     bool
 	usedReadlineRuntime    bool
 	usedStdinRuntime       bool
 	usedNetRuntime         bool
@@ -595,6 +596,8 @@ type Emitter struct {
 	usedFsPathOps                bool
 	usedFsRm                     bool
 	usedFsFdOps                  bool
+	usedOpenDecl                 bool
+	usedFsUtimes                 bool
 	usedFsRmdir                  bool
 	usedFsRename                 bool
 	usedFsReaddir                bool
@@ -2168,7 +2171,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")

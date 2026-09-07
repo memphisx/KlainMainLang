@@ -92,7 +92,7 @@ func (e *Emitter) ensureFsThrow() {
 	// under-allocated 24 bytes for the 6-field type), leaving `.code` unset.
 	eIR := errorObjType.StructIR()
 	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_fs_throw(ptr %%opdesc, ptr %%path) {
+define void @__kml_fs_throw(ptr %%opdesc, ptr %%syscall, ptr %%path) {
 entry:
   %%errno_ptr = call ptr @%s()
   %%errno_val = load i32, ptr %%errno_ptr, align 4
@@ -121,9 +121,17 @@ entry:
   store double %%errno_d, ptr %%errobj.errcode, align 8
   %%errobj.errstr = getelementptr %s, ptr %%errobj, i32 0, i32 5
   store ptr %%errmsg, ptr %%errobj.errstr, align 8
+  %%errobj.syscall = getelementptr %s, ptr %%errobj, i32 0, i32 6
+  store ptr %%syscall, ptr %%errobj.syscall, align 8
+  %%errobj.path = getelementptr %s, ptr %%errobj, i32 0, i32 7
+  store ptr %%path, ptr %%errobj.path, align 8
+  %%errno_neg = sub i32 0, %%errno_val
+  %%errno_negd = sitofp i32 %%errno_neg to double
+  %%errobj.errno = getelementptr %s, ptr %%errobj, i32 0, i32 8
+  store double %%errno_negd, ptr %%errobj.errno, align 8
   call void @__kml_throw(ptr %%errobj)
   ret void
-}`, accessor, fmtPtr, errorObjType.StructSize(), eIR, eIR, eIR, errNamePtr, eIR, eIR, eIR))
+}`, accessor, fmtPtr, errorObjType.StructSize(), eIR, eIR, eIR, errNamePtr, eIR, eIR, eIR, eIR, eIR, eIR))
 }
 
 // ensureStatDecl emits the `declare i32 @stat` exactly once. Shared by
@@ -275,6 +283,8 @@ func (e *Emitter) ensureFsReadFileRaw() {
 		modeExtLL = fmt.Sprintf("  %%mode_ext = zext %s %%mode_raw to i32\n", modeLoadTy)
 	}
 	eisdirOpDescPtr := e.internString("read")
+	scRead := e.internString("read")
+	scOpen := e.internString("open")
 	e.emitGlobal(fmt.Sprintf(`
 define { ptr, i64 } @__kml_fs_read_file_raw(ptr %%path) {
 entry:
@@ -293,7 +303,7 @@ checkdir:
 eisdir:
   %%eptr = call ptr @%s()
   store i32 %d, ptr %%eptr, align 4
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 doopen:
@@ -302,7 +312,7 @@ doopen:
   br i1 %%isnull, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
@@ -318,7 +328,7 @@ ok:
   %%r0 = insertvalue { ptr, i64 } undef, ptr %%buf, 0
   %%r1 = insertvalue { ptr, i64 } %%r0, i64 %%size, 1
   ret { ptr, i64 } %%r1
-}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), errnoEISDIR(), eisdirOpDescPtr, modePtr, opDescPtr))
+}`, L.modeOff, modeLoadTy, modeExtLL, modeReg, errnoAccessor(), errnoEISDIR(), eisdirOpDescPtr, scRead, modePtr, opDescPtr, scOpen))
 }
 
 // ensureFsWriteFile declares __kml_fs_write_file: writes (creating or
@@ -374,7 +384,7 @@ entry:
   br i1 %%isnull, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
@@ -382,7 +392,7 @@ ok:
   %%nwritten = call i64 @fwrite(ptr %%data, i64 1, i64 %%len, ptr %%f)
   call i32 @fclose(ptr %%f)
   ret void
-}`, fnName, modePtr, opDescPtr))
+}`, fnName, modePtr, opDescPtr, e.internString("open")))
 }
 
 // ensureFsWriteLikeBytes is ensureFsWriteLike's explicit-length sibling
@@ -408,14 +418,14 @@ entry:
   br i1 %%isnull, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
   %%nwritten = call i64 @fwrite(ptr %%data, i64 1, i64 %%len, ptr %%f)
   call i32 @fclose(ptr %%f)
   ret void
-}`, fnName, modePtr, opDescPtr))
+}`, fnName, modePtr, opDescPtr, e.internString("open")))
 }
 
 // ensureFsExists declares __kml_fs_exists: a plain existence check via
@@ -458,12 +468,12 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("unlink")))
 }
 
 // ensureFsRmdir declares __kml_fs_rmdir: removes an empty directory via
@@ -488,12 +498,12 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("rmdir")))
 }
 
 // ensureFsMkdir declares __kml_fs_mkdir: creates a directory via POSIX
@@ -517,12 +527,12 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("mkdir")))
 }
 
 // ensureFsMkdirP declares __kml_fs_mkdir_p: `mkdirSync(path, {recursive:
@@ -571,11 +581,11 @@ final:
   %%missing = icmp ne i32 %%acc, 0
   br i1 %%missing, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("mkdir")))
 }
 
 // ensureFsRename declares __kml_fs_rename: renames/moves a file via POSIX
@@ -598,12 +608,12 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%oldpath)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%oldpath)
   unreachable
 
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("rename")))
 }
 
 // direntNameOffset returns struct dirent's d_name field offset (in bytes)
@@ -627,12 +637,28 @@ ok:
 // per its own stated scope.
 func direntNameOffset() int {
 	if runtime.GOOS == "windows" {
-		return 8 // mingw-w64 dirent: d_ino u32, d_reclen u16, d_namlen u16, d_name
+		return 9 // kml_dirent: d_ino u32, d_reclen u16, d_namlen u16, d_type u8, d_name
 	}
 	if runtime.GOOS == "darwin" {
 		return 21
 	}
 	return 19
+}
+
+// direntTypeOffset is the byte offset of `d_type` in the host's `struct
+// dirent` — the file-type byte fs.readdirSync(withFileTypes) reads (ADR-00752).
+// glibc: d_ino(8)+d_off(8)+d_reclen(2) → 18. Darwin: d_ino(8)+d_seekoff(8)+
+// d_reclen(2)+d_namlen(2) → 20. Windows: the shim's kml_dirent places d_type
+// right after d_namlen, at offset 8 (win32fs.c), populated from the Win32
+// FindFirstFile attributes since mingw's own dirent has no d_type.
+func direntTypeOffset() int {
+	if runtime.GOOS == "windows" {
+		return 8
+	}
+	if runtime.GOOS == "darwin" {
+		return 20
+	}
+	return 18
 }
 
 // ensureFsReaddir declares __kml_fs_readdir: lists a directory's entries
@@ -661,14 +687,14 @@ func (e *Emitter) ensureFsReaddir() {
 	dotPtr := e.internString(".")
 	dotdotPtr := e.internString("..")
 	e.emitGlobal(fmt.Sprintf(`
-define {ptr, i64} @__kml_fs_readdir(ptr %%path) {
+define {ptr, i64} @__kml_fs_readdir(ptr %%path, i1 %%withTypes) {
 entry:
   %%dir = call ptr @opendir(ptr %%path)
   %%dirisnull = icmp eq ptr %%dir, null
   br i1 %%dirisnull, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
@@ -717,7 +743,30 @@ storeit:
   %%dataNow = load ptr, ptr %%data_p, align 8
   %%namecopy = call ptr @__kml_str_from_cstr(ptr %%nameptr)
   %%slot = getelementptr ptr, ptr %%dataNow, i64 %%curlen
+  br i1 %%withTypes, label %%mkdirent, label %%storename
+
+storename:
   store ptr %%namecopy, ptr %%slot, align 8
+  br label %%advance
+
+mkdirent:
+  %%dtypep = getelementptr i8, ptr %%ent, i64 %d
+  %%dtype = load i8, ptr %%dtypep, align 1
+  %%isdirt = icmp eq i8 %%dtype, 4
+  %%isregt = icmp eq i8 %%dtype, 8
+  %%islnkt = icmp eq i8 %%dtype, 10
+  %%m1 = select i1 %%isdirt, i64 16384, i64 0
+  %%m2 = select i1 %%isregt, i64 32768, i64 %%m1
+  %%mode = select i1 %%islnkt, i64 40960, i64 %%m2
+  %%dirent = call ptr @malloc(i64 16)
+  %%dname_p = getelementptr { ptr, i64 }, ptr %%dirent, i32 0, i32 0
+  store ptr %%namecopy, ptr %%dname_p, align 8
+  %%dmode_p = getelementptr { ptr, i64 }, ptr %%dirent, i32 0, i32 1
+  store i64 %%mode, ptr %%dmode_p, align 8
+  store ptr %%dirent, ptr %%slot, align 8
+  br label %%advance
+
+advance:
   %%newlen = add i64 %%curlen, 1
   store i64 %%newlen, ptr %%len_p, align 8
   br label %%readloop
@@ -729,7 +778,7 @@ done:
   %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
-}`, opDescPtr, direntNameOffset(), dotPtr, dotdotPtr))
+}`, opDescPtr, e.internString("scandir"), direntNameOffset(), dotPtr, dotdotPtr, direntTypeOffset()))
 }
 
 // statLayout returns the host libc's struct stat field offsets and load widths
@@ -914,11 +963,11 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
-%s}`, statResultIR, opDescPtr, statBodyLL(statLayout())))
+%s}`, statResultIR, opDescPtr, e.internString("stat"), statBodyLL(statLayout())))
 }
 
 // ensureFsLstat declares __kml_fs_lstat — statSync's twin over lstat(2)
@@ -940,11 +989,11 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
-%s}`, statResultIR, opDescPtr, statBodyLL(statLayout())))
+%s}`, statResultIR, opDescPtr, e.internString("lstat"), statBodyLL(statLayout())))
 }
 
 // ensureFsPathOps declares the one-shot path-based helpers (ADR-00497):
@@ -963,12 +1012,14 @@ func (e *Emitter) ensureFsPathOps() {
 	e.emitGlobal("declare ptr @realpath(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @mkdtemp(ptr noundef)")
 	e.emitGlobal("declare i32 @symlink(ptr noundef, ptr noundef)")
+	e.emitGlobal("declare i32 @link(ptr noundef, ptr noundef)")
 	e.ensureReadlinkDecl()
 	e.emitGlobal("declare i32 @chmod(ptr noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @truncate(ptr noundef, i64 noundef)")
 	realpathDesc := e.internString("cannot resolve path")
 	mkdtempDesc := e.internString("cannot create temp directory")
 	symlinkDesc := e.internString("cannot create symlink")
+	linkDesc := e.internString("cannot create link")
 	readlinkDesc := e.internString("cannot read symlink")
 	chmodDesc := e.internString("cannot chmod path")
 	truncateDesc := e.internString("cannot truncate path")
@@ -980,7 +1031,7 @@ entry:
   %%failed = icmp eq ptr %%r, null
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret ptr %%r
@@ -1010,7 +1061,7 @@ entry:
   %%failed = icmp eq ptr %%r, null
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%prefix)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%prefix)
   unreachable
 ok:
   ret ptr %%r
@@ -1022,7 +1073,19 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}
+
+define void @__kml_fs_link(ptr %%existing, ptr %%path) {
+entry:
+  %%r = call i32 @link(ptr %%existing, ptr %%path)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret void
@@ -1035,7 +1098,7 @@ entry:
   %%failed = icmp slt i64 %%n, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   %%end = getelementptr i8, ptr %%buf, i64 %%n
@@ -1050,7 +1113,7 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret void
@@ -1062,7 +1125,7 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret void
@@ -1075,11 +1138,14 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret void
-}`, realpathDesc, mkdtempDesc, symlinkDesc, readlinkDesc, chmodDesc, truncateDesc, accessDesc))
+}`, realpathDesc, e.internString("lstat"), mkdtempDesc, e.internString("mkdtemp"),
+		symlinkDesc, e.internString("symlink"), linkDesc, e.internString("link"),
+		readlinkDesc, e.internString("readlink"), chmodDesc, e.internString("chmod"),
+		truncateDesc, e.internString("open"), accessDesc, e.internString("access")))
 }
 
 // ensureFsRm declares __kml_fs_rm (ADR-00497): fs.rmSync. remove(3) first
@@ -1165,11 +1231,11 @@ endwalk:
   %%okr = icmp eq i32 %%rr, 0
   br i1 %%okr, label %%done, label %%fail
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 done:
   ret void
-}`, nameOff, rmDesc))
+}`, nameOff, rmDesc, e.internString("unlink")))
 }
 
 // openFlagBits maps a Node open-flags string to the host's O_* bit mask —
@@ -1194,17 +1260,55 @@ func openFlagBits(flags string) (int, bool) {
 // ensureFsFdOps declares the fd-based helpers (ADR-00498): open/close/
 // read/write/fstat over raw POSIX fds. open throws the shared fs error on
 // failure; the others throw on a negative return.
+// ensureFsUtimes declares __kml_fs_utimes(path, timeval[2]*): utimes(2) on
+// POSIX, a SetFileTime shim on Windows (win32fs.c), throwing the shared fs
+// error on failure. The `times` buffer is two {i64 sec, i64 usec} pairs
+// (ADR-00755).
+func (e *Emitter) ensureFsUtimes() {
+	if e.usedFsUtimes {
+		return
+	}
+	e.usedFsUtimes = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @utimes(ptr noundef, ptr noundef)")
+	utimesDesc := e.internString("cannot set file times")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_utimes(ptr %%path, ptr %%times) {
+entry:
+  %%r = call i32 @utimes(ptr %%path, ptr %%times)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret void
+}`, utimesDesc, e.internString("utime")))
+}
+
+// ensureOpenDecl declares C `open` exactly once (shared by the fd ops and the
+// macOS fs.watch backend, which would otherwise redefine it).
+func (e *Emitter) ensureOpenDecl() {
+	if e.usedOpenDecl {
+		return
+	}
+	e.usedOpenDecl = true
+	e.emitGlobal("declare i32 @open(ptr noundef, i32 noundef, ...)")
+}
+
 func (e *Emitter) ensureFsFdOps() {
 	if e.usedFsFdOps {
 		return
 	}
 	e.usedFsFdOps = true
 	e.ensureFsThrow()
-	e.emitGlobal("declare i32 @open(ptr noundef, i32 noundef, ...)")
+	e.ensureOpenDecl()
 	e.emitGlobal("declare i32 @close(i32 noundef)")
 	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
 	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
 	e.emitGlobal("declare i64 @lseek(i32 noundef, i64 noundef, i32 noundef)")
+	e.emitGlobal("declare i32 @fsync(i32 noundef)")
+	e.emitGlobal("declare i32 @ftruncate(i32 noundef, i64 noundef)")
 	e.emitFSDecl("fstat", "i32", []string{"i32", "ptr"})
 	openDesc := e.internString("cannot open path")
 	fdDesc := e.internString("fd operation failed")
@@ -1217,7 +1321,7 @@ entry:
   %%failed = icmp slt i32 %%fd, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   %%r = sext i32 %%fd to i64
@@ -1245,7 +1349,7 @@ chk:
   %%failed = icmp slt i64 %%n, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr null)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
   unreachable
 ok:
   ret i64 %%n
@@ -1259,10 +1363,40 @@ entry:
   %%failed = icmp ne i32 %%r, 0
   br i1 %%failed, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr null)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr null)
   unreachable
 ok:
-%s}`, openDesc, fdDesc, statResultIR, fdDesc, statBodyLL(statLayout())))
+%s}`, openDesc, e.internString("open"), fdDesc, e.internString("read"),
+		statResultIR, fdDesc, e.internString("fstat"), statBodyLL(statLayout())))
+	// __kml_fs_throw calls strlen() on the path argument, so it must be a valid
+	// C string, never null (the fdrw fail path's `ptr null` is a latent crash
+	// never hit by a test). fd-based ops have no path in Node's message anyway.
+	emptyPath := e.internString("")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_fsync(i64 %%fd) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%r = call i32 @fsync(i32 %%f32)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %s)
+  unreachable
+ok:
+  ret void
+}
+define void @__kml_fs_ftruncate(i64 %%fd, i64 %%len) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%r = call i32 @ftruncate(i32 %%f32, i64 %%len)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %s)
+  unreachable
+ok:
+  ret void
+}`, fdDesc, e.internString("fsync"), emptyPath, fdDesc, e.internString("ftruncate"), emptyPath))
 }
 
 // linuxErrnoPairs is the errno→code table for Windows, where the shim sets

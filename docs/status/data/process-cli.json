@@ -175,11 +175,11 @@
             "feature": "`process.stdin.setRawMode(enabled)` (raw terminal input)",
             "status": "implemented",
             "caveats": [
-              "A no-op when fd 0 is not a terminal (`tcgetattr` fails; on Windows, `GetConsoleMode` fails) — guard on `process.stdin.isTTY` first, as every TUI does",
-              "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
-              "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable"
+              "A no-op when fd 0 is not a terminal (`tcgetattr` fails; on Windows, `GetConsoleMode` fails) — guard on `process.stdin.isTTY` first, as every TUI does"
             ],
             "notes": [
+              "Raw mode disables signal generation (`ISIG`), so Ctrl-C stops delivering `SIGINT` and arrives as the raw byte `3` for the program to handle — matching Node/libuv `UV_TTY_MODE_RAW` exactly",
+              "Auto-restore on a crash/uncaught exception is the application's responsibility (same footgun as Node); `setRawMode(false)` restores the state captured on the first enable",
               "Routes through an embedded C shim compiled against the platform's own `<termios.h>`, so the glibc/Darwin `struct termios` layout difference is sidestepped by construction ([ADR-00518](../adr/ADR-00518.md)); on Windows the same shim uses the console-mode API (line input/echo/processed input off, VT input on, so arrow keys arrive as ESC `[` A there too) — verified in the suite under a ConPTY pseudo-console ([ADR-00727](../adr/ADR-00727.md))",
               "Pair with `process.stdin.on('data')` (event-driven, the Node-idiomatic raw loop) or with `klain:tty` `readByte`/`readKey` (synchronous)"
             ]
@@ -248,7 +248,7 @@
             "feature": "`process.getuid()` / `geteuid()` / `getgid()` / `getegid()`",
             "status": "implemented",
             "notes": [
-              "Direct POSIX credential reads returning a `number` — present unconditionally (this compiler is POSIX-only), matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md))"
+              "Direct POSIX credential reads returning a `number`, matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md)); on Windows they are rejected at compile time, exactly as Node leaves them undefined there ([TDD-00177](../tdd/TDD-00177.md))"
             ],
             "caveats": []
           },
@@ -323,13 +323,19 @@
             "caveats": [
               "The listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue (`process.nextTick` — see the row above)",
               "One listener per event, an arrow/function-expression literal only (the same posture as `Worker`); no `removeListener`",
-              "spawn's options support `{ cwd, shell, stdio: 'pipe' }` ([ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md)) — `cwd` is real (child chdir); `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell *path*, a dynamic value, or `shell:true` with an args array are clean rejections); `env`/`detached`/stdio arrays are clean rejections; exec/execFile still take no options. `'close'`/`'exit'` receive the exit `code` only (a signal death is folded to `128+signal`, no separate `signal` argument)",
-              "`exec`/`execSync` pass the command line to the shell **verbatim** — embedded quotes survive (`exec('echo \"hi\"')`), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused (`EINVAL`-shaped failed spawn, exit 127) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md))",
+              "spawn's options support `{ cwd, shell, stdio: 'pipe' }` ([ADR-00433](../adr/ADR-00433.md), [ADR-00740](../adr/ADR-00740.md)) — `cwd` is real (child chdir); `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell *path*, a dynamic value, or `shell:true` with an args array are clean rejections); `env` fully replaces the child's environment (an object literal of string values, Node's non-merging semantics — [ADR-00762](../adr/ADR-00762.md)); `windowsHide` (literal bool) suppresses the child's console window on Windows (`CREATE_NO_WINDOW`) and is a no-op on POSIX ([ADR-00763](../adr/ADR-00763.md)); `timeout` (ms) kills the child via the event loop with `killSignal` (a literal name/number, default SIGTERM), surfacing as the `(null, '<signal>')` exit event ([ADR-00764](../adr/ADR-00764.md)); `detached` (literal bool) makes the child a new session/group leader — `setsid` on POSIX, `DETACHED_PROCESS` on Windows ([ADR-00765](../adr/ADR-00765.md)); `stdio` takes `'pipe'`/`'inherit'`/`'ignore'` as a string or a 3-element `[stdin, stdout, stderr]` array — inherit wires the fd to the parent's, ignore sends it to `/dev/null`/NUL ([ADR-00766](../adr/ADR-00766.md); fd numbers, `'ipc'` and streams are clean rejections); exec/execFile still take no options",
+              "`exec`/`execSync` pass the command line to the shell **verbatim** — embedded quotes survive (`exec('echo \"hi\"')`), matching Node; on Windows a `.bat`/`.cmd` spawned *without* a shell is refused, surfacing as the spawn `'error'` event (`EINVAL`) rather than run through an implicit `cmd.exe`, closing the CVE-2024-27980 argument-injection path ([ADR-00740](../adr/ADR-00740.md)/[ADR-00754](../adr/ADR-00754.md))",
+              "The `'error'` Error carries a `.message` (`spawn <reason>`) but not the Node `.code`/`.errno`/`.syscall`/`.path`/`.spawnargs` properties",
+              "A legacy `'exit'`/`'close'` listener that declares one non-nullable `number` param sees `0` (not `null`) on a signal death — a plain `number` can't hold `null`; type the param `number | null` for the faithful `null` ([ADR-00761](../adr/ADR-00761.md))",
+              "`child.kill` takes a signal *name* string only as a **literal** (resolved to the host's signal number at compile time) or a number; a dynamic signal-name string is a clean rejection",
               "Handles and their buffered output are never freed (`-mm=manual`)"
             ],
             "notes": [
               "fork()+execvp() with three pipes; the two read ends are non-blocking and fold into the same `select()` event loop as Worker/channel pipes ([ADR-00322](../adr/ADR-00322.md))",
-              "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback"
+              "`spawn` streams (`child.stdout`/`stderr` `'data'`/`'end'`, `child.on('close'/'exit'/'error')`, `child.stdin.write`/`.end`, `child.pid`, `child.kill`, `child.unref()`/`ref()` — the loop-keepalive opt-out, [ADR-00767](../adr/ADR-00767.md)); `exec` runs via `/bin/sh -c` and `execFile` execvp's directly, both buffering into a single `(err, stdout, stderr)` callback",
+              "A spawn that fails to start (a missing command → `ENOENT`) emits the `'error'` event with an `Error` and **not** `'exit'` — detected via a close-on-exec status pipe on POSIX and `CreateProcessW`'s failure on Windows ([ADR-00754](../adr/ADR-00754.md))",
+              "The `'exit'`/`'close'` exit `code` is the child's real width: on Windows the full 32-bit value (`cmd /c exit 300` → `300`, an access violation → `3221225477`), on POSIX the 8-bit wait-status field (`300 & 0xff = 44`, as Node also reports there) ([ADR-00759](../adr/ADR-00759.md))",
+              "`'exit'`/`'close'` fire as `(code, signal)` like Node: a signal death gives `code = null` and the signal **name** (`'SIGTERM'`), a normal exit the integer code and `signal = null`. POSIX recovers the signal from the wait status (`WIFSIGNALED`/`WTERMSIG`); Windows from the signal `child.kill` recorded, since `TerminateProcess` leaves no signalled bit ([ADR-00761](../adr/ADR-00761.md), [TDD-00184](../tdd/TDD-00184.md))"
             ]
           },
           {
@@ -352,10 +358,11 @@
             "caveats": [
               "Options object supports `{ cwd, encoding: 'utf8' }` only (no `env`/`timeout`/`input`/`shell`/`stdio` — clean rejections); results are strings (the `encoding: 'utf8'` shape), not Buffers",
               "`spawnSync`'s result carries `status`/`stdout`/`stderr`/`pid` only — no `signal`/`error`/`output` fields (a signal death folds into `status` as `128+signal`)",
-              "`execSync`/`execFileSync` return stdout but do **not** throw on a non-zero exit status (Node throws) — use `spawnSync().status` where the exit code matters"
+              "`execSync`/`execFileSync` throw `Command failed: <command>` on a non-zero exit status ([ADR-00753](../adr/ADR-00753.md)), but the thrown plain `Error` does not yet carry the `.status`/`.stdout`/`.stderr` ExecException properties — use `spawnSync().status` when the exit code or captured output of a failing command is needed"
             ],
             "notes": [
               "One embedded C core ([ADR-00411](../adr/ADR-00411.md)): fork + execvp with both stdio pipes poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), then a blocking waitpid; `execSync` runs via `/bin/sh -c`",
+              "`execSync`/`execFileSync` throw on a non-zero exit and return the captured stdout only on success, matching Node ([ADR-00753](../adr/ADR-00753.md))",
               "Distinct from the bespoke `process.execFileSync` above (which throws on failure and inherits stderr)"
             ]
           }

@@ -5,10 +5,10 @@
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "16/17",
-    "loosePct": 94,
-    "strict": "2/17",
-    "strictPct": 12
+    "loose": "18/19",
+    "loosePct": 95,
+    "strict": "2/19",
+    "strictPct": 11
   },
   "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
   "entries": [
@@ -212,15 +212,19 @@
     },
     {
       "id": "fs.readdirSync",
-      "name": "fs.readdirSync(path)",
-      "statusRow": "fs.readdirSync(path)",
-      "signature": "readdirSync(path: string): string[]",
-      "badge": "exact",
-      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe.",
+      "name": "fs.readdirSync(path[, { withFileTypes: true }])",
+      "statusRow": "fs.readdirSync(path[, { withFileTypes: true }])",
+      "signature": "readdirSync(path: string, options?: { withFileTypes: true }): string[] | Dirent[]",
+      "badge": "caveats",
+      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe. With { withFileTypes: true } it returns Dirent[] — each with a .name and .isFile()/.isDirectory()/.isSymbolicLink(), classified from the entry's d_type (from FindFirstFile attributes on Windows) without a per-file stat.",
       "returns": {
-        "type": "string[]",
-        "desc": "Directory entry names."
+        "type": "string[] | Dirent[]",
+        "desc": "Directory entry names, or Dirent objects when withFileTypes is set."
       },
+      "differences": [
+        "Only `{ withFileTypes: true }` is honoured — `recursive` and `encoding: 'buffer'` are unsupported.",
+        "`Dirent` exposes `.name` and the three kind predicates only (no `.parentPath`/`.path`, no block/char/FIFO/socket predicates); a `DT_UNKNOWN` filesystem reports all kinds `false` rather than falling back to `lstat`."
+      ],
       "exampleKey": "fs/fs",
       "snippet": "const entries: string[] = fs.readdirSync('/tmp/kml_fs_example_dir')\nentries.sort()",
       "seeAlso": [
@@ -352,11 +356,11 @@
     },
     {
       "id": "fs.rmsync",
-      "name": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / readlinkSync / chmodSync / truncateSync / accessSync",
-      "statusRow": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / readlinkSync / chmodSync / truncateSync / accessSync",
-      "signature": "rmSync(path: string, options?: { recursive: boolean, force: boolean }): void",
+      "name": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / linkSync / readlinkSync / chmodSync / truncateSync / accessSync",
+      "statusRow": "fs.rmSync / realpathSync / mkdtempSync / symlinkSync / linkSync / readlinkSync / chmodSync / truncateSync / accessSync",
+      "signature": "rmSync(path: string, options?: { recursive: boolean, force: boolean }): void; linkSync(existingPath: string, newPath: string): void",
       "badge": "caveats",
-      "description": "The rest of the sync path-management set: recursive removal, canonicalization, temp-directory creation, symlink create/read, permission bits, truncation, and existence/permission checks.",
+      "description": "The rest of the sync path-management set: recursive removal, canonicalization, temp-directory creation, symlink create/read, hard links, permission bits, truncation, and existence/permission checks.",
       "params": [
         {
           "name": "path",
@@ -366,7 +370,8 @@
       ],
       "differences": [
         "`rmSync` options must be a `{ recursive, force }` boolean-literal object — no `maxRetries`/`retryDelay`.",
-        "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (`F_OK`) with no `fs.constants` to name the others."
+        "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (`F_OK`) with no `fs.constants` to name the others.",
+        "`linkSync` makes a hard link (`CreateHardLinkW` on Windows — unprivileged, unlike `symlinkSync`); it takes no link-type argument."
       ],
       "seeAlso": [
         "fs.unlinkSync",
@@ -408,6 +413,79 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fsopensyncpath-flags-mode"
+      }
+    },
+    {
+      "id": "fs.fsyncsync",
+      "name": "fs.fsyncSync / fdatasyncSync / ftruncateSync",
+      "statusRow": "fs.fsyncSync(fd) / fdatasyncSync(fd) / ftruncateSync(fd[, len])",
+      "signature": "fsyncSync(fd: number): void; ftruncateSync(fd: number, len?: number): void",
+      "badge": "caveats",
+      "description": "Durability and resize over an open file descriptor: flush buffered writes to disk (fsyncSync/fdatasyncSync) and resize the open file (ftruncateSync), completing the fd-based API alongside openSync/readSync/writeSync. On POSIX these are the fsync/ftruncate syscalls; on Windows they are Win32 shims (FlushFileBuffers / SetEndOfFile), so the same code runs on every host.",
+      "params": [
+        {
+          "name": "fd",
+          "type": "number",
+          "desc": "An open file descriptor from openSync."
+        },
+        {
+          "name": "len",
+          "type": "number",
+          "desc": "ftruncateSync only: the new file length; defaults to 0. Growing zero-fills."
+        }
+      ],
+      "returns": {
+        "type": "void",
+        "desc": "Nothing; throws a coded Error on failure."
+      },
+      "differences": [
+        "`fdatasyncSync` is an alias for `fsyncSync` — the data-only optimization isn't observable in a file's contents.",
+        "A bad fd throws a coded `Error` (`e.code === 'EBADF'`); the message is `fd operation failed '': <reason>`, not Node's `EBADF: …, fsync` form. `err.syscall` (`'fsync'`/`'ftruncate'`/`'fstat'`) and the numeric `err.errno` match Node; only `err.path` is absent (fd ops carry no path in Node either)."
+      ],
+      "seeAlso": [
+        "fs.openSync"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsfsyncsyncfd"
+      }
+    },
+    {
+      "id": "fs.utimessync",
+      "name": "fs.utimesSync(path, atime, mtime)",
+      "statusRow": "fs.utimesSync(path, atime, mtime)",
+      "signature": "utimesSync(path: string, atime: number | Date, mtime: number | Date): void",
+      "badge": "caveats",
+      "description": "Sets a file's access and modification times. atime/mtime are seconds (Node's number form) or a Date (its epoch); sub-second precision is carried as microseconds. On POSIX this is utimes(2); on Windows a SetFileTime shim converting Unix time to the 1601-epoch FILETIME.",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "desc": "The file to touch."
+        },
+        {
+          "name": "atime",
+          "type": "number | Date",
+          "desc": "New access time — seconds since the epoch, or a Date."
+        },
+        {
+          "name": "mtime",
+          "type": "number | Date",
+          "desc": "New modification time — seconds since the epoch, or a Date."
+        }
+      ],
+      "returns": {
+        "type": "void",
+        "desc": "Nothing; throws a coded Error on failure."
+      },
+      "differences": [
+        "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported; there is no fd-based `futimesSync`.",
+        "A missing path throws a coded `Error` (`e.code === 'ENOENT'`) that also carries `err.syscall` (the bare syscall — `'open'`/`'stat'`/`'scandir'`/…), `err.path`, and the numeric `err.errno` (the negated errno, `-2` for ENOENT); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+      ],
+      "seeAlso": [
+        "fs.statSync"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsutimessyncpath-atime-mtime"
       }
     },
     {

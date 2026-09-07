@@ -182,12 +182,19 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_cp_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_cp_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_cp_dispatch() {\nentry:\n  ret void\n}")
+		e.emitGlobal("define i64 @__kml_cp_next_timeout_ns() {\nentry:\n  ret i64 0\n}")
 	}
 	// readline hooks likewise.
 	if !e.usedReadlineRuntime {
 		e.emitGlobal("define i1 @__kml_rl_keepalive() {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_rl_dispatch() {\nentry:\n  ret void\n}")
+	}
+	// fs.watch hooks likewise (TDD-00181).
+	if !e.usedFsWatchRuntime {
+		e.emitGlobal("define i1 @__kml_fswatch_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_fswatch_dispatch() {\nentry:\n  ret void\n}")
 	}
 	// process.stdin streaming hooks likewise.
 	if !e.usedStdinRuntime {

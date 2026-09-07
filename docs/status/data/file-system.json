@@ -44,7 +44,7 @@
               "See [ADR-00094](../adr/ADR-00094.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
@@ -55,7 +55,7 @@
               "`data` may be a string (the original, `strlen`-based path, unchanged) or an `ArrayBuffer`/TypedArray (binary-safe, writes the real byte count via `fwrite` directly — [ADR-00094](../adr/ADR-00094.md)), dispatched on `data`'s inferred type"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No third `options` argument — `writeFileSync(p, d, 'utf8')` / `{ flag: 'a' }` are compile errors (`encoding`/`mode`/`flag` unavailable — use `appendFileSync` to append)."
             ]
           },
@@ -67,7 +67,7 @@
               "Same string/`ArrayBuffer`/TypedArray dispatch as `writeFileSync`"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No third `options` argument (`encoding`/`mode`/`flag` rejected at compile time)."
             ]
           },
@@ -88,8 +88,11 @@
             ]
           },
           {
-            "feature": "`fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync`",
+            "feature": "`fs.rmSync` / `realpathSync` / `mkdtempSync` / `symlinkSync` / `linkSync` / `readlinkSync` / `chmodSync` / `truncateSync` / `accessSync`",
             "status": "implemented",
+            "notes": [
+              "`linkSync(existing, newPath)` makes a hard link — a second name for one inode, so `nlink` rises and the content outlives unlinking the original; on Windows it is `CreateHardLinkW` (unprivileged, unlike `symlinkSync` which needs Developer Mode) ([ADR-00751](../adr/ADR-00751.md))"
+            ],
             "caveats": [
               "`rmSync` options must be a `{recursive, force}` boolean-literal object; no `maxRetries`/`retryDelay`",
               "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (F_OK) with no `fs.constants` to name others ([ADR-00497](../adr/ADR-00497.md))"
@@ -108,6 +111,29 @@
             ]
           },
           {
+            "feature": "`fs.fsyncSync(fd)` / `fdatasyncSync(fd)` / `ftruncateSync(fd[, len])`",
+            "status": "implemented",
+            "notes": [
+              "`fsyncSync`/`fdatasyncSync` flush an open fd to disk; `ftruncateSync` resizes it (shrinks or zero-fill-grows), `len` defaulting to 0 as in Node",
+              "On POSIX these are the `fsync`/`ftruncate` syscalls; on Windows they are Win32 shims (`FlushFileBuffers` / `SetFilePointerEx`+`SetEndOfFile`), so the same code works on every host ([ADR-00750](../adr/ADR-00750.md))"
+            ],
+            "caveats": [
+              "`fdatasyncSync` is an alias for `fsyncSync` (the data-only optimization isn't observable in the file's contents)",
+              "A bad fd throws a coded `Error` (`e.code === 'EBADF'`); the message is `fd operation failed '': <reason>`, not Node's `EBADF: …, fsync` form; `err.syscall` (`'fsync'`/`'ftruncate'`/`'fstat'` — [ADR-00768](../adr/ADR-00768.md)) and the numeric `err.errno` ([ADR-00770](../adr/ADR-00770.md)) match Node; only `err.path` is absent (fd ops carry no path in Node either)"
+            ]
+          },
+          {
+            "feature": "`fs.utimesSync(path, atime, mtime)`",
+            "status": "implemented",
+            "notes": [
+              "Sets the access/modification times. `atime`/`mtime` are a number of seconds (Node's number form) or a `Date` (its epoch); sub-second precision is carried as microseconds",
+              "On POSIX this is `utimes(2)`; on Windows a `SetFileTime` shim (Unix time → the 1601-epoch `FILETIME`), so the same code works on every host ([ADR-00755](../adr/ADR-00755.md))"
+            ],
+            "caveats": [
+              "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported; there is no fd-based `futimesSync`"
+            ]
+          },
+          {
             "feature": "`fs.unlinkSync(path)`",
             "status": "implemented",
             "notes": [
@@ -115,7 +141,7 @@
               "A directory throws as Node does per host (`EISDIR` on Linux, `EPERM` on macOS/Windows) instead of being silently removed ([ADR-00736](../adr/ADR-00736.md))"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
@@ -139,16 +165,18 @@
             ]
           },
           {
-            "feature": "`fs.readdirSync(path)`",
+            "feature": "`fs.readdirSync(path[, { withFileTypes: true }])`",
             "status": "implemented",
             "notes": [
               "Lists a directory's entries (excluding `.`/`..`) as a `string[]`, in whatever order the OS's own `readdir()` returns them — no ordering guarantee, matching real Node",
               "Built from `struct dirent`'s `d_name` field at a `runtime.GOOS`-conditional byte offset, independently verified by a compiled `offsetof` probe on both Darwin and (via Docker, see [ADR-00051](../adr/ADR-00051.md)) x86-64 Linux",
+              "`{ withFileTypes: true }` returns `Dirent[]` — each with `.name` and `.isFile()`/`.isDirectory()`/`.isSymbolicLink()`, classified from the entry's `d_type` (from the `FindFirstFile` attributes on Windows, whose `dirent` has none) with no per-file `stat` ([ADR-00752](../adr/ADR-00752.md))",
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
-              "Path only — no `options`; `withFileTypes` (a `Dirent[]`), `recursive`, and `encoding: 'buffer'` are unsupported (always a one-level `string[]`)."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "`Dirent` exposes `.name` and the three kind predicates only — no `.parentPath`/`.path`, and `isBlockDevice`/`isCharacterDevice`/`isFIFO`/`isSocket` are absent; a filesystem returning `DT_UNKNOWN` (rare) reports all kinds `false` rather than falling back to `lstat`",
+              "Only `{ withFileTypes: true }` is honoured; `recursive` and `encoding: 'buffer'` remain unsupported."
             ]
           },
           {
@@ -159,14 +187,14 @@
               "See [ADR-00027](../adr/ADR-00027.md)"
             ],
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
             ]
           },
           {
             "feature": "`fs.copyFileSync(src, dest)`",
             "status": "implemented",
             "caveats": [
-              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); the numeric `err.errno`, `err.path`, and `err.syscall` remain absent, and the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
+              "`err.code` matches Node (`e.code === 'ENOENT'`/`'EEXIST'`/… — [ADR-00684](../adr/ADR-00684.md)); `err.syscall` and `err.path` also match Node ([ADR-00768](../adr/ADR-00768.md)); the numeric `err.errno` also matches Node ([ADR-00770](../adr/ADR-00770.md) — the negated Linux value on Windows, not Node's `UV_E*` number); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format.",
               "No `mode` argument — `fs.constants.COPYFILE_EXCL`/`FICLONE` unsupported; always overwrites the destination."
             ],
             "notes": [

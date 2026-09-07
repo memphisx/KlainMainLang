@@ -7,8 +7,8 @@
       ordinary <a href="https://quasar.dev" target="_blank" rel="noopener">Quasar</a> single-page
       app, backed by real <code>fs</code> calls in compiled native code. The left pane lists a
       directory; the right pane previews the selected entry — text files as text, images inline. It
-      compiles to one self-contained binary with the whole UI embedded; no browser, no Electron, no
-      <code>node_modules</code> at runtime.
+      compiles — with <code>--static</code> — to one self-contained binary with the whole UI
+      embedded; no browser, no Electron, no <code>node_modules</code> at runtime.
     </p>
 
     <Shot :src="listingImg" alt="A native window listing a directory with file icons and sizes"
@@ -106,7 +106,7 @@
 
     <div class="km-doc__nextrow">
       <router-link to="/docs/guides" class="km-btn">← All guides</router-link>
-      <router-link to="/docs/examples/webview/explorer" class="km-btn km-btn--gold">See explorer.ts →</router-link>
+      <a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/explorer" target="_blank" rel="noopener" class="km-btn km-btn--gold">See the full source →</a>
     </div>
   </article>
 </template>

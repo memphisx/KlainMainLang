@@ -516,12 +516,12 @@ entry:
   br i1 %%failed, label %%fail, label %%ok
 
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 
 ok:
   ret void
-}`, opDescPtr))
+}`, opDescPtr, e.internString("chdir")))
 }
 
 // ensureGetpid declares __kml_getpid: the current process ID via POSIX
@@ -612,7 +612,7 @@ func (e *Emitter) ensureProcessKill() {
 	e.ensureErrnoAccessor()
 	e.ensureStrerror()
 	accessor := errnoAccessor()
-	e.emitGlobal("declare i32 @kill(i32 noundef, i32 noundef)")
+	e.ensureCPKill() // single owner of `declare i32 @kill` (shared with child.kill)
 	fmtPtr := e.internString("kill(pid=%lld, signal=%lld): %s")
 	killErrNamePtr := e.internString("Error")
 	e.emitGlobal(fmt.Sprintf(`

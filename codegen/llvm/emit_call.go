@@ -876,7 +876,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsStatSync(ex.Args, ex.GetPos())
 			case "lstatSync":
 				return e.emitFsLstatSync(ex.Args, ex.GetPos())
-			case "realpathSync", "mkdtempSync", "readlinkSync", "symlinkSync", "chmodSync", "truncateSync", "accessSync":
+			case "realpathSync", "mkdtempSync", "readlinkSync", "symlinkSync", "linkSync", "chmodSync", "truncateSync", "accessSync":
 				return e.emitFsPathOp(mem.Property, ex.Args, ex.GetPos())
 			case "rmSync":
 				return e.emitFsRmSync(ex.Args, ex.GetPos())
@@ -890,6 +890,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsReadSync(ex.Args, ex.GetPos())
 			case "fstatSync":
 				return e.emitFsFstatSync(ex.Args, ex.GetPos())
+			case "utimesSync":
+				return e.emitFsUtimesSync(ex.Args, ex.GetPos())
+			case "watch":
+				return e.emitFsWatch(ex.Args, ex.GetPos())
+			case "fsyncSync", "fdatasyncSync":
+				return e.emitFsFsyncSync(ex.Args, ex.GetPos())
+			case "ftruncateSync":
+				return e.emitFsFtruncateSync(ex.Args, ex.GetPos())
 			case "createReadStream":
 				return e.emitFsCreateReadStream(ex.Args, ex.GetPos())
 			case "createWriteStream":
@@ -1190,8 +1198,14 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		// fs.statSync Stats methods (ADR-00495).
 		if mem.Property == "isFile" || mem.Property == "isDirectory" || mem.Property == "isSymbolicLink" {
-			if objTy := e.inferExprType(mem.Object); objTy.IsStats {
+			if objTy := e.inferExprType(mem.Object); objTy.IsStats || objTy.IsDirent {
 				return e.emitStatsKindCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
+			}
+		}
+		// fs.watch's FSWatcher (TDD-00181): .on('change'|'rename', cb) / .close().
+		if mem.Property == "on" || mem.Property == "close" {
+			if e.inferExprType(mem.Object).IsFSWatcher {
+				return e.emitFSWatcherMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 			}
 		}
 		// SharedArrayBuffer.grow / ArrayBuffer.resize (ADR-00494) — only on

@@ -49,7 +49,7 @@ int close(int);
 // instead of OpenProcess(pid) reaching whatever unrelated process now owns
 // the reused pid (ADR-00737). Reaped slots are reclaimed only when the
 // table needs room for a new child.
-typedef struct { DWORD pid; HANDLE h; int killsig; int failed; int reaped; } kml_proc;
+typedef struct { DWORD pid; HANDLE h; int killsig; int failed; int reaped; int spawnerrno; DWORD exitcode; } kml_proc;
 #define KML_PROC_MAX 256
 static kml_proc kml_procs[KML_PROC_MAX];
 
@@ -120,6 +120,12 @@ static HANDLE inheritable_dup(int fd) {
 static HANDLE inheritable_std(int fd, DWORD std_which, int for_input) {
 	HANDLE d;
 	if (fd >= 0) return inheritable_dup(fd);
+	// fd == -2: stdio 'ignore' — always NUL, never our std handle (ADR-00766).
+	if (fd == -2) {
+		SECURITY_ATTRIBUTES sa2 = { sizeof sa2, NULL, TRUE };
+		return CreateFileW(L"NUL", for_input ? GENERIC_READ : GENERIC_WRITE,
+		                   FILE_SHARE_READ | FILE_SHARE_WRITE, &sa2, OPEN_EXISTING, 0, NULL);
+	}
 	HANDLE h = GetStdHandle(std_which);
 	if (h && h != INVALID_HANDLE_VALUE &&
 	    DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &d, 0, TRUE, DUPLICATE_SAME_ACCESS))
@@ -153,9 +159,17 @@ static int is_batch_file(const char *s) {
 // quoting — set by the shell (`cmd.exe /d /s /c <command>`) paths, where
 // libuv passes the command line through verbatim. Returns the pid, or -1
 // with errno set (ENOENT when CreateProcess cannot find the program).
-int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags) {
+int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags, char **spawn_env) {
 	(void)file;
 	int verbatim = flags & 1;
+	// flags bit 1 = windowsHide (CREATE_NO_WINDOW, ADR-00763); flags bit 2 =
+	// detached (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so the child has no
+	// console and its own group, ADR-00765). DETACHED_PROCESS already implies no
+	// window and is mutually exclusive with CREATE_NO_WINDOW, so detached wins.
+	DWORD create_flag;
+	if (flags & 4) create_flag = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+	else if (flags & 2) create_flag = CREATE_NO_WINDOW;
+	else create_flag = 0;
 	size_t total = 1;
 	int argc = 0;
 	for (; argv[argc]; argc++) total += strlen(argv[argc]) * 2 + 4;
@@ -170,6 +184,7 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 		if (!bpr) return -1;
 		bpr->h = NULL;
 		bpr->failed = 1;
+		bpr->spawnerrno = L_EINVAL;
 		return (int)bpr->pid;
 	}
 	wchar_t *cmd = (wchar_t *)malloc(total * sizeof(wchar_t) * 2);
@@ -194,13 +209,38 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	HANDLE herr = inheritable_std(err_fd, STD_ERROR_HANDLE, 0);
 	siex.StartupInfo.hStdInput = hin; siex.StartupInfo.hStdOutput = hout; siex.StartupInfo.hStdError = herr;
 
-	// Environment: the current block plus the inherited-socket marker.
+	// Environment. A custom spawn_env (a NULL-terminated UTF-8 "KEY=val" list)
+	// fully REPLACES the child's, matching Node (ADR-00762); otherwise
+	// CreateProcessW inherits ours. The inherited-socket marker (cluster IPC)
+	// is appended to whichever block is built.
 	wchar_t *env = NULL;
 	HANDLE hinh = INVALID_HANDLE_VALUE;
+	wchar_t markerbuf[96];
+	const wchar_t *marker = NULL;
 	if (inherit_fd >= 0) {
 		hinh = inheritable_dup(inherit_fd);
-		wchar_t marker[96];
-		wsprintfW(marker, L"KML_WIN_INHERIT_FD=%d:%I64u", inherit_fd, (unsigned long long)(uintptr_t)hinh);
+		wsprintfW(markerbuf, L"KML_WIN_INHERIT_FD=%d:%I64u", inherit_fd, (unsigned long long)(uintptr_t)hinh);
+		marker = markerbuf;
+	}
+	if (spawn_env) {
+		// Each UTF-8 entry → wide (the wide count includes the terminating NUL,
+		// which is exactly the per-entry separator a double-NUL block wants).
+		size_t wtotal = 0;
+		int ne = 0;
+		for (; spawn_env[ne]; ne++) {
+			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[ne], -1, NULL, 0);
+			wtotal += (wn > 0 ? (size_t)wn : 1);
+		}
+		size_t mlen = marker ? (wcslen(marker) + 1) : 0;
+		env = (wchar_t *)malloc((wtotal + mlen + 1) * sizeof(wchar_t));
+		wchar_t *p = env;
+		for (int i = 0; i < ne; i++) {
+			int wn = MultiByteToWideChar(CP_UTF8, 0, spawn_env[i], -1, p, (int)(wtotal - (size_t)(p - env)));
+			p += (wn > 0 ? wn : 1);
+		}
+		if (marker) { size_t l = wcslen(marker) + 1; memcpy(p, marker, l * sizeof(wchar_t)); p += l; }
+		*p = 0;
+	} else if (marker) {
 		wchar_t *cur = GetEnvironmentStringsW();
 		size_t curlen = 0;
 		for (wchar_t *q = cur; *q; q += wcslen(q) + 1) curlen += wcslen(q) + 1;
@@ -236,7 +276,7 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	PROCESS_INFORMATION pi;
 	memset(&pi, 0, sizeof pi);
 	BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE,
-	                         CREATE_UNICODE_ENVIRONMENT | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
+	                         CREATE_UNICODE_ENVIRONMENT | create_flag | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
 	                         env, wcwd, &siex.StartupInfo, &pi);
 	DWORD err = GetLastError();
 	free(cmd); free(wcwd); free(env);
@@ -258,6 +298,7 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 		if (!pr) return -1;
 		pr->h = NULL;
 		pr->failed = 1;
+		pr->spawnerrno = errno;
 		return (int)pr->pid;
 	}
 	CloseHandle(pi.hThread);
@@ -267,6 +308,16 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	// close() of that fd must release only its own handle (win32io.c).
 	if (inherit_fd >= 0 && inherit_fd < KFD_MAX && kfd_kind[inherit_fd] == KFD_SOCKET) kfd_inherited[inherit_fd] = 1;
 	return (int)pi.dwProcessId;
+}
+
+// __kml_win_spawn_failed(pid): the Linux-ABI errno a failed CreateProcessW
+// mapped to (0 if the child actually started), so the IR can fire the spawn
+// 'error' event instead of a bogus exit 127 (ADR-00754). There is no fork on
+// Windows, so this replaces the POSIX status-pipe path.
+int __kml_win_spawn_failed(int pid) {
+	kml_proc *pr = proc_slot((DWORD)pid, 0);
+	if (pr && pr->failed) return pr->spawnerrno ? pr->spawnerrno : L_ENOENT;
+	return 0;
 }
 
 // Child side of inherit_fd: runs before main() and re-homes the inherited
@@ -320,11 +371,25 @@ int waitpid(int pid, int *status, int options) {
 	if (w == WAIT_TIMEOUT) { if (!pr) CloseHandle(h); return 0; }
 	DWORD code = 0;
 	GetExitCodeProcess(h, &code);
+	// The full 32-bit code (e.g. 0xC0000005 for an access violation) cannot
+	// fit the POSIX wait word's 8-bit exit field, so stash it in the slot for
+	// __kml_win_exit_code to hand back the wide value (ADR-00759). *status
+	// keeps the POSIX encoding for WIFEXITED/WIFSIGNALED shape.
+	if (pr && !pr->killsig) pr->exitcode = code;
 	int st = (pr && pr->killsig) ? (pr->killsig & 0x7f) : (int)((code & 0xff) << 8);
 	if (status) *status = st;
 	CloseHandle(h);
 	if (pr) { pr->h = NULL; pr->reaped = 1; }
 	return pid;
+}
+
+// Full 32-bit exit code of a (reaped) child, for the wide exit-code path the
+// POSIX 8-bit wait status cannot carry (ADR-00759). -1 when the pid has no
+// slot (e.g. an OpenProcess-attached pid), so callers fall back to
+// WEXITSTATUS's low 8 bits.
+int __kml_win_exit_code(int pid) {
+	kml_proc *pr = proc_slot((DWORD)pid, 0);
+	return pr ? (int)pr->exitcode : -1;
 }
 
 int kill(int pid, int sig) {

@@ -217,6 +217,17 @@ plus a `clang`-then-`gcc` two-step on Alpine/musl — too distro-specific to
 safely automate, so the full recipe lives in `docs/adr/` rather than in the
 compiler. `RegExp`'s pcre2 has none of that drama and just links statically.
 
+`--static` works on **Windows** too, and there it links the *non-system*
+libraries statically — the mingw C++ runtime (`libstdc++`/`libgcc`/`libwinpthread`,
+pulled in by the vendored Yoga layout engine), `pcre2` (`RegExp`), and the full
+`libcurl` chain (`fetch`/`http`/`tls`; ucrt64's curl uses Windows SSPI, not MIT
+krb5, so the static chain has no gssapi drag) — while the UCRT and core Win32 DLLs
+stay dynamic, since they ship with Windows 10/11. The result is a single
+self-contained `.exe` that runs on a box with no MSYS2 install (ADR-00771/00772).
+Without `--static` the build is dynamic, like Mac/Linux: the program needs those
+DLLs bundled beside it or on `PATH` (a Windows app ships them; on Mac/Linux you
+declare the dependency instead). Showcase apps are built `--static` (`make apps`).
+
 ## Test262 conformance
 
 The conformance reports under [`docs/testing/`](docs/testing/) are generated, not hand-written — regenerate them, don't edit them. They're produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/ADR-00153.md) for the full design/investigation.

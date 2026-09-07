@@ -8,6 +8,12 @@ TEST_TIMEOUT ?= 20m
 # *_worker.ts files are worker modules loaded via new Worker(...) — they are
 # compiled into their spawning example's binary, not standalone entries.
 EXAMPLES     := $(shell find examples -name '*.ts' ! -name '*_worker.ts' ! -path 'examples/tls/*' ! -path 'examples/webview/*' ! -name 'standard_decorators.ts' | sort)
+# Showcase apps — real applications (the landing-page gallery), not console.log
+# fixtures. Built as distributable single binaries via `make apps` (`--static`),
+# with a self-containment assertion on Windows. Listed by entry source; loadtest
+# lives under apps/ (multi-module), the rest still under examples/ pending the
+# apps/ relocation.
+APPS         := apps/klaintop/main.ts apps/files/main.ts apps/todo/main.ts apps/menu/main.ts apps/explorer/main.ts apps/loadtest/main.ts
 HTTPBIN_LITE := .httpbin-lite
 HTTPBIN_LITE_PORT := 8765
 # TDD-00174 Stage A mode knobs: `make examples MM=auto OPTMEM=1` compiles the
@@ -21,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-par examples compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
+.PHONY: all build dist install test test-par examples apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts status status-check status-roundtrip reference-check reference-sync help
 
 ## all: build the compiler
 all: build
@@ -136,6 +142,33 @@ examples: build
 	done; \
 	echo ""; \
 	echo "Results: $$ok passed, $$fail failed"; \
+	test $$fail -eq 0
+
+## apps: build every showcase app (APPS) as a distributable single binary
+## (--static) and, on Windows, assert it imports no non-system DLL. These are
+## real applications, not console.log fixtures, so they get their own guard:
+## `make examples` only checks exit-0 on a non-tty and can't see a missing DLL.
+## macOS builds without --static (no static libSystem) — compile-check only there.
+apps: build
+	@uname_s=$$(uname -s 2>/dev/null); \
+	win=0; static=--static; \
+	case "$$uname_s" in MINGW*|MSYS*|CYGWIN*) win=1;; Darwin) static=;; esac; \
+	ok=0; fail=0; \
+	for src in $(APPS); do \
+		[ -e "$$src" ] || { printf '%-40s SKIP (missing)\n' "  $$src"; continue; }; \
+		base=$$(dirname $$src)/$$(basename $$src .ts); out=$$base; \
+		[ "$$win" = "1" ] && out=$$base.exe; \
+		printf '%-40s' "  $$src"; \
+		if ./$(BINARY) $$static -o $$out $$src >/tmp/kml-apps.log 2>&1; then \
+			if [ "$$win" = "1" ]; then \
+				bad=$$(objdump -p "$$out" 2>/dev/null | grep -i 'DLL Name' | grep -icE 'stdc|gcc_s|winpthread|pcre|curl|ssl|crypto|nghttp|brotli|zstd|ssh|idn|psl|unistring|iconv'); \
+				if [ "$$bad" = "0" ]; then echo "OK (self-contained)"; ok=$$((ok+1)); \
+				else echo "FAIL ($$bad non-system DLL import(s))"; fail=$$((fail+1)); fi; \
+			else echo "OK (built)"; ok=$$((ok+1)); fi; \
+		else echo "FAIL (build)"; tail -3 /tmp/kml-apps.log; fail=$$((fail+1)); fi; \
+	done; \
+	echo ""; \
+	echo "apps: $$ok ok, $$fail failed"; \
 	test $$fail -eq 0
 
 ## compile: compile a .ts file to a native binary  (usage: make compile FILE=path/to/file.ts)

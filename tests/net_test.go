@@ -409,3 +409,33 @@ server.on('listening', mustCall(() => {
 server.listen(0)
 `, "ready\ndata: bye\nend\nclose")
 }
+
+// ADR-00760: socket.setKeepAlive(enable, initialDelay) threads the idle time
+// into a keepalive-idle setsockopt (Linux TCP_KEEPIDLE / macOS TCP_KEEPALIVE,
+// seconds = ~~(ms/1000)); on Windows the shim remaps it to SIO_KEEPALIVE_VALS,
+// dodging the TCP_MAXSEG opt-number collision. The delay was previously
+// evaluated and dropped. Exercised over a real loopback round trip: the option
+// must apply without error and leave the connection fully usable.
+func TestE2ENetSetKeepAliveInitialDelay(t *testing.T) {
+	assertOutputImports(t, `
+import net from 'net'
+const dec = new TextDecoder()
+const server = net.createServer((sock) => {
+  sock.setKeepAlive(true, 5000)
+  sock.on('data', (c: Uint8Array) => { sock.write("ok") })
+})
+server.listen(0, () => {
+  const client = net.connect({ port: server.address().port, host: "127.0.0.1" }, () => {
+    client.setKeepAlive(true, 10000)
+    client.setKeepAlive(false)
+    client.setKeepAlive(true, 0)
+    client.write("go")
+  })
+  client.on('data', (c: Uint8Array) => {
+    console.log(dec.decode(c))
+    client.destroy()
+    server.close()
+  })
+})
+`, "ok")
+}

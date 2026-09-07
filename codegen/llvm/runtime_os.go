@@ -89,7 +89,7 @@ func (e *Emitter) ensureOSReadProcFile() {
 	fmt.Fprintf(&b, "  %%isnull = icmp eq ptr %%f, null\n")
 	fmt.Fprintf(&b, "  br i1 %%isnull, label %%fail, label %%ok\n")
 	fmt.Fprintf(&b, "fail:\n")
-	fmt.Fprintf(&b, "  call void @__kml_fs_throw(ptr %s, ptr %%path)\n", opDescPtr)
+	fmt.Fprintf(&b, "  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)\n", opDescPtr, e.internString("open"))
 	fmt.Fprintf(&b, "  unreachable\n")
 	fmt.Fprintf(&b, "ok:\n")
 	fmt.Fprintf(&b, "  %%buf_p = alloca ptr, align 8\n")

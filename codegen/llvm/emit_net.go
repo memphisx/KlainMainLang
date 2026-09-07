@@ -544,11 +544,18 @@ func (e *Emitter) emitNetSocketSockOpt(objVal Value, args []ast.Expression, whic
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i32", z, v.Ref))
 		enable = z
 	}
-	// Evaluate any further args (e.g. setKeepAlive's initialDelay) for side
-	// effects; not threaded into the socket option in V1.
+	// setKeepAlive's second argument is the keepalive-idle time in
+	// milliseconds; capture it (a number → i64) so it can be threaded into
+	// TCP_KEEPIDLE below. Any further args are evaluated for side effects.
+	var delayVal *Value
 	for i := 1; i < len(args); i++ {
-		if _, err := e.emitExpr(args[i]); err != nil {
+		v, err := e.emitExpr(args[i])
+		if err != nil {
 			return Value{}, err
+		}
+		if i == 1 && which == "keepalive" {
+			dv := v
+			delayVal = &dv
 		}
 	}
 	fd32 := e.netFieldFd32(objVal.Ref, netSocketIR)
@@ -562,6 +569,43 @@ func (e *Emitter) emitNetSocketSockOpt(objVal Value, args []ast.Expression, whic
 		level, optname = netKeepAliveConst()
 	}
 	e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, level, optname, valp))
+
+	// Node's setKeepAlive(enable, initialDelay): with an idle delay AND
+	// enable true, also set the keepalive-idle time — `~~(initialDelay/1000)`
+	// seconds — via TCP_KEEPIDLE (macOS TCP_KEEPALIVE). On Windows the shim
+	// translates this to SIO_KEEPALIVE_VALS, dodging the TCP_MAXSEG opt-number
+	// collision (ADR-00760). Only when both hold, matching libuv.
+	if which == "keepalive" && delayVal != nil {
+		// The delay is a number; normalise to i64 milliseconds (a literal
+		// arrives as double, a typed value may already be i64).
+		delayI64 := delayVal.Ref
+		if delayVal.Ty.IR == "double" {
+			di := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", di, delayVal.Ref))
+			delayI64 = di
+		}
+		sec := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, 1000", sec, delayI64))
+		sec32 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", sec32, sec))
+		enOK := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", enOK, enable))
+		secOK := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i32 %s, 0", secOK, sec32))
+		doIdle := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", doIdle, enOK, secOK))
+		setL := e.freshLabel("netkeepidle.set")
+		doneL := e.freshLabel("netkeepidle.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doIdle, setL, doneL))
+		e.emitLabel(setL)
+		secp := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", secp))
+		e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", sec32, secp))
+		idleLevel, idleOpt := netKeepIdleConst()
+		e.emitInstr(fmt.Sprintf("call i32 @setsockopt(i32 %s, i32 %d, i32 %d, ptr %s, i32 4)", fd32, idleLevel, idleOpt, secp))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+	}
 	return objVal, nil
 }
 

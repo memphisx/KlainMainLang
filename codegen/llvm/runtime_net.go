@@ -871,3 +871,16 @@ func netKeepAliveConst() (solSocket, soKeepAlive int) {
 	}
 	return sol, 9
 }
+
+// netKeepIdleConst returns the (IPPROTO_TCP, keepalive-idle option) pair for
+// the setsockopt threading setKeepAlive's idle time. IPPROTO_TCP is 6
+// everywhere; the option is macOS's TCP_KEEPALIVE (0x10) and Linux's
+// TCP_KEEPIDLE (4). Windows uses the Linux number, which the win32 shim
+// remaps to SIO_KEEPALIVE_VALS — a bare setsockopt(4) there is TCP_MAXSEG,
+// not a keepalive control (ADR-00760).
+func netKeepIdleConst() (ipprotoTCP, tcpKeepIdle int) {
+	if runtime.GOOS == "darwin" {
+		return 6, 0x10
+	}
+	return 6, 4
+}

@@ -23,6 +23,9 @@ var win32FSSource string
 //go:embed win32src/win32proc.c
 var win32ProcSource string
 
+//go:embed win32src/win32fswatch.c
+var win32FsWatchSource string
+
 //go:embed win32src/kml_posix_compat.h
 var win32CompatHeader string
 
@@ -33,7 +36,7 @@ var win32CompatHeader string
 // plain clang and let the link report the missing symbols itself.
 func win32ShimObjects() ([]string, error) {
 	var objs []string
-	for _, s := range []struct{ name, src string }{{"win32shim", win32ShimSource}, {"win32io", win32IOSource}, {"win32fs", win32FSSource}, {"win32proc", win32ProcSource}} {
+	for _, s := range []struct{ name, src string }{{"win32shim", win32ShimSource}, {"win32io", win32IOSource}, {"win32fs", win32FSSource}, {"win32proc", win32ProcSource}, {"win32fswatch", win32FsWatchSource}} {
 		o, err := win32ShimObject(s.name, s.src)
 		if err != nil {
 			return nil, err
@@ -80,9 +83,19 @@ func win32LinkArgs(args []string) []string {
 			return nil
 		}
 	}
-	// winpthread: the IR uses pthread mutexes/condvars (Atomics, workers) and
-	// glibc no longer needs -lpthread for them, so the emitters never add it.
-	extra := []string{"-lbcrypt", "-lpsapi", "-lwinpthread", "-lshell32"}
+	// winpthread: the IR uses pthread mutexes/condvars (Atomics, workers, the
+	// klain:sync goroutine runtime). Dynamic by default (libwinpthread-1.dll, on
+	// PATH / bundled); under --static the colon form links the static archive so a
+	// thread-using binary is self-contained (ADR-00772). --allow-multiple-definition
+	// then lets the win32 shim's socket/strerror symbols win over the static
+	// ws2_32/CRT copies static libcurl pulls in.
+	winpthread := "-lwinpthread"
+	extra := []string{"-lbcrypt", "-lpsapi", "-lshell32"}
+	if staticLinkMode {
+		winpthread = "-l:libwinpthread.a"
+		extra = append(extra, "-Wl,--allow-multiple-definition")
+	}
+	extra = append(extra, winpthread)
 	if objs, err := win32ShimObjects(); err == nil {
 		extra = append(objs, extra...)
 	} else {

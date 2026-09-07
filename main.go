@@ -65,9 +65,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *static && runtime.GOOS != "linux" {
-		fatal("--static is only supported when compiling on Linux (this run is on %s). This is not a missing-package issue: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. To produce a statically-linked binary for a scratch/distroless Docker image, run klainmain itself on Linux — e.g. a Linux build stage in a multi-stage Dockerfile (build the compiler and your program there, then copy just the resulting static binary into a scratch final stage).", runtime.GOOS)
+	if *static && runtime.GOOS == "darwin" {
+		fatal("--static is not supported on macOS: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. On Linux, --static produces a fully static binary (scratch/distroless-ready). On Windows, --static statically links the non-system libraries (libstdc++, winpthread, pcre2, the curl chain) so the .exe is self-contained — the UCRT and core Win32 DLLs stay dynamic, as they ship with Windows 10+. To produce a static Linux binary from here, use a Linux build stage in a multi-stage Dockerfile.")
 	}
+	llvm.SetStaticLink(*static)
 
 	switch *mm {
 	case "manual", "gc", "auto":
@@ -183,7 +184,7 @@ func main() {
 	if em.UsesWorkers() {
 		// Worker threads (worker_threads): the first and only pthread
 		// dependency; -pthread covers both compile and link phases.
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	if *mm == "gc" {
 		gcShimPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".gcshim.c"
@@ -193,7 +194,11 @@ func main() {
 		clangArgs = append(clangArgs, gcShimPath)
 	}
 	clangArgs = append(clangArgs, "-o", outBin)
-	if *static {
+	if *static && runtime.GOOS == "linux" {
+		// Fully static (incl. glibc) — scratch/distroless-ready. On Windows,
+		// --static instead statically links only the non-system libraries (via the
+		// llvm package's staticLinkMode gating); clang -static there would try to
+		// static the UCRT too and break. macOS --static is rejected above.
 		clangArgs = append(clangArgs, "-static")
 	}
 	if *mm == "gc" {
@@ -248,7 +253,7 @@ func main() {
 	// pcre2/curl references went unresolved (ADR-00738). Shared libraries on
 	// Linux/macOS forgave the old order; archives don't.
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	cmd := llvm.ClangCommand(clangArgs...)
 	cmd.Stdout = os.Stdout
@@ -304,10 +309,10 @@ func main() {
 			soPath := filepath.Join(islandDir, hash+soExt)
 			iArgs := []string{"-O2", "-shared", "-fPIC", illFile, "-o", soPath}
 			if iem.UsesWorkers() {
-				iArgs = append(iArgs, "-pthread")
+				iArgs = append(iArgs, llvm.WorkerPthreadLinkFlags()...)
 			}
 			for _, lib := range iem.LinkLibs() {
-				iArgs = append(iArgs, "-l"+lib)
+				iArgs = append(iArgs, llvm.LinkLibFlags(lib)...)
 			}
 			iCSources, cerr := iem.EmbeddedCSources()
 			if cerr != nil {

@@ -19,12 +19,12 @@
 import { Channel, select, defaultCase } from "klain:sync";
 import { render, enter, leave } from "klain:tui";
 import { readKey } from "klain:tty";
-import { Config, parseArgs, usage } from "./loadtest/config";
-import { Result, Stats, newStats, record, sampleRps } from "./loadtest/stats";
-import { startRun } from "./loadtest/engine";
-import { renderReport } from "./loadtest/report";
-import { renderRunning, renderResults } from "./loadtest/screens";
-import { FormState, newForm, handleKey, renderForm, formToConfig } from "./loadtest/configform";
+import { Config, parseArgs, usage } from "./config";
+import { Result, Stats, newStats, record, sampleRps } from "./stats";
+import { startRun } from "./engine";
+import { renderReport } from "./report";
+import { renderRunning, renderResults } from "./screens";
+import { FormState, newForm, handleKey, renderForm, formToConfig } from "./configform";
 
 // Drive one load run to completion, folding results into `stats`. When `live`
 // is true the dashboard is painted and a keypress can stop the run early;

@@ -115,7 +115,7 @@
 
     <div class="km-doc__nextrow">
       <router-link to="/docs/klain/sync" class="km-btn">← klain:sync reference</router-link>
-      <router-link to="/docs/examples/goroutines/load_test" class="km-btn km-btn--gold">Run the example →</router-link>
+      <a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/loadtest" target="_blank" rel="noopener" class="km-btn km-btn--gold">See the full source →</a>
     </div>
   </article>
 </template>

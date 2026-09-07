@@ -218,7 +218,7 @@ func assertMultiFileOutputGC(t *testing.T, files map[string]string, entryName, w
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDtoa(t, em, dir, clangArgs)

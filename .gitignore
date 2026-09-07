@@ -39,6 +39,15 @@ examples/**
 !examples/webview/dist/**
 !examples/webview/file-explorer/dist/**
 
+# Showcase apps (apps/) — real applications, same rule as examples/: keep only
+# source (.ts) and the webview dist assets; ignore all compiled output (the
+# .exe, and the .tui.c/.tty.c/.yoga.cc/.klainsync.c/.webview.cc/.pathwin32.c/…
+# sidecars the compiler writes next to each binary).
+apps/**
+!apps/**/
+!apps/**/*.ts
+!apps/**/dist/**
+
 # Emitted compiler sidecar artifacts — the .ll IR and the embedded-C helpers
 # (dtoa/JSON-tree/bigint/GC-shim) the compiler writes next to any output. These
 # are always regenerated and never committed; compiling a .ts anywhere in the

@@ -652,7 +652,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range linkLibs {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	// Compile+link the embedded C runtime files the program's IR depends on
 	// (dtoa float formatter, bigint/crypto/JSON/… backends) — the same set the

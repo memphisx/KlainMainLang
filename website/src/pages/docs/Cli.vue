@@ -14,7 +14,7 @@
       <tbody>
         <tr><td><code>--emit-llvm</code></td><td>Emit LLVM IR to stdout and stop — don't compile.</td></tr>
         <tr><td><code>-o &lt;name&gt;</code></td><td>Output binary name (default: input path without <code>.ts</code>).</td></tr>
-        <tr><td><code>--static</code></td><td>Statically link the output, for a scratch/distroless Docker image. <strong>Linux only</strong> — macOS ships no static libc, so it refuses cleanly with an explanation.</td></tr>
+        <tr><td><code>--static</code></td><td>Build a self-contained binary — the non-system libraries link statically instead of as dynamic dependencies. <strong>Linux:</strong> fully static (incl. libc), for a scratch/distroless image. <strong>Windows:</strong> statically links the mingw runtime, <code>pcre2</code>, and the <code>libcurl</code> chain, so the <code>.exe</code> needs no DLLs beside it (the UCRT and core Win32 DLLs stay dynamic — they ship with Windows 10/11). <strong>macOS:</strong> refuses cleanly (no static libSystem). Without it, builds are dynamic on every platform.</td></tr>
         <tr><td><code>-mm &lt;mode&gt;</code></td><td>Memory management: <code>manual</code> (default — <code>Memory.free(x)</code> only) or <code>gc</code> (Boehm GC, needs <code>bdw-gc</code>). Identical on Linux and macOS.</td></tr>
         <tr><td><code>-bigint &lt;lib&gt;</code></td><td>BigInt backend, linked only when used: <code>libtommath</code> (default) or <code>gmp</code>. Identical semantics — trades license/speed.</td></tr>
         <tr><td><code>-crypto &lt;lib&gt;</code></td><td><code>crypto.subtle</code> backend: <code>openssl</code> (default) or <code>commoncrypto</code> (macOS only, no OpenSSL dependency).</td></tr>
@@ -28,8 +28,18 @@
       Programs are pure libc by default. A binary only links an extra library when it actually
       uses the feature — <code>libcurl</code> for <code>fetch</code>/<code>http.listen</code>,
       <code>libnghttp2</code> for <code>http.listen</code>, <code>libpcre2</code> for
-      <code>RegExp</code>, OpenSSL for <code>crypto.subtle</code>/<code>tls</code>. Everything else
-      stays plain-libc, closer to typical C/C++ toolchain output than a self-contained Go binary.
+      <code>RegExp</code>, OpenSSL for <code>crypto.subtle</code>/<code>tls</code>. By default those
+      are dynamic dependencies — closer to typical C/C++ toolchain output than a self-contained Go
+      binary — so a dynamic binary assumes the target machine has them (the same assumption on every
+      platform: a Linux binary needs <code>libcurl.so</code> present, a Windows one needs the DLL).
+    </p>
+    <p>
+      Pass <code>--static</code> when you want a single self-contained binary that runs anywhere with
+      no external dependency. That's the flag to build a distributable CLI/TUI tool or a desktop app
+      — it's how the <router-link to="/docs/examples">showcase apps</router-link> are built. Without
+      it, distributing a dynamic build is a packaging step: on Linux/macOS you declare the dependency
+      (apt/Homebrew), on Windows you bundle the required DLLs alongside the <code>.exe</code> (or,
+      where a license forbids redistribution, point users to the vendor's download).
     </p>
 
     <blockquote>

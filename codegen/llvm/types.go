@@ -319,6 +319,14 @@ type Type struct {
 	// whose hidden first field is the raw st_mode word, backing the
 	// isFile()/isDirectory() method dispatch.
 	IsStats bool
+	// IsDirent marks a fs.readdirSync(path, { withFileTypes: true }) element
+	// (ADR-00752): a heap object of {name, mode} where `mode` carries the
+	// S_IFMT bits (from the dirent d_type), backing isFile()/isDirectory()/
+	// isSymbolicLink() the same way IsStats does.
+	IsDirent bool
+	// IsFSWatcher marks fs.watch's result (TDD-00181): an opaque handle whose
+	// .on('change'|'rename', cb)/.close() are method-dispatched.
+	IsFSWatcher bool
 	// BufferGrowable marks a buffer constructed with `{maxByteLength}`
 	// (ADR-00494): its header is the 24-byte {len, data, max} shape, so
 	// `.growable`/`.maxByteLength`/`.grow()` may read word 2. Buffers from
@@ -1214,6 +1222,28 @@ func StatsType() Type {
 	return ty
 }
 
+// DirentType returns the element type of fs.readdirSync(path, { withFileTypes:
+// true }) (ADR-00752). `name` is the entry name (Node's own-enumerable
+// property); `mode` is a hidden S_IFMT word (from the dirent d_type) backing
+// isFile()/isDirectory()/isSymbolicLink(), stripped from enumeration/JSON the
+// way Stats keeps its own fields but Dirent does not expose `mode`.
+func DirentType() Type {
+	ty := ObjectType([]Field{
+		{Name: "name", Ty: TypePtr},
+		{Name: "mode", Ty: TypeI64},
+	})
+	ty.IsDirent = true
+	return ty
+}
+
+// FSWatcherType is fs.watch's result (TDD-00181): an opaque handle (a pointer
+// to the runtime FSWatcher struct) whose .on/.close are method-dispatched.
+func FSWatcherType() Type {
+	ty := ObjectType([]Field{{Name: "__handle", Ty: TypePtr}})
+	ty.IsFSWatcher = true
+	return ty
+}
+
 // statFieldOrder is the field order StatsType/__kml_fs_stat share, used to fill
 // the object from the runtime's 14-i64 result.
 var statFieldOrder = []string{"dev", "mode", "nlink", "uid", "gid", "rdev", "blksize", "ino", "size", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthtimeMs"}
@@ -1859,6 +1889,10 @@ func (t Type) VisibleFields() []Field {
 	case t.IsStats:
 		// Every Stats field (mode included) is a real Node own-enumerable
 		// property, so nothing is stripped (ADR-00565).
+	case t.IsDirent && len(fields) > 1:
+		// Only `name` is a Node own-enumerable Dirent property; the trailing
+		// `mode` is our hidden isFile()/isDirectory() backing (ADR-00752).
+		fields = fields[:1]
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
 		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are

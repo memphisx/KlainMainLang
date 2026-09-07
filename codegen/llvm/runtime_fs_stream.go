@@ -36,7 +36,7 @@ entry:
   %%isnull = icmp eq ptr %%f, null
   br i1 %%isnull, label %%fail, label %%loop
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 loop:
   %%buf = call ptr @__kml_str_alloc(i64 %%hwm)
@@ -60,7 +60,7 @@ done:
   call void @free(ptr %%base)
   call i32 @fclose(ptr %%f)
   ret void
-}`, modePtr, opDescPtr))
+}`, modePtr, opDescPtr, e.internString("open")))
 }
 
 // ensureFsWriteStream declares the createWriteStream runtime: an open helper
@@ -91,11 +91,11 @@ entry:
   %%isnull = icmp eq ptr %%f, null
   br i1 %%isnull, label %%fail, label %%ok
 fail:
-  call void @__kml_fs_throw(ptr %s, ptr %%path)
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
 ok:
   ret ptr %%f
-}`, abPtr, wbPtr, opDescPtr))
+}`, abPtr, wbPtr, opDescPtr, e.internString("open")))
 
 	// Write sink (wstream field 9 ABI): ptr(ptr env, i64 v0, i64 v1). env is the
 	// FILE*. v0 is the string chunk ptr; write strlen(v0) bytes. Returns null

@@ -659,7 +659,7 @@
       "statusRow": "child_process.spawn() / .exec() / .execFile() (async, event-driven)",
       "signature": "spawn(cmd, args?, opts?); exec(cmd, cb); execFile(file, args?, cb)",
       "badge": "caveats",
-      "description": "fork()+execvp() with three pipes; the read ends are non-blocking and fold into the same select() event loop as Worker/channel pipes. spawn streams (child.stdout/stderr 'data'/'end', child.on('close'/'exit'), child.stdin.write/.end, child.pid, child.kill); exec runs via /bin/sh -c and execFile execvp's directly, both buffering into one (err, stdout, stderr) callback.",
+      "description": "fork()+execvp() with three pipes; the read ends are non-blocking and fold into the same select() event loop as Worker/channel pipes. spawn streams (child.stdout/stderr 'data'/'end', child.on('close'/'exit'/'error'), child.stdin.write/.end, child.pid, child.kill); exec runs via /bin/sh -c and execFile execvp's directly, both buffering into one (err, stdout, stderr) callback.",
       "returns": {
         "type": "ChildProcess",
         "desc": "The child handle."
@@ -667,9 +667,12 @@
       "differences": [
         "Listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue.",
         "One listener per event, an arrow/function-expression literal only; no `removeListener`.",
-        "spawn's options support `{ cwd, shell, stdio: 'pipe' }` — `cwd` is real; `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell path, a dynamic value, or `shell:true` + an args array are clean rejections); `env`/`detached`/stdio arrays are clean rejections; exec/execFile take no options.",
-        "`exec`/`execSync` hand the command to the shell verbatim (embedded quotes survive); on Windows a `.bat`/`.cmd` spawned without a shell is refused (exit 127), closing the CVE-2024-27980 injection path.",
-        "`'close'`/`'exit'` receive the exit `code` only (a signal death folds to `128+signal`).",
+        "spawn's options support `{ cwd, shell, stdio: 'pipe', env }` — `cwd` is real; `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell path, a dynamic value, or `shell:true` + an args array are clean rejections); `env` (an object literal of string values) fully replaces the child's environment, Node's non-merging semantics; `windowsHide` (literal bool) suppresses the child's console window on Windows (`CREATE_NO_WINDOW`), a no-op on POSIX; `timeout` (ms) has the event loop kill the child with `killSignal` (a literal signal name/number, default SIGTERM), surfacing as the `(null, '<signal>')` exit event; `detached` (literal bool) makes the child a new session/group leader — `setsid` on POSIX, `DETACHED_PROCESS` on Windows; `child.unref()`/`ref()` drop or restore the child's hold on the event-loop keepalive; `stdio` takes `'pipe'`/`'inherit'`/`'ignore'` as a string or a 3-element `[stdin, stdout, stderr]` array — inherit wires the fd to the parent's, ignore sends it to `/dev/null`/NUL (fd numbers, `'ipc'` and streams are clean rejections); exec/execFile take no options.",
+        "`exec`/`execSync` hand the command to the shell verbatim (embedded quotes survive); on Windows a `.bat`/`.cmd` spawned without a shell is refused, surfacing as the spawn `'error'` event (EINVAL), closing the CVE-2024-27980 injection path.",
+        "A spawn that fails to start (a missing command → ENOENT) emits `'error'` with an `Error` and not `'exit'`; the Error carries `.message` but not Node's `.code`/`.errno`/`.syscall`.",
+        "`'close'`/`'exit'` fire as `(code, signal)` like Node: a signal death gives `code = null` and the signal name (`'SIGTERM'`), a normal exit the integer code and `signal = null`. POSIX recovers the signal from the wait status; Windows from the signal `child.kill` recorded. A legacy listener with a single non-nullable `number` param sees `0` on a signal death (type it `number | null` for the faithful `null`).",
+        "The exit `code` is the child's real width — the full 32-bit value on Windows (`cmd /c exit 300` → `300`), the 8-bit wait-status field on POSIX (`300 & 0xff = 44`, as Node also reports there).",
+        "`child.kill` takes a signal name string only as a literal (resolved to the host's signal number at compile time) or a number; a dynamic signal-name string is a clean rejection.",
         "Handles and their buffered output are never freed (`-mm=manual`)."
       ],
       "seeAlso": [
@@ -719,8 +722,8 @@
       "snippet": "const r = spawnSync(\"echo\", [\"kalimera\", \"kosme\"])\nconsole.log(r.status, r.stdout.trim())",
       "differences": [
         "Options object supports `{ cwd, encoding: 'utf8' }` only (no `env`/`timeout`/`input`/`shell`/`stdio`); results are strings, not Buffers.",
-        "`spawnSync`'s result carries `status`/`stdout`/`stderr`/`pid` only — no `signal`/`error`/`output` fields (a signal death folds into `status` as `128+signal`).",
-        "`execSync`/`execFileSync` return stdout but do **not** throw on a non-zero exit status (Node throws) — use `spawnSync().status` where the exit code matters."
+        "`spawnSync`'s result carries `status`/`stdout`/`stderr`/`pid` only — no `signal`/`error`/`output` fields (a signal death folds into `status` as `128+signal`). `status` is the child's real-width exit code: the full 32-bit value on Windows, the 8-bit wait-status field on POSIX (as Node also reports there).",
+        "`execSync`/`execFileSync` throw `Command failed: <command>` on a non-zero exit status (matching Node), but the thrown plain `Error` does not yet carry the `.status`/`.stdout`/`.stderr` ExecException properties — use `spawnSync().status` when the exit code or output of a failing command is needed."
       ],
       "seeAlso": [
         "process.spawn",

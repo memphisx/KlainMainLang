@@ -22,13 +22,16 @@ var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "Ev
 // 3-field errorObjType prefix (kind/message/name, byte-identical offsets so
 // .message/.name/kind reads work through errorObjType.StructIR() unchanged) plus
 // a trailing `{ errData ptr, errLen i64 }` carrying the aggregated errors array
-// (TDD-00083). Only an AggregateError is allocated at this 40-byte size; every
-// other error stays the 24-byte errorObjType, and `.errors` access (see
+// (TDD-00083). Only an AggregateError is allocated at this size; every other
+// error stays the plain errorObjType, and `.errors` access (see
 // emitErrorErrorsAccess) is kind-guarded so those trailing fields are never read
-// on a non-aggregate object.
+// on a non-aggregate object. The allocation is sized to the full errorObjType
+// (not just the 5 IR fields here) so that a bounds-safe (if non-meaningful)
+// read of any errorObjType field — code/errcode/errstr and now syscall/path —
+// through errorObjType.StructIR() on an AggregateError stays inside the buffer.
 const (
 	aggregateErrorStructIR   = "{ i64, ptr, ptr, ptr, i64 }"
-	aggregateErrorStructSize = 40
+	aggregateErrorStructSize = 72
 )
 
 // errorKindIDs maps a kind name to its errorKinds index, built once at
@@ -71,6 +74,16 @@ var errorObjType = func() Type {
 		{Name: "code", Ty: TypePtr},
 		{Name: "errcode", Ty: TypeF64},
 		{Name: "errstr", Ty: TypePtr},
+		// Node fs-error extras: `err.syscall` (the bare syscall name — "open",
+		// "stat", "scandir", …) and `err.path` (the offending path). Default
+		// null for non-fs errors; set by __kml_fs_throw (ADR-00768).
+		{Name: "syscall", Ty: TypePtr},
+		{Name: "path", Ty: TypePtr},
+		// `err.errno` — the negative libuv-style errno (Node fs/net/child_process
+		// convention: ENOENT → -2 on POSIX). Distinct from `errcode` (idx 4),
+		// which is node:sqlite's positive result code. Default 0; set by
+		// __kml_fs_throw (ADR-00770).
+		{Name: "errno", Ty: TypeF64},
 	})
 	ty.IsError = true
 	return ty
@@ -117,6 +130,16 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	esGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", esGep))
+	// Default the fs-error extras (syscall/path) — set only by __kml_fs_throw.
+	scGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 6", scGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", scGep))
+	pGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 7", pGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", pGep))
+	enGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 8", enGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", enGep))
 
 	return dataReg
 }

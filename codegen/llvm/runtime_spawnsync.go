@@ -29,8 +29,9 @@ func SpawnSyncSource() string {
    shim; the child is started by __kml_win_spawn (CreateProcessW) instead
    of fork+exec, with the same pipe ends as its stdout/stderr. */
 #include "kml_posix_compat.h"
-int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags);
+int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags, char **spawn_env);
 int waitpid(int pid, int *status, int options);
+int __kml_win_exit_code(int pid);
 #define WIFEXITED(s) (((s) & 0x7f) == 0)
 #define WEXITSTATUS(s) (((s) >> 8) & 0xff)
 #define WIFSIGNALED(s) (((s) & 0x7f) != 0)
@@ -87,7 +88,7 @@ void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const cha
   argv[0] = (char *)file;
   for (int64_t i = 0; i < argn; i++) argv[i + 1] = args[i];
   argv[argn + 1] = NULL;
-  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1, (int)(flags & 1));
+  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1, (int)(flags & 1), NULL);
   free(argv);
   if (pid < 0) {
     close(outp[0]); close(outp[1]); close(errp[0]); close(errp[1]);
@@ -147,7 +148,16 @@ void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const cha
   }
   int st = 0;
   while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-  if (WIFEXITED(st)) r->status = WEXITSTATUS(st);
+  if (WIFEXITED(st)) {
+#ifdef _WIN32
+    /* Windows exit codes are full 32-bit; recover the wide value the POSIX
+       8-bit wait status dropped (ADR-00759), falling back for foreign pids. */
+    int wc = __kml_win_exit_code((int)pid);
+    r->status = wc >= 0 ? wc : WEXITSTATUS(st);
+#else
+    r->status = WEXITSTATUS(st);
+#endif
+  }
   else if (WIFSIGNALED(st)) r->status = 128 + WTERMSIG(st);
   else r->status = -1;
   r->out = kmlss_str(oa.buf ? oa.buf : "", oa.len);

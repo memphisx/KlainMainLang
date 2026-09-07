@@ -208,12 +208,13 @@ var virtualModuleMembers = map[string]map[string]bool{
 		"appendFileSync": true, "existsSync": true, "unlinkSync": true,
 		"mkdirSync": true, "rmdirSync": true, "renameSync": true,
 		"copyFileSync": true, "readdirSync": true,
-		"createReadStream": true, "createWriteStream": true,
+		"createReadStream": true, "createWriteStream": true, "watch": true,
 		// Stat/handle family — implemented in codegen (inferExprType) and long
 		// usable via the `fs.` namespace form; also valid as named imports.
 		"statSync": true, "lstatSync": true, "fstatSync": true,
-		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true,
+		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true, "linkSync": true, "utimesSync": true,
 		"openSync": true, "writeSync": true, "readSync": true,
+		"fsyncSync": true, "fdatasyncSync": true, "ftruncateSync": true,
 		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
 		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
 		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,

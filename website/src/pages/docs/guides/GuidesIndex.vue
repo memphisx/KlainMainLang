@@ -27,7 +27,7 @@
         <p>
           A read-only file explorer: a Quasar single-page UI in a native window, backed by real
           <code>fs</code> calls — directory listing, live text preview, and inline image preview —
-          compiled to one self-contained binary.
+          compiled with <code>--static</code> to one self-contained binary.
         </p>
         <span class="km-guidecard__go">Start the walkthrough →</span>
       </router-link>

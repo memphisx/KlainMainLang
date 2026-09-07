@@ -1682,7 +1682,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "existsSync":
 					return TypeBool
 				case "readdirSync":
+					if wt, err := readdirWithFileTypes(ex.Args, ex.GetPos()); err == nil && wt {
+						return ArrayOf(DirentType())
+					}
 					return ArrayOf(TypePtr)
+				case "watch":
+					return FSWatcherType()
 				case "statSync", "lstatSync", "fstatSync":
 					return StatsType()
 				case "openSync", "writeSync", "readSync":
@@ -1730,9 +1735,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeBool
 				}
 			}
-			// fs.statSync Stats methods (ADR-00495).
+			// FSWatcher .on/.close return void (TDD-00181).
+			if mem.Property == "on" || mem.Property == "close" {
+				if e.inferExprType(mem.Object).IsFSWatcher {
+					return TypeVoid
+				}
+			}
+			// fs.statSync Stats + Dirent methods (ADR-00495/ADR-00752).
 			if mem.Property == "isFile" || mem.Property == "isDirectory" || mem.Property == "isSymbolicLink" {
-				if e.inferExprType(mem.Object).IsStats {
+				if t := e.inferExprType(mem.Object); t.IsStats || t.IsDirent {
 					return TypeBool
 				}
 			}

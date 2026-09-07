@@ -17,7 +17,7 @@
       input-driven app: you do nothing until the user does something. The update step is then just a
       <code>switch</code> over the key, followed by a repaint:
     </p>
-    <CodeBlock filename="todo.ts" :code="update" />
+    <CodeBlock filename="main.ts" :code="update" />
     <p>
       That's the entire interaction model. Arrow keys move a cursor (note the modulo wrap so it
       loops around the ends), space toggles the selected task, and <code>q</code> quits by ending
@@ -40,7 +40,7 @@
       commits the draft as a new task and clears it. There's no hidden input widget with its own
       buffer — <em>you</em> own the keystrokes, so the behaviour is exactly what you write:
     </p>
-    <CodeBlock filename="todo.ts" :code="editing" />
+    <CodeBlock filename="main.ts" :code="editing" />
 
     <h2>3 · Persistence with <code>fs</code></h2>
     <p>
@@ -48,12 +48,13 @@
       inside the loop — no bridge, no IPC. Here that's <code>fs</code>: we load tasks on startup and
       save on quit, one line per task.
     </p>
-    <CodeBlock filename="todo.ts" :code="persistence" />
+    <CodeBlock filename="store.ts" :code="persistence" />
     <p>
-      And that's a complete, persistent application. The full runnable source is in the examples:
+      And that's a complete, persistent application, split by concern (types / store / view / main).
+      The full runnable source:
     </p>
     <p>
-      <router-link to="/docs/examples/tui/todo" class="km-btn km-btn--gold">See todo.ts →</router-link>
+      <a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/todo" target="_blank" rel="noopener" class="km-btn km-btn--gold">See the full source →</a>
     </p>
 
     <h2>Going further: the same loop, more state</h2>

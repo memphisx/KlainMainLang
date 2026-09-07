@@ -43,6 +43,11 @@ try {
     fs.readFileSync('/definitely/does/not/exist/kml-example.txt')
 } catch (e) {
     console.log('caught: ' + e.message)
+    // The Error also carries Node's fs-error surface: err.code (the errno
+    // name), err.errno (the negated errno, -2 for ENOENT), err.syscall (the
+    // bare syscall — 'open' here), and err.path (the offending path). A plain
+    // `new Error()` leaves syscall/path null and errno 0.
+    console.log(e.code + ' ' + e.errno + ' ' + e.syscall + ' ' + e.path)  // ENOENT -2 open /definitely/...
 }
 
 // existsSync itself never throws for a missing path — it's one of the few
@@ -69,6 +74,13 @@ console.log(entries.length)   // 2
 entries.sort()
 for (const name of entries) {
     console.log(name)   // a.txt, then b.txt
+}
+// { withFileTypes: true } returns Dirent[] instead of names — each carries a
+// .name and .isFile()/.isDirectory()/.isSymbolicLink(), classified from the
+// directory entry's type without a per-file stat.
+const dirents = fs.readdirSync(dir, { withFileTypes: true })
+for (const d of dirents) {
+    console.log(d.name + ' isFile=' + d.isFile())   // a.txt isFile=true, …
 }
 
 // renameSync moves/renames a file in place
@@ -155,8 +167,16 @@ fs.writeFileSync(tmpd + '/data.txt', 'hello')
 fs.symlinkSync(tmpd + '/data.txt', tmpd + '/alias')
 console.log(fs.lstatSync(tmpd + '/alias').isSymbolicLink())  // true
 console.log(fs.readlinkSync(tmpd + '/alias') === tmpd + '/data.txt')  // true
+// linkSync makes a hard link — a second name for the same inode (no Developer
+// Mode needed on Windows, unlike symlinkSync). nlink counts the names.
+fs.linkSync(tmpd + '/data.txt', tmpd + '/data.hardlink')
+console.log(fs.statSync(tmpd + '/data.hardlink').nlink)  // 2
 fs.truncateSync(tmpd + '/data.txt', 2)
 console.log(fs.statSync(tmpd + '/data.txt').size)  // 2
+// utimesSync sets the access/modify times — a number is seconds (Node's
+// form), or pass a Date. statSync reads them back in milliseconds.
+fs.utimesSync(tmpd + '/data.txt', 1_000_000_000, 1_500_000_000)
+console.log(fs.statSync(tmpd + '/data.txt').mtimeMs)  // 1500000000000
 fs.rmSync(tmpd, { recursive: true })   // removes the whole tree
 console.log(fs.existsSync(tmpd))       // false
 
@@ -164,9 +184,15 @@ console.log(fs.existsSync(tmpd))       // false
 // openSync/writeSync/readSync/fstatSync/closeSync over raw POSIX fds.
 const fd = fs.openSync('/tmp/kml_fd_example.txt', 'w')
 fs.writeSync(fd, 'raw fd write')
+// fsyncSync forces buffered writes down to disk; ftruncateSync resizes the
+// open file (shrinking here, from 12 bytes to 3). On Windows these map to
+// FlushFileBuffers / SetEndOfFile; on POSIX to the fsync/ftruncate syscalls.
+fs.fsyncSync(fd)
+fs.ftruncateSync(fd, 3)
 fs.closeSync(fd)
+console.log(fs.statSync('/tmp/kml_fd_example.txt').size)  // 3
 const rfd = fs.openSync('/tmp/kml_fd_example.txt', 'r')
-console.log(fs.fstatSync(rfd).size)   // 12
+console.log(fs.fstatSync(rfd).size)   // 3 (truncated above)
 const head = new Uint8Array(3)
 fs.readSync(rfd, head)
 console.log(head[0])                  // 114 ('r')

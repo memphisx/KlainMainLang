@@ -25,6 +25,14 @@
     <h2 id="compile-and-run-a-file">Compile and run a file</h2>
     <p>Compiling produces a native binary next to the source — it does <em>not</em> run it.</p>
     <CodeBlock lang="bash" terminal label="shell" :code="runCode" />
+    <p>
+      By default the binary links its non-libc dependencies (e.g. <code>libcurl</code>,
+      <code>pcre2</code>) dynamically, so the target machine must have them — the same as any
+      dynamically-linked program. To ship <strong>one self-contained binary</strong> that runs
+      anywhere with nothing installed, add <code>--static</code> (works on Linux and Windows;
+      see the <router-link to="/docs/cli">CLI reference</router-link>). It's how the showcase
+      apps are built.
+    </p>
 
     <h2>Your first program</h2>
     <CodeBlock filename="hello.ts" :code="helloCode" />
@@ -40,6 +48,7 @@
         <tr><td><code>make compile FILE=f.ts</code></td><td>Compile a file to a binary (don't run it)</td></tr>
         <tr><td><code>make ir FILE=f.ts</code></td><td>Emit LLVM IR only, no binary</td></tr>
         <tr><td><code>make examples</code></td><td>Compile and run every example — the readable regression suite</td></tr>
+        <tr><td><code>make apps</code></td><td>Build every showcase app as a self-contained <code>--static</code> binary (asserts no external DLLs on Windows)</td></tr>
       </tbody>
     </table>
 
@@ -57,7 +66,8 @@ const buildCode = `$ make build            # produces ./klainmain`
 
 const runCode = `$ ./klainmain examples/basics/basics.ts   # → examples/basics/basics
 $ ./examples/basics/basics                # run it yourself
-$ ./klainmain -o myapp app.ts             # custom output name`
+$ ./klainmain -o myapp app.ts             # custom output name
+$ ./klainmain --static -o myapp app.ts    # one self-contained binary (no external libs)`
 
 const helloCode = `const who: string = "native world";
 console.log("hello, " + who);`

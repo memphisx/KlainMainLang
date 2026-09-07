@@ -16,7 +16,7 @@
       the loop wakes on a <strong>tick</strong> or a <strong>keystroke</strong>, whichever comes
       first, with no background thread and no async machinery:
     </p>
-    <CodeBlock filename="klaintop.ts" :code="live" />
+    <CodeBlock filename="main.ts" :code="live" />
     <p>
       An empty return just means “the timer fired” — you re-sample and repaint. A real key still
       comes through immediately, so <code>q</code> quits without waiting out the second. One loop,
@@ -35,14 +35,14 @@
       <code>totalmem()</code>/<code>freemem()</code>. Because we're a native binary these are real
       OS calls, not shims:
     </p>
-    <CodeBlock filename="klaintop.ts" :code="sample" />
+    <CodeBlock filename="data.ts" :code="sample" />
     <p>
       The process table is just as direct: shell out to <code>ps</code> with
       <code>process.execFileSync</code>, parse the lines into rows, and sort them in-process. Feed the
       rows to a <code>List</code> — which scrolls to the selection on its own — and a
       <code>process.kill(pid)</code> behind a y/n confirm turns the monitor into a manager:
     </p>
-    <CodeBlock filename="klaintop.ts" :code="procs" />
+    <CodeBlock filename="data.ts" :code="procs" />
     <p>
       Feed the CPU/memory fractions into the same <code>Progress</code> and <code>Text</code>
       components from Part 1, advance the spinner's <code>frame</code> each tick, and you have a live
@@ -67,17 +67,17 @@
     </ul>
 
     <h2>The gallery</h2>
-    <p>Four complete apps, each a single runnable file — read them alongside these three parts:</p>
+    <p>Four complete apps, each its own <code>apps/</code> directory — read the source alongside these three parts:</p>
     <ul>
-      <li><router-link to="/docs/examples/tui/todo">todo</router-link> — the to-do list we built (list, input, progress, <code>fs</code>).</li>
-      <li><router-link to="/docs/examples/tui/klaintop">klaintop</router-link> — this process manager (timeout loop, <code>os</code>, <code>ps</code> + kill).</li>
-      <li><router-link to="/docs/examples/tui/files">files</router-link> — a two-pane file browser (nested layout, <code>fs</code>/<code>path</code>).</li>
-      <li><router-link to="/docs/examples/tui/menu">menu</router-link> — a minimal selectable menu, a good starting skeleton.</li>
+      <li><a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/todo" target="_blank" rel="noopener">todo</a> — the to-do list we built (list, input, progress, <code>fs</code>).</li>
+      <li><a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/klaintop" target="_blank" rel="noopener">klaintop</a> — this process manager (timeout loop, <code>os</code>, <code>ps</code> + kill).</li>
+      <li><a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/files" target="_blank" rel="noopener">files</a> — a two-pane file browser (nested layout, <code>fs</code>/<code>path</code>).</li>
+      <li><a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/menu" target="_blank" rel="noopener">menu</a> — a minimal selectable menu, a good starting skeleton.</li>
     </ul>
 
     <div class="km-doc__nextrow">
       <router-link to="/docs/guides/tui/input-state" class="km-btn">← Part 2 · Input &amp; state</router-link>
-      <router-link to="/docs/examples/tui/klaintop" class="km-btn km-btn--gold">Run the example →</router-link>
+      <a href="https://github.com/memphisx/KlainMainLang/tree/main/apps/klaintop" target="_blank" rel="noopener" class="km-btn km-btn--gold">See the full source →</a>
     </div>
   </article>
 </template>

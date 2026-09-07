@@ -1,0 +1,19 @@
+diff --git a/node_modules/@quasar/app-vite/lib/modes/ssg/ssg-builder.js b/node_modules/@quasar/app-vite/lib/modes/ssg/ssg-builder.js
+index 6a121ec..f1bc3bf 100644
+--- a/node_modules/@quasar/app-vite/lib/modes/ssg/ssg-builder.js
++++ b/node_modules/@quasar/app-vite/lib/modes/ssg/ssg-builder.js
+@@ -1,4 +1,5 @@
+ import { join } from 'node:path'
++import { pathToFileURL } from 'node:url'
+ import { merge } from 'webpack-merge'
+ 
+ import { AppBuilder } from '../../app-builder.js'
+@@ -499,7 +500,7 @@ export class QuasarModeBuilder extends AppBuilder {
+ 
+   async #renderSsgPages() {
+     const { renderSsgPage, getSsgPages } = await import(
+-      join(this.quasarConf.build.distDir, '__ssg__/ssg-script.js')
++      pathToFileURL(join(this.quasarConf.build.distDir, '__ssg__/ssg-script.js')).href
+     )
+ 
+     const ssgPageList = await getSsgPages({

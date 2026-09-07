@@ -508,6 +508,40 @@ fs.readdirSync()`)
 	}
 }
 
+// fs.readdirSync(path, { withFileTypes: true }) returns Dirent[] — each with
+// a `name` and isFile()/isDirectory()/isSymbolicLink(), classified from the
+// dirent d_type (from FindFirstFile attributes on Windows). `mode` is a
+// hidden backing field, not a JSON/enumerable property (ADR-00752).
+func TestE2EFsReaddirSyncWithFileTypes(t *testing.T) {
+	dir := tempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const ents = fs.readdirSync("%s", { withFileTypes: true })
+const rows: string[] = []
+for (const e of ents) {
+  rows.push(e.name + ':' + (e.isDirectory() ? 'dir' : e.isFile() ? 'file' : '?'))
+}
+rows.sort()
+console.log(rows.join(', '))
+console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'LEAK')
+`, dir)
+	assertOutputImports(t, src, "d:dir, f.txt:file\nno-mode-leak")
+}
+
+func TestE2EFsReaddirSyncWithFileTypesBadOptionRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readdirSync('.', { recursive: true })`)
+	if err == nil {
+		t.Fatal("expected a compile error for an unsupported readdirSync option, got none")
+	}
+}
+
 // fs.statSync (ADR-00495): size/mtimeMs fields + isFile()/isDirectory()
 // over the host's real struct stat offsets; a missing path throws the
 // shared catchable fs error. Verified on Mac (Linux offsets differ and are
@@ -593,6 +627,79 @@ try { fs.rmSync(os.tmpdir() + '/kml-definitely-absent-xyz') } catch (e) { consol
 `, "true\ntrue\ntrue\nfalse\n4\ntrue\n2\nfalse\nforce-ok\ncaught: true")
 }
 
+// ADR-00769: lstat on a symlink reports the *link's own* size — the byte length
+// of its target path (POSIX semantics, matching libuv/Node) — not the target
+// file's size (that's statSync, which follows) nor 0 (the Windows reparse
+// point's on-disk size). Verified against the target string's length so it holds
+// on every host regardless of the tmp path.
+func TestE2EFsLstatSymlinkSize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		probe := tempDir(t)
+		if err := os.Symlink(probe, filepath.Join(probe, "probe-link")); err != nil {
+			t.Skip("symlink creation not permitted on this Windows box (needs Developer Mode or admin)")
+		}
+	}
+	assertOutputImports(t, `
+import * as fs from 'fs'
+import os from 'os'
+const tmp = fs.mkdtempSync(os.tmpdir() + '/kmllsz-')
+fs.writeFileSync(tmp + '/target.txt', 'hello world')
+const target = tmp + '/target.txt'
+fs.symlinkSync(target, tmp + '/link')
+// lstat: the link's own size == byte length of the target path string.
+console.log(fs.lstatSync(tmp + '/link').size === target.length)
+// stat follows the link: the target file's 11 bytes ('hello world').
+console.log(fs.statSync(tmp + '/link').size)
+fs.rmSync(tmp, { recursive: true, force: true })
+`, "true\n11")
+}
+
+// fs.linkSync(existing, newPath) — a hard link: both names point at one
+// inode, so a write through either is visible through the other and the
+// content survives unlinking the original. Unlike symlinkSync, this needs no
+// Developer Mode on Windows (CreateHardLinkW is unprivileged).
+// fs.watch (TDD-00181, ADR-00756/ADR-00757) — Linux inotify + Windows
+// ReadDirectoryChangesW backends; macOS kqueue is pending (Stage 3). It
+// exercises the whole subsystem: an FSWatcher folded into the event loop, a
+// real file change delivered as a 'change' event, then close() letting the
+// loop exit.
+func TestE2EFsWatchChange(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS kqueue backend pending (TDD-00181 Stage 3)")
+	}
+	dir := tempDir(t)
+	p := dir + "/w.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+fs.writeFileSync("%s", "a")
+const w = fs.watch("%s", (evt: string, name: string) => {
+  console.log("event=" + evt)
+  w.close()
+})
+setTimeout(() => { fs.writeFileSync("%s", "bb") }, 150)
+`, p, p, p)
+	assertOutputImports(t, src, "event=change")
+}
+
+func TestE2EFsLinkSync(t *testing.T) {
+	dir := tempDir(t)
+	a := dir + "/orig.txt"
+	b := dir + "/hard.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+fs.writeFileSync("%s", "shared")
+fs.linkSync("%s", "%s")
+console.log(fs.readFileSync("%s"))
+console.log(fs.statSync("%s").nlink)
+fs.writeFileSync("%s", "CHANGED")
+console.log(fs.readFileSync("%s"))
+fs.unlinkSync("%s")
+console.log(fs.readFileSync("%s"))
+try { fs.linkSync("%s/absent", "%s/x") } catch (e: any) { console.log("caught:", e.code) }
+`, a, a, b, b, b, a, b, a, b, dir, dir)
+	assertOutputImports(t, src, "shared\n2\nCHANGED\nCHANGED\ncaught: ENOENT")
+}
+
 // fd-based fs ops (ADR-00498): openSync (literal flags → host O_* bits) /
 // writeSync (string data) / readSync (Uint8Array, offset/length/position) /
 // fstatSync / closeSync.
@@ -618,6 +725,58 @@ try { fs.openSync("%s/absent/f", 'r') } catch (e) { console.log("caught:", e.mes
 	assertOutputImports(t, src, "11\n11\ntrue\n5\n104\n5\n119\ncaught: true")
 }
 
+// fs.utimesSync(path, atime, mtime) sets the access/modification times from
+// a number (seconds, as Node) or a Date (its epoch). On Windows it is a
+// SetFileTime shim; on POSIX, utimes(2). statSync reads them back in ms.
+func TestE2EFsUtimesSync(t *testing.T) {
+	dir := tempDir(t)
+	p := dir + "/t.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+fs.writeFileSync("%s", "x")
+fs.utimesSync("%s", 1000000000, 1500000000)
+const s = fs.statSync("%s")
+console.log(s.atimeMs)
+console.log(s.mtimeMs)
+fs.utimesSync("%s", new Date(1600000000000), new Date(1700000000000))
+const s2 = fs.statSync("%s")
+console.log(s2.mtimeMs)
+try { fs.utimesSync("%s/nope", 1, 1) } catch (e: any) { console.log("caught:", e.code) }
+`, p, p, p, p, p, dir)
+	assertOutputImports(t, src, "1000000000000\n1500000000000\n1700000000000\ncaught: ENOENT")
+}
+
+// fd-based durability + resize ops: fsyncSync (flush to disk) and
+// ftruncateSync (shrink/grow/default-0). On Windows these are Win32 shims
+// (FlushFileBuffers / SetEndOfFile); on POSIX they are the fsync/ftruncate
+// syscalls. Both throw a coded Error on a bad fd.
+func TestE2EFsFsyncFtruncate(t *testing.T) {
+	dir := tempDir(t)
+	p := dir + "/dur.txt"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const fd = fs.openSync("%s", 'w')
+fs.writeSync(fd, "hello world")
+fs.fsyncSync(fd)
+fs.ftruncateSync(fd, 5)
+fs.fsyncSync(fd)
+fs.closeSync(fd)
+console.log(fs.statSync("%s").size)
+console.log(fs.readFileSync("%s"))
+const g = fs.openSync("%s", 'r+')
+fs.ftruncateSync(g, 8)
+fs.closeSync(g)
+console.log(fs.statSync("%s").size)
+const z = fs.openSync("%s", 'r+')
+fs.ftruncateSync(z)
+fs.closeSync(z)
+console.log(fs.statSync("%s").size)
+try { fs.fsyncSync(9999) } catch (e: any) { console.log("fsync:", e.code) }
+try { fs.ftruncateSync(9999, 3) } catch (e: any) { console.log("ftrunc:", e.code) }
+`, p, p, p, p, p, p, p)
+	assertOutputImports(t, src, "5\nhello\n8\n0\nfsync: EBADF\nftrunc: EBADF")
+}
+
 // ADR-00684: fs errors carry the Node error code, so `e.code === 'ENOENT'`
 // (the canonical fs error idiom) matches.
 func TestE2EFsErrorCode(t *testing.T) {
@@ -632,4 +791,53 @@ function main2(): void {
 }
 main2()
 `, "ENOENT true")
+}
+
+// ADR-00768: fs errors also carry Node's `err.syscall` (the bare syscall name)
+// and `err.path` (the offending path); a plain non-fs Error leaves both null.
+func TestE2EFsErrorSyscallAndPath(t *testing.T) {
+	assertOutputImports(t, `
+import { readFileSync, statSync, unlinkSync, mkdirSync, readdirSync } from 'fs'
+function probe(label: string, fn: () => void): void {
+  try { fn() } catch (e: any) {
+    console.log(label + ' ' + e.syscall + ' ' + e.path)
+  }
+}
+function main2(): void {
+  probe('read', () => { readFileSync('/no/such/f.txt') })
+  probe('stat', () => { statSync('/no/such/f') })
+  probe('unlink', () => { unlinkSync('/no/such/f') })
+  probe('mkdir', () => { mkdirSync('/no/deep/f') })
+  probe('scandir', () => { readdirSync('/no/such/f') })
+  try { throw new Error('plain') } catch (e: any) {
+    console.log('plain ' + e.syscall + ' ' + e.path)
+  }
+}
+main2()
+`, `read open /no/such/f.txt
+stat stat /no/such/f
+unlink unlink /no/such/f
+mkdir mkdir /no/deep/f
+scandir scandir /no/such/f
+plain null null`)
+}
+
+// ADR-00770: fs errors carry Node's numeric `err.errno` — the negative
+// libuv-style errno (ENOENT → -2). On POSIX this equals Node exactly; on Windows
+// the port normalizes errno to the Linux numbers, so it is the negated Linux
+// value (a documented divergence from Node's Windows UV_E* numbering). A plain
+// non-fs Error reads 0 (the falsy default; Node reports undefined).
+func TestE2EFsErrorErrno(t *testing.T) {
+	assertOutputImports(t, `
+import { readFileSync } from 'fs'
+function main2(): void {
+  try {
+    readFileSync('/no/such/dir/nope.txt')
+  } catch (e: any) {
+    console.log(e.errno, e.errno === -2)
+  }
+  try { throw new Error('plain') } catch (e: any) { console.log(e.errno) }
+}
+main2()
+`, "-2 true\n0")
 }

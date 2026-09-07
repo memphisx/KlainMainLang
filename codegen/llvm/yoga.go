@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -126,7 +127,13 @@ func yogaCSources() ([]CSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("yoga: extract: %w", err)
 	}
-	objDir := filepath.Join(dir, "obj")
+	// Key the object cache by compiler so a dynamic (clang) build and a --static
+	// (g++, Windows) build don't reuse each other's incompatible objects.
+	objSub := "obj-clang"
+	if runtime.GOOS == "windows" && staticLinkMode {
+		objSub = "obj-gpp-static"
+	}
+	objDir := filepath.Join(dir, objSub)
 	if err := os.MkdirAll(objDir, 0755); err != nil {
 		return nil, fmt.Errorf("yoga: obj dir: %w", err)
 	}
@@ -136,7 +143,19 @@ func yogaCSources() ([]CSource, error) {
 		obj := filepath.Join(objDir, name+".o")
 		src := filepath.Join(includeRoot, filepath.FromSlash(rel))
 		if fi, serr := os.Stat(obj); serr != nil || fi.Size() == 0 {
-			cmd := ClangCommand("-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
+			var cmd *exec.Cmd
+			if runtime.GOOS == "windows" && staticLinkMode {
+				// --static on Windows links the *static* gcc-built libstdc++.a; compile
+				// Yoga's C++ with g++ (not clang) so its RTTI COMDATs match the archive —
+				// ld.bfd rejects mixing clang and gcc COMDATs ("duplicate section has
+				// different size"). g++ ships with the required mingw toolchain and is
+				// native to the ucrt64 sysroot (no --target/--sysroot). Dynamic builds
+				// (default) and POSIX keep clang: the C++ runtime is a dynamic DLL/.so, so
+				// there is no static-archive ABI-match constraint (ADR-00772).
+				cmd = exec.Command("g++", "-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
+			} else {
+				cmd = ClangCommand("-std=c++20", "-O2", "-I"+includeRoot, "-c", src, "-o", obj)
+			}
 			if out, cerr := cmd.CombinedOutput(); cerr != nil {
 				return nil, fmt.Errorf("yoga: compiling %s: %v\n%s", rel, cerr, out)
 			}
@@ -150,11 +169,66 @@ func yogaCSources() ([]CSource, error) {
 	// Yoga's pixel-grid rounding pulls in libm (`round`); glibc keeps libm as a
 	// separate DSO the default link step won't add, so name it explicitly. No-op
 	// on macOS where libSystem already folds in libm (ADR-00034).
-	libs := append(objs, cxxRuntime, "-lm")
+	libs := append([]string{}, objs...)
+	if runtime.GOOS == "windows" && staticLinkMode {
+		// --static: the C++ runtime is the static libstdc++/winpthread group (no
+		// separate -lstdc++). ADR-00772.
+		libs = append(libs, "-lm")
+		libs = append(libs, winCxxStaticRuntime()...)
+	} else {
+		// Default / POSIX: dynamic C++ runtime (libstdc++-6.dll / libc++ / libstdc++.so).
+		libs = append(libs, cxxRuntime, "-lm")
+	}
 	// The painter runtime (tui.c) is a C TU that #includes <yoga/Yoga.h>, so it
 	// needs the same include root (a language-neutral -I, safe on the shared
 	// clang line). The empty Yoga member carries the prebuilt objects + C++ rt.
 	tui := CSource{Name: "tui", Content: TuiSource(), CFlags: []string{"-I" + includeRoot}}
 	yoga := CSource{Name: "yoga", Content: "// Yoga is linked as prebuilt objects (see yoga.go).\n", Ext: "cc", Libs: libs}
 	return []CSource{tui, yoga}, nil
+}
+
+// winCxxStaticRuntime returns the link flags that complete a self-contained C++
+// runtime on Windows, paired with the caller's `-l:libstdc++.a` (the static C++
+// archive). Empty on POSIX (the C++ runtime is a system library there). Shared by
+// klain:tui (Yoga) and klain:webview so a terminal or desktop binary is a single
+// .exe with no libstdc++-6.dll / libgcc_s_seh-1.dll / libwinpthread-1.dll beside
+// it (ADR-00771):
+//   - -static-libgcc drops the libgcc_s_seh-1.dll dependency (the driver knows
+//     libgcc.a's path).
+//   - -l:libwinpthread.a forces the static winpthread that libstdc++ pulls in;
+//     the colon form survives HostClangArgv's `-l` partition, unlike a
+//     `-Wl,-Bstatic … -Wl,-Bdynamic` toggle which the partition would split.
+//   - -Wl,--allow-multiple-definition lets the win32 shim's `strerror`/etc. win
+//     over the static CRT copies (first-definition-wins, as the shim ordering
+//     already relies on).
+// The C++ objects that reference this archive must be g++-built (Yoga here, the
+// webview amalgamation in webview_win32.go): clang RTTI COMDATs differ in size
+// from the gcc-built libstdc++.a and ld.bfd rejects the mix.
+func winCxxStaticRuntime() []string {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return []string{
+		// libstdc++ + winpthread as a static --start-group: -Bstatic forces the
+		// archives (not the DLL import libs), --start-group resolves their mutual
+		// references regardless of order, and -Bdynamic restores normal linking for
+		// everything after (system libs, curl/ssl on a networking program). An
+		// unreferenced winpthread is simply not pulled — a TUI app that uses no
+		// std::thread stays free of it — while klain:webview's pthread_create (its
+		// dispatch queue) links static. One comma-joined -Wl arg so it survives
+		// HostClangArgv's `-l` partition intact.
+		"-Wl,-Bstatic,--start-group,-lstdc++,-lwinpthread,--end-group,-Bdynamic",
+		// -static-libgcc drops libgcc_s_seh-1.dll (the driver knows libgcc.a's path).
+		"-static-libgcc",
+		// A trailing static winpthread (colon form → moved to the very end of the
+		// link by HostClangArgv's -l partition, after every object) catches
+		// pthread references the head group missed — e.g. the klain:sync goroutine
+		// runtime in a program that also uses klain:tui (loadtest), whose
+		// klainsync.o is linked after the group. Redundant with the group's own
+		// -lwinpthread; --allow-multiple-definition below reconciles them.
+		"-l:libwinpthread.a",
+		// The win32 shim's `strerror`/etc. win over the static CRT copies
+		// (first-definition-wins, as the shim ordering already relies on).
+		"-Wl,--allow-multiple-definition",
+	}
 }

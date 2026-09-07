@@ -66,6 +66,8 @@ enum {
 	L_F_GETFL = 3, L_F_SETFL = 4, L_O_NONBLOCK = 0x800,
 	L_SOL_SOCKET = 1, L_SO_REUSEADDR = 2, L_SO_KEEPALIVE = 9, L_SO_BROADCAST = 6,
 	L_SO_REUSEPORT = 15, L_SO_ERROR = 4,
+	L_IPPROTO_TCP = 6, L_TCP_KEEPIDLE = 4, // Linux TCP keepalive-idle; opt 4 is TCP_MAXSEG on Windows
+
 	L_O_CREAT = 0x40, L_O_EXCL = 0x80, L_O_TRUNC = 0x200, L_O_APPEND = 0x400,
 };
 
@@ -116,6 +118,7 @@ static int (WINAPI *p_getsockopt)(ws_SOCKET, int, int, char *, int *);
 static int (WINAPI *p_getsockname)(ws_SOCKET, void *, int *);
 static int (WINAPI *p_getpeername)(ws_SOCKET, void *, int *);
 static int (WINAPI *p_ioctlsocket)(ws_SOCKET, long, unsigned long *);
+static int (WINAPI *p_WSAIoctl)(ws_SOCKET, unsigned long, void *, unsigned long, void *, unsigned long, unsigned long *, void *, void *);
 static int (WINAPI *p_WSAPoll)(ws_pollfd *, unsigned long, int);
 // Winsock's select() reads fd_count and never assumes FD_SETSIZE, so a
 // wider array is fine; declared big enough for every fd this layer can hold.
@@ -140,7 +143,7 @@ void ws_init(void) {
 	B(WSAStartup); B(WSAGetLastError); B(socket); B(bind); B(listen); B(accept);
 	B(connect); B(recv); B(send); B(recvfrom); B(sendto); B(closesocket);
 	B(shutdown); B(setsockopt); B(getsockopt); B(getsockname); B(getpeername);
-	B(ioctlsocket); B(WSAPoll); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
+	B(ioctlsocket); B(WSAIoctl); B(WSAPoll); B(select); B(getaddrinfo); B(freeaddrinfo); B(inet_pton);
 	B(inet_ntop); B(gethostname); B(htons); B(ntohs);
 #undef B
 	ws_WSADATA d;
@@ -362,6 +365,22 @@ int getpeername(int fd, void *addr, int *len) {
 
 int setsockopt(int fd, int level, int opt, const void *val, int len) {
 	if (!kfd_is(fd, KFD_SOCKET)) { errno = L_ENOTSOCK; return -1; }
+	if (level == L_IPPROTO_TCP && opt == L_TCP_KEEPIDLE) {
+		// Windows has no TCP_KEEPIDLE (opt 4 is TCP_MAXSEG); libuv/Node set the
+		// keepalive-idle time through SIO_KEEPALIVE_VALS instead, in ms. The
+		// caller passes seconds (the Linux TCP_KEEPIDLE unit); convert, and use
+		// a 1 s probe interval to match libuv's default (ADR-00760).
+		if (!p_WSAIoctl || !val || len < 4) { errno = L_EINVAL; return -1; }
+		struct { unsigned long onoff, time_ms, interval_ms; } ka;
+		ka.onoff = 1;
+		ka.time_ms = (unsigned long)(*(const int *)val) * 1000UL;
+		ka.interval_ms = 1000UL;
+		unsigned long ret = 0;
+		// SIO_KEEPALIVE_VALS = _WSAIOW(IOC_VENDOR, 4).
+		if (p_WSAIoctl(kfd_sock(fd), 0x98000004UL, &ka, sizeof ka, NULL, 0, &ret, NULL, NULL) != 0)
+			return set_wsa_errno();
+		return 0;
+	}
 	if (level == L_SOL_SOCKET) {
 		level = WS_SOL_SOCKET;
 		switch (opt) {

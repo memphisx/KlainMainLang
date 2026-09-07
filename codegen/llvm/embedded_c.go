@@ -112,7 +112,21 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
+		if runtime.GOOS == "windows" && staticLinkMode {
+			// --static: precompile the amalgamation with g++ (COMDAT-compatible with the
+			// static libstdc++.a) and link the object, so the desktop .exe is
+			// self-contained — no libstdc++/libwinpthread DLLs beside it (ADR-00772).
+			obj, oerr := windowsWebviewObject()
+			if oerr != nil {
+				return nil, oerr
+			}
+			winLibs := append([]string{obj}, libs...)
+			out = append(out, CSource{"webview", "// webview linked as a prebuilt g++ object (see webview_win32.go).\n", nil, winLibs, "cc"})
+		} else {
+			// Default / POSIX: the amalgamation compiles on the shared clang line and
+			// links the dynamic C++ runtime.
+			out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
+		}
 	}
 	if e.UsesTtyShim() {
 		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
@@ -135,16 +149,30 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// warning). Under -mm=gc the runtime registers each M thread and each
 		// goroutine stack with Boehm — gated by KLAINSYNC_GC; the -lgc link is
 		// already added globally in gc mode (LocateGC).
-		cflags := []string{"-pthread", "-Wno-deprecated-declarations"}
+		cflags := []string{"-Wno-deprecated-declarations"}
+		var libs []string
+		if runtime.GOOS == "windows" && staticLinkMode {
+			// --static: -pthread would link libwinpthread-1.dll dynamically (it rides
+			// the shared compile+link clang line); link the static archive instead so a
+			// goroutine program is self-contained (ADR-00772). mingw's pthread.h is
+			// thread-safe without -pthread, so compiling without it is fine.
+			libs = WorkerPthreadLinkFlags()
+		} else {
+			cflags = append(cflags, "-pthread") // dynamic winpthread (default / POSIX)
+		}
 		if e.isGCMode() {
 			cflags = append(cflags, "-DKLAINSYNC_GC=1")
 		}
-		out = append(out, CSource{"klainsync", SyncSource(), cflags, nil, ""})
+		out = append(out, CSource{"klainsync", SyncSource(), cflags, libs, ""})
 	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.
-		out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
+		if runtime.GOOS == "windows" && staticLinkMode {
+			out = append(out, CSource{"embedassets", EmbedAssetsSource(), nil, WorkerPthreadLinkFlags(), ""})
+		} else {
+			out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
+		}
 	}
 	return out, nil
 }

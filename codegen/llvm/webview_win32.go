@@ -1,8 +1,11 @@
 package llvm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 )
@@ -21,7 +24,46 @@ func locateWebviewWindows() (cflags, libs []string, err error) {
 	if _, serr := os.Stat(hdr); serr != nil {
 		return nil, nil, fmt.Errorf("webview: WebView2.h not found in the mingw sysroot (%s) — install the WebView2 SDK header: `pacman -S mingw-w64-ucrt-x86_64-webview2-loader`", hdr)
 	}
-	return nil, []string{"-lole32", "-lshell32", "-lshlwapi", "-luser32", "-ladvapi32", "-lversion", "-lstdc++"}, nil
+	libs = []string{"-lole32", "-lshell32", "-lshlwapi", "-luser32", "-ladvapi32", "-lversion"}
+	if staticLinkMode {
+		// --static: the C++ runtime links statically (libstdc++ + winpthread group);
+		// the amalgamated binding is precompiled with g++ (windowsWebviewObject) so
+		// its objects are COMDAT-compatible with the gcc archive. ADR-00772.
+		libs = append(libs, winCxxStaticRuntime()...)
+	} else {
+		// Default: dynamic C++ runtime (libstdc++-6.dll, bundled/on-PATH).
+		libs = append(libs, "-lstdc++")
+	}
+	return nil, libs, nil
+}
+
+// windowsWebviewObject precompiles the amalgamated webview C++ source with g++
+// (not clang) into a cached object on Windows. The desktop app then links the
+// static gcc libstdc++.a; a clang-built object's RTTI COMDATs differ in size from
+// gcc's and ld.bfd rejects the mix, exactly as for Yoga (ADR-00771). g++ ships
+// with the required mingw toolchain and is native to the ucrt64 sysroot (so
+// WebView2.h resolves without a -I). Returns the object path; the caller carries
+// it as a link input instead of compiling WebviewSource() on the shared clang line.
+func windowsWebviewObject() (string, error) {
+	src := WebviewSource()
+	sum := sha256.Sum256([]byte("kml-webview-" + src))
+	dir := filepath.Join(os.TempDir(), "kml-webview-"+hex.EncodeToString(sum[:6]))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("webview: temp dir: %w", err)
+	}
+	obj := filepath.Join(dir, "webview.o")
+	if fi, serr := os.Stat(obj); serr == nil && fi.Size() > 0 {
+		return obj, nil
+	}
+	srcPath := filepath.Join(dir, "webview.cc")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		return "", fmt.Errorf("webview: write source: %w", err)
+	}
+	cmd := exec.Command("g++", "-std=c++17", "-O2", "-c", srcPath, "-o", obj)
+	if out, cerr := cmd.CombinedOutput(); cerr != nil {
+		return "", fmt.Errorf("webview: g++ compiling amalgamation: %v\n%s", cerr, out)
+	}
+	return obj, nil
 }
 
 // webviewWin32Deferral is appended to the vendored header on Windows. On

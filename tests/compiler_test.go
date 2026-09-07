@@ -75,10 +75,10 @@ func buildBinary(t *testing.T, src string) string {
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -435,7 +435,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -468,14 +468,23 @@ func buildBinaryGC(t *testing.T, src string) string {
 // string-in-memory shortcut for the (much more common) import-free case.
 func buildBinaryImports(t *testing.T, src string) string {
 	t.Helper()
-	if _, err := exec.LookPath("clang"); err != nil {
-		t.Skip("clang not found in PATH")
-	}
-
-	dir := tempDir(t)
-	srcFile := filepath.Join(dir, "main.ts")
+	d := tempDir(t)
+	srcFile := filepath.Join(d, "main.ts")
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
+	}
+	return buildBinaryFromFile(t, srcFile)
+}
+
+// buildBinaryFromFile resolves and compiles a program from a real entry file,
+// following its relative imports from that file's own directory — so a
+// multi-module app (e.g. apps/klaintop/main.ts importing ./data, ./view) builds
+// correctly, unlike buildBinaryImports which writes one inline source to a temp
+// file. Build artifacts go to a fresh temp dir, never next to the source.
+func buildBinaryFromFile(t *testing.T, srcFile string) string {
+	t.Helper()
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found in PATH")
 	}
 
 	prog, err := resolver.ResolveProgram(srcFile)
@@ -483,6 +492,7 @@ func buildBinaryImports(t *testing.T, src string) string {
 		t.Fatalf("resolve: %v", err)
 	}
 
+	dir := tempDir(t)
 	em := llvm.NewEmitter()
 	ir, err := em.EmitProgram(prog)
 	if err != nil {
@@ -498,10 +508,10 @@ func buildBinaryImports(t *testing.T, src string) string {
 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -618,7 +628,7 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -763,7 +773,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 		llFile, asanOptFile, "-o", binFile,
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -846,7 +856,7 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = append(clangArgs, cflags...)
 	clangArgs = append(clangArgs, libs...)
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendJSONParseTree(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -938,10 +948,10 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -1004,10 +1014,10 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -1100,10 +1110,10 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -1159,10 +1169,10 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)
@@ -1217,7 +1227,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -1256,7 +1266,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs = appendDtoa(t, em, dir, clangArgs)
 	clangArgs = appendDynJSON(t, em, dir, clangArgs)
@@ -1325,10 +1335,10 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	if em.UsesWorkers() {
-		clangArgs = append(clangArgs, "-pthread")
+		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
+		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
 	clangArgs, bigintUsed := appendBigIntBackend(t, em, dir, clangArgs)
 	clangArgs, cryptoUsed := appendCryptoBackend(t, em, dir, clangArgs)

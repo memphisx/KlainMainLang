@@ -21,6 +21,7 @@ This file is the scannable index: per-area completion % plus the caveats/blocker
 - [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)
 - [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity
 - [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior
+- [Platform Support & Windows Notes](#platform-support--windows-notes) — faithful per-platform behaviour and the known Windows-specific gaps, in one place
 - [Design Documents (TDDs)](#design-documents-tdds)
 - [Roadmap](#roadmap)
 - [Status page format](#status-page-format) — the shared layout every detail page follows
@@ -80,14 +81,14 @@ WHATWG/W3C-standard APIs — the kind a browser **and** Node.js both implement. 
 
 Node.js-specific runtime globals — not part of any Web/browser standard, but essential for the CLI-application and microservice use cases this project actually targets. Most (`fs.*`, `path.*`, `os.*`, `querystring.*`, `assert`, `http.createServer`, `cluster.*`, and this project's own `Memory.free`) require a default, namespace, or named import (`import fs from 'fs'` or `import { readFileSync } from 'fs'`) — see [MODULES.md](MODULES.md)'s import-gated-bindings row and [TDD-00049](../tdd/TDD-00049.md)/[ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md). `process`/`console` stay ambient, like `Math`/`JSON`, matching real Node/JS.
 
-**123 / 125 features, ~98% coverage.**
+**125 / 127 features, ~98% coverage.**
 
 | Category | Coverage | Strict | Page | Caveats |
 |---|---|---|---|---|
-| File System (fs) | 16/17, ~94% | 2/17, ~12% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | • Async variants (`fs.readFile(path, cb)` + `fs.promises`/`fs/promises`) run blocking I/O under the hood — async-shaped, not thread-pooled ([TDD-00107](../tdd/TDD-00107.md))<br>• `fs.createReadStream`/`createWriteStream` (Node Readable/Writable) deliver **string** chunks, read eagerly to EOF ([TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
+| File System (fs) | 18/19, ~95% | 2/19, ~11% | [FILE-SYSTEM.md](FILE-SYSTEM.md) | • Async variants (`fs.readFile(path, cb)` + `fs.promises`/`fs/promises`) run blocking I/O under the hood — async-shaped, not thread-pooled ([TDD-00107](../tdd/TDD-00107.md))<br>• `fs.createReadStream`/`createWriteStream` (Node Readable/Writable) deliver **string** chunks, read eagerly to EOF ([TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md)) |
 | Process / CLI I/O | 32/32, 100% | 12/32, ~38% | [PROCESS-CLI.md](PROCESS-CLI.md) | • `process.env` writes work but there's no `delete` (no dynamic-delete operator)<br>• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)<br>• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons<br>• `process.memoryUsage()` reports a real `rss` (peak, via `getrusage`); the V8-heap fields are 0<br>• `child_process.fork()` shipped as self-fork + string IPC (`NODE_CHANNEL_FD`); forking a different module stays out |
 | HTTP Server | 16/16, 100% | 14/16, ~88% | [HTTP-SERVER.md](HTTP-SERVER.md) | • Real Node `http.createServer` alongside the bespoke `http.listen` (now also `klain:http`): chained **and** variable-bound handle forms (`.listen(0)`/`.address().port`/`.close()`/`.on('request')`, untyped handler params contextually typed) — createServer is a V1 `res` subset (writeHead/setHeader/write/end), `.listen` blocks until close — [TDD-00131](../tdd/TDD-00131.md)/[ADR-00391](../adr/ADR-00391.md)/[ADR-00406](../adr/ADR-00406.md) |
-| `path` | 10/10, 100% | 7/10, 70% | [PATH.md](PATH.md) | POSIX-only (this compiler doesn't cross-compile) |
+| `path` | 10/10, 100% | 7/10, 70% | [PATH.md](PATH.md) | Host-flavoured — a bare `path` is `path.win32` on Windows and `path.posix` elsewhere, with `path.posix`/`path.win32` naming one explicitly on any host ([TDD-00178](../tdd/TDD-00178.md)); the posix flavour's `join`/`normalize` drops a trailing slash where Node keeps it |
 | `os` | 7/7, 100% | 5/7, ~71% | [OS.md](OS.md) | • Verified on Linux and Apple Silicon (M4 Pro) |
 | `events` (`EventEmitter`) | 8/8, 100% | 3/8, ~38% | [EVENT-EMITTER.md](EVENT-EMITTER.md) | • Multi-argument events via a tuple payload (`emit(e, a, b)` — [ADR-00392](../adr/ADR-00392.md)); no open-ended untyped `...args` beyond a declared tuple<br>• `instanceof EventEmitter` is a compile-time constant, not a runtime tag |
 | SQLite (`node:sqlite`) | 18/18, 100% | 9/18, 50% | [SQLITE.md](SQLITE.md) | • Synchronous `DatabaseSync`/`StatementSync` over the system `libsqlite3` (linked only when imported) — `exec`/`prepare`/`get`/`all`/`iterate`/`run`/`columns`, `open`/`close`/`isOpen`/`isTransaction`/`location`, scalar `db.function()` UDFs, positional **and** named params, all column types incl. `BLOB`→`Uint8Array` and `bigint` ([ADR-00540](../adr/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md))<br>• Result rows need an explicit shape (`.all<T>()`/`.get<T>()`); untyped `SELECT *` awaits a dynamic-object mode<br>• `db.aggregate()`, error `.code`, and a lazy iterator are later stages; sessions/changesets, extension loading, and async `backup()` are rejected with a clear message (unavailable in the system libsqlite3 / out of scope) |
@@ -161,6 +162,46 @@ Every row below is marked ✅ (or 100%) on its own page — the feature genuinel
 
 ---
 
+## Platform Support & Windows Notes
+
+The compiler targets the host it runs on (no cross-compilation): Linux (x86-64) and macOS (Apple Silicon) are the primary platforms, and Windows (x86-64) is supported through the mingw-w64 UCRT toolchain ([TDD-00177](../tdd/TDD-00177.md)). This section gathers the platform-keyed behaviour that would otherwise be scattered through per-feature caveats — separating the differences that are **faithful to Node** (correct, not gaps) from the **known Windows gaps** that remain. The gaps are acknowledged here rather than carried as feature caveats: none are scheduled, and they are picked up opportunistically as low-priority follow-ups to the port.
+
+### Faithful platform differences (correct — Node behaves the same)
+
+These are not gaps: the compiler matches Node's own per-platform behaviour. Documented here for reference, not as caveats.
+
+| Area | Behaviour |
+|---|---|
+| `process.platform` | `win32` / `linux` / `darwin`, resolved at compile time to the build host |
+| `os.EOL` | `\r\n` on Windows, `\n` on POSIX ([TDD-00177](../tdd/TDD-00177.md)) |
+| `path` | a bare `path` is `path.win32` on Windows and `path.posix` elsewhere, with `path.posix`/`path.win32` explicit on any host ([TDD-00178](../tdd/TDD-00178.md)) |
+| `process.getuid`/`geteuid`/`getgid`/`getegid` | present on POSIX; rejected at compile time on Windows, where Node leaves them undefined |
+| Signals | `SIGINT` (Ctrl+C) and `SIGBREAK` (Ctrl+Break) fire on Windows; `SIGTERM` listeners are accepted but never fire (nothing delivers it there) and `process.kill` terminates unconditionally ([ADR-00728](../adr/ADR-00728.md)) |
+| Child exit code | the full 32-bit value on Windows, the 8-bit POSIX wait-status field on Linux/macOS — as Node reports on each ([ADR-00759](../adr/ADR-00759.md)) |
+| `fs.chmod` | toggles the read-only attribute on Windows (no POSIX mode bits) |
+| `os.homedir()`/`os.tmpdir()` | read `USERPROFILE`/`TEMP` on Windows ([ADR-00739](../adr/ADR-00739.md)) |
+| `fs.symlink` | needs Developer Mode or an elevated token on Windows (as it does for any program) |
+
+### Known Windows gaps (acknowledged, not yet tackled)
+
+Divergences or missing pieces specific to the Windows platform layer. Kept here as a backlog rather than as caveats on the individual features — they may be tackled in the future.
+
+| Gap | Detail | Tracked in |
+|---|---|---|
+| Event-loop reactor / CRT fd table | blocking `process.stdin`/pipe reads, a ~10 ms idle poll slice, a 384-socket `select()` cap, `dup2` socket aliasing, synchronous `CreatePipe` child stdio | scoped in [TDD-00182](../tdd/TDD-00182.md) (owned handle table) + [TDD-00183](../tdd/TDD-00183.md) (IOCP) — not started |
+| `cluster` round-robin | workers share one listening socket instead of the primary's round-robin; `http.close()` from a worker doesn't reach siblings | [TDD-00177](../tdd/TDD-00177.md) |
+| Named pipes / `EPIPE` on write | `net.connect({ path })` has no `\\.\pipe\…` (Windows named-pipe) mapping; the WSA→errno table is complete, so a peer reset on a plaintext socket surfaces `ECONNRESET`/`ECONNABORTED` faithfully — the realistic broken-connection case ([ADR-00742](../adr/ADR-00742.md)). Two write-error nuances stay deferred (low-value): `WSAESHUTDOWN`→`EPIPE` (libuv parity) is not observably reachable — the JS `Writable` layer intercepts write-after-`end()` before the syscall; and on long-lived streaming / pub-sub connections (gRPC over HTTP/2, `wss`) a TLS write goes through OpenSSL's own BIO, whose surfaced error code is unverified against Node. A persistent-connection probe (client `destroy()`s, server keeps writing) would settle the latter | [TDD-00180](../tdd/TDD-00180.md) §5 |
+| `net` socket `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` | accepted but no-ops (cross-platform, most visible here) | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |
+| Non-ASCII console input (full reliability) | the console input code page is set to UTF-8 so typed non-ASCII arrives as UTF-8 via the CRT read ([ADR-00747](../adr/ADR-00747.md)); Node's fully-reliable wide `ReadConsoleW` path is not implemented | [TDD-00180](../tdd/TDD-00180.md) §2 |
+| `process.stdout.columns`/`.rows` off a TTY | returns an 80×24 fallback instead of Node's `undefined` (cross-platform; a `number \| null` return is now feasible but would change the type) | [PROCESS-CLI.md](PROCESS-CLI.md) |
+| `process.env` | a UCRT startup snapshot — a live `SetEnvironmentVariableW` is invisible, and there is no key enumeration on any host | [TDD-00180](../tdd/TDD-00180.md) §6 |
+
+### Out of scope on Windows by design
+
+`--static` (a compiled `.exe` links the optional libraries' `ucrt64/bin` DLLs; a fully static libcurl/OpenSSL build is a deferred Stage-5 evaluation, [TDD-00177](../tdd/TDD-00177.md) open question 5), `-crypto=commoncrypto` (macOS-only, ships with that OS), and the ASan/UBSan sanitizers (no mingw runtime in LLVM's Windows build). `-mm=gc` (Boehm) works on Windows, with `GC_set_handle_fork` skipped since there is no `fork()` there ([ADR-00719](../adr/ADR-00719.md)).
+
+---
+
 ## Design Documents (TDDs)
 
 Anything big enough to need a design pass before implementation gets scoped out in a Technical Design Document under `docs/tdd/` first. The individual `docs/tdd/TDD-*.md` files are the source of truth for status; [`docs/tdd/README.md`](../tdd/README.md)'s full index (number, title, status, implementing ADRs) and the backlog below are both generated from them.
@@ -216,6 +257,9 @@ Listed below is **every not-yet-done TDD** (Not Started, In Progress, or Partial
 | [00176](../tdd/TDD-00176.md) General `as T` on dynamic values — projection, rejection, or erasure? | Not Started | The design question [ADR-00715](../adr/ADR-00715.md)'s narrow carve-out defers: whether strict-mode `any as T` should emit a runtime dynamic→concrete projection, become a clean rejection, or stay erased with per-shape carve-outs; the scalar unbox subset is the likely first slice |
 | [00177](../tdd/TDD-00177.md) Windows support — mingw-w64 toolchain, Win32-native platform layer | Partially Implemented | Stages 0–5 shipped ([ADR-00718](../adr/ADR-00718.md), [ADR-00719](../adr/ADR-00719.md)): the full E2E suite, the examples, and TLS/HTTP2/wss servers run on Windows 11 x86-64 with the documented skips (signals, POSIX-only tools, sanitizers, symlinks without Developer Mode). `path` defaulting to `path.win32` shipped separately ([TDD-00178](../tdd/TDD-00178.md)). `klain:webview` (Edge WebView2) and `-package` (GUI-subsystem exe) followed ([ADR-00725](../adr/ADR-00725.md), [ADR-00726](../adr/ADR-00726.md)). Open: cluster round-robin scheduling (workers share one listening socket instead), an IOCP reactor, `--static` on Windows, CI |
 | [00180](../tdd/TDD-00180.md) Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped | Not Started | Subsystem-by-subsystem audit of the shipped Win32 layer against libuv/Node Windows behaviour: the mingw toolchain decision held; the structural debt is the CRT fd table (blocking stdin/pipe reads, 10 ms poll slices, socket cap — recommends an owned handle table before IOCP), plus ranked incremental gaps in console encoding, `child_process` shell/quoting, fs sharing/`\\?\` paths, errno tables, and Winsock option translation, security-flavoured rows first |
+| [00181](../tdd/TDD-00181.md) fs.watch — native file-change watching across the event loop | In Progress | The faithful, event-driven `fs.watch`: a native OS change source folded into the `select()` loop via the standard hook trio. **Stages 1–3 implemented**: the `FSWatcher` object + event-loop integration + the Linux `inotify` backend ([ADR-00756](../adr/ADR-00756.md), a readable fd, no thread) and the Windows `ReadDirectoryChangesW` backend ([ADR-00757](../adr/ADR-00757.md), a watcher thread + a loopback wakeup socket — the loop wakeup channel the §1 audit found missing), both verified, plus the macOS `kqueue`/`EVFILT_VNODE` backend ([ADR-00758](../adr/ADR-00758.md), CI-pending — no local Mac). Stage 4 flips the coverage row + adds the example once the macOS lane confirms |
+| [00182](../tdd/TDD-00182.md) Windows owned handle table + event-loop reactor | Not Started | Elaborates [TDD-00180](../tdd/TDD-00180.md)'s recommended **Option A** into an implementable design: replace the CRT fd table with an owned, kind-tagged handle table and wait once on a unified wait object the [ADR-00757](../adr/ADR-00757.md) wakeup channel signals — killing the blocking stdin/pipe reads, the 10 ms poll spin, the 384-socket cap, and `dup2` aliasing, while keeping the `select()` contract so the IR-level net/http/stdin callers are untouched. IOCP (Option B) stays the parked upgrade path. Staged 1–6; not to be started from the Windows box |
+| [00183](../tdd/TDD-00183.md) Windows IOCP reactor (completion-model I/O) | Not Started | **Option B** from [TDD-00180](../tdd/TDD-00180.md): the native completion-model reactor (overlapped `WSARecv`/`AcceptEx`, one `GetQueuedCompletionStatusEx`) — Windows' faithful long-term I/O model. A **committed follow-on to [TDD-00182](../tdd/TDD-00182.md)** (Option A), sequenced after it and built on its owned handle table; **lower priority than A but not deferred**. Waits on A so A's table/wakeup are shaped for B's reuse rather than discarded |
 
 ---
 

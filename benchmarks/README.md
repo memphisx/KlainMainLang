@@ -174,6 +174,57 @@ else Linux `DISPLAY`/`WAYLAND_DISPLAY` (macOS: logged-in session) → GUI, else 
    page polling, without stalling the GUI thread (servers/fd-loops under a
    webview still need a Worker — the sampler likely lives there).
 
+### Windows portability (design gaps to close before/while building)
+
+The `run.sh` bootstrap is POSIX-only by design and stays that way (the
+self-hosted tool is its cross-platform replacement). But three parts of the
+design above are quietly POSIX-shaped
+and need an explicit Windows branch when the tool is built, or the Windows
+numbers will be wrong or missing rather than merely different:
+
+1. **Memory sampling primitive (design decision 1).** `ps -o rss,%cpu -p <pid>`
+   and the `/usr/bin/time` cross-check do not exist natively on Windows (and the
+   MSYS `ps` does not report a working-set RSS the same way). The Windows path is
+   `OpenProcess` + `GetProcessMemoryInfo` (`PeakWorkingSetSize` for the peak,
+   `WorkingSetSize` per sample) — via a small shim, the same shape
+   `process.memoryUsage().rss` already uses on Windows. Two consequences:
+   - **RSS ≠ Working Set exactly.** Windows "working set" is the closest analogue
+     to POSIX RSS but is not identical (it excludes paged-out pages differently);
+     the results schema (decision 2) should record the metric name per platform
+     (`rss` vs `peak_working_set`) rather than pretend one number.
+   - **Cross-engine children (Node/Bun/PerryTS) must be sampled the same way.**
+     They will not self-report on the tool's tick, so external
+     `GetProcessMemoryInfo` on the child pid is the only uniform Windows path —
+     the runner interface (decision 3) must expose the sampling primitive per
+     platform, not assume `ps`.
+
+2. **GUI-availability probe (mode selection).** The adaptive branch keys off
+   Linux `DISPLAY`/`WAYLAND_DISPLAY` (macOS: logged-in session) and has no
+   Windows case. Windows has no `DISPLAY`; a GUI is available whenever the process
+   runs in an interactive window station (probe e.g. `GetConsoleWindow`/session
+   state, or simply attempt the webview and fall back). The webview presenter
+   itself is fine on Windows — `klain:webview` is Edge WebView2 there — but the
+   *selection* logic must not treat "no `DISPLAY`" as "headless" on Windows, or it
+   will never pick the GUI presenter. Headless detection is: explicit flag → no
+   TTY → (Windows: no interactive station) / (POSIX: no `DISPLAY`) → GUI else TUI.
+
+3. **Live over-time sampling depends on the Windows event-loop reactor.** The
+   over-time series relies on async `spawn` keeping the fiber live while a
+   `setInterval` samples. On Windows the current event loop still has the blocking
+   pipe reads + ~10 ms idle poll-spin (the CRT-fd-table debt scoped in
+   TDD-00182); draining a child's stdout can block a tick, so the sample cadence
+   and child-output interleaving may be degraded until that reactor lands. Peak
+   RSS (a single max) is unaffected; only the *series* fidelity is. Note this in
+   the schema/report so a Windows over-time curve is not mistaken for a
+   memory-behaviour difference. The TUI (`klain:tui`, ConPTY-backed) and the
+   `child_process` drive path (`spawnSync`/`execFileSync`/async `spawn`) are
+   otherwise verified on Windows.
+
+Wall-clock timing (`performance.now()`) is cross-platform, but Windows timer
+resolution is coarser (~15.6 ms `GetTickCount64` tick) — fine for the seconds-scale
+workloads here, but the schema should keep wall time a secondary signal on
+Windows, as the design already treats it everywhere.
+
 ### Staging
 
 - **Stage 0 (done)**: the benchmark programs + `run.sh` bootstrap.

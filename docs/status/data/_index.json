@@ -16,7 +16,7 @@
     },
     {
       "kind": "block",
-      "text": "- [TypeScript Core Language](#typescript-core-language) — core JavaScript/TypeScript language & standard library (works the same in any JS host)\n- [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)\n- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.createServer(…).listen()` server — Node-specific runtime globals with no browser equivalent\n- [Desktop (`klain:` bespoke)](#desktop-klain-bespoke) — the `klain:webview` desktop-window module, a capability with no Node/Web equivalent\n- [Terminal UI (`klain:` bespoke)](#terminal-ui-klain-bespoke) — the `klain:tui` native TUI framework (vendored Yoga flexbox + ANSI diff painter)\n- [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)\n- [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity\n- [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior\n- [Design Documents (TDDs)](#design-documents-tdds)\n- [Roadmap](#roadmap)\n- [Status page format](#status-page-format) — the shared layout every detail page follows"
+      "text": "- [TypeScript Core Language](#typescript-core-language) — core JavaScript/TypeScript language & standard library (works the same in any JS host)\n- [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)\n- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.createServer(…).listen()` server — Node-specific runtime globals with no browser equivalent\n- [Desktop (`klain:` bespoke)](#desktop-klain-bespoke) — the `klain:webview` desktop-window module, a capability with no Node/Web equivalent\n- [Terminal UI (`klain:` bespoke)](#terminal-ui-klain-bespoke) — the `klain:tui` native TUI framework (vendored Yoga flexbox + ANSI diff painter)\n- [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)\n- [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity\n- [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior\n- [Platform Support & Windows Notes](#platform-support--windows-notes) — faithful per-platform behaviour and the known Windows-specific gaps, in one place\n- [Design Documents (TDDs)](#design-documents-tdds)\n- [Roadmap](#roadmap)\n- [Status page format](#status-page-format) — the shared layout every detail page follows"
     },
     {
       "kind": "block",
@@ -265,7 +265,7 @@
         {
           "category": "`path`",
           "pageFile": "PATH.md",
-          "caveats": "POSIX-only (this compiler doesn't cross-compile)"
+          "caveats": "Host-flavoured — a bare `path` is `path.win32` on Windows and `path.posix` elsewhere, with `path.posix`/`path.win32` naming one explicitly on any host ([TDD-00178](../tdd/TDD-00178.md)); the posix flavour's `join`/`normalize` drops a trailing slash where Node keeps it"
         },
         {
           "category": "`os`",
@@ -436,6 +436,30 @@
     },
     {
       "kind": "block",
+      "text": "## Platform Support & Windows Notes"
+    },
+    {
+      "kind": "block",
+      "text": "The compiler targets the host it runs on (no cross-compilation): Linux (x86-64) and macOS (Apple Silicon) are the primary platforms, and Windows (x86-64) is supported through the mingw-w64 UCRT toolchain ([TDD-00177](../tdd/TDD-00177.md)). This section gathers the platform-keyed behaviour that would otherwise be scattered through per-feature caveats — separating the differences that are **faithful to Node** (correct, not gaps) from the **known Windows gaps** that remain. The gaps are acknowledged here rather than carried as feature caveats: none are scheduled, and they are picked up opportunistically as low-priority follow-ups to the port."
+    },
+    {
+      "kind": "block",
+      "text": "### Faithful platform differences (correct — Node behaves the same)\n\nThese are not gaps: the compiler matches Node's own per-platform behaviour. Documented here for reference, not as caveats.\n\n| Area | Behaviour |\n|---|---|\n| `process.platform` | `win32` / `linux` / `darwin`, resolved at compile time to the build host |\n| `os.EOL` | `\\r\\n` on Windows, `\\n` on POSIX ([TDD-00177](../tdd/TDD-00177.md)) |\n| `path` | a bare `path` is `path.win32` on Windows and `path.posix` elsewhere, with `path.posix`/`path.win32` explicit on any host ([TDD-00178](../tdd/TDD-00178.md)) |\n| `process.getuid`/`geteuid`/`getgid`/`getegid` | present on POSIX; rejected at compile time on Windows, where Node leaves them undefined |\n| Signals | `SIGINT` (Ctrl+C) and `SIGBREAK` (Ctrl+Break) fire on Windows; `SIGTERM` listeners are accepted but never fire (nothing delivers it there) and `process.kill` terminates unconditionally ([ADR-00728](../adr/ADR-00728.md)) |\n| Child exit code | the full 32-bit value on Windows, the 8-bit POSIX wait-status field on Linux/macOS — as Node reports on each ([ADR-00759](../adr/ADR-00759.md)) |\n| `fs.chmod` | toggles the read-only attribute on Windows (no POSIX mode bits) |\n| `os.homedir()`/`os.tmpdir()` | read `USERPROFILE`/`TEMP` on Windows ([ADR-00739](../adr/ADR-00739.md)) |\n| `fs.symlink` | needs Developer Mode or an elevated token on Windows (as it does for any program) |"
+    },
+    {
+      "kind": "block",
+      "text": "### Known Windows gaps (acknowledged, not yet tackled)\n\nDivergences or missing pieces specific to the Windows platform layer. Kept here as a backlog rather than as caveats on the individual features — they may be tackled in the future.\n\n| Gap | Detail | Tracked in |\n|---|---|---|\n| Event-loop reactor / CRT fd table | blocking `process.stdin`/pipe reads, a ~10 ms idle poll slice, a 384-socket `select()` cap, `dup2` socket aliasing, synchronous `CreatePipe` child stdio | scoped in [TDD-00182](../tdd/TDD-00182.md) (owned handle table) + [TDD-00183](../tdd/TDD-00183.md) (IOCP) — not started |\n| `cluster` round-robin | workers share one listening socket instead of the primary's round-robin; `http.close()` from a worker doesn't reach siblings | [TDD-00177](../tdd/TDD-00177.md) |\n| Named pipes / `EPIPE` on write | `net.connect({ path })` has no `\\\\.\\pipe\\…` (Windows named-pipe) mapping; the WSA→errno table is complete, so a peer reset on a plaintext socket surfaces `ECONNRESET`/`ECONNABORTED` faithfully — the realistic broken-connection case ([ADR-00742](../adr/ADR-00742.md)). Two write-error nuances stay deferred (low-value): `WSAESHUTDOWN`→`EPIPE` (libuv parity) is not observably reachable — the JS `Writable` layer intercepts write-after-`end()` before the syscall; and on long-lived streaming / pub-sub connections (gRPC over HTTP/2, `wss`) a TLS write goes through OpenSSL's own BIO, whose surfaced error code is unverified against Node. A persistent-connection probe (client `destroy()`s, server keeps writing) would settle the latter | [TDD-00180](../tdd/TDD-00180.md) §5 |\n| `net` socket `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` | accepted but no-ops (cross-platform, most visible here) | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |\n| Non-ASCII console input (full reliability) | the console input code page is set to UTF-8 so typed non-ASCII arrives as UTF-8 via the CRT read ([ADR-00747](../adr/ADR-00747.md)); Node's fully-reliable wide `ReadConsoleW` path is not implemented | [TDD-00180](../tdd/TDD-00180.md) §2 |\n| `process.stdout.columns`/`.rows` off a TTY | returns an 80×24 fallback instead of Node's `undefined` (cross-platform; a `number \\| null` return is now feasible but would change the type) | [PROCESS-CLI.md](PROCESS-CLI.md) |\n| `process.env` | a UCRT startup snapshot — a live `SetEnvironmentVariableW` is invisible, and there is no key enumeration on any host | [TDD-00180](../tdd/TDD-00180.md) §6 |"
+    },
+    {
+      "kind": "block",
+      "text": "### Out of scope on Windows by design\n\n`--static` (a compiled `.exe` links the optional libraries' `ucrt64/bin` DLLs; a fully static libcurl/OpenSSL build is a deferred Stage-5 evaluation, [TDD-00177](../tdd/TDD-00177.md) open question 5), `-crypto=commoncrypto` (macOS-only, ships with that OS), and the ASan/UBSan sanitizers (no mingw runtime in LLVM's Windows build). `-mm=gc` (Boehm) works on Windows, with `GC_set_handle_fork` skipped since there is no `fork()` there ([ADR-00719](../adr/ADR-00719.md))."
+    },
+    {
+      "kind": "block",
+      "text": "---"
+    },
+    {
+      "kind": "block",
       "text": "## Design Documents (TDDs)"
     },
     {
@@ -449,6 +473,18 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "183": {
+          "title": "Windows IOCP reactor (completion-model I/O)",
+          "notes": "**Option B** from [TDD-00180](../tdd/TDD-00180.md): the native completion-model reactor (overlapped `WSARecv`/`AcceptEx`, one `GetQueuedCompletionStatusEx`) — Windows' faithful long-term I/O model. A **committed follow-on to [TDD-00182](../tdd/TDD-00182.md)** (Option A), sequenced after it and built on its owned handle table; **lower priority than A but not deferred**. Waits on A so A's table/wakeup are shaped for B's reuse rather than discarded"
+        },
+        "182": {
+          "title": "Windows owned handle table + event-loop reactor",
+          "notes": "Elaborates [TDD-00180](../tdd/TDD-00180.md)'s recommended **Option A** into an implementable design: replace the CRT fd table with an owned, kind-tagged handle table and wait once on a unified wait object the [ADR-00757](../adr/ADR-00757.md) wakeup channel signals — killing the blocking stdin/pipe reads, the 10 ms poll spin, the 384-socket cap, and `dup2` aliasing, while keeping the `select()` contract so the IR-level net/http/stdin callers are untouched. IOCP (Option B) stays the parked upgrade path. Staged 1–6; not to be started from the Windows box"
+        },
+        "181": {
+          "title": "fs.watch — native file-change watching across the event loop",
+          "notes": "The faithful, event-driven `fs.watch`: a native OS change source folded into the `select()` loop via the standard hook trio. **Stages 1–3 implemented**: the `FSWatcher` object + event-loop integration + the Linux `inotify` backend ([ADR-00756](../adr/ADR-00756.md), a readable fd, no thread) and the Windows `ReadDirectoryChangesW` backend ([ADR-00757](../adr/ADR-00757.md), a watcher thread + a loopback wakeup socket — the loop wakeup channel the §1 audit found missing), both verified, plus the macOS `kqueue`/`EVFILT_VNODE` backend ([ADR-00758](../adr/ADR-00758.md), CI-pending — no local Mac). Stage 4 flips the coverage row + adds the example once the macOS lane confirms"
+        },
         "180": {
           "title": "Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped",
           "notes": "Subsystem-by-subsystem audit of the shipped Win32 layer against libuv/Node Windows behaviour: the mingw toolchain decision held; the structural debt is the CRT fd table (blocking stdin/pipe reads, 10 ms poll slices, socket cap — recommends an owned handle table before IOCP), plus ranked incremental gaps in console encoding, `child_process` shell/quoting, fs sharing/`\\\\?\\` paths, errno tables, and Winsock option translation, security-flavoured rows first"
