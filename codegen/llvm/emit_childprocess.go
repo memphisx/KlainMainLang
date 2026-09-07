@@ -54,10 +54,12 @@ func cpSpawnSyncResultType() Type {
 // cpSpawnSyncCall evaluates (file, argv) and emits the blocking
 // @__kml_cp_spawn_sync call, returning the raw C result-struct pointer
 // (layout: i64 status @0, ptr stdout @8, ptr stderr @16, i64 pid @24).
-func (e *Emitter) cpSpawnSyncCall(fileRef, argsPtr, argsLen, cwdRef string) string {
+// flags bit 0 marks a shell invocation (execSync): on Windows the command
+// line is passed verbatim, Node's windowsVerbatimArguments (ADR-00740).
+func (e *Emitter) cpSpawnSyncCall(fileRef, argsPtr, argsLen, cwdRef string, flags int) string {
 	e.ensureSpawnSyncRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn_sync(ptr %s, ptr %s, i64 %s, ptr %s)", r, fileRef, argsPtr, argsLen, cwdRef))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_cp_spawn_sync(ptr %s, ptr %s, i64 %s, ptr %s, i64 %d)", r, fileRef, argsPtr, argsLen, cwdRef, flags))
 	return r
 }
 
@@ -136,7 +138,7 @@ func (e *Emitter) emitCPSpawnSync(args []ast.Expression, pos ast.Pos) (Value, er
 			}
 		}
 	}
-	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef)
+	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef, 0)
 
 	ty := cpSpawnSyncResultType()
 	e.ensureCalloc()
@@ -183,7 +185,7 @@ func (e *Emitter) emitCPExecSync(args []ast.Expression, pos ast.Pos) (Value, err
 	cmdVal = e.coerce(cmdVal, TypePtr)
 	e.ensureMalloc()
 	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
-	raw := e.cpSpawnSyncCall(shFile, argvPtr, shArgc, cwdRef)
+	raw := e.cpSpawnSyncCall(shFile, argvPtr, shArgc, cwdRef, 1)
 	return Value{Ref: e.cpSpawnSyncField(raw, 1, "ptr"), Ty: TypePtr}, nil
 }
 
@@ -223,7 +225,7 @@ func (e *Emitter) emitCPExecFileSync(args []ast.Expression, pos ast.Pos) (Value,
 			}
 		}
 	}
-	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef)
+	raw := e.cpSpawnSyncCall(fileVal.Ref, argsPtr, argsLen, cwdRef, 0)
 	return Value{Ref: e.cpSpawnSyncField(raw, 1, "ptr"), Ty: TypePtr}, nil
 }
 
@@ -243,45 +245,51 @@ func (e *Emitter) cpSpawnCall(fileRef, argsPtr, argsLen string, mode int, cwdRef
 // else — `env`, `detached`, stdio arrays — is a clean rejection. Accepts an
 // object literal or a variable-bound typed object (same treatment as the
 // http client options, ADR-00429).
-func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (string, error) {
+func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (string, bool, error) {
 	cwdRef := "null"
+	shell := false
 	if lit, ok := arg.(*ast.ObjectLiteral); ok {
 		for _, prop := range lit.Properties {
 			switch prop.Key {
 			case "cwd":
 				v, err := e.emitExpr(prop.Value)
 				if err != nil {
-					return "", err
+					return "", false, err
 				}
 				cwdRef = e.coerce(v, TypePtr).Ref
 			case "shell":
-				if _, err := e.emitExpr(prop.Value); err != nil {
-					return "", err
+				// Literal true routes the command through the platform shell
+				// (`/bin/sh -c` / `cmd.exe /d /s /c`, ADR-00740); false is the
+				// default. A shell *path* or dynamic value is not supported.
+				b, ok := prop.Value.(*ast.BooleanLiteral)
+				if !ok {
+					return "", false, fmt.Errorf("%d:%d: child_process.spawn's shell option must be the literal true or false (a custom shell path is not supported)", pos.Line, pos.Col)
 				}
+				shell = b.Value
 			case "stdio":
 				sl, ok := prop.Value.(*ast.StringLiteral)
 				if !ok || sl.Value != "pipe" {
-					return "", fmt.Errorf("%d:%d: child_process.spawn supports stdio: 'pipe' only (the default)", pos.Line, pos.Col)
+					return "", false, fmt.Errorf("%d:%d: child_process.spawn supports stdio: 'pipe' only (the default)", pos.Line, pos.Col)
 				}
 			default:
-				return "", fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell, stdio: 'pipe' } only (got '%s')", pos.Line, pos.Col, prop.Key)
+				return "", false, fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell, stdio: 'pipe' } only (got '%s')", pos.Line, pos.Col, prop.Key)
 			}
 		}
-		return cwdRef, nil
+		return cwdRef, shell, nil
 	}
 	objTy := e.inferExprType(arg)
 	if !objTy.IsObject {
-		return "", fmt.Errorf("%d:%d: child_process.spawn's options must be an object", pos.Line, pos.Col)
+		return "", false, fmt.Errorf("%d:%d: child_process.spawn's options must be an object", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(arg)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	for _, f := range objVal.Ty.Fields {
 		switch f.Name {
 		case "cwd", "shell":
 		default:
-			return "", fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell } only (got '%s')", pos.Line, pos.Col, f.Name)
+			return "", false, fmt.Errorf("%d:%d: child_process.spawn options support { cwd, shell } only (got '%s')", pos.Line, pos.Col, f.Name)
 		}
 	}
 	if idx, fty, ok := objVal.Ty.FieldIndex("cwd"); ok && isStringTy(fty) {
@@ -291,7 +299,9 @@ func (e *Emitter) cpSpawnOptions(arg ast.Expression, pos ast.Pos) (string, error
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
 		cwdRef = r
 	}
-	return cwdRef, nil
+	// A dynamic options object supports cwd only; its shell field (if any)
+	// is not readable at compile time — spawn keeps the no-shell behavior.
+	return cwdRef, false, nil
 }
 
 // emitCPSpawn implements spawn(command, args?): streaming ChildProcess.
@@ -323,13 +333,27 @@ func (e *Emitter) emitCPSpawn(args []ast.Expression, pos ast.Pos) (Value, error)
 			rest = rest[1:]
 		}
 	}
-	cwdRef := "null"
+	cwdRef, shell := "null", false
 	if len(rest) >= 1 {
-		c, err := e.cpSpawnOptions(rest[0], pos)
+		c, sh, err := e.cpSpawnOptions(rest[0], pos)
 		if err != nil {
 			return Value{}, err
 		}
-		cwdRef = c
+		cwdRef, shell = c, sh
+	}
+	if shell {
+		// shell: true — the whole command line goes through the platform
+		// shell as ONE string, exec-style (`/bin/sh -c` / `cmd.exe /d /s /c`
+		// verbatim on Windows, ADR-00740). Node joins an args array into the
+		// command with spaces; that join is not implemented here yet, so an
+		// args array is a clean rejection instead of a silently wrong quote.
+		if argsPtr != "null" {
+			return Value{}, fmt.Errorf("%d:%d: child_process.spawn with shell: true takes the whole command as one string — put the arguments in the command, or drop shell", pos.Line, pos.Col)
+		}
+		shFile, shArgv, shArgc := e.emitShellArgv(fileVal.Ref)
+		// mode 2: streaming (bit 0 clear) + shell/verbatim (bit 1).
+		cp := e.cpSpawnCall(shFile, shArgv, shArgc, 2, cwdRef)
+		return Value{Ref: cp, Ty: ChildProcessType()}, nil
 	}
 	cp := e.cpSpawnCall(fileVal.Ref, argsPtr, argsLen, 0, cwdRef)
 	return Value{Ref: cp, Ty: ChildProcessType()}, nil
@@ -403,7 +427,9 @@ func (e *Emitter) emitCPExec(args []ast.Expression, pos ast.Pos) (Value, error) 
 	cmdVal = e.coerce(cmdVal, TypePtr)
 	// argv = ["-c", command] via /bin/sh, or cmd.exe /d /s /c on Windows
 	shFile, argvPtr, shArgc := e.emitShellArgv(cmdVal.Ref)
-	cp := e.cpSpawnCall(shFile, argvPtr, shArgc, 1, "null")
+	// mode 3: buffered (bit 0) + shell/verbatim command line (bit 1) — on
+	// Windows the command reaches cmd.exe verbatim, not re-quoted (ADR-00740).
+	cp := e.cpSpawnCall(shFile, argvPtr, shArgc, 3, "null")
 	if err := e.cpStoreExecCallback(cp, args[1], pos, "exec"); err != nil {
 		return Value{}, err
 	}

@@ -46,18 +46,21 @@ func (e *Emitter) emitOSTmpdir(args []ast.Expression, pos ast.Pos) (Value, error
 		return Value{}, fmt.Errorf("%d:%d: os.tmpdir() takes no arguments", pos.Line, pos.Col)
 	}
 	if runtime.GOOS == "windows" {
-		// Node on Windows: TEMP, then TMP, then <SystemRoot>	emp — the last
-		// is the literal fallback here (TDD-00177 Stage 1).
-		temp := e.emitGetenvCall(e.internString("TEMP"))
-		tmp := e.emitGetenvCall(e.internString("TMP"))
-		tempNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", tempNull, temp.Ref))
-		tmpNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", tmpNull, tmp.Ref))
-		second := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", second, tmpNull, e.internString(`C:\Windows\temp`), tmp.Ref))
+		// Node on Windows: TEMP, then TMP, then <SystemRoot|windir>\temp,
+		// with one trailing backslash stripped unless it names a drive root
+		// — the shim helper implements lib/os.js's algorithm exactly
+		// (ADR-00739; supersedes the TDD-00177 Stage 1 literal fallback).
+		if !e.usedOSTmpdirWin {
+			e.usedOSTmpdirWin = true
+			e.emitGlobal("declare ptr @__kml_os_tmpdir()")
+		}
+		e.ensureStrHeaderRuntime()
+		raw := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_os_tmpdir()", raw))
+		// Raw C string from the shim — wrap into a length-prefixed header
+		// string so .length/concat/indexOf work.
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", result, tempNull, second, temp.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", result, raw))
 		return Value{Ref: result, Ty: TypePtr}, nil
 	}
 	val := e.emitGetenvCall(e.internString("TMPDIR"))

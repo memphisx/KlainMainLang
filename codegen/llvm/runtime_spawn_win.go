@@ -20,7 +20,7 @@ func (e *Emitter) ensureWinSpawnDecl() {
 		return
 	}
 	e.usedWinSpawn = true
-	e.emitGlobal("declare i32 @__kml_win_spawn(ptr, ptr, ptr, i32, i32, i32, i32)")
+	e.emitGlobal("declare i32 @__kml_win_spawn(ptr, ptr, ptr, i32, i32, i32, i32, i32)")
 }
 
 // cpSpawnForkIR is the region of __kml_cp_spawn between the pipe setup and
@@ -28,7 +28,9 @@ func (e *Emitter) ensureWinSpawnDecl() {
 func (e *Emitter) cpSpawnForkIR() string {
 	if runtime.GOOS == "windows" {
 		e.ensureWinSpawnDecl()
-		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 %inr, i32 %outw, i32 %errw, i32 -1)
+		return `  %kmlverb64 = lshr i64 %mode, 1
+  %kmlverb = trunc i64 %kmlverb64 to i32
+  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 %inr, i32 %outw, i32 %errw, i32 -1, i32 %kmlverb)
   br label %parent
 `
 	}
@@ -62,7 +64,7 @@ setupfds:
 func (e *Emitter) execSyncForkIR() string {
 	if runtime.GOOS == "windows" {
 		e.ensureWinSpawnDecl()
-		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1)
+		return `  %pid = call i32 @__kml_win_spawn(ptr %file, ptr %argv, ptr %cwd, i32 -1, i32 %writefd, i32 -1, i32 -1, i32 0)
   br label %parent
 `
 	}
@@ -105,7 +107,7 @@ func (e *Emitter) clusterForkIR(fmtID, envID, fmtFD, envFD string) string {
   call i32 @setenv(ptr ` + envFD + `, ptr %fdbuf, i32 1)
   %exe = call ptr @__kml_cluster_self_exe()
   %argv = load ptr, ptr @__argv_ptr, align 8
-  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %cfd)
+  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %cfd, i32 0)
   call i32 @unsetenv(ptr ` + envID + `)
   call i32 @unsetenv(ptr ` + envFD + `)
   br label %parent
@@ -143,7 +145,7 @@ func (e *Emitter) cpForkIR(fmtFD, envFD string) string {
   %cfd64 = sext i32 %cfd to i64
   call i32 (ptr, ptr, ...) @sprintf(ptr %numptr, ptr ` + fmtFD + `, i64 %cfd64)
   call i32 @setenv(ptr ` + envFD + `, ptr %numptr, i32 1)
-  %pid = call i32 @__kml_win_spawn(ptr %argv0, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %cfd)
+  %pid = call i32 @__kml_win_spawn(ptr %argv0, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %cfd, i32 0)
   call i32 @unsetenv(ptr ` + envFD + `)
   br label %parent
 `
@@ -226,7 +228,7 @@ child:
   call i32 @setenv(ptr ` + envFD + `, ptr %fdbuf, i32 1)
   %exe = call ptr @__kml_win_self_exe()
   %argv = load ptr, ptr @__argv_ptr, align 8
-  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %lfd)
+  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 %lfd, i32 0)
   call i32 @unsetenv(ptr ` + envID + `)
   call i32 @unsetenv(ptr ` + envFD + `)
   br label %parentnext
@@ -297,7 +299,16 @@ func (e *Emitter) emitShellArgv(cmdRef string) (fileRef, argvPtr, argsLen string
 		s3 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 3", s3, argvPtr))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cmdRef, s3))
-		return e.internString("cmd.exe"), argvPtr, "4"
+		// Node honours ComSpec for the shell (CRT getenv is case-insensitive
+		// on Windows); cmd.exe only as the fallback (ADR-00740).
+		e.ensureGetenv()
+		comspec := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @getenv(ptr %s)", comspec, e.internString("COMSPEC")))
+		noComspec := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", noComspec, comspec))
+		fileSel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", fileSel, noComspec, e.internString("cmd.exe"), comspec))
+		return fileSel, argvPtr, "4"
 	}
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", argvPtr))
 	s0 := e.freshReg()

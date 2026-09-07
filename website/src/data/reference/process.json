@@ -667,7 +667,8 @@
       "differences": [
         "Listener callbacks fire synchronously from the event loop's dispatch, not deferred through the microtask queue.",
         "One listener per event, an arrow/function-expression literal only; no `removeListener`.",
-        "spawn's options support `{ cwd, shell, stdio: 'pipe' }` — `cwd` is real, `shell` is accepted but **ignored** (commands always exec directly), and `env`/`detached`/stdio arrays are clean rejections; exec/execFile take no options.",
+        "spawn's options support `{ cwd, shell, stdio: 'pipe' }` — `cwd` is real; `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell path, a dynamic value, or `shell:true` + an args array are clean rejections); `env`/`detached`/stdio arrays are clean rejections; exec/execFile take no options.",
+        "`exec`/`execSync` hand the command to the shell verbatim (embedded quotes survive); on Windows a `.bat`/`.cmd` spawned without a shell is refused (exit 127), closing the CVE-2024-27980 injection path.",
         "`'close'`/`'exit'` receive the exit `code` only (a signal death folds to `128+signal`).",
         "Handles and their buffered output are never freed (`-mm=manual`)."
       ],

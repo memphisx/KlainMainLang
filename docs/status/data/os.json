@@ -44,10 +44,11 @@
             "feature": "`os.tmpdir()`",
             "status": "implemented",
             "notes": [
-              "`getenv(\"TMPDIR\")`, falling back to `\"/tmp\"` — never throws"
+              "`getenv(\"TMPDIR\")`, falling back to `\"/tmp\"` — never throws",
+              "On Windows: `TEMP`, then `TMP`, then `<SystemRoot|windir>\\temp`, with one trailing backslash stripped unless it names a drive root — Node's exact algorithm ([ADR-00739](../adr/ADR-00739.md))"
             ],
             "caveats": [
-              "Consults only `$TMPDIR` (not `$TMP`/`$TEMP`) and keeps a trailing slash — `TMPDIR=/foo/` yields `'/foo/'`, where Node returns `'/foo'`."
+              "On POSIX hosts it consults only `$TMPDIR` (not `$TMP`/`$TEMP`) and keeps a trailing slash — `TMPDIR=/foo/` yields `'/foo/'`, where Node returns `'/foo'` (the Windows side strips, [ADR-00739](../adr/ADR-00739.md))."
             ]
           },
           {

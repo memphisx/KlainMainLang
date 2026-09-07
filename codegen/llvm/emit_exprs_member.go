@@ -837,11 +837,11 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 		}
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
-		// Environment probes (TDD-00122) — constant booleans. This compiler is
-		// POSIX-only; hasCrypto/hasIntl reflect the built-in surface.
+		// Environment probes (TDD-00122) — constant booleans reflecting the
+		// compile host; hasCrypto/hasIntl reflect the built-in surface.
 		switch ex.Property {
 		case "isWindows":
-			return Value{Ref: "0", Ty: TypeBool}, nil
+			return Value{Ref: testHostBool(runtime.GOOS == "windows"), Ty: TypeBool}, nil
 		case "isLinux":
 			return Value{Ref: testHostBool(runtime.GOOS == "linux"), Ty: TypeBool}, nil
 		case "isMacOS":

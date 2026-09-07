@@ -105,6 +105,16 @@ static int win_errno(DWORD e) {
 }
 static int fail(void) { errno = win_errno(GetLastError()); return -1; }
 static void *failp(void) { errno = win_errno(GetLastError()); return NULL; }
+// free() can reach HeapFree, which may clobber GetLastError() between a
+// failed Win32 call and the fail()/failp() that reads it — a dozen error
+// paths in this file freed the wide path first (ADR-00739). Every free in
+// this file goes through this preserving wrapper; the cost on success
+// paths is one SetLastError.
+static void free_keep_err(void *p) {
+	DWORD e = GetLastError();
+	free(p);
+	SetLastError(e);
+}
 
 // libuv wording (uv_strerror), which is what Node's messages carry.
 char *strerror(int e) {
@@ -241,16 +251,24 @@ static int stat_path(const char *path, kml_stat *st, int follow) {
 	if (!w) return -1;
 	DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT);
 	HANDLE h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, flags, NULL);
-	free(w);
+	free_keep_err(w);
 	if (h == INVALID_HANDLE_VALUE) return fail();
 	int r = stat_handle(h, st, !follow);
 	CloseHandle(h);
 	return r;
 }
 
-int stat(const char *path, kml_stat *st) { return stat_path(path, st, 1); }
+// stat/fstat (and mkdir/getcwd below) collide with prototypes newer
+// mingw-w64 headers pull in transitively (struct stat vs kml_stat, one-arg
+// mkdir) — the exact header drift that broke the CI runner twice
+// (ADR-00734, ADR-00737). Define them under shim-local C names and bind
+// the exported assembly symbol explicitly, so no header prototype can
+// conflict no matter what a future header set declares.
+int kml_win_stat(const char *path, kml_stat *st) __asm__("stat");
+int kml_win_stat(const char *path, kml_stat *st) { return stat_path(path, st, 1); }
 int lstat(const char *path, kml_stat *st) { return stat_path(path, st, 0); }
-int fstat(int fd, kml_stat *st) {
+int kml_win_fstat(int fd, kml_stat *st) __asm__("fstat");
+int kml_win_fstat(int fd, kml_stat *st) {
 	HANDLE h = (HANDLE)_get_osfhandle(fd);
 	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
 	return stat_handle(h, st, 0);
@@ -283,13 +301,13 @@ int open(const char *path, int flags, ...) {
 	if (is_dir_path(w)) {
 		// Node: opening a directory for reading is EISDIR (libuv maps the
 		// CreateFile refusal to that, matching POSIX read attempts).
-		free(w);
+		free_keep_err(w);
 		errno = L_EISDIR;
 		return -1;
 	}
 	int fd = _wopen(w, wf, pmode);
 	DWORD err = GetLastError();
-	free(w);
+	free_keep_err(w);
 	if (fd < 0) {
 		switch (errno) {
 		case 2: errno = L_ENOENT; break;
@@ -305,7 +323,7 @@ int open(const char *path, int flags, ...) {
 FILE *fopen(const char *path, const char *mode) {
 	wchar_t *w = to_wide(path);
 	if (!w) return NULL;
-	if (is_dir_path(w)) { free(w); errno = L_EISDIR; return NULL; }
+	if (is_dir_path(w)) { free_keep_err(w); errno = L_EISDIR; return NULL; }
 	// Force binary: "r" → "rb", "w+" → "w+b" (a 'b' already present is kept).
 	wchar_t wm[8];
 	size_t n = 0;
@@ -315,7 +333,7 @@ FILE *fopen(const char *path, const char *mode) {
 	wm[n] = 0;
 	FILE *f = _wfopen(w, wm);
 	DWORD err = GetLastError();
-	free(w);
+	free_keep_err(w);
 	if (!f) errno = err ? win_errno(err) : L_ENOENT;
 	return f;
 }
@@ -334,23 +352,23 @@ void *opendir(const char *path) {
 	if (!w) return NULL;
 	size_t len = wcslen(w);
 	wchar_t *pat = (wchar_t *)malloc((len + 3) * sizeof(wchar_t));
-	if (!pat) { free(w); errno = L_ENOSPC; return NULL; }
+	if (!pat) { free_keep_err(w); errno = L_ENOSPC; return NULL; }
 	wcscpy(pat, w);
 	if (len > 0 && pat[len - 1] != L'\\' && pat[len - 1] != L'/') pat[len++] = L'\\';
 	pat[len++] = L'*';
 	pat[len] = 0;
 	// A missing or non-directory path must fail here, not at the first read.
 	DWORD a = GetFileAttributesW(w);
-	free(w);
-	if (a == INVALID_FILE_ATTRIBUTES) { free(pat); return failp(); }
-	if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { free(pat); errno = L_ENOTDIR; return NULL; }
+	free_keep_err(w);
+	if (a == INVALID_FILE_ATTRIBUTES) { free_keep_err(pat); return failp(); }
+	if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { free_keep_err(pat); errno = L_ENOTDIR; return NULL; }
 	kml_dir *d = (kml_dir *)calloc(1, sizeof *d);
-	if (!d) { free(pat); errno = L_ENOSPC; return NULL; }
+	if (!d) { free_keep_err(pat); errno = L_ENOSPC; return NULL; }
 	d->h = FindFirstFileW(pat, &d->fd);
-	free(pat);
+	free_keep_err(pat);
 	if (d->h == INVALID_HANDLE_VALUE) {
 		if (GetLastError() == ERROR_FILE_NOT_FOUND) { d->done = 1; return d; } // empty dir
-		free(d);
+		free_keep_err(d);
 		return failp();
 	}
 	d->pending = 1;
@@ -374,16 +392,17 @@ int closedir(void *dp) {
 	kml_dir *d = (kml_dir *)dp;
 	if (!d) { errno = L_EBADF; return -1; }
 	if (d->h != INVALID_HANDLE_VALUE && d->h) FindClose(d->h);
-	free(d);
+	free_keep_err(d);
 	return 0;
 }
 
-int mkdir(const char *path, int mode) {
+int kml_win_mkdir(const char *path, int mode) __asm__("mkdir");
+int kml_win_mkdir(const char *path, int mode) {
 	(void)mode;
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	BOOL ok = CreateDirectoryW(w, NULL);
-	free(w);
+	free_keep_err(w);
 	return ok ? 0 : fail();
 }
 
@@ -391,7 +410,7 @@ int rmdir(const char *path) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	BOOL ok = RemoveDirectoryW(w);
-	free(w);
+	free_keep_err(w);
 	return ok ? 0 : fail();
 }
 
@@ -407,13 +426,19 @@ static int unlink_w(wchar_t *w) {
 		// read-only file succeeds as it does on POSIX.
 		SetFileAttributesW(w, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
 	}
-	return DeleteFileW(w) ? 0 : fail();
+	if (DeleteFileW(w)) return 0;
+	DWORD err = GetLastError();
+	// A failed unlink must leave the file as it was: restore the read-only
+	// attribute libuv restores too (ADR-00739).
+	if (a & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(w, a);
+	errno = win_errno(err);
+	return -1;
 }
 int unlink(const char *path) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	int r = unlink_w(w);
-	free(w);
+	free_keep_err(w);
 	return r;
 }
 int remove(const char *path) {
@@ -425,16 +450,16 @@ int remove(const char *path) {
 		r = RemoveDirectoryW(w) ? 0 : fail();
 	else
 		r = unlink_w(w);
-	free(w);
+	free_keep_err(w);
 	return r;
 }
 
 int rename(const char *from, const char *to) {
 	wchar_t *wf = to_wide(from), *wt = to_wide(to);
-	if (!wf || !wt) { free(wf); free(wt); return -1; }
+	if (!wf || !wt) { free_keep_err(wf); free_keep_err(wt); return -1; }
 	// POSIX rename replaces an existing target; MOVEFILE_REPLACE_EXISTING.
 	BOOL ok = MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
-	free(wf); free(wt);
+	free_keep_err(wf); free_keep_err(wt);
 	return ok ? 0 : fail();
 }
 
@@ -442,7 +467,7 @@ int access(const char *path, int mode) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	DWORD a = GetFileAttributesW(w);
-	free(w);
+	free_keep_err(w);
 	if (a == INVALID_FILE_ATTRIBUTES) return fail();
 	// W_OK (2) against a read-only file fails with EPERM (libuv's fs__access
 	// sets UV_EPERM, not EACCES); R_OK/X_OK/F_OK succeed if it exists.
@@ -454,11 +479,11 @@ int chmod(const char *path, int mode) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	DWORD a = GetFileAttributesW(w);
-	if (a == INVALID_FILE_ATTRIBUTES) { free(w); return fail(); }
+	if (a == INVALID_FILE_ATTRIBUTES) { free_keep_err(w); return fail(); }
 	// Only the read-only bit exists here: any owner write bit clears it.
 	if (mode & 0222) a &= ~(DWORD)FILE_ATTRIBUTE_READONLY; else a |= FILE_ATTRIBUTE_READONLY;
 	BOOL ok = SetFileAttributesW(w, a);
-	free(w);
+	free_keep_err(w);
 	return ok ? 0 : fail();
 }
 
@@ -466,20 +491,21 @@ int chdir(const char *path) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	BOOL ok = SetCurrentDirectoryW(w);
-	free(w);
+	free_keep_err(w);
 	return ok ? 0 : fail();
 }
 
-char *getcwd(char *buf, size_t size) {
+char *kml_win_getcwd(char *buf, size_t size) __asm__("getcwd");
+char *kml_win_getcwd(char *buf, size_t size) {
 	wchar_t w[32768];
 	DWORD n = GetCurrentDirectoryW(32768, w);
 	if (n == 0 || n >= 32768) return failp();
 	char *u = to_utf8(w);
 	if (!u) { errno = L_EINVAL; return NULL; }
 	if (!buf) return u; // glibc extension: allocate
-	if (strlen(u) + 1 > size) { free(u); errno = L_ENAMETOOLONG; return NULL; }
+	if (strlen(u) + 1 > size) { free_keep_err(u); errno = L_ENAMETOOLONG; return NULL; }
 	strcpy(buf, u);
-	free(u);
+	free_keep_err(u);
 	return buf;
 }
 
@@ -487,7 +513,7 @@ int truncate(const char *path, int64_t len) {
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	HANDLE h = CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	free(w);
+	free_keep_err(w);
 	if (h == INVALID_HANDLE_VALUE) return fail();
 	LARGE_INTEGER li; li.QuadPart = len;
 	int r = 0;
@@ -512,7 +538,7 @@ char *realpath(const char *path, char *resolved) {
 	wchar_t *w = to_wide(path);
 	if (!w) return NULL;
 	HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-	free(w);
+	free_keep_err(w);
 	if (h == INVALID_HANDLE_VALUE) return failp();
 	char *u = final_path_utf8(h);
 	CloseHandle(h);
@@ -520,7 +546,7 @@ char *realpath(const char *path, char *resolved) {
 	if (!resolved) return u;
 	strncpy(resolved, u, 4096);
 	resolved[4095] = 0;
-	free(u);
+	free_keep_err(u);
 	return resolved;
 }
 
@@ -543,13 +569,13 @@ int64_t readlink(const char *path, char *buf, size_t cap) {
 		size_t len = strlen(u);
 		if (len > cap) len = cap;
 		memcpy(buf, u, len);
-		free(u);
+		free_keep_err(u);
 		return (int64_t)len;
 	}
 	wchar_t *w = to_wide(path);
 	if (!w) return -1;
 	HANDLE h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-	free(w);
+	free_keep_err(w);
 	if (h == INVALID_HANDLE_VALUE) return fail();
 	char raw[16 * 1024];
 	DWORD got = 0;
@@ -576,13 +602,13 @@ int64_t readlink(const char *path, char *buf, size_t cap) {
 	size_t len = strlen(u);
 	if (len > cap) len = cap;
 	memcpy(buf, u, len);
-	free(u);
+	free_keep_err(u);
 	return (int64_t)len;
 }
 
 int symlink(const char *target, const char *path) {
 	wchar_t *wt = to_wide(target), *wp = to_wide(path);
-	if (!wt || !wp) { free(wt); free(wp); return -1; }
+	if (!wt || !wp) { free_keep_err(wt); free_keep_err(wp); return -1; }
 	// Node picks 'dir' vs 'file' from the target when no type is given; a
 	// relative target is resolved against the link's directory for that.
 	DWORD flags = 0;
@@ -606,7 +632,7 @@ int symlink(const char *target, const char *path) {
 		ok = CreateSymbolicLinkW(wp, wt, flags & ~(DWORD)SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
 	}
 	DWORD err = GetLastError();
-	free(wt); free(wp);
+	free_keep_err(wt); free_keep_err(wp);
 	if (ok) return 0;
 	errno = err == ERROR_PRIVILEGE_NOT_HELD ? L_EPERM : win_errno(err);
 	return -1;
@@ -617,13 +643,19 @@ char *mkdtemp(char *tmpl) {
 	if (len < 6 || strcmp(tmpl + len - 6, "XXXXXX") != 0) { errno = L_EINVAL; return NULL; }
 	static const char alphabet[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 	for (int attempt = 0; attempt < 100; attempt++) {
-		uint64_t r = ((uint64_t)GetTickCount64() * 6364136223846793005ULL) ^ ((uint64_t)GetCurrentProcessId() << 32) ^ (uint64_t)attempt * 0x9E3779B97F4A7C15ULL;
+		// CSPRNG names, as Node's mkdtemp uses (uv__random): the old
+		// GetTickCount64 × pid mix was predictable (ADR-00739). getrandom is
+		// the shim's BCryptGenRandom wrapper (win32shim.c).
+		extern int64_t getrandom(void *, size_t, unsigned);
+		uint64_t r = 0;
+		if (getrandom(&r, sizeof r, 0) != (int64_t)sizeof r)
+			r = ((uint64_t)GetTickCount64() * 6364136223846793005ULL) ^ ((uint64_t)GetCurrentProcessId() << 32) ^ (uint64_t)attempt * 0x9E3779B97F4A7C15ULL;
 		for (int i = 0; i < 6; i++) { tmpl[len - 6 + i] = alphabet[r % 62]; r /= 62; }
 		wchar_t *w = to_wide(tmpl);
 		if (!w) return NULL;
 		BOOL ok = CreateDirectoryW(w, NULL);
 		DWORD err = GetLastError();
-		free(w);
+		free_keep_err(w);
 		if (ok) return tmpl;
 		if (err != ERROR_ALREADY_EXISTS) { errno = win_errno(err); return NULL; }
 	}

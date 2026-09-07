@@ -10,7 +10,7 @@ func (e *Emitter) ensureSpawnSyncRuntime() {
 		return
 	}
 	e.usedSpawnSync = true
-	e.emitGlobal("declare ptr @__kml_cp_spawn_sync(ptr, ptr, i64, ptr)")
+	e.emitGlobal("declare ptr @__kml_cp_spawn_sync(ptr, ptr, i64, ptr, i64)")
 }
 
 // SpawnSyncSource is the embedded C implementation behind
@@ -29,7 +29,7 @@ func SpawnSyncSource() string {
    shim; the child is started by __kml_win_spawn (CreateProcessW) instead
    of fork+exec, with the same pipe ends as its stdout/stderr. */
 #include "kml_posix_compat.h"
-int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd);
+int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags);
 int waitpid(int pid, int *status, int options);
 #define WIFEXITED(s) (((s) & 0x7f) == 0)
 #define WEXITSTATUS(s) (((s) >> 8) & 0xff)
@@ -70,7 +70,10 @@ static void kmlss_push(kmlss_acc *a, const char *p, int64_t n) {
   a->len += n;
 }
 
-void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const char *cwd) {
+/* flags bit 0: shell/verbatim (execSync) — passed to __kml_win_spawn's
+   windowsVerbatimArguments on Windows, ignored on POSIX (ADR-00740). */
+void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const char *cwd, int64_t flags) {
+  (void)flags;
   kmlss_result *r = (kmlss_result *)calloc(1, sizeof(kmlss_result));
   int outp[2], errp[2];
   if (pipe(outp) != 0 || pipe(errp) != 0) {
@@ -84,7 +87,7 @@ void *__kml_cp_spawn_sync(const char *file, char **args, int64_t argn, const cha
   argv[0] = (char *)file;
   for (int64_t i = 0; i < argn; i++) argv[i + 1] = args[i];
   argv[argn + 1] = NULL;
-  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1);
+  int pid = __kml_win_spawn(file, argv, cwd, -1, outp[1], errp[1], -1, (int)(flags & 1));
   free(argv);
   if (pid < 0) {
     close(outp[0]); close(outp[1]); close(errp[0]); close(errp[1]);

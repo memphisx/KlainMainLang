@@ -31,8 +31,8 @@ Where each failing file died in the pipeline. Near-misses (already compiled and 
 
 | Failing files | Phase |
 |---|---|
-| 1425 | runtime (ran, wrong result — near-miss) |
-| 309 | clang (invalid IR — codegen bug) |
+| 1426 | runtime (ran, wrong result — near-miss) |
+| 308 | clang (invalid IR — codegen bug) |
 | 3 | codegen (in-process hang — emitter/parser spin) |
 | 847 | wrongly-accepted (negative test compiled/ran) |
 | 100 | strict typed-rejection (recoverable under -compat=js) |
@@ -120,7 +120,7 @@ The `Reason` is normalized (position stripped, quoted identifiers collapsed to `
 | 2859 | compile | COMPILE_ERROR: unexpected token ... in expression | `built-ins/Array/fromAsync/asyncitems-arraylike-promise.js` |
 | 2619 | compile | COMPILE_ERROR: undefined function or closure '%s' | `annexB/built-ins/Function/createdynfn-html-close-comment-body.js` |
 | 1465 | compile | COMPILE_ERROR: unexpected character '%s' | `built-ins/Function/prototype/toString/unicode.js` |
-| 1418 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/Date/prototype/setYear/time-clip.js` |
+| 1419 | runtime | RUNTIME_NONZERO_EXIT:  | `annexB/built-ins/Date/prototype/setYear/time-clip.js` |
 | 851 | compile | COMPILE_ERROR: field assignment on non-object | `annexB/built-ins/RegExp/RegExp-decimal-escape-class-range.js` |
 | 841 | neg-accepted | expected a parse-phase rejection but this compiled | `annexB/language/expressions/template-literal/legacy-octal-escape-sequence-strict.js` |
 | 677 | compile | COMPILE_ERROR: Reflect has no method '%s' | `annexB/built-ins/Date/prototype/getYear/not-a-constructor.js` |

@@ -124,7 +124,10 @@ doread:
   %hasdata = icmp sgt i64 %n, 0
   br i1 %hasdata, label %ondata, label %ckeof
 ondata:
-  %streaming = icmp eq i64 %mode, 0
+  ; mode is a bitmask (bit 0 = buffered exec, bit 1 = shell/verbatim spawn,
+  ; ADR-00740) — streaming iff the buffered bit is clear.
+  %modebuf = and i64 %mode, 1
+  %streaming = icmp eq i64 %modebuf, 0
   br i1 %streaming, label %fire, label %append
 fire:
   %hasL = icmp ne ptr %dataL, null
@@ -149,7 +152,8 @@ ckeof:
 oneof:
   call i32 @close(i32 %fd)
   store i32 -1, ptr %fdslot, align 4
-  %streaming2 = icmp eq i64 %mode, 0
+  %modebuf2 = and i64 %mode, 1
+  %streaming2 = icmp eq i64 %modebuf2, 0
   %hasEnd = icmp ne ptr %endL, null
   %fireEnd = and i1 %streaming2, %hasEnd
   br i1 %fireEnd, label %callend, label %ret
@@ -199,7 +203,8 @@ store:
   store i64 2, ptr %%st_p, align 8
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
   %%mode = load i64, ptr %%mode_p, align 8
-  %%buffered = icmp ne i64 %%mode, 0
+  %%modebuf = and i64 %%mode, 1
+  %%buffered = icmp ne i64 %%modebuf, 0
   br i1 %%buffered, label %%bufcb, label %%streamcb
 streamcb:
   ; fire 'exit'(code) then 'close'(code)
@@ -557,7 +562,8 @@ setnull:
   store i32 %%errr, ptr %%serr_p, align 4
   %%mode_p = getelementptr %s, ptr %%cp, i32 0, i32 13
   store i64 %%mode, ptr %%mode_p, align 8
-  %%buffered = icmp ne i64 %%mode, 0
+  %%modebufa = and i64 %%mode, 1
+  %%buffered = icmp ne i64 %%modebufa, 0
   br i1 %%buffered, label %%allocbufs, label %%reg
 allocbufs:
   %%oacc = call ptr @calloc(i64 1, i64 24)

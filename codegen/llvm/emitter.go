@@ -544,6 +544,7 @@ type Emitter struct {
 	usedStrHeaderRuntime         bool
 	usedMemmem                   bool
 	usedWinSpawn                 bool
+	usedOSTmpdirWin              bool
 	usedHTTPClusterSeed          bool
 	usedListenFdGlobal           bool
 	usedOSCpusWin                bool

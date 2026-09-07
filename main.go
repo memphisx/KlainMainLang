@@ -204,9 +204,6 @@ func main() {
 		clangArgs = append(clangArgs, cflags...)
 		clangArgs = append(clangArgs, libs...)
 	}
-	for _, lib := range em.LinkLibs() {
-		clangArgs = append(clangArgs, "-l"+lib)
-	}
 	// Every embedded C runtime file this program's IR depends on (bigint / crypto
 	// / tls / http2 / Buffer codecs / JSON parse-tree / URLPattern / dtoa float
 	// formatter) — resolved from the one shared source of truth the conformance
@@ -244,6 +241,14 @@ func main() {
 			fatal("cannot write embed asm: %v", err)
 		}
 		clangArgs = append(clangArgs, asmPath)
+	}
+	// -l flags go LAST, after every object and sidecar .c: a library listed
+	// before an object that needs it is never searched again by GNU ld, and
+	// on Windows the .dll.a import libraries are archives, so the sidecar's
+	// pcre2/curl references went unresolved (ADR-00738). Shared libraries on
+	// Linux/macOS forgave the old order; archives don't.
+	for _, lib := range em.LinkLibs() {
+		clangArgs = append(clangArgs, "-l"+lib)
 	}
 	cmd := llvm.ClangCommand(clangArgs...)
 	cmd.Stdout = os.Stdout

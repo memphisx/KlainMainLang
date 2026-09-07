@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // HostClangArgv is the single place that builds a `clang` argv for the
@@ -30,7 +31,23 @@ func HostClangArgv(args ...string) []string {
 		full = append(full, win32LinkArgs(args)...)
 	}
 	full = append(full, args...)
-	return full
+	// Stable-partition every -l flag to the end, after all objects and
+	// sources, preserving relative library order. GNU ld never re-searches a
+	// library listed before an object that needs it, and on Windows the
+	// .dll.a import libraries are archives — a sidecar .c listed after
+	// -lpcre2-8/-lcurl linked with unresolved references there while the
+	// ELF/Mach-O shared libraries forgave the same order (ADR-00738). Doing
+	// it here fixes every caller (driver, test helpers, conformance runner,
+	// webview builds) at the one point they all share.
+	var head, libs []string
+	for _, a := range full {
+		if strings.HasPrefix(a, "-l") {
+			libs = append(libs, a)
+		} else {
+			head = append(head, a)
+		}
+	}
+	return append(head, libs...)
 }
 
 // ClangCommand is HostClangArgv as a ready-to-run command.

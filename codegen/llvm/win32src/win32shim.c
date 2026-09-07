@@ -284,3 +284,28 @@ char *strcasestr(const char *hay, const char *needle) {
 	}
 	return NULL;
 }
+
+// os.tmpdir() (Windows): TEMP, then TMP, then <SystemRoot|windir>\temp, with
+// one trailing backslash stripped unless it names a drive root — Node's
+// exact algorithm (lib/os.js) (ADR-00739). Returns a malloc'd UTF-8 string.
+char *__kml_os_tmpdir(void) {
+	const char *p = getenv("TEMP");
+	if (!p || !*p) p = getenv("TMP");
+	char *out;
+	if (p && *p) {
+		out = (char *)malloc(strlen(p) + 1);
+		if (!out) return NULL;
+		strcpy(out, p);
+	} else {
+		const char *root = getenv("SystemRoot");
+		if (!root || !*root) root = getenv("windir");
+		if (!root || !*root) root = "C:\\Windows";
+		out = (char *)malloc(strlen(root) + 6);
+		if (!out) return NULL;
+		strcpy(out, root);
+		strcat(out, "\\temp");
+	}
+	size_t n = strlen(out);
+	if (n > 1 && out[n - 1] == '\\' && !(n >= 2 && out[n - 2] == ':')) out[n - 1] = 0;
+	return out;
+}

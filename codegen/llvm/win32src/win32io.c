@@ -324,17 +324,14 @@ int setsockopt(int fd, int level, int opt, const void *val, int len) {
 			// (no EADDRINUSE), which is not the Linux/Node contract.
 			opt = WS_SO_EXCLUSIVEADDRUSE;
 			break;
-		case L_SO_REUSEPORT: {
-			// No SO_REUSEPORT on Windows. The IR asks for it so several cluster
-			// workers can bind one port; Winsock's SO_REUSEADDR is the option
-			// that permits that (the kernel hands new connections to the last
-			// binder rather than balancing — TDD-00177 records the RR gap). It
-			// conflicts with the EXCLUSIVEADDRUSE set for SO_REUSEADDR above,
-			// so that is cleared first.
-			int off = 0, on = 1;
-			p_setsockopt(kfd_sock(fd), WS_SOL_SOCKET, WS_SO_EXCLUSIVEADDRUSE, (const char *)&off, sizeof off);
-			return p_setsockopt(kfd_sock(fd), WS_SOL_SOCKET, WS_SO_REUSEADDR, (const char *)&on, sizeof on) == 0 ? 0 : set_wsa_errno();
-		}
+		case L_SO_REUSEPORT:
+			// No SO_REUSEPORT on Windows, and no substitute is safe: Winsock's
+			// SO_REUSEADDR lets ANY local process bind over the port (hijack,
+			// no EADDRINUSE), which is why libuv/Node never set it. Cluster
+			// workers don't need it either — they receive the primary's
+			// listening socket by handle inheritance and never bind
+			// (httpListenInheritIR). Accept and do nothing (ADR-00737).
+			return 0;
 		case L_SO_KEEPALIVE: opt = WS_SO_KEEPALIVE; break;
 		case L_SO_BROADCAST: opt = WS_SO_BROADCAST; break;
 		default: break;

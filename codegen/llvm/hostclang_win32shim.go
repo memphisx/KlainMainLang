@@ -86,7 +86,13 @@ func win32LinkArgs(args []string) []string {
 	if objs, err := win32ShimObjects(); err == nil {
 		extra = append(objs, extra...)
 	} else {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		// A missing shim must fail THIS link, loudly and immediately — not
+		// degrade into hundreds of confusing `undefined reference` failures
+		// per test as it did on the CI runner (ADR-00734/ADR-00737). The
+		// sentinel object cannot exist, so clang stops right after the real
+		// error has been printed.
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		extra = append(extra, filepath.Join(win32ShimDir(), "WIN32-SHIM-COMPILE-FAILED-see-error-above.o"))
 	}
 	return extra
 }
