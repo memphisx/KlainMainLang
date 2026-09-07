@@ -99,7 +99,8 @@
             "feature": "`fs.openSync` / `closeSync` / `readSync` / `writeSync` / `fstatSync`",
             "status": "implemented",
             "notes": [
-              "On Windows, files open through `CreateFileW` with `FILE_SHARE_DELETE`, so a file this process holds open can still be unlinked or renamed (matching POSIX/Node); `a`/`a+` use a kernel append (`FILE_APPEND_DATA`), not a CRT seek-then-write ([ADR-00743](../adr/ADR-00743.md))"
+              "On Windows, files open through `CreateFileW` with `FILE_SHARE_DELETE`, so a file this process holds open can still be unlinked or renamed (matching POSIX/Node); `a`/`a+` use a kernel append (`FILE_APPEND_DATA`), not a CRT seek-then-write ([ADR-00743](../adr/ADR-00743.md))",
+              "On Windows, a path at/over `MAX_PATH` gets the `\\\\?\\` extended-length prefix (after `GetFullPathNameW` normalization), so fs ops on paths longer than 260 chars work instead of failing path-too-long — across every fs call, not just `openSync` ([ADR-00748](../adr/ADR-00748.md))"
             ],
             "caveats": [
               "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names",

@@ -31,7 +31,8 @@
             ],
             "notes": [
               "Multiple arguments join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `\"0\"`) — [ADR-00285](../adr/ADR-00285.md)",
-              "On Windows, VT/ANSI output processing is enabled on the console at startup (as Node does), so an escape like `\\x1b[31m` renders as colour rather than printing literally — no raw mode required ([ADR-00744](../adr/ADR-00744.md))"
+              "On Windows, VT/ANSI output processing is enabled on the console at startup (as Node does), so an escape like `\\x1b[31m` renders as colour rather than printing literally — no raw mode required ([ADR-00744](../adr/ADR-00744.md))",
+              "On Windows, the console is set to UTF-8 at startup (restored at exit), so non-ASCII output (`café`, CJK, emoji) renders correctly instead of OEM-code-page mojibake; redirected/piped output is unaffected either way ([ADR-00747](../adr/ADR-00747.md))"
             ]
           },
           {

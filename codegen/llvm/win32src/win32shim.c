@@ -52,6 +52,12 @@ char **__kml_win_argv(int *out_argc) {
 // the UCRT has no such data symbol — `stdin` is a macro over
 // __acrt_iob_func(0) — so expose one under this project's own name.
 FILE *__kml_win_stdin;
+// Saved console code pages, restored at exit (see kml_win_shim_init).
+static UINT kml_saved_out_cp, kml_saved_in_cp;
+static void kml_restore_console_cp(void) {
+	if (kml_saved_out_cp) SetConsoleOutputCP(kml_saved_out_cp);
+	if (kml_saved_in_cp) SetConsoleCP(kml_saved_in_cp);
+}
 __attribute__((constructor)) static void kml_win_shim_init(void) {
 	__kml_win_stdin = stdin;
 	// A crash (access violation, abort) must end the process at once with a
@@ -74,6 +80,23 @@ __attribute__((constructor)) static void kml_win_shim_init(void) {
 			SetConsoleMode(h, m | 0x0004);
 		if (which == STD_ERROR_HANDLE) break;
 	}
+	// Non-ASCII console I/O: the runtime writes UTF-8 bytes (console.log via
+	// printf, args via GetCommandLineW), but a Windows console interprets them
+	// in its OEM code page, so `café`/CJK/emoji render as mojibake. Node uses
+	// WriteConsoleW/ReadConsoleW to sidestep the code page; the printf-based
+	// output path here has no single choke point to reroute, so instead set
+	// the attached console's code pages to UTF-8 (65001) — observably the same
+	// for whole-line output — and restore them at exit so a later program in
+	// the same real console is unaffected (ADR-00747). No-op without a console
+	// (piped/file/GUI), so the redirect path that the test harness reads is
+	// untouched.
+	kml_saved_out_cp = GetConsoleOutputCP();
+	kml_saved_in_cp = GetConsoleCP();
+	if (kml_saved_out_cp && kml_saved_out_cp != CP_UTF8) SetConsoleOutputCP(CP_UTF8);
+	if (kml_saved_in_cp && kml_saved_in_cp != CP_UTF8) SetConsoleCP(CP_UTF8);
+	if ((kml_saved_out_cp && kml_saved_out_cp != CP_UTF8) ||
+	    (kml_saved_in_cp && kml_saved_in_cp != CP_UTF8))
+		atexit(kml_restore_console_cp);
 }
 
 // ---- time --------------------------------------------------------------

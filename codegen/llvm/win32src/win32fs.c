@@ -175,6 +175,25 @@ char *strerror(int e) {
 // ---- UTF-8 <-> UTF-16 ------------------------------------------------------------
 // Returns a malloc'd wide string, or NULL with errno set. Forward slashes
 // are accepted by every Win32 call used here, so no separator rewriting.
+// long_path_prefix wraps an absolute wide path in the `\\?\` extended-length
+// form so it can exceed MAX_PATH (260) regardless of the system long-path
+// policy — the prefix libuv's fs__capture_path adds (ADR-00748). `w` must be
+// an absolute, backslash-separated, normalized path (GetFullPathNameW output).
+// A UNC path `\\server\share` becomes `\\?\UNC\server\share`. Returns a fresh
+// malloc'd string, or NULL (caller keeps the plain path).
+static wchar_t *long_path_prefix(const wchar_t *w) {
+	size_t len = wcslen(w);
+	int unc = (w[0] == L'\\' && w[1] == L'\\');
+	// Already extended (`\\?\` or `\\.\`): leave it.
+	if (unc && (w[2] == L'?' || w[2] == L'.') && w[3] == L'\\') return NULL;
+	size_t extra = unc ? 8 : 4; // "\\?\UNC\" replaces the leading "\\", or "\\?\"
+	wchar_t *out = (wchar_t *)malloc((len + extra + 1) * sizeof(wchar_t));
+	if (!out) return NULL;
+	if (unc) { wcscpy(out, L"\\\\?\\UNC\\"); wcscpy(out + 8, w + 2); }
+	else { wcscpy(out, L"\\\\?\\"); wcscpy(out + 4, w); }
+	return out;
+}
+
 static wchar_t *to_wide(const char *s) {
 	if (!s) { errno = L_EINVAL; return NULL; }
 	int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
@@ -182,7 +201,27 @@ static wchar_t *to_wide(const char *s) {
 	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
 	if (!w) { errno = L_ENOSPC; return NULL; }
 	MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
-	return w;
+	// Short paths (the overwhelming majority) are returned byte-for-byte as
+	// before — zero behavioural change. Only a near-limit path is made
+	// absolute + normalized (GetFullPathNameW) and given the `\\?\` prefix so
+	// the fs call doesn't fail with a path-too-long error (ADR-00748). Forward
+	// slashes in the input are accepted throughout; GetFullPathNameW converts
+	// them to backslashes, which the extended-length form requires. The
+	// threshold is MAX_PATH-12 (248), not 260: CreateDirectoryW reserves 12
+	// chars for an 8.3 name, so a 248+ directory path fails plain
+	// (ERROR_FILENAME_EXCED_RANGE) even though it is under 260.
+	if ((size_t)(n - 1) < MAX_PATH - 12) return w;
+	DWORD full = GetFullPathNameW(w, 0, NULL, NULL);
+	if (full == 0) return w; // couldn't normalize — keep the plain path
+	wchar_t *abs = (wchar_t *)malloc((size_t)full * sizeof(wchar_t));
+	if (!abs) return w;
+	DWORD got = GetFullPathNameW(w, full, abs, NULL);
+	if (got == 0 || got >= full) { free(abs); return w; }
+	free(w);
+	wchar_t *ext = long_path_prefix(abs);
+	if (!ext) return abs; // already extended, or alloc failed
+	free(abs);
+	return ext;
 }
 static char *to_utf8(const wchar_t *w) {
 	int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);

@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -1560,6 +1562,37 @@ http.close(1)`)
 // (prior-knowledge) client, dispatching through the same handler as HTTP/1.1.
 // Uses curl --http2-prior-knowledge (skipped if curl is absent), the same
 // posture the tls tests take toward an external client.
+// nativeCurl returns a curl that does not mangle its arguments. The MSYS2
+// runtime curl (msys-2.0.dll, typically C:\msys64\usr\bin\curl.exe, on PATH
+// for the coreutils the child_process tests need) glob-expands its argv the
+// Cygwin way, so a `-w '%{http_version}'` write-out arrives as `%http_version`
+// (braces stripped) and `\n` as `n` — which made the HTTP/2, HTTPS and h2c
+// version assertions fail on the CI runner while passing locally where the
+// native curl was found first (ADR-00746). Prefer the native mingw curl from
+// the compiler's UCRT sysroot (it also carries nghttp2 for h2/h2c), then any
+// curl on PATH. POSIX is unaffected.
+func nativeCurl() string {
+	if runtime.GOOS != "windows" {
+		return "curl"
+	}
+	sysroot := os.Getenv("KLAIN_SYSROOT")
+	if sysroot == "" {
+		sysroot = `C:\msys64\ucrt64`
+	}
+	if c := filepath.Join(sysroot, "bin", "curl.exe"); fileExists(c) {
+		return c
+	}
+	if p, err := exec.LookPath("curl"); err == nil {
+		return p
+	}
+	return "curl"
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
 func TestE2EHTTPListenHTTP2Cleartext(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -1575,7 +1608,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 	port := startHTTPServer(t, src, 8961)
 
 	// h2c GET
-	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
 		fmt.Sprintf("http://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c GET: %v\n%s", err, out)
@@ -1585,7 +1618,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 	}
 
 	// h2c POST with a body
-	out, err = exec.Command("curl", "-s", "--http2-prior-knowledge",
+	out, err = exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
 		"-d", "payload", fmt.Sprintf("http://127.0.0.1:%d/submit", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c POST: %v\n%s", err, out)
@@ -1595,7 +1628,7 @@ http.listen(8961, (req: HttpRequest): Res => {
 	}
 
 	// HTTP/1.1 on the same server still works
-	out, err = exec.Command("curl", "-s", "--http1.1",
+	out, err = exec.Command(nativeCurl(), "-s", "--http1.1",
 		fmt.Sprintf("http://127.0.0.1:%d/one", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl 1.1: %v\n%s", err, out)
@@ -1649,7 +1682,7 @@ const server = http2.createServer((req, res) => {
 server.listen(8983)
 `
 	port := startHTTPServer(t, src, 8983)
-	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
 		fmt.Sprintf("http://127.0.0.1:%d/y", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c: %v\n%s", err, out)
@@ -1681,7 +1714,7 @@ server.listen(8985)
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8985)
 
-	out, err := exec.Command("curl", "-sk", "--http2",
+	out, err := exec.Command(nativeCurl(), "-sk", "--http2",
 		fmt.Sprintf("https://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2-tls GET: %v\n%s", err, out)
@@ -1693,12 +1726,12 @@ server.listen(8985)
 	// A 1.1-only TLS client offers no h2 ALPN — createSecureServer is h2-only
 	// (Node's allowHTTP1:false default), so the connection is dropped without a
 	// response. curl exits non-zero; the server must survive to serve h2 again.
-	_, err = exec.Command("curl", "-sk", "--http1.1", "--max-time", "3",
+	_, err = exec.Command(nativeCurl(), "-sk", "--http1.1", "--max-time", "3",
 		fmt.Sprintf("https://127.0.0.1:%d/one", port)).CombinedOutput()
 	if err == nil {
 		t.Errorf("1.1-only TLS client: want rejection, got success")
 	}
-	out, err = exec.Command("curl", "-sk", "--http2",
+	out, err = exec.Command(nativeCurl(), "-sk", "--http2",
 		fmt.Sprintf("https://127.0.0.1:%d/after", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2-tls after reject: %v\n%s", err, out)
@@ -1731,7 +1764,7 @@ server.listen(8987)
 	port := startHTTPServer(t, src, 8987)
 
 	// A GET — even an h2-capable client negotiates 1.1 (h1-only ALPN).
-	out, err := exec.Command("curl", "-sk", "--http2",
+	out, err := exec.Command(nativeCurl(), "-sk", "--http2",
 		fmt.Sprintf("https://127.0.0.1:%d/hello", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl https GET: %v\n%s", err, out)
@@ -1741,7 +1774,7 @@ server.listen(8987)
 	}
 
 	// A POST body — exercises the Content-Length read loop over the SSL shims.
-	out, err = exec.Command("curl", "-sk", fmt.Sprintf("https://127.0.0.1:%d/echo", port),
+	out, err = exec.Command(nativeCurl(), "-sk", fmt.Sprintf("https://127.0.0.1:%d/echo", port),
 		"-d", "payload", "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl https POST: %v\n%s", err, out)
@@ -1772,7 +1805,7 @@ server.listen(8988)
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8988)
 
-	out, err := exec.Command("curl", "-sk", "--http2",
+	out, err := exec.Command(nativeCurl(), "-sk", "--http2",
 		fmt.Sprintf("https://127.0.0.1:%d/h2", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2: %v\n%s", err, out)
@@ -1781,7 +1814,7 @@ server.listen(8988)
 		t.Errorf("allowHTTP1 h2: got %q, want %q", got, "both:GET:/h2|2")
 	}
 
-	out, err = exec.Command("curl", "-sk", "--http1.1",
+	out, err = exec.Command(nativeCurl(), "-sk", "--http1.1",
 		fmt.Sprintf("https://127.0.0.1:%d/one", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl 1.1 fallback: %v\n%s", err, out)
@@ -1810,7 +1843,7 @@ server.on('stream', (stream, headers) => {
 server.listen(8984)
 `
 	port := startHTTPServer(t, src, 8984)
-	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
 		fmt.Sprintf("http://127.0.0.1:%d/abc", port), "-w", "|%{http_code}|%{http_version}|%header{x-served-by}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c: %v\n%s", err, out)
@@ -1840,7 +1873,7 @@ server.on('stream', (stream, headers) => {
 server.listen(8985)
 `
 	port := startHTTPServer(t, src, 8985)
-	out, err := exec.Command("curl", "-s", "--http2-prior-knowledge",
+	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
 		"-d", "payload7", fmt.Sprintf("http://127.0.0.1:%d/up", port), "-w", "|%{http_version}").CombinedOutput()
 	if err != nil {
 		t.Fatalf("curl h2c POST: %v\n%s", err, out)

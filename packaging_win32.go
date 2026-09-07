@@ -57,7 +57,7 @@ func writeWindowsApp(outBin string, opts packageOpts, relink relinkFunc) (string
 		}
 	}
 	rcPath := filepath.Join(appDir, "app.rc")
-	resPath := filepath.Join(appDir, "app.res")
+	resPath := filepath.Join(appDir, "app.o")
 	if err := os.WriteFile(rcPath, []byte(buildWindowsRC(opts, iconPath)), 0644); err != nil {
 		return "", err
 	}
@@ -79,25 +79,39 @@ func writeWindowsApp(outBin string, opts packageOpts, relink relinkFunc) (string
 	return exe, nil
 }
 
-// compileRC compiles an .rc into a .res the linker takes directly: llvm-rc
-// (ships with LLVM) first, GNU windres (MSYS2's binutils) as the fallback.
-func compileRC(rc, res string) error {
-	if p, err := exec.LookPath("llvm-rc"); err == nil {
-		// /C 65001: the .rc is written as UTF-8 (the app name may be non-ASCII).
-		out, err := exec.Command(p, "/C", "65001", "/FO", res, rc).CombinedOutput()
-		if err == nil {
-			return nil
-		}
-		fmt.Fprintf(os.Stderr, "klainmain: llvm-rc failed (%v):\n%s", err, out)
-	}
+// compileRC compiles an .rc into a COFF object (.o) the mingw linker takes
+// directly. A Microsoft `.res` file (what `llvm-rc` and `windres -O res`
+// emit) is NOT linkable by the mingw `ld`/`lld` driver — it reports "file
+// format not recognized" (ADR-00746). GNU windres can emit a COFF object
+// with `-O coff`; llvm-rc cannot, so its `.res` is converted with
+// llvm-cvtres. windres (MSYS2 binutils, always in the toolchain) is tried
+// first; the LLVM pair is the fallback.
+func compileRC(rc, obj string) error {
 	if p, err := exec.LookPath("windres"); err == nil {
-		out, err := exec.Command(p, "--codepage=65001", "-i", rc, "-O", "res", "-o", res).CombinedOutput()
+		out, err := exec.Command(p, "--codepage=65001", "-i", rc, "-O", "coff", "-o", obj).CombinedOutput()
 		if err == nil {
 			return nil
 		}
-		return fmt.Errorf("windres: %v\n%s", err, out)
+		fmt.Fprintf(os.Stderr, "klainmain: windres failed (%v):\n%s", err, out)
 	}
-	return fmt.Errorf("no resource compiler found (llvm-rc from LLVM, or windres from MSYS2's binutils)")
+	rcTool, rcErr := exec.LookPath("llvm-rc")
+	cvtTool, cvtErr := exec.LookPath("llvm-cvtres")
+	if rcErr == nil && cvtErr == nil {
+		// /C 65001: the .rc is written as UTF-8 (the app name may be non-ASCII).
+		res := strings.TrimSuffix(obj, filepath.Ext(obj)) + ".res"
+		out, err := exec.Command(rcTool, "/C", "65001", "/FO", res, rc).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("llvm-rc: %v\n%s", err, out)
+		}
+		defer os.Remove(res)
+		// llvm-cvtres turns the MS .res into a COFF object the linker links.
+		out, err = exec.Command(cvtTool, "/MACHINE:X64", "/OUT:"+obj, res).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("llvm-cvtres: %v\n%s", err, out)
+		}
+		return nil
+	}
+	return fmt.Errorf("no resource compiler found (windres from MSYS2's binutils, or llvm-rc + llvm-cvtres from LLVM)")
 }
 
 // buildWindowsRC renders the resource script: the app icon as resource ID 1

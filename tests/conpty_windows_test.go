@@ -28,6 +28,7 @@ import (
 var (
 	kernel32                         = syscall.NewLazyDLL("kernel32.dll")
 	procCreatePseudoConsole          = kernel32.NewProc("CreatePseudoConsole")
+	procResizePseudoConsole          = kernel32.NewProc("ResizePseudoConsole")
 	procClosePseudoConsole           = kernel32.NewProc("ClosePseudoConsole")
 	procInitializeProcThreadAttrList = kernel32.NewProc("InitializeProcThreadAttributeList")
 	procUpdateProcThreadAttribute    = kernel32.NewProc("UpdateProcThreadAttribute")
@@ -161,6 +162,9 @@ func runInConPTYArgs(t *testing.T, argv []string, cols, rows int, timeout time.D
 		_ = syscall.WriteFile(inW, b, &n, nil)
 	}
 	conptyChildPID.Store(pi.ProcessId)
+	conptyResizeFn.Store(func(cols, rows int) {
+		procResizePseudoConsole.Call(hpc, uintptr(uint16(cols))|uintptr(uint16(rows))<<16)
+	})
 	if feed != nil {
 		go feed(write)
 	}
@@ -188,6 +192,18 @@ func runInConPTYArgs(t *testing.T, argv []string, cols, rows int, timeout time.D
 // child, for pressCtrlC. The harness runs one child at a time per test
 // binary (the E2E suite is serial), so a single slot suffices.
 var conptyChildPID atomic.Uint32
+
+// conptyResizeFn resizes the current pseudo-console (ResizePseudoConsole),
+// set per run for a feed callback to trigger a SIGWINCH. Serial suite → one
+// slot. Holds a func(cols, rows int).
+var conptyResizeFn atomic.Value
+
+// conptyResize resizes the running pseudo-console to cols×rows.
+func conptyResize(cols, rows int) {
+	if f, ok := conptyResizeFn.Load().(func(int, int)); ok && f != nil {
+		f(cols, rows)
+	}
+}
 
 // win32InputCtrlC is Ctrl+C in the console's "win32-input-mode" encoding
 // (`ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: virtual key 'C', scan code 46,

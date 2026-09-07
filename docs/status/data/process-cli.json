@@ -220,7 +220,7 @@
             ],
             "notes": [
               "Lets a running program (e.g. an `http.listen` server) intercept a signal and shut down gracefully instead of dying immediately. See [TDD-00019](../tdd/TDD-00019.md)/[ADR-00079](../adr/ADR-00079.md), [HTTP-SERVER.md](HTTP-SERVER.md).",
-              "`'SIGWINCH'` (terminal resize) lets a TUI re-read `process.stdout.columns`/`.rows` and repaint on a window resize ([ADR-00518](../adr/ADR-00518.md))"
+              "`'SIGWINCH'` (terminal resize) lets a TUI re-read `process.stdout.columns`/`.rows` and repaint on a window resize ([ADR-00518](../adr/ADR-00518.md)); on Windows (no `SIGWINCH` signal) a read-only console-size watcher thread delivers it through the same loop path as the other signals, ~200 ms poll latency ([ADR-00749](../adr/ADR-00749.md))"
             ]
           },
           {

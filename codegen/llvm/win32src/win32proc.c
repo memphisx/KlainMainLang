@@ -445,6 +445,36 @@ int __kml_win_sig_deliver(void) {
 	return n;
 }
 
+// SIGWINCH (28) has no Windows signal; libuv runs a console-resize watcher
+// thread. Mirror it (ADR-00749): poll the console window size read-only
+// (GetConsoleScreenBufferInfo consumes no input, so it never races the
+// raw-mode reader), and on a change queue signal 28 through the same
+// InterlockedExchange path the Ctrl handler uses — so __kml_win_sig_deliver
+// runs the IR's handler on the main thread, exactly as for SIGINT. No
+// console (piped/file) → the watcher exits at once, no resize is possible.
+static DWORD WINAPI kml_winch_watcher(LPVOID arg) {
+	(void)arg;
+	HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	if (!GetConsoleScreenBufferInfo(h, &csbi)) return 0;
+	SHORT w = csbi.srWindow.Right - csbi.srWindow.Left;
+	SHORT ht = csbi.srWindow.Bottom - csbi.srWindow.Top;
+	for (;;) {
+		Sleep(200);
+		if (!GetConsoleScreenBufferInfo(h, &csbi)) continue;
+		SHORT nw = csbi.srWindow.Right - csbi.srWindow.Left;
+		SHORT nh = csbi.srWindow.Bottom - csbi.srWindow.Top;
+		if (nw != w || nh != ht) {
+			w = nw; ht = nh;
+			if (kml_sig_handlers[28]) {
+				InterlockedExchange(&kml_sig_queued[28], 1);
+				InterlockedExchange(&__kml_win_sig_wake, 1);
+			}
+		}
+	}
+	return 0;
+}
+
 void *signal(int sig, void *handler) {
 	if (sig < 0 || sig >= 32) return (void *)(intptr_t)-1;
 	void *prev = (void *)kml_sig_handlers[sig];
@@ -454,6 +484,17 @@ void *signal(int sig, void *handler) {
 		if (!installed) { SetConsoleCtrlHandler(kml_ctrl_handler, TRUE); installed = 1; }
 		kml_sig_thread = GetCurrentThreadId();
 		__kml_win_sig_installed = 1;
+	}
+	if (sig == 28 && handler) {
+		static int winch_started;
+		// Deliver runs only on the installing thread with the flag set; a
+		// SIGWINCH-only program (no SIGINT) still needs both, like the ctrl path.
+		kml_sig_thread = GetCurrentThreadId();
+		__kml_win_sig_installed = 1;
+		if (!winch_started) {
+			HANDLE t = CreateThread(NULL, 0, kml_winch_watcher, NULL, 0, NULL);
+			if (t) { CloseHandle(t); winch_started = 1; }
+		}
 	}
 	return prev;
 }

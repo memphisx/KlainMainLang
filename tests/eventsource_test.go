@@ -324,10 +324,20 @@ setTimeout(() => {}, 300);
 // still needed at the end so the process actually exits instead of running
 // out the retry-and-keep-alive loop indefinitely.
 func TestE2EEventSourceOnErrorFires(t *testing.T) {
+	// Close inside onerror so no auto-reconnect fires a second 'error', and
+	// guard the print so the assertion is deterministic regardless of how
+	// fast the refused connect is detected (on Windows it can be quick enough
+	// that a reconnect at the default 3s delay would fire again inside a
+	// longer grace window — the flake that failed the CI runner, ADR-00746).
+	// The backstop setTimeout still closes if onerror never fires.
 	src := `
 const es = new EventSource("http://127.0.0.1:1/refused");
+let fired = false;
 es.onerror = (ev) => {
+  if (fired) return;
+  fired = true;
   console.log(ev.type);
+  es.close();
 };
 setTimeout(() => {
   es.close();

@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // The native `test` builtin (TDD-00122): mustCall/mustNotCall/mustCallAtLeast/
 // skip + env probes. mustCall wraps a callback, counts invocations, and verifies
@@ -86,11 +89,17 @@ console.log('should not run')
 }
 
 func TestE2ETestProbesOutput(t *testing.T) {
+	// isWindows is host-computed like isLinux/isMacOS (ADR-00739), so it is
+	// true when the suite runs on Windows and false elsewhere.
+	wantWin := "false"
+	if runtime.GOOS == "windows" {
+		wantWin = "true"
+	}
 	assertOutputImports(t, `
 import { isWindows, isMacOS, hasCrypto } from 'test'
 console.log(isWindows)
 console.log(hasCrypto)
-`, "false\ntrue")
+`, wantWin+"\ntrue")
 }
 
 // mustCall composes with real async: a satisfied timer callback exits 0.
