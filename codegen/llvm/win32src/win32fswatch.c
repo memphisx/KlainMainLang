@@ -12,6 +12,13 @@
 // The socket/read/write/close and socketpair here are the shim's POSIX-named
 // entry points (win32io.c / win32proc.c) over its fd table, so the returned
 // wakefd is a fd the shim's select() understands.
+// NO_OLDNAMES keeps io.h from declaring read/write/close with the deprecated
+// MSVC prototypes (`int read(int, void*, unsigned int)`), which conflict with
+// this file's `extern int64_t read/write` over the shim fd table. Newer mingw
+// headers (the CI runner's) declare them; older local ones may not — so the
+// clash only surfaced on CI. Same guard win32io.c / win32fs.c already use
+// (ADR-00741). Must precede every include that can pull io.h.
+#define NO_OLDNAMES 1
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
