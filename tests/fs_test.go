@@ -658,15 +658,13 @@ fs.rmSync(tmp, { recursive: true, force: true })
 // inode, so a write through either is visible through the other and the
 // content survives unlinking the original. Unlike symlinkSync, this needs no
 // Developer Mode on Windows (CreateHardLinkW is unprivileged).
-// fs.watch (TDD-00181, ADR-00756/ADR-00757) — Linux inotify + Windows
-// ReadDirectoryChangesW backends; macOS kqueue is pending (Stage 3). It
-// exercises the whole subsystem: an FSWatcher folded into the event loop, a
-// real file change delivered as a 'change' event, then close() letting the
-// loop exit.
+// fs.watch (TDD-00181, ADR-00756/ADR-00757/ADR-00758) — Linux inotify, Windows
+// ReadDirectoryChangesW, and macOS kqueue/EVFILT_VNODE backends. It exercises the
+// whole subsystem on every platform: an FSWatcher folded into the event loop, a
+// real file change delivered as a 'change' event, then close() letting the loop
+// exit. (macOS kqueue watches an fd, so the delivered `filename` is the watched
+// path rather than the changed entry — ADR-00758; this test only checks `evt`.)
 func TestE2EFsWatchChange(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS kqueue backend pending (TDD-00181 Stage 3)")
-	}
 	dir := tempDir(t)
 	p := dir + "/w.txt"
 	src := fmt.Sprintf(`
