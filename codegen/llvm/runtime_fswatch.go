@@ -535,7 +535,13 @@ next:
   br label %%loop
 ret:
   ret void
-}`, watchDesc, e.internString("watch"), sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, renameStr, changeStr))
+}`, watchDesc, e.internString("watch"),
+		// 12 FSWatcher-struct GEPs precede the event-name select; the docall
+		// `name_p` GEP is the one that follows it. renameStr/changeStr fill the
+		// select — they must sit between the 12th and 13th `sw`, not after both
+		// (the earlier all-`sw`-then-strings order put fsWatcherStructIR into the
+		// select and produced invalid `select … ptr { … }` IR on macOS).
+		sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, sw, renameStr, changeStr, sw))
 }
 
 // emitFsWatchWindows emits the Windows fs.watch backend IR (TDD-00181 Stage 2)
