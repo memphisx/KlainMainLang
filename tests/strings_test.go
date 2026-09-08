@@ -357,6 +357,31 @@ console.log(s.codePointAt(0) === s.charCodeAt(0))
 `, "104\ntrue")
 }
 
+func TestE2EStringCodePointAtUndefined(t *testing.T) {
+	// Out of range is a real `undefined` (Node behavior), not charCodeAt's NaN
+	// — codePointAt is `number | undefined` (TDD-00187).
+	assertOutput(t, `
+const s: string = 'hi'
+console.log(s.codePointAt(5))
+console.log(s.codePointAt(5) === undefined)
+console.log(s.codePointAt(9) ?? -1)
+console.log(s.codePointAt(0) ?? -1)
+`, "undefined\ntrue\n-1\n104")
+}
+
+func TestE2EStringCodePointAtStrictUndefined(t *testing.T) {
+	// Assigning the `number | undefined` result to a bare `number` is a strict
+	// compile error (strictNullChecks); `-compat=js` coerces it silently.
+	_, err := parseAndCompile(`
+const s: string = 'hi'
+const c: number = s.codePointAt(0)
+console.log(c)
+`)
+	if err == nil {
+		t.Fatal("expected a strict undefined-assignability error for codePointAt")
+	}
+}
+
 func TestE2EStringSearch(t *testing.T) {
 	assertOutput(t, `
 const s: string = 'hello world'

@@ -17,8 +17,19 @@ import (
 )
 
 func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: fs.readFileSync takes exactly 1 argument (path)", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: fs.readFileSync takes (path[, encoding | { encoding, flag }])", pos.Line, pos.Col)
+	}
+	// The optional encoding/options argument is accepted for `'utf8'` (this
+	// compiler's strings are already UTF-8, so it is a faithful no-op and the
+	// result stays a string) — the canonical `readFileSync(p, 'utf8')` idiom.
+	// The read `flag` is parsed but not acted on (a plain read). Without any
+	// encoding this still returns a string, not a Buffer (documented divergence
+	// — use readFileSyncBytes for the byte form).
+	if len(args) == 2 {
+		if _, err := fsTextOption(args[1], pos, "fs.readFileSync"); err != nil {
+			return Value{}, err
+		}
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -30,6 +41,48 @@ func (e *Emitter) emitFsReadFileSync(args []ast.Expression, pos ast.Pos) (Value,
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_read_file(ptr %s)", r, pathVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// fsTextOption parses the optional trailing encoding/options argument shared by
+// readFileSync/writeFileSync/appendFileSync: either a bare encoding string
+// literal (`'utf8'`/`'utf-8'`) or an object literal whose keys are a subset of
+// { encoding, flag }. A present encoding must be utf8 — the compiler's strings
+// are UTF-8, so it is a faithful no-op; any other encoding, an unsupported key
+// (e.g. `mode`, not yet plumbed through the write open()), or a non-literal
+// option is a clean rejection. Returns the `flag` string literal ("" if none),
+// which the write callers interpret (`'a'*` → append).
+func fsTextOption(arg ast.Expression, pos ast.Pos, what string) (flag string, err error) {
+	badEnc := func() (string, error) {
+		return "", fmt.Errorf("%d:%d: %s encoding must be the literal 'utf8' (this compiler's strings are UTF-8)", pos.Line, pos.Col, what)
+	}
+	switch a := arg.(type) {
+	case *ast.StringLiteral:
+		if a.Value != "utf8" && a.Value != "utf-8" {
+			return badEnc()
+		}
+		return "", nil
+	case *ast.ObjectLiteral:
+		for _, p := range a.Properties {
+			switch p.Key {
+			case "encoding":
+				s, ok := p.Value.(*ast.StringLiteral)
+				if !ok || (s.Value != "utf8" && s.Value != "utf-8") {
+					return badEnc()
+				}
+			case "flag":
+				s, ok := p.Value.(*ast.StringLiteral)
+				if !ok {
+					return "", fmt.Errorf("%d:%d: %s `flag` must be a string literal", pos.Line, pos.Col, what)
+				}
+				flag = s.Value
+			default:
+				return "", fmt.Errorf("%d:%d: %s options support only { encoding: 'utf8', flag } (not '%s')", pos.Line, pos.Col, what, p.Key)
+			}
+		}
+		return flag, nil
+	default:
+		return "", fmt.Errorf("%d:%d: %s options must be an encoding string or an object literal", pos.Line, pos.Col, what)
+	}
 }
 
 // emitFsReadFileSyncBytes implements fs.readFileSyncBytes(path): Uint8Array
@@ -71,8 +124,23 @@ func (e *Emitter) emitFsAppendFileSync(args []ast.Expression, pos ast.Pos) (Valu
 // the same pattern emitFetch already uses for its optional init fields
 // (emit_fetch.go).
 func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, runtimeFn string) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 2 arguments (path, data)", pos.Line, pos.Col, name)
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: %s takes (path, data[, encoding | { encoding, flag }])", pos.Line, pos.Col, name)
+	}
+	// Optional encoding/options argument. `'utf8'` is a no-op (strings are
+	// UTF-8); a `flag` beginning with `'a'` (`'a'`/`'a+'`/`'as'`) turns a
+	// writeFileSync into an append, matching Node — routed to the append
+	// runtime below. appendFileSync ignores the flag (it always appends).
+	isWrite := runtimeFn == "@__kml_fs_write_file"
+	if len(args) == 3 {
+		flag, err := fsTextOption(args[2], pos, name)
+		if err != nil {
+			return Value{}, err
+		}
+		if isWrite && len(flag) > 0 && flag[0] == 'a' {
+			isWrite = false
+			runtimeFn = "@__kml_fs_append_file"
+		}
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -80,7 +148,6 @@ func (e *Emitter) emitFsWriteLikeCall(args []ast.Expression, pos ast.Pos, name, 
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
 
-	isWrite := runtimeFn == "@__kml_fs_write_file"
 	dataTy := e.inferExprType(args[1])
 
 	switch {
@@ -276,8 +343,8 @@ func (e *Emitter) emitFsRenameSync(args []ast.Expression, pos ast.Pos) (Value, e
 // helpers, so a src file with an embedded null byte copies back at its real
 // size instead of truncated at the first null.
 func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: fs.copyFileSync takes exactly 2 arguments (src, dest)", pos.Line, pos.Col)
+	if len(args) < 2 || len(args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.copyFileSync takes (src, dest[, mode])", pos.Line, pos.Col)
 	}
 	srcVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -289,6 +356,27 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 		return Value{}, err
 	}
 	destVal = e.coerce(destVal, TypePtr)
+
+	// Optional `mode`: a bitmask of COPYFILE_EXCL (1), COPYFILE_FICLONE (2),
+	// COPYFILE_FICLONE_FORCE (4). Only EXCL has observable semantics (fail if
+	// dest exists) — enforced by a pre-guard that opens dest O_EXCL; the FICLONE
+	// copy-on-write hints are best-effort and a faithful no-op here. `mode` is a
+	// runtime i64 (works for both a literal and a computed value).
+	exclRef := "false"
+	if len(args) == 3 {
+		mv, err := e.emitExpr(args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		modeI := e.coerce(mv, TypeI64)
+		masked := e.freshReg()
+		exclB := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, 1", masked, modeI.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", exclB, masked))
+		exclRef = exclB
+	}
+	e.ensureFsCopyExclGuard()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_copy_excl_guard(ptr %s, i1 %s)", destVal.Ref, exclRef))
 
 	e.ensureFsReadFileRaw()
 	e.ensureFsWriteFileBytes()
@@ -308,11 +396,17 @@ func (e *Emitter) emitFsCopyFileSync(args []ast.Expression, pos ast.Pos) (Value,
 // real Node's own readdirSync, which makes no ordering guarantee either).
 func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync takes (path[, { withFileTypes: true }])", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync takes (path[, { withFileTypes, recursive }])", pos.Line, pos.Col)
 	}
-	withTypes, err := readdirWithFileTypes(args, pos)
+	withTypes, recursive, err := readdirOptions(args, pos)
 	if err != nil {
 		return Value{}, err
+	}
+	if recursive && withTypes {
+		// Node's recursive+withFileTypes yields Dirents keyed by parentPath — a
+		// distinct object shape (this compiler's Dirent has no parentPath yet),
+		// so reject cleanly rather than return the wrong shape.
+		return Value{}, fmt.Errorf("%d:%d: fs.readdirSync `{ recursive: true, withFileTypes: true }` together is not yet supported (recursive returns a string[]; withFileTypes a Dirent[])", pos.Line, pos.Col)
 	}
 	pathVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -320,8 +414,15 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	pathVal = e.coerce(pathVal, TypePtr)
 
-	e.ensureFsReaddir()
 	r := e.freshReg()
+	if recursive {
+		// Every nested entry as a string[] of "/"-joined paths relative to the
+		// starting directory (ADR-00786).
+		e.ensureFsReaddirRecursive()
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir_recursive(ptr %s)", r, pathVal.Ref))
+		return Value{Ref: r, Ty: ArrayOf(TypePtr)}, nil
+	}
+	e.ensureFsReaddir()
 	if withTypes {
 		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_fs_readdir(ptr %s, i1 true)", r, pathVal.Ref))
 		return Value{Ref: r, Ty: ArrayOf(DirentType())}, nil
@@ -330,23 +431,36 @@ func (e *Emitter) emitFsReaddirSync(args []ast.Expression, pos ast.Pos) (Value, 
 	return Value{Ref: r, Ty: ArrayOf(TypePtr)}, nil
 }
 
-// readdirWithFileTypes parses fs.readdirSync's optional second argument. Only
-// the literal `{ withFileTypes: true }` is understood (matching mkdirSync's
-// `{ recursive: true }` handling); anything else is a clean rejection. Used
-// by both the emitter and inferExprType so the two stay in lockstep.
-func readdirWithFileTypes(args []ast.Expression, pos ast.Pos) (bool, error) {
+// readdirOptions parses fs.readdirSync's optional second argument. The literal
+// keys `{ withFileTypes: true }` and `{ recursive: true }` are understood (each
+// `true`, in any combination); anything else is a clean rejection. Used by both
+// the emitter and inferExprType so the two stay in lockstep.
+func readdirOptions(args []ast.Expression, pos ast.Pos) (withTypes, recursive bool, err error) {
 	if len(args) < 2 {
-		return false, nil
+		return false, false, nil
+	}
+	bad := func() (bool, bool, error) {
+		return false, false, fmt.Errorf("%d:%d: fs.readdirSync options support only `{ withFileTypes: true }` and/or `{ recursive: true }`", pos.Line, pos.Col)
 	}
 	ol, ok := args[1].(*ast.ObjectLiteral)
-	if !ok || len(ol.Properties) != 1 || ol.Properties[0].Key != "withFileTypes" {
-		return false, fmt.Errorf("%d:%d: fs.readdirSync options support only `{ withFileTypes: true }`", pos.Line, pos.Col)
+	if !ok || len(ol.Properties) == 0 {
+		return bad()
 	}
-	b, ok := ol.Properties[0].Value.(*ast.BooleanLiteral)
-	if !ok || !b.Value {
-		return false, fmt.Errorf("%d:%d: fs.readdirSync options support only `{ withFileTypes: true }`", pos.Line, pos.Col)
+	for _, p := range ol.Properties {
+		b, ok := p.Value.(*ast.BooleanLiteral)
+		if !ok || !b.Value {
+			return bad()
+		}
+		switch p.Key {
+		case "withFileTypes":
+			withTypes = true
+		case "recursive":
+			recursive = true
+		default:
+			return bad()
+		}
 	}
-	return true, nil
+	return withTypes, recursive, nil
 }
 
 // emitFsStatSync implements fs.statSync(path) (ADR-00495): __kml_fs_stat
@@ -368,9 +482,12 @@ func (e *Emitter) emitFsStatSync(args []ast.Expression, pos ast.Pos) (Value, err
 	return e.buildStatsObject(trip), nil
 }
 
-// emitStatsKindCall implements stats.isFile()/isDirectory(): mask the hidden
-// st_mode word with S_IFMT (0xF000) and compare against S_IFREG (0x8000) /
-// S_IFDIR (0x4000) — identical values on every POSIX target here.
+// emitStatsKindCall implements the Stats/Dirent kind predicates: mask the
+// hidden `mode` word with S_IFMT (0xF000) and compare against the S_IF* value
+// for the requested kind — identical values on every POSIX target here (and the
+// synthesized d_type→mode word a Dirent carries uses the same encoding). Backs
+// isFile/isDirectory/isSymbolicLink (ADR-00495/00752) plus the device
+// predicates isFIFO/isCharacterDevice/isBlockDevice/isSocket (ADR-00787).
 func (e *Emitter) emitStatsKindCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: stats.%s() takes no arguments", pos.Line, pos.Col, method)
@@ -383,16 +500,29 @@ func (e *Emitter) emitStatsKindCall(objExpr ast.Expression, method string, args 
 	mode := e.loadFieldValue(objVal, idx, fieldTy)
 	masked := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 61440", masked, mode.Ref))
-	want := "32768"
-	switch method {
-	case "isDirectory":
-		want = "16384"
-	case "isSymbolicLink":
-		want = "40960"
-	}
+	want := map[string]string{
+		"isFile":            "32768", // S_IFREG
+		"isDirectory":       "16384", // S_IFDIR
+		"isSymbolicLink":    "40960", // S_IFLNK
+		"isFIFO":            "4096",  // S_IFIFO
+		"isCharacterDevice": "8192",  // S_IFCHR
+		"isBlockDevice":     "24576", // S_IFBLK
+		"isSocket":          "49152", // S_IFSOCK
+	}[method]
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", res, masked, want))
 	return Value{Ref: res, Ty: TypeBool}, nil
+}
+
+// isStatsKindPredicate reports whether method is one of the Stats/Dirent
+// kind-predicate names emitStatsKindCall handles.
+func isStatsKindPredicate(method string) bool {
+	switch method {
+	case "isFile", "isDirectory", "isSymbolicLink",
+		"isFIFO", "isCharacterDevice", "isBlockDevice", "isSocket":
+		return true
+	}
+	return false
 }
 
 // emitFsLstatSync — statSync's non-following twin (ADR-00497).
@@ -696,6 +826,38 @@ func (e *Emitter) emitFsUtimesSync(args []ast.Expression, pos ast.Pos) (Value, e
 	}
 	e.ensureFsUtimes()
 	e.emitInstr(fmt.Sprintf("call void @__kml_fs_utimes(ptr %s, ptr %s)", pathVal.Ref, buf))
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitFsFutimesSync implements fs.futimesSync(fd, atime, mtime): utimesSync's
+// fd-based twin (ADR-00788). Same atime/mtime forms (a number of seconds or a
+// Date) and the same [4 x i64] two-timeval buffer; the target is an open fd
+// rather than a path.
+func (e *Emitter) emitFsFutimesSync(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 3 {
+		return Value{}, fmt.Errorf("%d:%d: fs.futimesSync takes (fd, atime, mtime)", pos.Line, pos.Col)
+	}
+	fv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	fd := e.coerce(fv, TypeI64)
+	buf := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [4 x i64], align 8", buf))
+	for i, arg := range args[1:] {
+		secRef, usecRef, err := e.emitSecondsToTimeval(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		secSlot := e.freshReg()
+		usecSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr [4 x i64], ptr %s, i32 0, i32 %d", secSlot, buf, i*2))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", secRef, secSlot))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr [4 x i64], ptr %s, i32 0, i32 %d", usecSlot, buf, i*2+1))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", usecRef, usecSlot))
+	}
+	e.ensureFsFutimes()
+	e.emitInstr(fmt.Sprintf("call void @__kml_fs_futimes(i64 %s, ptr %s)", fd.Ref, buf))
 	return Value{Ty: TypeVoid}, nil
 }
 

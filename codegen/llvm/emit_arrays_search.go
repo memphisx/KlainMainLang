@@ -214,10 +214,12 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 		return Value{}, err
 	}
 
-	zeroVal := zeroRef(elemTy)
 	foundAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, foundAlloca, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), foundAlloca, elemTy.Align()))
+	flagAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", flagAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", flagAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -256,6 +258,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 
 	e.emitLabel(matchL)
 	e.storeArrayElem(foundAlloca, elemTy, elemVal)
+	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", flagAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(decL)
@@ -270,7 +273,9 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	}
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
-	return Value{Ref: result, Ty: elemTy}, nil
+	found := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", found, flagAlloca))
+	return e.wrapUndefinedable(Value{Ref: result, Ty: elemTy}, found), nil
 }
 
 // emitArrayFindLastIndex implements arr.findLastIndex(pred): same reverse

@@ -36,6 +36,19 @@ console.log(fs.readFileSync(path)) // replaced
 fs.appendFileSync(path, '\nsecond line')
 console.log(fs.readFileSync(path)) // replaced\nsecond line
 
+// The canonical text-I/O idiom: an 'utf8' encoding (a bare string or an
+// { encoding: 'utf8' } object) on read/write/append. This compiler's strings
+// are already UTF-8, so the encoding is a faithful no-op — the point is that
+// the everyday `readFileSync(path, 'utf8')` call now compiles.
+fs.writeFileSync(path, 'text', 'utf8')
+console.log(fs.readFileSync(path, 'utf8'))              // text
+console.log(fs.readFileSync(path, { encoding: 'utf8' })) // text
+
+// writeFileSync with { flag: 'a' } appends instead of truncating (Node's flag
+// semantics); { flag: 'w' } is the default truncate.
+fs.writeFileSync(path, '!', { flag: 'a' })
+console.log(fs.readFileSync(path, 'utf8'))              // text!
+
 // A failed read/write/append/delete throws a catchable Error, built from
 // the OS's own reason (via strerror(errno)) — same approach as fetch's
 // network-failure handling.
@@ -80,8 +93,24 @@ for (const name of entries) {
 // directory entry's type without a per-file stat.
 const dirents = fs.readdirSync(dir, { withFileTypes: true })
 for (const d of dirents) {
-    console.log(d.name + ' isFile=' + d.isFile())   // a.txt isFile=true, …
+    // Each Dirent carries .parentPath (the directory it was read from) and the
+    // full set of kind predicates — isFile/isDirectory/isSymbolicLink plus the
+    // device predicates isFIFO/isCharacterDevice/isBlockDevice/isSocket.
+    console.log(d.name + ' isFile=' + d.isFile() + ' isFIFO=' + d.isFIFO() +
+        ' parent=' + (d.parentPath === dir))   // a.txt isFile=true isFIFO=false parent=true, …
 }
+
+// { recursive: true } walks the whole tree, returning every nested entry as a
+// path relative to `dir` (joined with '/'). Create a nested layout first.
+fs.mkdirSync(dir + '/nested', { recursive: true })
+fs.writeFileSync(dir + '/nested/c.txt', 'c')
+const tree = fs.readdirSync(dir, { recursive: true })
+tree.sort()
+for (const rel of tree) {
+    console.log(rel)   // a.txt, b.txt, nested, nested/c.txt
+}
+fs.unlinkSync(dir + '/nested/c.txt')
+fs.rmdirSync(dir + '/nested')
 
 // renameSync moves/renames a file in place
 fs.renameSync(dir + '/a.txt', dir + '/a_renamed.txt')
@@ -92,6 +121,19 @@ console.log(fs.existsSync(dir + '/a_renamed.txt'))    // 1
 // exist independently afterward with the same content
 fs.copyFileSync(dir + '/a_renamed.txt', dir + '/a_copy.txt')
 console.log(fs.readFileSync(dir + '/a_copy.txt'))   // file a
+// fs.constants gives the copyFile flags and POSIX access modes by name, so
+// there's no need to spell the raw numbers. COPYFILE_EXCL makes the copy fail
+// if dest already exists.
+try {
+    fs.copyFileSync(dir + '/a_renamed.txt', dir + '/a_copy.txt', fs.constants.COPYFILE_EXCL)
+} catch (e) {
+    console.log('EXCL refused: ' + (e as any).code)   // EXCL refused: EEXIST
+}
+
+// accessSync checks a path against a mode (F_OK exists, R_OK/W_OK/X_OK
+// readable/writable/executable) and throws if the check fails.
+fs.accessSync(dir + '/a_copy.txt', fs.constants.R_OK)
+console.log('a_copy is readable')                     // a_copy is readable
 
 // mkdirSync throws if the directory already exists (no {recursive: true}
 // option in this compiler — always the plain, non-recursive mkdir())
@@ -189,8 +231,11 @@ fs.writeSync(fd, 'raw fd write')
 // FlushFileBuffers / SetEndOfFile; on POSIX to the fsync/ftruncate syscalls.
 fs.fsyncSync(fd)
 fs.ftruncateSync(fd, 3)
+// futimesSync sets access/modify times on the open fd (utimesSync's fd twin).
+fs.futimesSync(fd, 1_000_000_000, 1_500_000_000)
 fs.closeSync(fd)
 console.log(fs.statSync('/tmp/kml_fd_example.txt').size)  // 3
+console.log(fs.statSync('/tmp/kml_fd_example.txt').mtimeMs)  // 1500000000000
 const rfd = fs.openSync('/tmp/kml_fd_example.txt', 'r')
 console.log(fs.fstatSync(rfd).size)   // 3 (truncated above)
 const head = new Uint8Array(3)

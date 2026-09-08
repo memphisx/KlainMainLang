@@ -58,10 +58,11 @@
             "feature": "`.pop()`",
             "status": "implemented",
             "caveats": [
-              "On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type ([ADR-00157](../adr/ADR-00157.md) convention)",
+              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
               "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
             ],
             "notes": [
+              "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Works on any mutable receiver (variable, object/class field, nested-array element — [ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md)"
             ]
           },
@@ -69,10 +70,11 @@
             "feature": "`.shift()`",
             "status": "implemented",
             "caveats": [
-              "Same empty-array zero-value-instead-of-`undefined` convention as `.pop()` ([ADR-00157](../adr/ADR-00157.md))",
+              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))",
               "A length change propagates from a callee to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))"
             ],
             "notes": [
+              "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md)). See [ADR-00167](../adr/ADR-00167.md)"
             ]
           },
@@ -106,7 +108,10 @@
             "feature": "`.at(i)`",
             "status": "implemented",
             "caveats": [
-              "Out-of-range `.at()` diverges from `undefined` — `[10,20,30].at(5)` is `0` and `[10,20,30].at(-5)` is `10` (Node: `undefined` for both; a negative index past the start is clamped to 0 rather than left out of range). The zero-value undefined stand-in `.pop()`/`.shift()` also use."
+              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
+            ],
+            "notes": [
+              "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens. A negative index past the start is out of range (`undefined`), matching Node"
             ]
           },
           {
@@ -127,7 +132,10 @@
             "feature": "`.find(fn)`",
             "status": "implemented",
             "caveats": [
-              "A no-match `.find()` returns the element type's zero value, not `undefined` — `[5,6,7].find(x => x > 10)` is `0` (Node: `undefined`); a reference-typed element returns the `null` stand-in (`.findIndex` correctly returns `-1`)."
+              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
+            ],
+            "notes": [
+              "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens"
             ]
           },
           {
@@ -153,6 +161,13 @@
           {
             "feature": "`.reduce(fn, init?)`",
             "status": "implemented"
+          },
+          {
+            "feature": "`.reduceRight(fn, init?)`",
+            "status": "implemented",
+            "notes": [
+              "Right-to-left fold sharing `.reduce`'s machinery — only the traversal direction reverses ([ADR-00776](../adr/ADR-00776.md))"
+            ]
           },
           {
             "feature": "`.forEach(fn)`",
@@ -214,7 +229,11 @@
             "feature": "`.findLast(fn)` / `.findLastIndex(fn)`",
             "status": "implemented",
             "notes": [
+              "Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens",
               "Genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's reverse call order, observable via side effects ([ADR-00057](../adr/ADR-00057.md))"
+            ],
+            "caveats": [
+              "A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md))"
             ]
           },
           {
@@ -275,7 +294,7 @@
     },
     {
       "kind": "block",
-      "text": "- `.reduceRight()` (right-to-left fold) is not implemented at all — no row above.\n- `Object.groupBy` also rejects a nested-array element (`number[][]`) — its buckets store each element as a raw `i64` ([ADR-00152](../adr/ADR-00152.md))."
+      "text": "- `Object.groupBy` also rejects a nested-array element (`number[][]`) — its buckets store each element as a raw `i64` ([ADR-00152](../adr/ADR-00152.md))."
     }
   ]
 }

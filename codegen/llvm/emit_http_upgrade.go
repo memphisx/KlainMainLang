@@ -467,6 +467,8 @@ func walkExprForUpgrade(ex ast.Expression, found *bool) {
 		for _, e := range n.Exprs {
 			walkExprForUpgrade(e, found)
 		}
+	case *ast.NonNullExpression:
+		walkExprForUpgrade(n.Arg, found)
 	case *ast.UnaryExpression:
 		walkExprForUpgrade(n.Arg, found)
 	case *ast.UpdateExpression:

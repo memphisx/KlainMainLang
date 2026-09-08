@@ -14,6 +14,6 @@ for await (const chunk of res.body) {
 console.log("streamed in multiple chunks:", chunks >= 2);
 console.log("body:", text);
 
-// Buffered accessors still work — they drive the transfer to completion.
+// Buffered accessors return a real Promise<T> — await drives the transfer.
 const whole = await fetch("http://127.0.0.1:8765/get");
-console.log("text() length > 0:", whole.text().length > 0);
+console.log("text() length > 0:", (await whole.text()).length > 0);

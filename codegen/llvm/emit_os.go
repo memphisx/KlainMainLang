@@ -14,29 +14,98 @@ import (
 	"KlainMainLang/ast"
 )
 
-// emitOSHomedir implements os.homedir(): getenv("HOME"), throwing a
-// catchable Error if unset — matches real Node, which throws when it can't
-// determine the home directory (as opposed to os.tmpdir()'s silent
-// fallback, see emitOSTmpdir).
+// emitOSHomedir implements os.homedir(). On Windows it reads USERPROFILE and
+// throws a catchable Error if unset (TDD-00177 Stage 1). On POSIX it mirrors
+// libuv's uv_os_homedir: a *set* HOME wins (an empty one included — Node
+// returns "" there, it is not treated as unset); only an unset HOME falls
+// back to the passwd database (getpwuid(getuid())->pw_dir via the
+// struct-layout-safe __kml_os_homedir_pw shim), and it throws only if that
+// fails too — so a program run under a login without HOME (a bare cron/systemd
+// unit, a container) still gets a home directory, matching real Node instead
+// of throwing.
 func (e *Emitter) emitOSHomedir(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: os.homedir() takes no arguments", pos.Line, pos.Col)
 	}
-	// Node: HOME on POSIX, USERPROFILE on Windows (TDD-00177 Stage 1).
-	homeVar := "HOME"
 	if runtime.GOOS == "windows" {
-		homeVar = "USERPROFILE"
+		val := e.emitGetenvCall(e.internString("USERPROFILE"))
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+		failL := e.freshLabel("os.homedir.fail")
+		okL := e.freshLabel("os.homedir.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, failL, okL))
+		e.emitLabel(failL)
+		e.emitInternalThrow(e.internString("could not determine home directory"))
+		e.emitLabel(okL)
+		return Value{Ref: val.Ref, Ty: TypePtr}, nil
 	}
-	val := e.emitGetenvCall(e.internString(homeVar))
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+
+	// POSIX. emitGetenvCall wraps HOME into a header string ("" stays "",
+	// unset stays null); only the null (unset) case takes the passwd fallback.
+	e.ensureStrHeaderRuntime()
+	e.usedOSHomedirPw = true
+	e.emitGlobal("declare ptr @__kml_os_homedir_pw()")
+
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr", slot))
+
+	home := e.emitGetenvCall(e.internString("HOME"))
+	homeNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", homeNull, home.Ref))
+	passwdL := e.freshLabel("os.homedir.passwd")
+	useHomeL := e.freshLabel("os.homedir.usehome")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", homeNull, passwdL, useHomeL))
+
+	doneL := e.freshLabel("os.homedir.done")
+
+	e.emitLabel(useHomeL)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s", home.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(passwdL)
+	pw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_os_homedir_pw()", pw))
+	pwNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", pwNull, pw))
 	failL := e.freshLabel("os.homedir.fail")
-	okL := e.freshLabel("os.homedir.ok")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, failL, okL))
+	usePwL := e.freshLabel("os.homedir.usepw")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pwNull, failL, usePwL))
+
+	e.emitLabel(usePwL)
+	pwStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", pwStr, pw))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s", pwStr, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
 	e.emitLabel(failL)
 	e.emitInternalThrow(e.internString("could not determine home directory"))
-	e.emitLabel(okL)
-	return Value{Ref: val.Ref, Ty: TypePtr}, nil
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s", result, slot))
+	return Value{Ref: result, Ty: TypePtr}, nil
+}
+
+// UsesOSHomedirPw reports whether the program's os.homedir() needed the POSIX
+// passwd-database fallback shim (getpwuid), so its C source gets linked in.
+func (e *Emitter) UsesOSHomedirPw() bool { return e.usedOSHomedirPw }
+
+// OSHomedirPwSource is the struct-layout-safe passwd-lookup shim behind the
+// POSIX os.homedir() fallback: it returns getpwuid(getuid())->pw_dir (a
+// pointer into a static buffer libc owns, so no free), or NULL if the current
+// uid has no passwd entry. Compiled against the platform's own <pwd.h> so the
+// struct passwd layout (which differs across Darwin/glibc) never has to be
+// reproduced in IR.
+func OSHomedirPwSource() string {
+	return `#include <pwd.h>
+#include <unistd.h>
+#include <stddef.h>
+
+const char *__kml_os_homedir_pw(void) {
+  struct passwd *pw = getpwuid(getuid());
+  return pw ? pw->pw_dir : NULL;
+}
+`
 }
 
 // emitOSTmpdir implements os.tmpdir(): getenv("TMPDIR"), falling back to
@@ -63,11 +132,56 @@ func (e *Emitter) emitOSTmpdir(args []ast.Expression, pos ast.Pos) (Value, error
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", result, raw))
 		return Value{Ref: result, Ty: TypePtr}, nil
 	}
+	// POSIX Node: `process.env.TMPDIR || '/tmp'`, then strip a single trailing
+	// '/' unless the path is just "/" (lib/os.js's tmpdir()). The `||` makes an
+	// unset *or empty* TMPDIR fall back to /tmp; the trailing-slash strip means
+	// `TMPDIR=/foo/` yields `/foo`, matching real Node.
+	e.ensureStrHeaderRuntime()
+	e.ensureMalloc()
+	e.ensureMemcpy()
 	val := e.emitGetenvCall(e.internString("TMPDIR"))
+	tmpFallback := e.internString("/tmp")
+
+	fallbackL := e.freshLabel("tmpdir.fallback")
+	checkEmptyL := e.freshLabel("tmpdir.checkempty")
+	haveL := e.freshLabel("tmpdir.have")
+	doneL := e.freshLabel("tmpdir.done")
+
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, fallbackL, checkEmptyL))
+
+	e.emitLabel(checkEmptyL)
+	slen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", slen, val.Ref))
+	isEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, slen))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, fallbackL, haveL))
+
+	e.emitLabel(haveL)
+	lastIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, slen))
+	lastPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", lastPtr, val.Ref, lastIdx))
+	lastCh := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", lastCh, lastPtr))
+	isSlash := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 47", isSlash, lastCh)) // '/'
+	gt1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 1", gt1, slen))
+	strip := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", strip, isSlash, gt1))
+	newLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", newLen, strip, lastIdx, slen))
+	stripped := e.emitStringExtract(val.Ref, "0", newLen)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(fallbackL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", result, isNull, e.internString("/tmp"), val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", result, stripped.Ref, haveL, tmpFallback, fallbackL))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 

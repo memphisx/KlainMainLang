@@ -177,9 +177,11 @@ func (p *Parser) parseUnionType(source string) (*ast.TypeAnnotation, error) {
 	}
 
 	nullable := ta.Nullable
+	undef := ta.Undefined
 	var members []*ast.TypeAnnotation
 	if ta.Name == "null" || ta.Name == "undefined" {
 		nullable = true
+		undef = undef || ta.Name == "undefined"
 	} else {
 		members = append(members, ta)
 	}
@@ -191,6 +193,7 @@ func (p *Parser) parseUnionType(source string) (*ast.TypeAnnotation, error) {
 		}
 		if right.Name == "null" || right.Name == "undefined" {
 			nullable = true
+			undef = undef || right.Name == "undefined"
 			continue
 		}
 		members = append(members, right)
@@ -200,9 +203,11 @@ func (p *Parser) parseUnionType(source string) (*ast.TypeAnnotation, error) {
 	case 0:
 		// Every member was null/undefined (e.g. "null | undefined").
 		ta.Nullable = true
+		ta.Undefined = undef
 		return ta, nil
 	case 1:
 		members[0].Nullable = nullable
+		members[0].Undefined = undef
 		return members[0], nil
 	default:
 		// A distinct copy, not members[0] itself reused by pointer: setting
@@ -217,6 +222,7 @@ func (p *Parser) parseUnionType(source string) (*ast.TypeAnnotation, error) {
 		// itself — keeps UnionMembers nil.
 		head := *members[0]
 		head.Nullable = nullable
+		head.Undefined = undef
 		head.UnionMembers = members
 		return &head, nil
 	}
@@ -548,7 +554,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 				p.match(lexer.SEMICOLON, lexer.COMMA)
 				continue
 			}
-			p.match(lexer.QUESTION)
+			optional := p.match(lexer.QUESTION)
 			if _, err := p.expect(lexer.COLON); err != nil {
 				return nil, err
 			}
@@ -556,7 +562,7 @@ func (p *Parser) parseTypeAnnotationAtom(source string) (*ast.TypeAnnotation, er
 			if err != nil {
 				return nil, err
 			}
-			fields = append(fields, ast.AnnotField{Name: nameTok.Literal, Type: fieldType})
+			fields = append(fields, ast.AnnotField{Name: nameTok.Literal, Type: fieldType, Optional: optional})
 			p.match(lexer.SEMICOLON, lexer.COMMA)
 		}
 		if _, err := p.expect(lexer.RBRACE); err != nil {
@@ -919,8 +925,9 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 			continue
 		}
 
-		// Optional marker (name?: type) — accepted but treated as required for codegen.
-		p.match(lexer.QUESTION)
+		// Optional marker (name?: type) — the field's type widens to
+		// `T | undefined` and an object literal may omit it (TDD-00187 Stage 2).
+		optional := p.match(lexer.QUESTION)
 		if _, err := p.expect(lexer.COLON); err != nil {
 			return nil, err
 		}
@@ -937,7 +944,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 				ft = jsdocTypeAnnotation(t)
 			}
 		}
-		fields = append(fields, ast.AnnotField{Name: fieldTok.Literal, Type: ft})
+		fields = append(fields, ast.AnnotField{Name: fieldTok.Literal, Type: ft, Optional: optional})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {

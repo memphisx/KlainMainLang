@@ -722,6 +722,10 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			// without this an unannotated `let n = !cond` fell through to the
 			// TypeI64 default and printed `0`/`1` instead of `false`/`true`.
 			ty = e.inferExprType(init)
+		case *ast.NonNullExpression:
+			// `expr!` — the operand's type with null/undefined stripped
+			// (TDD-00187); inferExprType handles the unwrap.
+			ty = e.inferExprType(init)
 		case *ast.SequenceExpression:
 			// The comma operator's value is its last operand's — inferExprType
 			// handles that; without this case the switch's default left `ty` at
@@ -923,14 +927,18 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 						ty = recvTy
 					}
 				case "pop", "shift":
+					// `T | undefined` (TDD-00187) — must mirror inferExprType.
 					if recvTy := e.inferExprType(mem.Object); recvTy.IsArray && recvTy.ElemType != nil {
-						ty = *recvTy.ElemType
+						ty = undefinedableElem(*recvTy.ElemType)
 					}
 				default:
 					inferred := e.inferExprType(init)
 					// IsDynamic checked explicitly: TypeAny shares i64's IR
-					// since the NaN-box migration (TDD-00156).
-					if inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject || inferred.IsDynamic {
+					// since the NaN-box migration (TDD-00156). A nullable
+					// scalar (an `i64 | undefined` from .find()/.at(),
+					// TDD-00187) shares it too but needs the { i1, T } slot,
+					// so it is kept as well.
+					if inferred.IR != TypeI64.IR || inferred.IsArray || inferred.IsObject || inferred.IsDynamic || isNullableScalar(inferred) {
 						ty = inferred
 					}
 				}
@@ -1048,6 +1056,16 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			} else {
 				ty = TypeF64
 			}
+		}
+	}
+
+	// TDD-00187 strict gate: `let x: number = arr.pop()` is a compile error
+	// under strict (the initializer is `number | undefined`); `-compat=js`
+	// auto-unwraps. Only an explicit bare-T annotation gates — an inferred
+	// binding simply adopts the nullable type.
+	if v.TypeAnnot != nil && v.Init != nil {
+		if err := e.checkStrictUndefinedAssign(ty, v.Init, v.GetPos(), "initializer"); err != nil {
+			return err
 		}
 	}
 

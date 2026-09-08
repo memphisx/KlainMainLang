@@ -253,7 +253,9 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 }
 
 // emitArrayAt implements arr.at(index): returns the element at the given index
-// with negative-index support. Returns zero/null for out-of-range indices.
+// with negative-index support, as `T | undefined` — an out-of-range index
+// yields a real absent value (TDD-00187; a nested-array element still
+// zero-fills, ADR-00246).
 func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: at takes exactly 1 argument", pos.Line, pos.Col)
@@ -266,7 +268,16 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	if err != nil {
 		return Value{}, err
 	}
-	normIdx := e.emitNormalizeSliceIdx(e.arrayIndexToI64(idxRaw).Ref, lenReg)
+	// Real JS .at() index handling: a negative index counts from the end and,
+	// unlike .slice()'s clamp, one still negative after `+ len` is simply out
+	// of range (`[10,20,30].at(-5)` is `undefined`, not the first element).
+	rawI := e.arrayIndexToI64(idxRaw).Ref
+	isNeg := e.freshReg()
+	plusLen := e.freshReg()
+	normIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, rawI))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, rawI, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", normIdx, isNeg, plusLen, rawI))
 
 	// An array-typed result (nested array, TDD-00029) needs a {ptr,i64}
 	// slot, not elemTy.IR's plain "ptr" — the same StructFieldIR convention
@@ -282,13 +293,17 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
 		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resultAlloca, elemTy.Align()))
 	} else {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroRef(elemTy), resultAlloca, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), resultAlloca, elemTy.Align()))
 	}
 
+	nonNeg := e.freshReg()
+	below := e.freshReg()
 	inBounds := e.freshReg()
 	loadL := e.freshLabel("at.load")
 	doneL := e.freshLabel("at.done")
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inBounds, normIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", nonNeg, normIdx))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", below, normIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inBounds, nonNeg, below))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, loadL, doneL))
 
 	e.emitLabel(loadL)
@@ -302,12 +317,19 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resultAlloca, elemTy.Align()))
 	// TDD-00101: a bigint-element TypedArray's .at() surfaces a bigint
-	// handle (out-of-range gives 0n rather than undefined — same
-	// zero-value convention plain arrays already use here).
+	// handle. Out of range that handle is `undefined` (a flagged null,
+	// TDD-00187): the wrap-to-handle call only makes sense for a real
+	// element, so select null on the miss path.
 	if taTy := e.inferExprType(mem.Object); taTy.BigIntElem {
-		return e.wrapTypedArrayLoad(Value{Ref: result, Ty: elemTy}, taTy), nil
+		handle := e.wrapTypedArrayLoad(Value{Ref: result, Ty: elemTy}, taTy)
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, inBounds, handle.Ref))
+		hty := undefinedableElem(handle.Ty)
+		return Value{Ref: sel, Ty: hty}, nil
 	}
-	return Value{Ref: result, Ty: elemTy}, nil
+	// `T | undefined`: present exactly when the index was in range. inBounds
+	// was computed in the pre-branch block, which dominates the merge.
+	return e.wrapUndefinedable(Value{Ref: result, Ty: elemTy}, inBounds), nil
 }
 
 // emitArrayWith implements arr.with(index, val): returns a fresh copy of arr

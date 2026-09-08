@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strconv"
 )
 
 func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
@@ -753,6 +754,39 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			continue
 		}
 
+		// A position that may be past the source's length binds as
+		// `T | undefined` (TDD-00187 Stage 2): a scalar element gets a
+		// nullable-scalar { i1, T } local (absent on the out-of-bounds
+		// branch), a pointer element keeps its null with the static type
+		// flagged. A provably-in-bounds position (compile-time-known source
+		// length, e.g. a literal init) stays a bare T — matching tsc, which
+		// types tuple destructuring bare. A `= default` also stays bare: the
+		// binding is always defined, exactly as TS narrows it.
+		knownLen, convErr := strconv.Atoi(lenVal)
+		lenIsConst := convErr == nil
+		mayBeAbsent := elem.Default == nil && !(lenIsConst && i < knownLen)
+
+		if mayBeAbsent && isNullableScalar(undefinedableElem(elemTy)) {
+			nty := undefinedableElem(elemTy)
+			nsPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", nsPtr, nullableScalarStorageIR(nty), storageAlign(nty)))
+
+			e.emitLabel(okL)
+			gepReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
+			val := e.loadArrayElem(gepReg, elemTy)
+			e.storeNullableScalarPresent(nsPtr, nty, val.Ref)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(oobL)
+			e.storeNullableScalarAbsent(nsPtr, nty)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+
+			e.emitLabel(afterL)
+			e.define(elem.Name, Symbol{Ptr: nsPtr, Ty: nty, NullableBoxed: true})
+			continue
+		}
+
 		localPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, elemTy.IR, elemTy.Align()))
 
@@ -772,12 +806,19 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			defVal = e.coerce(defVal, elemTy)
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, defVal.Ref, localPtr, elemTy.Align()))
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemTy.zeroLiteral(), localPtr, elemTy.Align()))
+			// Miss default: the undefined box for a dynamic element, the
+			// zero/null otherwise (a pointer element's null renders as
+			// `undefined` via the flagged binding type below).
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), localPtr, elemTy.Align()))
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 		e.emitLabel(afterL)
-		e.define(elem.Name, Symbol{Ptr: localPtr, Ty: elemTy})
+		bindTy := elemTy
+		if mayBeAbsent {
+			bindTy = undefinedableElem(elemTy)
+		}
+		e.define(elem.Name, Symbol{Ptr: localPtr, Ty: bindTy})
 	}
 	return nil
 }

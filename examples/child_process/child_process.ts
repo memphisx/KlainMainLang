@@ -39,9 +39,13 @@ execFile("echo", ["direct", "argv"], (err, stdout, stderr) => {
 // ── spawn error: a command that can't start emits 'error', not 'exit' ─────
 const missing = spawn("no-such-command-kml", [])
 missing.on('error', (err) => {
-  console.log("spawn error:", err.message)   // spawn <reason> (ENOENT)
+  console.log("spawn error:", err.message)          // spawn <reason>
+  console.log("code:", (err as any).code)           // ENOENT
+  console.log("errno:", (err as any).errno)         // -2 on POSIX (negative libuv errno)
 })
-// 'exit' never fires for a failed spawn; 'close' still does.
+// 'exit' never fires for a failed spawn; 'close' still does. The Error carries
+// Node's `err.code`/`err.errno`, so `err.code === 'ENOENT'` distinguishes a
+// missing command from other spawn failures.
 
 // ── execSync: blocking, returns stdout, throws on a nonzero exit ──────────
 console.log("execSync:", execSync("echo synchronous").trim())

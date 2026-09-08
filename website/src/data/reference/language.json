@@ -500,9 +500,10 @@
       "statusRow": "Optional parameters (param?)",
       "signature": "function f(x?: number) { … }",
       "badge": "caveats",
-      "description": "Optional parameters.",
+      "description": "Optional parameters. An omitted argument reads as a real `T | undefined` inside the body (as in TS) — a present 0/\"\" is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it.",
       "differences": [
-        "An omitted `?` argument gets the parameter type's zero value — the same `undefined` stand-in default parameter values/destructuring defaults use, not real JS's `undefined`."
+        "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state).",
+        "An un-narrowed optional scalar is still lenient in arithmetic — the payload is unwrapped before the operator, so `a + b` on an absent `b` reads 0 rather than erroring (the same residual as any un-narrowed nullable local)."
       ],
       "seeAlso": ["lang.defaultparams"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions#optional_parameters" }
@@ -589,7 +590,7 @@
       "differences": [
         "A free `function*` may be top-level **or nested** (a nested one captures enclosing state by reference; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding — an argument/nested/IIFE use is a clean rejection. `static`/`abstract` generator methods stay clean rejections.",
         "The return-type annotation is optional (inferred from the body's yields); still requires a plain non-destructured parameter list and a non-array parameter type. An array element type is supported — yielded/sent arrays round-trip through for...of, .next(), yield*, and for await.",
-        "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}` — this compiler's usual stand-in for real JS's `undefined`."
+        "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` — deliberately kept bare: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS."
       ],
       "seeAlso": ["lang.asyncgen", "lang.forof"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function*" }

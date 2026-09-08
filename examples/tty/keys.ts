@@ -11,6 +11,9 @@
 
 import { readKey } from "klain:tty";
 
+// .columns/.rows are `number | undefined` — off a TTY (piped/redirected)
+// they are a real `undefined`, exactly as in Node; `?? 80` is the idiomatic
+// fallback when a concrete size is needed.
 console.log(
   "terminal: " +
     process.stdout.columns +
@@ -18,6 +21,7 @@ console.log(
     process.stdout.rows +
     (process.stdin.isTTY ? " (interactive)" : " (not a tty)"),
 );
+console.log("usable width: " + (process.stdout.columns ?? 80));
 
 // Piped/redirected: no keyboard to read, so report and leave. Every raw-mode
 // program should guard on isTTY before touching raw mode, exactly as here.

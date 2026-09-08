@@ -1540,6 +1540,9 @@ ccdone:
   %ipcckeep = call i1 @__kml_ipcc_keepalive()
   ; fs.watch: an open FSWatcher keeps this loop alive (TDD-00181).
   %fwkeep = call i1 @__kml_fswatch_keepalive()
+  ; async-I/O thread pool: an outstanding fs read/write keeps this loop alive
+  ; so it doesn't exit before the completion settles its Promise (TDD-00185).
+  %plkeep = call i1 @__kml_pool_keepalive()
   %anywork0 = or i1 %havetimer, %haslistener
   %anywork1 = or i1 %anywork0, %hasactiveconns
   %anywork2 = or i1 %anywork1, %hasopenes
@@ -1552,7 +1555,8 @@ ccdone:
   %anywork6d = or i1 %anywork6c, %dgkeep
   %anywork6e = or i1 %anywork6d, %sdkeep
   %anywork6f = or i1 %anywork6e, %ipcckeep
-  %anywork = or i1 %anywork6f, %fwkeep
+  %anywork6g = or i1 %anywork6f, %fwkeep
+  %anywork = or i1 %anywork6g, %plkeep
   ; TDD-00084 Part B: an active coroutine task keeps the loop alive too.
   %hasactivetasks_aw = load i1, ptr %hasactivetasks_slot, align 1
   %anyworkt = or i1 %anywork, %hasactivetasks_aw
@@ -1714,6 +1718,10 @@ wscsetdone:
   ; fs.watch: add the inotify/kqueue fd (or Windows wakeup socket) while any
   ; FSWatcher is open (TDD-00181).
   call i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd)
+  ; async-I/O thread pool: add this loop's completion-wakeup fd while any fs op
+  ; is in flight, so select() sleeps until a worker posts a completion instead
+  ; of spinning (TDD-00185). Returns 0 — no forced-zero timeout.
+  call i1 @__kml_pool_fdset_add(ptr %fdset, ptr %maxfd)
   ; readline: add stdin (fd 0) while an interface is open.
   %rlfdforce = call i1 @__kml_rl_fdset_add(ptr %fdset, ptr %maxfd)
   %rlfz0 = load i1, ptr %forcezero, align 1
@@ -2007,6 +2015,9 @@ afterselectok:
   call void @__kml_ipcc_dispatch()
   ; fs.watch: read pending file-change events and fire watcher listeners.
   call void @__kml_fswatch_dispatch()
+  ; async-I/O thread pool: drain arrived completions and settle their Promises
+  ; on this (the loop) thread (TDD-00185).
+  call void @__kml_pool_dispatch()
   ; readline: drain stdin and emit 'line'/'close' events.
   call void @__kml_rl_dispatch()
   ; process.stdin: drain stdin and emit 'data'/'end' events.

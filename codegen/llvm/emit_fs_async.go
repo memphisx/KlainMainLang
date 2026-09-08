@@ -14,6 +14,7 @@ package llvm
 
 import (
 	"fmt"
+	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -148,12 +149,81 @@ func (e *Emitter) emitFsAsyncCallback(op string, args []ast.Expression, pos ast.
 	return Value{Ty: TypeVoid}, nil
 }
 
+// fsPoolOpID maps an fs.promises op to its pool op id — must match the enum in
+// threadpoolsrc/klainpool.c and the order of poolThunks in threadpool.go.
+var fsPoolOpID = map[string]int{
+	"readFile": 0, "writeFile": 1, "appendFile": 2, "unlink": 3,
+	"mkdir": 4, "rmdir": 5, "rename": 6, "copyFile": 7, "readdir": 8,
+}
+
+// emitFsPromisePooled lowers an fs.promises op onto the thread pool (TDD-00185):
+// evaluate + coerce its string arguments, allocate a *pending* task Promise,
+// hand them to the C submit entry (which strdup's the args and queues the op),
+// and return the pending Promise. The awaiting fiber parks on it through the
+// existing await-on-unsettled-Promise path; a worker runs the op off-thread
+// under its own setjmp guard and the loop's pool dispatch settles the Promise —
+// fulfilled with the op's result, or rejected with the Error the sync helper
+// would have thrown. Returns pooled=false for cases that must stay inline (a
+// binary-data writeFile/appendFile, whose byte-length dispatch the inline path
+// owns), so the caller falls through.
+func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.Pos) (Value, bool, error) {
+	// The pool runtime (klainpool.c) is POSIX-only — pthread condvars plus a
+	// socketpair/select() wakeup with no Win32 build. Windows keeps the inline
+	// settled-Promise path until the reactor work (TDD-00182/00183) subsumes it.
+	if runtime.GOOS == "windows" {
+		return Value{}, false, nil
+	}
+	opid, ok := fsPoolOpID[op]
+	if !ok {
+		return Value{}, false, nil
+	}
+	spec := fsAsyncOps()[op]
+
+	// writeFile/appendFile of an ArrayBuffer/TypedArray keeps the inline path
+	// (its explicit-length write). Only plain-string data is pooled.
+	if op == "writeFile" || op == "appendFile" {
+		dataTy := e.inferExprType(args[1])
+		if dataTy.IsArrayBuffer || dataTy.IsTypedArray {
+			return Value{}, false, nil
+		}
+	}
+
+	argRefs := []string{"null", "null"}
+	for i := 0; i < spec.argc; i++ {
+		v, err := e.emitExpr(args[i])
+		if err != nil {
+			return Value{}, false, err
+		}
+		argRefs[i] = e.coerce(v, TypePtr).Ref
+	}
+
+	e.ensurePromiseRuntime()
+	e.ensureThreadPool()
+	q := e.emitAllocSettledPromise() // pending (state 0); the pool settles it
+	e.emitInstr(fmt.Sprintf("call void @__kml_pool_submit(i32 %d, ptr %s, ptr %s, ptr %s)",
+		opid, q, argRefs[0], argRefs[1]))
+
+	qt := PromiseOf(spec.resultTy)
+	qt.PromiseTask = true
+	return Value{Ref: q, Ty: qt}, true, nil
+}
+
 // emitFsAsyncPromise implements the Promise form — fs.promises.<op>(...opArgs)
 // and the 'fs/promises' named import — returning a settled task Promise.
 func (e *Emitter) emitFsAsyncPromise(op string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	spec := fsAsyncOps()[op]
 	if len(args) != spec.argc {
 		return Value{}, fmt.Errorf("%d:%d: fs.promises.%s takes %d argument(s)", pos.Line, pos.Col, op, spec.argc)
+	}
+	// TDD-00185: the fs.promises ops run on the blocking-work thread pool — a
+	// genuinely non-blocking op that returns a *pending* Promise the loop settles
+	// when the worker completes. Binary-data writes (writeFile/appendFile of an
+	// ArrayBuffer/TypedArray) decline pooling and fall through to the inline path
+	// below, which already handles the byte-length dispatch.
+	if v, pooled, err := e.emitFsPromisePooled(op, args, pos); err != nil {
+		return Value{}, err
+	} else if pooled {
+		return v, nil
 	}
 	e.ensurePromiseRuntime()
 	q := e.emitAllocSettledPromise()

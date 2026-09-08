@@ -174,6 +174,55 @@ try {
 `, "Reduce of empty array with no initial value")
 }
 
+// --- .reduceRight() (ADR-00776) ---
+//
+// Same fold as .reduce() but right-to-left: seeds from the last element (or
+// the initial value), then walks the index down to 0. The callback argument
+// order is unchanged; only visitation order reverses.
+
+func TestE2EArrayReduceRightOrder(t *testing.T) {
+	// String concat makes the direction observable: right-to-left yields "dcba".
+	assertOutput(t, `
+const words: string[] = ["a", "b", "c", "d"]
+console.log(words.reduceRight((acc, w) => acc + w, ""))
+`, "dcba")
+}
+
+func TestE2EArrayReduceRightNoInitialValue(t *testing.T) {
+	// Seeds from the last element; 5-4-3-2-1 = -5 (left-fold would give a
+	// different sign/order), proving the seed and direction.
+	assertOutput(t, `
+const arr: number[] = [1, 2, 3, 4, 5]
+console.log(arr.reduceRight((acc, val) => acc - val))
+`, "-5")
+}
+
+func TestE2EArrayReduceRightNoInitialValueSingleElement(t *testing.T) {
+	// Callback never runs — the single element seeds and is returned as-is.
+	assertOutput(t, `
+const arr: number[] = [42]
+console.log(arr.reduceRight((acc, val) => acc + val))
+`, "42")
+}
+
+func TestE2EArrayReduceRightEmptyWithInitialValue(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = []
+console.log(arr.reduceRight((acc: number, val: number) => acc + val, 42))
+`, "42")
+}
+
+func TestE2EArrayReduceRightEmptyNoInitialValueThrows(t *testing.T) {
+	assertOutput(t, `
+const arr: number[] = []
+try {
+  arr.reduceRight((acc, val) => acc + val)
+} catch (e) {
+  console.log(e.message)
+}
+`, "Reduce of empty array with no initial value")
+}
+
 func TestE2EArraySort(t *testing.T) {
 	assertOutput(t, `
 const nums: number[] = [3, 1, 4, 1, 5, 9, 2, 6]
@@ -230,16 +279,16 @@ func TestE2EArrayToStringCoercion(t *testing.T) {
 	assertOutput(t, `
 const a = [1, 2, 3]
 console.log(String(a))
-console.log(` + "`x=${a}`" + `)
+console.log(`+"`x=${a}`"+`)
 const s = ["p", "q"]
-console.log(` + "`${s}`" + `)
+console.log(`+"`${s}`"+`)
 const n = [[1, 2], [3, 4]]
 console.log(n.join("-"))
 console.log(String(n))
 const deep = [[[1, 2], [3]], [[4]]]
 console.log(String(deep))
 const empty: number[] = []
-console.log(` + "`[${empty}]`" + `)
+console.log(`+"`[${empty}]`"+`)
 `, "1,2,3\nx=1,2,3\np,q\n1,2-3,4\n1,2,3,4\n1,2,3,4\n[]")
 }
 
@@ -544,7 +593,7 @@ func TestE2EArrayFindLast(t *testing.T) {
 const nums: number[] = [1, 2, 3, 4, 5, 4, 3]
 console.log(nums.findLast((n) => n === 4))
 console.log(nums.findLast((n) => n === 99))
-`, "4\n0")
+`, "4\nundefined")
 }
 
 func TestE2EArrayFindLastIndex(t *testing.T) {
@@ -1030,7 +1079,7 @@ const arr: number[] = [];
 const result = arr.pop();
 console.log(result);
 console.log(arr.length);
-`, "0\n0")
+`, "undefined\n0")
 }
 
 func TestE2EPopOnEmptyStringArray(t *testing.T) {
@@ -1039,10 +1088,10 @@ const arr: string[] = [];
 const result = arr.pop();
 console.log("result:", result);
 console.log("len:", arr.length);
-`, "result: null\nlen: 0")
+`, "result: undefined\nlen: 0")
 }
 
-// --- shift on empty array: returns element type's zero value, length stays 0 ---
+// --- shift on empty array: returns undefined, length stays 0 (TDD-00187) ---
 
 func TestE2EShiftOnEmptyArray(t *testing.T) {
 	assertOutput(t, `
@@ -1050,7 +1099,7 @@ const arr: number[] = [];
 const result = arr.shift();
 console.log(result);
 console.log(arr.length);
-`, "0\n0")
+`, "undefined\n0")
 }
 
 func TestE2EShiftOnEmptyStringArray(t *testing.T) {
@@ -1059,7 +1108,7 @@ const arr: string[] = [];
 const result = arr.shift();
 console.log("result:", result);
 console.log("len:", arr.length);
-`, "result: null\nlen: 0")
+`, "result: undefined\nlen: 0")
 }
 
 // --- pop/shift on non-empty array still works normally (non-regression) ---
@@ -1224,24 +1273,23 @@ console.log(h);
 `, "x y\nc-a-t\nh")
 }
 
-func TestE2EArrayDestructuringOutOfBoundsReadsZero(t *testing.T) {
+func TestE2EArrayDestructuringOutOfBoundsIsUndefined(t *testing.T) {
 	// A pattern position past the source array's actual length is ordinary,
 	// valid JS (unlike plain out-of-bounds `arr[i]` indexing, which throws)
-	// — it must read a safe, deterministic zero, not garbage from whatever
-	// heap memory happens to sit past the source array's malloc'd buffer.
-	// Real bug found investigating destructuring defaults; see ADR-00157.
+	// — it binds a real `undefined` (TDD-00187 Stage 2), never garbage from
+	// past the source's malloc'd buffer (the ADR-00157 bounds check).
 	assertOutput(t, `
 let [a, b] = [1];
 console.log(a, b);
-`, "1 0")
+`, "1 undefined")
 }
 
-func TestE2EArrayDestructuringAllOutOfBoundsReadsZero(t *testing.T) {
+func TestE2EArrayDestructuringAllOutOfBoundsIsUndefined(t *testing.T) {
 	assertOutput(t, `
 let arr: number[] = [];
 let [a, b] = arr;
 console.log(a, b);
-`, "0 0")
+`, "undefined undefined")
 }
 
 func TestE2EArrayDestructuringNestedArrayOutOfBoundsIsEmptyArray(t *testing.T) {
@@ -1255,13 +1303,13 @@ console.log(y.length);
 `, "1\n0")
 }
 
-func TestE2EDestructuredArrayParamOutOfBoundsReadsZero(t *testing.T) {
+func TestE2EDestructuredArrayParamOutOfBoundsIsUndefined(t *testing.T) {
 	assertOutput(t, `
 function f([a, b]: number[]): void {
   console.log(a, b);
 }
 f([5]);
-`, "5 0")
+`, "5 undefined")
 }
 
 // --- Array destructuring default values (`[a = expr] = arr`, ADR-00158) ---
@@ -1742,4 +1790,83 @@ try {
 }
 console.log(arr.length)
 `, "caught\n0")
+}
+
+// --- T | undefined element-absence results (TDD-00187 Stage 1) ---
+
+func TestE2EPopShiftFindAtReturnUndefined(t *testing.T) {
+	assertOutput(t, `
+const a: number[] = [];
+const b = [1, 2, 3];
+console.log(a.pop());
+console.log(a.shift());
+console.log(b.find((x) => x > 10));
+console.log(b.findLast((x) => x > 10));
+console.log(b.at(7));
+console.log(b.at(-1));
+console.log(b.at(-9));
+console.log(a.pop() === undefined);
+console.log(b.at(0) === 1);
+`, "undefined\nundefined\nundefined\nundefined\nundefined\n3\nundefined\ntrue\ntrue")
+}
+
+func TestE2EPopUndefinedNeverEqualsZero(t *testing.T) {
+	// An absent result must not compare equal to the payload zero — the
+	// presence bit takes part in ==/=== (TDD-00187).
+	assertOutput(t, `
+const a: number[] = [];
+const z = [0];
+console.log(a.pop() === 0);
+console.log(z.pop() === 0);
+console.log(a.find((x) => x === 0) === 0);
+`, "false\ntrue\nfalse")
+}
+
+func TestE2EUndefinedResultNarrowingAndDefaults(t *testing.T) {
+	assertOutput(t, `
+const b = [1, 2, 3];
+const a: number[] = [];
+const x = b.pop();
+if (x !== undefined) {
+  console.log(x + 1);
+}
+console.log(a.pop() ?? 42);
+console.log(b.at(0)! + 1);
+`, "4\n42\n2")
+}
+
+func TestE2EPopEmptyStringArrayIsUndefined(t *testing.T) {
+	assertOutput(t, `
+const s: string[] = [];
+console.log(s.pop());
+console.log(s.pop() === undefined);
+const t2 = ["hi"];
+console.log(t2.find((v) => v === "hi"));
+`, "undefined\ntrue\nhi")
+}
+
+func TestE2EStrictRejectsUndefinedIntoBareT(t *testing.T) {
+	// TDD-00187 strict gate: each bare-T boundary rejects a `T | undefined`
+	// absence result without narrowing/assertion.
+	for _, src := range []string{
+		`const b = [1]; const y: number = b.pop();`,
+		`const b = [1]; let y: number = 0; y = b.pop();`,
+		`const b = [1]; function f(): number { return b.pop(); }`,
+		`const b = [1]; function g(n: number): number { return n; } g(b.pop());`,
+		`const b = [1]; console.log(b.pop() * 2);`,
+	} {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a strict-mode compile error for: %s", src)
+		}
+	}
+}
+
+func TestE2ECompatJSWidensUndefinedResult(t *testing.T) {
+	// -compat=js: strictNullChecks:false semantics — the absence result
+	// auto-unwraps at a bare-T boundary (an empty pop reads as the zero).
+	assertOutputCompatJS(t, `
+const b = [1, 2, 3];
+const y: number = b.pop();
+console.log(y + 1);
+`, "4")
 }

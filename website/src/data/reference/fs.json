@@ -5,25 +5,30 @@
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "18/19",
+    "loose": "19/20",
     "loosePct": 95,
-    "strict": "2/19",
-    "strictPct": 11
+    "strict": "2/20",
+    "strictPct": 10
   },
-  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays), and the async variants are an API shape, not a concurrency gain (blocking I/O under the hood).",
+  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The fs.promises ops are genuinely non-blocking (a background thread pool); the legacy callback form and binary-data async writes stay an API shape over inline blocking I/O.",
   "entries": [
     {
       "id": "fs.readFileSync",
-      "name": "fs.readFileSync(path)",
-      "statusRow": "fs.readFileSync(path)",
-      "signature": "readFileSync(path: string): string",
+      "name": "fs.readFileSync(path[, 'utf8'])",
+      "statusRow": "fs.readFileSync(path[, 'utf8'])",
+      "signature": "readFileSync(path: string, encoding?: 'utf8' | { encoding?: 'utf8', flag?: string }): string",
       "badge": "caveats",
-      "description": "Reads the whole file into a string. Throws a catchable Error (built from strerror(errno)) if the file can't be opened.",
+      "description": "Reads the whole file into a string. Throws a catchable Error (built from strerror(errno)) if the file can't be opened. The optional encoding argument accepts 'utf8' (a bare string or { encoding: 'utf8' }) — a faithful no-op since strings are UTF-8, so the everyday readFileSync(path, 'utf8') idiom compiles.",
       "params": [
         {
           "name": "path",
           "type": "string",
           "desc": "Path to read."
+        },
+        {
+          "name": "encoding",
+          "type": "'utf8' | { encoding?: 'utf8', flag?: string }",
+          "desc": "Optional. Only 'utf8' is accepted; other encodings reject at compile time."
         }
       ],
       "returns": {
@@ -31,9 +36,10 @@
         "desc": "The file contents as text."
       },
       "exampleKey": "fs/fs",
-      "snippet": "const content: string = fs.readFileSync('/tmp/kml_fs_example.txt')\nconsole.log(content.length)",
+      "snippet": "const content = fs.readFileSync('/tmp/kml_fs_example.txt', 'utf8')\nconsole.log(content.length)",
       "differences": [
-        "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file."
+        "Text-only by design — a file with embedded null bytes reads back shorter than its real size (`.length` is `strlen`-based); use `fs.readFileSyncBytes(path)` for a binary file.",
+        "With no encoding the result is still a `string`, not a `Buffer` (the text-only default); a non-`'utf8'` encoding is a clean rejection."
       ],
       "seeAlso": [
         "fs.readFileSyncBytes",
@@ -72,11 +78,11 @@
     },
     {
       "id": "fs.writeFileSync",
-      "name": "fs.writeFileSync(path, data)",
-      "statusRow": "fs.writeFileSync(path, data)",
-      "signature": "writeFileSync(path: string, data: string | ArrayBuffer | TypedArray): void",
-      "badge": "exact",
-      "description": "Creates or truncates the file with data, throwing on failure. data may be a string (the strlen-based path) or an ArrayBuffer/TypedArray (binary-safe, writes the real byte count via fwrite) — dispatched on data's inferred type.",
+      "name": "fs.writeFileSync(path, data[, opts])",
+      "statusRow": "fs.writeFileSync(path, data[, opts])",
+      "signature": "writeFileSync(path: string, data: string | ArrayBuffer | TypedArray, opts?: 'utf8' | { encoding?: 'utf8', flag?: string }): void",
+      "badge": "caveats",
+      "description": "Creates or truncates the file with data, throwing on failure. data may be a string (the strlen-based path) or an ArrayBuffer/TypedArray (binary-safe, writes the real byte count via fwrite) — dispatched on data's inferred type. The optional third argument accepts 'utf8' / { encoding: 'utf8', flag }; { flag: 'a' } appends instead of truncating, { flag: 'w' } (default) truncates.",
       "params": [
         {
           "name": "path",
@@ -87,6 +93,11 @@
           "name": "data",
           "type": "string | ArrayBuffer | TypedArray",
           "desc": "Content; binary for the typed-array forms."
+        },
+        {
+          "name": "opts",
+          "type": "'utf8' | { encoding?: 'utf8', flag?: string }",
+          "desc": "Optional. encoding only 'utf8'; flag 'a'* appends. mode and other encodings reject."
         }
       ],
       "returns": {
@@ -94,7 +105,10 @@
         "desc": "Nothing."
       },
       "exampleKey": "fs/fs",
-      "snippet": "fs.writeFileSync('/tmp/out.txt', 'first line')",
+      "snippet": "fs.writeFileSync('/tmp/out.txt', 'first line', 'utf8')\nfs.writeFileSync('/tmp/out.txt', ' more', { flag: 'a' })",
+      "differences": [
+        "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections."
+      ],
       "seeAlso": [
         "fs.appendFileSync",
         "fs.readFileSync"
@@ -105,17 +119,20 @@
     },
     {
       "id": "fs.appendFileSync",
-      "name": "fs.appendFileSync(path, data)",
-      "statusRow": "fs.appendFileSync(path, data)",
-      "signature": "appendFileSync(path: string, data: string | ArrayBuffer | TypedArray): void",
-      "badge": "exact",
-      "description": "Like writeFileSync, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure. Same string/ArrayBuffer/TypedArray dispatch as writeFileSync.",
+      "name": "fs.appendFileSync(path, data[, opts])",
+      "statusRow": "fs.appendFileSync(path, data[, opts])",
+      "signature": "appendFileSync(path: string, data: string | ArrayBuffer | TypedArray, opts?: 'utf8' | { encoding?: 'utf8', flag?: string }): void",
+      "badge": "caveats",
+      "description": "Like writeFileSync, but appends instead of truncating (creates the file if it doesn't exist). Throws on failure. Same string/ArrayBuffer/TypedArray dispatch as writeFileSync. The optional third argument 'utf8' / { encoding: 'utf8', flag } is accepted (the flag is a no-op — it always appends).",
       "returns": {
         "type": "void",
         "desc": "Nothing."
       },
       "exampleKey": "fs/fs",
-      "snippet": "fs.appendFileSync('/tmp/out.txt', '\\nsecond line')",
+      "snippet": "fs.appendFileSync('/tmp/out.txt', '\\nsecond line', 'utf8')",
+      "differences": [
+        "The options argument supports only `{ encoding: 'utf8', flag }` — `mode` and non-`'utf8'` encodings are clean rejections."
+      ],
       "seeAlso": [
         "fs.writeFileSync"
       ],
@@ -212,18 +229,19 @@
     },
     {
       "id": "fs.readdirSync",
-      "name": "fs.readdirSync(path[, { withFileTypes: true }])",
-      "statusRow": "fs.readdirSync(path[, { withFileTypes: true }])",
-      "signature": "readdirSync(path: string, options?: { withFileTypes: true }): string[] | Dirent[]",
+      "name": "fs.readdirSync(path[, { withFileTypes, recursive }])",
+      "statusRow": "fs.readdirSync(path[, { withFileTypes, recursive }])",
+      "signature": "readdirSync(path: string, options?: { withFileTypes?: true, recursive?: true }): string[] | Dirent[]",
       "badge": "caveats",
-      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe. With { withFileTypes: true } it returns Dirent[] — each with a .name and .isFile()/.isDirectory()/.isSymbolicLink(), classified from the entry's d_type (from FindFirstFile attributes on Windows) without a per-file stat.",
+      "description": "Lists a directory's entries (excluding . and ..) as a string[], in whatever order the OS's own readdir() returns them — no ordering guarantee, matching real Node. Verified on both Darwin and x86-64 Linux via a compiled offsetof probe. With { withFileTypes: true } it returns Dirent[] — each with .name, .parentPath (the directory it was read from), and the full kind-predicate set .isFile()/.isDirectory()/.isSymbolicLink()/.isFIFO()/.isCharacterDevice()/.isBlockDevice()/.isSocket(), classified from the entry's d_type (from FindFirstFile attributes on Windows) without a per-file stat. With { recursive: true } it walks the whole subtree, returning every nested entry as a '/'-joined path relative to the start directory.",
       "returns": {
         "type": "string[] | Dirent[]",
-        "desc": "Directory entry names, or Dirent objects when withFileTypes is set."
+        "desc": "Directory entry names (recursive: relative paths), or Dirent objects when withFileTypes is set."
       },
       "differences": [
-        "Only `{ withFileTypes: true }` is honoured — `recursive` and `encoding: 'buffer'` are unsupported.",
-        "`Dirent` exposes `.name` and the three kind predicates only (no `.parentPath`/`.path`, no block/char/FIFO/socket predicates); a `DT_UNKNOWN` filesystem reports all kinds `false` rather than falling back to `lstat`."
+        "`{ recursive: true, withFileTypes: true }` together is a clean rejection (recursive Dirents need `parentPath`); `encoding: 'buffer'` is unsupported; recursive paths join with `'/'` (Node uses the platform separator).",
+        "A `DT_UNKNOWN` filesystem (rare) is not descended in recursive mode and reports all Dirent kinds `false` rather than falling back to `lstat`.",
+        "`Dirent` exposes `.name`/`.parentPath` and all seven kind predicates; only the `.path` alias for `.parentPath` is absent."
       ],
       "exampleKey": "fs/fs",
       "snippet": "const entries: string[] = fs.readdirSync('/tmp/kml_fs_example_dir')\nentries.sort()",
@@ -256,15 +274,18 @@
     },
     {
       "id": "fs.copyFileSync",
-      "name": "fs.copyFileSync(src, dest)",
-      "statusRow": "fs.copyFileSync(src, dest)",
-      "signature": "copyFileSync(src: string, dest: string): void",
-      "badge": "exact",
-      "description": "Copies a file by composing the raw byte-count-aware read/write helpers — binary-safe, so a source file with an embedded null byte copies back whole. No new C-level I/O code.",
+      "name": "fs.copyFileSync(src, dest[, mode])",
+      "statusRow": "fs.copyFileSync(src, dest[, mode])",
+      "signature": "copyFileSync(src: string, dest: string, mode?: number): void",
+      "badge": "caveats",
+      "description": "Copies a file by composing the raw byte-count-aware read/write helpers — binary-safe, so a source file with an embedded null byte copies back whole. The optional mode bitmask honours COPYFILE_EXCL (bit 1): the copy fails with EEXIST if dest already exists (an atomic O_EXCL guard), instead of the default overwrite.",
       "returns": {
         "type": "void",
         "desc": "Nothing."
       },
+      "differences": [
+        "`COPYFILE_FICLONE`/`FICLONE_FORCE` mode bits are accepted but a best-effort no-op (no reflink); `fs.constants.COPYFILE_EXCL`/`COPYFILE_FICLONE`/`COPYFILE_FICLONE_FORCE` name all three."
+      ],
       "seeAlso": [
         "fs.renameSync",
         "fs.readFileSyncBytes"
@@ -287,7 +308,7 @@
       "exampleKey": "fs_async/fs_async",
       "snippet": "await fs.promises.writeFile('demo.txt', 'hi')\nconst text: string = await fs.promises.readFile('demo.txt')",
       "differences": [
-        "Blocking I/O under the hood — no thread pool, so the syscall runs inline; only *delivery* is async (the callback fires right after the op, the Promise is returned already settled). An API-shape gain, not a concurrency/performance one.",
+        "The fs.promises ops are genuinely non-blocking — readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir run on a background thread pool (default 4, UV_THREADPOOL_SIZE) and return a pending Promise the loop settles on completion, so other connections/timers keep running during the I/O (TDD-00185). Two cases stay inline (delivery-only async, no concurrency gain): the legacy callback form (fs.readFile(path, cb)), and a writeFile/appendFile of an ArrayBuffer/TypedArray. The pool is POSIX-first; Windows keeps the inline path for now.",
         "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form.",
         "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)."
       ],
@@ -314,7 +335,7 @@
       "snippet": "for await (const chunk of fs.createReadStream('demo.txt')) { /* ... */ }\nfs.createReadStream('a.txt').pipe(fs.createWriteStream('b.txt'))",
       "differences": [
         "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on.",
-        "`createReadStream` reads eagerly to EOF at construction (chunked, not a lazy pull) — a huge file is fully read into per-chunk buffers.",
+        "`createReadStream` reads on a background thread pool (TDD-00186): the file opens synchronously (a missing file still throws), then each highWaterMark chunk is read off the loop thread and enqueued into the Readable in order, so the read no longer freezes the reactor. Consumer backpressure is not yet honored — the worker reads ahead and chunks queue in the readable (the same memory profile as before); true highWaterMark backpressure is a follow-on.",
         "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors."
       ],
       "seeAlso": [
@@ -369,8 +390,8 @@
         }
       ],
       "differences": [
-        "`rmSync` options must be a `{ recursive, force }` boolean-literal object — no `maxRetries`/`retryDelay`.",
-        "`readlinkSync` caps targets at 4096 bytes; `accessSync`'s mode defaults to existence-only (`F_OK`) with no `fs.constants` to name the others.",
+        "`rmSync` options must be a `{ recursive, force }` boolean-literal object — no `maxRetries`/`retryDelay` (a Windows-centric retry knob).",
+        "`readlinkSync` reads targets of any length (a growing buffer); `accessSync`'s mode defaults to existence-only (`F_OK`) and `fs.constants.F_OK`/`R_OK`/`W_OK`/`X_OK` name the others.",
         "`linkSync` makes a hard link (`CreateHardLinkW` on Windows — unprivileged, unlike `symlinkSync`); it takes no link-type argument."
       ],
       "seeAlso": [
@@ -405,7 +426,7 @@
         "desc": "The open file descriptor."
       },
       "differences": [
-        "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — no `fs.constants` names.",
+        "`openSync` flags must be a string literal (`r r+ w w+ a a+ wx ax`) or a raw numeric mask — `fs.constants` has the access/copyFile constants but not the host-specific `O_*` open flags.",
         "`writeSync` writes string data only (no Buffer/offset/length variant); `readSync`'s buffer must be a `Uint8Array`/`Buffer`."
       ],
       "seeAlso": [
@@ -451,11 +472,11 @@
     },
     {
       "id": "fs.utimessync",
-      "name": "fs.utimesSync(path, atime, mtime)",
-      "statusRow": "fs.utimesSync(path, atime, mtime)",
-      "signature": "utimesSync(path: string, atime: number | Date, mtime: number | Date): void",
+      "name": "fs.utimesSync(path, …) / fs.futimesSync(fd, …)",
+      "statusRow": "fs.utimesSync(path, …) / fs.futimesSync(fd, …)",
+      "signature": "utimesSync(path: string, atime: number | Date, mtime: number | Date): void; futimesSync(fd: number, atime: number | Date, mtime: number | Date): void",
       "badge": "caveats",
-      "description": "Sets a file's access and modification times. atime/mtime are seconds (Node's number form) or a Date (its epoch); sub-second precision is carried as microseconds. On POSIX this is utimes(2); on Windows a SetFileTime shim converting Unix time to the 1601-epoch FILETIME.",
+      "description": "Sets a file's access and modification times, by path (utimesSync) or open fd (futimesSync). atime/mtime are seconds (Node's number form) or a Date (its epoch); sub-second precision is carried as microseconds. On POSIX these are utimes(2)/futimes(2); on Windows a SetFileTime shim converting Unix time to the 1601-epoch FILETIME (keyed on the path or _get_osfhandle(fd)).",
       "params": [
         {
           "name": "path",
@@ -478,7 +499,7 @@
         "desc": "Nothing; throws a coded Error on failure."
       },
       "differences": [
-        "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported; there is no fd-based `futimesSync`.",
+        "`atime`/`mtime` accept a number or `Date` only — a numeric string (which Node also coerces) is not supported.",
         "A missing path throws a coded `Error` (`e.code === 'ENOENT'`) that also carries `err.syscall` (the bare syscall — `'open'`/`'stat'`/`'scandir'`/…), `err.path`, and the numeric `err.errno` (the negated errno, `-2` for ENOENT); only the message text differs from Node's `ENOENT: …, <syscall> '<path>'` format."
       ],
       "seeAlso": [
@@ -486,6 +507,31 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fsutimessyncpath-atime-mtime"
+      }
+    },
+    {
+      "id": "fs.watch",
+      "name": "fs.watch",
+      "statusRow": "fs.watch(path, listener) → FSWatcher",
+      "signature": "fs.watch(path, listener?): FSWatcher; watcher.on('change'|'rename', (evt, name) => …); watcher.close()",
+      "badge": "caveats",
+      "description": "Native, event-driven file-change watching folded into the event loop — no stat-polling. Returns an FSWatcher that fires (eventType, filename) on each change; .close() stops watching and lets a watch-only program exit. Backends: Linux inotify, macOS kqueue/EVFILT_VNODE, Windows ReadDirectoryChangesW.",
+      "returns": {
+        "type": "FSWatcher",
+        "desc": "A watcher with .on('change'|'rename', …) and .close()."
+      },
+      "exampleKey": "fs_watch/fs_watch",
+      "snippet": "const w = fs.watch('file.txt', (evt, name) => { console.log(evt); w.close() })",
+      "differences": [
+        "`filename` names the changed entry on Linux, but is the **watched path** on macOS (kqueue watches an fd, not directory entries — Node uses FSEvents there); a documented divergence, the file-watch case is faithful.",
+        "One listener slot per event (`.on(...)`, arrow-literal only) — the Worker/ChildProcess posture, not the full EventEmitter.",
+        "`recursive` is honoured natively on macOS/Windows; on Linux (inotify) it watches only the named path. `encoding` accepts only `'utf8'`; no coalescing/ordering guarantees (as in Node)."
+      ],
+      "seeAlso": [
+        "fs.statSync"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fswatchfilename-options-listener"
       }
     },
     {

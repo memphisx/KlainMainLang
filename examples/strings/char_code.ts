@@ -40,8 +40,14 @@ console.log(isUpper('M'))   // 1
 
 // codePointAt — this compiler's strings are plain byte sequences, not real
 // UTF-16 like actual JS strings, so there's no surrogate-pair/multi-byte
-// decoding here: codePointAt is exactly charCodeAt's byte value under a
-// second name. Correct for ASCII/Latin-1 text (where a "code point" and a
-// "char code" are the same number).
+// decoding here: an in-range codePointAt is exactly charCodeAt's byte value
+// under a second name. Correct for ASCII/Latin-1 text (where a "code point"
+// and a "char code" are the same number).
 console.log(s.codePointAt(0))                          // 72
 console.log(s.codePointAt(0) === s.charCodeAt(0))      // true
+
+// Out of range, codePointAt returns `undefined` (as in Node), where charCodeAt
+// returns NaN — so its type is `number | undefined`. Provide a fallback with
+// `??`, or assert presence with `!`.
+console.log(s.codePointAt(99))                         // undefined
+console.log(s.codePointAt(99) ?? -1)                   // -1

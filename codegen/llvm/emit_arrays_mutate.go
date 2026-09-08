@@ -99,12 +99,12 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
-	// Guard: empty array — return the element type's zero value and leave
-	// length unchanged (0). Real JS returns `undefined`; this compiler has
-	// no general sentinel for that on a concrete scalar type, so we return
-	// the type's own zero value — the same simplification already used by
-	// optional parameters, under-assigned class fields, and destructuring
-	// past the source's length (ADR-00157/ADR-00158/ADR-00164).
+	// Guard: empty array — return `undefined` (TDD-00187) and leave length
+	// unchanged (0): a scalar element wraps in the { i1, T } presence
+	// aggregate below, a pointer element yields null with the static type
+	// flagged, a dynamic element yields the undefined box. A nested-array
+	// element still zero-fills ({null,0}) — its aggregate has no absent
+	// state (ADR-00246).
 	isEmpty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, curLen))
 
@@ -123,7 +123,7 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
 		zeroVal = Value{Ref: r1, Ty: elemTy}
 	} else {
-		zeroVal = e.emitScalarZero(elemTy)
+		zeroVal = Value{Ref: missRef(elemTy), Ty: elemTy}
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
@@ -147,7 +147,12 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, popL))
 	}
 
-	return Value{Ref: phiReg, Ty: elemTy}, nil
+	// The result is `T | undefined` (TDD-00187): present exactly when the
+	// array wasn't empty. isEmpty was computed in the pre-branch block, which
+	// dominates the merge, so it's valid to consume here.
+	notEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notEmpty, isEmpty))
+	return e.wrapUndefinedable(Value{Ref: phiReg, Ty: elemTy}, notEmpty), nil
 }
 
 // emitSplice implements arr.splice(start, deleteCount?, ...items): removes
@@ -400,11 +405,9 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 }
 
 // emitShift implements arr.shift(): save ptr[0], memmove left, decrement len.
-// On an empty array, returns the element type's zero value and leaves length
-// unchanged (0) — real JS returns `undefined`, but this compiler has no general
-// sentinel for that on a concrete scalar type (the same simplification used by
-// optional params, class-field zero-initialization, and destructuring past the
-// source length — ADR-00157/ADR-00158/ADR-00164).
+// On an empty array, returns `undefined` and leaves length unchanged (0) —
+// same TDD-00187 representation as emitPop (a nested-array element still
+// zero-fills, ADR-00246).
 func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: shift takes no arguments", pos.Line, pos.Col)
@@ -419,7 +422,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
 
-	// Guard: empty array — return the element type's zero value.
+	// Guard: empty array — return `undefined` (TDD-00187).
 	isEmpty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, curLen))
 
@@ -437,7 +440,7 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
 		zeroVal = Value{Ref: r1, Ty: elemTy}
 	} else {
-		zeroVal = e.emitScalarZero(elemTy)
+		zeroVal = Value{Ref: missRef(elemTy), Ty: elemTy}
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
@@ -467,7 +470,10 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, shiftL))
 	}
 
-	return Value{Ref: phiReg, Ty: elemTy}, nil
+	// `T | undefined`: present exactly when the array wasn't empty (TDD-00187).
+	notEmpty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notEmpty, isEmpty))
+	return e.wrapUndefinedable(Value{Ref: phiReg, Ty: elemTy}, notEmpty), nil
 }
 
 // emitUnshift implements arr.unshift(...items): realloc, memmove right by the

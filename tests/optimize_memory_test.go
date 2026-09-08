@@ -135,7 +135,7 @@ for (let i = 0; i < 5; i++) {
 console.log(total)
 for (let i = 0; i < 3; i++) { opt(i) }
 `
-	const want = "85\n0 0\n1 99\n2 0"
+	const want = "85\n0 undefined\n1 99\n2 undefined"
 	binFile := buildBinaryOptimizeMemory(t, src, "")
 	out, err := exec.Command(binFile).Output()
 	if err != nil {

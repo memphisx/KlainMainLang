@@ -371,13 +371,18 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return Value{}, err
 			}
 			if ty, ok := e.callAssertedTargetTy(ex); ok && mem.Property == "json" {
-				// `res.json() as T` supplies the projection target exactly
-				// as a declaration annotation would (emitResponseJSON).
+				// `res.json() as T` supplies the parse target (a carve-out in
+				// the same spirit as `JSON.parse(s) as T`); the result is still
+				// a Promise<T> you await (TDD-00186 Part B).
 				bodyVal, err := e.emitResponseBody(objVal, ex.GetPos())
 				if err != nil {
 					return Value{}, err
 				}
-				return e.emitJSONParseValue(bodyVal, ty, ex.GetPos())
+				parsed, err := e.emitJSONParseValue(bodyVal, ty, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				return e.wrapSettledTaskPromise(parsed), nil
 			}
 			return e.emitResponseCall(objVal, mem.Property, ex.GetPos())
 		}
@@ -892,6 +897,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitFsFstatSync(ex.Args, ex.GetPos())
 			case "utimesSync":
 				return e.emitFsUtimesSync(ex.Args, ex.GetPos())
+			case "futimesSync":
+				return e.emitFsFutimesSync(ex.Args, ex.GetPos())
 			case "watch":
 				return e.emitFsWatch(ex.Args, ex.GetPos())
 			case "fsyncSync", "fdatasyncSync":
@@ -1165,7 +1172,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitConsoleCount(ex.Args, ex.GetPos())
 			case "countReset":
 				return e.emitConsoleCountReset(ex.Args, ex.GetPos())
-			case "group":
+			case "group", "groupCollapsed":
 				return e.emitConsoleGroup(ex.Args, ex.GetPos())
 			case "groupEnd":
 				return e.emitConsoleGroupEnd(ex.Args, ex.GetPos())
@@ -1196,8 +1203,8 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "splice" {
 			return e.emitSplice(mem, ex.Args, ex.GetPos())
 		}
-		// fs.statSync Stats methods (ADR-00495).
-		if mem.Property == "isFile" || mem.Property == "isDirectory" || mem.Property == "isSymbolicLink" {
+		// fs.statSync Stats / Dirent kind predicates (ADR-00495/00752/00787).
+		if isStatsKindPredicate(mem.Property) {
 			if objTy := e.inferExprType(mem.Object); objTy.IsStats || objTy.IsDirent {
 				return e.emitStatsKindCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
 			}
@@ -1377,7 +1384,10 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitArrayFilter(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "reduce" {
-			return e.emitArrayReduce(mem, ex.Args, ex.GetPos())
+			return e.emitArrayReduce(mem, ex.Args, ex.GetPos(), false)
+		}
+		if mem.Property == "reduceRight" {
+			return e.emitArrayReduce(mem, ex.Args, ex.GetPos(), true)
 		}
 		if mem.Property == "find" {
 			return e.emitArrayFind(mem, ex.Args, ex.GetPos())
@@ -2161,6 +2171,14 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 				argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(paramTy), agg))
 				paramNullableAgg = agg
 			} else {
+				// TDD-00187 strict gate: passing a `T | undefined` absence
+				// result where a bare-T parameter is declared is a compile
+				// error under strict.
+				if !paramTy.Inferred {
+					if err := e.checkStrictUndefinedAssign(paramTy, arg, arg.GetPos(), "argument"); err != nil {
+						return Value{}, err
+					}
+				}
 				val, err := e.emitExprWithObjectHint(arg, paramTy)
 				if err != nil {
 					return Value{}, err

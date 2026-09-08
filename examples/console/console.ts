@@ -64,11 +64,20 @@ console.log('back to top level')
 console.groupEnd()
 console.log('still top level')
 
-// every argument to a single console.log call gets its own indented line
-// (this compiler prints one argument per line, not space-joined on one
-// line like real Node's console.log)
+// a single console.log call space-joins its arguments on one line (like real
+// Node), and the whole line is indented once for the active group
 console.group('multi-arg')
 console.log('a', 'b', 'c')
+console.groupEnd()
+
+// console.group itself takes variadic label args (formatted like console.log),
+// and console.groupCollapsed is its terminal-identical alias
+console.group('label', 1, true)
+console.log('under a variadic group label')
+console.groupEnd()
+
+console.groupCollapsed('collapsed section')
+console.log('groupCollapsed indents exactly like group')
 console.groupEnd()
 
 // --- console.table(rows) ---

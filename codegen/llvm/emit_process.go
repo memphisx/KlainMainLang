@@ -163,9 +163,10 @@ func (e *Emitter) emitProcessHrtimeBigint(args []ast.Expression, pos ast.Pos) (V
 	return Value{Ref: r, Ty: BigIntType()}, nil
 }
 
-// emitGetenvCall calls C getenv() on the given key pointer, returning a
-// possibly-null string ptr (nil when the variable isn't set) — same convention
-// as emitArrayFind: a plain TypePtr the caller compares against null.
+// emitGetenvCall calls C getenv() on the given key pointer. The result is
+// `string | undefined` (TDD-00187 Stage 3): a missing variable is the null
+// pointer with the static type flagged Nullable|IsUndefined, so it prints and
+// compares as `undefined` and strict mode gates bare-string use.
 func (e *Emitter) emitGetenvCall(keyPtr string) Value {
 	e.ensureGetenv()
 	e.ensureStrHeaderRuntime()
@@ -175,7 +176,7 @@ func (e *Emitter) emitGetenvCall(keyPtr string) Value {
 	// length header — copy it into a length-prefixed string (null stays null).
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", result, raw))
-	return Value{Ref: result, Ty: TypePtr}
+	return Value{Ref: result, Ty: undefinedableElem(TypePtr)}
 }
 
 // emitProcessEnvSet implements `process.env.KEY = val` / `process.env["KEY"] =
@@ -514,31 +515,108 @@ func memoryUsageType() Type {
 }
 
 // emitProcessMemoryUsage implements process.memoryUsage(): an object with the
-// same shape Node returns. This compiler has no managed V8 heap, so the only
-// field with a real value is `rss` — the process's *instantaneous* resident set
-// size (ADR-00570), read via __kml_current_rss_bytes (Darwin task_info /
-// Linux /proc/self/statm), matching Node's own rss rather than getrusage's
-// ru_maxrss peak. heapTotal/heapUsed/external/arrayBuffers are V8-specific and
-// report 0 (calloc-zeroed), disclosed as a caveat rather than fabricated.
+// same shape Node returns.
+//
+//   - `rss` — the process's *instantaneous* resident set size (ADR-00570), read
+//     via __kml_current_rss_bytes (Darwin task_info / Linux /proc/self/statm /
+//     Windows WorkingSetSize), matching Node's own rss, not getrusage peak.
+//   - `heapTotal`/`heapUsed` — this compiler's object heap (ADR-00791). Under
+//     -mm=gc that is Boehm's collected heap (GC_get_heap_size / minus free
+//     bytes) — a real managed heap directly analogous to V8's; otherwise it is
+//     the C allocator's own arena (Darwin malloc_zone_statistics, glibc
+//     mallinfo2) — this compiler's only heap. A native reinterpretation, not
+//     V8's number, but directionally correct (it tracks growth/leaks) rather
+//     than a fabricated stub.
+//   - `external`/`arrayBuffers` — V8's off-heap C++-binding accounting has no
+//     native analog here (all allocation lives in rss and the one heap above),
+//     so they stay 0, disclosed rather than invented.
 func (e *Emitter) emitProcessMemoryUsage(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: process.memoryUsage takes no arguments", pos.Line, pos.Col)
 	}
 	e.ensureCurrentRSS()
 	e.ensureCalloc()
+	if !e.usedHeapStats {
+		e.usedHeapStats = true
+		e.emitGlobal("declare i64 @__kml_heap_total_bytes()")
+		e.emitGlobal("declare i64 @__kml_heap_used_bytes()")
+	}
 
 	rss := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_current_rss_bytes()", rss))
+	heapTotal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_heap_total_bytes()", heapTotal))
+	heapUsed := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_heap_used_bytes()", heapUsed))
 
 	ty := memoryUsageType()
 	dataReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
 	structIR := ty.StructIR()
-	idx, _, _ := ty.FieldIndex("rss")
-	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, idx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", rss, gep))
+	for _, f := range []struct {
+		name string
+		val  string
+	}{{"rss", rss}, {"heapTotal", heapTotal}, {"heapUsed", heapUsed}} {
+		idx, _, _ := ty.FieldIndex(f.name)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, idx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", f.val, gep))
+	}
 	return Value{Ref: dataReg, Ty: ty}, nil
+}
+
+// UsesHeapStats reports whether process.memoryUsage()'s heapTotal/heapUsed
+// shim (ProcMemSource) needs linking.
+func (e *Emitter) UsesHeapStats() bool { return e.usedHeapStats }
+
+// ProcMemSource is the heap-accounting shim behind process.memoryUsage()'s
+// heapTotal/heapUsed. It reports this compiler's object heap: Boehm's collected
+// heap under -mm=gc (KLAIN_GC), else the platform C allocator's own arena
+// (Darwin's malloc_zone_statistics, glibc's mallinfo2). Every struct here is
+// read against the platform's own headers so no allocator-internal layout is
+// reproduced in IR; an unrecognised platform returns 0 (the prior behaviour).
+func ProcMemSource() string {
+	return `#include <stddef.h>
+#include <stdint.h>
+
+#if defined(KLAIN_GC)
+#include <gc.h>
+uint64_t __kml_heap_total_bytes(void) { return (uint64_t)GC_get_heap_size(); }
+uint64_t __kml_heap_used_bytes(void) {
+  return (uint64_t)(GC_get_heap_size() - GC_get_free_bytes());
+}
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>
+uint64_t __kml_heap_total_bytes(void) {
+  malloc_statistics_t s;
+  malloc_zone_statistics(malloc_default_zone(), &s);
+  return (uint64_t)s.size_allocated;
+}
+uint64_t __kml_heap_used_bytes(void) {
+  malloc_statistics_t s;
+  malloc_zone_statistics(malloc_default_zone(), &s);
+  return (uint64_t)s.size_in_use;
+}
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#if defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 33)
+uint64_t __kml_heap_total_bytes(void) {
+  struct mallinfo2 m = mallinfo2();
+  return (uint64_t)(m.arena + m.hblkhd);
+}
+uint64_t __kml_heap_used_bytes(void) { return (uint64_t)mallinfo2().uordblks; }
+#else
+uint64_t __kml_heap_total_bytes(void) {
+  struct mallinfo m = mallinfo();
+  return (uint64_t)((unsigned)m.arena + (unsigned)m.hblkhd);
+}
+uint64_t __kml_heap_used_bytes(void) { return (uint64_t)(unsigned)mallinfo().uordblks; }
+#endif
+#else
+uint64_t __kml_heap_total_bytes(void) { return 0; }
+uint64_t __kml_heap_used_bytes(void) { return 0; }
+#endif
+`
 }
 
 // emitProcessOn implements process.on('SIGINT' | 'SIGTERM', handler): TDD-00019.

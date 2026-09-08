@@ -34,7 +34,7 @@
               "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
               "`ReadableStream.from()` accepts arrays only, not async iterables",
               "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
-              "`read()` on a closed stream yields the chunk type's zero value, not `undefined`; `controller.desiredSize` is `0` (not `null`) once closed/errored",
+              "`read()` on a closed stream yields the chunk type's zero value, not `undefined`, and `controller.desiredSize` is `0` (not `null`) once closed/errored — needs the discriminated `{done, value}` record design, not a plain `T \\| undefined` field flip ([ADR-00781](../adr/ADR-00781.md))",
               "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
               "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
               "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",

@@ -191,6 +191,8 @@ func walkExprForNew(cls string, ex ast.Expression, found *bool) {
 		for _, e := range n.Exprs {
 			walkExprForNew(cls, e, found)
 		}
+	case *ast.NonNullExpression:
+		walkExprForNew(cls, n.Arg, found)
 	case *ast.UnaryExpression:
 		walkExprForNew(cls, n.Arg, found)
 	case *ast.UpdateExpression:
@@ -262,7 +264,9 @@ func (e *Emitter) emitAsyncLocalStorageMethod(objExpr ast.Expression, method str
 		if len(args) != 0 {
 			return Value{}, fmt.Errorf("%d:%d: getStore() takes no arguments", pos.Line, pos.Col)
 		}
-		// undefined when the instance is disabled; else the nearest frame's value.
+		// `T | undefined` (TDD-00187): undefined when the instance is disabled,
+		// or when there is no active frame (__kml_als_lookup already returns the
+		// NaN-boxed undefined word in that case).
 		dp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, i64 }, ptr %s, i32 0, i32 1", dp, objVal.Ref))
 		dis := e.freshReg()
@@ -273,7 +277,21 @@ func (e *Emitter) emitAsyncLocalStorageMethod(objExpr ast.Expression, method str
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_als_lookup(i64 %s)", look, id))
 		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", word, disB, nbUndefined, look))
-		return e.coerce(Value{Ref: word, Ty: TypeAny}, elemT), nil
+		// A dynamic store carries `undefined` natively in its NaN box, so hand
+		// the word straight back. A concrete scalar/pointer store gets the
+		// presence-flagged `T | undefined` wrap so the absent state survives.
+		if elemT.IsDynamic {
+			return e.coerce(Value{Ref: word, Ty: TypeAny}, elemT), nil
+		}
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, word, nbUndefined))
+		payload := e.coerce(Value{Ref: word, Ty: TypeAny}, elemT)
+		if payload.Ty.IR == "ptr" {
+			nz := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", nz, present, payload.Ref))
+			payload = Value{Ref: nz, Ty: payload.Ty}
+		}
+		return e.wrapUndefinedable(payload, present), nil
 
 	case "run", "exit":
 		return e.emitAlsRunExit(objVal, id, elemT, method, args, pos)

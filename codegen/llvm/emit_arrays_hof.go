@@ -274,9 +274,20 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 // initial value`; this compiler's own internal-throw convention for a
 // runtime-detected error like this is always a plain Error, not a
 // TypeError, matching e.g. the array-index-out-of-bounds throw elsewhere).
-func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+// emitArrayReduce implements both arr.reduce (fromRight=false) and
+// arr.reduceRight (fromRight=true). The two differ only in traversal order:
+// reduceRight seeds from the last element and walks the index down to 0, so the
+// index setup, loop-termination test, and step are the sole branch points; the
+// accumulator/callback/coercion machinery is shared verbatim. The callback
+// argument order (accumulator, element, ...) is identical for both — only the
+// visitation order reverses, matching real JS.
+func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos, fromRight bool) (Value, error) {
+	verb := "reduce"
+	if fromRight {
+		verb = "reduceRight"
+	}
 	if len(args) != 1 && len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: reduce takes 1 or 2 arguments (callback[, initial])", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s takes 1 or 2 arguments (callback[, initial])", pos.Line, pos.Col, verb)
 	}
 	hasInitial := len(args) == 2
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
@@ -301,13 +312,17 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	// A reduce callback must return the accumulator value; a void callback would
 	// leave nothing to store back into the accumulator (invalid IR otherwise).
 	if rt := cb.retType(); rt.IR == "void" || rt.IR == "" {
-		return Value{}, fmt.Errorf("%d:%d: reduce callback must return the accumulator value", pos.Line, pos.Col)
+		return Value{}, fmt.Errorf("%d:%d: %s callback must return the accumulator value", pos.Line, pos.Col, verb)
 	}
 
 	var accTy Type
 	accAlloca := e.freshReg()
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+
+	// lastIdx = len - 1, reused by the fromRight seed/start-index math.
+	lastIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, lenReg))
 
 	if hasInitial {
 		initVal, err := e.emitExpr(args[1])
@@ -317,7 +332,13 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		accTy = initVal.Ty
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, initVal.Ref, accAlloca, accTy.Align()))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		// reduce starts at the first index (0); reduceRight at the last (len-1),
+		// which is -1 for an empty array so the descending loop exits at once.
+		if fromRight {
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, idxAlloca))
+		} else {
+			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		}
 	} else {
 		accTy = elemTy
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accTy.IR, accTy.Align()))
@@ -332,11 +353,23 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		e.emitInternalThrow(e.internString("Reduce of empty array with no initial value"))
 
 		e.emitLabel(seedL)
+		// Seed from the last element (reduceRight) or the first (reduce), then
+		// start the loop one step inward: len-2 descending, or 1 ascending.
+		seedIdx := "0"
+		if fromRight {
+			seedIdx = lastIdx
+		}
 		firstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 0", firstGep, elemTy.IR, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", firstGep, elemTy.IR, ptrReg, seedIdx))
 		firstVal := e.loadArrayElem(firstGep, elemTy)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, firstVal.Ref, accAlloca, elemTy.Align()))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", idxAlloca))
+		if fromRight {
+			startIdx := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lastIdx))
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
+		} else {
+			e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", idxAlloca))
+		}
 	}
 
 	condL := e.freshLabel("red.cond")
@@ -348,7 +381,13 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	idxVal := e.freshReg()
 	done := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	// reduceRight walks down and finishes once the index passes 0 (negative);
+	// reduce walks up and finishes when it reaches len.
+	if fromRight {
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", done, idxVal))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
@@ -366,7 +405,11 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accTy.IR, newAccCoerced.Ref, accAlloca, accTy.Align()))
 
 	idxNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	if fromRight {
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", idxNext, idxVal))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
+	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
@@ -377,7 +420,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 }
 
 // emitArrayFind implements arr.find(pred): returns the first element satisfying
-// pred, or the zero value of the element type if none is found.
+// pred, or `undefined` (`T | undefined`, TDD-00187) if none is found.
 func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: find takes exactly 1 argument", pos.Line, pos.Col)
@@ -393,9 +436,12 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 
 	foundAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
-	// Zero-initialise: 0 for numbers, null for pointers.
-	zeroVal := zeroRef(elemTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, zeroVal, foundAlloca, elemTy.Align()))
+	// Miss default: undefined box for a dynamic element, zero/null otherwise
+	// (a scalar's zero is then marked absent via the flag below — TDD-00187).
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), foundAlloca, elemTy.Align()))
+	flagAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", flagAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", flagAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -428,6 +474,7 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 
 	e.emitLabel(matchL)
 	e.storeArrayElem(foundAlloca, elemTy, inVal)
+	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", flagAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(incL)
@@ -442,7 +489,9 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	}
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
-	return Value{Ref: result, Ty: elemTy}, nil
+	found := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", found, flagAlloca))
+	return e.wrapUndefinedable(Value{Ref: result, Ty: elemTy}, found), nil
 }
 
 // emitArraySome implements arr.some(pred): returns true if any element satisfies pred.

@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "7/7",
     "loosePct": 100,
-    "strict": "5/7",
-    "strictPct": 71
+    "strict": "7/7",
+    "strictPct": 100
   },
   "lede": "Node-os-shaped operating-system information for portable CLI and microservice programs. The functions map onto real syscalls and /proc parsing rather than a fixed table, so os.cpus() returns live per-core tick counters on both Darwin and Linux. os.cpus() speed reports the fixed 2400 MHz libuv nominal on Apple Silicon (where hw.cpufrequency is unavailable), cpufreq's scaling_max_freq or 0 on Linux (VMs and containers have no cpufreq), and Darwin times.irq is 0 — all exactly what real Node reports on that hardware; os.EOL is \"\\n\" on POSIX hosts and \"\\r\\n\" on Windows.",
   "entries": [
@@ -38,7 +38,7 @@
       "statusRow": "os.homedir()",
       "signature": "homedir(): string",
       "badge": "exact",
-      "description": "Returns the current user's home directory from getenv(\"HOME\"). Throws a catchable Error if HOME is unset, matching real Node.",
+      "description": "Returns the current user's home directory, mirroring libuv's uv_os_homedir: a set HOME wins (an empty one included, matching Node's \"\"); on POSIX an unset HOME falls back to the passwd database (getpwuid), throwing a catchable Error only if that fails too. Windows reads USERPROFILE.",
       "returns": {
         "type": "string",
         "desc": "The home directory path."
@@ -58,7 +58,7 @@
       "statusRow": "os.tmpdir()",
       "signature": "tmpdir(): string",
       "badge": "exact",
-      "description": "Returns the default temporary-file directory from getenv(\"TMPDIR\"), falling back to \"/tmp\". Never throws.",
+      "description": "Returns the default temporary-file directory: on POSIX, process.env.TMPDIR (an unset or empty value falls back to \"/tmp\"), with a single trailing slash stripped unless the path is just \"/\". Never throws.",
       "returns": {
         "type": "string",
         "desc": "The temp directory path."

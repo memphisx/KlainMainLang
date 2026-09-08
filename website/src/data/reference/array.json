@@ -4,12 +4,12 @@
   "kind": "language",
   "statusPage": "ARRAY-METHODS.md",
   "coverage": {
-    "loose": "35/35",
+    "loose": "36/36",
     "loosePct": 100,
-    "strict": "20/35",
-    "strictPct": 57
+    "strict": "20/36",
+    "strictPct": 56
   },
-  "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element. reduceRight is the one method not implemented at all.",
+  "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
   "entries": [
     {
       "id": "array.literal",
@@ -86,17 +86,18 @@
     {
       "id": "array.pop",
       "name": ".pop()",
-      "signature": "pop(): T",
+      "signature": "pop(): T | undefined",
       "badge": "caveats",
       "description": "Removes and returns the last element. Works on any mutable receiver (variable, object/class field, nested-array element).",
       "returns": {
-        "type": "T",
-        "desc": "The removed element."
+        "type": "T | undefined",
+        "desc": "The removed element, or `undefined` on an empty array."
       },
       "exampleKey": "arrays/array_methods",
       "snippet": "let stack = [10, 20, 30]\nlet a = stack.pop()   // 30",
       "differences": [
-        "On an empty array returns the element type's zero value (length stays 0) — real JS returns `undefined`; this compiler has no undefined sentinel for a concrete scalar type.",
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
+        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state.",
         "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": [
@@ -110,17 +111,18 @@
     {
       "id": "array.shift",
       "name": ".shift()",
-      "signature": "shift(): T",
+      "signature": "shift(): T | undefined",
       "badge": "caveats",
       "description": "Removes and returns the first element, shifting the rest down. Works on any mutable receiver.",
       "returns": {
-        "type": "T",
-        "desc": "The removed element."
+        "type": "T | undefined",
+        "desc": "The removed element, or `undefined` on an empty array."
       },
       "exampleKey": "arrays/mutators_everywhere",
       "snippet": "const done = list.titles.shift()",
       "differences": [
-        "Same empty-array zero-value-instead-of-`undefined` convention as `.pop()`.",
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
+        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state.",
         "A length change propagates to the caller for a plain array **variable** parameter, but not when the array is passed as an **object field**/**array element** or a HOF-callback element."
       ],
       "seeAlso": [
@@ -197,12 +199,12 @@
     {
       "id": "array.at",
       "name": ".at(i)",
-      "signature": "at(i: number): T",
-      "badge": "exact",
+      "signature": "at(i: number): T | undefined",
+      "badge": "caveats",
       "description": "Returns the element at index i, with negative indices counting from the end.",
       "returns": {
-        "type": "T",
-        "desc": "The element at i."
+        "type": "T | undefined",
+        "desc": "The element at i, or `undefined` when out of range (negative indices count from the end; one past the start is out of range, matching Node)."
       },
       "seeAlso": [
         "array.slice",
@@ -210,7 +212,11 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/at"
-      }
+      },
+      "differences": [
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
+        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+      ]
     },
     {
       "id": "array.indexOf",
@@ -256,12 +262,12 @@
     {
       "id": "array.find",
       "name": ".find(fn)",
-      "signature": "find(fn: (x: T) => boolean): T",
-      "badge": "exact",
+      "signature": "find(fn: (x: T) => boolean): T | undefined",
+      "badge": "caveats",
       "description": "Returns the first element for which the predicate is true.",
       "returns": {
-        "type": "T",
-        "desc": "The first matching element."
+        "type": "T | undefined",
+        "desc": "The first matching element, or `undefined` when nothing matches."
       },
       "exampleKey": "arrays/higher_order",
       "snippet": "const first3 = [1,2,3,4,5].find(x => x > 3)   // 4",
@@ -271,7 +277,11 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/find"
-      }
+      },
+      "differences": [
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
+        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+      ]
     },
     {
       "id": "array.findIndex",
@@ -405,10 +415,27 @@
     {
       "id": "array.reduceRight",
       "name": ".reduceRight(fn, init?)",
-      "statusRow": null,
       "signature": "reduceRight(fn: (acc: U, x: T) => U, init?: U): U",
-      "badge": "missing",
-      "description": "Right-to-left fold. Not implemented — use .reduce() over a reversed copy, or .toReversed().reduce(...), where order matters.",
+      "badge": "exact",
+      "description": "Folds the array to a single value right-to-left. Like .reduce() but visiting the last element first: without an initial value the last element seeds the accumulator and the fold walks leftward from the second-to-last; an empty array with no initial value throws, matching real JS.",
+      "params": [
+        {
+          "name": "fn",
+          "type": "(acc, x) => U",
+          "desc": "Reducer called per element, from the end."
+        },
+        {
+          "name": "init?",
+          "type": "U",
+          "desc": "Seed accumulator; the last element is used if omitted."
+        }
+      ],
+      "returns": {
+        "type": "U",
+        "desc": "The folded result."
+      },
+      "exampleKey": "arrays/higher_order",
+      "snippet": "const rtl = ['a','b','c','d'].reduceRight((acc, w) => acc + w, '')   // 'dcba'",
       "seeAlso": [
         "array.reduce",
         "array.toSorted"
@@ -573,8 +600,8 @@
     {
       "id": "array.findLast",
       "name": ".findLast(fn) / .findLastIndex(fn)",
-      "signature": "findLast(fn: (x: T) => boolean): T; findLastIndex(fn): number",
-      "badge": "exact",
+      "signature": "findLast(fn: (x: T) => boolean): T | undefined; findLastIndex(fn): number",
+      "badge": "caveats",
       "description": "Finds the last matching element / its index. Genuine reverse iteration, not a forward scan keeping the last match — the callback is invoked starting from the last element, matching real JS's reverse call order, observable via side effects.",
       "exampleKey": "arrays/array_methods",
       "seeAlso": [
@@ -583,7 +610,11 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findLast"
-      }
+      },
+      "differences": [
+        "The absence result is a real `T | undefined` (TDD-00187): strict mode requires narrowing (`!== undefined`), a `??` default, or a `!` assertion before use where a bare `T` is expected; `-compat=js` auto-widens.",
+        "A nested-array element (`T[][]` receiver) still zero-fills the miss instead of `undefined` — its {ptr,i64} aggregate has no absent state."
+      ]
     },
     {
       "id": "array.toSorted",

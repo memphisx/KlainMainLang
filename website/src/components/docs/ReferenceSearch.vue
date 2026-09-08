@@ -1,5 +1,15 @@
 <template>
-  <teleport to="body">
+  <!--
+    `:disabled="!mounted"` keeps the teleport client-only. Under SSG a
+    `teleport to="body"` serializes into <body> with anchor comments, but the
+    client hydration expects a comment placeholder at this position (the dialog
+    is closed, so `v-if="modelValue"` is a comment) — server-node vs client-comment
+    is a structural hydration mismatch that collapsed the docs layout to a black
+    page on every direct load / refresh. Disabled until mounted, the teleport
+    renders inline (a matching comment) during SSR and hydration, then activates
+    after mount so the dialog still portals to <body> when opened.
+  -->
+  <teleport to="body" :disabled="!mounted">
     <div v-if="modelValue" class="km-search" @click.self="close">
       <div class="km-search__panel" role="dialog" aria-modal="true" aria-label="Search documentation">
         <div class="km-search__bar">
@@ -62,6 +72,10 @@ const router = useRouter()
 const query = ref('')
 const active = ref(0)
 const input = ref(null)
+// Gate the teleport on client mount (see the template comment): false during
+// SSR + hydration so the teleport renders inline, true afterwards so the dialog
+// portals to <body> when opened.
+const mounted = ref(false)
 
 const KIND_LABEL = { page: 'Page', reference: 'Reference', api: 'API', example: 'Example' }
 // Kind ordering for the tie-break: a page/surface beats an individual method
@@ -123,7 +137,10 @@ function onKeydown (e) {
     emit('update:modelValue', true)
   }
 }
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => {
+  mounted.value = true
+  window.addEventListener('keydown', onKeydown)
+})
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 

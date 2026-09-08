@@ -9,7 +9,7 @@ function enqueue(queue: string[], item: string): void {
 
 function drainFirst(queue: string[]): string {
   const head = queue.shift()
-  return head
+  return head!
 }
 
 const jobs: string[] = ["build"]

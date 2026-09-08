@@ -509,6 +509,9 @@ type Type struct {
 	// IsH2Constants marks a binding of the compile-time http2.constants
 	// namespace (TDD-00139 Stage 4).
 	IsH2Constants bool
+	// IsFsConstants marks a binding of the compile-time fs.constants
+	// namespace (ADR-00795).
+	IsFsConstants bool
 	// IsTestContext marks the node:test runner's `t` (TDD-00140).
 	IsTestContext bool
 	// IsDCChannel marks a diagnostics_channel Channel handle.
@@ -1223,13 +1226,17 @@ func StatsType() Type {
 }
 
 // DirentType returns the element type of fs.readdirSync(path, { withFileTypes:
-// true }) (ADR-00752). `name` is the entry name (Node's own-enumerable
-// property); `mode` is a hidden S_IFMT word (from the dirent d_type) backing
-// isFile()/isDirectory()/isSymbolicLink(), stripped from enumeration/JSON the
-// way Stats keeps its own fields but Dirent does not expose `mode`.
+// true }) (ADR-00752/ADR-00787). `name` and `parentPath` (the directory the
+// entry was read from) are Node's own-enumerable Dirent properties; `mode` is a
+// hidden S_IFMT word (from the dirent d_type) backing the kind predicates
+// isFile()/isDirectory()/isSymbolicLink()/isFIFO()/isCharacterDevice()/
+// isBlockDevice()/isSocket(). `mode` is placed last so the enumeration/JSON
+// strip keeps the two leading real properties, the way Stats keeps its own
+// fields but Dirent does not expose `mode`.
 func DirentType() Type {
 	ty := ObjectType([]Field{
 		{Name: "name", Ty: TypePtr},
+		{Name: "parentPath", Ty: TypePtr},
 		{Name: "mode", Ty: TypeI64},
 	})
 	ty.IsDirent = true
@@ -1889,10 +1896,10 @@ func (t Type) VisibleFields() []Field {
 	case t.IsStats:
 		// Every Stats field (mode included) is a real Node own-enumerable
 		// property, so nothing is stripped (ADR-00565).
-	case t.IsDirent && len(fields) > 1:
-		// Only `name` is a Node own-enumerable Dirent property; the trailing
-		// `mode` is our hidden isFile()/isDirectory() backing (ADR-00752).
-		fields = fields[:1]
+	case t.IsDirent && len(fields) > 2:
+		// `name` and `parentPath` are Node own-enumerable Dirent properties; the
+		// trailing `mode` is our hidden kind-predicate backing (ADR-00752/00787).
+		fields = fields[:2]
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
 		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are

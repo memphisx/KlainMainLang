@@ -10,7 +10,7 @@
     "strict": "1/3",
     "strictPct": 33
   },
-  "lede": "The WHATWG fetch client — fetch(), Response, Request, Headers — over libcurl, non-blocking under the event loop. The defining divergence from standard fetch: the response body accessors (.text()/.json()/.arrayBuffer()) are synchronous, returning the value directly rather than a Promise (awaiting them is a harmless no-op). Response headers can't be read yet. WebSocket, EventSource, and XMLHttpRequest are separate Networking surfaces, documented elsewhere.",
+  "lede": "The WHATWG fetch client — fetch(), Response, Request, Headers — over libcurl, non-blocking under the event loop. The response body accessors (.text()/.json()/.arrayBuffer()) return a real Promise<T> you await — a genuine thenable, so .then() and Promise.all() work on them. The remaining divergence is that the body is buffered eagerly at the accessor call rather than lazily off the transfer, so intervening work doesn't overlap the download. WebSocket, EventSource, and XMLHttpRequest are separate Networking surfaces, documented elsewhere.",
   "entries": [
     {
       "id": "fetch.fetch",
@@ -75,17 +75,17 @@
       "id": "fetch.response.text",
       "name": "Response.text()",
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
-      "signature": "text(): string",
+      "signature": "text(): Promise<string>",
       "badge": "caveats",
-      "description": "Reads the body to completion and returns it as a string. Both call styles work: const s = r.text() and await r.text() (awaiting a non-thenable is identity).",
+      "description": "Reads the body to completion and resolves to it as a string. Returns a real Promise<string> — await it, or chain .then().",
       "returns": {
-        "type": "string",
-        "desc": "The response body as text."
+        "type": "Promise<string>",
+        "desc": "Resolves to the response body as text."
       },
       "exampleKey": "fetch/fetch",
-      "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconst body: string = r.text()",
+      "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconst body: string = await r.text()",
       "differences": [
-        "**Synchronous** — returns `string` directly, not the `Promise<string>` real WHATWG fetch returns.",
+        "The body is buffered eagerly at the call, not lazily off the transfer — so intervening work doesn't overlap the download the way Node's streamed body does.",
         "The result is a null-terminated string: a binary body with an embedded null byte truncates at the first one — use `.arrayBuffer()` for binary.",
         "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed `TypeError`."
       ],
@@ -102,17 +102,18 @@
       "id": "fetch.response.json",
       "name": "Response.json()",
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
-      "signature": "json(): T",
+      "signature": "json(): Promise<T>",
       "badge": "caveats",
-      "description": "Reads and parses the body as JSON, projecting it into a declared type. Reuses JSON.parse's machinery — validates the body (a non-JSON body throws a catchable SyntaxError) and projects nested objects, array/object-array fields, and top-level T[].",
+      "description": "Reads and parses the body as JSON, resolving to a value projected into a declared type. Returns a real Promise<T> — await it, or chain .then(). Reuses JSON.parse's machinery — validates the body (a non-JSON body throws a catchable SyntaxError) and projects nested objects, array/object-array fields, and top-level T[].",
       "returns": {
-        "type": "T",
-        "desc": "The parsed value, projected to the annotated type."
+        "type": "Promise<T>",
+        "desc": "Resolves to the parsed value, projected to the annotated type."
       },
       "exampleKey": "fetch/fetch",
-      "snippet": "interface Ip { origin: string }\nconst info: Ip = (await fetch('http://127.0.0.1:8765/ip')).json()",
+      "snippet": "interface Ip { origin: string }\nconst info: Ip = await (await fetch('http://127.0.0.1:8765/ip')).json()",
       "differences": [
-        "**Synchronous** — returns the parsed value directly, not `Promise<any>`.",
+        "The body is buffered eagerly at the call, not lazily; a JSON parse error surfaces at the call rather than as a promise rejection.",
+        "A typed declaration `const p: T = await r.json()` parses straight into `T` (the `JSON.parse`-style projection carve-out).",
         "Only `any`/`unknown` dynamic shapes are unsupported; every statically-typed shape projects.",
         "Same embedded-null truncation as `.text()` — the body is read as a null-terminated string."
       ],
@@ -128,15 +129,16 @@
       "id": "fetch.response.arrayBuffer",
       "name": "Response.arrayBuffer()",
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
-      "signature": "arrayBuffer(): ArrayBuffer",
+      "signature": "arrayBuffer(): Promise<ArrayBuffer>",
       "badge": "caveats",
-      "description": "Reads the body to completion and returns it as an ArrayBuffer, carrying the real byte count and coming back whole regardless of content. The binary-safe body accessor — use it for any body that may contain null bytes.",
+      "description": "Reads the body to completion and resolves to an ArrayBuffer, carrying the real byte count and coming back whole regardless of content. The binary-safe body accessor — use it for any body that may contain null bytes. Returns a real Promise<ArrayBuffer> — await it, or chain .then().",
       "returns": {
-        "type": "ArrayBuffer",
-        "desc": "The complete response body as bytes."
+        "type": "Promise<ArrayBuffer>",
+        "desc": "Resolves to the complete response body as bytes."
       },
+      "snippet": "const binary = await fetch('http://127.0.0.1:8765/bytes/16')\nconst bytes = new Uint8Array(await binary.arrayBuffer())",
       "differences": [
-        "**Synchronous** — returns `ArrayBuffer` directly, not `Promise<ArrayBuffer>`."
+        "The body is buffered eagerly at the call, not lazily off the transfer."
       ],
       "seeAlso": [
         "fetch.response.text",

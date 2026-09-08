@@ -720,6 +720,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		return e.emitNullableScalarAssign(sym, ex)
 	}
 
+	// TDD-00187 strict gate: `x = arr.pop()` into a bare-T binding is a
+	// compile error under strict (the value is `T | undefined`).
+	if ex.Op == "=" {
+		if err := e.checkStrictUndefinedAssign(sym.Ty, ex.Right, ex.GetPos(), "assigned value"); err != nil {
+			return Value{}, err
+		}
+	}
+
 	if sym.Ty.IsDynamic && ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
 		// `-compat=js` (TDD-00076 A2): compound assignment dispatches the
 		// operator at runtime; strict keeps the rejection.

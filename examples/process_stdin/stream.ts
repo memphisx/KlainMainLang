@@ -3,21 +3,24 @@
 //
 //   printf 'hello\nworld\n' | ./stream
 //
-// 'data' fires once per read chunk (a UTF-8 string); 'end' fires on EOF.
+// setEncoding('utf8') is the idiomatic opener (chunks are UTF-8 strings), and
+// the stream methods return the stream, so the listeners chain. 'data' fires
+// once per read chunk; 'end' fires on EOF.
 
 let bytes = 0;
 let lines = 0;
 
-process.stdin.on("data", (chunk: string) => {
-  // Uppercase and echo straight through.
-  process.stdout.write(chunk.toUpperCase());
-  bytes += chunk.length;
-  for (let i = 0; i < chunk.length; i++) {
-    if (chunk[i] === "\n") lines++;
-  }
-});
-
-process.stdin.on("end", () => {
-  console.error("---");
-  console.error("bytes: " + bytes + ", newlines: " + lines);
-});
+process.stdin
+  .setEncoding("utf8")
+  .on("data", (chunk: string) => {
+    // Uppercase and echo straight through.
+    process.stdout.write(chunk.toUpperCase());
+    bytes += chunk.length;
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk[i] === "\n") lines++;
+    }
+  })
+  .on("end", () => {
+    console.error("---");
+    console.error("bytes: " + bytes + ", newlines: " + lines);
+  });

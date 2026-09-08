@@ -521,7 +521,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// `name = expr;` (initializer, unannotated — type inferred at codegen,
 		// TDD-00063 Stage 1). The `: type` is optional only when an `= expr`
 		// initializer follows to give the field its type.
-		p.match(lexer.QUESTION)
+		optionalField := p.match(lexer.QUESTION)
 		var ft *ast.TypeAnnotation
 		if p.check(lexer.COLON) {
 			p.advance()
@@ -554,7 +554,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// rather than accepted — a disclosed narrowing.
 			ft = &ast.TypeAnnotation{Name: "number", Source: "ts"}
 		}
-		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
+		fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Type: ft, Optional: optionalField, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
 		p.match(lexer.SEMICOLON, lexer.COMMA)
 	}
 	if pendingOverload != "" {

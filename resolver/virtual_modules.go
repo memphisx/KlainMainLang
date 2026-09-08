@@ -212,9 +212,14 @@ var virtualModuleMembers = map[string]map[string]bool{
 		// Stat/handle family — implemented in codegen (inferExprType) and long
 		// usable via the `fs.` namespace form; also valid as named imports.
 		"statSync": true, "lstatSync": true, "fstatSync": true,
-		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true, "linkSync": true, "utimesSync": true,
-		"openSync": true, "writeSync": true, "readSync": true,
+		"realpathSync": true, "mkdtempSync": true, "readlinkSync": true, "linkSync": true, "utimesSync": true, "futimesSync": true,
+		"openSync": true, "closeSync": true, "writeSync": true, "readSync": true,
 		"fsyncSync": true, "fdatasyncSync": true, "ftruncateSync": true,
+		// Real Node exports with existing codegen dispatch, previously usable
+		// only via the `fs.` namespace form — also valid as named imports.
+		"accessSync": true, "chmodSync": true, "truncateSync": true, "symlinkSync": true,
+		// fs.constants namespace (ADR-00795) — also valid as `import { constants }`.
+		"constants": true,
 		// Async callback form (TDD-00107): fs.readFile(path, cb), etc.
 		"readFile": true, "writeFile": true, "appendFile": true, "unlink": true,
 		"mkdir": true, "rmdir": true, "rename": true, "copyFile": true,

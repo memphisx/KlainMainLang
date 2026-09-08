@@ -1,4 +1,4 @@
-// Array higher-order methods: map, filter, reduce, find, some, every, join, forEach.
+// Array higher-order methods: map, filter, reduce, reduceRight, find, some, every, join, forEach.
 
 const nums: number[] = [1, 2, 3, 4, 5]
 
@@ -37,6 +37,18 @@ try {
 } catch (e) {
   console.log(e.message)  // Reduce of empty array with no initial value
 }
+
+// ── reduceRight ─────────────────────────────────────────────────────────────
+// Same fold as reduce, but right-to-left. String concatenation makes the
+// direction visible: the last element is prepended first.
+const letters: string[] = ['a', 'b', 'c', 'd']
+const rtl = letters.reduceRight((acc, w) => acc + w, '')
+console.log(rtl)  // dcba
+
+// Without an initial value it seeds from the last element and folds leftward:
+// 5 - 4 - 3 - 2 - 1 = -5.
+const rtlSub = nums.reduceRight((acc, n) => acc - n)
+console.log(rtlSub)  // -5
 
 // ── find ──────────────────────────────────────────────────────────────────────
 const first3 = nums.find(x => x > 3)

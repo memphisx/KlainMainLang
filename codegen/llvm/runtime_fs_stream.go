@@ -63,6 +63,33 @@ done:
 }`, modePtr, opDescPtr, e.internString("open")))
 }
 
+// ensureFsOpenRead declares @__kml_fs_open_read(path) -> FILE*: fopen("rb"),
+// throwing the Node-shaped Error synchronously on a missing file (matching the
+// eager path's throw-at-creation), and returning the open handle otherwise. The
+// pool then reads from it off-thread (TDD-00186).
+func (e *Emitter) ensureFsOpenRead() {
+	if e.usedFsOpenRead {
+		return
+	}
+	e.usedFsOpenRead = true
+	e.ensureFsThrow()
+	e.ensureFopen()
+	modePtr := e.internString("rb")
+	opDescPtr := e.internString("cannot open file for reading")
+	e.emitGlobal(fmt.Sprintf(`
+define ptr @__kml_fs_open_read(ptr %%path) {
+entry:
+  %%f = call ptr @fopen(ptr %%path, ptr %s)
+  %%isnull = icmp eq ptr %%f, null
+  br i1 %%isnull, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+ok:
+  ret ptr %%f
+}`, modePtr, opDescPtr, e.internString("open")))
+}
+
 // ensureFsWriteStream declares the createWriteStream runtime: an open helper
 // (fopen, throw on failure, return the FILE*) and the two Writable sink thunks
 // (fwrite one chunk; fclose on close). The FILE* is the closure env of both

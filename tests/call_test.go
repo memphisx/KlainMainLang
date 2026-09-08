@@ -319,6 +319,28 @@ console.groupEnd()
 `, "g\n  a b c")
 }
 
+func TestE2EConsoleGroupVariadicLabel(t *testing.T) {
+	// console.group accepts multiple label args, formatted like console.log
+	// (Node), printed on one line at the current (pre-increment) indent.
+	assertOutput(t, `
+console.group("a", "b", "c")
+console.log("inside")
+console.groupEnd()
+console.log("top")
+`, "a b c\n  inside\ntop")
+}
+
+func TestE2EConsoleGroupCollapsedAliasesGroup(t *testing.T) {
+	// console.groupCollapsed is identical to console.group in a terminal (only a
+	// browser devtools console renders it collapsed).
+	assertOutput(t, `
+console.groupCollapsed("g")
+console.log("inside")
+console.groupEnd()
+console.log("top")
+`, "g\n  inside\ntop")
+}
+
 func TestE2EConsoleGroupEndUnbalancedDoesNotUnderflow(t *testing.T) {
 	assertOutput(t, `
 console.groupEnd()

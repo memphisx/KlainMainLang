@@ -37,6 +37,8 @@ async function main(): Promise<void> {
     }, 5)
   })
 
-  console.log(store.getStore() === null ? 'no ambient context outside a run' : '?')
+  // getStore() is `RequestCtx | undefined` — outside any run it is a real
+  // `undefined`, as in Node (TDD-00187).
+  console.log(store.getStore() === undefined ? 'no ambient context outside a run' : '?')
 }
 main()

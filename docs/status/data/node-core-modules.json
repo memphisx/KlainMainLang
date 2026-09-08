@@ -255,11 +255,11 @@
             "notes": [
               "Surface: `AsyncLocalStorage`, `AsyncResource`",
               "`AsyncLocalStorage<T>`: `run`/`getStore`/`exit`/`enterWith`/`disable` with real context propagation **across `await`** — the store lives in the coroutine task struct, so a value set with `run(...)` survives an await/park/resume and a spawned task inherits it ([ADR-00678](../adr/ADR-00678.md)); a `setTimeout`/`setInterval` scheduled inside `run(...)` carries it to its fire ([ADR-00679](../adr/ADR-00679.md))",
-              "Static `AsyncLocalStorage.bind(fn)` (a wrapper of `fn`'s own signature that reinstalls the captured context) and `AsyncResource` (`runInAsyncScope`, capturing at construction) capture-and-replay the context ([ADR-00680](../adr/ADR-00680.md))"
+              "Static `AsyncLocalStorage.bind(fn)` (a wrapper of `fn`'s own signature that reinstalls the captured context) and `AsyncResource` (`runInAsyncScope`, capturing at construction) capture-and-replay the context ([ADR-00680](../adr/ADR-00680.md))",
+              "`getStore()` on an unset/disabled store is a real `undefined` typed `T | undefined`, distinguishable from a genuine `0`/`\"\"`/null store ([ADR-00782](../adr/ADR-00782.md))"
             ],
             "caveats": [
               "`AsyncLocalStorage.snapshot()` is a clean rejection — its runner is fully generic (parameter/return types vary per call site), needing generic first-class closures this compiler doesn't have",
-              "`getStore()` on an unset/disabled store returns the element type's zero value (this compiler's undefined stand-in); use an object store to distinguish absence via `=== null`",
               "`AsyncResource.runInAsyncScope(fn, thisArg, …)` accepts `thisArg` but does not bind it (closures carry no dynamic `this`); a `run(...)` callback that throws does not restore the frame (exception-safe restore is a follow-up)",
               "`.then`/`.catch` reaction callbacks and EventEmitter listeners do not yet propagate context (only `await`, task-spawn, and timers do)",
               "The low-level `createHook`/`executionAsyncId`/`triggerAsyncId`/async-id lifecycle is out of scope — a compiled AOT binary has no V8 promise-hooks or GC-tracked async-ids (a faithful impossibility), so those stay clean rejections"

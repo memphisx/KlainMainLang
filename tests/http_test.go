@@ -672,7 +672,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8951, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
-  return { status: 200, body: r.text() }
+  return { status: 200, body: await r.text() }
 })
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8951)
@@ -704,7 +704,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8952, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
-  return { status: 200, body: r.text() }
+  return { status: 200, body: await r.text() }
 })
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8952)

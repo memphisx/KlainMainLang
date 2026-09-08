@@ -53,6 +53,18 @@ jobs:
       - name: Build (SSG)
         run: npm run build
 
+      # Guard the deploy against hydration regressions (e.g. the docs-drawer /
+      # ReferenceSearch teleport black-page bug): serve the just-built dist/ssg
+      # and deep-load every route, asserting no hydration mismatch and visible
+      # content. E2E_SERVE_ONLY reuses the build above instead of rebuilding.
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E (hydration)
+        run: npm run test:e2e
+        env:
+          E2E_SERVE_ONLY: '1'
+
       - name: Add .nojekyll
         run: touch dist/ssg/.nojekyll
 

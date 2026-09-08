@@ -754,6 +754,23 @@ func NewSequenceExpression(exprs []Expression, pos Pos) *SequenceExpression {
 	return &SequenceExpression{Exprs: exprs, pos: pos}
 }
 
+// NonNullExpression — TypeScript's postfix non-null assertion (`expr!`):
+// asserts the operand is neither null nor undefined, unwrapping a
+// `T | undefined` / `T | null` to its bare `T` at compile time. Purely a
+// type-level assertion — no runtime check is emitted, exactly as in TS.
+type NonNullExpression struct {
+	Arg Expression
+	pos Pos
+}
+
+func (*NonNullExpression) nodeMarker()   {}
+func (*NonNullExpression) exprMarker()   {}
+func (n *NonNullExpression) GetPos() Pos { return n.pos }
+
+func NewNonNullExpression(arg Expression, pos Pos) *NonNullExpression {
+	return &NonNullExpression{Arg: arg, pos: pos}
+}
+
 // SpreadElement — ...expr inside an array literal.
 type SpreadElement struct {
 	Arg Expression
@@ -2108,6 +2125,11 @@ func NewImportCallExpression(specifier Expression, pos Pos) *ImportCallExpressio
 type AnnotField struct {
 	Name string
 	Type *TypeAnnotation
+	// Optional marks a `name?: T` field (TDD-00187 Stage 2): the field's
+	// resolved type widens to `T | undefined`, and an object literal may omit
+	// it (the omitted slot reads back as a real absent value). Meaningful for
+	// interface / object-type / class fields alike.
+	Optional bool
 	// Static/Visibility are TDD-00009 Stage 4 class-member modifiers,
 	// meaningful only when this AnnotField is one of a ClassDeclaration's
 	// Fields — always zero-value ("", false) for every other reuse of this
@@ -2162,6 +2184,11 @@ type TypeAnnotation struct {
 	// Type.FuncHasRest convention.
 	FuncHasRest bool
 	Nullable    bool             // true for T | null or T | undefined
+	// Undefined records that the nullish member of the union was spelled
+	// `undefined` (or that the type comes from a `?:` optional field), so the
+	// resolved Type carries IsUndefined and an absent value renders/compares
+	// as `undefined`, not `null` (TDD-00187). Only meaningful with Nullable.
+	Undefined   bool
 	// UnionMembers holds every non-null/undefined member of a T | U | ...
 	// union with more than one such member (TDD-00043). nil for the common
 	// single-type case (with or without Nullable) — this field only becomes

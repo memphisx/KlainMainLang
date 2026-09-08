@@ -23,6 +23,10 @@ import (
 // been consulted (or once it is read into an ordinary scalar expression).
 func (t Type) withoutNullable() Type {
 	t.Nullable = false
+	// The payload of a `T | undefined` is a plain T — leaving IsUndefined set
+	// would make downstream null-aware paths (`??`'s statically-nullish check,
+	// string rendering) misread the bare payload as `undefined` itself.
+	t.IsUndefined = false
 	return t
 }
 
@@ -295,6 +299,11 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 		}
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy)))
 		return nil
+	}
+	// TDD-00187 strict gate: storing a `T | undefined` absence result into a
+	// bare-T field is a compile error under strict.
+	if err := e.checkStrictUndefinedAssign(fieldTy, expr, expr.GetPos(), "field value"); err != nil {
+		return err
 	}
 	val, err := e.emitExprWithObjectHint(expr, fieldTy)
 	if err != nil {
@@ -649,19 +658,29 @@ func (e *Emitter) emitConsoleScalarValue(val Value, fd int, term string) error {
 func (e *Emitter) emitConsoleNullableScalar(sym Symbol, fd int, term string) error {
 	present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
 	payload := Value{Ref: e.loadNullableScalarPayload(sym.Ptr, sym.Ty), Ty: sym.Ty.withoutNullable()}
-	return e.emitConsolePresenceBranch(present, payload, fd, term)
+	return e.emitConsolePresenceBranch(present, payload, absentLiteral(sym.Ty), fd, term)
 }
 
 // emitConsoleNullableScalarAgg prints a nullable-scalar aggregate *value* (a
 // T|null return/field value) the same null-aware way a boxed local prints.
 func (e *Emitter) emitConsoleNullableScalarAgg(val Value, fd int, term string) error {
 	present, payload := e.nullableScalarAggParts(val)
-	return e.emitConsolePresenceBranch(present, payload, fd, term)
+	return e.emitConsolePresenceBranch(present, payload, absentLiteral(val.Ty), fd, term)
 }
 
-// emitConsolePresenceBranch prints payload when present is true, the literal
-// `null` when false.
-func (e *Emitter) emitConsolePresenceBranch(present string, payload Value, fd int, term string) error {
+// absentLiteral is how an absent nullable scalar renders: "undefined" for a
+// `T | undefined` (an element-absence result, TDD-00187), "null" for a
+// `T | null` annotation (TDD-00064).
+func absentLiteral(ty Type) string {
+	if ty.IsUndefined {
+		return "undefined"
+	}
+	return "null"
+}
+
+// emitConsolePresenceBranch prints payload when present is true, the given
+// absent literal ("null"/"undefined") when false.
+func (e *Emitter) emitConsolePresenceBranch(present string, payload Value, absent string, fd int, term string) error {
 	valL := e.freshLabel("console.nullscalar.val")
 	nullL := e.freshLabel("console.nullscalar.null")
 	mergeL := e.freshLabel("console.nullscalar.merge")
@@ -674,7 +693,7 @@ func (e *Emitter) emitConsolePresenceBranch(present string, payload Value, fd in
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(nullL)
-	e.emitConsolePrintVal(Value{Ref: e.internString("null"), Ty: TypePtr}, e.internString("%s"+term), fd)
+	e.emitConsolePrintVal(Value{Ref: e.internString(absent), Ty: TypePtr}, e.internString("%s"+term), fd)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)

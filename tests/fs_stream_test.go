@@ -8,9 +8,38 @@ import (
 
 // --- fs.createReadStream / fs.createWriteStream (TDD-00108) ---
 //
-// A Node Readable/Writable over a file: eager chunked fread on the read side, an
-// fwrite/fclose sink on the write side. Chunks are strings (text-first fs), so a
-// read→write pipe round-trips. Consumed via for-await or .on('data')/.on('end').
+// A Node Readable/Writable over a file: chunked read on the read side (now on
+// the blocking-work thread pool — TDD-00186 — so it no longer freezes the loop),
+// an fwrite/fclose sink on the write side. Chunks are strings (text-first fs), so
+// a read→write pipe round-trips. Consumed via for-await or .on('data')/.on('end').
+
+// TDD-00186: the pooled read delivers its chunks off the loop thread and in
+// order. A large file read at a small highWaterMark yields many chunks that
+// reassemble byte-identically, while a timer set before the read keeps firing —
+// proof the read no longer blocks the reactor.
+func TestE2EFsCreateReadStreamPooledOrderedNonBlocking(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "big.txt")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+let big: string = ""
+for (let i = 0; i < 1000; i++) { big += ("0000" + i).slice(-4) + ":" }
+fs.writeFileSync(%q, big)
+let ticks: number = 0
+const timer = setInterval(() => { ticks++ }, 1)
+let out: string = ""
+let n: number = 0
+const rs = fs.createReadStream(%q, { highWaterMark: 64 })
+rs.on('data', (c: string) => { out += c; n++ })
+rs.on('end', () => {
+  clearInterval(timer)
+  const ordered: boolean = out === big
+  const many: boolean = n > 1
+  console.log((ordered ? "intact" : "CORRUPT") + ":" + (many ? "multi" : "single"))
+})
+`, path, path)
+	assertOutputImports(t, src, "intact:multi")
+}
 
 func TestE2EFsCreateWriteStream(t *testing.T) {
 	dir := tempDir(t)

@@ -752,16 +752,26 @@ storename:
 mkdirent:
   %%dtypep = getelementptr i8, ptr %%ent, i64 %d
   %%dtype = load i8, ptr %%dtypep, align 1
+  %%isfifot = icmp eq i8 %%dtype, 1
+  %%ischrt = icmp eq i8 %%dtype, 2
   %%isdirt = icmp eq i8 %%dtype, 4
+  %%isblkt = icmp eq i8 %%dtype, 6
   %%isregt = icmp eq i8 %%dtype, 8
   %%islnkt = icmp eq i8 %%dtype, 10
-  %%m1 = select i1 %%isdirt, i64 16384, i64 0
-  %%m2 = select i1 %%isregt, i64 32768, i64 %%m1
-  %%mode = select i1 %%islnkt, i64 40960, i64 %%m2
-  %%dirent = call ptr @malloc(i64 16)
-  %%dname_p = getelementptr { ptr, i64 }, ptr %%dirent, i32 0, i32 0
+  %%issockt = icmp eq i8 %%dtype, 12
+  %%m1 = select i1 %%isfifot, i64 4096, i64 0
+  %%m2 = select i1 %%ischrt, i64 8192, i64 %%m1
+  %%m3 = select i1 %%isdirt, i64 16384, i64 %%m2
+  %%m4 = select i1 %%isblkt, i64 24576, i64 %%m3
+  %%m5 = select i1 %%isregt, i64 32768, i64 %%m4
+  %%m6 = select i1 %%islnkt, i64 40960, i64 %%m5
+  %%mode = select i1 %%issockt, i64 49152, i64 %%m6
+  %%dirent = call ptr @malloc(i64 24)
+  %%dname_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 0
   store ptr %%namecopy, ptr %%dname_p, align 8
-  %%dmode_p = getelementptr { ptr, i64 }, ptr %%dirent, i32 0, i32 1
+  %%dpp_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 1
+  store ptr %%path, ptr %%dpp_p, align 8
+  %%dmode_p = getelementptr { ptr, ptr, i64 }, ptr %%dirent, i32 0, i32 2
   store i64 %%mode, ptr %%dmode_p, align 8
   store ptr %%dirent, ptr %%slot, align 8
   br label %%advance
@@ -779,6 +789,157 @@ done:
   %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
   ret {ptr, i64} %%r1
 }`, opDescPtr, e.internString("scandir"), direntNameOffset(), dotPtr, dotdotPtr, direntTypeOffset()))
+}
+
+// ensureFsReaddirRecursive declares __kml_fs_readdir_recursive, backing
+// fs.readdirSync(path, { recursive: true }): every entry in the tree, as a
+// string[] of paths relative to the starting directory ("sub", "sub/f.txt",
+// …), joined with "/". It is a genuine recursive descent — __kml_fs_readdir_rec
+// calls itself per subdirectory, threading the shared {data,len,cap}
+// accumulator (%bufslot). A subdirectory is recognised by d_type == DT_DIR (4),
+// the fast path every normal filesystem here populates (APFS/ext4/the Windows
+// shim); a filesystem that reports DT_UNKNOWN is not descended (a documented
+// caveat, no stat fallback). Only the top-level open throws (via the wrapper),
+// matching Node; an unreadable subdirectory is skipped. Returns {ptr, i64}, the
+// same aggregate the non-recursive form uses, so the string[] path in the
+// emitter is unchanged.
+func (e *Emitter) ensureFsReaddirRecursive() {
+	if e.usedFsReaddirRecursive {
+		return
+	}
+	e.usedFsReaddirRecursive = true
+	e.ensureFsReaddir() // shares opendir/readdir/closedir/strdup decls + the throw
+	e.ensureFree()
+	e.ensureStrlen()
+	e.ensureSprintf()
+	opDescPtr := e.internString("cannot open directory")
+	joinFmt := e.internString("%s/%s")
+	emptyPtr := e.internString("")
+	dotPtr := e.internString(".")
+	dotdotPtr := e.internString("..")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_readdir_rec(ptr %%full, ptr %%rel, ptr %%bufslot) {
+entry:
+  %%dir = call ptr @opendir(ptr %%full)
+  %%dnull = icmp eq ptr %%dir, null
+  br i1 %%dnull, label %%ret, label %%rl
+
+rl:
+  %%ent = call ptr @readdir(ptr %%dir)
+  %%enull = icmp eq ptr %%ent, null
+  br i1 %%enull, label %%close, label %%got
+
+got:
+  %%nameptr = getelementptr i8, ptr %%ent, i64 %d
+  %%isdot = call i32 @strcmp(ptr %%nameptr, ptr %s)
+  %%isdd = call i32 @strcmp(ptr %%nameptr, ptr %s)
+  %%d0 = icmp eq i32 %%isdot, 0
+  %%d1 = icmp eq i32 %%isdd, 0
+  %%skip = or i1 %%d0, %%d1
+  br i1 %%skip, label %%rl, label %%build
+
+build:
+  %%rellen = call i64 @strlen(ptr %%rel)
+  %%relempty = icmp eq i64 %%rellen, 0
+  br i1 %%relempty, label %%relroot, label %%reljoin
+
+relroot:
+  %%cr0 = call ptr @strdup(ptr %%nameptr)
+  br label %%haverel
+
+reljoin:
+  %%namelen = call i64 @strlen(ptr %%nameptr)
+  %%rsz1 = add i64 %%rellen, %%namelen
+  %%rsz2 = add i64 %%rsz1, 2
+  %%cr1 = call ptr @malloc(i64 %%rsz2)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%cr1, ptr %s, ptr %%rel, ptr %%nameptr)
+  br label %%haverel
+
+haverel:
+  %%childRel = phi ptr [ %%cr0, %%relroot ], [ %%cr1, %%reljoin ]
+  %%km = call ptr @__kml_str_from_cstr(ptr %%childRel)
+  %%data_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 0
+  %%len_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 1
+  %%cap_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 2
+  %%curlen = load i64, ptr %%len_p, align 8
+  %%curcap = load i64, ptr %%cap_p, align 8
+  %%np1 = add i64 %%curlen, 1
+  %%needgrow = icmp sgt i64 %%np1, %%curcap
+  br i1 %%needgrow, label %%grow, label %%store
+
+grow:
+  %%curdata = load ptr, ptr %%data_p, align 8
+  %%cap2 = mul i64 %%curcap, 2
+  %%atleast8 = icmp sgt i64 %%cap2, 8
+  %%newcap = select i1 %%atleast8, i64 %%cap2, i64 8
+  %%newcapbytes = mul i64 %%newcap, 8
+  %%newdata = call ptr @realloc(ptr %%curdata, i64 %%newcapbytes)
+  store ptr %%newdata, ptr %%data_p, align 8
+  store i64 %%newcap, ptr %%cap_p, align 8
+  br label %%store
+
+store:
+  %%dnow = load ptr, ptr %%data_p, align 8
+  %%slot = getelementptr ptr, ptr %%dnow, i64 %%curlen
+  store ptr %%km, ptr %%slot, align 8
+  %%newlen = add i64 %%curlen, 1
+  store i64 %%newlen, ptr %%len_p, align 8
+  %%dtp = getelementptr i8, ptr %%ent, i64 %d
+  %%dt = load i8, ptr %%dtp, align 1
+  %%isdir = icmp eq i8 %%dt, 4
+  br i1 %%isdir, label %%recurse, label %%freerel
+
+recurse:
+  %%fulllen = call i64 @strlen(ptr %%full)
+  %%namelen2 = call i64 @strlen(ptr %%nameptr)
+  %%fsz1 = add i64 %%fulllen, %%namelen2
+  %%fsz2 = add i64 %%fsz1, 2
+  %%cf = call ptr @malloc(i64 %%fsz2)
+  call i32 (ptr, ptr, ...) @sprintf(ptr %%cf, ptr %s, ptr %%full, ptr %%nameptr)
+  call void @__kml_fs_readdir_rec(ptr %%cf, ptr %%childRel, ptr %%bufslot)
+  call void @free(ptr %%cf)
+  br label %%freerel
+
+freerel:
+  call void @free(ptr %%childRel)
+  br label %%rl
+
+close:
+  call i32 @closedir(ptr %%dir)
+  br label %%ret
+
+ret:
+  ret void
+}
+
+define {ptr, i64} @__kml_fs_readdir_recursive(ptr %%path) {
+entry:
+  %%probe = call ptr @opendir(ptr %%path)
+  %%pnull = icmp eq ptr %%probe, null
+  br i1 %%pnull, label %%fail, label %%ok
+
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
+  unreachable
+
+ok:
+  call i32 @closedir(ptr %%probe)
+  %%bufslot = call ptr @malloc(i64 24)
+  %%data_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 0
+  %%len_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 1
+  %%cap_p = getelementptr { ptr, i64, i64 }, ptr %%bufslot, i32 0, i32 2
+  store ptr null, ptr %%data_p, align 8
+  store i64 0, ptr %%len_p, align 8
+  store i64 0, ptr %%cap_p, align 8
+  call void @__kml_fs_readdir_rec(ptr %%path, ptr %s, ptr %%bufslot)
+  %%finaldata = load ptr, ptr %%data_p, align 8
+  %%finallen = load i64, ptr %%len_p, align 8
+  %%r0 = insertvalue {ptr, i64} undef, ptr %%finaldata, 0
+  %%r1 = insertvalue {ptr, i64} %%r0, i64 %%finallen, 1
+  ret {ptr, i64} %%r1
+}`,
+		direntNameOffset(), dotPtr, dotdotPtr, joinFmt, direntTypeOffset(), joinFmt,
+		opDescPtr, e.internString("scandir"), emptyPtr))
 }
 
 // statLayout returns the host libc's struct stat field offsets and load widths
@@ -1006,6 +1167,7 @@ func (e *Emitter) ensureFsPathOps() {
 	e.usedFsPathOps = true
 	e.ensureFsThrow()
 	e.ensureMalloc()
+	e.ensureFree() // readlink's grow loop frees each undersized attempt
 	e.ensureStrlen()
 	e.ensureMemcpy()
 	e.ensureFsExists() // owns the `access` decl
@@ -1093,10 +1255,24 @@ ok:
 
 define ptr @__kml_fs_readlink(ptr %%path) {
 entry:
-  %%buf = call ptr @malloc(i64 4097)
-  %%n = call i64 @readlink(ptr %%path, ptr %%buf, i64 4096)
+  br label %%try
+try:
+  %%cap = phi i64 [ 256, %%entry ], [ %%cap2, %%grow ]
+  %%prev = phi ptr [ null, %%entry ], [ %%buf, %%grow ]
+  call void @free(ptr %%prev)
+  %%allocsz = add i64 %%cap, 1
+  %%buf = call ptr @malloc(i64 %%allocsz)
+  %%n = call i64 @readlink(ptr %%path, ptr %%buf, i64 %%cap)
   %%failed = icmp slt i64 %%n, 0
-  br i1 %%failed, label %%fail, label %%ok
+  br i1 %%failed, label %%fail, label %%chkfit
+chkfit:
+  ; readlink returns min(len, cap); n == cap means the target may be longer,
+  ; so grow and retry until it fits strictly inside the buffer (no truncation).
+  %%fit = icmp slt i64 %%n, %%cap
+  br i1 %%fit, label %%ok, label %%grow
+grow:
+  %%cap2 = mul i64 %%cap, 2
+  br label %%try
 fail:
   call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%path)
   unreachable
@@ -1146,6 +1322,41 @@ ok:
 		symlinkDesc, e.internString("symlink"), linkDesc, e.internString("link"),
 		readlinkDesc, e.internString("readlink"), chmodDesc, e.internString("chmod"),
 		truncateDesc, e.internString("open"), accessDesc, e.internString("access")))
+}
+
+// ensureFsCopyExclGuard declares __kml_fs_copy_excl_guard(dest, excl): the
+// COPYFILE_EXCL half of fs.copyFileSync's `mode` (ADR-00788). When excl is set
+// it opens dest with O_WRONLY|O_CREAT|O_EXCL (the "wx" flag bits) — atomically
+// failing with EEXIST if dest already exists, exactly as Node's COPYFILE_EXCL —
+// and closes the freshly-created empty file, which the subsequent
+// __kml_fs_write_file_bytes then fills. When excl is clear it is a no-op (the
+// default overwrite copy). Uses the shared fd-op decls (open/close).
+func (e *Emitter) ensureFsCopyExclGuard() {
+	if e.usedFsCopyExclGuard {
+		return
+	}
+	e.usedFsCopyExclGuard = true
+	e.ensureFsThrow()
+	e.ensureFsFdOps() // shares the open/close declarations
+	wx, _ := openFlagBits("wx")
+	desc := e.internString("cannot open file for writing")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_copy_excl_guard(ptr %%dest, i1 %%excl) {
+entry:
+  br i1 %%excl, label %%guard, label %%skip
+guard:
+  %%fd = call i32 (ptr, i32, ...) @open(ptr %%dest, i32 %d, i32 420)
+  %%failed = icmp slt i32 %%fd, 0
+  br i1 %%failed, label %%fail, label %%closefd
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %%dest)
+  unreachable
+closefd:
+  %%c = call i32 @close(i32 %%fd)
+  br label %%skip
+skip:
+  ret void
+}`, wx, desc, e.internString("open")))
 }
 
 // ensureFsRm declares __kml_fs_rm (ADR-00497): fs.rmSync. remove(3) first
@@ -1284,6 +1495,33 @@ fail:
 ok:
   ret void
 }`, utimesDesc, e.internString("utime")))
+}
+
+// ensureFsFutimes declares __kml_fs_futimes(fd, timeval[2]*): the fd-based twin
+// of __kml_fs_utimes (ADR-00788) — futimes(2) on POSIX, a win32 SetFileTime
+// shim keyed on _get_osfhandle(fd) (win32fs.c) on Windows. Same two
+// {i64 sec, i64 usec} `times` buffer as utimesSync.
+func (e *Emitter) ensureFsFutimes() {
+	if e.usedFsFutimes {
+		return
+	}
+	e.usedFsFutimes = true
+	e.ensureFsThrow()
+	e.emitGlobal("declare i32 @futimes(i32 noundef, ptr noundef)")
+	desc := e.internString("cannot set file times")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_fs_futimes(i64 %%fd, ptr %%times) {
+entry:
+  %%f32 = trunc i64 %%fd to i32
+  %%r = call i32 @futimes(i32 %%f32, ptr %%times)
+  %%failed = icmp ne i32 %%r, 0
+  br i1 %%failed, label %%fail, label %%ok
+fail:
+  call void @__kml_fs_throw(ptr %s, ptr %s, ptr %s)
+  unreachable
+ok:
+  ret void
+}`, desc, e.internString("futime"), e.internString("")))
 }
 
 // ensureOpenDecl declares C `open` exactly once (shared by the fd ops and the

@@ -53,6 +53,40 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			return e.emitAnyBinary("+", left, right, ex.GetPos())
 		}
 	}
+	// TDD-00187 strict gate: arithmetic/relational use of a `T | undefined`
+	// absence result (`arr.pop() + 1`) without narrowing is a compile error
+	// under strict, exactly as strictNullChecks. Equality and logical ops stay
+	// legal (TS allows them), and `T | null` values keep TDD-00064's
+	// documented lenient payload collapse.
+	if !e.compatJS() {
+		switch ex.Op {
+		case "==", "===", "!=", "!==", "&&", "||", "??":
+		default:
+			// String concatenation is legal on `T | undefined` in TS (an
+			// absent operand renders "undefined") — only genuine arithmetic/
+			// relational use gates.
+			if !(ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))) {
+				for _, v := range []Value{left, right} {
+					if isNullableScalar(v.Ty) && v.Ty.IsUndefined {
+						return Value{}, fmt.Errorf("%d:%d: '%s | undefined' is possibly undefined in operator '%s' — narrow with `if (x !== undefined)`, provide a default with `??`, or assert with `!`",
+							ex.GetPos().Line, ex.GetPos().Col, tsTypeName(v.Ty.withoutNullable()), ex.Op)
+					}
+				}
+			}
+		}
+	}
+
+	// Presence-aware equality on a nullable-scalar aggregate: `arr.pop() === 0`
+	// on an empty array must be false (the value is undefined, not the payload
+	// zero the lenient collapse below would compare). Two aggregates compare
+	// equal when both absent or both present with equal payloads.
+	if (ex.Op == "==" || ex.Op == "===" || ex.Op == "!=" || ex.Op == "!==") &&
+		(isNullableScalar(left.Ty) || isNullableScalar(right.Ty)) &&
+		!left.Ty.IsNull && !right.Ty.IsNull &&
+		nullableScalarEqComparable(left.Ty) && nullableScalarEqComparable(right.Ty) {
+		return e.emitNullableScalarValueEq(ex.Op, left, right)
+	}
+
 	strConcatToStr := ex.Op == "+" && (isStringTy(left.Ty) || isStringTy(right.Ty))
 	if isNullableScalar(left.Ty) && !strConcatToStr {
 		left = e.nullableScalarPayloadOf(left)
@@ -1585,7 +1619,11 @@ func (e *Emitter) emitNullCoalesce(ex *ast.BinaryExpression) (Value, error) {
 	// coerce a non-ptr right (a number/boolean) to ptr, and `coerce(number,
 	// ptr)` silently returns the number, emitting an invalid `store ptr
 	// <double>`. Matches JS (`null ?? 42 === 42`) and keeps the IR well-typed.
-	if left.Ty.IsNull || left.Ty.IsUndefined {
+	// Keyed on IsNull (the literal `null`/`undefined`, both IsNull) — a runtime
+	// `T | undefined` *pointer* union (a null-flagged ptr from wrapUndefinedable,
+	// IsUndefined but not IsNull, TDD-00187) is NOT statically nullish and must
+	// fall through to the runtime null test below.
+	if left.Ty.IsNull {
 		return e.emitExpr(ex.Right)
 	}
 	if left.Ty.IR != "ptr" {

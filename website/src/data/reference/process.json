@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "12/32",
-    "strictPct": 38
+    "strict": "13/32",
+    "strictPct": 41
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. Two recurring divergences: an out-of-range process.argv[i] reads \"\" (falsy), not Node's undefined; and every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
@@ -27,7 +27,7 @@
       "snippet": "const args: string[] = process.argv\nfor (const a of args) console.log(a)",
       "differences": [
         "Mirrors C's `argv` directly (`argv[0]` is the binary's own path), not Node's two-prefix convention.",
-        "An out-of-range `process.argv[i]` read yields `\"\"` (falsy), not Node's `undefined` and not the general array bounds throw."
+        "An out-of-range `process.argv[i]` read is a real `undefined` (`string | undefined`, TDD-00187): falsy, `=== undefined` true, never a bounds throw; strict mode requires narrowing/`??`/`!` before bare-string use, `-compat=js` auto-widens. `typeof` still reports `'string'` when absent (Node: `'undefined'`)."
       ],
       "seeAlso": [
         "process.env",
@@ -41,12 +41,12 @@
       "id": "process.env",
       "name": "process.env",
       "statusRow": "Environment variables (process.env.KEY / process.env[\"KEY\"])",
-      "signature": "process.env.KEY: string | null; process.env[\"KEY\"]",
-      "badge": "exact",
-      "description": "Environment variables, via both dot and bracket notation. Returns a possibly-null string (same convention as .find()), so process.env.X ?? \"default\" works.",
+      "signature": "process.env.KEY: string | undefined; process.env[\"KEY\"]",
+      "badge": "caveats",
+      "description": "Environment variables, via both dot and bracket notation. A missing variable is a real `undefined` — printing, `=== undefined`, `??`, and narrowing all behave as in Node; strict mode requires narrowing/`??`/`!` before using the value where a bare string is expected.",
       "returns": {
-        "type": "string | null",
-        "desc": "The value, or null if unset."
+        "type": "string | undefined",
+        "desc": "The value, or undefined if unset."
       },
       "exampleKey": "process/process",
       "snippet": "const path: string = process.env.PATH ?? \"no PATH set\"",
@@ -56,7 +56,10 @@
       ],
       "spec": {
         "mdn": "https://nodejs.org/api/process.html#processenv"
-      }
+      },
+      "differences": [
+        "`typeof process.env.MISSING` is `'string'` (Node: `'undefined'`) — `typeof` reads the static kind, not the runtime absence."
+      ]
     },
     {
       "id": "process.exit",
@@ -326,18 +329,15 @@
       "id": "process.stdout.size",
       "name": "process.stdout.columns / .rows",
       "statusRow": "process.stdout.columns / .rows (terminal size)",
-      "signature": "process.stdout.columns: number; process.stdout.rows: number",
-      "badge": "caveats",
-      "description": "The terminal's current width and height, read live via ioctl(TIOCGWINSZ) on each access (never cached, matching Node). Available on process.stdout and process.stderr. Pair with process.on('SIGWINCH') to repaint on a window resize.",
+      "signature": "process.stdout.columns: number | undefined; process.stdout.rows: number | undefined",
+      "badge": "exact",
+      "description": "The terminal's current width and height, read live via ioctl(TIOCGWINSZ) on each access (never cached, matching Node). Off a TTY (piped/redirected) the value is a real `undefined`, exactly as in Node — `?? 80` is the idiomatic fallback, and strict mode requires narrowing/`??`/`!` before bare-number use. Available on process.stdout and process.stderr. Pair with process.on('SIGWINCH') to repaint on a window resize.",
       "returns": {
-        "type": "number",
-        "desc": "Columns or rows."
+        "type": "number | undefined",
+        "desc": "Columns or rows, or undefined when the fd is not a terminal."
       },
       "exampleKey": "tty/keys",
       "snippet": "console.log(process.stdout.columns + \"x\" + process.stdout.rows)",
-      "differences": [
-        "Off a non-TTY (piped/redirected) returns an 80x24 fallback rather than Node's `undefined` — there is no clean undefined-number here."
-      ],
       "seeAlso": [
         "process.stdin.setRawMode",
         "process.signals"
@@ -406,7 +406,7 @@
       "statusRow": "Writing process.env (process.env.KEY = val / process.env[\"KEY\"] = val)",
       "signature": "process.env.KEY = val; process.env[\"KEY\"] = val",
       "badge": "caveats",
-      "description": "Sets an environment variable via setenv(key, String(val), overwrite); a written variable is inherited by child processes.",
+      "description": "Sets an environment variable via setenv(key, String(val), overwrite); a written variable is inherited by child processes. `delete process.env.KEY` unsets the variable for real.",
       "returns": {
         "type": "void",
         "desc": "Nothing."
@@ -414,7 +414,6 @@
       "exampleKey": "process/process_info",
       "snippet": "process.env.GREETING = \"hi\"",
       "differences": [
-        "Write only — no `delete process.env.KEY` (`delete` is not a parser keyword; the fixed-shape object model has no dynamic delete).",
         "Compound assignment (`process.env.X += …`) is a clean rejection."
       ],
       "seeAlso": [
@@ -520,13 +519,14 @@
       "statusRow": "process.memoryUsage()",
       "signature": "process.memoryUsage(): { rss: number; heapTotal: number; heapUsed: number; external: number; arrayBuffers: number }",
       "badge": "caveats",
-      "description": "Returns Node's object shape. Only rss carries a real value — the process's instantaneous resident set size (Darwin task_info, Linux /proc/self/statm), matching Node's live rss. There is no managed V8 heap to measure in a native build, so heapTotal/heapUsed/external/arrayBuffers are returned as 0 rather than fabricated.",
+      "description": "Returns Node's object shape. rss is the process's instantaneous resident set size (Darwin task_info, Linux /proc/self/statm), matching Node's live rss. heapTotal/heapUsed report this compiler's own object heap — Boehm's collected heap under -mm=gc, otherwise the C allocator's arena (Darwin malloc_zone_statistics, glibc mallinfo2) — so they are real and grow with allocation, a native reinterpretation rather than V8's number. external/arrayBuffers have no native off-heap analogue and stay 0.",
       "returns": {
         "type": "object",
-        "desc": "Memory-usage byte counts; only rss is populated."
+        "desc": "Memory-usage byte counts; rss and heapTotal/heapUsed are populated, external/arrayBuffers are 0."
       },
       "caveats": [
-        "heapTotal/heapUsed/external/arrayBuffers are always 0 (no managed heap)"
+        "heapTotal/heapUsed measure this compiler's object heap (C allocator arena, or Boehm's heap under -mm=gc), not a V8 JS-object heap — real and growth-tracking, but different magnitudes than Node",
+        "external/arrayBuffers are always 0 (no off-heap C++-binding accounting)"
       ],
       "exampleKey": "process/process_info",
       "snippet": "const m = process.memoryUsage(); console.log(m.rss > 0)",
@@ -607,17 +607,17 @@
       "id": "process.stdin",
       "name": "process.stdin (streamed)",
       "statusRow": "process.stdin (streamed reads, not just readLineSync())",
-      "signature": "process.stdin.on('data' | 'end', cb)",
+      "signature": "process.stdin.setEncoding('utf8'): typeof process.stdin; process.stdin.on('data' | 'end', cb): typeof process.stdin",
       "badge": "caveats",
-      "description": "Streamed stdin over a non-blocking fd 0 folded into the same select() loop as readline/child_process: 'data' per read chunk, 'end' once on EOF. Distinct from the blocking readLineSync() and the line-oriented readline module.",
+      "description": "Streamed stdin over a non-blocking fd 0 folded into the same select() loop as readline/child_process: 'data' per read chunk, 'end' once on EOF. setEncoding('utf8') and the stream methods return the stream, so the idiomatic setEncoding('utf8').on('data', …).on('end', …) chain works. Distinct from the blocking readLineSync() and the line-oriented readline module.",
       "returns": {
-        "type": "void",
-        "desc": "Registers a stream listener."
+        "type": "typeof process.stdin",
+        "desc": "The stream, for chaining."
       },
       "exampleKey": "process_stdin/stream",
-      "snippet": "process.stdin.on(\"data\", (chunk: string) => process.stdout.write(chunk.toUpperCase()))\nprocess.stdin.on(\"end\", () => console.error(\"done\"))",
+      "snippet": "process.stdin.setEncoding(\"utf8\")\n  .on(\"data\", (chunk: string) => process.stdout.write(chunk.toUpperCase()))\n  .on(\"end\", () => console.error(\"done\"))",
       "differences": [
-        "`'data'` delivers each chunk as a UTF-8 string, not a `Buffer` — no `setEncoding`, no binary mode.",
+        "`'data'` delivers each chunk as a UTF-8 string, not a `Buffer` — `setEncoding('utf8')` is a faithful no-op but a non-utf8 encoding is rejected (no binary mode).",
         "Flowing mode only (attaching `'data'` starts it) — no `.pause()`/`.resume()`/`.read()`/`'readable'`.",
         "One listener per event, arrow/function-expression literal only; callbacks fire synchronously from the dispatch, not via a microtask."
       ],
@@ -669,7 +669,7 @@
         "One listener per event, an arrow/function-expression literal only; no `removeListener`.",
         "spawn's options support `{ cwd, shell, stdio: 'pipe', env }` — `cwd` is real; `shell: true` routes the command through the platform shell (`/bin/sh -c` / `cmd.exe /d /s /c`, honouring `%ComSpec%`) as one string (a shell path, a dynamic value, or `shell:true` + an args array are clean rejections); `env` (an object literal of string values) fully replaces the child's environment, Node's non-merging semantics; `windowsHide` (literal bool) suppresses the child's console window on Windows (`CREATE_NO_WINDOW`), a no-op on POSIX; `timeout` (ms) has the event loop kill the child with `killSignal` (a literal signal name/number, default SIGTERM), surfacing as the `(null, '<signal>')` exit event; `detached` (literal bool) makes the child a new session/group leader — `setsid` on POSIX, `DETACHED_PROCESS` on Windows; `child.unref()`/`ref()` drop or restore the child's hold on the event-loop keepalive; `stdio` takes `'pipe'`/`'inherit'`/`'ignore'` as a string or a 3-element `[stdin, stdout, stderr]` array — inherit wires the fd to the parent's, ignore sends it to `/dev/null`/NUL (fd numbers, `'ipc'` and streams are clean rejections); exec/execFile take no options.",
         "`exec`/`execSync` hand the command to the shell verbatim (embedded quotes survive); on Windows a `.bat`/`.cmd` spawned without a shell is refused, surfacing as the spawn `'error'` event (EINVAL), closing the CVE-2024-27980 injection path.",
-        "A spawn that fails to start (a missing command → ENOENT) emits `'error'` with an `Error` and not `'exit'`; the Error carries `.message` but not Node's `.code`/`.errno`/`.syscall`.",
+        "A spawn that fails to start (a missing command → ENOENT) emits `'error'` with an `Error` and not `'exit'`; the Error carries `.message`, `.code` (`'ENOENT'` — the canonical `e.code === 'ENOENT'` guard) and `.errno` (the negative libuv-style errno, `-2` on POSIX). `.syscall`/`.path`/`.spawnargs` and Node's `spawn <file> <CODE>` message wording (which need the command string) are still unset.",
         "`'close'`/`'exit'` fire as `(code, signal)` like Node: a signal death gives `code = null` and the signal name (`'SIGTERM'`), a normal exit the integer code and `signal = null`. POSIX recovers the signal from the wait status; Windows from the signal `child.kill` recorded. A legacy listener with a single non-nullable `number` param sees `0` on a signal death (type it `number | null` for the faithful `null`).",
         "The exit `code` is the child's real width — the full 32-bit value on Windows (`cmd /c exit 300` → `300`), the 8-bit wait-status field on POSIX (`300 & 0xff = 44`, as Node also reports there).",
         "`child.kill` takes a signal name string only as a literal (resolved to the host's signal number at compile time) or a number; a dynamic signal-name string is a clean rejection.",

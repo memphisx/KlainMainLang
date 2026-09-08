@@ -405,6 +405,8 @@ func (st *tdzState) walkExpr(expr ast.Expression) error {
 				return err
 			}
 		}
+	case *ast.NonNullExpression:
+		return st.walkExpr(e.Arg)
 	case *ast.SpreadElement:
 		return st.walkExpr(e.Arg)
 	case *ast.UnaryExpression:
@@ -1081,6 +1083,8 @@ func (da *daState) walkExprDA(expr ast.Expression) error {
 				return err
 			}
 		}
+	case *ast.NonNullExpression:
+		return da.walkExprDA(e.Arg)
 	case *ast.SpreadElement:
 		return da.walkExprDA(e.Arg)
 	case *ast.UnaryExpression:
@@ -1412,6 +1416,8 @@ func gatherAssignedNamesExpr(expr ast.Expression, out map[string]bool) {
 		for _, x := range e.Exprs {
 			gatherAssignedNamesExpr(x, out)
 		}
+	case *ast.NonNullExpression:
+		gatherAssignedNamesExpr(e.Arg, out)
 	case *ast.UnaryExpression:
 		gatherAssignedNamesExpr(e.Arg, out)
 	case *ast.SpreadElement:

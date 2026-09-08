@@ -8,6 +8,7 @@ package llvm
 
 import (
 	"fmt"
+	"runtime"
 
 	"KlainMainLang/ast"
 )
@@ -34,17 +35,35 @@ func (e *Emitter) emitFsCreateReadStream(args []ast.Expression, pos ast.Pos) (Va
 	}
 
 	e.ensureNodeStreamRuntime()
-	e.ensureFsReadStream()
 	chunkTy := TypePtr // string chunks
 
-	// Build a WHATWG rstream, fill it from the file, close it — the exact shape
-	// emitReadableStreamFrom uses, but sourced from fread instead of an array.
+	// The pool runtime is POSIX-only (see emitFsPromisePooled): Windows keeps
+	// the pre-TDD-00186 eager read-to-EOF fill until the reactor work lands.
+	if runtime.GOOS == "windows" {
+		e.ensureFsReadStream()
+		fulfillFn := e.emitStreamFulfillThunk(chunkTy)
+		rs := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfillFn))
+		e.emitInstr(fmt.Sprintf("call void @__kml_fs_read_stream(ptr %s, ptr %s, i64 %d)", pathVal.Ref, rs, hwm))
+		closed := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, rs))
+		return e.wrapWebReadable(Value{Ref: rs, Ty: ReadableStreamType(chunkTy)})
+	}
+
+	e.ensureThreadPool() // pool + stream-completion drain helpers (TDD-00186)
+	e.ensureFsOpenRead()
+
+	// TDD-00186: build a WHATWG rstream, open the file synchronously (throwing on
+	// a missing file, as the eager path did), then read it off the loop thread on
+	// the pool — each highWaterMark chunk is enqueued via the pool's stream drain,
+	// and the readable is closed by the terminal STREAM_END completion. The read
+	// no longer blocks the reactor.
 	fulfillFn := e.emitStreamFulfillThunk(chunkTy)
 	rs := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfillFn))
-	e.emitInstr(fmt.Sprintf("call void @__kml_fs_read_stream(ptr %s, ptr %s, i64 %d)", pathVal.Ref, rs, hwm))
-	closed := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, rs))
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_open_read(ptr %s)", fp, pathVal.Ref))
+	e.emitInstr(fmt.Sprintf("call void @__kml_pool_submit_readstream(ptr %s, ptr %s, i64 %d)", rs, fp, hwm))
 
 	// Wrap the readable in a Node Readable (.on('data')/.pipe()/for-await).
 	return e.wrapWebReadable(Value{Ref: rs, Ty: ReadableStreamType(chunkTy)})

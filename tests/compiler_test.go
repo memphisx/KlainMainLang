@@ -91,6 +91,9 @@ func buildBinary(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -363,6 +366,49 @@ func appendSync(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) 
 	return append(clangArgs, "-pthread", "-Wno-deprecated-declarations", syncFile)
 }
 
+// appendThreadPool links the async-I/O thread-pool runtime (TDD-00185) into the
+// test build, mirroring main.go's EmbeddedCSources entry — the flags come from
+// em.ThreadPoolCFlags() (the shared source of truth) so this can't drift.
+func appendThreadPool(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesThreadPool() {
+		return clangArgs
+	}
+	poolFile := filepath.Join(dir, "klainpool.c")
+	if err := os.WriteFile(poolFile, []byte(llvm.ThreadPoolSource()), 0644); err != nil {
+		t.Fatalf("write threadpool runtime: %v", err)
+	}
+	clangArgs = append(clangArgs, em.ThreadPoolCFlags()...)
+	return append(clangArgs, poolFile)
+}
+
+func appendProcMem(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesHeapStats() {
+		return clangArgs
+	}
+	pmFile := filepath.Join(dir, "procmem.c")
+	if err := os.WriteFile(pmFile, []byte(llvm.ProcMemSource()), 0644); err != nil {
+		t.Fatalf("write procmem shim: %v", err)
+	}
+	// This harness always builds in the default (non-gc) allocator mode, so the
+	// Darwin/glibc allocator-stats branch is what compiles here; the -mm=gc
+	// (KLAIN_GC) branch is exercised through the CLI / make examples path.
+	return append(clangArgs, pmFile)
+}
+
+func appendOSHomedirPw(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
+	t.Helper()
+	if !em.UsesOSHomedirPw() {
+		return clangArgs
+	}
+	pwFile := filepath.Join(dir, "oshomedirpw.c")
+	if err := os.WriteFile(pwFile, []byte(llvm.OSHomedirPwSource()), 0644); err != nil {
+		t.Fatalf("write os.homedir passwd shim: %v", err)
+	}
+	return append(clangArgs, pwFile)
+}
+
 func appendTty(t *testing.T, em *llvm.Emitter, dir string, clangArgs []string) []string {
 	t.Helper()
 	if !em.UsesTtyShim() {
@@ -444,6 +490,9 @@ func buildBinaryGC(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -524,6 +573,9 @@ func buildBinaryFromFile(t *testing.T, srcFile string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs, webviewUsed, wverr := appendWebview(t, em, dir, clangArgs)
@@ -637,6 +689,9 @@ func buildBinaryGCImports(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -668,6 +723,36 @@ func compileAndRunImports(t *testing.T, src string) string {
 func assertOutputImports(t *testing.T, src, want string) {
 	t.Helper()
 	compareLines(t, compileAndRunImports(t, src), want)
+}
+
+// assertOutputImportsEnv compiles import-using source, then runs the binary
+// with extra environment variables overriding the inherited ones (each entry
+// "KEY=VALUE"). The env override applies only to the child run, not to the Go
+// test process — so a test can set e.g. TMPDIR for the program under test
+// without disturbing t.TempDir()/the build, which read TMPDIR themselves. An
+// override with an existing key replaces the inherited value rather than
+// appending a duplicate (whose resolution getenv leaves platform-dependent).
+func assertOutputImportsEnv(t *testing.T, src, want string, overrides ...string) {
+	t.Helper()
+	binFile := buildBinaryImports(t, src)
+	env := os.Environ()
+	for _, o := range overrides {
+		key := o[:strings.IndexByte(o, '=')+1]
+		kept := env[:0]
+		for _, e := range env {
+			if !strings.HasPrefix(e, key) {
+				kept = append(kept, e)
+			}
+		}
+		env = append(kept, o)
+	}
+	cmd := exec.Command(binFile)
+	cmd.Env = env
+	result, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
 
 // compileAndRunExpectExitImports is compileAndRunExpectExit's counterpart
@@ -782,6 +867,9 @@ func buildBinaryASan(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -865,6 +953,9 @@ func buildBinaryGCASan(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs, _ = appendCryptoBackend(t, em, dir, clangArgs)
 	clangArgs = appendTLSBackend(t, em, dir, clangArgs)
@@ -964,6 +1055,9 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1030,6 +1124,9 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1126,6 +1223,9 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1185,6 +1285,9 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)
@@ -1351,6 +1454,9 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	clangArgs = appendSpawnSync(t, em, dir, clangArgs)
 	clangArgs = appendURLPattern(t, em, dir, clangArgs)
 	clangArgs = appendPathWin32(t, em, dir, clangArgs)
+	clangArgs = appendThreadPool(t, em, dir, clangArgs)
+	clangArgs = appendProcMem(t, em, dir, clangArgs)
+	clangArgs = appendOSHomedirPw(t, em, dir, clangArgs)
 	clangArgs = appendTty(t, em, dir, clangArgs)
 	clangArgs = appendTui(t, em, dir, clangArgs)
 	clangArgs = appendSync(t, em, dir, clangArgs)

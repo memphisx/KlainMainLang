@@ -121,9 +121,60 @@ fs.writeFileSync("a")`)
 
 func TestE2EFsReadFileSyncWrongArgCountRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readFileSync("a", "b")`)
+fs.readFileSync("a", "utf8", "extra")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.readFileSync with the wrong argument count, got none")
+	}
+}
+
+// --- fs read/write encoding & flag options (ADR-00785) ---
+
+func TestE2EFsReadWriteEncodingOption(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "enc.txt")
+	// The canonical `writeFileSync(p, d, 'utf8')` / `readFileSync(p, 'utf8')`
+	// idiom and its `{ encoding: 'utf8' }` object form both compile and behave
+	// (strings are already UTF-8, so the encoding is a faithful no-op).
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "hello", "utf8")
+console.log(fs.readFileSync(%q, "utf8"))
+fs.appendFileSync(%q, " world", { encoding: "utf8" })
+console.log(fs.readFileSync(%q, { encoding: "utf8" }))
+`, path, path, path, path)
+	assertOutputImports(t, src, "hello\nhello world")
+}
+
+func TestE2EFsWriteFileSyncAppendFlag(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "flag.txt")
+	// `{ flag: 'a' }` turns writeFileSync into an append (Node semantics);
+	// `{ flag: 'w' }` truncates, the default.
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "a")
+fs.writeFileSync(%q, "B", { flag: "a" })
+fs.writeFileSync(%q, "C", { flag: "a" })
+console.log(fs.readFileSync(%q, "utf8"))
+fs.writeFileSync(%q, "reset", { flag: "w" })
+console.log(fs.readFileSync(%q, "utf8"))
+`, path, path, path, path, path, path)
+	assertOutputImports(t, src, "aBC\nreset")
+}
+
+func TestE2EFsReadFileSyncBadEncodingRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readFileSync("a", "latin1")`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-utf8 encoding, got none")
+	}
+}
+
+func TestE2EFsWriteFileSyncModeOptionRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.writeFileSync("a", "d", { mode: 384 })`)
+	if err == nil {
+		t.Fatal("expected a clean rejection for the unsupported mode option, got none")
 	}
 }
 
@@ -451,12 +502,117 @@ fs.copyFileSync(%q, %q)
 	}
 }
 
+// ADR-00795: fs.constants exposes the POSIX access modes and the copyFile
+// flags as compile-time numeric literals, so code can use the named constants
+// (via `fs.constants.X`, a `const c = fs.constants` alias, or a
+// `import { constants }` named import) with accessSync/copyFileSync instead of
+// raw magic numbers. Values match Node exactly.
+func TestE2EFsConstantsValues(t *testing.T) {
+	assertOutputImports(t, `
+import fs from 'fs'
+const c = fs.constants
+console.log(fs.constants.F_OK, fs.constants.R_OK, fs.constants.W_OK, fs.constants.X_OK)
+console.log(c.COPYFILE_EXCL, c.COPYFILE_FICLONE, c.COPYFILE_FICLONE_FORCE)
+`, "0 4 2 1\n1 2 4")
+}
+
+func TestE2EFsConstantsNamedImportAndConsumers(t *testing.T) {
+	dir := tempDir(t)
+	src := filepath.Join(dir, "src.txt")
+	dest := filepath.Join(dir, "dest.txt")
+	code := fmt.Sprintf(`
+import { constants, writeFileSync, accessSync, copyFileSync, existsSync } from 'fs'
+writeFileSync(%q, "hi")
+accessSync(%q, constants.R_OK)
+console.log("readable")
+copyFileSync(%q, %q, constants.COPYFILE_EXCL)
+console.log("copied", existsSync(%q))
+try {
+  copyFileSync(%q, %q, constants.COPYFILE_EXCL)
+  console.log("overwrote")
+} catch (e) {
+  console.log("EXCL blocked")
+}
+`, src, src, src, dest, dest, src, dest)
+	assertOutputImports(t, code, "readable\ncopied true\nEXCL blocked")
+}
+
+func TestE2EFsConstantsUnknownMemberRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+import fs from 'fs'
+console.log(fs.constants.O_RDWR)
+`)
+	if err == nil {
+		t.Fatal("expected a compile error for an unsupported fs.constants member, got none")
+	}
+}
+
 func TestE2EFsCopyFileSyncWrongArgCountRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import fs from 'fs'
 fs.copyFileSync("a")`)
 	if err == nil {
 		t.Fatal("expected a compile error for fs.copyFileSync with the wrong argument count, got none")
 	}
+}
+
+// copyFileSync's mode argument: COPYFILE_EXCL (1) fails with EEXIST if dest
+// already exists; without it (or mode 0) the copy overwrites (ADR-00788).
+func TestE2EFsCopyFileSyncModeExcl(t *testing.T) {
+	dir := tempDir(t)
+	src := filepath.Join(dir, "src.txt")
+	dst := filepath.Join(dir, "dst.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prog := fmt.Sprintf(`
+import fs from 'fs'
+fs.copyFileSync(%q, %q)                       // create
+fs.copyFileSync(%q, %q, 0)                     // overwrite ok (mode 0)
+console.log(fs.readFileSync(%q, 'utf8'))
+try {
+  fs.copyFileSync(%q, %q, 1)                   // COPYFILE_EXCL → EEXIST
+  console.log('NO THROW')
+} catch (e) {
+  console.log('excl:' + (e as any).code)
+}
+`, src, dst, src, dst, dst, src, dst)
+	assertOutputImports(t, prog, "hello\nexcl:EEXIST")
+}
+
+func TestE2EFsReadlinkSyncLongTarget(t *testing.T) {
+	// The old readlink path capped the target at 4096 bytes; the grow loop
+	// handles any length (ADR-00788). 500 chars exercises the 256→512 grow and
+	// stays under macOS's own symlink-target limit.
+	dir := tempDir(t)
+	link := filepath.Join(dir, "l")
+	target := ""
+	for i := 0; i < 500; i++ {
+		target += "z"
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	src := fmt.Sprintf(`
+import fs from 'fs'
+const s = fs.readlinkSync(%q)
+console.log(s.length)
+`, link)
+	assertOutputImports(t, src, "500")
+}
+
+func TestE2EFsFutimesSync(t *testing.T) {
+	// futimesSync sets atime/mtime on an open fd (the fd-based utimesSync).
+	dir := tempDir(t)
+	path := filepath.Join(dir, "t.txt")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "x")
+const fd = fs.openSync(%q, "r+")
+fs.futimesSync(fd, 1000000, 2000000)
+fs.closeSync(fd)
+console.log(Math.round(fs.statSync(%q).mtimeMs / 1000))
+`, path, path, path)
+	assertOutputImports(t, src, "2000000")
 }
 
 func TestE2EFsReaddirSyncListsEntriesExcludingDotAndDotDot(t *testing.T) {
@@ -534,11 +690,70 @@ console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'L
 	assertOutputImports(t, src, "d:dir, f.txt:file\nno-mode-leak")
 }
 
+// Dirent.parentPath (the directory the entry was read from) and the device
+// kind predicates isFIFO/isCharacterDevice/isBlockDevice/isSocket (ADR-00787).
+func TestE2EFsReaddirSyncDirentParentPathAndDevicePredicates(t *testing.T) {
+	dir := tempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const ents = fs.readdirSync(%q, { withFileTypes: true })
+const rows: string[] = []
+for (const e of ents) {
+  const kind = e.isFIFO() || e.isCharacterDevice() || e.isBlockDevice() || e.isSocket() ? 'dev'
+    : e.isDirectory() ? 'dir' : e.isFile() ? 'file' : '?'
+  rows.push(e.name + ':' + kind + ':' + (e.parentPath === %q ? 'parent-ok' : 'BAD'))
+}
+rows.sort()
+console.log(rows.join(', '))
+// parentPath is own-enumerable (like name); mode stays hidden.
+console.log(JSON.stringify(ents[0]).indexOf('parentPath') !== -1 ? 'parentPath-enumerable' : 'MISSING')
+console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'LEAK')
+`, dir, dir)
+	assertOutputImports(t, src, "d:dir:parent-ok, f.txt:file:parent-ok\nparentPath-enumerable\nno-mode-leak")
+}
+
 func TestE2EFsReaddirSyncWithFileTypesBadOptionRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import fs from 'fs'
-fs.readdirSync('.', { recursive: true })`)
+fs.readdirSync('.', { encoding: 'buffer' })`)
 	if err == nil {
 		t.Fatal("expected a compile error for an unsupported readdirSync option, got none")
+	}
+}
+
+// fs.readdirSync(path, { recursive: true }) — every nested entry as a string[]
+// of "/"-joined paths relative to the start dir (ADR-00786).
+func TestE2EFsReaddirSyncRecursive(t *testing.T) {
+	dir := tempDir(t)
+	for _, d := range []string{"sub/deep", "other"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	for _, f := range []string{"a.txt", "sub/b.txt", "sub/deep/c.txt", "other/d.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	src := fmt.Sprintf(`
+import fs from 'fs'
+const all = fs.readdirSync(%q, { recursive: true })
+console.log(all.length)
+for (const e of all.sort()) console.log(e)
+`, dir)
+	assertOutputImports(t, src, "7\na.txt\nother\nother/d.txt\nsub\nsub/b.txt\nsub/deep\nsub/deep/c.txt")
+}
+
+func TestE2EFsReaddirSyncRecursiveWithFileTypesRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, `import fs from 'fs'
+fs.readdirSync('.', { recursive: true, withFileTypes: true })`)
+	if err == nil {
+		t.Fatal("expected recursive + withFileTypes together to be a clean rejection, got none")
 	}
 }
 

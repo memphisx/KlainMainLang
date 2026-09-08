@@ -468,15 +468,15 @@ func (e *Emitter) emitConsoleGroupIndent(fd int) {
 	e.emitLabel(doneL)
 }
 
-// emitConsoleGroup implements console.group(label?): prints label (if
-// given) at the current indent depth, then increases the depth by one so
-// every subsequent console.* call (until the matching groupEnd) is indented
-// one level further.
+// emitConsoleGroup implements console.group(...label) and its
+// console.groupCollapsed alias (identical in a terminal — only a browser
+// devtools console renders the collapsed variant differently). The label
+// arguments are printed exactly like console.log — variadic, with the same
+// format-specifier handling — at the current indent depth, then the depth is
+// increased by one so every subsequent console.* call (until the matching
+// groupEnd) is indented one level further.
 func (e *Emitter) emitConsoleGroup(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: console.group takes 0 or 1 arguments (label?)", pos.Line, pos.Col)
-	}
-	if len(args) == 1 {
+	if len(args) > 0 {
 		if _, err := e.emitConsolePrint(args, 1, ""); err != nil {
 			return Value{}, err
 		}
@@ -794,7 +794,9 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		safe := e.freshReg()
 		isNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), val.Ref))
+		// A `T | undefined` pointer (an element-absence result, TDD-00187)
+		// renders its null as "undefined", matching real JS.
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString(absentLiteral(val.Ty)), val.Ref))
 		call("ptr " + safe)
 	}
 }

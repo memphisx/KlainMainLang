@@ -4,7 +4,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> TypeScript → native compiler written in Go. Emits LLVM IR text, compiled with `clang -O2`.\n> Targets whatever architecture the host clang defaults to (arm64 on Apple Silicon, x86-64 on Linux, etc.); Windows x86-64 is supported through the mingw-w64 UCRT toolchain (TDD-00177 — see the README's Windows section for the install list and the remaining gaps).\n> `number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, `1 / 0` → `Infinity`); `int8..int64`/`uint8..uint64`/`float32` are the integer/width escape hatch — see [TYPE-SYSTEM.md](TYPE-SYSTEM.md).\n> Multi-file compilation exists (named `import`/`export` plus static CommonJS `require`, V1 scope — see [MODULES.md](MODULES.md)); the entry file's top-level statements still all run in one `main()`, and imported files may only contain declarations.\n> No garbage collector by default — every heap allocation is `malloc`'d and (almost) never `free`d in `manual` mode. `-mm=gc` opts into a real one (Boehm). See [MEMORY-MANAGEMENT.md](MEMORY-MANAGEMENT.md).\n> Programs are pure libc by default; a program only needs `libcurl` installed on the build machine if it actually calls `fetch` (compiled binaries automatically link `-lcurl` only when used — see [ADR-00020](../adr/ADR-00020.md))."
+      "text": "> Per-area implementation status for the TypeScript → native compiler. For what the project is and how to build/run it, start at the root [README](../../README.md); this page only tracks **how much of each surface is implemented, and how faithfully** — coverage percentages, caveats, and the gaps that matter."
     },
     {
       "kind": "block",
@@ -16,7 +16,7 @@
     },
     {
       "kind": "block",
-      "text": "- [TypeScript Core Language](#typescript-core-language) — core JavaScript/TypeScript language & standard library (works the same in any JS host)\n- [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)\n- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.createServer(…).listen()` server — Node-specific runtime globals with no browser equivalent\n- [Desktop (`klain:` bespoke)](#desktop-klain-bespoke) — the `klain:webview` desktop-window module, a capability with no Node/Web equivalent\n- [Terminal UI (`klain:` bespoke)](#terminal-ui-klain-bespoke) — the `klain:tui` native TUI framework (vendored Yoga flexbox + ANSI diff painter)\n- [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)\n- [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity\n- [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior\n- [Platform Support & Windows Notes](#platform-support--windows-notes) — faithful per-platform behaviour and the known Windows-specific gaps, in one place\n- [Design Documents (TDDs)](#design-documents-tdds)\n- [Roadmap](#roadmap)\n- [Status page format](#status-page-format) — the shared layout every detail page follows"
+      "text": "- [TypeScript Core Language](#typescript-core-language) — core JavaScript/TypeScript language & standard library (works the same in any JS host)\n- [Web Platform APIs](#web-platform-apis) — WHATWG/browser-standard APIs (also implemented by Node.js, but not part of the JS *language* itself)\n- [Node.js APIs](#nodejs-apis) — `fs`, `process`, and a real `http.createServer(…).listen()` server — Node-specific runtime globals with no browser equivalent\n- [Desktop (`klain:` bespoke)](#desktop-klain-bespoke) — the `klain:webview` desktop-window module, a capability with no Node/Web equivalent\n- [Terminal UI (`klain:` bespoke)](#terminal-ui-klain-bespoke) — the `klain:tui` native TUI framework (vendored Yoga flexbox + ANSI diff painter)\n- [Cross-Cutting](#cross-cutting) — concerns spanning every feature area (memory management)\n- [What Is NOT Implemented](#what-is-not-implemented) — core language gaps, by priority/complexity\n- [Fidelity Gaps in Shipped Features](#fidelity-gaps-in-shipped-features) — features marked ✅/100% that still have real, non-cosmetic differences from actual JS/TS behavior\n- [Platform Support & Windows Notes](#platform-support--windows-notes) — faithful per-platform behaviour and the known Windows-specific gaps, in one place\n- [Design Documents (TDDs)](#design-documents-tdds)\n- [Roadmap & priorities](#roadmap--priorities) — pointer to the prioritized backlog ([docs/BACKLOG.md](../BACKLOG.md))\n- [Status page format](#status-page-format) — the shared layout every detail page follows"
     },
     {
       "kind": "block",
@@ -85,7 +85,7 @@
         {
           "category": "Array methods",
           "pageFile": "ARRAY-METHODS.md",
-          "caveats": "• A length-mutating method (`.push`/`.pop`/`.shift`/`.unshift`/`.splice`) inside a callee now grows the caller's array when it is passed as a plain **variable** — full JS reference semantics ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md)); residual: an array passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element still crosses as a copy<br>• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md))<br>• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))<br>• `.pop()`/`.shift()` on an empty array return the element type's zero value, not `undefined` ([ADR-00157](../adr/ADR-00157.md) convention)"
+          "caveats": "• A length-mutating method (`.push`/`.pop`/`.shift`/`.unshift`/`.splice`) inside a callee still mutates a copy when the array crossed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element — only a plain **variable** argument has full JS reference semantics ([TDD-00127](../tdd/TDD-00127.md)/[ADR-00517](../adr/ADR-00517.md))<br>• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md))<br>• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))<br>• A nested-array element (`T[][]`) still zero-fills an element-absence miss (`.pop()`/`.at()`/…) instead of reading `undefined` ([ADR-00246](../adr/ADR-00246.md))"
         },
         {
           "category": "Number / Math",
@@ -130,7 +130,7 @@
         {
           "category": "JSDoc type expressions",
           "pageFile": "JSDOC.md",
-          "caveats": "• JSDoc type strings are parsed by the real type parser ([TDD-00125](../tdd/TDD-00125.md) Stage 4): union, nullable `?T`, non-null `!T`, `*`, inline object shapes, `Array.<T>`, `function(...)` types, and `import(\"./m\").T` references all resolve. `Object.<K,V>` normalizes to `Record<K,V>` and now works end-to-end (per-key read/write) on top of index-signature support ([ADR-00557](../adr/ADR-00557.md))"
+          "caveats": "• `?T` nullable is recognized as a leading marker only (a `?` buried mid-expression is left to the parser); `!T` and `{...T}` varargs are stripped rather than modeled; a `=` optional marker doesn't yet make the parameter structurally optional<br>• A nested `function(...)` type inside another type isn't rewritten to the arrow form, and an `import(\"./m\").T` qualifier drops to the bare name — resolving only when that module is part of the build ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
         },
         {
           "category": "Modules",
@@ -190,7 +190,7 @@
         {
           "category": "Web Crypto",
           "pageFile": "WEB-CRYPTO.md",
-          "caveats": "Complete surface over the selectable `-crypto` backend (OpenSSL/CommonCrypto): digest, HMAC, AES-GCM/CBC, RSA-OAEP/RSA-PSS, ECDSA, PBKDF2/HKDF, key formats raw/pkcs8/spki/jwk; plus the Node `crypto` module's `generateKeyPair(Sync)`/`randomBytes` (PEM, ADR-00434); per-row caveats keep Strict low"
+          "caveats": "• `importKey`/`generateKey`/`deriveBits`/`deriveKey`/`sign`/`verify` reject any algorithm outside the supported set (AES-GCM/CBC, RSA-OAEP/RSA-PSS, ECDSA, HMAC, PBKDF2/HKDF) as not implemented<br>• Key-format, curve, and backend-specific restrictions (`jwk` as a `Map`, CommonCrypto label/salt limits, `publicExponent` fixed to 65537) live in the page's per-row Caveats"
         },
         {
           "category": "Performance & Timing (incl. Date)",
@@ -200,12 +200,12 @@
         {
           "category": "Networking (fetch, WebSocket, SSE)",
           "pageFile": "NETWORKING.md",
-          "caveats": "• `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send; both `ws://` and `wss://` work in each direction — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))<br>• `Response.text()`/`.json()`/`.arrayBuffer()` are synchronous, not `Promise`-returning ([ADR-00241](../adr/ADR-00241.md))"
+          "caveats": "• `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send; both `ws://` and `wss://` work in each direction — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))<br>• `Response.text()`/`.json()`/`.arrayBuffer()` buffer the whole body eagerly at the accessor call rather than lazily off the fetch reactor ([TDD-00186](../tdd/TDD-00186.md))"
         },
         {
           "category": "Streams",
           "pageFile": "STREAMS.md",
-          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• `class X extends Readable/Writable/Duplex/Transform` works (options form too; no `_flush` override); `PassThrough`, `new Duplex(...)`, callback-style `pipeline`/`finished`, and `duplexPair()` shipped (string chunks; `finished` returns no cleanup fn)<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
+          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• Node stream classes carry string chunks; `extends Transform` has no `_flush` override; `finished` returns no cleanup fn<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
         },
         {
           "category": "Events & Cancellation",
@@ -250,17 +250,17 @@
         {
           "category": "File System (fs)",
           "pageFile": "FILE-SYSTEM.md",
-          "caveats": "• Async variants (`fs.readFile(path, cb)` + `fs.promises`/`fs/promises`) run blocking I/O under the hood — async-shaped, not thread-pooled ([TDD-00107](../tdd/TDD-00107.md))<br>• `fs.createReadStream`/`createWriteStream` (Node Readable/Writable) deliver **string** chunks, read eagerly to EOF ([TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• The legacy callback form (`fs.readFile(path, cb)`) and binary-data async writes still run inline on the loop thread, and the thread pool is POSIX-only so far ([TDD-00185](../tdd/TDD-00185.md))<br>• `fs.createReadStream` ignores consumer backpressure (the worker reads ahead); `createWriteStream` still writes inline on the loop thread; both deliver **string** chunks ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
         },
         {
           "category": "Process / CLI I/O",
           "pageFile": "PROCESS-CLI.md",
-          "caveats": "• `process.env` writes work but there's no `delete` (no dynamic-delete operator)<br>• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)<br>• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons<br>• `process.memoryUsage()` reports a real `rss` (peak, via `getrusage`); the V8-heap fields are 0<br>• `child_process.fork()` shipped as self-fork + string IPC (`NODE_CHANNEL_FD`); forking a different module stays out"
+          "caveats": "• `process.env` writes work but there's no `delete` (no dynamic-delete operator)<br>• `process.on(...)` covers `'SIGINT'`/`'SIGTERM'`/`'exit'`/`'uncaughtException'` but not `'unhandledRejection'`; an `'uncaughtException'` handler runs then still exits (can't resume)<br>• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons<br>• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))<br>• `child_process.fork()` is self-fork only — forking a different module stays out"
         },
         {
           "category": "HTTP Server",
           "pageFile": "HTTP-SERVER.md",
-          "caveats": "• Real Node `http.createServer` alongside the bespoke `http.listen` (now also `klain:http`): chained **and** variable-bound handle forms (`.listen(0)`/`.address().port`/`.close()`/`.on('request')`, untyped handler params contextually typed) — createServer is a V1 `res` subset (writeHead/setHeader/write/end), `.listen` blocks until close — [TDD-00131](../tdd/TDD-00131.md)/[ADR-00391](../adr/ADR-00391.md)/[ADR-00406](../adr/ADR-00406.md)"
+          "caveats": "• `createServer`'s `res` is a V1 subset (`writeHead`/`setHeader`/`write`/`end`) and `.listen` blocks until close; one server instance per program, `http.close()` doesn't allow a re-listen ([TDD-00131](../tdd/TDD-00131.md) Stage 1)<br>• The `createServer`/`listen` options object is mostly rejected; keep-alive only on a buffered `res.end` (chunked/streaming responses force `Connection: close`)"
         },
         {
           "category": "`path`",
@@ -270,7 +270,7 @@
         {
           "category": "`os`",
           "pageFile": "OS.md",
-          "caveats": "• Verified on Linux and Apple Silicon (M4 Pro)"
+          "caveats": ""
         },
         {
           "category": "`events` (`EventEmitter`)",
@@ -280,7 +280,7 @@
         {
           "category": "SQLite (`node:sqlite`)",
           "pageFile": "SQLITE.md",
-          "caveats": "• Synchronous `DatabaseSync`/`StatementSync` over the system `libsqlite3` (linked only when imported) — `exec`/`prepare`/`get`/`all`/`iterate`/`run`/`columns`, `open`/`close`/`isOpen`/`isTransaction`/`location`, scalar `db.function()` UDFs, positional **and** named params, all column types incl. `BLOB`→`Uint8Array` and `bigint` ([ADR-00540](../adr/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md))<br>• Result rows need an explicit shape (`.all<T>()`/`.get<T>()`); untyped `SELECT *` awaits a dynamic-object mode<br>• `db.aggregate()`, error `.code`, and a lazy iterator are later stages; sessions/changesets, extension loading, and async `backup()` are rejected with a clear message (unavailable in the system libsqlite3 / out of scope)"
+          "caveats": "• Result rows need an explicit shape (`.all<T>()`/`.get<T>()`); untyped `SELECT *` awaits a dynamic-object mode<br>• `db.aggregate()`, error `.code`, and a lazy iterator are later stages; sessions/changesets, extension loading, and async `backup()` are rejected with a clear message (unavailable in the system libsqlite3 / out of scope)"
         },
         {
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
@@ -396,7 +396,7 @@
     },
     {
       "kind": "block",
-      "text": "This section is core-*language* gaps only. Not-yet-built library/runtime APIs (Web Platform + Node modules) live in the [Roadmap](#roadmap)'s backlog, not here."
+      "text": "This section is core-*language* gaps only. Not-yet-built library/runtime APIs (Web Platform + Node modules) live in the prioritized backlog ([docs/BACKLOG.md](../BACKLOG.md)), not here."
     },
     {
       "kind": "block",
@@ -412,7 +412,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Notes |\n|---|---|\n| Decorators | **Shipped** ([TDD-00161](../tdd/TDD-00161.md) Stages 1-5, [ADR-00641](../adr/ADR-00641.md)–[ADR-00645](../adr/ADR-00645.md)): experimental dialect (class/property/parameter/method), `-emit-decorator-metadata` design:* reflection metadata, and the standard TC39 dialect (`-decorators=standard`, class + method), factory `@dec(...)` decorators, and the standard dialect's construction-time decorators (field/accessor + `addInitializer`, [ADR-00647](../adr/ADR-00647.md)–[ADR-00649](../adr/ADR-00649.md)) across every member placement. What remains: class-decorator *replacement* (a documented static-model divergence) and static-field decorators |\n| Dynamic `import()` — runtime-variable specifier | Real laziness **shipped** under `-dynamic-import=lazy` (a `.so`/`.dylib` island per literal-specifier target, [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md)); what remains out of scope is a genuinely *runtime-computed* specifier (`import(expr)`), which whole-program AOT can't resolve — a bounded template-literal form is a possible follow-on, see [TDD-00056](../tdd/TDD-00056.md) |\n| Dynamic property add/delete on *statically-typed* objects | **Shipped for dynamic (`any`-typed) objects and, under `-compat=js`, for untyped literals** ([TDD-00155](../tdd/TDD-00155.md), all stages): runtime add/delete, prototype chains, descriptors, untyped `JSON.parse`, `Proxy` traps + `Reflect` ([ADR-00630](../adr/ADR-00630.md)). Statically-*annotated* structs stay fixed-shape by design (the two-tier decision) — under `-compat=js` untyped literals are dynamic from the start, which supersedes the once-planned widening analysis. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md). |"
+      "text": "| Feature | Notes |\n|---|---|\n| Decorator class *replacement* + static-field decorators | The two remaining decorator pieces ([TDD-00161](../tdd/TDD-00161.md)): a class decorator that returns a replacement class is refused at runtime — a documented divergence under the static model, whose home is a future `-compat=js`/first-class-constructor world — and static-field decorators are not run |\n| Dynamic `import()` — runtime-variable specifier | A genuinely *runtime-computed* specifier (`import(expr)`) is out of scope — whole-program AOT can't resolve it; a bounded template-literal form is a possible follow-on ([TDD-00056](../tdd/TDD-00056.md)). Literal-specifier `import()` needs the opt-in `-dynamic-import=lazy` flag |\n| Dynamic property add/delete on *statically-typed* objects | A statically-*annotated* struct stays fixed-shape by design (the two-tier decision, [TDD-00155](../tdd/TDD-00155.md)) — runtime add/delete, prototype chains, and `Proxy` traps require an `any`-typed value or, under `-compat=js`, an untyped literal. See [OBJECT-COLLECTIONS.md](OBJECT-COLLECTIONS.md) |"
     },
     {
       "kind": "block",
@@ -428,7 +428,7 @@
     },
     {
       "kind": "block",
-      "text": "| Feature | Gap | Where documented |\n|---|---|---|\n| `EventEmitter` (100%) | `.emit(event, data)` takes one payload type per instance (multi-argument via a declared tuple payload, [ADR-00392](../adr/ADR-00392.md)), not real Node's open-ended variadic `...args`; `instanceof EventEmitter` is a compile-time constant, never a runtime tag (never a registered class). Overriding `on`/`emit`/`off`/etc. in a subclass now works ([ADR-00631](../adr/ADR-00631.md)) | [EVENT-EMITTER.md](EVENT-EMITTER.md)'s Known Limitations |\n| Array methods (100%) | `.sort()`'s custom comparator (a separate C-ABI `qsort()` trampoline, not a direct closure call), `.indexOf()`/`.includes()` (compare a bare register directly, no callback at all), and `Object.groupBy()` (buckets store every element as a raw `i64`, a different scheme than a plain array's backing buffer) still reject a nested-array element — every *other* element-consuming method (`.map`/`.filter`/`.forEach`/`.reduce`/`.find`/`.findIndex`/`.findLast`/`.findLastIndex`/`.some`/`.every`, and now `.join()`/array→string coercion) supports one, see [ADR-00152](../adr/ADR-00152.md) | [ARRAY-METHODS.md](ARRAY-METHODS.md)'s own caveats paragraph |\n| RegExp (100%) | `.exec()`/`.match()` turn an unmatched optional capture group into `\"\"` instead of a per-element `null`, and lack `index`/`input`/`groups`; `.matchAll()` is an eager `string[][]`, not a lazy iterator; no implicit string→RegExp coercion anywhere; `.replace()`/`.replaceAll()` template support is `$1`-`$9`/`$&`/`$$` only (no `` $` ``/`$'`) with a fixed-arity `(match, offset, string)` callback (no variadic captured groups); `.split()` doesn't replicate real JS's zero-length-match splitting or splice captured groups into the result | [REGEXP.md](REGEXP.md)'s own caveats paragraph |\n| `.codePointAt()` / `.localeCompare()` (✅) | Byte-sequence stand-ins, not real Unicode/locale behavior — `.codePointAt()` is `.charCodeAt()` under another name (no surrogate-pair decoding), `.localeCompare()` is a length-aware byte compare (binary-safe, but still byte-order, not collation). Correct only for ASCII/Latin-1 text | [STRING-METHODS.md](STRING-METHODS.md) |\n| `setImmediate` (✅) | Indistinguishable from a same-tick `setTimeout(fn, 0)` — real Node guarantees `setImmediate` fires first when scheduled from an I/O callback (distinct check/timers event-loop phases); this compiler's timer queue is a single flat fire-time-ordered list with no phase concept | [TIMERS.md](TIMERS.md) |\n| `XMLHttpRequest` / `WebSocket` (100% as part of Networking) | `XMLHttpRequest` only implements the spec's legacy synchronous mode (no default-async, callback-interleaved mode); `WebSocket` has no binary `.send()`. Both `ws://` and `wss://` work in each direction — the server speaks `wss://` when the klain:ws `WebSocketServer` (or a raw `'upgrade'` handler) is attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md)) | [NETWORKING.md](NETWORKING.md) |\n| Optional (`?:`) interface fields, under-assigned class fields, array destructuring past the source's length (all ✅/100%) | Read as a deterministic zero (or, for a nested-array destructured element, an empty array) — a documented simplification, not real JS's `undefined` (no general sentinel for that on a concrete scalar type) | [ADR-00157](../adr/ADR-00157.md) |"
+      "text": "| Feature | Gap | Where documented |\n|---|---|---|\n| `EventEmitter` (100%) | `.emit(event, data)` takes one payload type per instance (multi-argument via a declared tuple payload, [ADR-00392](../adr/ADR-00392.md)), not real Node's open-ended variadic `...args`; `instanceof EventEmitter` is a compile-time constant, never a runtime tag (never a registered class). | [EVENT-EMITTER.md](EVENT-EMITTER.md)'s Known Limitations |\n| Array methods (100%) | `.sort()`'s custom comparator (a separate C-ABI `qsort()` trampoline, not a direct closure call), `.indexOf()`/`.includes()` (compare a bare register directly, no callback at all), and `Object.groupBy()` (buckets store every element as a raw `i64`, a different scheme than a plain array's backing buffer) still reject a nested-array element — every *other* element-consuming method (`.map`/`.filter`/`.forEach`/`.reduce`/`.find`/`.findIndex`/`.findLast`/`.findLastIndex`/`.some`/`.every`, and `.join()`/array→string coercion) supports one, see [ADR-00152](../adr/ADR-00152.md) | [ARRAY-METHODS.md](ARRAY-METHODS.md)'s own caveats paragraph |\n| RegExp (100%) | `.exec()`/`.match()` turn an unmatched optional capture group into `\"\"` instead of a per-element `null`, and lack `index`/`input`/`groups`; `.matchAll()` is an eager `string[][]`, not a lazy iterator; no implicit string→RegExp coercion anywhere; `.replace()`/`.replaceAll()` template support is `$1`-`$9`/`$&`/`$$` only (no `` $` ``/`$'`) with a fixed-arity `(match, offset, string)` callback (no variadic captured groups); `.split()` doesn't replicate real JS's zero-length-match splitting or splice captured groups into the result | [REGEXP.md](REGEXP.md)'s own caveats paragraph |\n| `.codePointAt()` / `.localeCompare()` (✅) | Byte-sequence stand-ins, not real Unicode/locale behavior — `.codePointAt()` is `.charCodeAt()` under another name (no surrogate-pair decoding), `.localeCompare()` is a length-aware byte compare (binary-safe, but still byte-order, not collation). Correct only for ASCII/Latin-1 text | [STRING-METHODS.md](STRING-METHODS.md) |\n| `setImmediate` (✅) | Indistinguishable from a same-tick `setTimeout(fn, 0)` — real Node guarantees `setImmediate` fires first when scheduled from an I/O callback (distinct check/timers event-loop phases); this compiler's timer queue is a single flat fire-time-ordered list with no phase concept | [TIMERS.md](TIMERS.md) |\n| `XMLHttpRequest` / `WebSocket` (100% as part of Networking) | `XMLHttpRequest` only implements the spec's legacy synchronous mode (no default-async, callback-interleaved mode); `WebSocket` has no binary `.send()`. Both `ws://` and `wss://` work in each direction — the server speaks `wss://` when the klain:ws `WebSocketServer` (or a raw `'upgrade'` handler) is attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md)) | [NETWORKING.md](NETWORKING.md) |\n| Under-assigned (non-optional) class fields; array/tuple-typed optional fields; nested-array destructured elements (all ✅/100%) | Still zero-fill instead of reading `undefined` ([TDD-00187](../tdd/TDD-00187.md) residue): a non-optional class field left unassigned by the constructor (no definite-assignment check), an omitted array/tuple-typed optional field (empty array — its slot has no absent state), and a nested-array destructured element | [ADR-00779](../adr/ADR-00779.md), [ADR-00157](../adr/ADR-00157.md) |"
     },
     {
       "kind": "block",
@@ -448,7 +448,7 @@
     },
     {
       "kind": "block",
-      "text": "### Known Windows gaps (acknowledged, not yet tackled)\n\nDivergences or missing pieces specific to the Windows platform layer. Kept here as a backlog rather than as caveats on the individual features — they may be tackled in the future.\n\n| Gap | Detail | Tracked in |\n|---|---|---|\n| Event-loop reactor / CRT fd table | blocking `process.stdin`/pipe reads, a ~10 ms idle poll slice, a 384-socket `select()` cap, `dup2` socket aliasing, synchronous `CreatePipe` child stdio | scoped in [TDD-00182](../tdd/TDD-00182.md) (owned handle table) + [TDD-00183](../tdd/TDD-00183.md) (IOCP) — not started |\n| `cluster` round-robin | workers share one listening socket instead of the primary's round-robin; `http.close()` from a worker doesn't reach siblings | [TDD-00177](../tdd/TDD-00177.md) |\n| Named pipes / `EPIPE` on write | `net.connect({ path })` has no `\\\\.\\pipe\\…` (Windows named-pipe) mapping; the WSA→errno table is complete, so a peer reset on a plaintext socket surfaces `ECONNRESET`/`ECONNABORTED` faithfully — the realistic broken-connection case ([ADR-00742](../adr/ADR-00742.md)). Two write-error nuances stay deferred (low-value): `WSAESHUTDOWN`→`EPIPE` (libuv parity) is not observably reachable — the JS `Writable` layer intercepts write-after-`end()` before the syscall; and on long-lived streaming / pub-sub connections (gRPC over HTTP/2, `wss`) a TLS write goes through OpenSSL's own BIO, whose surfaced error code is unverified against Node. A persistent-connection probe (client `destroy()`s, server keeps writing) would settle the latter | [TDD-00180](../tdd/TDD-00180.md) §5 |\n| `net` socket `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` | accepted but no-ops (cross-platform, most visible here) | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |\n| Non-ASCII console input (full reliability) | the console input code page is set to UTF-8 so typed non-ASCII arrives as UTF-8 via the CRT read ([ADR-00747](../adr/ADR-00747.md)); Node's fully-reliable wide `ReadConsoleW` path is not implemented | [TDD-00180](../tdd/TDD-00180.md) §2 |\n| `process.stdout.columns`/`.rows` off a TTY | returns an 80×24 fallback instead of Node's `undefined` (cross-platform; a `number \\| null` return is now feasible but would change the type) | [PROCESS-CLI.md](PROCESS-CLI.md) |\n| `process.env` | a UCRT startup snapshot — a live `SetEnvironmentVariableW` is invisible, and there is no key enumeration on any host | [TDD-00180](../tdd/TDD-00180.md) §6 |"
+      "text": "### Known Windows gaps (acknowledged, not yet tackled)\n\nDivergences or missing pieces specific to the Windows platform layer. Kept here as a backlog rather than as caveats on the individual features — they may be tackled in the future.\n\n| Gap | Detail | Tracked in |\n|---|---|---|\n| Event-loop reactor / CRT fd table | blocking `process.stdin`/pipe reads, a ~10 ms idle poll slice, a 384-socket `select()` cap, `dup2` socket aliasing, synchronous `CreatePipe` child stdio | scoped in [TDD-00182](../tdd/TDD-00182.md) (owned handle table) + [TDD-00183](../tdd/TDD-00183.md) (IOCP) — not started |\n| `cluster` round-robin | workers share one listening socket instead of the primary's round-robin; `http.close()` from a worker doesn't reach siblings | [TDD-00177](../tdd/TDD-00177.md) |\n| Named pipes / `EPIPE` on write | `net.connect({ path })` has no `\\\\.\\pipe\\…` (Windows named-pipe) mapping; the WSA→errno table is complete, so a peer reset on a plaintext socket surfaces `ECONNRESET`/`ECONNABORTED` faithfully — the realistic broken-connection case ([ADR-00742](../adr/ADR-00742.md)). Two write-error nuances stay deferred (low-value): `WSAESHUTDOWN`→`EPIPE` (libuv parity) is not observably reachable — the JS `Writable` layer intercepts write-after-`end()` before the syscall; and on long-lived streaming / pub-sub connections (gRPC over HTTP/2, `wss`) a TLS write goes through OpenSSL's own BIO, whose surfaced error code is unverified against Node. A persistent-connection probe (client `destroy()`s, server keeps writing) would settle the latter | [TDD-00180](../tdd/TDD-00180.md) §5 |\n| `net` socket `setEncoding`/`ref`/`unref`/`pause`/`resume`/`setTimeout` | accepted but no-ops (cross-platform, most visible here) | [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md) |\n| Non-ASCII console input (full reliability) | the console input code page is set to UTF-8 so typed non-ASCII arrives as UTF-8 via the CRT read ([ADR-00747](../adr/ADR-00747.md)); Node's fully-reliable wide `ReadConsoleW` path is not implemented | [TDD-00180](../tdd/TDD-00180.md) §2 |\n| `process.env` | a UCRT startup snapshot — a live `SetEnvironmentVariableW` is invisible, and there is no key enumeration on any host | [TDD-00180](../tdd/TDD-00180.md) §6 |"
     },
     {
       "kind": "block",
@@ -473,6 +473,22 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "188": {
+          "title": "Runtime call-frame stack for `console.trace()` / `Error.stack`",
+          "notes": "BACKLOG §3: the runtime-readable stack trace. Node's `console.trace()` and `Error.stack` materialize a *string of `.ts` frames* the running program can read in an ordinary `-O2` build — distinct from [TDD-00073](../tdd/TDD-00073.md)'s DWARF-for-debuggers (`-g`/`-O0`, `lldb`/`gdb` only) and from a native `backtrace()` (mangled `@fn__kml_modN` symbols, `-O2` inlining drops frames). The mechanism is a **per-fiber shadow call stack**: a static `FrameDesc{name,file,defLine}` per emitted function, pushed/popped around each function body, walked to format `at <fn> (<file>:<line>)`. Two hard parts: the `setjmp`/`longjmp` unwind (a `longjmp` to `catch` skips the epilogue pops, so `emitTry` snapshots and restores the shadow depth) and per-fiber isolation (each ucontext async fiber owns its own stack, joining the scheduler's context-switch swap set). Recommended behind `--stack-traces` (off by default) since always-on push/pop taxes the CLI/microservice hot path; `Error.stack` gains a new `errorObjType` field captured at construction. `console.trace` today prints its `Trace:` message line but no frames"
+        },
+        "187": {
+          "title": "`undefined` for a concrete scalar — retiring the zero-fill caveat family",
+          "notes": "Remaining: the `{value, done}` iterator/stream-read record \u2014 `ReadableStream.read()` after close needs a discriminated `{done: false, value: T} | {done: true, value: undefined}` record design (plus `desiredSize` `0`-vs-`null`), not a plain field flip. Deliberate non-goal: a generator's `.next().value` stays bare `T` \u2014 tsc types it `any` there, so the current typing is already stricter than TS ([ADR-00781](../adr/ADR-00781.md))"
+        },
+        "186": {
+          "title": "Real async streaming I/O (pool-backed file streams, fetch body Promises)",
+          "notes": "Stage 4 of [TDD-00185](../tdd/TDD-00185.md), spun out. Remaining: consumer backpressure on the pooled read streams (the worker reads ahead of the consumer), a `STREAM_ERROR` completion kind for mid-read failures, and lazy fetch-body buffering \u2014 `Response.text()`/`.json()`/`.arrayBuffer()` buffer the whole body eagerly at the accessor call instead of off the fetch reactor, so intervening work doesn't overlap the download"
+        },
+        "185": {
+          "title": "Blocking-work thread pool for real async I/O",
+          "notes": "A libuv-style shared thread pool (default 4, `UV_THREADPOOL_SIZE`) runs blocking fs work off-thread and settles the Promise on the loop thread via a completion queue \u2014 the same wakeup primitive [TDD-00182](../tdd/TDD-00182.md)/[TDD-00183](../tdd/TDD-00183.md) want. Remaining: the legacy callback form (`fs.readFile(path, cb)`) and binary-data async writes stay inline on the loop thread, and the pool is POSIX-only \u2014 Windows waits on the reactor work"
+        },
         "183": {
           "title": "Windows IOCP reactor (completion-model I/O)",
           "notes": "**Option B** from [TDD-00180](../tdd/TDD-00180.md): the native completion-model reactor (overlapped `WSARecv`/`AcceptEx`, one `GetQueuedCompletionStatusEx`) — Windows' faithful long-term I/O model. A **committed follow-on to [TDD-00182](../tdd/TDD-00182.md)** (Option A), sequenced after it and built on its owned handle table; **lower priority than A but not deferred**. Waits on A so A's table/wakeup are shaped for B's reuse rather than discarded"
@@ -483,7 +499,7 @@
         },
         "181": {
           "title": "fs.watch — native file-change watching across the event loop",
-          "notes": "The faithful, event-driven `fs.watch`: a native OS change source folded into the `select()` loop via the standard hook trio. **Stages 1–3 implemented**: the `FSWatcher` object + event-loop integration + the Linux `inotify` backend ([ADR-00756](../adr/ADR-00756.md), a readable fd, no thread) and the Windows `ReadDirectoryChangesW` backend ([ADR-00757](../adr/ADR-00757.md), a watcher thread + a loopback wakeup socket — the loop wakeup channel the §1 audit found missing), both verified, plus the macOS `kqueue`/`EVFILT_VNODE` backend ([ADR-00758](../adr/ADR-00758.md), CI-pending — no local Mac). Stage 4 flips the coverage row + adds the example once the macOS lane confirms"
+          "notes": "The faithful, event-driven `fs.watch`: a native OS change source folded into the `select()` loop via the standard hook trio. **Complete** — all four stages shipped: the `FSWatcher` object + event-loop integration, the Linux `inotify` backend ([ADR-00756](../adr/ADR-00756.md), a readable fd, no thread), the Windows `ReadDirectoryChangesW` backend ([ADR-00757](../adr/ADR-00757.md), a watcher thread + a loopback wakeup socket — the loop wakeup channel the §1 audit found missing), and the macOS `kqueue`/`EVFILT_VNODE` backend ([ADR-00758](../adr/ADR-00758.md)), each verified on its platform; the coverage row, reference entry, and example are shipped"
         },
         "180": {
           "title": "Windows faithfulness audit — where the platform layer is still CRT/POSIX-shaped",
@@ -507,7 +523,7 @@
         },
         "11": {
           "title": "IndexedDB-compatible storage API",
-          "notes": "Real IDB shape over a pluggable backend — Roadmap's [Later](#later--differentiator-features-deliberately-deprioritized) tier"
+          "notes": "Real IDB shape over a pluggable backend — deliberately deprioritized ([docs/BACKLOG.md](../BACKLOG.md) §6)"
         },
         "22": {
           "title": "Best-effort vanilla-JS compatibility (opt-in)",
@@ -631,7 +647,7 @@
         },
         "142": {
           "title": "`klain:webview` — desktop apps via the system webview",
-          "notes": "Window + page↔native `bind`/`eval` + served-SPA + loop fusion + async bind + `-package` (.app/.desktop) + typed bind & the `bindings` allowlist + `--emit-window-dts`/async typed bind + `klain:assets` embedding & `Webview({ serve })` single-file apps ship; multi-window deferred — see the Desktop row"
+          "notes": "Remaining: multi-window \u2014 a second `new Webview` is a clean rejection until the engine run-loop/app-delegate rework lands \u2014 see the Desktop row"
         },
         "145": {
           "title": "Status tracking as JSON source-of-truth (Markdown generated)",
@@ -655,7 +671,7 @@
         },
         "151": {
           "title": "`node:sqlite` — a real synchronous SQLite API",
-          "notes": "The one database surface that is also a built-in Node API, so implemented faithfully under its real specifier (distinct from the compile-the-package / `klain:`-signature-shim route for Postgres/MariaDB). Synchronous like `fs.readFileSync`; libsqlite3 links like libcurl. Near-complete namespace shipped — DatabaseSync (exec/prepare/close/open/isOpen/isTransaction/location/function) + StatementSync (get/all/iterate/run/columns/sourceSQL/expandedSQL/setters), positional+named params, all column types incl. BLOB→Uint8Array and bigint, scalar UDFs. Result rows use statically-typed shapes (`.all<T>()`); the dynamic-row (untyped `SELECT *`) mode, `aggregate()`, error `.code`, sessions/extensions/`backup()` remain. Not the KV-for-IndexedDB use [00011](../tdd/TDD-00011.md) set aside"
+          "notes": "The one database surface that is also a built-in Node API, so implemented faithfully under its real specifier (synchronous like `fs.readFileSync`; libsqlite3 links like libcurl). Remaining: the dynamic-row mode for untyped `SELECT *` (rows currently need an explicit `.all<T>()` shape), `db.aggregate()`, error `.code`, and a lazy `iterate()`; sessions/changesets, extension loading, and async `backup()` are rejected as out of scope. Not the KV-for-IndexedDB use [TDD-00011](../tdd/TDD-00011.md) set aside"
         },
         "155": {
           "title": "The native dynamic object model (D1) — property bag, prototype chain, descriptors",
@@ -663,7 +679,7 @@
         },
         "161": {
           "title": "Decorators (`@decorator` on classes, members, parameters)",
-          "notes": "The #1 TypeScript-oracle front-end gap ([00121](../tdd/TDD-00121.md) Track C): 141 single-file false-rejects die on `@`, more than 2× the next feature cluster. Governing tension = decorators can replace a member/class at runtime vs. this compiler's static vtable model (the D1 static-vs-runtime problem again). Staged so each stage runs its accepted subset faithfully and cleanly rejects the rest (never parse-and-ignore). **Stages 1-5 landed** ([ADR-00641](../adr/ADR-00641.md)–[ADR-00645](../adr/ADR-00645.md)): the experimental dialect runs property/parameter/method/class decorators (method replacement re-routes calls through a per-method slot); `-emit-decorator-metadata` emits `design:*` metadata; the standard TC39 dialect (`-decorators=standard`) runs class + method `(value, context)` decorators. Factory `@dec(...)` decorators work across all placements ([ADR-00646](../adr/ADR-00646.md) — the general callee-value call fix). Class-decorator *replacement* is a documented genuine-impossibility divergence under the static model (refused at runtime; future `-compat=js`/first-class-constructor home). The standard dialect also runs instance-field decorators (initializer transforms) + `context.addInitializer` per-instance, and dynamic functions now bind typed parameters and **capture** enclosing locals ([ADR-00647](../adr/ADR-00647.md) — unblocks factory/wrapping/capturing decorators). getter/setter and `accessor` auto-field decorators run — the standard dialect now covers **every member placement** ([ADR-00648](../adr/ADR-00648.md), [ADR-00649](../adr/ADR-00649.md)). Remaining: class-decorator replacement (the `-compat=js`/first-class-constructor follow-up) and static-field decorators; a replacement decorator that reads typed `this.field` hits the general replacement-`this` boundary"
+          "notes": "Remaining: class-decorator *replacement* (refused at runtime under the static vtable model — a documented divergence whose home is a future `-compat=js`/first-class-constructor world; a replacement decorator reading typed `this.field` hits the same boundary) and static-field decorators. Both dialects (experimental + `-decorators=standard`), every member placement, factory decorators, and `-emit-decorator-metadata` otherwise run ([ADR-00641](../adr/ADR-00641.md)\u2013[ADR-00649](../adr/ADR-00649.md))"
         },
         "162": {
           "title": "Implicit `any` for untyped bindings + clean rejection of incompatible reassignment",
@@ -679,7 +695,7 @@
         },
         "165": {
           "title": "Importable specifiers for the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`)",
-          "notes": "Closes the [Node modules index](../status/NODE-MODULES.md) gap where these worked as globals but their `import … from '<name>'` specifier was rejected. Per official spec the primary same-named export of each **is** the ambient global (no behavioral divergence). **Stages 1–3 shipped** ([ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) — the import wiring is complete: same-name/`node:`/default and **aliased** imports all resolve (erase-to-global, rename, or rebuild the parse-time constructor node). **Stage 4** is in progress — the **legacy `url`-module function surface is complete** — `parse`/`format`/`fileURLToPath`/`pathToFileURL`/`resolve`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode` ([ADR-00669](../adr/ADR-00669.md)–[ADR-00672](../adr/ADR-00672.md)), on the hybrid `url` module. Remaining across other modules: `PerformanceObserver`, `timers/promises` — new feature surfaces ranked by leverage"
+          "notes": "Remaining (Stage 4): new feature surfaces on the now-importable Web-global-backed modules, ranked by leverage \u2014 `PerformanceObserver` extensions ([TDD-00166](../tdd/TDD-00166.md)) and `timers/promises`. The import wiring itself (same-name/`node:`/default/aliased specifiers) is complete"
         },
         "166": {
           "title": "`PerformanceObserver` (perf_hooks)",
@@ -721,51 +737,7 @@
     },
     {
       "kind": "block",
-      "text": "## Roadmap"
-    },
-    {
-      "kind": "block",
-      "text": "Grouped by kind of work rather than a fixed sequence number, since priorities shift and bug fixes get picked up opportunistically rather than in strict order. Core-language feature gaps already have their own complexity breakdown in [What Is NOT Implemented](#what-is-not-implemented) above — not repeated here."
-    },
-    {
-      "kind": "block",
-      "text": "### Next up — bugs found but not yet fixed"
-    },
-    {
-      "kind": "block",
-      "text": "Pulled from each page's own Known Limitations sections. A guiding principle: **most caveats in this project are deferred shortcuts (\"too much effort right now to do fully\"), not permanent design decisions** — where a divergence from real JS/TS behavior is fixable and would move conformance, it should be fixed on sight rather than documented as if intentional, and the ones that genuinely are permanent scope narrowings (e.g. *statically-typed* objects stay fixed-shape — runtime property add/delete needs an `any`-typed value or `-compat=js`, the two-tier model) say so explicitly."
-    },
-    {
-      "kind": "block",
-      "text": "None currently open."
-    },
-    {
-      "kind": "block",
-      "text": "### Web Platform & Node.js APIs backlog"
-    },
-    {
-      "kind": "block",
-      "text": "Not-yet-implemented items from the [Web Platform APIs](#web-platform-apis) and [Node.js APIs](#nodejs-apis) sections above, grouped by effort. Within a tier, the same tiebreaker applies — prefer whichever unlocks REST API interaction / file I/O / process interaction."
-    },
-    {
-      "kind": "block",
-      "text": "What remains, tiered by effort:"
-    },
-    {
-      "kind": "block",
-      "text": "**Medium effort (new dependency or subsystem):**\n- `vm` — lower individual priority, grouped in [NODE-CORE-MODULES.md](NODE-CORE-MODULES.md). Feasibility (assessed 2026-08-23): only a narrow static subset (a compile-time string-literal expression via the existing `eval` fast path) is in reach; anything dynamic needs the unstarted embedded engine ([TDD-00046](../tdd/TDD-00046.md))."
-    },
-    {
-      "kind": "block",
-      "text": "### Later — differentiator features, deliberately deprioritized"
-    },
-    {
-      "kind": "block",
-      "text": "**IndexedDB-compatible storage API** (see [TDD-00011](../tdd/TDD-00011.md)) — not started, and deliberately scoped to be picked up only after most of the rest of this roadmap is further along. The idea: expose the real `indexedDB` global/`IDBDatabase`/`IDBObjectStore` API shape (not a bespoke KV API, and not a SQL surface) so hand-written app code using that idiom — and, longer-term, existing npm `IndexedDB` client packages like Dexie.js/localForage, though that specifically also needs `class` support ([TDD-00009](../tdd/TDD-00009.md)) first — has somewhere to run. Four backend directions compared (lowest to highest effort/risk): a hand-rolled RESP client proxying to an external Redis (no new dependency at all — just one missing socket primitive, outbound `connect()`); an embedded SQLite (same C-linking pattern `fetch`/libcurl already uses); a from-scratch native storage engine (zero dependency, matching this project's usual ethos, but real crash-safety engineering); or embedding a mature pure-Go engine (BBolt recommended over BadgerDB/Pebble/BuntDB/go-memdb) via a `cgo`-built static archive linked into the compiled output — gated on a direct prototype confirming the Go runtime's own background threading/signal handling coexists safely with this compiler's fiber scheduler, not yet verified either way."
-    },
-    {
-      "kind": "block",
-      "text": "**Native reinterpretations of a few browser APIs** (see [NOTIFICATIONS-MISC.md](NOTIFICATIONS-MISC.md)) — the same idea as the IndexedDB work above: keep a familiar browser API *shape*, back it with an OS-native implementation. The candidates are the Notifications API (→ macOS Notification Center / Linux `libnotify`), the Storage API's `localStorage`/`sessionStorage` (→ a file-persisted / in-process KV store, a lighter sibling of the IndexedDB idea), and the Clipboard API (→ the OS clipboard). None is scoped in a TDD yet or a committed target — noted so they're on the map rather than dismissed as \"browser-only.\" The rest of that page (Push, Service Worker, Geolocation, Canvas/WebGL) stays genuinely out of scope with no native analogue.\n\n**Mobile targets — Sailfish OS and Android** (see [TDD-00146](../tdd/TDD-00146.md), [TDD-00147](../tdd/TDD-00147.md)) — scoped, not started. Sailfish is the cheap one (glibc/aarch64 Linux: a `--target`/`--sysroot` cross-compile mode, RPM packaging, and its Gecko `sailfish-components-webview` as a `-webview=sailfish` backend under [TDD-00144](../tdd/TDD-00144.md)'s flag); Android is the expensive one (bionic has no ucontext, so the fiber runtime needs a vendored/own context switch, plus vendored curl/pcre2/gc — though its WebView bridge is the best of any platform). Both share the cross-target flag and a remote-runner E2E lane as first steps."
+      "text": "## Roadmap & priorities\n\nRemaining work and its prioritization live in one place now: [docs/BACKLOG.md](../BACKLOG.md) — the hand-maintained, leverage-ranked backlog reconciled against this status data and the TDD index. This page tracks *what is implemented and how faithfully*; the backlog tracks *what to do next and in what order*. (The old inline Roadmap section duplicated it and drifted.)"
     },
     {
       "kind": "block",

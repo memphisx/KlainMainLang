@@ -361,6 +361,7 @@ type Emitter struct {
 	usedConnPokeGlobal     bool
 	usedChildProcRuntime   bool
 	usedFsWatchRuntime     bool
+	usedThreadPool         bool
 	usedReadlineRuntime    bool
 	usedStdinRuntime       bool
 	usedNetRuntime         bool
@@ -493,6 +494,7 @@ type Emitter struct {
 	usedFsReadFile               bool
 	usedFsReadFileRaw            bool
 	usedFsReadStream             bool
+	usedFsOpenRead               bool
 	usedFread                    bool
 	usedFsWriteStream            bool
 	usedTLS                      bool
@@ -546,6 +548,8 @@ type Emitter struct {
 	usedMemmem                   bool
 	usedWinSpawn                 bool
 	usedOSTmpdirWin              bool
+	usedOSHomedirPw              bool
+	usedHeapStats                bool
 	usedHTTPClusterSeed          bool
 	usedListenFdGlobal           bool
 	usedOSCpusWin                bool
@@ -601,6 +605,9 @@ type Emitter struct {
 	usedFsRmdir                  bool
 	usedFsRename                 bool
 	usedFsReaddir                bool
+	usedFsReaddirRecursive       bool
+	usedFsCopyExclGuard          bool
+	usedFsFutimes                bool
 	usedConsoleGroupDepth        bool
 	usedConsoleTimer             bool
 	usedConsoleCountMap          bool
@@ -1680,7 +1687,15 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if len(ta.Fields) > 0 {
 		fields := make([]Field, len(ta.Fields))
 		for i, af := range ta.Fields {
-			fields[i] = Field{Name: af.Name, Ty: e.resolveType(af.Type)}
+			fty := e.resolveType(af.Type)
+			// A `name?: T` optional field is `T | undefined` (TDD-00187
+			// Stage 2): a scalar widens to the { i1, T } presence slot, a
+			// pointer keeps null-as-absent — either way the calloc-zeroed
+			// slot of an omitted field reads back as a real absent value.
+			if af.Optional {
+				fty = undefinedableElem(fty)
+			}
+			fields[i] = Field{Name: af.Name, Ty: fty}
 		}
 		return ObjectType(fields)
 	}
@@ -1702,6 +1717,7 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if ty, ok := e.interfaces[name]; ok {
 		if ta.Nullable {
 			ty.Nullable = true
+			ty.IsUndefined = ta.Undefined
 		}
 		return ty
 	}
@@ -1712,6 +1728,7 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 	if backing, ok := e.enumBacking[name]; ok {
 		if ta.Nullable {
 			backing.Nullable = true
+			backing.IsUndefined = ta.Undefined
 		}
 		return backing
 	}
@@ -1723,12 +1740,14 @@ func (e *Emitter) resolveType(ta *ast.TypeAnnotation) Type {
 		ty := errorObjType
 		if ta.Nullable {
 			ty.Nullable = true
+			ty.IsUndefined = ta.Undefined
 		}
 		return ty
 	}
 	ty := ResolveTypeName(ta.Name)
 	if ta.Nullable {
 		ty.Nullable = true
+		ty.IsUndefined = ta.Undefined
 	}
 	return ty
 }
@@ -2171,7 +2190,7 @@ entry:
 	// lighter task_run_all drive; a pure-timer program keeps timer_drain.
 	// TDD-00098: a program that spawned workers must keep driving the full
 	// loop — it is what delivers worker messages and joins exited workers.
-	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
+	useFullLoop := e.usedEventSource || e.usedWSClient || (e.usedTaskRuntime && e.usedTimers) || e.usedWorkerRuntime || e.usedChanRuntime || e.usedChildProcRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedReadlineRuntime || e.usedStdinRuntime || e.usedNetRuntime || e.usedDgramRuntime || e.usedIPCChildRuntime || e.usedHTTPListen
 	if useFullLoop {
 		e.ensureHTTPRuntime() // emit event_loop_run + every symbol it references
 		e.emitInstr("call void @__kml_event_loop_run()")
@@ -2454,7 +2473,13 @@ func (e *Emitter) registerInterfaces(prog *ast.Program) {
 			}
 			fields := make([]Field, len(s.Fields))
 			for i, f := range s.Fields {
-				fields[i] = Field{Name: f.Name, Ty: e.resolveType(f.Type)}
+				fty := e.resolveType(f.Type)
+				// `name?: T` widens to `T | undefined` (TDD-00187 Stage 2) —
+				// same rule as resolveType's inline object-shape path.
+				if f.Optional {
+					fty = undefinedableElem(fty)
+				}
+				fields[i] = Field{Name: f.Name, Ty: fty}
 			}
 			// interface+interface declaration merging (ADR-00479): a second
 			// same-name interface unions its members into the first (first
@@ -2752,7 +2777,7 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 			pty = TypeI64
 			pty.Inferred = true // no annotation given — see docs/adr/ADR-00042.md
 		}
-		sig.ParamTypes = append(sig.ParamTypes, pty)
+		sig.ParamTypes = append(sig.ParamTypes, optionalParamType(p, pty))
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default) // nil when no default
 		sig.Optional = append(sig.Optional, p.Optional)

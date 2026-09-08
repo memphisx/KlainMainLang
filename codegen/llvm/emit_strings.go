@@ -43,10 +43,18 @@ func isNumberTy(ty Type) bool {
 // happens to be absent) is the exact same "printf/strlen(NULL) is UB"
 // hazard, just reached through string concatenation instead of printing.
 func (e *Emitter) emitStringNullToLiteral(v Value) Value {
+	// A `T | undefined` operand (TDD-00187) whose value is absent renders as
+	// "undefined", not "null" — Node stringifies `undefined` in a `+` as
+	// "undefined" (`"x" + undefined === "xundefined"`). A plain `T | null`
+	// operand keeps "null". The static IsUndefined flag distinguishes them.
+	lit := "null"
+	if v.Ty.IsUndefined {
+		lit = "undefined"
+	}
 	isNull := e.freshReg()
 	safe := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString(lit), v.Ref))
 	return Value{Ref: safe, Ty: TypePtr}
 }
 
@@ -500,17 +508,55 @@ func (e *Emitter) emitStringCharAtMethod(mem *ast.MemberExpression, args []ast.E
 
 // emitStringCodePointAt implements s.codePointAt(i). This compiler's strings
 // are plain byte sequences, not real UTF-16 (like actual JS strings) — there
-// is no surrogate-pair/multi-byte code point decoding here, so this is
-// exactly charCodeAt's byte value under a second name. Correct for
+// is no surrogate-pair/multi-byte code point decoding here, so an in-range
+// result is exactly charCodeAt's byte value under a second name. Correct for
 // ASCII/Latin-1 input (where a "code point" and a "char code" are the same
 // number); a documented scope narrowing for anything requiring real Unicode
 // decoding, consistent with this compiler having no Unicode infrastructure
 // at all yet.
+//
+// Unlike charCodeAt (whose out-of-range result is NaN, hence a double),
+// codePointAt returns `number | undefined` — Node yields `undefined` for an
+// out-of-range index (TDD-00187). An in-range code point is a real integer,
+// so the payload is an i64 riding the presence-flagged { i1, i64 } aggregate.
 func (e *Emitter) emitStringCodePointAt(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: codePointAt expects 1 argument", pos.Line, pos.Col)
 	}
-	return e.emitStringCharCodeAt(mem, args, pos)
+	strVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(strVal.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: codePointAt is only supported on strings", pos.Line, pos.Col)
+	}
+	idxRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	idxVal := e.coerce(idxRaw, TypeI64)
+	// Bounds check: an out-of-range index (negative or >= length) is absent.
+	// The load itself is clamped to index 0 when out of range (still inside
+	// the allocation — at worst the NUL terminator) and its value discarded by
+	// the presence bit.
+	e.ensureStrlen()
+	sLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, strVal.Ref))
+	geZero := e.freshReg()
+	ltLen := e.freshReg()
+	inBounds := e.freshReg()
+	safeIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", geZero, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", ltLen, idxVal.Ref, sLen))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inBounds, geZero, ltLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", safeIdx, inBounds, idxVal.Ref))
+	charPtr := e.freshReg()
+	charByte := e.freshReg()
+	asI64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", charPtr, strVal.Ref, safeIdx))
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", charByte, charPtr))
+	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", asI64, charByte))
+	return e.wrapUndefinedable(Value{Ref: asI64, Ty: TypeI64}, inBounds), nil
 }
 
 // emitStringSearch implements s.search(pattern) — real JS-shaped since

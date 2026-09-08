@@ -29,7 +29,7 @@ try {
     console.log(r.status)  // 200
     console.log(r.ok)      // true
 
-    const body: string = r.text()
+    const body: string = await r.text()
     const lines: string[] = body.split('\n')
     console.log(lines[0])          // Weather report: Thessaloniki
     console.log(lines[1] === '')   // true — a blank line always follows the header

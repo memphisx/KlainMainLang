@@ -298,6 +298,12 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		return nil
 	}
 
+	// TDD-00187 strict gate: returning a `T | undefined` absence result from
+	// a bare-T function is a compile error under strict.
+	if err := e.checkStrictUndefinedAssign(e.currentRetType, r.Value, r.GetPos(), "return value"); err != nil {
+		return err
+	}
+
 	// A by-value small-tuple return (TDD-00134 Stage 3): `return [a, b]`
 	// builds the aggregate with insertvalue — no allocation at all.
 	if e.currentRetType.IsTuple && e.currentRetType.TupleByVal {

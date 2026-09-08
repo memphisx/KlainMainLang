@@ -10,7 +10,7 @@ import (
 // verified manually under a pty on macOS — see ADR-00518. These E2E tests
 // cover the deterministic, dep-free surface: that the klain:tty shim links and
 // runs, that klain:tty.readByte/readKey pull bytes off a piped stdin, that the
-// columns/rows fall back to 80x24 off a non-TTY, and that setRawMode is a clean
+// columns/rows read undefined off a non-TTY, and that setRawMode is a clean
 // no-op on a pipe (tcgetattr fails, so the terminal is left untouched).
 
 // klain:tty.readByte reads single bytes off fd 0, returning -1 at EOF.
@@ -45,16 +45,19 @@ console.log(codes.trim())
 	}
 }
 
-// process.stdout.columns/.rows fall back to 80x24 when stdout is not a TTY
-// (piped/redirected), a documented divergence from Node's `undefined`.
-func TestE2ETtyWinSizeFallback(t *testing.T) {
+// process.stdout.columns/.rows are `number | undefined` (TDD-00187 Stage 4):
+// off a TTY (piped/redirected, as under this harness) they are a real
+// `undefined`, exactly as in Node — the old 80x24 stand-in divergence is
+// retired, and `?? 80` is the idiomatic fallback.
+func TestE2ETtyWinSizeUndefinedOffTTY(t *testing.T) {
 	got := compileAndRun(t, `
-const c: number = process.stdout.columns
-const r: number = process.stdout.rows
-console.log(c + "x" + r)
+const c = process.stdout.columns
+console.log(c)
+console.log(c === undefined)
+console.log((c ?? 80) + "x" + (process.stdout.rows ?? 24))
 `)
-	if got != "80x24" {
-		t.Fatalf("got %q, want 80x24", got)
+	if got != "undefined\ntrue\n80x24" {
+		t.Fatalf("got %q, want undefined/true/80x24", got)
 	}
 }
 
@@ -113,5 +116,18 @@ console.log("a=" + a.charCodeAt(0) + " blen=" + b.length)
 `, "A")
 	if got != "a=65 blen=0" {
 		t.Fatalf("got %q, want %q", got, "a=65 blen=0")
+	}
+}
+
+func TestE2EStrictRejectsColumnsIntoBareNumber(t *testing.T) {
+	// `process.stdout.columns` is `number | undefined` (TDD-00187 Stage 4) —
+	// a bare-number binding or arithmetic use requires narrowing/`??`/`!`.
+	for _, src := range []string{
+		`const c: number = process.stdout.columns;`,
+		`console.log(process.stdout.rows * 2);`,
+	} {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a strict-mode compile error for: %s", src)
+		}
 	}
 }

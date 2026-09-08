@@ -597,6 +597,8 @@ func (p *escPlanner) walkExpr(expr ast.Expression, suspends bool) error {
 				return err
 			}
 		}
+	case *ast.NonNullExpression:
+		return p.walkExpr(x.Arg, suspends)
 	}
 	return nil
 }
@@ -808,6 +810,8 @@ func (c *escChecker) aliases(expr ast.Expression) bool {
 		if len(x.Exprs) > 0 {
 			return c.aliases(x.Exprs[len(x.Exprs)-1])
 		}
+	case *ast.NonNullExpression:
+		return c.aliases(x.Arg)
 	}
 	return false
 }
@@ -845,6 +849,8 @@ func (c *escChecker) interiorAlias(expr ast.Expression) bool {
 		if len(x.Exprs) > 0 {
 			return c.interiorAlias(x.Exprs[len(x.Exprs)-1])
 		}
+	case *ast.NonNullExpression:
+		return c.interiorAlias(x.Arg)
 	}
 	return false
 }
@@ -1131,6 +1137,8 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 				return v
 			}
 		}
+	case *ast.NonNullExpression:
+		return c.expr(x.Arg)
 	case *ast.YieldExpression:
 		if c.leaks(x.Argument) {
 			return &escViolation{reason: "yielded", pos: x.GetPos()}

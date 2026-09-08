@@ -306,24 +306,50 @@ console.log(sum([10, 20]))
 // --- optional (`param?: T`) parameters ---
 
 func TestE2EOptionalParamNumber(t *testing.T) {
+	// An omitted optional argument reads as `T | undefined` in the body
+	// (TDD-00187); supply a fallback with `??`.
 	assertOutput(t, `
-function f(x?: number): number { return x }
+function f(x?: number): number { return x ?? -1 }
 console.log(f())
 console.log(f(5))
-`, "0\n5")
+`, "-1\n5")
+}
+
+func TestE2EOptionalParamPresentZero(t *testing.T) {
+	// A real 0 is present, distinguishable from an omitted argument — the
+	// parameter carries a presence bit, not just a zeroed value.
+	assertOutput(t, `
+function seen(x?: number): boolean { return x !== undefined }
+console.log(seen())
+console.log(seen(0))
+function f(x?: number): number { return x ?? -1 }
+console.log(f(0))
+`, "false\ntrue\n0")
+}
+
+func TestE2EOptionalParamStrictUndefined(t *testing.T) {
+	// Returning the bare `T | undefined` parameter where `T` is declared is a
+	// strict compile error (strictNullChecks); `-compat=js` coerces it.
+	_, err := parseAndCompile(`
+function f(x?: number): number { return x }
+console.log(f(5))
+`)
+	if err == nil {
+		t.Fatal("expected a strict undefined-assignability error returning an optional param")
+	}
 }
 
 func TestE2EOptionalParamString(t *testing.T) {
 	assertOutput(t, `
-function greet(name?: string): string { return name }
+function greet(name?: string): string { return name ?? 'anon' }
 console.log(greet())
 console.log(greet('Alice'))
-`, "null\nAlice")
+`, "anon\nAlice")
 }
 
 func TestE2EOptionalParamMultiple(t *testing.T) {
 	assertOutput(t, `
-function box(a: number, b?: number, c?: number): number { return a + b + c }
+function box(a: number, b?: number, c?: number): number { return a + (b ?? 0) + (c ?? 0) }
 console.log(box(1))
 console.log(box(1, 2))
 console.log(box(1, 2, 3))
@@ -331,6 +357,8 @@ console.log(box(1, 2, 3))
 }
 
 func TestE2EOptionalParamArray(t *testing.T) {
+	// An array aggregate has no spare absent state, so an omitted array-typed
+	// optional parameter stays an empty array (not `undefined`).
 	assertOutput(t, `
 function count(nums?: number[]): number { return nums.length }
 console.log(count())
@@ -339,6 +367,7 @@ console.log(count([1, 2, 3]))
 }
 
 func TestE2EOptionalParamClassMethod(t *testing.T) {
+	// Concatenating an absent value renders "undefined" (as in Node).
 	assertOutput(t, `
 class Greeter {
   greet(name?: string): string { return 'Hi, ' + name }
@@ -346,7 +375,7 @@ class Greeter {
 const g = new Greeter()
 console.log(g.greet())
 console.log(g.greet('Bob'))
-`, "Hi, null\nHi, Bob")
+`, "Hi, undefined\nHi, Bob")
 }
 
 func TestE2EOptionalParamStaticMethod(t *testing.T) {
@@ -356,7 +385,7 @@ class Util {
 }
 console.log(Util.greet())
 console.log(Util.greet('Bob'))
-`, "Hi, null\nHi, Bob")
+`, "Hi, undefined\nHi, Bob")
 }
 
 // --- void return type ---

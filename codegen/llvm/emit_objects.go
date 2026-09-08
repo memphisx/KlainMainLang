@@ -663,8 +663,8 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			continue
 		}
 
-		if prop.Default != nil && !(fieldTy.Nullable && fieldTy.IR == "ptr") {
-			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
+		if prop.Default != nil && !(fieldTy.Nullable && fieldTy.IR == "ptr") && !isNullableScalar(fieldTy) {
+			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be nullable/optional (T | null, T | undefined, or `key?: T`) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
@@ -723,6 +723,34 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenValReg, lenAlloca))
 			}
 			e.define(prop.Local, Symbol{Ptr: hdrSlot, Ty: fieldTy})
+			continue
+		}
+		// A nullable-scalar field (`y?: number` / `y: number | null`,
+		// TDD-00064/TDD-00187) destructures into a nullable-scalar *local*:
+		// the whole { i1, T } slot copies over, so absence survives into the
+		// binding. A `= default` keys off the presence bit — now a reliable
+		// "was this provided" signal, retiring the old scalar-default
+		// rejection for optional/nullable scalar fields.
+		if isNullableScalar(fieldTy) {
+			nsPtr := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", nsPtr, nullableScalarStorageIR(fieldTy), storageAlign(fieldTy)))
+			e.copyNullableScalar(nsPtr, fieldTy, gepReg)
+			if prop.Default != nil {
+				present := e.loadNullableScalarPresent(nsPtr, fieldTy)
+				absentL := e.freshLabel("destr.absent")
+				afterL := e.freshLabel("destr.after")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, afterL, absentL))
+				e.emitLabel(absentL)
+				defVal, err := e.emitExpr(prop.Default)
+				if err != nil {
+					return err
+				}
+				defVal = e.coerce(defVal, fieldTy.withoutNullable())
+				e.storeNullableScalarPresent(nsPtr, fieldTy, defVal.Ref)
+				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+				e.emitLabel(afterL)
+			}
+			e.define(prop.Local, Symbol{Ptr: nsPtr, Ty: fieldTy, NullableBoxed: true})
 			continue
 		}
 		valReg := e.freshReg()

@@ -118,6 +118,8 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return e.emitTemplateLiteral(ex)
 	case *ast.ConditionalExpression:
 		return e.emitConditional(ex)
+	case *ast.NonNullExpression:
+		return e.emitNonNull(ex)
 	case *ast.SequenceExpression:
 		// Comma operator: evaluate each operand for its side effects, yield the
 		// last. An empty list can't occur (the parser always has a first

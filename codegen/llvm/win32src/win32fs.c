@@ -371,6 +371,23 @@ int kml_win_utimes(const char *path, const void *times) {
 	return r;
 }
 
+// futimes(fd, times): the fd-based twin of utimes above (ADR-00788) — set
+// access/modify times on an already-open fd. Same two {int64 sec, int64 usec}
+// timeval pairs; the target HANDLE comes from _get_osfhandle(fd) instead of
+// opening a path. Windows has no futimes; SetFileTime on the fd's handle.
+int kml_win_futimes(int fd, const void *times) __asm__("futimes");
+int kml_win_futimes(int fd, const void *times) {
+	const int64_t *tv = (const int64_t *)times;
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	ULONGLONG au = (ULONGLONG)(tv[0] * 10000000LL + tv[1] * 10LL + 116444736000000000LL);
+	ULONGLONG mu = (ULONGLONG)(tv[2] * 10000000LL + tv[3] * 10LL + 116444736000000000LL);
+	FILETIME aft, mft;
+	aft.dwLowDateTime = (DWORD)au; aft.dwHighDateTime = (DWORD)(au >> 32);
+	mft.dwLowDateTime = (DWORD)mu; mft.dwHighDateTime = (DWORD)(mu >> 32);
+	return SetFileTime(h, NULL, &aft, &mft) ? 0 : fail();
+}
+
 // fsync(fd): Node's fs.fsyncSync — flush buffered writes to disk. The POSIX
 // name is defined via an asm alias (ADR-00737 convention) so no mingw header
 // prototype can collide; FlushFileBuffers is the Win32 equivalent.

@@ -9,6 +9,11 @@ node_modules
 /src-cordova
 /.vite
 
+# Playwright e2e
+/test-results
+/playwright-report
+/playwright/.cache
+
 # Logs
 npm-debug.log*
 yarn-debug.log*

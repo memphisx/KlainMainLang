@@ -254,7 +254,7 @@ func (e *Emitter) buildParamSig(params []ast.Param) FuncSig {
 			pty = TypeI64
 			pty.Inferred = true
 		}
-		sig.ParamTypes = append(sig.ParamTypes, pty)
+		sig.ParamTypes = append(sig.ParamTypes, optionalParamType(p, pty))
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default)
 		sig.Optional = append(sig.Optional, p.Optional)
@@ -875,6 +875,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			var fty Type
 			if f.Type != nil {
 				fty = e.resolveType(f.Type)
+				// `tag?: T` widens to `T | undefined` (TDD-00187 Stage 2);
+				// the instance's calloc zero reads back as absent.
+				if f.Optional {
+					fty = undefinedableElem(fty)
+				}
 			} else {
 				fty = e.inferExprType(f.Initializer)
 			}
@@ -2040,6 +2045,11 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				// ADR-00164: an omitted `param?: T` gets T's zero value.
 				if paramTy.IsArray {
 					argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+				} else if isNullableScalar(paramTy) {
+					// An omitted optional `T | undefined` param is a genuinely
+					// absent { i1, T } aggregate (present = false) — TDD-00187.
+					argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
+					scratch.bindNullable(i, "zeroinitializer", paramTy)
 				} else {
 					argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 					scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})
@@ -2294,6 +2304,11 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
 				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+			} else if isNullableScalar(paramTy) {
+				// An omitted optional `T | undefined` param is a genuinely
+				// absent { i1, T } aggregate (present = false) — TDD-00187.
+				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
+				scratch.bindNullable(i, "zeroinitializer", paramTy)
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 				scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})
@@ -2652,6 +2667,11 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray {
 				argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+			} else if isNullableScalar(paramTy) {
+				// An omitted optional `T | undefined` param is a genuinely
+				// absent { i1, T } aggregate (present = false) — TDD-00187.
+				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
+				scratch.bindNullable(i, "zeroinitializer", paramTy)
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", paramTy.IR, paramTy.zeroLiteral()))
 				scratch.bind(i, Value{Ref: paramTy.zeroLiteral(), Ty: paramTy})

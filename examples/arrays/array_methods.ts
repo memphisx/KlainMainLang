@@ -79,7 +79,7 @@ s.push(3)
 
 let total: number = 0
 while (s.length > 0) {
-    total = total + s.pop()
+    total = total + s.pop()!
 }
 console.log(total)        // 6
 console.log(s.length)     // 0

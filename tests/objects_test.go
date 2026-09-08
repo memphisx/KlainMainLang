@@ -891,19 +891,19 @@ console.log(k in p)
 //
 // Object literal allocation must zero-fill, not just malloc: a field
 // omitted from a given literal (an optional `?:` interface field) never
-// gets its own storeField call, so it must read back a deterministic zero,
-// not whatever garbage was already in that heap slot. Real bug found
-// investigating destructuring defaults; see ADR-00157.
+// gets its own storeField call. The calloc zero is the { i1, T } absent
+// state, so the read is a real `undefined` (TDD-00187 Stage 2), never heap
+// garbage (the ADR-00157 zeroing).
 
-func TestE2EOptionalFieldOmittedReadsZero(t *testing.T) {
+func TestE2EOptionalFieldOmittedIsUndefined(t *testing.T) {
 	assertOutput(t, `
 interface Point { x: number; y?: number }
 let p: Point = { x: 1 };
 console.log(p.x, p.y);
-`, "1 0")
+`, "1 undefined")
 }
 
-func TestE2EOptionalFieldOmittedReadsZeroAfterHeapChurn(t *testing.T) {
+func TestE2EOptionalFieldOmittedIsUndefinedAfterHeapChurn(t *testing.T) {
 	// A fresh, never-reused heap page can look zeroed by pure luck even
 	// with plain malloc — churn the heap with unrelated allocations first
 	// (not asserted on, purely to disturb whatever memory a naive fix might
@@ -917,7 +917,7 @@ for (let i = 0; i < 50; i++) {
 }
 let p: Point = { x: 1 };
 console.log(p.y);
-`, "0")
+`, "undefined")
 }
 
 func TestE2EClassFieldUnassignedInConstructorReadsZero(t *testing.T) {
@@ -993,23 +993,25 @@ let { x = 5 } = p;
 	if err == nil {
 		t.Fatal("expected a compile error for a destructuring default on a non-nullable field")
 	}
-	if !strings.Contains(err.Error(), "nullable reference type") {
+	if !strings.Contains(err.Error(), "nullable/optional") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
 
-func TestE2EObjectDestructuringDefaultOnNullableScalarFieldRejected(t *testing.T) {
-	// number | null fakes its null via an in-band 0 sentinel — indistinct
-	// from a real 0, so a default here would silently override a
-	// legitimate value. Rejected, not allowed to be unsound.
-	_, err := parseAndCompile(`
-interface Point { x: number | null }
+func TestE2EObjectDestructuringDefaultOnNullableScalarField(t *testing.T) {
+	// A nullable/optional scalar field carries a real { i1, T } presence bit
+	// (TDD-00064/TDD-00187), so a destructuring default is sound now: a real
+	// stored 0 survives, only genuine absence takes the default. This was a
+	// rejection before the presence-flagged representation existed.
+	assertOutput(t, `
+interface Point { x: number | null; y?: number }
 let p: Point = { x: 0 };
-let { x = 5 } = p;
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a destructuring default on a nullable scalar field")
-	}
+let { x = 5, y = 7 } = p;
+console.log(x, y);
+let q: Point = { x: null, y: 3 };
+let { x: x2 = 5, y: y2 = 7 } = q;
+console.log(x2, y2);
+`, "0 7\n5 3")
 }
 
 // --- Object destructuring with string/numeric-literal keys (TDD-00065 Stage 3a) ---
@@ -1528,4 +1530,63 @@ console.log(x);
 	if !strings.Contains(err.Error(), "constant string or number") {
 		t.Fatalf("expected the constant-key error, got: %v", err)
 	}
+}
+
+// --- Optional fields are real `T | undefined` (TDD-00187 Stage 2) ---
+
+func TestE2EOptionalFieldFullSemantics(t *testing.T) {
+	assertOutput(t, `
+interface P { x: number; y?: number; s?: string }
+const a: P = { x: 1 };
+const b: P = { x: 2, y: 5, s: "hi" };
+console.log(a.y, b.y);
+console.log(a.s, b.s);
+console.log(a.y === undefined, b.y === undefined);
+console.log(a.y ?? 42, b.y! + 1);
+a.y = 7;
+console.log(a.y);
+const { y } = a;
+console.log(y);
+`, "undefined 5\nundefined hi\ntrue false\n42 6\n7\n7")
+}
+
+func TestE2EOptionalClassFieldIsUndefined(t *testing.T) {
+	assertOutput(t, `
+class C { name: string = "c"; tag?: number }
+const k = new C();
+console.log(k.tag);
+console.log(k.tag === undefined);
+k.tag = 3;
+console.log(k.tag);
+`, "undefined\ntrue\n3")
+}
+
+func TestE2EStrictRejectsOptionalFieldIntoBareT(t *testing.T) {
+	for _, src := range []string{
+		`interface P { y?: number }
+const a: P = {};
+const n: number = a.y;`,
+		`interface P { y?: number }
+const a: P = {};
+console.log(a.y + 1);`,
+	} {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a strict-mode compile error for: %s", src)
+		}
+	}
+}
+
+func TestE2EUndefinedAnnotationRendersUndefined(t *testing.T) {
+	// `number | undefined` (vs `| null`) renders its absent state as
+	// `undefined` — the annotation now carries the distinction.
+	assertOutput(t, `
+let u: number | undefined;
+console.log(u);
+u = 4;
+console.log(u);
+let v: number | undefined = undefined;
+console.log(v ?? 7);
+let w: number | null = null;
+console.log(w);
+`, "undefined\n4\n7\nnull")
 }

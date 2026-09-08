@@ -71,6 +71,30 @@ process.stdin.on('end', () => { console.log(bytes) })
 	}
 }
 
+// setEncoding('utf8') is a faithful no-op (chunks already arrive as UTF-8
+// strings) and returns the stream, so the canonical
+// setEncoding().on('data').on('end') chain works (ADR-00793).
+func TestE2EStdinSetEncodingAndChaining(t *testing.T) {
+	got := runStdinStream(t, `
+let data = ''
+process.stdin.setEncoding('utf8')
+  .on('data', (chunk: string) => { data = data + chunk })
+  .on('end', () => { console.log('len ' + data.length) })
+`, "hello\nworld\n")
+	if got != "len 12" {
+		t.Fatalf("got: %q, want %q", got, "len 12")
+	}
+}
+
+// A non-utf8 encoding is a clean compile error, not a silently wrong decode
+// (there is no Buffer chunk to re-decode).
+func TestE2EStdinSetEncodingNonUtf8Rejected(t *testing.T) {
+	_, err := parseAndCompile(`process.stdin.setEncoding('latin1')`)
+	if err == nil {
+		t.Fatal("expected a compile error for a non-utf8 process.stdin.setEncoding, got none")
+	}
+}
+
 // An unsupported event is a clean compile error.
 func TestE2EStdinUnsupportedEventRejected(t *testing.T) {
 	_, err := parseAndCompile(`

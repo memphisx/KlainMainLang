@@ -78,11 +78,11 @@ func (e *Emitter) emitProcessSetRawMode(args []ast.Expression, pos ast.Pos) (Val
 }
 
 // emitProcessWinSize implements process.stdout/.stderr `.columns` / `.rows`:
-// a live ioctl(TIOCGWINSZ) read (never cached, matching Node). When the fd
-// isn't a terminal (piped/redirected) the ioctl fails and the shim returns
-// the classic 80x24 fallback rather than Node's `undefined` — a documented
-// divergence, since this compiler has no clean undefined-number and 80x24 is
-// the same fallback most CLI libraries substitute for that undefined anyway.
+// a live ioctl(TIOCGWINSZ) read (never cached, matching Node). The result is
+// `number | undefined` (TDD-00187 Stage 4): when the fd isn't a terminal
+// (piped/redirected) the shim returns -1 and the value is a real absent
+// `{ i1, i64 }` — Node's `undefined`, retiring the old 80x24 stand-in
+// divergence.
 func (e *Emitter) emitProcessWinSize(fd int, field string) Value {
 	e.ensureTtyWinSize()
 	fn := "__kml_tty_cols"
@@ -93,7 +93,12 @@ func (e *Emitter) emitProcessWinSize(fd int, field string) Value {
 	e.emitInstr(fmt.Sprintf("%s = call i32 @%s(i32 %d)", r, fn, fd))
 	w := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sext i32 %s to i64", w, r))
-	return Value{Ref: w, Ty: TypeI64}
+	present := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", present, w))
+	// Absent payload stays a deterministic zero (the { i1, T } convention).
+	payload := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", payload, present, w))
+	return e.wrapUndefinedable(Value{Ref: payload, Ty: TypeI64}, present)
 }
 
 // emitTtyModuleCall dispatches `tty__kml_builtin.<member>(...)` — the
@@ -198,12 +203,12 @@ void __kml_tty_set_raw(int enabled) {
 int __kml_tty_cols(int fd) {
   CONSOLE_SCREEN_BUFFER_INFO i;
   if (GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(fd), &i)) return i.srWindow.Right - i.srWindow.Left + 1;
-  return 80; /* not a console (Node yields undefined) */
+  return -1; /* not a console -> undefined, as in Node */
 }
 int __kml_tty_rows(int fd) {
   CONSOLE_SCREEN_BUFFER_INFO i;
   if (GetConsoleScreenBufferInfo((HANDLE)_get_osfhandle(fd), &i)) return i.srWindow.Bottom - i.srWindow.Top + 1;
-  return 24;
+  return -1;
 }
 int __kml_tty_read_byte(void) {
   unsigned char c; DWORD n = 0;
@@ -271,13 +276,13 @@ void __kml_tty_set_raw(int enabled) {
 int __kml_tty_cols(int fd) {
   struct winsize ws;
   if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) return ws.ws_col;
-  return 80; /* fallback when fd is not a terminal (Node yields undefined) */
+  return -1; /* not a terminal -> undefined, as in Node */
 }
 
 int __kml_tty_rows(int fd) {
   struct winsize ws;
   if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) return ws.ws_row;
-  return 24;
+  return -1;
 }
 
 /* One blocking byte off fd 0; -1 at EOF. */

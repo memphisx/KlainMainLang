@@ -196,6 +196,13 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
 		e.emitGlobal("define void @__kml_fswatch_dispatch() {\nentry:\n  ret void\n}")
 	}
+	// TDD-00185: async-I/O thread-pool hooks. When the pool is used, klainpool.c
+	// defines these three; otherwise they are no-ops, like every hook above.
+	if !e.usedThreadPool {
+		e.emitGlobal("define i1 @__kml_pool_keepalive() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define i1 @__kml_pool_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("define void @__kml_pool_dispatch() {\nentry:\n  ret void\n}")
+	}
 	// process.stdin streaming hooks likewise.
 	if !e.usedStdinRuntime {
 		e.emitGlobal("define i1 @__kml_stdin_keepalive() {\nentry:\n  ret i1 0\n}")

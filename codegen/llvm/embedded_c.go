@@ -128,6 +128,22 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			out = append(out, CSource{"webview", WebviewSource(), cflags, libs, "cc"})
 		}
 	}
+	if e.UsesHeapStats() {
+		// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads Boehm's
+		// heap (gc.h, on the global include path LocateGC adds); -DKLAIN_GC selects
+		// that branch. No extra libs — malloc.h/malloc/malloc.h live in libc, and
+		// -lgc is already linked globally in gc mode.
+		var cflags []string
+		if e.isGCMode() {
+			cflags = []string{"-DKLAIN_GC=1"}
+		}
+		out = append(out, CSource{"procmem", ProcMemSource(), cflags, nil, ""})
+	}
+	if e.UsesOSHomedirPw() {
+		// os.homedir()'s POSIX passwd-database fallback (getpwuid). No extra
+		// libs — pwd.h/unistd.h live in libc. Windows never sets this flag.
+		out = append(out, CSource{"oshomedirpw", OSHomedirPwSource(), nil, nil, ""})
+	}
 	if e.UsesTtyShim() {
 		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
 		// ioctl live in libc on both platforms.
@@ -164,6 +180,12 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			cflags = append(cflags, "-DKLAINSYNC_GC=1")
 		}
 		out = append(out, CSource{"klainsync", SyncSource(), cflags, libs, ""})
+	}
+	if e.UsesThreadPool() {
+		// TDD-00185: the blocking-work thread pool for real async fs I/O. Needs
+		// pthread; under -mm=gc each worker registers with Boehm before its first
+		// allocation (KLAINPOOL_GC), matching the Worker/klain:sync threads.
+		out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), nil, ""})
 	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added

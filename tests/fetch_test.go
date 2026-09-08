@@ -80,7 +80,7 @@ async function main2(): Promise<void> {
     const r: Response = await fetch("%s/flat")
     console.log(r.status)
     console.log(r.ok)
-    const body: string = r.text()
+    const body: string = await r.text()
     console.log(body)
 }
 main2()
@@ -88,10 +88,9 @@ main2()
 	assertOutput(t, src, "200\ntrue\n"+`{"title":"hello","count":42,"active":true}`)
 }
 
-// Awaiting the (synchronous) body accessors used to hard compile-crash and free
-// the live buffer — `await` treated the string/buffer as a Promise slot. `await`
-// of a non-thenable is identity, so these must work exactly as the un-awaited
-// forms and preserve the buffer (ADR-00241).
+// The body accessors return real Promise<T> (TDD-00186 Part B, ADR-00794), so
+// `await r.text()` unwraps a genuine thenable to the buffered string — and
+// reusing the Response afterward still reads the live buffer (ADR-00241).
 func TestE2EFetchAwaitText(t *testing.T) {
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
@@ -103,6 +102,37 @@ async function main2(): Promise<void> {
 main2()
 `, srv.URL)
 	assertOutput(t, src, `{"title":"hello","count":42,"active":true}`)
+}
+
+// TDD-00186 Part B (ADR-00794): the body accessors return a real Promise<T>,
+// so a `.then()` reaction on `r.text()` fires with the buffered string — proving
+// it is a genuine thenable, not a bare value dressed up by `await`-is-identity.
+func TestE2EFetchBodyPromiseThen(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    await r.text().then((body: string) => { console.log(body.length > 0) })
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "true")
+}
+
+// The body promises compose through Promise.all like any other Promise<T>.
+func TestE2EFetchBodyPromiseAll(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const a: Response = await fetch("%s/flat")
+    const b: Response = await fetch("%s/flat")
+    const bodies: string[] = await Promise.all([a.text(), b.text()])
+    console.log(bodies.length)
+    console.log(bodies[0] === bodies[1])
+}
+main2()
+`, srv.URL, srv.URL)
+	assertOutput(t, src, "2\ntrue")
 }
 
 func TestE2EFetchAwaitJSONProjection(t *testing.T) {
@@ -467,7 +497,7 @@ func TestE2EFetchLargeBody(t *testing.T) {
 	src := fmt.Sprintf(`
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/large")
-    const body: string = r.text()
+    const body: string = await r.text()
     console.log(body.length)
 }
 main2()
@@ -505,7 +535,7 @@ func TestE2EFetchTopLevelBusySpinDoesNotOverflowStack(t *testing.T) {
 	src := fmt.Sprintf(`
 const r = await fetch("%s/slow")
 console.log(r.status)
-console.log(r.text())
+console.log(await r.text())
 `, srv.URL)
 	assertOutput(t, src, "200\ndone")
 }
@@ -759,7 +789,7 @@ func TestE2EFetchArrayBufferPreservesEmbeddedNullByte(t *testing.T) {
 	src := fmt.Sprintf(`
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/binary")
-    const buf = r.arrayBuffer()
+    const buf = await r.arrayBuffer()
     const arr = new Uint8Array(buf)
     console.log(arr.length)
     for (let i = 0; i < arr.length; i++) {
@@ -772,16 +802,15 @@ main2()
 }
 
 func TestE2EFetchTextStillStrlenBasedAfterArrayBuffer(t *testing.T) {
-	// .text()/.json() are deliberately unchanged (ADR-00094) — still
-	// strlen-based, so a body with an embedded null still reads back short
-	// via .text() even though .arrayBuffer() (tested above) now sees the
-	// whole thing. This pins that intentional split down as a regression
-	// guard, not an oversight.
+	// .text()/.json() stay strlen-based (ADR-00094) — a body with an embedded
+	// null reads back short via `await r.text()` even though `await
+	// r.arrayBuffer()` (tested above) sees the whole thing. This pins that
+	// intentional split down as a regression guard, not an oversight.
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/binary")
-    console.log(r.text().length)
+    console.log((await r.text()).length)
 }
 main2()
 `, srv.URL)
@@ -797,7 +826,7 @@ async function main2(): Promise<void> {
     ps.push(fetch("%s/binary"))
     const responses = await Promise.all(ps)
     for (const r of responses) {
-        const arr = new Uint8Array(r.arrayBuffer())
+        const arr = new Uint8Array(await r.arrayBuffer())
         console.log(arr.length)
     }
 }
@@ -813,7 +842,7 @@ async function main2(): Promise<void> {
     const ps: Array<Promise<Response>> = []
     ps.push(fetch("%s/binary"))
     const r = await Promise.race(ps)
-    const arr = new Uint8Array(r.arrayBuffer())
+    const arr = new Uint8Array(await r.arrayBuffer())
     console.log(arr.length)
 }
 main2()
@@ -830,7 +859,7 @@ async function main2(): Promise<void> {
     const results = await Promise.allSettled(ps)
     for (const res of results) {
         console.log(res.status)
-        const arr = new Uint8Array(res.value.arrayBuffer())
+        const arr = new Uint8Array(await res.value.arrayBuffer())
         console.log(arr.length)
     }
 }
@@ -985,7 +1014,7 @@ async function main2(): Promise<void> {
     console.log(a.status)
     const b: Response = await rp
     console.log(b.status)
-    console.log(b.text())
+    console.log(await b.text())
 }
 main2()
 `, srv.URL)

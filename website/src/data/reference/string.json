@@ -452,18 +452,18 @@
     {
       "id": "string.codePointAt",
       "name": ".codePointAt(i)",
-      "signature": "codePointAt(i: number): number",
+      "signature": "codePointAt(i: number): number | undefined",
       "badge": "caveats",
-      "description": "Returns the code point at index i.",
+      "description": "Returns the code point at index i, or undefined if out of range.",
       "returns": {
-        "type": "number",
-        "desc": "The code point, or NaN if out of range."
+        "type": "number | undefined",
+        "desc": "The code point, or undefined if the index is out of range (as in Node)."
       },
       "exampleKey": "strings/char_code",
-      "snippet": "console.log('Hello'.codePointAt(0))   // 72\nconsole.log('Hello'.codePointAt(0) === 'Hello'.charCodeAt(0))   // true",
+      "snippet": "console.log('Hello'.codePointAt(0))   // 72\nconsole.log('Hello'.codePointAt(99) ?? -1)   // -1",
       "differences": [
-        "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text.",
-        "An out-of-range index returns `NaN` (bounds-checked), where real JS returns `undefined` — no undefined sentinel for a numeric result."
+        "This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so an in-range result is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text.",
+        "An out-of-range index returns a real `undefined` (as in Node), so the type is `number | undefined` — narrow, `?? n`, or `!` before use; `.charCodeAt`'s out-of-range `NaN` is a separate, already-faithful behavior."
       ],
       "seeAlso": [
         "string.charCodeAt"

@@ -326,7 +326,8 @@
             "notes": [
               "Holes are supported (`const [, b] = arr` skips index 0)",
               "The source may be a string — `const [a, b] = \"xy\"` binds its characters (`a`=`\"x\"`, `b`=`\"y\"`), one per byte, in both the declaration and assignment forms ([ADR-00536](../adr/ADR-00536.md))",
-              "Default values (`[a = 1]`) fire exactly when that position is past the source array's actual length — see [ADR-00157](../adr/ADR-00157.md)/[ADR-00158](../adr/ADR-00158.md)",
+              "A position past the source's length binds a real `undefined` (`T \\| undefined`; strict mode requires narrowing/`??`/`!` before bare-`T` use, `-compat=js` auto-widens) — a provably-in-bounds position off a known-length literal stays bare `T`, matching tsc ([TDD-00187](../tdd/TDD-00187.md) Stage 2, [ADR-00779](../adr/ADR-00779.md))",
+              "Default values (`[a = 1]`) fire exactly when that position is past the source array's actual length — the binding then stays bare `T` — see [ADR-00157](../adr/ADR-00157.md)/[ADR-00158](../adr/ADR-00158.md)",
               "A rest element (`[a, ...rest]`) works in the declaration form, a destructured parameter, and the assignment form alike — a real, independent copy of every remaining position, empty (not an error) when the source is shorter than the pattern — see [ADR-00161](../adr/ADR-00161.md)",
               "Usable as a for-of loop variable (`for (const [a, b] of pairs)`, over an array-of-arrays), reusing the same unpack core — see [ADR-00192](../adr/ADR-00192.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 1",
               "Nested patterns (`[[a, b], c]`, `[{ x }, { y }]`) work in a declaration, for-of loop variable, and destructured parameter — see [ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 2"
@@ -336,7 +337,7 @@
             "feature": "Object destructuring `const { x, y } = obj`",
             "status": "implemented",
             "caveats": [
-              "Default values (`{ x = 1 }`) are supported only for a field typed as a nullable *reference* (`T \\| null` where T is string/array/object/class) — the only field shape with a real \"not provided\" signal; a default on a nullable scalar (`number \\| null`, whose `null` is a fake in-band 0 sentinel — [ADR-00158](../adr/ADR-00158.md)) or any non-nullable field is a clean compile-time rejection",
+              "Default values (`{ x = 1 }`) require a nullable/optional field (`T \\| null`, `T \\| undefined`, or `key?: T`) — a nullable *scalar* field now carries a real `{ i1, T }` presence bit ([TDD-00064](../tdd/TDD-00064.md)/[TDD-00187](../tdd/TDD-00187.md)), so its default fires on genuine absence only (a stored 0 survives); a default on a non-nullable field stays a clean compile-time rejection ([ADR-00158](../adr/ADR-00158.md)/[ADR-00779](../adr/ADR-00779.md))",
               "*Assignment* to already-declared targets now supports nested patterns (`({ p, q: { r, s } } = obj)`, `({ arr: [x, y] } = obj)`) and object-property defaults, shorthand `{ x = default }` and keyed `{ k: x = default }`, on a nullable-reference field, at declaration-form parity ([ADR-00595](../adr/ADR-00595.md)/[ADR-00597](../adr/ADR-00597.md)); a `= default` on a nested position stays rejected — matching the declaration form",
               "`{ ...rest }` over an `any`/union/generic source (Stage 3c) and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections",
               "A computed key (`{ [k]: v }`) is supported only for a **constant** string/number literal key (`{ [\"a\"]: v }`, `{ [0]: v }` — resolves to that field); a runtime-valued key on a fixed object is a clean rejection ([ADR-00609](../adr/ADR-00609.md))"
@@ -418,8 +419,11 @@
           {
             "feature": "Optional parameters (`param?`)",
             "status": "implemented",
+            "notes": [
+              "An omitted `?` argument reads as a real `T | undefined` inside the body, as in TS ([ADR-00164](../adr/ADR-00164.md), [ADR-00783](../adr/ADR-00783.md), [TDD-00187](../tdd/TDD-00187.md)) — a present `0`/`\"\"` is distinguishable from an omitted argument; narrow, `?? d`, or `!` to consume it"
+            ],
             "caveats": [
-              "An omitted `?` argument gets the parameter type's zero value — the same `undefined` stand-in default parameter values/destructuring defaults use, not real JS's `undefined` ([ADR-00164](../adr/ADR-00164.md))"
+              "An array-typed optional parameter stays an empty array when omitted (an array aggregate has no spare absent state); an un-narrowed optional scalar is still lenient in arithmetic (`emitIdent` unwraps the payload before the operator, so `a + b` on an absent `b` reads `0` rather than erroring — the same residual as any un-narrowed nullable local)"
             ]
           },
           {
@@ -484,7 +488,7 @@
             "caveats": [
               "A free `function*` may be top-level **or nested** (a nested `function*` captures enclosing state by reference — an enclosing `let` mutated after the generator is created is seen by a later `.next()` — reusing the closure-boxing on the instance's `__env`; an *array* capture stays a clean rejection); a generator *expression* is supported only as a top-level `const/let/var G = function* ...` binding (rewritten to a named declaration, [TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/ADR-00293.md)) — an argument/nested/IIFE use is a clean rejection. Instance generator methods — sync and `async *m()` — are supported separately (rows below), but `static`/`abstract` generator methods stay clean rejections ([TDD-00094](../tdd/TDD-00094.md))",
               "The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](../adr/ADR-00293.md)); still requires a plain non-destructured parameter list and a non-array parameter type (an array *element* type is supported — yielded/sent arrays round-trip through every generator slot, `for...of`/`.next()`/`yield*`/`for await` alike, [ADR-00676](../adr/ADR-00676.md); a tuple/object element type also works)",
-              "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}` — this compiler's usual stand-in for real JS's `undefined` ([TDD-00061](../tdd/TDD-00061.md)/[ADR-00173](../adr/ADR-00173.md))"
+              "Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` ([TDD-00061](../tdd/TDD-00061.md)/[ADR-00173](../adr/ADR-00173.md)) — deliberately kept bare even with the `T \\| undefined` sentinel available: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS, and flipping it would break every `.next().value` consumer for no faithfulness gain ([ADR-00781](../adr/ADR-00781.md))"
             ],
             "notes": [
               "Real suspend/resume via this compiler's own `ucontext.h`-based fiber primitive (the same one `http.listen`/`await fetch(...)` already use), not a synchronous stand-in — see [ADR-00171](../adr/ADR-00171.md)/[ADR-00172](../adr/ADR-00172.md)",
@@ -642,8 +646,12 @@
           {
             "feature": "Interfaces (structural)",
             "status": "implemented",
+            "caveats": [
+              "An optional field whose type is an array or tuple stays bare — an omitted `tags?: string[]` reads as an empty array, not `undefined` (the `{ptr,i64}` slot has no distinct absent state — [ADR-00246](../adr/ADR-00246.md))"
+            ],
             "notes": [
-              "Heap-allocated objects"
+              "Heap-allocated objects",
+              "An optional field (`y?: T`) is a real `T \\| undefined` ([TDD-00187](../tdd/TDD-00187.md) Stage 2, [ADR-00779](../adr/ADR-00779.md)): an omitted field reads back `undefined` (never a stand-in zero), a written one is present; strict mode gates bare-`T` use, `-compat=js` auto-widens. Class `tag?: T` fields work the same way"
             ]
           },
           {

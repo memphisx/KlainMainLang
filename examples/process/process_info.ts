@@ -32,10 +32,12 @@ const [ds, dns] = process.hrtime(t0);
 console.log("diff nanoseconds in range:", dns >= 0 && dns < 1000000000);
 console.log("uptime >= 0:", process.uptime() >= 0);
 
-// memoryUsage() returns Node's shape; rss is a real value (peak resident set,
-// from getrusage). The V8-heap fields have no native analogue and report 0.
+// memoryUsage() returns Node's shape. rss is the real instantaneous resident
+// set; heapTotal/heapUsed report this compiler's own object heap (the C
+// allocator arena by default, Boehm's heap under -mm=gc), so they are real and
+// positive. external/arrayBuffers have no native off-heap analogue and are 0.
 const mem = process.memoryUsage();
-console.log("rss > 0:", mem.rss > 0, "heapUsed:", mem.heapUsed);
+console.log("rss > 0:", mem.rss > 0, "heapUsed > 0:", mem.heapUsed > 0);
 
 process.on('exit', (code: number) => {
   console.log("exiting with code", code);

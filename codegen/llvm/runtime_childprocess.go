@@ -409,12 +409,21 @@ entry:
 
 	// __kml_cp_spawn_errobj(errno): builds the Error a failed *spawn* emits
 	// through the 'error' event (ADR-00754) — message "spawn <reason>" from
-	// strerror(errno), a full 6-field errorObjType so the listener can read
-	// .message/.name safely. (The Node .code/.errno/.syscall props are not
-	// attached, same boundary as the fs errors.)
+	// strerror(errno), a full errorObjType. Carries the Node error props
+	// `err.code` (`ENOENT` for a missing command — the canonical spawn-failure
+	// idiom `e.code === 'ENOENT'`), `err.errno` (the negative libuv-style errno,
+	// `-2` on POSIX — negating the platform errno is faithful on both Linux and
+	// macOS; each reports its own raw number, as Node does), and `err.errstr`.
+	// `err.syscall`/`err.path` stay null — Node's `spawn <file>` syscall needs
+	// the command string, not threaded here (the message shape is likewise
+	// unchanged, ADR-00754). The `__kml_errno_code` map is built per-platform
+	// from Go's syscall constants, so the code string is correct where the raw
+	// number differs Linux↔macOS (EAGAIN 11 vs 35, …).
 	e.ensureStrerror()
+	e.ensureErrnoCode()
 	fmtSpawn := e.internString("spawn %s")
 	spawnErrName := e.internString("Error")
+	eIR := errorObjType.StructIR()
 	e.emitGlobal(fmt.Sprintf(`
 define ptr @__kml_cp_spawn_errobj(i64 %%errno) {
 entry:
@@ -423,6 +432,10 @@ entry:
   %%buf = call ptr @__kml_str_alloc(i64 128)
   call i32 (ptr, ptr, ...) @sprintf(ptr %%buf, ptr %s, ptr %%reason)
   call void @__kml_str_finalize(ptr %%buf)
+  %%code = call ptr @__kml_errno_code(i32 %%e32)
+  %%errno_pos = sitofp i32 %%e32 to double
+  %%errno_neg32 = sub i32 0, %%e32
+  %%errno_neg = sitofp i32 %%errno_neg32 to double
   %%obj = call ptr @malloc(i64 %d)
   %%k = getelementptr %s, ptr %%obj, i32 0, i32 0
   store i64 0, ptr %%k, align 8
@@ -431,13 +444,19 @@ entry:
   %%nm = getelementptr %s, ptr %%obj, i32 0, i32 2
   store ptr %s, ptr %%nm, align 8
   %%c = getelementptr %s, ptr %%obj, i32 0, i32 3
-  store ptr null, ptr %%c, align 8
+  store ptr %%code, ptr %%c, align 8
   %%ec = getelementptr %s, ptr %%obj, i32 0, i32 4
-  store double 0.0, ptr %%ec, align 8
+  store double %%errno_pos, ptr %%ec, align 8
   %%es = getelementptr %s, ptr %%obj, i32 0, i32 5
-  store ptr null, ptr %%es, align 8
+  store ptr %%reason, ptr %%es, align 8
+  %%sc = getelementptr %s, ptr %%obj, i32 0, i32 6
+  store ptr null, ptr %%sc, align 8
+  %%pa = getelementptr %s, ptr %%obj, i32 0, i32 7
+  store ptr null, ptr %%pa, align 8
+  %%en = getelementptr %s, ptr %%obj, i32 0, i32 8
+  store double %%errno_neg, ptr %%en, align 8
   ret ptr %%obj
-}`, fmtSpawn, errorObjType.StructSize(), errorObjType.StructIR(), errorObjType.StructIR(), errorObjType.StructIR(), spawnErrName, errorObjType.StructIR(), errorObjType.StructIR(), errorObjType.StructIR()))
+}`, fmtSpawn, errorObjType.StructSize(), eIR, eIR, eIR, spawnErrName, eIR, eIR, eIR, eIR, eIR, eIR))
 
 	// __kml_cp_dispatch(): drain + finalize every live child. Called by the
 	// event loop after select().

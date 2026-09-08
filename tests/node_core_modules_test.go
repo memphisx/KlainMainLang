@@ -790,14 +790,16 @@ main2()
 func TestE2EAsyncLocalStorageBind(t *testing.T) {
 	// bind(fn) captures the context now and returns a wrapper of fn's own
 	// signature that reinstalls it on every later call — outside any run.
+	// getStore() is `number | undefined` (TDD-00187), asserted present with `!`
+	// inside the bound context that is known to carry a store.
 	assertOutputImports(t, `
 import { AsyncLocalStorage } from 'async_hooks'
 const als = new AsyncLocalStorage<number>()
 let boundThunk: () => number = () => 0
 let boundArg: (x: number) => number = (x: number) => x
 als.run(7, () => {
-  boundThunk = AsyncLocalStorage.bind((): number => als.getStore())
-  boundArg = AsyncLocalStorage.bind((x: number): number => als.getStore() + x)
+  boundThunk = AsyncLocalStorage.bind((): number => als.getStore()!)
+  boundArg = AsyncLocalStorage.bind((x: number): number => als.getStore()! + x)
 })
 console.log(boundThunk())
 console.log(boundArg(100))
@@ -806,14 +808,34 @@ console.log(boundArg(100))
 
 func TestE2EAsyncResourceRunInAsyncScope(t *testing.T) {
 	// new AsyncResource() captures the context at construction; runInAsyncScope
-	// replays it — here after the run(...) has already exited.
+	// replays it — here after the run(...) has already exited. Outside the
+	// replayed scope getStore() is a real `undefined` (TDD-00187), not the old
+	// zero value.
 	assertOutputImports(t, `
 import { AsyncLocalStorage, AsyncResource } from 'async_hooks'
 const als = new AsyncLocalStorage<number>()
 const res = als.run(9, () => new AsyncResource('r'))
 res.runInAsyncScope((): void => { console.log('scope', als.getStore()) })
 console.log('outside', als.getStore())
-`, "scope 9\noutside NaN")
+`, "scope 9\noutside undefined")
+}
+
+func TestE2EAsyncLocalStorageGetStoreUndefined(t *testing.T) {
+	// A scalar (number) store: getStore() outside any run — or after the run
+	// exits — is a real `undefined` (TDD-00187), not the old zero value, and
+	// distinguishable from a genuine 0 store via `=== undefined` / `??`.
+	assertOutputImports(t, `
+import { AsyncLocalStorage } from 'async_hooks'
+const als = new AsyncLocalStorage<number>()
+console.log(als.getStore() === undefined)
+console.log(als.getStore() ?? -1)
+als.run(0, () => {
+  console.log(als.getStore())
+  console.log(als.getStore() === undefined)
+  console.log(als.getStore() ?? -1)
+})
+console.log(als.getStore() === undefined)
+`, "true\n-1\n0\nfalse\n0\ntrue")
 }
 
 func TestE2EAsyncLocalStorageSnapshotRejected(t *testing.T) {

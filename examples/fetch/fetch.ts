@@ -18,7 +18,7 @@
 const r = await fetch('http://127.0.0.1:8765/get')
 console.log(r.status)          // 200
 console.log(r.ok)              // true
-console.log(r.text().length > 0)   // true
+console.log((await r.text()).length > 0)   // true — .text() is a Promise<string>
 
 // ── a 404 still resolves normally — .ok is what distinguishes it ───────────
 const missing = await fetch('http://127.0.0.1:8765/status/404')
@@ -29,21 +29,18 @@ console.log(missing.ok)        // false
 const redirected = await fetch('http://127.0.0.1:8765/redirect-to?url=/get')
 console.log(redirected.status) // 200, not 302 — the redirect was already followed
 
-// ── .json() parses the body straight into a declared type ──────────────────
-// (flat objects with primitive fields only, the same scope JSON.parse itself
-// has — see examples/json/json_methods.ts)
-interface Ip { origin: string }
-const ipInfo: Ip = (await fetch('http://127.0.0.1:8765/ip')).json()
-console.log(ipInfo.origin.length > 0)  // true — some IP address string came back
-
-// ── awaiting the body accessors also works ─────────────────────────────────
-// .text()/.json()/.arrayBuffer() are synchronous here (they return the value
-// directly, not a Promise), but the instinctive `await res.text()` — how a TS
-// developer reflexively writes them — is a safe no-op: awaiting a non-thenable
-// is identity, and the type-directed .json() projection carries through it.
+// ── the body accessors are real Promise<T> (WHATWG) ────────────────────────
+// .text()/.json()/.arrayBuffer() each return a Promise you await — a genuine
+// thenable, so `.then(...)` and Promise.all([...]) work on them too.
 const ipRes = await fetch('http://127.0.0.1:8765/ip')
 const ipText: string = await ipRes.text()
 console.log(ipText.length > 0)         // true
+
+// .json() parses the body into a declared type (flat objects with primitive
+// fields only, JSON.parse's own scope — see examples/json/json_methods.ts).
+// A typed `const x: T = ...` binding parses straight into T, so the projection
+// carries through the await.
+interface Ip { origin: string }
 const ipAwaited: Ip = await ipRes.json()
 console.log(ipAwaited.origin.length > 0)  // true
 
@@ -63,5 +60,5 @@ try {
 // random-bytes endpoint, which would only sometimes happen to), so this
 // path is exercised on every run, not just probabilistically.
 const binary = await fetch('http://127.0.0.1:8765/bytes/16')
-const bytes = new Uint8Array(binary.arrayBuffer())
+const bytes = new Uint8Array(await binary.arrayBuffer())
 console.log(bytes.length)  // 16 — exact, even though byte 5 is 0

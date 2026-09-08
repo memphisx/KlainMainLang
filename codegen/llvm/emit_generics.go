@@ -166,7 +166,7 @@ func (e *Emitter) buildGenericParamSig(params []ast.Param, subs map[string]Type)
 			pty = TypeI64
 			pty.Inferred = true
 		}
-		sig.ParamTypes = append(sig.ParamTypes, pty)
+		sig.ParamTypes = append(sig.ParamTypes, optionalParamType(p, pty))
 		sig.ParamNames = append(sig.ParamNames, p.Name)
 		sig.Defaults = append(sig.Defaults, p.Default)
 		sig.Optional = append(sig.Optional, p.Optional)
@@ -400,7 +400,12 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 func (e *Emitter) instantiateGenericInterface(decl *ast.InterfaceDeclaration, subs map[string]Type) Type {
 	fields := make([]Field, len(decl.Fields))
 	for i, f := range decl.Fields {
-		fields[i] = Field{Name: f.Name, Ty: e.substituteGenericType(f.Type, subs)}
+		fty := e.substituteGenericType(f.Type, subs)
+		// `name?: T` widens to `T | undefined` (TDD-00187 Stage 2).
+		if f.Optional {
+			fty = undefinedableElem(fty)
+		}
+		fields[i] = Field{Name: f.Name, Ty: fty}
 	}
 	return ObjectType(fields)
 }
@@ -427,6 +432,10 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 		var fty Type
 		if f.Type != nil {
 			fty = e.substituteGenericType(f.Type, subs)
+			// `tag?: T` widens to `T | undefined` (TDD-00187 Stage 2).
+			if f.Optional {
+				fty = undefinedableElem(fty)
+			}
 		} else {
 			fty = e.inferExprType(f.Initializer)
 		}

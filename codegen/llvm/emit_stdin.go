@@ -34,7 +34,29 @@ func (e *Emitter) emitStdinMethodCall(objExpr ast.Expression, method string, arg
 	if err != nil {
 		return Value{}, err
 	}
+	// Node's stream methods return the stream itself, so the idiomatic
+	// process.stdin.setEncoding('utf8').on('data', …).on('end', …) chain works;
+	// StdinType is re-derived for the chained call in inferExprType.
+	handle := Value{Ref: objVal.Ref, Ty: StdinType()}
 	switch method {
+	case "setEncoding":
+		// This stream already delivers 'data' chunks as UTF-8 strings, so
+		// setEncoding('utf8') is a faithful no-op. A different encoding cannot be
+		// honored (there is no Buffer chunk to re-decode), so it is a clean
+		// rejection rather than a silently wrong decode.
+		enc, err := stringLiteralArg(args, 0, "process.stdin.setEncoding", pos)
+		_ = enc
+		if err != nil {
+			return Value{}, err
+		}
+		if len(args) != 1 {
+			return Value{}, fmt.Errorf("%d:%d: process.stdin.setEncoding takes one encoding argument", pos.Line, pos.Col)
+		}
+		lit, _ := args[0].(*ast.StringLiteral)
+		if lit == nil || (lit.Value != "utf8" && lit.Value != "utf-8") {
+			return Value{}, fmt.Errorf("%d:%d: process.stdin.setEncoding supports only 'utf8' (chunks are delivered as UTF-8 strings)", pos.Line, pos.Col)
+		}
+		return handle, nil
 	case "on":
 		evt, err := stringLiteralArg(args, 0, "process.stdin.on", pos)
 		if err != nil {
@@ -61,9 +83,9 @@ func (e *Emitter) emitStdinMethodCall(objExpr ast.Expression, method string, arg
 		default:
 			return Value{}, fmt.Errorf("%d:%d: process.stdin.on supports 'data' and 'end' (got '%s')", pos.Line, pos.Col, evt)
 		}
-		return Value{Ty: TypeVoid}, nil
+		return handle, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: process.stdin has no method '%s' (supported: on, setRawMode)", pos.Line, pos.Col, method)
+	return Value{}, fmt.Errorf("%d:%d: process.stdin has no method '%s' (supported: on, setEncoding, setRawMode)", pos.Line, pos.Col, method)
 }
 
 // stdinStoreField GEPs the handle's field idx and stores a ptr into it.

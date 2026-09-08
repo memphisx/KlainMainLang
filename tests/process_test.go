@@ -47,11 +47,13 @@ func TestE2EProcessEnv(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
+	// process.env reads are `string | undefined` (TDD-00187 Stage 3), so a
+	// bare-string binding needs `!`/`??` under strict, exactly as in TS.
 	binFile := buildBinary(t, `
-const fromDot: string = process.env.KML_TEST_VAR
+const fromDot: string = process.env.KML_TEST_VAR!
 console.log(fromDot)
 const key: string = "KML_TEST_VAR"
-const fromBracket: string = process.env[key]
+const fromBracket: string = process.env[key]!
 console.log(fromBracket)
 const missing = process.env.KML_TEST_VAR_MISSING ?? "default"
 console.log(missing)
@@ -253,18 +255,23 @@ func TestE2EProcessPidIsPositive(t *testing.T) {
 
 func TestE2EProcessMemoryUsageRssPositive(t *testing.T) {
 	// rss is the real instantaneous resident set (ADR-00570: Darwin task_info /
-	// Linux /proc/self/statm), so it grows as memory is allocated; the V8-heap
-	// fields have no native analogue and report 0.
+	// Linux /proc/self/statm). heapTotal/heapUsed are this compiler's own object
+	// heap (ADR-00791: default = the C allocator arena, -mm=gc = Boehm's heap) —
+	// real, positive, and growing with allocation. external/arrayBuffers have no
+	// native off-heap analogue and stay 0.
 	assertOutput(t, `
-const before = process.memoryUsage().rss;
+const before = process.memoryUsage();
 let arr: number[] = [];
 for (let i = 0; i < 1000000; i++) { arr.push(i); }
 const m = process.memoryUsage();
 console.log(m.rss > 0);
-console.log(m.rss >= before);
-console.log(m.heapUsed);
+console.log(m.rss >= before.rss);
+console.log(m.heapTotal > 0);
+console.log(m.heapUsed > 0);
+console.log(m.heapUsed <= m.heapTotal);
+console.log(m.heapUsed >= before.heapUsed);
 console.log(m.external);
-console.log(m.arrayBuffers);`, "true\ntrue\n0\n0\n0")
+console.log(m.arrayBuffers);`, "true\ntrue\ntrue\ntrue\ntrue\ntrue\n0\n0")
 }
 
 func TestE2EProcessMemoryUsageWrongArgCountRejected(t *testing.T) {
@@ -665,4 +672,40 @@ console.log(process.getgid() >= 0)
 console.log(process.geteuid() === process.getuid())
 console.log(process.getegid() === process.getgid())
 `, "true\ntrue\ntrue\ntrue")
+}
+
+// --- process.env / argv absence as real `string | undefined` (TDD-00187 Stage 3) ---
+
+func TestE2EProcessEnvMissingIsUndefined(t *testing.T) {
+	assertOutput(t, `
+console.log(process.env.KML_DEFINITELY_MISSING_XYZ);
+console.log(process.env.KML_DEFINITELY_MISSING_XYZ === undefined);
+console.log(process.env.KML_DEFINITELY_MISSING_XYZ ?? "fallback");
+console.log(process.env["KML_DEFINITELY_MISSING_XYZ"] === undefined);
+process.env.KML_SET_HERE = "v";
+console.log(process.env.KML_SET_HERE === undefined);
+console.log(process.env.KML_SET_HERE);
+`, "undefined\ntrue\nfallback\ntrue\nfalse\nv")
+}
+
+func TestE2EProcessArgvOutOfRangeIsUndefined(t *testing.T) {
+	assertOutput(t, `
+console.log(process.argv[99]);
+console.log(process.argv[99] === undefined);
+console.log(process.argv[99] ?? "none");
+console.log(process.argv[0] === undefined);
+if (!process.argv[50]) { console.log("falsy"); }
+console.log(process.argv[50] === "child");
+`, "undefined\ntrue\nnone\nfalse\nfalsy\nfalse")
+}
+
+func TestE2EStrictRejectsEnvIntoBareString(t *testing.T) {
+	for _, src := range []string{
+		`const p: string = process.env.PATH;`,
+		`const a: string = process.argv[2];`,
+	} {
+		if _, err := parseAndCompile(src); err == nil {
+			t.Fatalf("expected a strict-mode compile error for: %s", src)
+		}
+	}
 }

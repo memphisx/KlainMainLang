@@ -329,18 +329,39 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 // there's no surrounding typed declaration to parse into (falls back to
 // TypePtr, matching bare JSON.parse's own default-context behavior), and
 // arrayBuffer() (ADR-00094).
+//
+// Each returns a real Promise<T> (TDD-00186 Part B, ADR-00794): the body is
+// buffered synchronously — emitResponseBody/emitResponseArrayBuffer drive the
+// parked fetch to done — then wrapped in an already-settled task promise, so
+// the observable return type matches WHATWG (`await r.json()`,
+// `r.json().then(...)`, `Promise.all([r.json(), ...])`). The declaration-context
+// json() fast path (emitResponseJSON via emitDeclJSONProjection) still parses
+// straight into the declared type without the promise box — `await` there is
+// stripped before dispatch, so `const p: T = await r.json()` is unaffected.
 func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Value, error) {
 	switch method {
 	case "text":
-		return e.emitResponseBody(objVal, pos)
+		body, err := e.emitResponseBody(objVal, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.wrapSettledTaskPromise(body), nil
 	case "json":
 		bodyVal, err := e.emitResponseBody(objVal, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitJSONParseValue(bodyVal, TypePtr, pos)
+		parsed, err := e.emitJSONParseValue(bodyVal, TypePtr, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.wrapSettledTaskPromise(parsed), nil
 	case "arrayBuffer":
-		return e.emitResponseArrayBuffer(objVal, pos)
+		buf, err := e.emitResponseArrayBuffer(objVal, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.wrapSettledTaskPromise(buf), nil
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
 }

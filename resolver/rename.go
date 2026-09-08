@@ -655,6 +655,8 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		for i := range e.Exprs {
 			e.Exprs[i] = rewriteExpr(e.Exprs[i], sc, lu)
 		}
+	case *ast.NonNullExpression:
+		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.SpreadElement:
 		e.Arg = rewriteExpr(e.Arg, sc, lu)
 	case *ast.UnaryExpression:

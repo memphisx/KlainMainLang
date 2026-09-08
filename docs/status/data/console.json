@@ -99,7 +99,8 @@
             "feature": "`console.group()` / `.groupEnd()`",
             "status": "implemented",
             "notes": [
-              "Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/ADR-00029.md)."
+              "Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/ADR-00029.md).",
+              "`console.group(...label)` takes variadic label args, formatted like `console.log`; `console.groupCollapsed` is the terminal-identical alias (a browser devtools console would render it collapsed) ([ADR-00792](../adr/ADR-00792.md))"
             ]
           },
           {

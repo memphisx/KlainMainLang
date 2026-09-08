@@ -435,7 +435,6 @@
       "description": "AsyncLocalStorage carries a typed store through an async call tree: run/getStore/exit/enterWith/disable, with real propagation across await (the store rides the coroutine task struct, so it survives an await/park/resume and a spawned task inherits it) and across a setTimeout/setInterval scheduled inside run(). Static AsyncLocalStorage.bind(fn) and AsyncResource.runInAsyncScope capture the current context and replay it later.",
       "differences": [
         "AsyncLocalStorage.snapshot() is a clean rejection — its runner is fully generic (parameter/return types vary per call site), needing generic first-class closures this compiler lacks",
-        "getStore() on an unset/disabled store returns the element type's zero value (the undefined stand-in); use an object store to tell absence apart via === null",
         "runInAsyncScope accepts thisArg but doesn't bind it (no dynamic this on closures); a run() callback that throws doesn't restore the frame yet",
         ".then/.catch reactions and EventEmitter listeners don't propagate context yet (only await, task-spawn, and timers do)",
         "The low-level createHook/executionAsyncId/async-id lifecycle is out of scope — a compiled AOT binary has no V8 promise-hooks or GC-tracked async-ids"

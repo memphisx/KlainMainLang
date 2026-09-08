@@ -516,6 +516,13 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 				return nil, err
 			}
 			expr = ast.NewIndexExpression(expr, index, posOf(lbrak))
+		case lexer.NOT:
+			// Postfix non-null assertion `expr!` (TS). Unambiguous here: a NOT
+			// token directly after a complete member/call chain can only be
+			// the assertion (`!=`/`!==` lex as their own tokens), and it binds
+			// like the member chain itself so `a!.b` and `f()!.c` work.
+			tok := p.advance()
+			expr = ast.NewNonNullExpression(expr, posOf(tok))
 		case lexer.LT:
 			// Explicit call-site type arguments `f<string>(x)` (ADR-00473).
 			// Ambiguous with comparison (`a < b > (c)`), resolved by

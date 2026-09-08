@@ -359,6 +359,21 @@ c.on('close', () => {
 `, "hasError true\nexitFired false")
 }
 
+// A failed spawn's 'error' Error carries Node's `err.code` ('ENOENT' for a
+// missing command) and the negative libuv-style `err.errno` (-2 on POSIX) —
+// ADR-00784. The canonical guard `e.code === 'ENOENT'` matches.
+func TestE2EChildProcessSpawnErrorCodeErrno(t *testing.T) {
+	assertOutputImports(t, `
+import { spawn } from 'child_process'
+const c = spawn("kml-definitely-not-a-real-command-xyz", [])
+c.on('error', (e) => {
+  console.log("code", (e as any).code)
+  console.log("isENOENT", (e as any).code === 'ENOENT')
+  console.log("errno", (e as any).errno)
+})
+`, "code ENOENT\nisENOENT true\nerrno -2")
+}
+
 func TestE2EChildProcessSpawnSyncLargeInterleavedOutput(t *testing.T) {
 	skipPOSIXToolsOnWindows(t, "/bin/sh -c for-loop with seq")
 	// Both pipes are poll-multiplexed: a child writing well past the pipe

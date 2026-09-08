@@ -910,6 +910,8 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		for _, sub := range x.Exprs {
 			scanExprFV(sub, bound, result)
 		}
+	case *ast.NonNullExpression:
+		scanExprFV(x.Arg, bound, result)
 	case *ast.NewTypedArrayExpression:
 		// `new Int32Array(buf)` inside a closure body: buf is a real free
 		// variable (was silently unscanned, later failing as "undefined
@@ -1278,6 +1280,8 @@ func capScanExpr(expr ast.Expression, bound map[string]bool, result map[string]b
 		for _, sub := range x.Exprs {
 			capScanExpr(sub, bound, result)
 		}
+	case *ast.NonNullExpression:
+		capScanExpr(x.Arg, bound, result)
 	case *ast.NewTypedArrayExpression:
 		capScanExpr(x.Arg, bound, result)
 		if x.ByteOffset != nil {

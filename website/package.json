@@ -13,7 +13,9 @@
     "dev": "npm run gen && quasar dev",
     "dev:ssg": "npm run gen && quasar dev -m ssg",
     "build": "npm run check:reference && npm run gen && quasar build -m ssg",
-    "build:spa": "npm run gen && quasar build"
+    "build:spa": "npm run gen && quasar build",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@fontsource/inter": "^5.1.0",
