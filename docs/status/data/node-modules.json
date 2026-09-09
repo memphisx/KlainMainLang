@@ -362,9 +362,9 @@
           },
           {
             "feature": "`node:ffi`",
-            "status": "missing",
+            "status": "implemented",
             "notes": [
-              "Foreign function interface (Node v26.1.0, experimental) — designed in [TDD-00164](../tdd/TDD-00164.md); not started"
+              "Foreign function interface (Node v26.1.0, experimental) — all stages shipped ([FFI.md](FFI.md)): `dlopen`/typed calls/`bigint` pointers, raw-memory helpers, `registerCallback` trampolines; POSIX only ([TDD-00164](../tdd/TDD-00164.md))"
             ]
           },
           {

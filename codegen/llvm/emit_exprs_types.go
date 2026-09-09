@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
 // emitTemplateLiteral builds the concatenated result of a template literal.
@@ -678,6 +679,23 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.Property == "expandedSQL" && e.inferExprType(ex.Object).IsSQLiteStatement {
 			return TypePtr
 		}
+		// node:ffi (TDD-00164): compile-time constants + fn.pointer.
+		if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" && ex.Property == "suffix" {
+			return TypePtr
+		}
+		if inner, ok := ex.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
+			if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+				return TypePtr
+			}
+		}
+		if ex.Property == "pointer" && e.inferExprType(ex.Object).IsFFIFunction {
+			return BigIntType()
+		}
+		if ex.Property == "functions" || ex.Property == "symbols" {
+			if ot := e.inferExprType(ex.Object); ot.IsFFILibrary {
+				return ffiLibAccumulatorType(ot.FFILibReg, ex.Property == "functions")
+			}
+		}
 		// res.statusCode (ServerResponse, TDD-00131) — the response status,
 		// stored as the object's i64 `status` field.
 		if ex.Property == "statusCode" {
@@ -981,6 +999,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		if ex.ClassName == "WebSocketServer" && e.usedKlainWS {
 			return WebSocketServerType()
 		}
+		// new DynamicLibrary(path) → the node:ffi handle (TDD-00164).
+		if ex.ClassName == "DynamicLibrary" && e.usedNodeFFI {
+			return FFILibraryType()
+		}
 		// new PerformanceObserver(cb) → the perf_hooks handle (TDD-00166).
 		if ex.ClassName == "PerformanceObserver" {
 			return PerfObserverType()
@@ -1138,6 +1160,69 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					return TypeVoid
 				}
 			}
+			// node:ffi (TDD-00164): module calls + DynamicLibrary methods.
+			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+				switch mem.Property {
+				case "dlopen":
+					if t, err := ffiDlopenResultType(ex.Args); err == nil {
+						return t
+					}
+					return TypePtr
+				case "dlsym", "getRawPointer":
+					return BigIntType()
+				case "dlclose":
+					return TypeVoid
+				case "toString":
+					nt := TypePtr
+					nt.Nullable = true
+					return nt
+				case "toBuffer":
+					return BufferType()
+				case "toArrayBuffer":
+					return ArrayBufferType()
+				case "exportString", "exportBuffer", "exportArrayBuffer", "exportArrayBufferView":
+					return TypeVoid
+				}
+				if c, ok := ffiAccessorTypes[strings.TrimPrefix(mem.Property, "get")]; ok && strings.HasPrefix(mem.Property, "get") {
+					return ffiReturnKmlType(c)
+				}
+				if _, ok := ffiAccessorTypes[strings.TrimPrefix(mem.Property, "set")]; ok && strings.HasPrefix(mem.Property, "set") {
+					return TypeVoid
+				}
+			}
+			if ot := e.inferExprType(mem.Object); ot.IsFFILibrary {
+				switch mem.Property {
+				case "getFunction":
+					if len(ex.Args) == 2 {
+						if sig, err := ffiParseSignature(ex.Args[1]); err == nil {
+							return FFIFunctionType(sig)
+						}
+					}
+					return TypePtr
+				case "getFunctions":
+					if len(ex.Args) == 0 {
+						return ffiLibAccumulatorType(ot.FFILibReg, true)
+					}
+					if len(ex.Args) == 1 {
+						if defs, ok := ex.Args[0].(*ast.ObjectLiteral); ok {
+							if t, err := ffiDefinitionsType(defs); err == nil {
+								return t
+							}
+						}
+					}
+					return TypePtr
+				case "getSymbols":
+					return ffiLibAccumulatorType(ot.FFILibReg, false)
+				case "getSymbol", "registerCallback":
+					return BigIntType()
+				case "close", "unregisterCallback", "refCallback", "unrefCallback":
+					return TypeVoid
+				}
+			}
+		}
+		// node:ffi (TDD-00164): a call through a bound native function value.
+		if ct := e.inferExprType(ex.Callee); ct.IsFFIFunction && ct.FFISig != nil {
+			return ffiReturnKmlType(ct.FFISig.Ret)
 		}
 		// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage 4).
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {

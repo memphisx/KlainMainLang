@@ -177,7 +177,12 @@ const w = new Webview({
 })
 
 // page:  const p = await window.mkPoint(4, 5)   // -> { x: 4, y: 5 }
-w.run()`
+w.run()
+
+// The bindings value can also be a variable holding the API object —
+// same typing, same allowlist — handy when the surface is assembled elsewhere:
+//   const api = { doSth: () => 'did it', log: (m: string) => console.log(m) }
+//   const w = new Webview({ title: 'My App', bindings: api })`
 
 const embedCode = `import { Webview } from 'klain:webview'
 

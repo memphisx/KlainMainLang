@@ -612,6 +612,26 @@ uint64_t __kml_heap_total_bytes(void) {
 }
 uint64_t __kml_heap_used_bytes(void) { return (uint64_t)(unsigned)mallinfo().uordblks; }
 #endif
+#elif defined(_WIN32)
+#include <malloc.h>
+// The UCRT has no mallinfo; _heapwalk sums the C runtime heap the same way the
+// POSIX arena queries do — used = live blocks, total = used + free. The same
+// native reinterpretation as the other platforms (not V8's number), and
+// directionally correct: it tracks growth and leaks in this compiler's own heap.
+static void __kml_win_heap(uint64_t *total, uint64_t *used) {
+  uint64_t u = 0, f = 0;
+  _HEAPINFO hi;
+  hi._pentry = NULL;
+  int rc;
+  while ((rc = _heapwalk(&hi)) == _HEAPOK) {
+    if (hi._useflag == _USEDENTRY) u += (uint64_t)hi._size;
+    else f += (uint64_t)hi._size;
+  }
+  *used = u;
+  *total = u + f;
+}
+uint64_t __kml_heap_total_bytes(void) { uint64_t t, u; __kml_win_heap(&t, &u); return t; }
+uint64_t __kml_heap_used_bytes(void) { uint64_t t, u; __kml_win_heap(&t, &u); return u; }
 #else
 uint64_t __kml_heap_total_bytes(void) { return 0; }
 uint64_t __kml_heap_used_bytes(void) { return 0; }

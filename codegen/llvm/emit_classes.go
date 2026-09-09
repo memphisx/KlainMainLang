@@ -1882,6 +1882,10 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if ex.ClassName == "PerformanceObserver" {
 		return e.emitNewPerformanceObserver(ex)
 	}
+	// new DynamicLibrary(path) — node:ffi (TDD-00164), not a user class.
+	if ex.ClassName == "DynamicLibrary" && e.usedNodeFFI {
+		return e.emitNewDynamicLibrary(ex)
+	}
 	// new AsyncLocalStorage<T>() — async_hooks (TDD-00168), not a user class.
 	if ex.ClassName == "AsyncLocalStorage" {
 		return e.emitNewAsyncLocalStorage(ex)

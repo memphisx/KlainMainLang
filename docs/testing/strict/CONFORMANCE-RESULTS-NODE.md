@@ -69,25 +69,25 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 |---|---|
 | 276 | COMPILE_ERROR: a number has no method '%s' |
 | 123 | COMPILE_ERROR: undefined variable '%s' |
-| 95 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
-| 75 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 76 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 61 | COMPILE_ERROR: no field '%s' |
 | 54 | COMPILE_ERROR: unknown class '%s' |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 52 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 48 | COMPILE_ERROR: undefined function or closure '%s' |
+| 49 | COMPILE_ERROR: undefined function or closure '%s' |
 | 45 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 32 | COMPILE_ERROR: fs has no method '%s' |
 | 30 | COMPILE_ERROR: process has no method '%s' |
+| 26 | RUN_TIMEOUT |
 | 25 | COMPILE_ERROR: expected ), got => |
-| 25 | RUN_TIMEOUT |
 | 24 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
 | 23 | COMPILE_ERROR: a Request has no method '%s' |
 | 23 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
-| 21 | COMPILE_ERROR: '%s' is not an array |
+| 22 | COMPILE_ERROR: '%s' is not an array |
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
 | 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
@@ -97,13 +97,13 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
-| 17 | RUNTIME_NONZERO_EXIT:  |
 | 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
+| 16 | RUNTIME_NONZERO_EXIT:  |
 | 15 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
+| 15 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | MODULE_NOT_IMPLEMENTED: module |
 | 13 | COMPILE_ERROR: child_process.spawnSync options support { cwd, encoding } only (got '%s') |
 | 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |

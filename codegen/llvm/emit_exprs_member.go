@@ -846,6 +846,39 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			return Value{Ref: e.internString(pathFlavorDelimiter(pf)), Ty: TypePtr}, nil
 		}
 	}
+	// node:ffi compile-time constants (TDD-00164): ffi.suffix is the host's
+	// shared-library filename suffix; ffi.types.X are the type-name strings.
+	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+		if ex.Property == "suffix" {
+			return Value{Ref: e.internString(ffiSuffix()), Ty: TypePtr}, nil
+		}
+	}
+	if inner, ok := ex.Object.(*ast.MemberExpression); ok && inner.Property == "types" {
+		if id, ok := inner.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+			if c, present := ffiTypesConstants[ex.Property]; present {
+				return Value{Ref: e.internString(c), Ty: TypePtr}, nil
+			}
+			return Value{}, fmt.Errorf("%d:%d: unknown ffi.types constant '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
+		}
+	}
+	// A DynamicLibrary's accumulator properties (TDD-00164): the previously
+	// resolved functions/symbol addresses, rebuilt from the compile-time
+	// registration record.
+	if ex.Property == "functions" || ex.Property == "symbols" {
+		if e.inferExprType(ex.Object).IsFFILibrary {
+			return e.emitFFILibraryProperty(ex.Object, ex.Property, ex.GetPos())
+		}
+	}
+	// A bound native function's .pointer (TDD-00164): the raw symbol address.
+	if ex.Property == "pointer" {
+		if e.inferExprType(ex.Object).IsFFIFunction {
+			fv, err := e.emitExpr(ex.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.ffiPtrToBigInt(fv.Ref), nil
+		}
+	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "test__kml_builtin" {
 		// Environment probes (TDD-00122) — constant booleans reflecting the
 		// compile host; hasCrypto/hasIntl reflect the built-in surface.

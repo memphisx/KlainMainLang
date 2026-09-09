@@ -63,6 +63,14 @@ only genuine scope narrowings get to stay.
 5. **General C FFI (AOT `node:ffi`)** — [X-plat] Enabler. TDD-00164.
    Foundational pivot: unblocks `node:sqlite` (TDD-00151), the `opentui` TUI
    backend, GTK/Qt/SDL/imgui GUI, ncurses, native DB clients.
+   All three stages shipped (ADR-00797/ADR-00798/ADR-00799):
+   `dlopen`/`DynamicLibrary`/typed C-ABI calls/`bigint` pointers, the
+   raw-memory helpers, and `registerCallback` (closure→C-function-pointer
+   via static per-signature trampoline families, 16 live per shape), POSIX.
+   The `functions`/`symbols` accumulators also ship (ADR-00800).
+   Remaining: `using`/`[Symbol.dispose]` disposal, Windows `LoadLibrary`
+   shim, `close()`-invalidates-callbacks; beyond-Node capabilities are
+   TDD-00190 (`klain:ffi`), now unblocked.
 
 ---
 
@@ -218,7 +226,11 @@ native-reinterpreted APIs, the File API family (TDD-00172), mobile targets
 the TUI-framework roadmap (TDD-00150), `TextDecoder` non-UTF-8 (TDD-00034),
 the `klmpm` package manager (TDD-00054), npm/`node_modules` interop
 (TDD-00053, bottlenecked on TDD-00022's scope), an alternative Go-helper
-`fetch` backend (TDD-00003), self-hosting (TDD-00124).
+`fetch` backend (TDD-00003), self-hosting (TDD-00124) with its Go-fidelity
+`klain:` module set (TDD-00189: `klain:embed`/`klain:flag`/`klain:fmt` —
+`klain:embed` also carries standalone value and may be pulled forward), and
+`klain:ffi` beyond-Node FFI extensions (TDD-00190, gated on TDD-00164
+Stages B–C closing).
 
 Feasibility/reference documents, not queued work: the WebAssembly target
 (TDD-00048), the freestanding Pico (TDD-00036) and Raspberry Pi (TDD-00045)

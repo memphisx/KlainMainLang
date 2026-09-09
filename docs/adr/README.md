@@ -840,3 +840,7 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00794](ADR-00794.md) | Response.text()/.json()/.arrayBuffer() return real Promise<T> | `Implements [TDD-00186](../tdd/TDD-00186.md)`, `Extends [ADR-00094](ADR-00094.md)` |
 | [00795](ADR-00795.md) | fs.constants (access modes + copyFile flags) | `Extends [ADR-00788](ADR-00788.md)` |
 | [00796](ADR-00796.md) | Gate the fs thread pool off on Windows (the documented inline fallback was never wired) | Extends [ADR-00773](ADR-00773.md), [ADR-00775](ADR-00775.md); Implements [TDD-00185](../tdd/TDD-00185.md), [TDD-00186](../tdd/TDD-00186.md) |
+| [00797](ADR-00797.md) | node:ffi Stage A — dlopen + statically-lowered typed C-ABI calls | Implements [TDD-00164](../tdd/TDD-00164.md) (Stage A); Supersedes the [TDD-00032](../tdd/TDD-00032.md)/[TDD-00150](../tdd/TDD-00150.md) placeholder FFI sketch |
+| [00798](ADR-00798.md) | node:ffi Stage B — raw memory helpers (peek/poke, to/export buffers, getRawPointer) | Extends [ADR-00797](ADR-00797.md); Implements [TDD-00164](../tdd/TDD-00164.md) (Stage B) |
+| [00799](ADR-00799.md) | node:ffi Stage C — registerCallback via static per-signature trampoline families | Extends [ADR-00797](ADR-00797.md), [ADR-00798](ADR-00798.md); Implements [TDD-00164](../tdd/TDD-00164.md) (Stage C) |
+| [00800](ADR-00800.md) | node:ffi symbol accumulators — library.functions/.symbols, no-arg getFunctions()/getSymbols() | Extends [ADR-00797](ADR-00797.md), [ADR-00799](ADR-00799.md); Implements [TDD-00164](../tdd/TDD-00164.md) (residual surface) |

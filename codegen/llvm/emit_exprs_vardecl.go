@@ -972,6 +972,8 @@ func (e *Emitter) emitVarDecl(v *ast.VarDeclaration) error {
 			} else if init.ClassName == "WebSocketServer" && e.usedKlainWS {
 				// klain:ws handle (TDD-00158) — an opaque singleton handle.
 				ty = WebSocketServerType()
+			} else if init.ClassName == "DynamicLibrary" && e.usedNodeFFI {
+				ty = FFILibraryType() // node:ffi handle (TDD-00164)
 			} else if init.ClassName == "PerformanceObserver" {
 				ty = PerfObserverType() // perf_hooks handle (TDD-00166)
 			} else if init.ClassName == "AsyncLocalStorage" {

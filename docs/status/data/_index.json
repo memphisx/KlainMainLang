@@ -283,6 +283,11 @@
           "caveats": "• Result rows need an explicit shape (`.all<T>()`/`.get<T>()`); untyped `SELECT *` awaits a dynamic-object mode<br>• `db.aggregate()`, error `.code`, and a lazy iterator are later stages; sessions/changesets, extension loading, and async `backup()` are rejected with a clear message (unavailable in the system libsqlite3 / out of scope)"
         },
         {
+          "category": "FFI (`node:ffi`)",
+          "pageFile": "FFI.md",
+          "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering); the `functions`/`symbols` accumulators are compile-time records (literal names only, resolution order)<br>• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` and Windows are not there yet; `exportString` is utf8-only and truncates to capacity"
+        },
+        {
           "category": "Other core modules (`querystring`, `assert`, `test`, `zlib`, `net`, `util`, `dns`, `dgram`, `cluster`, `tls`, `http` client, `https`, `stream/web`, `vm`, `http2`)",
           "pageFile": "NODE-CORE-MODULES.md",
           "caveats": "`querystring`/`assert`/`zlib`/`net`/`util`/`dns`/`dgram`/`cluster`/`tls` done (`tls` = client + server); `https` = client (`get`/`request` over libcurl) + server (`https.createServer`, HTTPS/1.1, [ADR-00505](../adr/ADR-00505.md)); `stream/web` re-exports the WHATWG classes; `diagnostics_channel` pub/sub (string messages); `http2` ships all four stages — `createServer` (h2c) + `createSecureServer` (h2 over TLS, `allowHTTP1` 1.1 fallback), compat + `.on('stream')` APIs, client sessions, constants/settings ([TDD-00139](../tdd/TDD-00139.md)/[TDD-00111](../tdd/TDD-00111.md)); `vm` not started"
@@ -607,7 +612,7 @@
         },
         "124": {
           "title": "Self-hosting — rewriting the compiler in its own language",
-          "notes": "Feasibility/reference doc; gated on the language reaching the needed surface"
+          "notes": "Feasibility/reference doc; gated on the language reaching the needed surface. The stdlib-shaped residue (Go packages with no faithful Node equivalent) is scoped separately as the [00189](../tdd/TDD-00189.md) `klain:` module set"
         },
         "126": {
           "title": "Opt-in JSDoc/inline-TS type-enforcement flag",
@@ -691,7 +696,15 @@
         },
         "164": {
           "title": "General C FFI — AOT `node:ffi` (`dlopen` + static signatures + callback trampolines)",
-          "notes": "The split-out concrete design for [00150](../tdd/TDD-00150.md) Stage 2 / the [00032](../tdd/TDD-00032.md) placeholder foundation — the pivot that unlocks opentui's native backend, the GTK/Qt/SDL/imgui GUI crossover, ncurses, and DB clients. Now anchored to Node's real first-party `node:ffi` (v26.1.0, experimental): implement the actual Node API (`dlopen`/`DynamicLibrary`/plain-object signatures/`registerCallback`/raw-memory helpers) rather than a bespoke dialect, so portable FFI code compiles unchanged. The fit is strong — the type-name enum ≈ the JSDoc int-width set, 64-bit↔`bigint` already modelled, `dlopen`/`dlsym` are the `ensure*()` libc-primitive shape, and a *static* signature is easier to lower AOT than Node's runtime-parsed one. Staged A (load + typed calls) → B (raw memory) → C (closure→C-function-pointer trampoline — the one genuinely new codegen piece, the core gap 00032/00150 named). Not started"
+          "notes": "The split-out concrete design for [00150](../tdd/TDD-00150.md) Stage 2 / the [00032](../tdd/TDD-00032.md) placeholder foundation — the pivot that unlocks opentui's native backend, the GTK/Qt/SDL/imgui GUI crossover, ncurses, and DB clients. Now anchored to Node's real first-party `node:ffi` (v26.1.0, experimental): implement the actual Node API (`dlopen`/`DynamicLibrary`/plain-object signatures/`registerCallback`/raw-memory helpers) rather than a bespoke dialect, so portable FFI code compiles unchanged. The fit is strong — the type-name enum ≈ the JSDoc int-width set, 64-bit↔`bigint` already modelled, `dlopen`/`dlsym` are the `ensure*()` libc-primitive shape, and a *static* signature is easier to lower AOT than Node's runtime-parsed one. Staged A (load + typed calls) → B (raw memory) → C (closure→C-function-pointer trampoline — the one genuinely new codegen piece, the core gap 00032/00150 named). **All three stages shipped** ([ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)): `dlopen`/`DynamicLibrary`/`getFunction(s)`/`getSymbol`/`dlsym`/`dlclose`/`suffix`/`types` with compile-time signature lowering to direct C-ABI calls (64-bit↔`bigint`), the raw-memory helpers, and `registerCallback` — the closure→C-function-pointer trampoline, via static per-(signature×ABI) wrapper families over a 16-slot registration table (option (a); no runtime codegen, no W^X). The `library.functions`/`.symbols` accumulators + no-arg `getFunctions()`/`getSymbols()` also ship ([ADR-00800](../adr/ADR-00800.md), compile-time records re-`dlsym`'d at the read point). Remaining: `using` disposal, Windows, `close()`-invalidates-callbacks. Beyond-Node capabilities move to [00190](../tdd/TDD-00190.md)"
+        },
+        "189": {
+          "title": "Go-fidelity `klain:` modules for self-hosting (`klain:embed` + the Go-stdlib gap set)",
+          "notes": "Scopes the Go-stdlib residue a mechanical self-hosting port ([00124](../tdd/TDD-00124.md)) can't get from the faithful Node modules, as bespoke `klain:` surface: `klain:embed` (compile-time `//go:embed`-style file/dir embedding — a compiler intrinsic no FFI can provide, generalizing the `klain:assets` engine), `klain:flag` (Go-flag CLI conventions the `klainmain` CLI already speaks), `klain:fmt` (`sprintf` with the audited Go verb set), and a conditional `klain:utf8` (byte-oriented rune decoding, decided by a lexer spike port). `sync` already covered by `klain:sync`; `text/template`/`regexp`/`strconv` port without modules. Staged embed → flag → fmt → spike"
+        },
+        "190": {
+          "title": "`klain:ffi` — FFI capabilities beyond `node:ffi`'s surface",
+          "notes": "The superset module for what `node:ffi` lacks vs the field (koffi/ffi-napi/Deno/Bun): struct-by-value + `sizeof`/`offsetof`, atomic `errno` capture, pooled non-blocking calls (reuses [00185](../tdd/TDD-00185.md)), variadic calls, typed data symbols, thread-safe callbacks, wide strings. Re-exports `node:ffi` and adds the rest under the opt-in `klain:` specifier, keeping the Node module strictly conformant. Key leverage: a compile-time signature lowers structs to the C ABI the backend already speaks — several rows that need libffi trampolines elsewhere are plain codegen here. Gated on [00164](../tdd/TDD-00164.md) Stages B–C closing first. Not started"
         },
         "165": {
           "title": "Importable specifiers for the Web-global-backed Node modules (`url`/`timers`/`perf_hooks`/`buffer`/`events`)",

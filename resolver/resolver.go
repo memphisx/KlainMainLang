@@ -789,6 +789,12 @@ func ResolveProgramWithOptions(entryPath string, allowGlobalShadowing bool, lazy
 			break
 		}
 	}
+	for _, f := range files {
+		if fileImportsModule(f.prog, "node:ffi") {
+			merged.UsesNodeFFI = true
+			break
+		}
+	}
 	return merged, nil
 }
 

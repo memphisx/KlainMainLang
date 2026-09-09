@@ -118,6 +118,12 @@ var virtualBuiltinMarkers = map[string]string{
 	// registered only under the real `node:sqlite` specifier — there is no
 	// bare Node `sqlite` module, so the init() auto-prefixer leaves it alone.
 	"node:sqlite": "sqlite__kml_builtin",
+	// TDD-00164: Node's experimental FFI module (v26.1.0+). Registered only
+	// under the real `node:ffi` specifier, same posture as node:sqlite —
+	// there is no bare `ffi` core module in Node. `DynamicLibrary` binds as
+	// identity (a builtin constructor via the generic NewExpression path,
+	// like AsyncLocalStorage); everything else is marker-dispatched.
+	"node:ffi": "ffi__kml_builtin",
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
 	// `performance`, `Buffer`, `EventEmitter`), so a same-name import is
@@ -334,6 +340,24 @@ var virtualModuleMembers = map[string]map[string]bool{
 	// identity (StatementSync is only ever returned from db.prepare(), never
 	// user-constructed, but it is a valid named import).
 	"node:sqlite": {"DatabaseSync": true, "StatementSync": true},
+	// TDD-00164 (all three stages): load + typed calls (dlopen/DynamicLibrary/
+	// dlsym/dlclose/suffix/types), the raw-memory helpers, and the
+	// registerCallback trampoline surface (methods on DynamicLibrary, so not
+	// module exports — they need no entry here).
+	"node:ffi": {
+		"dlopen": true, "dlclose": true, "dlsym": true,
+		"suffix": true, "types": true, "DynamicLibrary": true,
+		"toString": true, "toBuffer": true, "toArrayBuffer": true,
+		"exportString": true, "exportBuffer": true,
+		"exportArrayBuffer": true, "exportArrayBufferView": true,
+		"getRawPointer": true,
+		"getInt8": true, "getUint8": true, "getInt16": true, "getUint16": true,
+		"getInt32": true, "getUint32": true, "getInt64": true, "getUint64": true,
+		"getFloat32": true, "getFloat64": true,
+		"setInt8": true, "setUint8": true, "setInt16": true, "setUint16": true,
+		"setInt32": true, "setUint32": true, "setInt64": true, "setUint64": true,
+		"setFloat32": true, "setFloat64": true,
+	},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds

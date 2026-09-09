@@ -218,6 +218,27 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 			return e.emitSQLiteStatementMethod(mem.Object, mem.Property, ex.TypeArgs, ex.Args, ex.GetPos())
 		}
 	}
+	// node:ffi (TDD-00164): lib.getFunction/getSymbol/close on a DynamicLibrary,
+	// and the ffi.* module functions. The module dispatch must run before every
+	// property-name-based handler below — `ffi.toString(ptr)` would otherwise
+	// be captured by the generic number/string `.toString` paths (the marker
+	// identifier has no real value type).
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
+		if e.inferExprType(mem.Object).IsFFILibrary {
+			return e.emitFFILibraryMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
+		}
+		if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "ffi__kml_builtin" {
+			return e.emitFFIModuleCall(mem.Property, ex.Args, ex.GetPos())
+		}
+	}
+	// node:ffi (TDD-00164): a call through a bound native function value —
+	// `functions.add(1, 2)` or `const f = lib.getFunction(...); f(...)`. The
+	// callee's compile-time type carries the C signature; checked before the
+	// name-based member dispatches below so a native function named like a
+	// builtin method still calls the native symbol.
+	if e.inferExprType(ex.Callee).IsFFIFunction {
+		return e.emitFFIFunctionCall(ex)
+	}
 	// Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
 	// 4). Checked before every mem.Property-name-based/inferExprType-based
 	// dispatch below, for the same reason super's own checks above are: a

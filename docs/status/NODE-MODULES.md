@@ -68,7 +68,7 @@ Modules that fit the compiler's model and would add value — ranked and pulled 
 | `node:tty` | ❌ | • The `tty` module surface (`tty.isatty`, `ReadStream`/`WriteStream`); the primitives exist as `process.stdin.isTTY`/`setRawMode`/`columns` and the bespoke [`klain:tty`](../guides) reads, but the Node `tty` module is not exposed |
 | `constants` | ❌ | • Legacy aggregate of `os`/`fs`/`crypto` constants (superseded by per-module `.constants`) — not started |
 | `test/reporters` | ❌ | • Pluggable test reporters (`spec`/`tap`/`dot`) — the runner ships; reporter modules are not started |
-| `node:ffi` | ❌ | • Foreign function interface (Node v26.1.0, experimental) — designed in [TDD-00164](../tdd/TDD-00164.md); not started |
+| `node:ffi` | ✅ | • Foreign function interface (Node v26.1.0, experimental) — all stages shipped ([FFI.md](FFI.md)): `dlopen`/typed calls/`bigint` pointers, raw-memory helpers, `registerCallback` trampolines; POSIX only ([TDD-00164](../tdd/TDD-00164.md)) |
 | `vm` | ❌ | • Sandboxed `eval`-like execution — the **largest** unimplemented-module gap (~77 conformance files, [NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)); gated on an opt-in embedded JS engine (no runtime evaluator today) |
 | `sea` (single executable apps) | ❌ | • `klainmain` already emits a standalone native binary, so the *outcome* is native; the Node SEA blob/asset API shape is not implemented |
 | `domain` | ❌ | • Deprecated in Node (superseded by `AsyncLocalStorage`) — ~35 conformance files reference it, but it is the lowest-priority module gap ([NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)) |

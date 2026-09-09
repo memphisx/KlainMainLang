@@ -17,8 +17,8 @@ import (
 // piped run of the same program falls back to 80x24, TestE2ETtyWinSizeFallback).
 func TestE2ETtyConsoleSize(t *testing.T) {
 	bin := buildBinary(t, `
-const c: number = process.stdout.columns
-const r: number = process.stdout.rows
+const c: number = process.stdout.columns!
+const r: number = process.stdout.rows!
 console.log("size=" + c + "x" + r + " tty=" + process.stdout.isTTY)
 `)
 	res := runInConPTY(t, bin, 100, 30, 20*time.Second, nil)

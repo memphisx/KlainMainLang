@@ -98,6 +98,11 @@ type Program struct {
 	// front whether to emit the WebSocket handshake + frame loop; a program
 	// that never imports it is wholly untouched.
 	UsesKlainWS bool
+	// UsesNodeFFI is set by the resolver when any file imports `node:ffi`
+	// (TDD-00164). Known before codegen so `new DynamicLibrary(...)` can be
+	// recognized as the builtin constructor only in programs that actually
+	// imported the module; a program that never imports it is wholly untouched.
+	UsesNodeFFI bool
 }
 
 // NSAliasDecl is one `import X = Y.Z` alias declaration (ADR-00456).

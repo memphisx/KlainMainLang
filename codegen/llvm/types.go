@@ -207,6 +207,27 @@ type Type struct {
 	// owning database (for changes()/last_insert_rowid()), and a `sourceSQL`
 	// field. get/all/run dispatch on this flag.
 	IsSQLiteStatement bool
+	// IsFFILibrary marks a node:ffi DynamicLibrary (TDD-00164): a heap object
+	// holding the raw dlopen handle (__kml_handle) plus the `path` string as a
+	// plain field. getFunction/getSymbol/close dispatch on this flag in
+	// emit_call.go. See emit_ffi.go.
+	IsFFILibrary bool
+	// IsFFIFunction marks a native function bound via node:ffi's
+	// library.getFunction / dlopen definitions (TDD-00164): the runtime value
+	// is the raw C symbol pointer (IR "ptr"), and FFISig carries the
+	// compile-time signature that types the indirect call. Calling a value of
+	// this type emits a direct C-ABI `call` through the pointer.
+	IsFFIFunction bool
+	// FFISig is the statically-resolved node:ffi signature of an IsFFIFunction
+	// value: canonical node:ffi type names (aliases already normalized).
+	FFISig *FFISignature
+	// FFILibReg is an IsFFILibrary type's compile-time accumulator of the
+	// names resolved through it (dlopen definitions, getFunction/getFunctions,
+	// getSymbol) — the shared pointer travels with the type through
+	// destructuring/assignment, so `library.functions`/`library.symbols` and
+	// no-arg `getFunctions()`/`getSymbols()` can rebuild Node's accumulator
+	// objects statically (re-dlsym'd at the read point; no runtime registry).
+	FFILibReg *FFILibReg
 	// IsURL marks `new URL(...)`'s result: an ordinary heap object (href,
 	// protocol, host, hostname, port, pathname, search, hash, origin,
 	// searchParams — all plain field reads via the existing object
@@ -927,6 +948,77 @@ func SQLiteStatementType() Type {
 	})
 	ty.IsSQLiteStatement = true
 	return ty
+}
+
+// FFISignature is a statically-resolved node:ffi call signature (TDD-00164):
+// the `{ arguments: [...], return: '...' }` object from source, with every
+// type name normalized to its canonical spelling (i32→int32, ptr→pointer, …).
+type FFISignature struct {
+	Args []string
+	Ret  string
+}
+
+// FFILibFunc is one resolution entry in an FFILibReg: a nil Sig means the name
+// was resolved only as a raw symbol (getSymbol/dlsym), not a callable.
+type FFILibFunc struct {
+	Name string
+	Sig  *FFISignature
+}
+
+// FFILibReg accumulates the symbol/function names statically resolved through
+// one DynamicLibrary value, in resolution (source) order — see Type.FFILibReg.
+type FFILibReg struct {
+	Entries []FFILibFunc
+}
+
+// AddFunc records a function registration once per name (first signature wins,
+// matching the shipped no-rediagnosis posture); a prior symbol-only entry for
+// the name is upgraded in place, keeping its original position.
+func (r *FFILibReg) AddFunc(name string, sig *FFISignature) {
+	for i, f := range r.Entries {
+		if f.Name == name {
+			if f.Sig == nil {
+				r.Entries[i].Sig = sig
+			}
+			return
+		}
+	}
+	r.Entries = append(r.Entries, FFILibFunc{Name: name, Sig: sig})
+}
+
+// AddSym records a getSymbol/dlsym resolution once per name.
+func (r *FFILibReg) AddSym(name string) {
+	for _, f := range r.Entries {
+		if f.Name == name {
+			return
+		}
+	}
+	r.Entries = append(r.Entries, FFILibFunc{Name: name})
+}
+
+// FFILibraryType returns node:ffi's DynamicLibrary handle type (TDD-00164):
+// the raw dlopen handle in a hidden __kml_handle field plus the library path
+// as a plain `path` field, read through the ordinary object machinery. Every
+// construction carries a fresh registration accumulator; the one that lands in
+// the variable's symbol-table type is the live one.
+func FFILibraryType() Type {
+	ty := ObjectType([]Field{
+		{Name: "__kml_handle", Ty: TypePtr},
+		{Name: "path", Ty: TypePtr},
+	})
+	ty.IsFFILibrary = true
+	ty.FFILibReg = &FFILibReg{}
+	return ty
+}
+
+// FFIFunctionType returns the type of a bound native function (TDD-00164):
+// runtime value is the raw symbol pointer; the signature travels at compile
+// time only.
+func FFIFunctionType(sig *FFISignature) Type {
+	t := TypePtr
+	t.IsFFIFunction = true
+	t.FFISig = sig
+	return t
 }
 
 // SQLiteColumnMetaType is one entry of stmt.columns() (ADR-00540): the

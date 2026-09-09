@@ -67,19 +67,19 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 205 | COMPILE_ERROR: slice is only supported on strings |
+| 206 | COMPILE_ERROR: slice is only supported on strings |
 | 204 | COMPILE_ERROR: a number has no method '%s' |
 | 126 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
 | 124 | COMPILE_ERROR: undefined variable '%s' |
-| 95 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
 | 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 51 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 52 | COMPILE_ERROR: field access on non-object (no field '%s') |
 | 47 | COMPILE_ERROR: unknown class '%s' |
 | 46 | COMPILE_ERROR: no field '%s' |
 | 43 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 38 | COMPILE_ERROR: undefined function or closure '%s' |
+| 39 | COMPILE_ERROR: undefined function or closure '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 35 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 26 | COMPILE_ERROR: process has no method '%s' |
@@ -91,17 +91,17 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 20 | COMPILE_ERROR: field assignment on non-object |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
+| 19 | RUNTIME_NONZERO_EXIT:  |
 | 18 | COMPILE_ERROR: fs has no method '%s' |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
-| 18 | RUNTIME_NONZERO_EXIT:  |
 | 17 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 17 | COMPILE_ERROR: unexpected token + in expression |
-| 17 | RUN_TIMEOUT |
 | 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
+| 16 | RUN_TIMEOUT |
 | 15 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
+| 15 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 14 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | MODULE_NOT_IMPLEMENTED: module |
 | 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |
 | 13 | COMPILE_ERROR: expected }, got : |

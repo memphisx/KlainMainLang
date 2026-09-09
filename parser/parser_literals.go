@@ -146,8 +146,12 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 		}
 		// PropertyName: IDENT, or a STRING/NUMBER literal used as the key
 		// text (`{ "foo": 1 }`, `{ 0: 'a' }`) — real JS/TS allow both,
-		// only the identifier form supports shorthand.
-		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
+		// only the identifier form supports shorthand. A reserved word is
+		// also a valid unquoted property name in real JS/TS (`{ return:
+		// 'int32' }`, `{ new: true }`) — accepted contextually when a ':' or
+		// '(' follows, so keyword statements after a brace still parse.
+		if !p.check(lexer.IDENT) && !p.check(lexer.STRING) && !p.check(lexer.NUMBER) &&
+			!(lexer.IsKeyword(p.peek().Type) && (p.peekNth(1).Type == lexer.COLON || p.peekNth(1).Type == lexer.LPAREN)) {
 			return nil, fmt.Errorf("%d:%d: expected property name, got %s", p.peek().Line, p.peek().Col, p.peek().Type)
 		}
 		keyTok := p.advance()

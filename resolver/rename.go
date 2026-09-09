@@ -618,6 +618,13 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if ref.Marker == "sqlite__kml_builtin" {
 					return ast.NewIdentifier(ref.Member, e.GetPos())
 				}
+				// node:ffi's DynamicLibrary is a builtin constructor — identity
+				// (TDD-00164), routed through the generic NewExpression like
+				// AsyncLocalStorage. The function members (dlopen/dlsym/…)
+				// take the marker member-expression route below.
+				if ref.Marker == "ffi__kml_builtin" && ref.Member == "DynamicLibrary" {
+					return ast.NewIdentifier(ref.Member, e.GetPos())
+				}
 				// klain:sync's Channel is a parse-time constructor — identity
 				// (TDD-00143). `go` is a function member and takes the marker
 				// member-expression route below.

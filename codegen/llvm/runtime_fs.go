@@ -1541,9 +1541,14 @@ func (e *Emitter) ensureFsFdOps() {
 	e.usedFsFdOps = true
 	e.ensureFsThrow()
 	e.ensureOpenDecl()
-	e.emitGlobal("declare i32 @close(i32 noundef)")
-	e.emitGlobal("declare i64 @read(i32 noundef, ptr noundef, i64 noundef)")
-	e.emitGlobal("declare i64 @write(i32 noundef, ptr noundef, i64 noundef)")
+	// close/read/write are also declared by other subsystems (stdin, http,
+	// process, worker pool). Route through the shared ensure*Decl guards so a
+	// program using both fs fd-ops and one of those paths emits each declare
+	// exactly once — a duplicate `declare` is lenient on macOS/Linux clang but
+	// a hard "invalid redefinition" error on the Windows UCRT64 clang.
+	e.ensureCloseDecl()
+	e.ensureReadDecl()
+	e.ensureWriteDecl()
 	e.emitGlobal("declare i64 @lseek(i32 noundef, i64 noundef, i32 noundef)")
 	e.emitGlobal("declare i32 @fsync(i32 noundef)")
 	e.emitGlobal("declare i32 @ftruncate(i32 noundef, i64 noundef)")
