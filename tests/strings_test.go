@@ -161,6 +161,21 @@ console.log(msg)
 `, "value is 42")
 }
 
+func TestE2EStringifyAbsentScalar(t *testing.T) {
+	// `String(x)` and `${x}` of an absent `number | undefined` local render
+	// "undefined", not the unwrapped payload zero — matching Node, and the `+`
+	// concat path which was already null-aware (ADR-00836).
+	assertOutput(t, `
+const miss = [1, 2, 3].find(x => x > 9)
+console.log(String(miss))
+console.log(` + "`" + `val=${miss}` + "`" + `)
+console.log("x" + miss)
+const hit = [1, 2, 3].find(x => x > 1)
+console.log(String(hit))
+console.log(` + "`" + `val=${hit}` + "`" + `)
+`, "undefined\nval=undefined\nxundefined\n2\nval=2")
+}
+
 func TestE2EStringPlusAssign(t *testing.T) {
 	// A pre-existing bug (found while building TDD-00059's own tagged-
 	// template example/tests, which accumulate a result via `+=`): `+=`
@@ -332,6 +347,18 @@ console.log(s.at(1))
 `, "h\no\ne")
 }
 
+func TestE2EStringAtUndefinedOutOfRange(t *testing.T) {
+	// `.at()` out of range is a real `undefined` (string | undefined), as in
+	// Node — not "" (TDD-00187 sentinel applied to the string .at() path).
+	assertOutput(t, `
+const s = 'hi'
+console.log(s.at(5))
+console.log(s.at(5) === undefined)
+console.log(s.at(-9) === undefined)
+console.log(s.at(1)!)
+`, "undefined\ntrue\ntrue\ni")
+}
+
 func TestE2EStringCharAt(t *testing.T) {
 	assertOutput(t, `
 const s: string = 'hello'
@@ -453,6 +480,18 @@ console.log(empty.length)
 `, "3\na\nc\n0")
 }
 
+func TestE2EStringSplitLimit(t *testing.T) {
+	// `split(sep, limit)` caps the result to the first `limit` segments, as in
+	// Node — string and RegExp separators; limit 0 → [], negative → no cap
+	// (ADR-00842).
+	assertOutput(t, `
+console.log("a-b-c-d".split("-", 2).join("|"))
+console.log("a-b-c".split("-", 0).length)
+console.log("a-b-c".split("-", 10).join("|"))
+console.log("a1b2c".split(/[0-9]/, 2).join("|"))
+`, "a|b\n0\na|b|c\na|b")
+}
+
 // --- String-literal escape sequences (ADR-00194) ---
 
 func TestE2EStringHexEscape(t *testing.T) {
@@ -513,4 +552,73 @@ const s: string = "kalimera";
 console.log(s.toString());
 console.log(s.toString().length);
 `, "kalimera\n8")
+}
+
+func TestE2EStringLastIndexOf(t *testing.T) {
+	// s.lastIndexOf(sub): last occurrence's byte index, or -1; empty needle → len
+	// (ADR-00843).
+	assertOutput(t, `
+console.log("path/to/file".lastIndexOf("/"))
+console.log("abcabc".lastIndexOf("bc"))
+console.log("abc".lastIndexOf("x"))
+console.log("abc".lastIndexOf(""))
+`, "7\n4\n-1\n3")
+}
+
+func TestE2EStringIndexOfFromIndex(t *testing.T) {
+	// indexOf(needle, fromIndex) starts the search at the (clamped) offset
+	// (ADR-00848).
+	assertOutput(t, `
+console.log("Hello, World".indexOf("o", 5))
+console.log("aaa".indexOf("a", 1))
+console.log("abc".indexOf("x", 0))
+console.log("hello".indexOf("l", 100))
+`, "8\n1\n-1\n-1")
+}
+
+func TestE2EStringIncludesPosition(t *testing.T) {
+	// includes(searchString, position) starts the search at position (ADR-00848).
+	assertOutput(t, `
+console.log("hello".includes("lo", 3))
+console.log("hello".includes("he", 1))
+console.log("hello".includes("ell", 1))
+console.log("abcabc".includes("abc", 1))
+`, "true\nfalse\ntrue\ntrue")
+}
+
+func TestE2EStringStartsEndsWithPosition(t *testing.T) {
+	// startsWith(x, position) / endsWith(x, endPosition) (ADR-00848).
+	assertOutput(t, `
+console.log("hello".startsWith("llo", 2))
+console.log("hello".startsWith("lo", 3))
+console.log("hello".startsWith("x", 10))
+console.log("hello".endsWith("ell", 4))
+console.log("hello".endsWith("h", 1))
+console.log("hello".endsWith("lo"))
+`, "true\ntrue\nfalse\ntrue\ntrue\ntrue")
+}
+
+func TestE2EStringSubstr(t *testing.T) {
+	// substr(start, length) — negative start counts from the end (ADR-00852).
+	assertOutput(t, `
+console.log("abcdef".substr(2, 3))
+console.log("abcdef".substr(2))
+console.log("abcdef".substr(-2))
+console.log("abcdef".substr(-2, 1))
+console.log("abcdef".substr(2, 100))
+console.log("abcdef".substr(100) + "|")
+console.log("abcdef".substr(-100, 2))
+console.log("hi".substr(1, -5) + "|")
+`, "cde\ncdef\nef\ne\ncdef\n|\nab\n|")
+}
+
+func TestE2EStringLastIndexOfFromIndex(t *testing.T) {
+	// lastIndexOf(searchString, fromIndex) — backward scan from fromIndex (ADR-00848).
+	assertOutput(t, `
+console.log("hello".lastIndexOf("l", 2))
+console.log("hellol".lastIndexOf("l", 4))
+console.log("hello".lastIndexOf("l", 1))
+console.log("hello".lastIndexOf("l", 100))
+console.log("hello".lastIndexOf("l", -5))
+`, "2\n3\n-1\n3\n-1")
 }

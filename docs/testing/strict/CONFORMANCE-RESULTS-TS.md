@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**5383 / 9256 agree with TypeScript (58.2%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
+**5404 / 9256 agree with TypeScript (58.4%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
 
-- **1979** match-accept (both compile clean)
-- **3404** match-reject (both reject)
-- **2898** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **975** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2017** match-accept (both compile clean)
+- **3387** match-reject (both reject)
+- **2860** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **992** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 2702 | 4833 | 55.9% | 603 | 1430 |
-| conformance | 2681 | 4423 | 60.6% | 372 | 1148 |
+| compiler | 2711 | 4833 | 56.1% | 613 | 1430 |
+| conformance | 2693 | 4423 | 60.9% | 379 | 1148 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -70,6 +70,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `arithmeticOperatorWithTypeParameter` | conformance |
 | `arrayAssignmentTest5` | compiler |
 | `arrayCast` | compiler |
+| `arrayIndexWithArrayFails` | compiler |
 | `arrayReferenceWithoutTypeArgs` | compiler |
 | `arrowFunctionErrorSpan` | compiler |
 | `asOperator2` | conformance |
@@ -95,7 +96,6 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `asyncAliasReturnType_es5` | conformance |
 | `asyncDeclare_es5` | conformance |
 | `asyncDeclare_es6` | conformance |
-| `asyncFunctionReturnExpressionErrorSpans` | compiler |
 | `augmentedClassWithPrototypePropertyOnModule` | compiler |
 | `augmentedTypesModules2` | compiler |
 | `augmentedTypesModules3` | compiler |
@@ -122,13 +122,13 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `capturedLetConstInLoop14` | compiler |
 | `capturedLetConstInLoop8` | compiler |
 | `capturedLetConstInLoop8_ES6` | compiler |
+| `chainedAssignment1` | compiler |
 | `chainedAssignment3` | compiler |
+| `chainedAssignmentChecking` | compiler |
 | `chainedCallsWithTypeParameterConstrainedToOtherTypeParameter2` | compiler |
 | `checkSuperCallBeforeThisAccessing5` | compiler |
 | `checkTypePredicateForRedundantProperties` | compiler |
-| `circularBaseConstraint` | compiler |
-| `circularImportAlias` | conformance |
-| … | +875 more |
+| … | +892 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -136,57 +136,52 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 158 | REJECTED: undefined variable '%s' |
-| 81 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
+| 157 | REJECTED: undefined variable '%s' |
+| 87 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
 | 72 | REJECTED: '%s' is declared more than once in <path> |
-| 69 | REJECTED: undefined function or closure '%s' |
+| 72 | REJECTED: undefined function or closure '%s' |
 | 62 | REJECTED: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… |
 | 57 | REJECTED: expected '%s' after export specifier list, got ; |
-| 49 | REJECTED: '%s' is only valid inside a method or constructor body |
-| 49 | REJECTED: expected :, got ( |
+| 50 | REJECTED: '%s' is only valid inside a method or constructor body |
+| 50 | REJECTED: expected :, got ( |
 | 44 | REJECTED: a number has no method '%s' |
-| 43 | REJECTED: unknown class '%s' |
+| 44 | REJECTED: unknown class '%s' |
 | 42 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
 | 34 | REJECTED: unexpected token , in expression |
+| 32 | REJECTED: '%s' is not an array |
 | 32 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
 | 32 | REJECTED: expected type name, got this |
+| 31 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
+| 31 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 31 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
-| 30 | REJECTED: '%s' is not an array |
 | 30 | REJECTED: expected :, got IDENT |
-| 30 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
 | 29 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
-| 29 | REJECTED: any/unknown is not yet supported as an array element or object field type |
 | 29 | REJECTED: at most one call signature is supported per object type |
 | 28 | REJECTED: an object has no method '%s' |
-| 28 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
-| 28 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 26 | REJECTED: a destructured parameter requires an explicit type annotation |
-| 26 | REJECTED: expected ), got => |
 | 25 | REJECTED: expected ;, got IDENT |
+| 25 | REJECTED: initializer'%s's type — this compiler is a typed subset |
+| 25 | REJECTED: object has no field '%s' |
 | 25 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
 | 24 | REJECTED: expected IDENT, got ( |
 | 24 | REJECTED: unexpected token + in expression |
-| 22 | REJECTED: object has no field '%s' |
+| 22 | REJECTED: no field '%s' |
 | 22 | REJECTED: unexpected token void in expression |
 | 20 | REJECTED: expected :, got . |
 | 20 | REJECTED: expected member name, got < |
 | 20 | REJECTED: expected type name, got \| |
-| 20 | REJECTED: no field '%s' |
 | 20 | REJECTED: operator '%s' on any/unknown is not yet supported |
 | 20 | REJECTED: unexpected token = in expression |
 | 19 | REJECTED: <path>: expected ] in array type annotation |
-| 18 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
-| 18 | REJECTED: an array element type is not yet supported on a generator function |
+| 19 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
+| 19 | REJECTED: field access on non-object (no field '%s') |
 | 18 | REJECTED: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends |
 | 18 | REJECTED: class '%s' redeclares inherited field '%s' |
-| 18 | REJECTED: expected IDENT, got ! |
 | 18 | REJECTED: expected IDENT, got STRING |
 | 18 | REJECTED: expected member name, got new |
-| 17 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 17 | REJECTED: expected (, got ; |
 | 17 | REJECTED: expected :, got } |
 | 17 | REJECTED: expected type name, got ... |
-| 17 | REJECTED: field access on non-object (no field '%s') |
 | 17 | REJECTED: for...in requires an object with known fields |
 | 17 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
 | 17 | REJECTED: only simple function calls are supported (the callee is not a named function, a function value, or a supported method) |
@@ -196,7 +191,12 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 16 | REJECTED: object destructuring requires an object variable, function call, or object literal |
 | 15 | REJECTED: class '%s' extends unknown class '%s' |
 | 15 | REJECTED: expected '%s' to close type assertion |
-| … | +322 more distinct reasons |
+| 15 | REJECTED: expected (, got ) |
+| 15 | REJECTED: expected :, got ; |
+| 14 | REJECTED: a call signature combined with other object-type members is not supported — a callable object value has no runtime sha… |
+| 14 | REJECTED: expected {, got IDENT |
+| 14 | REJECTED: type argument for '%s' does not satisfy the constraint '%s' on function '%s' |
+| … | +323 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -204,36 +204,35 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 
 | Count | Blocker |
 |---|---|
+| 70 | `T` |
 | 65 | `from` |
-| 64 | `T` |
-| 51 | `>` |
-| 49 | `this` |
+| 52 | `>` |
+| 50 | `this` |
 | 43 | `members` |
-| 39 | `x` |
+| 40 | `x` |
 | 30 | `C__kml_mod0` |
-| 28 | `s type is incompatible with the variable` |
-| 27 | `foo` |
+| 29 | `foo` |
+| 25 | `s type is incompatible with the variable` |
 | 20 | `array` |
-| 17 | `b` |
+| 18 | `a` |
+| 18 | `b` |
 | 17 | `dec__kml_mod0` |
-| 17 | `which` |
 | 16 | `B__kml_mod0` |
-| 16 | `a` |
 | 16 | `c` |
 | 16 | `export` |
+| 16 | `f__kml_mod0` |
+| 16 | `foo__kml_mod0` |
 | 14 | `C` |
 | 14 | `D__kml_mod0` |
-| 14 | `foo__kml_mod0` |
-| 13 | `f__kml_mod0` |
 | 13 | `new` |
 | 12 | `a__kml_mod0` |
 | 11 | `obj4` |
+| 11 | `x__kml_mod0` |
 | 10 | `+` |
 | 10 | `bar` |
 | 10 | `callback` |
 | 10 | `f` |
 | 10 | `get x` |
-| 10 | `x__kml_mod0` |
 | 9 | `A__kml_mod0` |
 | 9 | `Foo` |
 | 9 | `Foo__kml_mod0` |
@@ -241,6 +240,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 8 | `U` |
 | 8 | `number)` |
 | 8 | `of` |
+| 8 | `which` |
 | 8 | `y` |
 | 7 | `Symbol` |
 | 6 | `A` |
@@ -252,6 +252,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 6 | `decorator__kml_mod0` |
 | 6 | `in` |
 | 6 | `m` |
+| 6 | `m__kml_mod0` |
 | 6 | `obj__kml_mod0` |
 | 6 | `s type is not a member of ` |
 | 6 | `then` |
@@ -262,6 +263,5 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 5 | `const` |
 | 5 | `d__kml_mod0` |
 | 5 | `m1` |
-| 5 | `�` |
-| 4 | `0` |
-| … | +330 more distinct blockers |
+| 5 | `string \| undefined` |
+| … | +341 more distinct blockers |

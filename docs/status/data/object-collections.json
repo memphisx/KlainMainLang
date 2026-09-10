@@ -190,11 +190,8 @@
           {
             "feature": "`Map.set/get/has/delete/keys/values`",
             "status": "implemented",
-            "caveats": [
-              "A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `\"null\"` stand-in on a miss ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md))"
-            ],
             "notes": [
-              "`.get()` on a scalar-valued map returns `V \\| null` — a missing key is distinguishable from a stored `0`/`false` via the presence-flagged nullable-scalar representation"
+              "`.get()` (`Map` and `WeakMap`) returns `V \\| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`\"\"` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \\| null` and keeps `null`.)"
             ]
           },
           {

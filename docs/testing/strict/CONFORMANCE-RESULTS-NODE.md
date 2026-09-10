@@ -12,9 +12,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **49 passed**, 2402 failed, 1027 skipped (out of scope).
+3478 files total: **48 passed**, 2403 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **49 passed (2.0%)**.
+Of the 2451 files that compiled far enough to run, **48 passed (2.0%)**.
 
 ## By module (top 40 by file count)
 
@@ -67,46 +67,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 277 | COMPILE_ERROR: a number has no method '%s' |
-| 123 | COMPILE_ERROR: undefined variable '%s' |
-| 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
-| 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
+| 284 | COMPILE_ERROR: a number has no method '%s' |
+| 125 | COMPILE_ERROR: undefined variable '%s' |
+| 104 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 88 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 76 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 61 | COMPILE_ERROR: no field '%s' |
+| 63 | COMPILE_ERROR: no field '%s' |
 | 54 | COMPILE_ERROR: unknown class '%s' |
+| 53 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 52 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 49 | COMPILE_ERROR: undefined function or closure '%s' |
-| 45 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
+| 50 | COMPILE_ERROR: undefined function or closure '%s' |
+| 46 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 32 | COMPILE_ERROR: fs has no method '%s' |
-| 30 | COMPILE_ERROR: process has no method '%s' |
-| 25 | COMPILE_ERROR: expected ), got => |
+| 31 | COMPILE_ERROR: process has no method '%s' |
 | 25 | RUN_TIMEOUT |
 | 24 | COMPILE_ERROR: child_process.fork supports self-fork only — the path must be __filename or process… |
-| 23 | COMPILE_ERROR: a Request has no method '%s' |
-| 23 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
-| 22 | COMPILE_ERROR: '%s' is not an array |
+| 22 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 21 | COMPILE_ERROR: '%s' is not an array |
+| 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '%s') |
 | 21 | COMPILE_ERROR: field assignment on non-object |
 | 21 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
-| 21 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
+| 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
+| 18 | COMPILE_ERROR: unexpected token + in expression |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
+| 18 | RUNTIME_NONZERO_EXIT:  |
 | 17 | COMPILE_ERROR: a ChildProcess stream supports only .on('%s'|'%s', cb) |
-| 17 | COMPILE_ERROR: unexpected token + in expression |
-| 17 | RUNTIME_NONZERO_EXIT:  |
-| 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
 | 15 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
 | 15 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
-| 15 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
+| 14 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
 | 14 | MODULE_NOT_IMPLEMENTED: module |
 | 13 | COMPILE_ERROR: child_process.spawnSync options support { cwd, encoding } only (got '%s') |
 | 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |
+| 13 | COMPILE_ERROR: expected }, got : |
+| 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
 
 ## Top skip reasons
 
@@ -140,7 +140,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (49)
+## Passing files (48)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -177,7 +177,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-process-exit-recursive.js` | process |  |
 | `test-process-exit.js` | process |  |
 | `test-process-uptime.js` | process |  |
-| `test-promises-unhandled-proxy-rejections.js` | promises |  |
 | `test-promises-unhandled-symbol-rejections.js` | promises |  |
 | `test-runner-subtest-after-hook.js` | runner |  |
 | `test-stdin-hang.js` | stdin |  |

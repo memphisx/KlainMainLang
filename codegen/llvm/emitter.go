@@ -299,6 +299,8 @@ type Emitter struct {
 	usedDynJSONC        bool
 	usedNanBox          bool
 	usedAnyOps          bool
+	usedAnyToPrimitive  bool
+	usedAnyLooseEq      bool
 	// jsCtorParamTy is `-compat=js` call-site-inferred constructor parameter
 	// types (class name → per-index type; zero Type = no site could infer),
 	// filled by jsCollectCtorParamTypes and consumed in registerClasses.
@@ -513,6 +515,7 @@ type Emitter struct {
 	usedQuerystringParse         bool
 	usedHTTPDate                 bool
 	usedHTTPKeepAlive            bool
+	usedHTTPFireClose            bool
 	usedFsReadFile               bool
 	usedFsReadFileRaw            bool
 	usedFsReadStream             bool
@@ -781,6 +784,7 @@ type Emitter struct {
 	usedAwaitTimerDrive    bool // a lightweight await references @__kml_timer_fire_next (TDD-00087)
 	usedMicrotasks         bool
 	thenCtr                int // unique-name counter for .then/.catch/.finally reaction runners
+	fsCbCtr                int // unique-name counter for pooled fs callback-form reaction runners
 	newPromiseCtr          int // unique-name counter for new Promise(executor) resolve/reject thunks (TDD-00087)
 	usedCurrentTaskGlobal  bool
 	usedAsyncLocalStorage  bool
@@ -833,6 +837,8 @@ type Emitter struct {
 	usedStreamPipeRuntime   bool
 	usedAwaitFetchHeaders   bool
 	usedFetchBodyStream     bool
+	usedFetchBodyProm       bool              // lazy Response body promises settled off the reactor (TDD-00186)
+	fetchBodyPromRunner     map[string]string // method (text/json/arrayBuffer) → synthesized settle-runner name
 	usedHTTPStreamRuntime   bool
 	usedReqBodyRuntime      bool
 	usedReqBodyStream       bool
@@ -1260,9 +1266,41 @@ func (e *Emitter) freshLabel(prefix string) string {
 
 func (e *Emitter) emitGlobal(line string) { e.globals.WriteString(line + "\n") }
 func (e *Emitter) emitAlloca(line string) { e.allocas.WriteString("  " + line + "\n") }
+
+// emitGuardPanic is the sentinel a codegen invariant guard panics with; it is
+// recovered at the EmitProgram boundary and turned into a clean compile error
+// rather than a Go stack trace. Used by the malformed-store rail below.
+type emitGuardPanic struct{ msg string }
+
+// malformedStoreValueOperand reports whether a `store` instruction line carries
+// an EMPTY value operand — the signature of an unimplemented expression that
+// returned a zero `Value{}` (empty Ref) whose Ref was then formatted straight
+// into `store <ty> <val>, ptr …`, yielding `store <ty> , ptr …` (invalid IR
+// clang later rejects with an opaque scratch-file error). Valid stores always
+// have a non-empty value token between the type and the first comma.
+func malformedStoreValueOperand(line string) bool {
+	rest := strings.TrimPrefix(line, "store ")
+	// Skip the type token.
+	rest = strings.TrimLeft(rest, " ")
+	sp := strings.IndexByte(rest, ' ')
+	if sp < 0 {
+		return false // no space after type — not the shape we guard
+	}
+	rest = strings.TrimLeft(rest[sp:], " ")
+	// After the type + whitespace, a well-formed store has a value token; the
+	// bug leaves a bare comma here (empty operand).
+	return rest == "" || rest[0] == ','
+}
+
 func (e *Emitter) emitInstr(line string) {
 	if e.blockDone {
 		return // skip dead code after a terminator
+	}
+	if strings.HasPrefix(line, "store ") && malformedStoreValueOperand(line) {
+		// Turn silent invalid IR into a loud, clean rejection at the emitter — a
+		// permanent rail so no unimplemented expression can ship a malformed store
+		// past codegen into clang. See "Invalid-IR backlog" cluster B.
+		panic(emitGuardPanic{msg: "unsupported operation: an expression produced no value and cannot be stored — this construct is not yet implemented"})
 	}
 	e.body.WriteString("  " + line + "\n")
 }
@@ -1895,7 +1933,18 @@ func (e *Emitter) rewriteTopLevelGeneratorExpressions(prog *ast.Program) {
 	}
 }
 
-func (e *Emitter) EmitProgram(prog *ast.Program) (string, error) {
+func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
+	// Recover a codegen invariant-guard panic (e.g. the malformed-store rail in
+	// emitInstr) into a clean compile error instead of a Go stack trace.
+	defer func() {
+		if r := recover(); r != nil {
+			if g, ok := r.(emitGuardPanic); ok {
+				ir, err = "", fmt.Errorf("%s", g.msg)
+				return
+			}
+			panic(r)
+		}
+	}()
 	// TDD-00128: enforce `/** @pure */` before any codegen. A front-end-only
 	// check with zero effect on the emitted IR — a violation is a compile error.
 	if err := e.checkPurity(prog); err != nil {
@@ -2369,6 +2418,11 @@ done:
 	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyStream {
 		e.emitGlobal("define i64 @__kml_fetch_body_write(ptr %p, ptr %c, i64 %t) {\n  ret i64 0\n}")
 		e.emitGlobal("define void @__kml_fetch_body_on_done(ptr %p) {\n  ret void\n}")
+	}
+	// The lazy Response-body-promise drain hook (TDD-00186), referenced by the
+	// curl drain; a no-op stub unless a body accessor built one.
+	if (e.usedFetch || e.usedFetchAsync) && !e.usedFetchBodyProm {
+		e.emitGlobal("define void @__kml_fetch_bodyprom_on_done(ptr %p) {\n  ret void\n}")
 	}
 	// cluster (TDD-00105): the primary blocks until every forked worker exits,
 	// keeping it alive while workers serve (a worker's own table is empty, so

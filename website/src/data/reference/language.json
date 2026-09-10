@@ -524,9 +524,9 @@
       "statusRow": "Destructured function parameters (function f({ x, y }: T) {} / function f([a, b]: T[]) {})",
       "signature": "function f({ x, y }: T) { … }",
       "badge": "caveats",
-      "description": "Object- and array-destructured parameters. Each element/field may have its own default; nested patterns work; supported on named functions, class methods/constructors, and arrow functions.",
+      "description": "Object- and array-destructured parameters. A destructured callback parameter needs no annotation — its type is supplied by contextual typing from the higher-order method's element type, so the common `Object.entries(o).map(([k, v]) => …)` / Map-entries / pair-array idiom works. A heterogeneous tuple pattern binds each position by its own type. Each element/field may have its own default; nested patterns work; supported on named functions, class methods/constructors, and arrow functions.",
       "differences": [
-        "Requires an explicit type annotation on the pattern (no sensible unannotated default the way a scalar param has); no combination with `...` or a whole-parameter default value.",
+        "No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error.",
         "A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows."
       ],
       "seeAlso": ["lang.arraydestructure", "lang.objdestructure"],

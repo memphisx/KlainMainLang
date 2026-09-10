@@ -185,6 +185,19 @@ console.log(add(5, 3))
 `, "15\n8")
 }
 
+func TestE2EDefaultParamExplicitUndefined(t *testing.T) {
+	// `f(undefined)` triggers the default — JS treats an explicit `undefined`
+	// argument as omitted for default substitution (ADR-00838).
+	assertOutput(t, `
+function f(x: number = 5): number { return x }
+console.log(f())
+console.log(f(undefined))
+console.log(f(10))
+function g(a: string, b: string = 'def'): string { return a + '-' + b }
+console.log(g('x', undefined))
+`, "5\n5\n10\nx-def")
+}
+
 func TestE2EDefaultParamString(t *testing.T) {
 	assertOutput(t, `
 function greet(name: string = 'World'): string { return 'Hello, ' + name }
@@ -2282,7 +2295,7 @@ func TestE2EModuleGlobalMapInFunction(t *testing.T) {
 	assertOutput(t, `
 const cache = new Map<string, number>()
 cache.set("a", 1)
-function get(k: string): number { return cache.get(k) }
+function get(k: string): number { return cache.get(k)! }
 cache.set("b", 2)
 console.log(get("a"))
 console.log(get("b"))

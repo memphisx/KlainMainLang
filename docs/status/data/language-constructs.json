@@ -258,7 +258,7 @@
             "feature": "Optional chaining `?.`",
             "status": "implemented",
             "notes": [
-              "Null-guards ptr fields; returns null on null receiver",
+              "`o?.x` is `PropType | undefined` — a null receiver short-circuits to a real `undefined` (as in TS), not `null` or a stand-in zero; a scalar prop rides the `{ i1, T }` optional, a pointer prop the null-pointer-flagged-undefined, an array prop keeps its zero-shaped value (no absent state, [ADR-00246](../adr/ADR-00246.md)) ([ADR-00834](../adr/ADR-00834.md))",
               "An array receiver (`arr?.length`, `arr?.map(...)`) uses plain access — an array is a value aggregate, never a null pointer ([ADR-00539](../adr/ADR-00539.md))"
             ]
           },
@@ -287,6 +287,7 @@
             "feature": "Spread in array literals `[...a, ...b]`",
             "status": "implemented",
             "notes": [
+              "A spread accepts any array-valued **expression**, not just a variable — `[...m.keys()]`, `[...arr.slice(1)]`, `[...arr.map(f)]`, `[...[1,2]]` all work ([ADR-00845](../adr/ADR-00845.md))",
               "Elisions (`[1,,3]`) parse too — a hole reads as `undefined`/zero and counts toward the length ([ADR-00467](../adr/ADR-00467.md))"
             ]
           }
@@ -437,12 +438,14 @@
             "feature": "Destructured function parameters (`function f({ x, y }: T) {}` / `function f([a, b]: T[]) {}`)",
             "status": "implemented",
             "caveats": [
-              "Requires an explicit type annotation on the pattern (no sensible unannotated default the way a scalar param has); no combination with `...` or a whole-parameter default value",
+              "No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error",
               "A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows"
             ],
             "notes": [
+              "A **destructured callback parameter** needs no annotation — its type is supplied by contextual typing from the higher-order method's element type: `Object.entries(o).map(([k, v]) => …)`, `pairs.filter(([k, v]) => …)`, `map.entries()`/pair-array `.forEach`/`.reduce`, etc. ([ADR-00854](../adr/ADR-00854.md)/[TDD-00199](../tdd/TDD-00199.md))",
+              "A **heterogeneous tuple** pattern param binds each position by its own type (`([k, v]: [string, number]) => …`, and the `[string, V]` entry tuples from `Object.entries`/`Map`), not a single uniform element type ([ADR-00854](../adr/ADR-00854.md))",
               "Each individual pattern element/field may have its own default (`function f([a = 1]: number[])`, `function f({ x = \"d\" }: T)`)",
-              "Nested patterns (`function f([[a, b]]: number[][])`, `function f({ p: { x } }: T)`) work — see [ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 2",
+              "Nested patterns (`function f([[a, b]]: number[][])`, `function f({ p: { x } }: T)`, `arr.map(([[x, y], z]) => …)`) work — see [ADR-00193](../adr/ADR-00193.md)/[TDD-00065](../tdd/TDD-00065.md) Stage 2",
               "Works on named function declarations, class methods/constructors, and arrow functions alike — including an array-destructured param on an arrow function/closure, since array-typed closure parameters are supported ([ADR-00152](../adr/ADR-00152.md)). See [ADR-00109](../adr/ADR-00109.md)/[ADR-00158](../adr/ADR-00158.md)"
             ]
           },

@@ -19,6 +19,22 @@ console.log(JSON.stringify(u))
 `, `{"name":"bob","addr":{"city":"Thessaloniki","zip":54600},"tags":["a","b"]}`)
 }
 
+func TestE2EJSONStringifyDropsUndefinedOptionalFields(t *testing.T) {
+	// An omitted optional field (`b?: T` absent) has its key DROPPED, as in Node
+	// (only a genuinely `null` value serializes as `null`) — compact and pretty,
+	// including the all-absent → `{}` edge and correct commas around a dropped
+	// middle field (ADR-00837).
+	assertOutput(t, `
+interface P { a: number; b?: number; s?: string }
+console.log(JSON.stringify({ a: 1 } as P))
+console.log(JSON.stringify({ a: 1, b: 2 } as P))
+console.log(JSON.stringify({ a: 1, s: "x" } as P))
+const e: { x?: number } = {}
+console.log(JSON.stringify(e))
+console.log(JSON.stringify({ a: 1, s: "x" } as P, null, 2))
+`, "{\"a\":1}\n{\"a\":1,\"b\":2}\n{\"a\":1,\"s\":\"x\"}\n{}\n{\n  \"a\": 1,\n  \"s\": \"x\"\n}")
+}
+
 func TestE2EJSONStringifyPrettyNumberSpace(t *testing.T) {
 	// A numeric space indents nested objects and arrays with N spaces, and puts
 	// a space after each colon — matching Node's JSON.stringify(x, null, 2).

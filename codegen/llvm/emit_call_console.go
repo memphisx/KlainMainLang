@@ -254,6 +254,29 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// A class instance / object literal prints Node-style: `Foo { x: 1 }`
 	// (util.inspect), in both -compat modes. See TDD-00075/emit_inspect.go.
 	if isInspectableObject(val.Ty) {
+		// An absent object (`C | undefined` / `C | null` — a null pointer, e.g.
+		// an object-array `.find()` miss or a `Map<K,object>.get()` miss) must
+		// print its keyword, not dereference null to inspect fields (a segfault).
+		if val.Ty.Nullable || val.Ty.IsNull {
+			isNull := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+			nullL := e.freshLabel("clog.objnull")
+			objL := e.freshLabel("clog.obj")
+			doneL := e.freshLabel("clog.objdone")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, objL))
+			e.emitLabel(nullL)
+			e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(objL)
+			strVal, err := e.emitInspectObject(val, 0)
+			if err != nil {
+				return err
+			}
+			e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			return nil
+		}
 		strVal, err := e.emitInspectObject(val, 0)
 		if err != nil {
 			return err

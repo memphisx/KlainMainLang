@@ -1409,7 +1409,8 @@ let maybe: Circle | null = new Circle(5)
 console.log(maybe?.area)
 maybe = null
 console.log(maybe?.area)
-`, "75\n0")
+console.log(maybe?.area === undefined)
+`, "75\nundefined\ntrue")
 }
 
 func TestE2EClassAccessorInheritanceOverrideVtableDispatch(t *testing.T) {

@@ -144,6 +144,41 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 	return dataReg
 }
 
+// emitErrorToString renders an Error the way `err.toString()` / `String(err)` /
+// `` `${err}` `` do in JS: `name` when the message is empty, otherwise
+// `name + ": " + message` (name is the kind name, always set). errVal is the
+// error object pointer.
+func (e *Emitter) emitErrorToString(errVal Value) (Value, error) {
+	e.ensureStrlen()
+	nameGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), errVal.Ref))
+	namePtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", namePtr, nameGep))
+	msgGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), errVal.Ref))
+	msgPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msgPtr, msgGep))
+
+	nameVal := Value{Ref: namePtr, Ty: TypePtr}
+	// name + ": " + message
+	withSep, err := e.emitStringConcat(nameVal, Value{Ref: e.internString(": "), Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	full, err := e.emitStringConcat(withSep, Value{Ref: msgPtr, Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	// Empty message → just the name (JS's Error.prototype.toString rule).
+	msgLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", msgLen, msgPtr))
+	empty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, msgLen))
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", res, empty, namePtr, full.Ref))
+	return Value{Ref: res, Ty: TypePtr}, nil
+}
+
 // buildErrorObjWithCode builds an errorObjType instance carrying the Node
 // error-code trio (code string, numeric errcode, errstr string) — used by
 // node:sqlite failures so `err.code === 'ERR_SQLITE_ERROR'` matches Node.

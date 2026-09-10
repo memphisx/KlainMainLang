@@ -5,7 +5,7 @@
   "statusPage": "STREAMS.md",
   "coversRows": "all",
   "coverage": { "loose": "9/9", "loosePct": 100, "strict": "1/9", "strictPct": 11 },
-  "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) are the backbone, and Node's older stream module (Readable/Writable/Transform/PassThrough, pipeline/finished, duplexPair) wraps the same internals. In-memory pipelines run on the promise/microtask runtime alone — no fibers or libcurl. The recurring divergences are edge-semantic rather than shape: a synchronously-throwing pull/start/write propagates to the caller instead of erroring the stream, closed-stream reads yield the chunk type's zero value rather than undefined, desiredSize settles to 0 instead of null, and fs/http don't yet hand out Node streams. new Duplex remains rejected — duplexPair() is the one Duplex producer.",
+  "lede": "Two stream worlds live here. The WHATWG classes (ReadableStream/WritableStream/TransformStream, plus Compression/Decompression) are the backbone, and Node's older stream module (Readable/Writable/Transform/PassThrough, pipeline/finished, duplexPair) wraps the same internals. In-memory pipelines run on the promise/microtask runtime alone — no fibers or libcurl. The recurring divergences are edge-semantic rather than shape: a synchronously-throwing pull/start/write propagates to the caller instead of erroring the stream, an array/tuple-chunk closed-stream read still yields a zero-shaped value rather than undefined (scalar/string/object chunks read a real undefined), and fs/http don't yet hand out Node streams. new Duplex remains rejected — duplexPair() is the one Duplex producer.",
   "entries": [
     {
       "id": "streams.readablestream",
@@ -21,7 +21,7 @@
         "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
         "`ReadableStream.from()` accepts arrays only, not async iterables",
         "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter; *async* method shorthand (`{ async pull(c) {…} }`) doesn't parse — use `pull: async (c) => …`",
-        "`read()` on a closed stream yields the chunk type's zero value, not `undefined`, and `controller.desiredSize` is `0` (not `null`) once closed/errored — needs the discriminated `{done, value}` record design, not a plain `T | undefined` field flip",
+        "`read()` on a closed stream whose chunk type is an **array/tuple** still yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state); a scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored",
         "`releaseLock()` leaves queued pending reads pending instead of rejecting them",
         "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
         "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
@@ -42,7 +42,7 @@
       "exampleKey": "streams/pipeline",
       "snippet": "const printed: string[] = []\nconst sink = new WritableStream<string>({\n  write: (chunk) => { printed.push(chunk) }\n})\nawait source.pipeThrough(upper).pipeTo(sink)",
       "differences": [
-        "`desiredSize` is `0` (not `null`) once errored; `releaseLock()` doesn't reject a pending-write view",
+        "`releaseLock()` doesn't reject a pending-write view",
         "A synchronously-throwing sink write propagates instead of erroring the stream (an async rejection is handled per spec)",
         "A sink abort callback can't take a reason parameter; no transformer/sink `start` promise-vs-write interlock beyond the started flag"
       ],

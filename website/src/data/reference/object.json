@@ -7,10 +7,10 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "16/32",
+    "strict": "17/32",
     "strictPct": 50
   },
-  "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as the null stand-in.",
+  "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, compile-time Object.hasOwn. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
     {
       "id": "object.literal",
@@ -367,13 +367,10 @@
       "name": "Map.set/get/has/delete/keys/values",
       "statusRow": "Map.set/get/has/delete/keys/values",
       "signature": "new Map<K, V>(); m.set(k, v); m.get(k); m.has(k); m.delete(k); m.keys()",
-      "badge": "caveats",
-      "description": ".get() on a scalar-valued map returns V | null — a missing key is distinguishable from a stored 0/false via the presence-flagged nullable-scalar representation.",
+      "badge": "exact",
+      "description": ".get() returns V | undefined — a missing key reads as a real undefined (as in Node), distinguishable from a stored 0/false/\"\" via the presence-flagged representation; narrow, ?? d, or ! before use.",
       "exampleKey": "map/map",
-      "snippet": "const scores = new Map<string, number>();\nscores.set(\"alice\", 95);\nconsole.log(scores.get(\"alice\")); // 95\nconsole.log(scores.has(\"dave\"));  // 0",
-      "differences": [
-        "A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `\"null\"` stand-in on a miss"
-      ],
+      "snippet": "const scores = new Map<string, number>();\nscores.set(\"alice\", 95);\nconsole.log(scores.get(\"alice\"));          // 95\nconsole.log(scores.get(\"dave\") === undefined); // true",
       "seeAlso": [
         "map.size",
         "map.entries",

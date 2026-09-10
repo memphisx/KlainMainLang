@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <errno.h>
 
 // ---- IR-exported thunks (Promise/exception layout lives in the emitted IR) --
 // Each thunk runs one fs op under a per-worker setjmp guard and returns two
@@ -50,10 +51,17 @@ extern void __kml_pool_thunk_rmdir(const char *path, struct kml_triple *out);
 extern void __kml_pool_thunk_rename(const char *oldp, const char *newp, struct kml_triple *out);
 extern void __kml_pool_thunk_copyfile(const char *src, const char *dst, struct kml_triple *out);
 extern void __kml_pool_thunk_readdir(const char *path, struct kml_triple *out);
+// TDD-00185 binary writes: explicit byte buffer + length (an ArrayBuffer/
+// TypedArray body, copied raw at submit so no GC pointer crosses the thread).
+extern void __kml_pool_thunk_writefile_bytes(const char *path, const void *data, int64_t len, struct kml_triple *out);
+extern void __kml_pool_thunk_appendfile_bytes(const char *path, const void *data, int64_t len, struct kml_triple *out);
 extern void __kml_pool_settle(void *promise, int64_t v0, int64_t v1, int64_t state);
-// TDD-00186 stream drain (loop thread): enqueue one chunk / close the readable.
+// TDD-00186 stream drain (loop thread): enqueue one chunk / close / error the
+// readable, and re-run the WHATWG pull check to grant the next credit.
 extern void __kml_pool_stream_chunk(void *rs, int64_t chunk);
 extern void __kml_pool_stream_end(void *rs);
+extern void __kml_pool_stream_error(void *rs, int64_t err_errno);
+extern void __kml_rs_pull_if_needed(void *rs);
 
 #ifdef KLAINPOOL_GC
 // Under -mm=gc a worker allocates GC memory (the read buffer / result string),
@@ -74,9 +82,28 @@ extern void GC_allow_register_threads(void);
 // STREAM_CHUNKs and a terminal STREAM_END.
 enum {
     KML_CMP_SETTLE = 0,      // settle a Promise (target = promise, v0/v1/state)
-    KML_CMP_STREAM_CHUNK,    // enqueue a chunk into a readable (target = rs, v0 = chunk ptr)
-    KML_CMP_STREAM_END,      // close a readable (target = rs)
+    KML_CMP_STREAM_CHUNK,    // enqueue a chunk into a readable (target = ctl, v0 = chunk ptr)
+    KML_CMP_STREAM_END,      // close a readable (target = ctl)
+    KML_CMP_STREAM_ERROR,    // error a readable (target = ctl, v0 = errno)
 };
+
+// TDD-00186 backpressure: a demand-driven read stream. The worker reads exactly
+// one chunk per credit and blocks otherwise; the loop grants a credit from the
+// readable's pull hook (fired by the WHATWG machinery when the consumer drains
+// below the high-water mark) and re-arms it as each chunk is drained — so at most
+// ~one chunk is outstanding. `inflight` is loop-only (guards against a double
+// grant while a read is in flight); `credits` is the worker's condvar signal.
+typedef struct kml_stream_ctl {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int64_t credits;         // worker go-signal (mutex-guarded)
+    int inflight;            // loop-only: a read is dispatched, not yet drained
+    int stop;                // loop sets on cancel; worker exits its wait
+    void *rs;                // the readable (loop-thread use only)
+    void *fp;                // FILE* opened on the loop thread
+    int64_t hwm;             // fread chunk size
+    struct kml_loop_port *port;
+} kml_stream_ctl;
 
 // One struct, reused as work item (loop -> pool), stream job, and completion
 // item (pool -> loop). arg0/arg1 are strdup'd copies the item owns and frees.
@@ -87,6 +114,8 @@ typedef struct kml_pool_item {
     void *promise;          // completion target: a Promise, or (stream) the readable
     char *arg0;
     char *arg1;
+    void *data;             // binary write: raw malloc'd byte buffer the item owns
+    int64_t datalen;        // binary write: its byte length
     void *fp;               // stream job: the FILE* opened on the loop thread
     int64_t hwm;            // stream job: highWaterMark chunk size
     struct kml_loop_port *port;
@@ -107,6 +136,8 @@ enum {
     KML_OP_COPYFILE,
     KML_OP_READDIR,
     KML_OP_READSTREAM,      // TDD-00186: chunked file read feeding a Readable
+    KML_OP_WRITEFILE_BYTES,  // TDD-00185: writeFile of a raw byte buffer
+    KML_OP_APPENDFILE_BYTES, // TDD-00185: appendFile of a raw byte buffer
 };
 
 // Per-loop completion port: a Treiber stack the workers push completions onto,
@@ -173,26 +204,47 @@ static void post_completion(kml_loop_port *p, int kind, void *target, int64_t v0
     push_completion(p, c);
 }
 
-// TDD-00186: read a file in hwm chunks on the worker, posting each as a
-// STREAM_CHUNK the loop enqueues into the readable, then a terminal STREAM_END.
-// The chunk is a length-prefixed KML string (length at data-8), built in plain
-// C — the readable leaks its chunks (as the eager path did), so no GC alloc.
-static void run_read_stream(kml_pool_item *it) {
-    FILE *f = (FILE *)it->fp;
-    void *rs = it->promise;
-    kml_loop_port *p = it->port;
-    int64_t hwm = it->hwm > 0 ? it->hwm : 65536;
+static void free_stream_ctl(kml_stream_ctl *ctl) {
+    pthread_mutex_destroy(&ctl->mu);
+    pthread_cond_destroy(&ctl->cv);
+    free(ctl);
+}
+
+// TDD-00186: read a file in hwm chunks on the worker, ONE chunk per credit
+// (backpressure). Blocks on the condvar until the loop grants a credit from the
+// readable's pull hook; posts each chunk as a STREAM_CHUNK, a terminal
+// STREAM_END at clean EOF, or a STREAM_ERROR on a mid-read failure / a consumer
+// cancel (`stop`). The chunk is a length-prefixed KML string (length at data-8),
+// built in plain C — the readable leaks its chunks (as the eager path did), so
+// no GC alloc happens off-thread.
+static void run_read_stream(kml_stream_ctl *ctl) {
+    FILE *f = (FILE *)ctl->fp;
+    kml_loop_port *p = ctl->port;
+    int64_t hwm = ctl->hwm > 0 ? ctl->hwm : 65536;
+    int err_errno = 0;               // 0 = clean EOF (or cancel); nonzero = error
     for (;;) {
+        pthread_mutex_lock(&ctl->mu);
+        while (ctl->credits <= 0 && !ctl->stop) pthread_cond_wait(&ctl->cv, &ctl->mu);
+        int stop = ctl->stop;
+        if (!stop) ctl->credits--;
+        pthread_mutex_unlock(&ctl->mu);
+        if (stop) break;             // consumer cancelled — end the stream cleanly
+
         char *base = (char *)malloc((size_t)hwm + 9);
-        if (!base) break;
+        if (!base) { err_errno = ENOMEM; break; }
         size_t n = f ? fread(base + 8, 1, (size_t)hwm, f) : 0;
-        if (n == 0) { free(base); break; }
+        if (n == 0) {
+            if (f && ferror(f)) err_errno = EIO;
+            free(base);
+            break;
+        }
         *(int64_t *)base = (int64_t)n;   // length header at data-8
         base[8 + n] = 0;                 // NUL terminator
-        post_completion(p, KML_CMP_STREAM_CHUNK, rs, (int64_t)(intptr_t)(base + 8));
+        post_completion(p, KML_CMP_STREAM_CHUNK, ctl, (int64_t)(intptr_t)(base + 8));
     }
-    if (f) fclose((FILE *)f);
-    post_completion(p, KML_CMP_STREAM_END, rs, 0);
+    if (f) fclose(f);
+    if (err_errno) post_completion(p, KML_CMP_STREAM_ERROR, ctl, (int64_t)err_errno);
+    else post_completion(p, KML_CMP_STREAM_END, ctl, 0);
 }
 
 // Run one work item. Returns 1 if the item itself should be pushed as its
@@ -200,7 +252,7 @@ static void run_read_stream(kml_pool_item *it) {
 // be freed (the stream job).
 static int run_item(kml_pool_item *it) {
     if (it->opid == KML_OP_READSTREAM) {
-        run_read_stream(it);
+        run_read_stream((kml_stream_ctl *)it->promise);
         return 0;
     }
     struct kml_triple r = { 0, 0, NULL };
@@ -214,6 +266,8 @@ static int run_item(kml_pool_item *it) {
     case KML_OP_RENAME:     __kml_pool_thunk_rename(it->arg0, it->arg1, &r); break;
     case KML_OP_COPYFILE:   __kml_pool_thunk_copyfile(it->arg0, it->arg1, &r); break;
     case KML_OP_READDIR:    __kml_pool_thunk_readdir(it->arg0, &r); break;
+    case KML_OP_WRITEFILE_BYTES:  __kml_pool_thunk_writefile_bytes(it->arg0, it->data, it->datalen, &r); break;
+    case KML_OP_APPENDFILE_BYTES: __kml_pool_thunk_appendfile_bytes(it->arg0, it->data, it->datalen, &r); break;
     default:                r.err = (void *)1; break;
     }
     it->kind = KML_CMP_SETTLE;
@@ -250,6 +304,7 @@ static void *worker_main(void *arg) {
         } else {
             free(it->arg0);
             free(it->arg1);
+            free(it->data);
             free(it);                         // stream job: completions already posted
         }
     }
@@ -281,9 +336,12 @@ static void ensure_pool_locked(void) {
 // Enqueue a prepared work item and bump this loop's inflight count. Only the
 // terminal completion (SETTLE, or a stream's STREAM_END) decrements inflight, so
 // the loop stays alive across a whole multi-chunk stream read.
-static void enqueue_work(kml_loop_port *p, kml_pool_item *it) {
+// bump: whether the submit itself is an in-flight read (one-shot ops), or not
+// (a demand-driven read stream, where each granted credit — not the submit —
+// bumps inflight, so an unconsumed stream doesn't pin the loop alive).
+static void enqueue_work(kml_loop_port *p, kml_pool_item *it, int bump) {
     it->port = p;
-    atomic_fetch_add_explicit(&p->inflight, 1, memory_order_relaxed);
+    if (bump) atomic_fetch_add_explicit(&p->inflight, 1, memory_order_relaxed);
     pthread_mutex_lock(&q_mu);
     ensure_pool_locked();
     if (q_tail) q_tail->next = it; else q_head = it;
@@ -300,18 +358,76 @@ void __kml_pool_submit(int opid, void *promise, const char *arg0, const char *ar
     it->promise = promise;
     it->arg0 = arg0 ? strdup(arg0) : NULL;
     it->arg1 = arg1 ? strdup(arg1) : NULL;
-    enqueue_work(loop_port(), it);
+    enqueue_work(loop_port(), it, 1);
 }
 
-// TDD-00186: submit a chunked read of an already-opened file (fp, a FILE*
-// opened synchronously on the loop thread) that feeds the readable `rs`.
-void __kml_pool_submit_readstream(void *rs, void *fp, int64_t hwm) {
+// TDD-00185: submit a binary writeFile/appendFile. The byte buffer is copied
+// into a raw malloc'd block the item owns (never a GC pointer, so the worker is
+// GC-safe), mirroring the strdup of arg0; freed alongside arg0/arg1 at drain.
+void __kml_pool_submit_write_bytes(int opid, void *promise, const char *path, const void *data, int64_t len) {
+    kml_pool_item *it = (kml_pool_item *)calloc(1, sizeof *it);
+    it->opid = opid;
+    it->promise = promise;
+    it->arg0 = path ? strdup(path) : NULL;
+    it->datalen = len;
+    if (len > 0 && data) {
+        it->data = malloc((size_t)len);
+        if (it->data) memcpy(it->data, data, (size_t)len);
+    }
+    enqueue_work(loop_port(), it, 1);
+}
+
+// TDD-00186: allocate a demand-driven read-stream control block on the loop
+// thread. `rs` is the readable, `fp` the FILE* opened synchronously, `hwm` the
+// fread chunk size. The returned handle is the env of the pull/cancel closures
+// installed on the readable and the work item's target.
+void *__kml_pool_stream_ctl_new(void *rs, void *fp, int64_t hwm) {
+    kml_stream_ctl *ctl = (kml_stream_ctl *)calloc(1, sizeof *ctl);
+    pthread_mutex_init(&ctl->mu, NULL);
+    pthread_cond_init(&ctl->cv, NULL);
+    ctl->rs = rs;
+    ctl->fp = fp;
+    ctl->hwm = hwm;
+    ctl->port = loop_port();
+    return ctl;
+}
+
+// TDD-00186: submit a chunked read for a control block onto the pool.
+void __kml_pool_submit_readstream(void *ctl) {
     kml_pool_item *it = (kml_pool_item *)calloc(1, sizeof *it);
     it->opid = KML_OP_READSTREAM;
-    it->promise = rs;
-    it->fp = fp;
-    it->hwm = hwm;
-    enqueue_work(loop_port(), it);
+    it->promise = ctl;
+    enqueue_work(loop_port(), it, 0);   // credits, not the submit, bump inflight
+}
+
+// TDD-00186 pull hook (loop thread): the readable's field-9 pull closure. Grant
+// exactly one read credit unless one is already in flight — returns NULL (a
+// synchronous pull); the chunk lands later via the completion drain, which
+// clears `inflight` and re-arms the pull.
+void *__kml_pool_stream_pull(void *ctlv) {
+    kml_stream_ctl *ctl = (kml_stream_ctl *)ctlv;
+    if (ctl->inflight) return NULL;
+    ctl->inflight = 1;
+    // A dispatched read keeps the loop alive; its completion (chunk/end/error)
+    // decrements. Between reads a demand-starved stream sits at 0, so an
+    // abandoned consumer lets the loop exit rather than hang.
+    atomic_fetch_add_explicit(&ctl->port->inflight, 1, memory_order_relaxed);
+    pthread_mutex_lock(&ctl->mu);
+    ctl->credits++;
+    pthread_cond_signal(&ctl->cv);
+    pthread_mutex_unlock(&ctl->mu);
+    return NULL;
+}
+
+// TDD-00186 cancel hook (loop thread): the readable's field-10 cancel closure.
+// Tell the worker to stop; it wakes, ends the stream, and the drain frees ctl.
+void *__kml_pool_stream_cancel(void *ctlv) {
+    kml_stream_ctl *ctl = (kml_stream_ctl *)ctlv;
+    pthread_mutex_lock(&ctl->mu);
+    ctl->stop = 1;
+    pthread_cond_signal(&ctl->cv);
+    pthread_mutex_unlock(&ctl->mu);
+    return NULL;
 }
 
 // ---- event-loop hooks (called from the emitted reactor) --------------------
@@ -362,16 +478,32 @@ void __kml_pool_dispatch(void) {
             __kml_pool_settle(c->promise, c->v0, c->v1, c->state);
             atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
             break;
-        case KML_CMP_STREAM_CHUNK:
-            __kml_pool_stream_chunk(c->promise, c->v0);
+        case KML_CMP_STREAM_CHUNK: {
+            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
+            atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
+            __kml_pool_stream_chunk(ctl->rs, c->v0);
+            ctl->inflight = 0;                    // read complete
+            __kml_rs_pull_if_needed(ctl->rs);     // grant the next credit if wanted
             break;
-        case KML_CMP_STREAM_END:
-            __kml_pool_stream_end(c->promise);
+        }
+        case KML_CMP_STREAM_END: {
+            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
+            __kml_pool_stream_end(ctl->rs);
+            free_stream_ctl(ctl);
             atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
             break;
         }
+        case KML_CMP_STREAM_ERROR: {
+            kml_stream_ctl *ctl = (kml_stream_ctl *)c->promise;
+            __kml_pool_stream_error(ctl->rs, c->v0);
+            free_stream_ctl(ctl);
+            atomic_fetch_sub_explicit(&p->inflight, 1, memory_order_relaxed);
+            break;
+        }
+        }
         free(c->arg0);
         free(c->arg1);
+        free(c->data);
         free(c);
         c = nx;
     }

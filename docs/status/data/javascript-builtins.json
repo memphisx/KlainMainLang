@@ -45,20 +45,16 @@
             "feature": "`Number` (all statics/constants, `toFixed`/`toString`/`toPrecision`/`toExponential`)",
             "status": "implemented",
             "notes": [
+              "`toExponential()` with no argument uses the shortest round-trip mantissa (`(12345).toExponential()` → `1.2345e+4`), as in Node ([ADR-00832](../adr/ADR-00832.md))",
               "→ [Number & Math](NUMBER-MATH.md)"
-            ],
-            "caveats": [
-              "`toExponential()` requires an explicit fraction-digits argument — the zero-argument auto-precision form (`(1.5).toExponential()`, valid in JS) is a compile error."
             ]
           },
           {
             "feature": "`Math` (full surface incl. `cbrt`/`clz32`/`fround`/`imul`/`hypot`/`expm1`/`log1p`)",
             "status": "implemented",
             "notes": [
+              "`Math.max`/`Math.min` accept any arity: zero args give the JS identity (`-Infinity`/`+Infinity`), one arg returns that value, as in Node ([ADR-00831](../adr/ADR-00831.md))",
               "→ [Number & Math](NUMBER-MATH.md)"
-            ],
-            "caveats": [
-              "`Math.max`/`Math.min` require at least two arguments — the zero-arg (JS: `∓Infinity`) and one-arg forms are compile errors."
             ]
           },
           {
@@ -117,7 +113,7 @@
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
             ],
             "caveats": [
-              "No error-options second argument — `new Error(m, { cause })` fails to parse, so `.cause` is unavailable; `.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`); and an Error has no `.toString()` / can't be interpolated (`` `${err}` `` is a compile error)."
+              "No error-options second argument — `new Error(m, { cause })` fails to parse, so `.cause` is unavailable; `.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`). `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node ([ADR-00846](../adr/ADR-00846.md))."
             ]
           },
           {
@@ -231,7 +227,7 @@
               "→ [Performance timing](PERFORMANCE-TIMING.md)"
             ],
             "caveats": [
-              "`Date` is a plain i64 epoch with no NaN — an invalid date is a `-1` sentinel (`new Date('bad').getTime()` is `-1`, Node: `NaN`) and out-of-range fields wrap rather than invalidating (`Date.parse('2020-13-45')` is a valid timestamp, Node: `NaN`); no UTC accessors (`Date.UTC`/`getUTC*`/`getTimezoneOffset`) or `Date.prototype.toString` — each is a compile error."
+              "`Date` is a plain i64 epoch with no NaN — an invalid date is a `-1` sentinel (`new Date('bad').getTime()` is `-1`, Node: `NaN`) and out-of-range fields wrap rather than invalidating (`Date.parse('2020-13-45')` is a valid timestamp, Node: `NaN`); no `Date.UTC` static, `getTimezoneOffset`, or `Date.prototype.toString` — each is a compile error (the `getUTC*`/`setUTC*` instance accessors DO work — [ADR-00844](../adr/ADR-00844.md))."
             ]
           },
           {
@@ -289,7 +285,7 @@
             "feature": "`Array`",
             "status": "implemented",
             "caveats": [
-              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `a.length = n` truncation compile-errors; **`.reduceRight()` absent**; `.keys`/`values`/`entries` materialized not lazy; `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
+              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `a.length = n` truncation compile-errors; `.keys`/`values`/`entries` materialized not lazy; `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
             ]
           },
           {
@@ -436,13 +432,6 @@
             ]
           },
           {
-            "feature": "`Array.prototype.reduceRight()`",
-            "status": "missing",
-            "notes": [
-              "Unimplemented → [Array methods](ARRAY-METHODS.md)"
-            ]
-          },
-          {
             "feature": "`RegExp` `u`/`v`/`y`/`d` flag semantics",
             "status": "missing",
             "notes": [
@@ -490,7 +479,7 @@
             "feature": "`Intl.*` (Collator/NumberFormat/DateTimeFormat/…)",
             "status": "missing",
             "notes": [
-              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `localeCompare`/`bigint.toLocaleString`/`Date.toLocale*` are gaps"
+              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `localeCompare`/`bigint.toLocaleString`/`Date.toLocale*` are gaps. `Number.prototype.toLocaleString()` implements the **no-argument** en-US default (thousands grouping + max 3 fraction digits, [ADR-00847](../adr/ADR-00847.md)); a locale/options argument is a clean rejection"
             ]
           },
           {

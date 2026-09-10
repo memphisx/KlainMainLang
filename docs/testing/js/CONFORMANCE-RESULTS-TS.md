@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**5381 / 9256 agree with TypeScript (58.1%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
+**5421 / 9256 agree with TypeScript (58.6%)** on accept/reject over 9256 classified cases (2578 multi-file/out-of-scope skipped).
 
-- **2018** match-accept (both compile clean)
-- **3363** match-reject (both reject)
-- **2859** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1016** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2076** match-accept (both compile clean)
+- **3345** match-reject (both reject)
+- **2801** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1034** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 2706 | 4833 | 56.0% | 615 | 1430 |
-| conformance | 2675 | 4423 | 60.5% | 401 | 1148 |
+| compiler | 2727 | 4833 | 56.4% | 626 | 1430 |
+| conformance | 2694 | 4423 | 60.9% | 408 | 1148 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -72,6 +72,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `arithmeticOperatorWithUndefinedValueAndValidOperands` | conformance |
 | `arrayAssignmentTest5` | compiler |
 | `arrayCast` | compiler |
+| `arrayIndexWithArrayFails` | compiler |
 | `arrayReferenceWithoutTypeArgs` | compiler |
 | `arrowFunctionErrorSpan` | compiler |
 | `asOperator2` | conformance |
@@ -100,7 +101,6 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `asyncAliasReturnType_es5` | conformance |
 | `asyncDeclare_es5` | conformance |
 | `asyncDeclare_es6` | conformance |
-| `asyncFunctionReturnExpressionErrorSpans` | compiler |
 | `augmentedClassWithPrototypePropertyOnModule` | compiler |
 | `augmentedTypesModules2` | compiler |
 | `augmentedTypesModules3` | compiler |
@@ -127,8 +127,8 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `capturedLetConstInLoop14` | compiler |
 | `capturedLetConstInLoop8` | compiler |
 | `capturedLetConstInLoop8_ES6` | compiler |
-| `chainedAssignment3` | compiler |
-| … | +916 more |
+| `chainedAssignment1` | compiler |
+| … | +934 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -137,66 +137,66 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | Count | Reason |
 |---|---|
 | 156 | REJECTED: undefined variable '%s' |
-| 81 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
+| 87 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
+| 73 | REJECTED: undefined function or closure '%s' |
 | 72 | REJECTED: '%s' is declared more than once in <path> |
-| 70 | REJECTED: undefined function or closure '%s' |
 | 62 | REJECTED: a computed class member name must be a constant string or number literal — a dynamic key (identifier, call, Symbol, or… |
 | 57 | REJECTED: expected '%s' after export specifier list, got ; |
-| 49 | REJECTED: expected :, got ( |
-| 48 | REJECTED: a number has no method '%s' |
-| 46 | REJECTED: '%s' is only valid inside a method or constructor body |
-| 42 | REJECTED: any/unknown is not yet supported as an array element or object field type |
+| 50 | REJECTED: expected :, got ( |
+| 49 | REJECTED: a number has no method '%s' |
+| 47 | REJECTED: '%s' is only valid inside a method or constructor body |
 | 42 | REJECTED: any/unknown is not yet supported nested inside an array or object parameter type |
-| 39 | REJECTED: unknown class '%s' |
+| 40 | REJECTED: unknown class '%s' |
 | 36 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
+| 34 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
 | 34 | REJECTED: unexpected token , in expression |
-| 33 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
 | 32 | REJECTED: expected type name, got this |
+| 31 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 31 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
 | 30 | REJECTED: expected :, got IDENT |
 | 29 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
 | 29 | REJECTED: at most one call signature is supported per object type |
-| 28 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
-| 27 | REJECTED: '%s' is not an array |
+| 28 | REJECTED: '%s' is not an array |
 | 26 | REJECTED: a destructured parameter requires an explicit type annotation |
 | 26 | REJECTED: an object has no method '%s' |
-| 26 | REJECTED: expected ), got => |
 | 25 | REJECTED: expected ;, got IDENT |
-| 25 | REJECTED: initializer'%s's type — this compiler is a typed subset |
 | 25 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
 | 24 | REJECTED: expected IDENT, got ( |
 | 24 | REJECTED: unexpected token + in expression |
 | 22 | REJECTED: unexpected token void in expression |
+| 21 | REJECTED: initializer'%s's type — this compiler is a typed subset |
+| 21 | REJECTED: no field '%s' |
 | 20 | REJECTED: expected :, got . |
 | 20 | REJECTED: expected member name, got < |
 | 20 | REJECTED: expected type name, got \| |
+| 20 | REJECTED: field access on non-object (no field '%s') |
 | 20 | REJECTED: unexpected token = in expression |
 | 19 | REJECTED: <path>: expected ] in array type annotation |
-| 19 | REJECTED: no field '%s' |
-| 18 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
-| 18 | REJECTED: an array element type is not yet supported on a generator function |
+| 19 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
 | 18 | REJECTED: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends |
 | 18 | REJECTED: class '%s' redeclares inherited field '%s' |
-| 18 | REJECTED: expected IDENT, got ! |
 | 18 | REJECTED: expected IDENT, got STRING |
 | 18 | REJECTED: expected member name, got new |
-| 18 | REJECTED: field access on non-object (no field '%s') |
-| 17 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 17 | REJECTED: expected (, got ; |
 | 17 | REJECTED: expected :, got } |
 | 17 | REJECTED: expected type name, got ... |
 | 17 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
+| 17 | REJECTED: object has no field '%s' |
 | 17 | REJECTED: only simple function calls are supported (the callee is not a named function, a function value, or a supported method) |
 | 16 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
 | 16 | REJECTED: constructor of class '%s' calls super(...) but base class '%s' has no constructor |
 | 16 | REJECTED: expected IDENT, got await |
 | 16 | REJECTED: object destructuring requires an object variable, function call, or object literal |
+| 16 | REJECTED: type argument for '%s' does not satisfy the constraint '%s' on function '%s' |
 | 15 | REJECTED: class '%s' extends unknown class '%s' |
 | 15 | REJECTED: expected '%s' to close type assertion |
 | 15 | REJECTED: expected (, got ) |
 | 15 | REJECTED: expected :, got ; |
-| 15 | REJECTED: object has no field '%s' |
-| … | +319 more distinct reasons |
+| 14 | REJECTED: a call signature combined with other object-type members is not supported — a callable object value has no runtime sha… |
+| 14 | REJECTED: expected {, got IDENT |
+| 13 | REJECTED: a computed destructuring key must be a constant string or number literal, got IDENT |
+| 13 | REJECTED: any/unknown is not yet supported as an array element or object field type |
+| … | +316 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -204,41 +204,42 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 
 | Count | Blocker |
 |---|---|
-| 66 | `T` |
+| 72 | `T` |
 | 65 | `from` |
-| 51 | `>` |
-| 46 | `this` |
+| 52 | `>` |
+| 47 | `this` |
 | 43 | `members` |
 | 31 | `C__kml_mod0` |
 | 31 | `x` |
-| 27 | `foo` |
-| 25 | `s type is incompatible with the variable` |
+| 29 | `foo` |
+| 21 | `s type is incompatible with the variable` |
 | 20 | `array` |
-| 17 | `b` |
+| 19 | `f__kml_mod0` |
+| 18 | `b` |
+| 18 | `foo__kml_mod0` |
 | 17 | `dec__kml_mod0` |
-| 17 | `which` |
 | 16 | `B__kml_mod0` |
+| 16 | `a` |
 | 16 | `c` |
 | 16 | `export` |
-| 16 | `f__kml_mod0` |
-| 16 | `foo__kml_mod0` |
 | 14 | `C` |
 | 14 | `D__kml_mod0` |
-| 14 | `a` |
 | 13 | `new` |
 | 11 | `a__kml_mod0` |
 | 11 | `obj4` |
+| 11 | `x__kml_mod0` |
 | 10 | `Symbol` |
 | 10 | `bar` |
 | 10 | `callback` |
 | 10 | `get x` |
-| 10 | `x__kml_mod0` |
 | 9 | `A__kml_mod0` |
 | 9 | `Foo` |
 | 9 | `Foo__kml_mod0` |
 | 9 | `f` |
 | 8 | `of` |
+| 8 | `which` |
 | 8 | `y` |
+| 7 | `M` |
 | 7 | `Object` |
 | 7 | `U` |
 | 7 | `number)` |
@@ -246,10 +247,10 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 6 | `B` |
 | 6 | `C2__kml_mod0` |
 | 6 | `Derived__kml_mod0` |
-| 6 | `M` |
 | 6 | `Point` |
 | 6 | `decorator__kml_mod0` |
 | 6 | `m` |
+| 6 | `m__kml_mod0` |
 | 6 | `s type is not a member of ` |
 | 6 | `then` |
 | 5 | `C1__kml_mod0` |
@@ -263,5 +264,4 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 5 | `�` |
 | 4 | `0` |
 | 4 | `Bar__kml_mod0` |
-| 4 | `I` |
-| … | +324 more distinct blockers |
+| … | +331 more distinct blockers |

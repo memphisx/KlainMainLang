@@ -12,6 +12,18 @@ import (
 // object-literal field value, or a plain reassignment target. See
 // docs/tdd/TDD-00028.md and docs/adr/ADR-00104.md.
 
+func TestE2ELeadingDotFloatLiteral(t *testing.T) {
+	// A fraction written without a leading integer digit (`.9`, `-.9`) is valid
+	// JS but an invalid LLVM double token — was emitted verbatim, producing
+	// `store double .9` (invalid IR). Now normalized to the exact bit pattern.
+	assertOutput(t, `
+const x = .9;
+console.log(x);
+console.log(Math.trunc(-.9));
+console.log(.5 + .25);
+`, "0.9\n-0\n0.75")
+}
+
 func TestE2EArrayLiteralAsCallArgument(t *testing.T) {
 	assertOutput(t, `
 function first(arr: number[]): number {
@@ -125,7 +137,7 @@ console.log(nested[1][1]);
 func TestE2ENewMapAsCallArgument(t *testing.T) {
 	assertOutput(t, `
 function firstValue(m: Map<string, number>): number {
-  return m.get("a");
+  return m.get("a")!;
 }
 const built = new Map<string, number>();
 built.set("a", 42);

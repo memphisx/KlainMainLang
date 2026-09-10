@@ -555,6 +555,20 @@ console.log(z ?? 42)
 `, "42\n7\n0")
 }
 
+func TestE2ENullCoalesceNullableRight(t *testing.T) {
+	// `a ?? b` where the right operand is itself nullable stays `T | undefined`:
+	// `undefined ?? undefined` is `undefined`, so a chained `?? d` reaches the
+	// default (ADR-00841). Previously the intermediate collapsed to its payload 0.
+	assertOutput(t, `
+const m = new Map<string, number>()
+console.log(m.get("x") ?? -1)
+console.log(m.get("x") ?? m.get("y") ?? -1)
+console.log((m.get("x") ?? m.get("y")) === undefined)
+m.set("y", 5)
+console.log(m.get("x") ?? m.get("y") ?? -1)
+`, "-1\n-1\ntrue\n5")
+}
+
 func TestE2ENullableScalarNullEquality(t *testing.T) {
 	assertOutput(t, `
 let z: number | null = 0
@@ -952,11 +966,14 @@ console.log(c)
 }
 
 func TestE2ENullEquality(t *testing.T) {
+	// `null === undefined` is false (strict equality distinguishes the two
+	// nullish kinds, as in JS — ADR-00833); loose `==` would treat them equal.
 	assertOutput(t, `
 console.log(null === null)
 console.log(null === undefined)
 console.log(null !== null)
-`, "true\ntrue\nfalse")
+console.log(null == undefined)
+`, "true\nfalse\nfalse\ntrue")
 }
 
 func TestE2ENullOptionalChain(t *testing.T) {
@@ -965,7 +982,7 @@ const s: string | null = null
 console.log(s?.length)
 const t2: string | null = "hello"
 console.log(t2?.length)
-`, "0\n5")
+`, "undefined\n5")
 }
 
 // --- Comma / sequence operator (ADR-00179) ---
@@ -1168,11 +1185,15 @@ func TestE2EGlobalConversionFunctions(t *testing.T) {
 	assertOutput(t, `
 console.log(String(42), String(3.5), String(true), String("x"));
 console.log(Number("3.5"), Number(""), Number("12px"), Number("0x10"), Number(true), Number(null));
+console.log(Number(undefined));
 console.log(Boolean(1), Boolean(0), Boolean(""), Boolean("x"), Boolean(NaN));
 console.log(Number.isNaN(Number("abc")));
 const pn = parseInt("abc");
 console.log(pn, Number.isNaN(pn));
-`, "42 3.5 true x\n3.5 0 NaN 16 1 0\ntrue false false true false\ntrue\nNaN true")
+// Binary/octal string prefixes — JS ToNumber accepts them (ADR-00850).
+console.log(Number("0b101"), Number("0o17"), Number("0B11"), Number("0O10"));
+console.log(Number.isNaN(Number("0b")), Number.isNaN(Number("-0b1")), Number.isNaN(Number("0b101x")));
+`, "42 3.5 true x\n3.5 0 NaN 16 1 0\nNaN\ntrue false false true false\ntrue\nNaN true\n5 15 3 8\ntrue true true")
 }
 
 // Mixed int/float arithmetic promotes to double (ADR-00292) — the old
@@ -1557,7 +1578,8 @@ class C { m(): number { console.log("called"); return 7; } }
 const a: C | null = null;
 const r = a?.m();
 console.log("done", r);
-`, "done 0")
+console.log(r === undefined);
+`, "done undefined\ntrue")
 }
 
 func TestE2EOptionalChainCallNonNullInvokes(t *testing.T) {
@@ -1566,6 +1588,26 @@ class C { m(): number { return 7; } }
 const a: C | null = new C();
 console.log(a?.m());
 `, "7")
+}
+
+// An optional call `x?.m()` is `RetType | undefined`: a short-circuit yields a
+// real `undefined` (=== undefined true), not the return type's zero (ADR-00840).
+func TestE2EOptionalCallUndefinedResult(t *testing.T) {
+	assertOutput(t, `
+const m = new Map<string, string>()
+m.set("k", "hello")
+console.log(m.get("k")?.toUpperCase())
+console.log(m.get("z")?.toUpperCase())
+console.log(m.get("z")?.toUpperCase() === undefined)
+// A scalar (number) Map value is a { i1, T } nullable scalar — an optional
+// call on it must unwrap the payload, not run the method on the aggregate
+// (ADR-00851).
+const n = new Map<string, number>()
+n.set("a", 1)
+console.log(n.get("a")?.toFixed(1))
+console.log(n.get("z")?.toFixed(1))
+console.log(n.get("z")?.toFixed(1) === undefined)
+`, "HELLO\nundefined\ntrue\n1.0\nundefined\ntrue")
 }
 
 // ADR-00735: Math.random() must cover [0,1) on every host. On Windows the

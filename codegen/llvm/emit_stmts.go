@@ -626,6 +626,22 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			}
 			return e.emitForAwaitOfStream(s, objTy, streamVal, condL, bodyL, incL, endL)
 		}
+		// A server http `req` (TDD-00195 Stage 1) — get its cached Node Readable
+		// view and iterate that as a stream.
+		if objTy.IsRequest {
+			objVal, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			nr, err := e.reqAsNodeReadable(objVal, s.GetPos())
+			if err != nil {
+				return err
+			}
+			chunkTy := TypedArrayType("uint8")
+			rsTy := ReadableStreamType(chunkTy)
+			rsPtr := e.nodeStreamSide(nr.Ref, 0)
+			return e.emitForAwaitOfStream(s, rsTy, Value{Ref: rsPtr, Ty: rsTy}, condL, bodyL, incL, endL)
+		}
 		// A Node Readable (fs.createReadStream, Readable.from, …) — unwrap to its
 		// inner WHATWG rstream (field 0) and reuse the stream for-await path
 		// (TDD-00108). Its chunk type is StreamOut.

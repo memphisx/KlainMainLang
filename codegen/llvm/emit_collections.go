@@ -394,7 +394,17 @@ func (e *Emitter) emitMapCall(ty Type, mapPtr string, method string, args []ast.
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_num_get(ptr %s, i64 %s)", raw, mapPtr, kRef))
 		}
-		return e.mapValFromI64(raw, valTy), nil
+		v := e.mapValFromI64(raw, valTy)
+		// A pointer value type (string/object/class) reads its null-pointer miss
+		// as a real `V | undefined` — Node types `Map.get` `V | undefined`, and a
+		// miss is `undefined`, not `null` (ADR-00833). URLSearchParams.get is
+		// spec'd to return `null` (not undefined), and URLPattern's bespoke
+		// group-Map deliberately uses `null` — both are excluded.
+		if !ty.IsURLSearchParams && !ty.IsURLPattern && mapGetUndefinedablePtr(valTy) {
+			v.Ty.Nullable = true
+			v.Ty.IsUndefined = true
+		}
+		return v, nil
 
 	case "has":
 		if len(args) != 1 {
@@ -889,6 +899,15 @@ func isNullableScalarMapValue(valTy Type) bool {
 
 // emitMapGetNullable returns a scalar Map value as a `V | null` aggregate: the
 // presence bit comes from has(), the payload from the raw get(). See bug #3.
+// mapGetUndefinedablePtr reports whether a pointer-typed Map/WeakMap value
+// should read its miss as `V | undefined` (string/object/class). Arrays (the
+// {ptr,i64} aggregate, no spare absent state), the dynamic box, and an
+// already-nullable type are excluded.
+func mapGetUndefinedablePtr(valTy Type) bool {
+	return valTy.IR == "ptr" && !valTy.IsArray && !valTy.IsDynamic &&
+		!valTy.Nullable && !valTy.IsNull
+}
+
 func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, strKey bool, valTy Type) Value {
 	present := e.freshReg()
 	raw := e.freshReg()
@@ -901,6 +920,7 @@ func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, strKey bool, valTy Typ
 	}
 	nty := valTy
 	nty.Nullable = true
+	nty.IsUndefined = true // Map.get() misses yield `undefined`, not `null` (Node)
 	payload := e.mapValFromI64(raw, valTy)
 	agg := e.makeNullableScalarAgg(nty, present, payload.Ref)
 	return Value{Ref: agg, Ty: nty}

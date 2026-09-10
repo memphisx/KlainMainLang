@@ -34,6 +34,55 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return Value{}, err
 	}
 
+	// TDD-00201: an object operand coerces via the ToPrimitive ladder
+	// (@@toPrimitive/valueOf/toString) before the operator logic runs. Bitwise/
+	// shift ops already coerce operands to i64 (running the same ladder through
+	// coerce), so they are not listed here. Reference `===`/`!==` never coerces.
+	switch ex.Op {
+	case "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+		// Stage 1 — number hint: the result is used numerically, coerce to double.
+		if objectMayToPrimitive(left.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(left, "number"); perr == nil && ok {
+				left = e.coerce(r, TypeF64)
+			}
+		}
+		if objectMayToPrimitive(right.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(right, "number"); perr == nil && ok {
+				right = e.coerce(r, TypeF64)
+			}
+		}
+	case "+":
+		// Stage 3 — default hint: `+` overloads to string concat or numeric add.
+		// ToPrimitive with the "default" hint (valueOf→toString) yields the raw
+		// primitive (number OR string); the existing +overload logic below then
+		// decides concat vs add (`{valueOf(){return 5}}+3===8`,
+		// `{toString(){return "a"}}+"b"==="ab"`).
+		if objectMayToPrimitive(left.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(left, "default"); perr == nil && ok {
+				left = r
+			}
+		}
+		if objectMayToPrimitive(right.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(right, "default"); perr == nil && ok {
+				right = r
+			}
+		}
+	case "==", "!=":
+		// Stage 3 — loose equality: `obj == primitive` runs ToPrimitive on the
+		// object (default hint). Only when the OTHER side is a number/string/
+		// bigint — `obj == null`/`undefined` is false without coercion, and
+		// `obj == obj` is reference equality, both left untouched.
+		if objectMayToPrimitive(left.Ty) && isLooseEqPrimitive(right.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(left, "default"); perr == nil && ok {
+				left = r
+			}
+		} else if objectMayToPrimitive(right.Ty) && isLooseEqPrimitive(left.Ty) {
+			if r, ok, perr := e.emitObjectToPrimitive(right, "default"); perr == nil && ok {
+				right = r
+			}
+		}
+	}
+
 	// A nullable-scalar aggregate operand (a T|null return/field value) that
 	// reached here is not a `=== null` comparison (those returned above) — it
 	// is ordinary arithmetic/comparison, which operates on the bare payload
@@ -114,10 +163,16 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			return e.emitStringConcat(ls, rs)
 		}
 		switch ex.Op {
-		case "===", "==":
+		case "===":
 			return e.emitAnyEquals(left, right, false)
-		case "!==", "!=":
+		case "!==":
 			return e.emitAnyEquals(left, right, true)
+		case "==":
+			// Loose equality coerces (TDD-00201 Stage 4): the JS Abstract
+			// Equality Comparison, incl. ToPrimitive on an object operand.
+			return e.emitAnyLooseEquals(left, right, false)
+		case "!=":
+			return e.emitAnyLooseEquals(left, right, true)
 		default:
 			// `-compat=js` (TDD-00076 A2): real runtime operator dispatch on
 			// the NaN-boxed word. strict keeps the clean rejection.
@@ -270,6 +325,16 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		right = e.coerce(right, TypeI64)
 	}
 
+	// -compat=js loose `==`/`!=` between two static operands of different storage
+	// kinds (`"" == 0`, `null == 0`, `5 == "5"`) is JS Abstract Equality — box
+	// both and run the loose comparison, rather than the string/null/reject paths
+	// below which assume matching kinds. Placed after numeric promotion so an
+	// int/float pair (already unified to double) is not diverted; dynamic operands
+	// were handled earlier. (TDD-00201 Stage 4.)
+	if e.compatJS() && (ex.Op == "==" || ex.Op == "!=") && left.Ty.IR != right.Ty.IR {
+		return e.emitAnyLooseEquals(left, right, ex.Op == "!=")
+	}
+
 	// Unify types (promote right to left's type for now)
 	right = e.coerce(right, left.Ty)
 	ty := left.Ty
@@ -279,6 +344,45 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 	isNullCheck := left.Ty.IsNull || right.Ty.IsNull
 	if ty.IR == "ptr" && !ty.IsObject && !ty.IsArray && !ty.IsFunc && !isNullCheck {
 		return e.emitStringBinary(ex.Op, left, right, ex.GetPos())
+	}
+
+	// Equality between a heap object/array (ptr) and a bare scalar (non-ptr) that
+	// survived unification — e.g. `obj === 5` (`===` never coerces) or a loose
+	// `obj == 5` on an object with no numeric ToPrimitive method. The types are
+	// disjoint (an object is never strict-equal to a number), so emitting the
+	// icmp would compare a `ptr` against a scalar constant — invalid IR. Reject
+	// cleanly, consistent with the disjoint-scalar rejection below and TS's own
+	// no-overlap comparison error. Object-vs-object / object-vs-string stay ptr==
+	// ptr comparisons; null/undefined checks are exempt.
+	{
+		lObjArr := ty.IsObject || ty.IsArray
+		rObjArr := right.Ty.IsObject || right.Ty.IsArray
+		if !isNullCheck && !ty.IsDynamic && !right.Ty.IsDynamic && !leftIsDate && !rightIsDate && (lObjArr || rObjArr) {
+			switch ex.Op {
+			case "==", "!=", "===", "!==":
+				// Object vs a disjoint scalar: an object is never equal to a
+				// number/boolean, so the icmp would compare a `ptr` against a
+				// scalar constant (invalid IR). Both-objects / object-vs-string
+				// stay ptr==ptr comparisons; only one-object-vs-non-ptr rejects.
+				if lObjArr != rObjArr {
+					other := right.Ty
+					if rObjArr {
+						other = ty
+					}
+					if other.IR != "ptr" {
+						return Value{}, fmt.Errorf("%d:%d: operator '%s' between an object and a disjoint scalar type is not supported in strict mode — an object is never equal to a number/boolean, so this comparison is always %s (TypeScript reports the same no-overlap error); compile with -compat=js to evaluate it as untyped JS would", ex.GetPos().Line, ex.GetPos().Col, ex.Op, disjointEqConstResult(ex.Op))
+					}
+				}
+			case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
+				// An object/array operand reaching here has no own numeric
+				// ToPrimitive method (one with valueOf/toString was already
+				// coerced by the pre-pass above), so it has no primitive value in
+				// an arithmetic/relational context. TypeScript reports the same
+				// error; emitting the op would combine a `ptr` with a scalar
+				// (invalid IR). Reject cleanly, naming the -compat=js hatch.
+				return Value{}, fmt.Errorf("%d:%d: operator '%s' on an object without a primitive value (no valueOf/toString) is not supported in strict mode — TypeScript reports the same error; compile with -compat=js to coerce it as untyped JS would (valueOf/toString, else \"[object Object]\")", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
+			}
+		}
 	}
 
 	// After unification the operands still have incompatible storage types (e.g.
@@ -298,6 +402,12 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			switch ex.Op {
 			case "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=":
 				return e.emitAnyBinary(ex.Op, left, right, ex.GetPos())
+			case "==":
+				// Loose equality of a mixed concrete pair (`5 == "5"`) coerces
+				// per JS Abstract Equality (TDD-00201 Stage 4).
+				return e.emitAnyLooseEquals(left, right, false)
+			case "!=":
+				return e.emitAnyLooseEquals(left, right, true)
 			}
 		}
 		return Value{}, fmt.Errorf("%d:%d: operator '%s' between incompatible types is not supported — this compiler is a typed subset (a value of one type cannot be combined with an incompatible one the way untyped JS allows)", ex.GetPos().Line, ex.GetPos().Col, ex.Op)

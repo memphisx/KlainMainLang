@@ -10,7 +10,7 @@ import (
 func (e *Emitter) emitTemplateLiteral(tl *ast.TemplateLiteral) (Value, error) {
 	acc := Value{Ref: e.internString(tl.Quasis[0]), Ty: TypePtr}
 	for i, expr := range tl.Exprs {
-		val, err := e.emitExpr(expr)
+		val, err := e.emitPreserveNullableOperand(expr)
 		if err != nil {
 			return Value{}, err
 		}
@@ -54,6 +54,12 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			label = "undefined"
 		}
 		return Value{Ref: e.internString(label), Ty: TypePtr}, nil
+	}
+	// An Error stringifies as `name: message` (JS Error.prototype.toString), so
+	// `String(err)` / `` `${err}` `` render Node's "Error: boom" rather than an
+	// object dump.
+	if v.Ty.IsError {
+		return e.emitErrorToString(v)
 	}
 	// A tuple stringifies to its elements joined by commas (TDD-00066),
 	// matching real JS's `String([a, b])` / `${tuple}` — checked before the
@@ -100,6 +106,21 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		return v, nil
 	}
 	if isInspectableObject(v.Ty) {
+		// TDD-00201 Stage 2: an object literal declaring a string-hint ToPrimitive
+		// method (@@toPrimitive, else own toString) stringifies through that
+		// method rather than the debug dump below — `String(obj)`, `` `${obj}` ``,
+		// and concatenation all follow. A class instance carries its methods as
+		// MethodSigs, not struct fields, so this is a no-op for classes (ok ==
+		// false) and the class `toString()` path below still wins. A valueOf-only
+		// object falls through (inherited Object.prototype.toString wins the
+		// string hint), landing on the "[object Object]"/inspect default below.
+		if objectMayToPrimitive(v.Ty) {
+			if res, ok, err := e.emitObjectToPrimitive(v, "string"); err != nil {
+				return Value{}, err
+			} else if ok {
+				return e.emitValueToString(res)
+			}
+		}
 		// A user-defined class `toString()` is honored in both modes — the
 		// developer chose it (matching real JS's ToString).
 		canon := e.canonicalizeClassTy(v.Ty)
@@ -209,9 +230,14 @@ func (e *Emitter) inferArrayType(lit *ast.ArrayLiteral) Type {
 	}
 	first := lit.Elements[0]
 	if sp, ok := first.(*ast.SpreadElement); ok {
-		// Spread of an array — infer from the spread source.
-		if ty := e.inferExprType(sp.Arg); ty.IsArray {
+		// Spread of an array — infer from the spread source. Spreading a string
+		// (`[..."abc"]`) yields single-character strings.
+		ty := e.inferExprType(sp.Arg)
+		if ty.IsArray {
 			return ty
+		}
+		if isStringTy(ty) && !ty.IsClass && !ty.IsObject {
+			return ArrayOf(TypePtr) // char array: single-character strings
 		}
 		return ArrayOf(TypeF64)
 	}
@@ -358,20 +384,18 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 		if cb.Body != nil {
 			e.pushScope()
 			for i, p := range cb.Params {
-				e.define(p.Name, Symbol{Ty: hintFor(i, p.Type)})
+				e.definePatternParamForInference(p, hintFor(i, p.Type), i)
 			}
 			rt := e.inferExprType(cb.Body)
 			e.popScope()
 			return rt, true
 		}
 		if cb.Block != nil {
-			paramNames := make([]string, len(cb.Params))
 			paramTypes := make([]Type, len(cb.Params))
 			for i, p := range cb.Params {
-				paramNames[i] = p.Name
 				paramTypes[i] = hintFor(i, p.Type)
 			}
-			if inferred, ok := e.inferUnannotatedReturnType(cb.Block, paramNames, paramTypes); ok {
+			if inferred, ok := e.inferUnannotatedReturnTypeParams(cb.Block, cb.Params, paramTypes); ok {
 				return inferred, true
 			}
 		}
@@ -380,13 +404,11 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 		if cb.RetType != nil {
 			return e.resolveType(cb.RetType), true
 		}
-		paramNames := make([]string, len(cb.Params))
 		paramTypes := make([]Type, len(cb.Params))
 		for i, p := range cb.Params {
-			paramNames[i] = p.Name
 			paramTypes[i] = hintFor(i, p.Type)
 		}
-		if inferred, ok := e.inferUnannotatedReturnType(cb.Body, paramNames, paramTypes); ok {
+		if inferred, ok := e.inferUnannotatedReturnTypeParams(cb.Body, cb.Params, paramTypes); ok {
 			return inferred, true
 		}
 		return TypeVoid, true
@@ -633,6 +655,9 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			// A nullable-scalar left operand unwraps: `??`'s result is the
 			// bare payload (emitNullCoalesceScalar returns exactly that).
 			if isNullableScalar(lt) {
+				if isNullableScalar(rt) {
+					return rt
+				}
 				return lt.withoutNullable()
 			}
 			return lt
@@ -643,6 +668,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			return TypeF64
 		}
 	case *ast.MemberExpression:
+		// `o?.x` is `PropType | undefined` — mirror emitOptionalMember, which
+		// wraps a pointer (non-array) object's optional read as `T | undefined`
+		// (a scalar/pointer prop; undefinedableElem no-ops on array/tuple/dynamic).
+		if ex.Optional {
+			objTy := e.inferExprType(ex.Object)
+			plain := ast.NewMemberExpression(ex.Object, ex.Property, ex.GetPos())
+			inner := e.inferExprType(plain)
+			if (objTy.IR == "ptr" && !objTy.IsArray) || isNullableScalar(objTy) {
+				return undefinedableElem(inner)
+			}
+			return inner
+		}
 		// `F.prototype` on a recognized prototype constructor is a dynamic
 		// object (TDD-00155 Stage 4).
 		if id, ok := ex.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && ex.Property == "prototype" {
@@ -1064,6 +1101,18 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 		}
 		return e.inferExprType(desugarTaggedTemplate(ex))
 	case *ast.CallExpression:
+		// `a?.m(...)` is `RetType | undefined` — mirror emitOptionalCall, which
+		// wraps a pointer (non-array) receiver's optional call as `T | undefined`.
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Optional {
+			objTy := e.inferExprType(mem.Object)
+			plain := ast.NewCallExpression(&ast.MemberExpression{Object: mem.Object, Property: mem.Property}, ex.Args, ex.GetPos())
+			plain.TypeArgs = ex.TypeArgs
+			inner := e.inferExprType(plain)
+			if (objTy.IR == "ptr" && !objTy.IsArray) || isNullableScalar(objTy) {
+				return undefinedableElem(inner)
+			}
+			return inner
+		}
 		// klain:assets (TDD-00142 Stage 7): embedDir(...) → EmbeddedAssets,
 		// assets.get(...) → ArrayBuffer.
 		if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
@@ -1429,7 +1478,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "getWriter":
 					return WSWriterType(chunkTy)
 				case "read":
-					pt := PromiseOf(genNextResultType(chunkTy))
+					pt := PromiseOf(streamReadResultType(chunkTy))
 					pt.PromiseTask = true
 					return pt
 				case "cancel", "write", "close", "abort", "pipeTo":
@@ -1495,7 +1544,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			if objTy := e.inferExprType(mem.Object); objTy.IsFinalizationRegistry {
 				switch mem.Property {
 				case "register":
-					return TypeVoid
+					return TypeUndefined // register() evaluates to `undefined`
 				case "unregister":
 					return TypeBool
 				}
@@ -1737,6 +1786,10 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 					// Any float argument promotes the whole fold to a double
 					// (llvm.minimum/maximum) — must match emitMathMinMax. A
 					// spread argument contributes its array's element type.
+					// Zero args is the ±Infinity identity, a double.
+					if len(ex.Args) == 0 {
+						return TypeF64
+					}
 					for _, a := range ex.Args {
 						if sp, ok := a.(*ast.SpreadElement); ok {
 							at := e.inferExprType(sp.Arg)
@@ -2450,10 +2503,15 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				case "get":
 					if objTy.MapVal != nil {
 						v := *objTy.MapVal
-						// A scalar value type's get() is `V | null` (bug #3);
-						// a pointer value keeps its own type (null-pointer miss).
+						// A scalar value type's get() is `V | undefined` (a miss is
+						// `undefined`, as in Node — mirrors emitMapGetNullable); a
 						if isNullableScalarMapValue(v) {
 							v.Nullable = true
+							v.IsUndefined = true
+						}
+						if !objTy.IsURLSearchParams && !objTy.IsURLPattern && mapGetUndefinedablePtr(v) {
+							v.Nullable = true
+							v.IsUndefined = true
 						}
 						return v
 					}
@@ -2518,8 +2576,12 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 			switch mem.Property {
 			case "getTime", "valueOf", "getFullYear", "getMonth", "getDate", "getDay",
 				"getHours", "getMinutes", "getSeconds", "getMilliseconds",
+				"getUTCFullYear", "getUTCMonth", "getUTCDate", "getUTCDay",
+				"getUTCHours", "getUTCMinutes", "getUTCSeconds", "getUTCMilliseconds",
 				"setFullYear", "setMonth", "setDate", "setHours", "setMinutes",
-				"setSeconds", "setMilliseconds", "setTime":
+				"setSeconds", "setMilliseconds", "setTime",
+				"setUTCFullYear", "setUTCMonth", "setUTCDate", "setUTCHours",
+				"setUTCMinutes", "setUTCSeconds", "setUTCMilliseconds":
 				if e.inferExprType(mem.Object).IsDate {
 					return TypeI64
 				}
@@ -2620,7 +2682,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return regExpExecResultType()
 			case "matchAll":
 				return ArrayOf(ArrayOf(TypePtr))
-			case "substring", "trim", "toUpperCase", "toLowerCase", "replace":
+			case "substring", "substr", "trim", "toUpperCase", "toLowerCase", "replace":
 				if isStringTy(e.inferExprType(mem.Object)) {
 					return TypePtr
 				}
@@ -2639,7 +2701,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				return undefinedableElem(TypeI64)
 			case "includes", "startsWith", "endsWith", "some", "every":
 				return TypeBool
-			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt", "toPrecision", "toExponential":
+			case "join", "repeat", "padStart", "padEnd", "toFixed", "charAt", "toPrecision", "toExponential", "toLocaleString":
 				return TypePtr
 			case "at", "findLast":
 				// `T | undefined` — an out-of-range index / predicate miss
@@ -2651,7 +2713,7 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 				if objTy.IsArray && objTy.ElemType != nil {
 					return undefinedableElem(*objTy.ElemType)
 				}
-				return TypePtr // string.at returns a char string
+				return undefinedableElem(TypePtr) // string.at → `string | undefined`
 			case "sort", "concat", "reverse", "fill", "toReversed", "toSorted", "toSpliced", "with", "copyWithin", "values":
 				objTy := e.inferExprType(mem.Object)
 				if objTy.IsArray {

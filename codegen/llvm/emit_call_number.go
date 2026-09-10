@@ -135,7 +135,7 @@ func (e *Emitter) emitGlobalStringConv(args []ast.Expression, pos ast.Pos) (Valu
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: String() takes at most 1 argument", pos.Line, pos.Col)
 	}
-	v, err := e.emitExpr(args[0])
+	v, err := e.emitPreserveNullableOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
@@ -172,7 +172,11 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Number() takes at most 1 argument", pos.Line, pos.Col)
 	}
-	if _, isNull := args[0].(*ast.NullLiteral); isNull {
+	if nl, isNull := args[0].(*ast.NullLiteral); isNull {
+		// Number(null) is 0, but Number(undefined) is NaN (JS).
+		if nl.IsUndefined {
+			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
+		}
 		return Value{Ref: "0", Ty: TypeI64}, nil
 	}
 	v, err := e.emitExpr(args[0])

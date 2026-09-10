@@ -478,6 +478,13 @@ func (e *Emitter) emitTagCheck(tag string, want int, prefix string) (matchL, nex
 // result slot, one branch block per tag storing into it, and a merge block
 // that loads the result — generalized from 2 branches to 7 (one per tag).
 func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
+	// TDD-00201 Stage 4: a dynamic object stringifies via its own toString /
+	// @@toPrimitive (string hint) rather than the "[object Object]" default —
+	// `String({toString(){return "hi"}})` is "hi". Runtime ToPrimitive returns a
+	// primitive box (or "[object Object]" when the object has no such method); a
+	// non-object box passes through, so this is a no-op for scalars.
+	v = Value{Ref: e.emitAnyToPrimitive(v.Ref, true), Ty: TypeAny}
+
 	tag, payload := e.emitUnboxTagPayload(v)
 
 	resPtr := e.freshReg()

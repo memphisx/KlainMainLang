@@ -12,9 +12,9 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3478 files total: **49 passed**, 2402 failed, 1027 skipped (out of scope).
+3478 files total: **47 passed**, 2404 failed, 1027 skipped (out of scope).
 
-Of the 2451 files that compiled far enough to run, **49 passed (2.0%)**.
+Of the 2451 files that compiled far enough to run, **47 passed (1.9%)**.
 
 ## By module (top 40 by file count)
 
@@ -30,7 +30,7 @@ Of the 2451 files that compiled far enough to run, **49 passed (2.0%)**.
 | child | 1 | 61 | 42 | 104 |
 | crypto | 0 | 60 | 39 | 99 |
 | process | 6 | 60 | 17 | 83 |
-| cluster | 1 | 61 | 19 | 81 |
+| cluster | 0 | 62 | 19 | 81 |
 | vm | 0 | 69 | 10 | 79 |
 | repl | 0 | 37 | 39 | 76 |
 | dgram | 1 | 57 | 16 | 74 |
@@ -67,46 +67,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 206 | COMPILE_ERROR: slice is only supported on strings |
-| 205 | COMPILE_ERROR: a number has no method '%s' |
-| 126 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 124 | COMPILE_ERROR: undefined variable '%s' |
-| 97 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
-| 87 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
+| 212 | COMPILE_ERROR: a number has no method '%s' |
+| 209 | COMPILE_ERROR: slice is only supported on strings |
+| 127 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
+| 126 | COMPILE_ERROR: undefined variable '%s' |
+| 104 | COMPILE_ERROR: built-in module '%s' has no exported member '%s' |
+| 88 | COMPILE_ERROR: new Worker(...) requires a compile-time string-literal path — the worker file is co… |
 | 78 | MODULE_NOT_IMPLEMENTED: vm |
 | 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
 | 52 | COMPILE_ERROR: field access on non-object (no field '%s') |
+| 50 | COMPILE_ERROR: no field '%s' |
 | 47 | COMPILE_ERROR: unknown class '%s' |
-| 46 | COMPILE_ERROR: no field '%s' |
 | 43 | COMPILE_ERROR: this usage of the built-in '%s' module is not supported |
-| 39 | COMPILE_ERROR: undefined function or closure '%s' |
+| 40 | COMPILE_ERROR: undefined function or closure '%s' |
+| 36 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 35 | COMPILE_ERROR: capturing array variable '%s' in a closure is not yet supported |
 | 26 | COMPILE_ERROR: process has no method '%s' |
-| 25 | COMPILE_ERROR: expected ), got => |
 | 23 | COMPILE_ERROR: an http2 '%s' listener must be (stream, headers[, flags]) => void |
-| 22 | COMPILE_ERROR: a Request has no method '%s' |
-| 21 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s', listener) (got '%s') |
+| 21 | RUNTIME_NONZERO_EXIT:  |
 | 20 | COMPILE_ERROR: a net socket supports '%s', '%s', '%s', and '%s'/'%s' (got '%s') |
+| 20 | COMPILE_ERROR: an http.Server supports .on('%s'|'%s'|'%s'|'%s'|'%s'|'%s', listener) (got '%s') |
 | 20 | COMPILE_ERROR: field assignment on non-object |
 | 19 | MODULE_NOT_IMPLEMENTED: perf_hooks |
 | 19 | MODULE_NOT_IMPLEMENTED: v8 |
-| 19 | RUNTIME_NONZERO_EXIT:  |
 | 18 | COMPILE_ERROR: fs has no method '%s' |
+| 18 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
+| 18 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
+| 18 | COMPILE_ERROR: unexpected token + in expression |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
-| 17 | COMPILE_ERROR: object destructuring requires an object variable, function call, or object literal |
-| 17 | COMPILE_ERROR: unexpected token + in expression |
-| 16 | COMPILE_ERROR: a destructured parameter requires an explicit type annotation |
 | 16 | RUN_TIMEOUT |
 | 15 | COMPILE_ERROR: http.get options support { port, path, host, method, headers, agent } only (got '%s') |
-| 15 | COMPILE_ERROR: this http.Server already has a request handler (one listener per server, V1) |
 | 14 | COMPILE_ERROR: a dgram socket supports only .on('%s', listener) (got '%s') |
 | 14 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
 | 14 | MODULE_NOT_IMPLEMENTED: module |
 | 13 | COMPILE_ERROR: createServer option '%s' is not supported (only {} or {requireHostHeader: false}) |
 | 13 | COMPILE_ERROR: expected }, got : |
-| 12 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
-| 12 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
+| 13 | COMPILE_ERROR: http.createServer's listener must be (req: IncomingMessage, res: ServerResponse) => v… |
+| 13 | COMPILE_ERROR: new Worker options: only '%s' is supported (found '%s') |
+| 12 | COMPILE_ERROR: a ReadableStream's read callback must be an arrow function or function expression |
+| 12 | COMPILE_ERROR: on'%s's payload type |
+| 11 | COMPILE_ERROR: a ReadableStream's write callback must be an arrow function or function expression |
 
 ## Top skip reasons
 
@@ -140,7 +140,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 10 | unhandled require form: require(fixtures.path('tls-connect')); |
 | 9 | Node-internal harness file require('../common/dns') |
 
-## Passing files (49)
+## Passing files (47)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -150,7 +150,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-buffer-badhex.js` | buffer |  |
 | `test-buffer-nopendingdep-map.js` | buffer |  |
 | `test-child-process-set-blocking.js` | child |  |
-| `test-cluster-kill-infinite-loop.js` | cluster |  |
 | `test-dgram-abort-closed.js` | dgram |  |
 | `test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
 | `test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |
@@ -176,7 +175,6 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `test-process-exit-recursive.js` | process |  |
 | `test-process-exit.js` | process |  |
 | `test-process-uptime.js` | process |  |
-| `test-promises-unhandled-proxy-rejections.js` | promises |  |
 | `test-promises-unhandled-symbol-rejections.js` | promises |  |
 | `test-runner-subtest-after-hook.js` | runner |  |
 | `test-stdin-hang.js` | stdin |  |

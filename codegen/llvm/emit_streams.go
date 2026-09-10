@@ -47,22 +47,63 @@ func (e *Emitter) streamChunkFromWords(v0, v1 string, ty Type) Value {
 	return e.promiseValFromBits(v0, ty)
 }
 
+// streamReadResultType is `reader.read()`'s own record shape — `{value: T |
+// undefined, done: bool}`. Unlike a generator's `.next()` result (whose `value`
+// stays bare `T`, deliberately — tsc types it `any`, ADR-00781), a closed
+// stream's read() yields a real `undefined` value, so the `value` field is
+// flipped to `T | undefined` via the shared sentinel (TDD-00196): a scalar
+// chunk rides the `{ i1, T }` optional, a pointer chunk the null pointer. An
+// array/tuple/dynamic chunk passes through unchanged — undefinedableElem leaves
+// those bare (ADR-00246: an array slot has no spare absent state), so an
+// array-chunk stream keeps its documented zero-on-close behaviour.
+func streamReadResultType(chunkTy Type) Type {
+	return ObjectType([]Field{
+		{Name: "value", Ty: undefinedableElem(chunkTy)},
+		{Name: "done", Ty: TypeBool},
+	})
+}
+
 // buildStreamReadRecord mallocs a {value, done} record — buildGenNextResult's
-// sibling, but storing the value through StructFieldIR so an array-shaped
-// chunk gets its full {ptr,i64} slot.
-func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, doneI1 string) string {
+// sibling. The `value` field is stored in its (possibly `T | undefined`)
+// field type: a scalar chunk becomes a `{ i1, T }` aggregate whose presence bit
+// is `present` (= not done), a pointer/array chunk stores its register directly
+// (a done read's rebuilt chunk is already the null/zero that reads as absent).
+func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, doneI1, presentI1 string) string {
 	e.ensureMalloc()
 	rec := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", rec, resultTy.StructSize()))
-	vIdx, _, _ := resultTy.FieldIndex("value")
+	vIdx, valTy, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rec, vIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(chunkTy), chunk.Ref, vGep))
+	if isNullableScalar(valTy) {
+		agg := e.makeNullableScalarAgg(valTy, presentI1, chunk.Ref)
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", nullableScalarStorageIR(valTy), agg, vGep))
+	} else {
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(valTy), chunk.Ref, vGep))
+	}
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), rec, dIdx))
 	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", doneI1, dGep))
 	return rec
+}
+
+// loadStreamResultValue loads a read-result record's `value` field back to a
+// bare chunk Value — the read-side inverse of buildStreamReadRecord's store.
+// A `T | undefined` scalar field is demoted to its payload (a present value on
+// the done:false path this is only called on); a pointer/array field loads as
+// the bare chunk type directly. Shared by the for-await loop and the pipe/tee
+// decode thunk.
+func (e *Emitter) loadStreamResultValue(recPtr string, resultTy, chunkTy Type) Value {
+	vIdx, valTy, _ := resultTy.FieldIndex("value")
+	vGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), recPtr, vIdx))
+	loaded := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(valTy), vGep, chunkTy.Align()))
+	if isNullableScalar(valTy) {
+		return e.nullableScalarPayloadOf(Value{Ref: loaded, Ty: valTy})
+	}
+	return Value{Ref: loaded, Ty: chunkTy}
 }
 
 // emitStreamFulfillThunk emits the per-site `void @__kml_rs_fulfill_N(ptr %p,
@@ -72,13 +113,15 @@ func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, don
 func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
 	e.streamSiteCtr++
 	fn := fmt.Sprintf("@__kml_rs_fulfill_%d", e.streamSiteCtr)
-	resultTy := genNextResultType(chunkTy)
+	resultTy := streamReadResultType(chunkTy)
 
 	restore := e.beginThunkEmit()
 	chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
 	doneI1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %%done, 0", doneI1))
-	rec := e.buildStreamReadRecord(resultTy, chunkTy, chunk, doneI1)
+	presentI1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %%done, 0", presentI1))
+	rec := e.buildStreamReadRecord(resultTy, chunkTy, chunk, doneI1, presentI1)
 	e.storePromiseValue("%p", Value{Ref: rec, Ty: resultTy})
 	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
 	e.emitInstr("ret void")
@@ -493,9 +536,22 @@ func (e *Emitter) emitStreamProperty(ex *ast.MemberExpression, objTy Type) (Valu
 		if !ty.IsRSController {
 			break
 		}
+		// Spec: desiredSize is `number | null` — `null` once errored, `0` once
+		// closed, `hwm − queued` while readable. The runtime double already
+		// yields 0 for both closed and errored; the errored case (state 2) is
+		// flipped to `null` here via the { i1, double } optional (TDD-00196).
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call double @__kml_rs_desired(ptr %s)", d, ptr))
-		return Value{Ref: d, Ty: TypeF64}, nil
+		stGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stGep, rstreamStructIR, ptr))
+		st := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stGep))
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 2", present, st))
+		nty := TypeF64
+		nty.Nullable = true
+		agg := e.makeNullableScalarAgg(nty, present, d)
+		return Value{Ref: agg, Ty: nty}, nil
 	case "closed":
 		if !ty.IsStreamReader {
 			break
@@ -613,7 +669,7 @@ func (e *Emitter) emitStreamMethodCall(objExpr ast.Expression, method string, ar
 		case "read":
 			prom := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_read(ptr %s)", prom, ptr))
-			pt := PromiseOf(genNextResultType(chunkTy))
+			pt := PromiseOf(streamReadResultType(chunkTy))
 			pt.PromiseTask = true
 			return Value{Ref: prom, Ty: pt}, nil
 		case "releaseLock":
@@ -729,7 +785,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 	if ty.StreamChunk != nil {
 		chunkTy = *ty.StreamChunk
 	}
-	resultTy := genNextResultType(chunkTy)
+	resultTy := streamReadResultType(chunkTy)
 
 	if ty.IsReadableStream {
 		// Lock like getReader() does; an already-locked stream throws.
@@ -775,11 +831,9 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 	e.emitLabel(bodyL)
 	recB := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", recB, resultAlloca))
-	vIdx, _, _ := resultTy.FieldIndex("value")
-	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), recB, vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(chunkTy), vGep, chunkTy.Align()))
+	// done:false here, so the value field is always present — demote the
+	// `T | undefined` field back to its bare chunk value.
+	loaded := e.loadStreamResultValue(recB, resultTy, chunkTy).Ref
 	switch {
 	case s.ObjectPattern != nil:
 		if err := e.unpackObjectPatternInto(loaded, chunkTy, s.ObjectPattern, s.GetPos()); err != nil {

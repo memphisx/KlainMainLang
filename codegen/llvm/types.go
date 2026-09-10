@@ -1994,9 +1994,10 @@ func (t Type) VisibleFields() []Field {
 		fields = fields[:2]
 	case t.IsRequest && len(fields) > 5:
 		// HttpRequest's first five fields (method/path/query/headers/body) are
-		// the user-facing surface; the trailing bodyLength + __kml_bodyctx are
-		// implementation-only (backing .bodyBytes()/.stream()) and must not leak
-		// through Object.keys/JSON.stringify/spread (TDD-00118 follow-up).
+		// the user-facing surface; the trailing bodyLength + __kml_bodyctx +
+		// __kml_noderd are implementation-only (backing .bodyBytes()/.stream()/
+		// the Node Readable view) and must not leak through Object.keys/
+		// JSON.stringify/spread (TDD-00118 follow-up).
 		fields = fields[:5]
 	}
 	hasPrivate := false
@@ -2045,6 +2046,11 @@ func ServerResponseType() Type {
 		{Name: "status", Ty: TypeI64},
 		{Name: "body", Ty: TypePtr},
 		{Name: "headers", Ty: MapType(TypePtr, TypePtr)},
+		// TDD-00195 Stage 2: set by res.end() so the connection fiber knows the
+		// response is complete. A void `(req,res)` handler that ends the response
+		// asynchronously (e.g. from req.on('end')) parks until this flips, rather
+		// than flushing an empty response when the handler returns.
+		{Name: "ended", Ty: TypeI64},
 	})
 	ty.IsServerResponse = true
 	return ty
@@ -2172,6 +2178,11 @@ func RequestType() Type {
 		// program uses req.stream() (which switches the dispatcher to
 		// headers-complete dispatch); .body/.bodyBytes() drain through it.
 		{Name: "__kml_bodyctx", Ty: TypePtr},
+		// The cached Node Readable view of the request body (TDD-00195 Stage 1) —
+		// null until the first `req.on('data')`/`for await`/`req.pipe`, then
+		// reused so all Node-Readable forms share one underlying stream (a second
+		// req.stream() would throw "disturbed").
+		{Name: "__kml_noderd", Ty: TypePtr},
 	})
 	ty.IsRequest = true
 	return ty

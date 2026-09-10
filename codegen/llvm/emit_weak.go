@@ -227,6 +227,7 @@ func (e *Emitter) emitWeakCall(ty Type, ptr, method string, args []ast.Expressio
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get(ptr %s, ptr %s)", raw, ptr, kRef))
 			nty := valTy
 			nty.Nullable = true
+			nty.IsUndefined = true // a miss is undefined, not null (ADR-00833)
 			payload := e.mapValFromI64(raw, valTy)
 			agg := e.makeNullableScalarAgg(nty, present, payload.Ref)
 			return Value{Ref: agg, Ty: nty}, nil

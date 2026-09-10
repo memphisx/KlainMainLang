@@ -464,6 +464,18 @@ console.log(Math.fround(0.1).toFixed(18))
 `, "5.5\n0.100000001490116119")
 }
 
+func TestE2EMathMinMaxArity(t *testing.T) {
+	// Node accepts any arity: 0 args → the ±Infinity identity, 1 arg → the value
+	// (ADR-00831). Previously 0/1-arg forms were compile errors.
+	assertOutput(t, `
+console.log(Math.max())
+console.log(Math.min())
+console.log(Math.max(5))
+console.log(Math.min(42))
+console.log(Math.max(3, 7, 2))
+`, "-Infinity\nInfinity\n5\n42\n7")
+}
+
 func TestE2ENumberToPrecision(t *testing.T) {
 	assertOutput(t, `
 console.log((1).toPrecision(4))
@@ -475,12 +487,39 @@ console.log((5).toPrecision(1))
 // TestE2ENumberToPrecisionNoArg confirms toPrecision() with no argument is
 // exactly String(x) — the number's default toString — matching real JS
 // (ADR-00534).
+// TestE2ENumberToLocaleString: the no-arg en-US default — thousands grouping +
+// max 3 fraction digits (rounded), matching Node (ADR-00847).
+func TestE2ENumberToLocaleString(t *testing.T) {
+	assertOutput(t, `
+console.log((1000000).toLocaleString())
+console.log((1234.5).toLocaleString())
+console.log((1234.5678).toLocaleString())
+console.log((-9876543.21).toLocaleString())
+console.log((999).toLocaleString())
+console.log((0).toLocaleString())
+`, "1,000,000\n1,234.5\n1,234.568\n-9,876,543.21\n999\n0")
+}
+
 func TestE2ENumberToPrecisionNoArg(t *testing.T) {
 	assertOutput(t, `
 console.log((123.456).toPrecision())
 console.log((1000).toPrecision())
 console.log((0).toPrecision())
 `, "123.456\n1000\n0")
+}
+
+// TestE2ENumberToExponentialNoArg: the no-argument form uses the shortest
+// round-trip mantissa, as in Node (ADR-00832) — previously a compile error.
+func TestE2ENumberToExponentialNoArg(t *testing.T) {
+	assertOutput(t, `
+console.log((12345).toExponential())
+console.log((0.1).toExponential())
+console.log((100).toExponential())
+console.log((0).toExponential())
+console.log((-12345).toExponential())
+console.log((3.14159).toExponential())
+console.log((5).toExponential(2))
+`, "1.2345e+4\n1e-1\n1e+2\n0e+0\n-1.2345e+4\n3.14159e+0\n5.00e+0")
 }
 
 func TestE2ENumberToExponential(t *testing.T) {

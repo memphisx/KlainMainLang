@@ -215,6 +215,60 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	return Value{Ty: TypeVoid}, nil
 }
 
+// emitParkUntilResEnded parks the connection fiber after a void `(req,res)`
+// handler returns until res.end() has flipped res.ended (TDD-00195 Stage 2). A
+// handler that ends the response synchronously (or an async handler awaited to
+// completion) has res.ended already set, so this is a no-op; a fire-and-forget
+// handler that defers res.end to an async callback (e.g. req.on('end')) parks
+// here — the reqbody pump feeds the body and fires the callbacks while parked,
+// res.end() sets the flag and pokes, and the loop's conn scan resumes the fiber
+// to run the send tail (rather than flushing an empty response on return). Only
+// on a connection fiber (idx >= 0); a no-op otherwise.
+func (e *Emitter) emitParkUntilResEnded(res string) {
+	srt := ServerResponseType()
+	endedIdx, _, _ := srt.FieldIndex("ended")
+	srtIR := srt.StructIR()
+	slotIR := "{ i64, ptr, ptr, ptr, ptr }"
+
+	checkL := e.freshLabel("res.park.check")
+	yieldL := e.freshLabel("res.park.yield")
+	doneL := e.freshLabel("res.park.done")
+
+	idx0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", idx0))
+	onFiber := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", onFiber, idx0))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", onFiber, checkL, doneL))
+
+	e.emitLabel(checkL)
+	endedGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", endedGep, srtIR, res, endedIdx))
+	endedVal := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", endedVal, endedGep))
+	isDone := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isDone, endedVal))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDone, doneL, yieldL))
+
+	e.emitLabel(yieldL)
+	// Recompute the self slot each iteration — the connection array may be
+	// realloc-moved while this fiber is parked.
+	connData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
+	selfIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", selfIdx))
+	selfSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", selfSlot, slotIR, connData, selfIdx))
+	ctxSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", ctxSlot, slotIR, selfSlot))
+	ctx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ctx, ctxSlot))
+	sw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr @__kml_main_ctx)", sw, ctx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", checkL))
+
+	e.emitLabel(doneL)
+}
+
 // emitNewServerResponse allocates a fresh ServerResponseType `res` for Node's
 // http.createServer path (TDD-00131), initialized to status 200, an empty body,
 // and an empty headers map. res.writeHead/setHeader/write/end then mutate these.
@@ -234,6 +288,7 @@ func (e *Emitter) emitNewServerResponse() string {
 	emptyMap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", emptyMap))
 	store("headers", "ptr", emptyMap)
+	store("ended", "i64", "0") // TDD-00195: set by res.end()
 	return res
 }
 
@@ -830,8 +885,51 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_upgrade_handler%s, align 8", cb.hdrPtr, upSfx))
 			return Value{Ty: TypeVoid}, nil
 		}
+		if evt == "close" {
+			// The server 'close' event (TDD-00197): fired once the server stops
+			// listening AND every in-flight connection has drained. Stored in the
+			// primary reactor global the loop's __kml_http_fire_close() reads.
+			if len(args) != 2 {
+				return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
+			}
+			if sfx, _ := e.httpServerSfxForExpr(objExpr); sfx != "" {
+				return Value{}, fmt.Errorf("%d:%d: the 'close' event is supported on the primary HTTP server only (an additional server has no drain-tracking yet — TDD-00197)", pos.Line, pos.Col)
+			}
+			cb, err := e.resolveCallback(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			if cb.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: a 'close' listener must be a function literal", pos.Line, pos.Col)
+			}
+			e.ensureHTTPRuntime()
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_close_evt, align 8", cb.hdrPtr))
+			return Value{Ty: TypeVoid}, nil
+		}
+		if evt == "connection" {
+			// The server 'connection' event (TDD-00198): fired once per accepted
+			// connection at fiber entry, handed a net.Socket over the fd (before any
+			// HTTP parsing). Stored in this server's own suffixed global.
+			if len(args) != 2 {
+				return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
+			}
+			cnSfx, _ := e.httpServerSfxForExpr(objExpr)
+			cb, err := e.resolveCallbackWithHints(args[1], []Type{NetSocketType()})
+			if err != nil {
+				return Value{}, err
+			}
+			if cb.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: a 'connection' listener must be a function literal", pos.Line, pos.Col)
+			}
+			e.ensureHTTPRuntime()
+			if cnSfx != "" {
+				e.ensureExtraWSUpGlobals(cnSfx)
+			}
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_listen_connection_handler%s, align 8", cb.hdrPtr, cnSfx))
+			return Value{Ty: TypeVoid}, nil
+		}
 		if evt != "request" && evt != "stream" {
-			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening'|'upgrade', listener) (got '%s')", pos.Line, pos.Col, evt)
+			return Value{}, fmt.Errorf("%d:%d: an http.Server supports .on('request'|'stream'|'listening'|'upgrade'|'close'|'connection', listener) (got '%s')", pos.Line, pos.Col, evt)
 		}
 		if len(args) != 2 {
 			return Value{}, fmt.Errorf("%d:%d: server.on takes (event, listener)", pos.Line, pos.Col)
@@ -855,6 +953,24 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		}
 		e.ensureHTTPRuntime()
 		e.ensureHTTPClose()
+		// Resolve an optional close(cb) closure before the primary/extra branch so
+		// its header register dominates both. On the primary this cb is deferred
+		// (stored into @__kml_http_close_cb, fired by the reactor at drain — Node's
+		// "cb fires once the server is fully closed", not synchronously); on an
+		// additional server it stays synchronous (TDD-00197: the drain-tracking
+		// 'close' event is primary-only for now — an extra server has no reactor
+		// global for its own active-connection count).
+		var closeCb *Callback
+		if len(args) == 1 {
+			rc, err := e.resolveCallback(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			if rc.kind != cbClosure {
+				return Value{}, fmt.Errorf("%d:%d: a server.close callback must be a function literal", pos.Line, pos.Col)
+			}
+			closeCb = &rc
+		}
 		// TDD-00191 Stage 1: the primary server clears @__kml_listen_fd; an
 		// additional one clears its extra-listener-table entry by fd. Branch on
 		// the handle's primary flag (slot 3).
@@ -870,6 +986,12 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", clIsPrim, clPrimL, clExtraL))
 		e.emitLabel(clPrimL)
 		e.emitInstr("call void @__kml_http_close()")
+		// Defer the callback: stash it and flag a pending close; the reactor fires
+		// it (and any .on('close') handler) once the server has fully drained.
+		if closeCb != nil {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_http_close_cb, align 8", closeCb.hdrPtr))
+		}
+		e.emitInstr("store i64 1, ptr @__kml_http_close_pending, align 8")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", clContL))
 		e.emitLabel(clExtraL)
 		clFd := e.freshReg()
@@ -877,17 +999,15 @@ func (e *Emitter) emitHTTPServerMethod(objExpr ast.Expression, method string, ar
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", clFd, objVal.Ref))
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", clFd32, clFd))
 		e.emitInstr(fmt.Sprintf("call void @__kml_http_close_extra_listener(i32 %s)", clFd32))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", clContL))
-		e.emitLabel(clContL)
-		if len(args) == 1 {
-			cb, err := e.resolveCallback(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			if _, err := e.emitCBCall(cb, nil); err != nil {
+		// An additional server's close(cb) stays synchronous (no per-server drain
+		// tracking yet — TDD-00197 primary-only).
+		if closeCb != nil {
+			if _, err := e.emitCBCall(*closeCb, nil); err != nil {
 				return Value{}, err
 			}
 		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", clContL))
+		e.emitLabel(clContL)
 		return Value{Ty: TypeVoid}, nil
 	case "closeAllConnections":
 		if len(args) != 0 {
@@ -1023,6 +1143,7 @@ func (e *Emitter) ensureExtraWSUpGlobals(sfx string) {
 	e.extraWSUpGlobalsEmitted[sfx] = true
 	e.emitGlobal(fmt.Sprintf("@__kml_listen_ws_handler%s = internal thread_local global ptr null, align 8", sfx))
 	e.emitGlobal(fmt.Sprintf("@__kml_listen_upgrade_handler%s = internal thread_local global ptr null, align 8", sfx))
+	e.emitGlobal(fmt.Sprintf("@__kml_listen_connection_handler%s = internal thread_local global ptr null, align 8", sfx))
 }
 
 // httpServerSfxForExpr resolves a server-handle expression to its dispatcher
@@ -1250,6 +1371,14 @@ func (e *Emitter) emitServerResponseMethod(resExpr ast.Expression, method string
 		if method == "write" {
 			return Value{Ref: "true", Ty: TypeBool}, nil
 		}
+		// res.end() marks the response complete and pokes parked fibers, so a
+		// void handler that ended the response asynchronously (its connection
+		// fiber parked after returning — TDD-00195) is resumed to run the send
+		// tail. A synchronous res.end() before the handler returns just sets the
+		// flag; the fiber never parks.
+		e.ensureConnPokeGlobal()
+		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", fieldGEP("ended")))
+		e.emitInstr("store i8 1, ptr @__kml_conn_poke, align 1")
 		return Value{Ty: TypeVoid}, nil
 	case "cork", "uncork":
 		// Writable hints to batch writes. For a buffered sink they are valid
@@ -1348,6 +1477,56 @@ func (e *Emitter) emitRequestStream(objVal Value, pos ast.Pos) (Value, error) {
 	actual := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_reqbody_stream(ptr %s, ptr %s)", actual, ctxVal.Ref, s))
 	return Value{Ref: actual, Ty: ReadableStreamType(chunkTy)}, nil
+}
+
+// reqAsNodeReadable returns the request body as a Node Readable (TDD-00195
+// Stage 1), created once from req.stream() + wrapWebReadable and cached in the
+// request's __kml_noderd field — so `req.on('data')`, `for await (chunk of req)`
+// and `req.pipe(dest)` all share one underlying WHATWG stream (a second
+// req.stream() would throw "disturbed"). Chunks are Uint8Array.
+func (e *Emitter) reqAsNodeReadable(objVal Value, pos ast.Pos) (Value, error) {
+	e.ensureNodeStreamRuntime() // wrapWebReadable emits __kml_ns_alloc
+	nrTy := NodeReadableType(TypedArrayType("uint8"))
+	rdIdx, _, ok := objVal.Ty.FieldIndex("__kml_noderd")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a HttpRequest", pos.Line, pos.Col)
+	}
+	structIR := objVal.Ty.StructIR()
+	fieldGEP := func() string {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, objVal.Ref, rdIdx))
+		return g
+	}
+	cached := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cached, fieldGEP()))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cached))
+	makeL := e.freshLabel("req.rd.make")
+	haveL := e.freshLabel("req.rd.have")
+	doneL := e.freshLabel("req.rd.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, makeL, haveL))
+
+	e.emitLabel(makeL)
+	ws, err := e.emitRequestStream(objVal, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	nr, err := e.wrapWebReadable(ws)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nr.Ref, fieldGEP()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(haveL)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	// Reload the (now-populated) field on the merge — avoids a cross-block phi
+	// over wrapWebReadable's own instruction sequence.
+	e.emitLabel(doneL)
+	final := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, fieldGEP()))
+	return Value{Ref: final, Ty: nrTy}, nil
 }
 
 func (e *Emitter) emitRequestBodyBytes(objVal Value, pos ast.Pos) (Value, error) {
@@ -1527,6 +1706,7 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 	storeReqField("body", in.body)
 	storeReqField("bodyLength", in.bodyLength)
 	storeReqField("__kml_bodyctx", in.bodyctx)
+	storeReqField("__kml_noderd", "null") // TDD-00195: lazily cached Node Readable
 	reqVal := e.coerce(Value{Ref: reqReg, Ty: reqTy}, paramTy)
 
 	handlerPtr := e.freshReg()
@@ -1575,6 +1755,7 @@ func (e *Emitter) emitHTTPCallHandler(paramTy, retTy Type, isAsyncHandler bool, 
 		res := e.emitNewServerResponse()
 		e.emitInstr(fmt.Sprintf("call void (ptr, %s, ptr) %s(ptr %s, %s %s, ptr %s)",
 			paramTy.IR, fp, ep, paramTy.IR, reqVal.Ref, res))
+		e.emitParkUntilResEnded(res)
 		return res
 	}
 
@@ -1675,7 +1856,10 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	noQueryL := e.freshLabel("http.noquery")
 	mergeQueryL := e.freshLabel("http.mergequery")
 	noReqL := e.freshLabel("http.noreq")
-	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+	// TDD-00198: the server 'connection' event fires once per connection, at
+	// fiber entry, before any HTTP parsing — then control falls into the read
+	// loop. A null handler short-circuits straight to readLoopL.
+	e.emitHTTPConnectionEvent(sfx, readLoopL)
 
 	// readLoopL: is there enough spare capacity to read into? Grow first if
 	// not, then issue the read() at the current end-of-buffer offset.
@@ -2276,14 +2460,29 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 		e.emitTerminator("ret void")
 
 		// Buffered branch — unbox the string and write it whole via strlen.
+		// Keep-alive on this branch mirrors the single-shape buffered path below:
+		// `streamKA` already carries the per-response decision (it is forced off
+		// for HTTPS/1.1, so that path stays close-only), so the string branch
+		// re-arms the connection exactly as the chunked branch does at stream end.
 		e.emitLabel(bufferL)
 		strPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", strPtr, payloadReg))
 		e.ensureStrlen()
 		uStrLen := e.emitStrLenHeader(strPtr) // TDD-00120: binary-safe
-		// The union-body tail always closes (keepalive=0): its runtime string/stream
-		// branch keeps this path simpler than the single-shape buffered path below.
-		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s, i1 0)", fd32, statusVal.Ref, strPtr, uStrLen, extraHeadersRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_http_send_response(i32 %s, i64 %s, ptr %s, i64 %s, ptr %s, i1 %s)", fd32, statusVal.Ref, strPtr, uStrLen, extraHeadersRef, streamKA))
+		uKaContL := e.freshLabel("http.union.keepalive")
+		uKaDoneL := e.freshLabel("http.union.reqdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", streamKA, uKaContL, uKaDoneL))
+
+		e.emitLabel(uKaContL)
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalReadA))
+		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", headersParsedA))
+		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", headerEndA))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", contentLenA))
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", headersMapA))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
+
+		e.emitLabel(uKaDoneL)
 		e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", fdPtr))
 		emitConnActiveDecrement()
 		e.emitTerminator("ret void")

@@ -26,6 +26,27 @@ console.log(new Empty())
 `, "{ a: 5, b: 'hi', c: true }\nEmpty {}")
 }
 
+// An absent object value (`C | undefined` — an object-array find() miss, an
+// object-valued Map.get() miss, an omitted optional object field) must print
+// `undefined`, not dereference a null pointer (previously a segfault); and an
+// optional object field is a real `C | undefined` (=== undefined, not null),
+// as in Node (ADR-00835).
+func TestE2EInspectAbsentObjectValue(t *testing.T) {
+	assertOutput(t, `
+class C { n: number; constructor(n: number){ this.n = n } }
+console.log([new C(5)].find(c => c.n > 9))
+const m = new Map<string, C>()
+m.set("a", new C(1))
+console.log(m.get("z"))
+interface Q { inner?: C }
+const q: Q = {}
+console.log(q.inner)
+console.log(q.inner === undefined)
+console.log(q.inner === null)
+console.log(m.get("a"))
+`, "undefined\nundefined\nundefined\ntrue\nfalse\nC { n: 1 }")
+}
+
 func TestE2EInspectNestedAndBigInt(t *testing.T) {
 	assertOutput(t, `
 const nested = { outer: 1, inner: { x: 2, y: "deep" } }

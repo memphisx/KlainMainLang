@@ -79,6 +79,29 @@ func (e *Emitter) loadNullableScalarPayload(ptr string, ty Type) string {
 	return reg
 }
 
+// loadNullableScalarAgg loads the whole { i1, T } aggregate from the slot,
+// preserving presence — for a consumer (String()/template interpolation) that
+// stringifies null-aware instead of unwrapping to the payload zero.
+func (e *Emitter) loadNullableScalarAgg(ptr string, ty Type) Value {
+	reg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, nullableScalarStorageIR(ty), ptr, storageAlign(ty)))
+	return Value{Ref: reg, Ty: ty}
+}
+
+// emitPreserveNullableOperand evaluates expr while preserving a nullable-scalar
+// local's `{ i1, T }` aggregate (its presence bit), rather than the unwrapped
+// payload zero a plain read surfaces. Used where an absent value must stay
+// absent: stringification (`String(x)`/`${x}` render "undefined"/"null") and
+// `??` (a nullable right operand keeps its own nullish-ness). A narrowed local
+// is proven present, so it takes the ordinary (unwrapped) path; a non-lvalue
+// nullable expression (e.g. `m.get(k)`) already yields its aggregate.
+func (e *Emitter) emitPreserveNullableOperand(expr ast.Expression) (Value, error) {
+	if sym, ok := e.nullableScalarLValue(expr); ok && !sym.NarrowedNonNull {
+		return e.loadNullableScalarAgg(sym.Ptr, sym.Ty), nil
+	}
+	return e.emitExpr(expr)
+}
+
 // loadNullableScalarPresent loads the i1 presence bit from the { i1, T } slot.
 func (e *Emitter) loadNullableScalarPresent(ptr string, ty Type) string {
 	f0 := e.nullableScalarFieldPtr(ptr, ty, 0)
@@ -353,6 +376,13 @@ func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef strin
 // is payload. The right side is evaluated only when left is absent.
 func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, rightExpr ast.Expression) (Value, error) {
 	base := payload.Ty // already the bare (non-nullable) payload type
+	// If the right operand is itself a nullable scalar (`a ?? b` where b is
+	// `T | undefined`, e.g. a chained `m.get(x) ?? m.get(y) ?? d`), the result
+	// stays `T | undefined` — `undefined ?? undefined` is `undefined`, not the
+	// payload zero. Produce a presence-preserving `{ i1, T }` result.
+	if rt := e.inferExprType(rightExpr); isNullableScalar(rt) {
+		return e.emitNullCoalesceScalarNullableRight(presentRef, payload, rightExpr, rt)
+	}
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, base.IR, base.Align()))
 
@@ -381,6 +411,47 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 	return Value{Ref: result, Ty: base}, nil
 }
 
+// emitNullCoalesceScalarNullableRight handles `a ?? b` where the right operand
+// is itself a nullable scalar: the result is `T | undefined` (present when the
+// left is present, else the right's own aggregate — which may be absent). The
+// result rides the `{ i1, T }` optional so a chained `?? d` sees the real
+// nullish-ness rather than a payload zero.
+func (e *Emitter) emitNullCoalesceScalarNullableRight(presentRef string, payload Value, rightExpr ast.Expression, resTy Type) (Value, error) {
+	agg := nullableScalarStorageIR(resTy)
+	resPtr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, agg, storageAlign(resTy)))
+
+	presentL := e.freshLabel("nullc.present")
+	absentL := e.freshLabel("nullc.absent")
+	mergeL := e.freshLabel("nullc.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", presentRef, presentL, absentL))
+
+	e.emitLabel(absentL)
+	right, err := e.emitPreserveNullableOperand(rightExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	var rightAgg string
+	if isNullableScalar(right.Ty) {
+		rightAgg = right.Ref // already a { i1, T } aggregate (may be absent)
+	} else {
+		rv := e.coerce(right, resTy.withoutNullable())
+		rightAgg = e.makeNullableScalarAgg(resTy, "true", rv.Ref)
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, rightAgg, resPtr, storageAlign(resTy)))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(presentL)
+	leftAgg := e.makeNullableScalarAgg(resTy, "true", payload.Ref) // left present
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, leftAgg, resPtr, storageAlign(resTy)))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, agg, resPtr, storageAlign(resTy)))
+	return Value{Ref: result, Ty: resTy}, nil
+}
+
 // emitNullableScalarNullCompare handles `x == null` / `!= null` / `=== null` /
 // `!== null` where one operand is a nullable-scalar local and the other is a
 // null/undefined literal, by comparing the stored presence bit — so a
@@ -388,13 +459,42 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 // expression is not this exact shape, leaving the generic path untouched.
 func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value, bool, error) {
 	var scalarExpr ast.Expression
+	litUndef := false // was the literal spelled `undefined` (vs `null`)?
 	switch {
 	case isNullLiteralExpr(ex.Right):
 		scalarExpr = ex.Left
+		litUndef = ex.Right.(*ast.NullLiteral).IsUndefined
 	case isNullLiteralExpr(ex.Left):
 		scalarExpr = ex.Right
+		litUndef = ex.Left.(*ast.NullLiteral).IsUndefined
 	default:
 		return Value{}, false, nil
+	}
+	// A dynamic/any operand carries its kind only at runtime — its NaN-boxed
+	// tag can be undefined, null, or anything else — so neither the constant
+	// fold nor the presence-bit path below applies. Defer to the runtime
+	// tag-aware comparison (emitAnyEquals). Without this, `(x: any) === undefined`
+	// / `=== null` folded to a compile-time false because a bare `any` type is
+	// not marked IsUndefined, so a genuinely-undefined dynamic value never
+	// strict-equalled the literal (a missing dynamic property, `als.getStore()`,
+	// etc.).
+	if e.inferExprType(scalarExpr).IsDynamic {
+		return Value{}, false, nil
+	}
+	// Strict `===`/`!==` distinguishes `null` from `undefined` (JS: `undefined
+	// === null` is false), so an absent value only strict-equals the literal
+	// spelled its own kind. Loose `==`/`!=` treats both as nullish. When the
+	// strict kinds can't match, the result is a compile-time constant (never
+	// equal), regardless of the presence bit.
+	strict := ex.Op == "===" || ex.Op == "!=="
+	valUndef := e.inferExprType(scalarExpr).IsUndefined
+	if strict && litUndef != valUndef {
+		switch ex.Op {
+		case "===":
+			return Value{Ref: "false", Ty: TypeBool}, true, nil
+		case "!==":
+			return Value{Ref: "true", Ty: TypeBool}, true, nil
+		}
 	}
 	// Boxed-local path.
 	if sym, ok := e.nullableScalarLValue(scalarExpr); ok {

@@ -33,7 +33,7 @@ import querystring from 'querystring'
 const m = querystring.parse("?a=1")
 console.log(m.get("?a"))
 console.log(m.get("a"))
-`, "1\nnull")
+`, "1\nundefined")
 }
 
 func TestE2EQuerystringStringify(t *testing.T) {
@@ -705,15 +705,15 @@ func TestE2EAsyncLocalStorageSyncNesting(t *testing.T) {
 import { AsyncLocalStorage } from 'async_hooks'
 interface Ctx { name: string }
 const als = new AsyncLocalStorage<Ctx>()
-console.log(als.getStore() === null ? 'empty' : '?')
+console.log(als.getStore() === undefined ? 'empty' : '?')
 als.run({ name: 'outer' }, () => {
   console.log(als.getStore()?.name)
   als.run({ name: 'inner' }, () => { console.log(als.getStore()?.name) })
   console.log(als.getStore()?.name)
-  als.exit(() => { console.log(als.getStore() === null ? 'exited' : '?') })
+  als.exit(() => { console.log(als.getStore() === undefined ? 'exited' : '?') })
   console.log(als.getStore()?.name)
 })
-console.log(als.getStore() === null ? 'empty2' : '?')
+console.log(als.getStore() === undefined ? 'empty2' : '?')
 `, "empty\nouter\ninner\nouter\nexited\nouter\nempty2")
 }
 
@@ -732,7 +732,7 @@ async function main2(): Promise<void> {
     await worker()
     console.log('inRun', als.getStore()?.id)
   })
-  console.log(als.getStore() === null ? 'empty' : '?')
+  console.log(als.getStore() === undefined ? 'empty' : '?')
 }
 main2()
 `, "before 42\nafter 42\ninRun 42\nempty")
@@ -762,7 +762,7 @@ const als = new AsyncLocalStorage<Ctx>()
 als.enterWith({ v: 9 })
 console.log(als.getStore()?.v)
 als.disable()
-console.log(als.getStore() === null ? 'off' : '?')
+console.log(als.getStore() === undefined ? 'off' : '?')
 `, "9\noff")
 }
 
@@ -779,7 +779,7 @@ async function main2(): Promise<void> {
     setTimeout(() => { console.log('timer sees', als.getStore()?.v) }, 5)
   })
   await new Promise<number>((res) => { setTimeout(() => res(0), 20) })
-  console.log('outside', als.getStore() === null ? 'empty' : '?')
+  console.log('outside', als.getStore() === undefined ? 'empty' : '?')
 }
 main2()
 `, "timer sees 7\noutside empty")

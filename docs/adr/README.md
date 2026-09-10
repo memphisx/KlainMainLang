@@ -863,3 +863,46 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [00817](ADR-00817.md) | `-webview=sailfish` moc build integration + un-gating | `Extends [ADR-00816](ADR-00816.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
 | [00818](ADR-00818.md) | `-webview=sailfish` on-device bring-up — the shim runs on real hardware | `Extends [ADR-00816](ADR-00816.md), [ADR-00817](ADR-00817.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
 | [00819](ADR-00819.md) | `-webview=sailfish` native QTimer loop-fusion pump | `Extends [ADR-00818](ADR-00818.md)`, `Implements [TDD-00146](../tdd/TDD-00146.md)` |
+| [00820](ADR-00820.md) | Pooled binary fs writes and the pooled callback form | `Implements [TDD-00185](../tdd/TDD-00185.md)`, `Extends [ADR-00773](ADR-00773.md), [ADR-00774](ADR-00774.md)` |
+| [00821](ADR-00821.md) | Backpressure and mid-read errors for the pooled read stream | `Implements [TDD-00186](../tdd/TDD-00186.md)`, `Extends [ADR-00775](ADR-00775.md), [ADR-00820](ADR-00820.md)` |
+| [00822](ADR-00822.md) | RPM packaging tests tolerate an arch-incapable rpmbuild host | `Extends [ADR-00810](ADR-00810.md)` |
+| [00823](ADR-00823.md) | Lazy Response body promises settled off the fetch reactor | `Implements [TDD-00186](../tdd/TDD-00186.md)`, `Extends [ADR-00794](ADR-00794.md)` |
+| [00824](ADR-00824.md) | Server request as a Node Readable (TDD-00195 Stage 1) | `Implements [TDD-00195](../tdd/TDD-00195.md)`, `Extends [ADR-00362](ADR-00362.md)` |
+| [00825](ADR-00825.md) | Response flush driven by res.end() (TDD-00195 Stage 2 core) | `Implements [TDD-00195](../tdd/TDD-00195.md)`, `Extends [ADR-00300](ADR-00300.md), [ADR-00824](ADR-00824.md)` |
+| [00826](ADR-00826.md) | `ReadableStream.read()` value + `desiredSize` as `T \| undefined` / `number \| null` | Implements [TDD-00196](../tdd/TDD-00196.md); extends [ADR-00781](ADR-00781.md) (the deferred stream members of [TDD-00187](../tdd/TDD-00187.md)); reuses [ADR-00779](ADR-00779.md) (nullable-scalar fields), [ADR-00296](ADR-00296.md) (the streams runtime) |
+| [00827](ADR-00827.md) | keep-alive on the union-body (`string \| ReadableStream`) string branch | Extends [ADR-00802](ADR-00802.md) (persistent streamed responses), [ADR-00825](ADR-00825.md) (`res.end()`-driven flush); part of the [TDD-00131](../tdd/TDD-00131.md) `http.createServer`/`klain:http` server |
+| [00828](ADR-00828.md) | the server `'close'` event + drain-accurate `server.close(cb)` | Implements [TDD-00197](../tdd/TDD-00197.md); extends [ADR-00502](ADR-00502.md) (server `.on` events) and [TDD-00027](../tdd/TDD-00027.md) (`http.close()` graceful drain) |
+| [00829](ADR-00829.md) | the server `'connection'` event via a dispatcher-entry hook | Implements [TDD-00198](../tdd/TDD-00198.md); extends [ADR-00502](ADR-00502.md) (server `.on` events); reuses [TDD-00158](../tdd/TDD-00158.md) (the `'upgrade'` `net.Socket` build) |
+| [00830](ADR-00830.md) | string `.at(i)` returns `string \| undefined` (out-of-range → `undefined`) | Extends [TDD-00187](../tdd/TDD-00187.md) (the `T \| undefined` sentinel); supersedes the out-of-range behavior of [ADR-00166](ADR-00166.md) |
+| [00831](ADR-00831.md) | `Math.max()`/`Math.min()` accept any arity (0 and 1 args) | Extends [ADR-00286](ADR-00286.md) (the min/max fold) |
+| [00832](ADR-00832.md) | `Number.prototype.toExponential()` with no argument (shortest round-trip) | Extends [ADR-00551](ADR-00551.md) (the fixed-precision `toExponential`) and [TDD-00080](../tdd/TDD-00080.md) (the shortest-round-trip `__kml_dtoa`) |
+| [00833](ADR-00833.md) | `undefined !== null` for absent scalars, and `Map.get()` misses are `undefined` | Extends [TDD-00064](../tdd/TDD-00064.md) (the `{ i1, T }` nullable scalar) and [TDD-00187](../tdd/TDD-00187.md) (the `T \| undefined` sentinel) |
+| [00834](ADR-00834.md) | optional chaining `o?.x` yields `PropType \| undefined` | Extends [TDD-00187](../tdd/TDD-00187.md) (the `T \| undefined` sentinel) and [ADR-00833](ADR-00833.md) (the null-vs-undefined `===` distinction it relies on) |
+| [00835](ADR-00835.md) | absent object values print `undefined` (not a segfault), optional object fields are `C \| undefined` | Extends [ADR-00833](ADR-00833.md)/[ADR-00834](ADR-00834.md) (the `T \| undefined` work that surfaced these) and [TDD-00187](../tdd/TDD-00187.md) |
+| [00836](ADR-00836.md) | `String(x)` / `` `${x}` `` of an absent scalar render "undefined" | Extends [TDD-00187](../tdd/TDD-00187.md) / [ADR-00833](ADR-00833.md); mirrors the concat null-awareness of [ADR-00537](ADR-00537.md) |
+| [00837](ADR-00837.md) | `JSON.stringify` drops an omitted optional field's key | Extends [TDD-00187](../tdd/TDD-00187.md) / [ADR-00779](ADR-00779.md) (optional fields as `T \| undefined`); follow-on to [ADR-00836](ADR-00836.md) |
+| [00838](ADR-00838.md) | `f(undefined)` triggers a defaulted parameter's default | Extends [ADR-00164](ADR-00164.md) (default/optional parameters) |
+| [00839](ADR-00839.md) | `Number(undefined)` is `NaN` (not `0`) | Extends [ADR-00291](ADR-00291.md) (`String`/`Number`/`Boolean` conversions) |
+| [00840](ADR-00840.md) | optional call `a?.m()` yields `RetType \| undefined` | Extends [ADR-00682](ADR-00682.md) (optional-chaining calls) and [ADR-00834](ADR-00834.md) (optional member reads as `T \| undefined`) |
+| [00841](ADR-00841.md) | `a ?? b` with a nullable right operand stays `T \| undefined` | Extends [TDD-00064](../tdd/TDD-00064.md) (nullable-scalar `??`) and [ADR-00833](ADR-00833.md) (the null-vs-undefined `===` this relies on) |
+| [00842](ADR-00842.md) | `String.prototype.split(sep, limit)` — the optional limit argument | Extends [ADR-00004](ADR-00004.md) (`split`) and the RegExp split |
+| [00843](ADR-00843.md) | `Array.prototype.lastIndexOf` and `String.prototype.lastIndexOf` | Siblings of `indexOf` ([ADR-00558](ADR-00558.md) buffer path); array element compare per [ADR-00152](ADR-00152.md) |
+| [00844](ADR-00844.md) | `Date` `getUTC*` / `setUTC*` accessors | Extends [ADR-00014](ADR-00014.md) (`Date`), [ADR-00039](ADR-00039.md) (setters) |
+| [00845](ADR-00845.md) | array-literal spread accepts any array-valued expression | Extends [ADR-00467](ADR-00467.md) (array-literal spread) |
+| [00846](ADR-00846.md) | `Error.prototype.toString` / `String(err)` / `` `${err}` `` | Extends the Error object ([ADR-00082](ADR-00082.md) layout, [ADR-00630](ADR-00630.md) subclassing) |
+| [00847](ADR-00847.md) | `Number.prototype.toLocaleString()` — the no-argument en-US default | Reuses the embedded `dtoa.c` (as [ADR-00832](ADR-00832.md) did) |
+| [00848](ADR-00848.md) | `indexOf(x, fromIndex)` — the optional start-offset argument | Extends `indexOf` ([ADR-00843](ADR-00843.md) `lastIndexOf`, [ADR-00558](ADR-00558.md) buffer path) |
+| [00849](ADR-00849.md) | Spreading a string into an array literal (`[..."abc"]`) | Extends array-literal spread ([ADR-00845](ADR-00845.md)) |
+| [00850](ADR-00850.md) | `Number("0b…")` / `Number("0o…")` — binary and octal string prefixes | Extends string `ToNumber` ([ADR-00545](ADR-00545.md) the hex/parseFloat split) |
+| [00851](ADR-00851.md) | Optional chaining on a nullable-scalar receiver (`map.get(k)?.m()`) | Follows the `Map.get` → `V \| undefined` flip ([ADR-00794](ADR-00794.md) family), extends optional-call ([ADR-00834](ADR-00834.md)) |
+| [00852](ADR-00852.md) | `String.prototype.substr(start, length)` | Sibling of `substring` / `slice` string extraction |
+| [00853](ADR-00853.md) | `String`/`Number`/`Boolean` as a first-class callback | Extends the callback resolver ([ADR-00686](ADR-00686.md) HOF arity) |
+| [00854](ADR-00854.md) | Destructured callback parameters (`([k, v]) => …`) | Implements [TDD-00199](../tdd/TDD-00199.md); extends the tuple model ([ADR-00492](ADR-00492.md) `Object.entries` typed values, [TDD-00066](../tdd/TDD-00066.md)) |
+| [00855](ADR-00855.md) | `any === undefined` / `=== null` mis-folded to compile-time false | Fixes a bug in the nullable-scalar null-compare fast path ([ADR-00851](ADR-00851.md) `Map.get`→`V \| undefined`, [TDD-00187](../tdd/TDD-00187.md) undefined sentinel) |
+| [00856](ADR-00856.md) | Emitter rail — reject empty-operand stores instead of shipping invalid IR | |
+| [00857](ADR-00857.md) | FinalizationRegistry.register() evaluates to undefined, not void | `Extends [ADR-00856](ADR-00856.md)`, `Implements [TDD-00163](../tdd/TDD-00163.md)` |
+| [00858](ADR-00858.md) | Leading-/trailing-dot float literals emit exact bit pattern, not verbatim | |
+| [00859](ADR-00859.md) | ToPrimitive number-hint coercion of objects (TDD-00201 Stage 1) | `Implements [TDD-00201](../tdd/TDD-00201.md)` |
+| [00860](ADR-00860.md) | ToPrimitive string-hint coercion of objects (TDD-00201 Stage 2) | `Extends [ADR-00859](ADR-00859.md)`, `Implements [TDD-00201](../tdd/TDD-00201.md)` |
+| [00861](ADR-00861.md) | ToPrimitive at operator sites — `+` and loose equality (TDD-00201 Stage 3) | `Extends [ADR-00859](ADR-00859.md), [ADR-00860](ADR-00860.md)`, `Implements [TDD-00201](../tdd/TDD-00201.md)` |
+| [00862](ADR-00862.md) | Runtime ToPrimitive over NaN-boxed objects — compat=js (TDD-00201 Stage 4) | `Extends [ADR-00859](ADR-00859.md), [ADR-00860](ADR-00860.md), [ADR-00861](ADR-00861.md)`, `Implements [TDD-00201](../tdd/TDD-00201.md)` |

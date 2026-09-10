@@ -53,25 +53,39 @@
             ]
           },
           {
-            "feature": "`.indexOf(substr)`",
+            "feature": "`.substr(start, length?)`",
+            "status": "implemented",
+            "caveats": [
+              "Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text."
+            ]
+          },
+          {
+            "feature": "`.indexOf(substr, fromIndex?)`",
             "status": "implemented",
             "caveats": [
               "Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`)."
             ]
           },
           {
-            "feature": "`.includes(substr)`",
+            "feature": "`.lastIndexOf(substr, fromIndex?)`",
+            "status": "implemented",
+            "caveats": [
+              "Returns the LAST occurrence's byte offset (binary-safe, descending memcmp scan), not a UTF-16 index — like `.indexOf` on non-ASCII text ([ADR-00843](../adr/ADR-00843.md))"
+            ]
+          },
+          {
+            "feature": "`.includes(substr, position?)`",
             "status": "implemented",
             "caveats": [
               "Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text)."
             ]
           },
           {
-            "feature": "`.startsWith(prefix)`",
+            "feature": "`.startsWith(prefix, position?)`",
             "status": "implemented"
           },
           {
-            "feature": "`.endsWith(suffix)`",
+            "feature": "`.endsWith(suffix, endPosition?)`",
             "status": "implemented"
           },
           {
@@ -82,10 +96,11 @@
             ]
           },
           {
-            "feature": "`.split(sep)`",
+            "feature": "`.split(sep, limit?)`",
             "status": "implemented",
             "notes": [
-              "Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md))"
+              "Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md))",
+              "The optional `limit` caps the result to the first `limit` segments (string or RegExp separator); a negative limit is no cap, as in JS ([ADR-00842](../adr/ADR-00842.md))"
             ]
           },
           {
@@ -151,8 +166,8 @@
           {
             "feature": "`.at(i)`",
             "status": "implemented",
-            "caveats": [
-              "An out-of-range `i` returns `\"\"` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data ([ADR-00166](../adr/ADR-00166.md))"
+            "notes": [
+              "Returns `string | undefined`: an out-of-range `i` (including a negative index past `-length`) is a real `undefined`, as in Node — narrow, `?? ''`, or `!` before use ([TDD-00187](../tdd/TDD-00187.md), [ADR-00830](../adr/ADR-00830.md))"
             ]
           },
           {

@@ -371,11 +371,82 @@ func (e *Emitter) emitStringSubstring(mem *ast.MemberExpression, args []ast.Expr
 	return e.emitStringExtract(objVal.Ref, realStart, sliceLen), nil
 }
 
+// emitStringSubstr implements the (deprecated but common) s.substr(start, length):
+// a negative start counts from the end (`max(len + start, 0)`); length (default
+// to the end) is clamped to `[0, len - start]`. Distinct from substring, which
+// takes an end index and swaps reversed bounds.
+func (e *Emitter) emitStringSubstr(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: substr takes 1 or 2 arguments (start[, length])", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(objVal.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: substr is only supported on strings", pos.Line, pos.Col)
+	}
+	e.ensureStrlen()
+	e.ensureMalloc()
+	e.ensureMemcpy()
+
+	sLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, objVal.Ref))
+
+	startRaw, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	sr := e.coerce(startRaw, TypeI64).Ref
+	// start: negative → len + start, then clamp to [0, len].
+	neg := e.freshReg()
+	fromEnd := e.freshReg()
+	s0 := e.freshReg()
+	ltz := e.freshReg()
+	sClamp := e.freshReg()
+	gtL := e.freshReg()
+	start := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, sr))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", fromEnd, sLen, sr))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", s0, neg, fromEnd, sr))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", ltz, s0))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", sClamp, ltz, s0))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", gtL, sClamp, sLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", start, gtL, sLen, sClamp))
+
+	// avail = len - start (the maximum length from here).
+	avail := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", avail, sLen, start))
+
+	var sliceLen string
+	if len(args) == 2 {
+		lenRaw, lerr := e.emitExpr(args[1])
+		if lerr != nil {
+			return Value{}, lerr
+		}
+		lr := e.coerce(lenRaw, TypeI64).Ref
+		// length: <0 → 0, else min(length, avail).
+		lneg := e.freshReg()
+		l0 := e.freshReg()
+		gtAvail := e.freshReg()
+		clamped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", lneg, lr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", l0, lneg, lr))
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", gtAvail, l0, avail))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", clamped, gtAvail, avail, l0))
+		sliceLen = clamped
+	} else {
+		sliceLen = avail
+	}
+
+	return e.emitStringExtract(objVal.Ref, start, sliceLen), nil
+}
+
 // emitStringIndexOf implements s.indexOf(needle): returns the byte offset of the
 // first occurrence, or -1 if not found. Uses strstr + ptrtoint arithmetic + select.
 func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: indexOf takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: indexOf takes 1 or 2 arguments (searchString[, fromIndex])", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -388,19 +459,73 @@ func (e *Emitter) emitStringIndexOf(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
+	// ToString(searchString) for an object argument (TDD-00201): `s.indexOf(obj)`
+	// searches for obj's toString/@@toPrimitive value, not its pointer.
+	if needleVal, err = e.coerceStringArg(needleVal); err != nil {
+		return Value{}, err
+	}
 	// Binary-safe: __kml_str_indexof searches via memmem over the header lengths,
 	// so an embedded NUL in either operand doesn't cut the search short. Returns
-	// the byte index or -1 directly (TDD-00120 Stage 2).
+	// the byte index or -1 directly (TDD-00120 Stage 2). The optional fromIndex
+	// starts the search at (clamped) that offset.
 	e.ensureStrHeaderRuntime()
 	final := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
+	if len(args) == 2 {
+		fromVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		from := e.coerce(fromVal, TypeI64).Ref
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof_from(ptr %s, ptr %s, i64 %s)", final, objVal.Ref, needleVal.Ref, from))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
+	}
+	return e.countToNumber(Value{Ref: final, Ty: TypeI64}), nil
+}
+
+// emitStringLastIndexOf implements s.lastIndexOf(sub): the byte index of the
+// LAST occurrence of sub, or -1 — binary-safe, via __kml_str_lastindexof's
+// descending memcmp scan.
+func (e *Emitter) emitStringLastIndexOf(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: lastIndexOf takes 1 or 2 arguments (searchString[, fromIndex])", pos.Line, pos.Col)
+	}
+	objVal, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(objVal.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: lastIndexOf is only supported on strings", pos.Line, pos.Col)
+	}
+	needleVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	// ToString(searchString) for an object argument (TDD-00201).
+	if needleVal, err = e.coerceStringArg(needleVal); err != nil {
+		return Value{}, err
+	}
+	e.ensureStrHeaderRuntime()
+	final := e.freshReg()
+	// The optional fromIndex is the highest start offset considered — the scan
+	// walks backward from min(fromIndex, len-needleLen).
+	if len(args) == 2 {
+		fromVal, ferr := e.emitExpr(args[1])
+		if ferr != nil {
+			return Value{}, ferr
+		}
+		f := e.coerce(fromVal, TypeI64).Ref
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_lastindexof_from(ptr %s, ptr %s, i64 %s)", final, objVal.Ref, needleVal.Ref, f))
+		return e.countToNumber(Value{Ref: final, Ty: TypeI64}), nil
+	}
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_lastindexof(ptr %s, ptr %s)", final, objVal.Ref, needleVal.Ref))
 	return e.countToNumber(Value{Ref: final, Ty: TypeI64}), nil
 }
 
 // emitStringIncludes implements s.includes(needle): returns true iff needle appears in s.
 func (e *Emitter) emitStringIncludes(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: includes takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: includes takes 1 or 2 arguments (searchString[, position])", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -413,11 +538,24 @@ func (e *Emitter) emitStringIncludes(mem *ast.MemberExpression, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
+	if needleVal, err = e.coerceStringArg(needleVal); err != nil { // ToString (TDD-00201)
+		return Value{}, err
+	}
 	// Binary-safe includes: memmem-based index, then test for >= 0 (TDD-00120).
+	// The optional position starts the search there (via __kml_str_indexof_from).
 	e.ensureStrHeaderRuntime()
 	idx := e.freshReg()
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", idx, objVal.Ref, needleVal.Ref))
+	if len(args) == 2 {
+		posVal, perr := e.emitExpr(args[1])
+		if perr != nil {
+			return Value{}, perr
+		}
+		from := e.coerce(posVal, TypeI64).Ref
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof_from(ptr %s, ptr %s, i64 %s)", idx, objVal.Ref, needleVal.Ref, from))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_indexof(ptr %s, ptr %s)", idx, objVal.Ref, needleVal.Ref))
+	}
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", found, idx))
 	return Value{Ref: found, Ty: TypeBool}, nil
 }
@@ -726,8 +864,8 @@ func (e *Emitter) emitStringToLower(mem *ast.MemberExpression, args []ast.Expres
 }
 
 func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: startsWith takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: startsWith takes 1 or 2 arguments (searchString[, position])", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -739,6 +877,23 @@ func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Exp
 	prefixVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
+	}
+	if prefixVal, err = e.coerceStringArg(prefixVal); err != nil { // ToString (TDD-00201)
+		return Value{}, err
+	}
+	// The optional position anchors the prefix test at that offset (binary-safe
+	// bounds-checked memcmp).
+	if len(args) == 2 {
+		posVal, perr := e.emitExpr(args[1])
+		if perr != nil {
+			return Value{}, perr
+		}
+		p := e.coerce(posVal, TypeI64).Ref
+		e.ensureStrHeaderRuntime()
+		e.ensureMemcmp()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_str_startswith_at(ptr %s, ptr %s, i64 %s)", r, objVal.Ref, prefixVal.Ref, p))
+		return Value{Ref: r, Ty: TypeBool}, nil
 	}
 	e.ensureStrlen()
 	e.ensureStrncmp()
@@ -752,8 +907,8 @@ func (e *Emitter) emitStringStartsWith(mem *ast.MemberExpression, args []ast.Exp
 }
 
 func (e *Emitter) emitStringEndsWith(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: endsWith takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: endsWith takes 1 or 2 arguments (searchString[, endPosition])", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -765,6 +920,22 @@ func (e *Emitter) emitStringEndsWith(mem *ast.MemberExpression, args []ast.Expre
 	suffixVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
+	}
+	if suffixVal, err = e.coerceStringArg(suffixVal); err != nil { // ToString (TDD-00201)
+		return Value{}, err
+	}
+	// The optional endPosition treats the string as if it ended there.
+	if len(args) == 2 {
+		endVal, eerr := e.emitExpr(args[1])
+		if eerr != nil {
+			return Value{}, eerr
+		}
+		ep := e.coerce(endVal, TypeI64).Ref
+		e.ensureStrHeaderRuntime()
+		e.ensureMemcmp()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_str_endswith_at(ptr %s, ptr %s, i64 %s)", r, objVal.Ref, suffixVal.Ref, ep))
+		return Value{Ref: r, Ty: TypeBool}, nil
 	}
 	e.ensureStrlen()
 	e.ensureStrncmp()
@@ -816,6 +987,14 @@ func (e *Emitter) emitStringReplace(mem *ast.MemberExpression, args []ast.Expres
 	if err != nil {
 		return Value{}, err
 	}
+	// ToString an object search/replacement (TDD-00201); a RegExp arg was already
+	// dispatched to emitRegexReplace above, so neither is a regex here.
+	if searchVal, err = e.coerceStringArg(searchVal); err != nil {
+		return Value{}, err
+	}
+	if repVal, err = e.coerceStringArg(repVal); err != nil {
+		return Value{}, err
+	}
 	e.ensureStringReplace()
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
@@ -852,6 +1031,14 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
+	// ToString an object search/replacement (TDD-00201); a RegExp arg was already
+	// dispatched to emitRegexReplace above.
+	if searchVal, err = e.coerceStringArg(searchVal); err != nil {
+		return Value{}, err
+	}
+	if repVal, err = e.coerceStringArg(repVal); err != nil {
+		return Value{}, err
+	}
 	e.ensureStringReplaceAll()
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
@@ -862,8 +1049,8 @@ func (e *Emitter) emitStringReplaceAll(mem *ast.MemberExpression, args []ast.Exp
 }
 
 func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: split takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: split takes 1 or 2 arguments (separator[, limit])", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -872,24 +1059,61 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 	if !isStringTy(objVal.Ty) {
 		return Value{}, fmt.Errorf("%d:%d: split is only supported on strings", pos.Line, pos.Col)
 	}
+	var result Value
 	if e.inferExprType(args[0]).IsRegExp {
 		objVal = e.coerce(objVal, TypePtr)
 		regexVal, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitRegexSplit(objVal, regexVal), nil
+		result = e.emitRegexSplit(objVal, regexVal)
+	} else {
+		sepVal, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		// ToString an object separator (TDD-00201); the regex path is handled above.
+		if sepVal, err = e.coerceStringArg(sepVal); err != nil {
+			return Value{}, err
+		}
+		e.ensureStringSplit()
+		sLen := e.emitStrLenHeader(objVal.Ref)
+		sepLen := e.emitStrLenHeader(sepVal.Ref)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_split(ptr %s, i64 %s, ptr %s, i64 %s)", r, objVal.Ref, sLen, sepVal.Ref, sepLen))
+		result = Value{Ref: r, Ty: ArrayOf(TypePtr)}
 	}
-	sepVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
+	// Optional `limit`: cap the result to the first `limit` segments (JS
+	// `split(sep, limit)`). We split fully, then clamp the reported length — the
+	// observable result is identical. A negative limit acts as "no cap" (JS
+	// ToUint32 makes it a huge count); the data pointer is unchanged.
+	if len(args) == 2 {
+		limVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		lim := e.coerce(limVal, TypeI64).Ref
+		fullLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", fullLen, result.Ref))
+		dataPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, result.Ref))
+		// effectiveLimit = limit < 0 ? fullLen : limit
+		negLim := e.freshReg()
+		effLim := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", negLim, lim))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", effLim, negLim, fullLen, lim))
+		// newLen = min(fullLen, effectiveLimit)
+		useLim := e.freshReg()
+		newLen := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", useLim, effLim, fullLen))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", newLen, useLim, effLim, fullLen))
+		agg0 := e.freshReg()
+		agg1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, newLen))
+		result = Value{Ref: agg1, Ty: ArrayOf(TypePtr)}
 	}
-	e.ensureStringSplit()
-	sLen := e.emitStrLenHeader(objVal.Ref)
-	sepLen := e.emitStrLenHeader(sepVal.Ref)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_split(ptr %s, i64 %s, ptr %s, i64 %s)", result, objVal.Ref, sLen, sepVal.Ref, sepLen))
-	return Value{Ref: result, Ty: ArrayOf(TypePtr)}, nil
+	return result, nil
 }
 
 // emitStringCharAt extracts the character at a runtime index and returns it
@@ -1018,7 +1242,10 @@ func (e *Emitter) emitStringRepeat(mem *ast.MemberExpression, args []ast.Express
 }
 
 // emitStringAt implements s.at(index): returns the character at the given index
-// with negative-index support. Returns "" for out-of-range indices.
+// with negative-index support. An out-of-range index yields a real `undefined`
+// (Node types `.at()` `string | undefined`, TDD-00187), not `""` — the absent
+// value is the null pointer with the static type flagged Nullable|IsUndefined.
+// Must mirror inferExprType's `at` case (undefinedableElem(TypePtr)).
 func (e *Emitter) emitStringAt(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: at takes exactly 1 argument", pos.Line, pos.Col)
@@ -1036,12 +1263,31 @@ func (e *Emitter) emitStringAt(mem *ast.MemberExpression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	startN := e.emitNormalizeSliceIdx(e.coerce(idxRaw, TypeI64).Ref, sLen)
+	// `.at` index semantics (NOT slice-clamping): a negative index adds the
+	// length once; anything still outside [0, len) is a miss → undefined. (Using
+	// slice-normalization here wrongly clamped `"hi".at(-9)` to index 0.)
+	idx := e.coerce(idxRaw, TypeI64).Ref
+	neg := e.freshReg()
+	adjusted := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, idx))
+	plusLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, idx, sLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adjusted, neg, plusLen, idx))
+	geZero := e.freshReg()
+	ltLen := e.freshReg()
 	inBounds := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", geZero, adjusted))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", ltLen, adjusted, sLen))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inBounds, geZero, ltLen))
+	safeIdx := e.freshReg()
 	sliceLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inBounds, startN, sLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", safeIdx, inBounds, adjusted))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 1, i64 0", sliceLen, inBounds))
-	return e.emitStringExtract(objVal.Ref, startN, sliceLen), nil
+	char := e.emitStringExtract(objVal.Ref, safeIdx, sliceLen)
+	// null when out of range → renders/compares as undefined
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", res, inBounds, char.Ref))
+	return e.wrapUndefinedable(Value{Ref: res, Ty: TypePtr}, inBounds), nil
 }
 
 // emitStringPad is the shared implementation for padStart and padEnd.
@@ -1224,18 +1470,46 @@ func (e *Emitter) numberToDouble(mem *ast.MemberExpression) (string, error) {
 	return dblReg, nil
 }
 
-// emitNumberToExponential implements Number.prototype.toExponential(digits),
-// via sprintf's own %e conversion. Known deviation from real JS, documented
-// in docs/status/NUMBER-MATH.md: the exponent is always rendered with a sign and 2 digits
-// (e.g. "1.23e+03"), whereas real JS always uses the minimum digit count
-// ("1.23e+3") — cosmetic only, the numeric value itself is exact.
-func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: toExponential takes exactly 1 argument", pos.Line, pos.Col)
+// emitNumberToExponential implements Number.prototype.toExponential(digits?).
+// With a fractionDigits argument, sprintf's %e gives the fixed-precision form;
+// the exponent is normalized to JS's minimum-digit form ("1.23e+03" → "1.23e+3")
+// by __kml_strip_exp_zeros. With NO argument, the result uses as many mantissa
+// digits as needed to round-trip the value uniquely (ECMAScript 21.1.3.3, the
+// "f is undefined" path) — delegated to __kml_dtoa_exp, which reuses dtoa's
+// shortest-precision loop.
+// emitNumberToLocaleString implements Number.prototype.toLocaleString() with no
+// argument — the en-US default (thousands grouping, max 3 fraction digits). A
+// locale/options argument is an Intl feature (out of scope), rejected cleanly.
+func (e *Emitter) emitNumberToLocaleString(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 0 {
+		return Value{}, fmt.Errorf("%d:%d: toLocaleString() locale/options arguments are an Intl feature (not supported); the no-argument form gives the en-US default", pos.Line, pos.Col)
 	}
 	dblReg, err := e.numberToDouble(mem)
 	if err != nil {
 		return Value{}, err
+	}
+	e.ensureDtoa()
+	buf := e.emitStringScratch(512)
+	e.emitInstr(fmt.Sprintf("call void @__kml_num_tolocalestring(ptr %s, double %s)", buf, dblReg))
+	e.emitStringFinalizeLen(buf)
+	return Value{Ref: buf, Ty: TypePtr}, nil
+}
+
+func (e *Emitter) emitNumberToExponential(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) > 1 {
+		return Value{}, fmt.Errorf("%d:%d: toExponential takes 0 or 1 arguments", pos.Line, pos.Col)
+	}
+	dblReg, err := e.numberToDouble(mem)
+	if err != nil {
+		return Value{}, err
+	}
+	if len(args) == 0 {
+		// Shortest round-trip exponential form.
+		e.ensureDtoa()
+		buf := e.emitStringScratch(40)
+		e.emitInstr(fmt.Sprintf("call void @__kml_dtoa_exp(ptr %s, double %s)", buf, dblReg))
+		e.emitStringFinalizeLen(buf)
+		return Value{Ref: buf, Ty: TypePtr}, nil
 	}
 	digitsVal, err := e.emitExpr(args[0])
 	if err != nil {

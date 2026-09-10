@@ -123,10 +123,10 @@
             ]
           },
           {
-            "feature": "`Number.prototype.toExponential(n)`",
+            "feature": "`Number.prototype.toExponential(n?)`",
             "status": "implemented",
             "notes": [
-              "`sprintf(\"%.*e\", ...)`; the exponent is normalized to JS's minimum-digit form (`1.23e+4`, not `1.23e+04`) ([ADR-00551](../adr/ADR-00551.md))"
+              "With a fraction-digits argument: `sprintf(\"%.*e\", ...)`, exponent normalized to JS's minimum-digit form (`1.23e+4`, not `1.23e+04`) ([ADR-00551](../adr/ADR-00551.md)). With no argument: the shortest round-trip mantissa via `__kml_dtoa_exp` (reuses the dtoa shortest-precision loop), as in Node ([ADR-00832](../adr/ADR-00832.md))"
             ]
           },
           {

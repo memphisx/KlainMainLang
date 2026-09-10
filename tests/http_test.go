@@ -749,6 +749,191 @@ http.listen(8199, (req: HttpRequest) => {
 	}
 }
 
+func TestE2EHTTPUnionBodyStringKeepAlive(t *testing.T) {
+	// A handler whose `body` is a union `string | ReadableStream` taking the
+	// *string* branch is now persistent too (TDD-00196 follow-on): it advertises
+	// Connection: keep-alive and re-arms the connection, so a second request on
+	// the same socket is served. Previously the union string branch always closed.
+	src := `
+import http from 'klain:http'
+interface Res { status: number; body: string | ReadableStream<string> }
+http.listen(8204, (req: HttpRequest): Res => {
+  return { status: 200, body: 'path=' + req.path }
+})
+`
+	port := startHTTPServer(t, src, 8204)
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+
+	// First request: no Connection header ⇒ keep-alive.
+	if _, err := conn.Write([]byte("GET /a HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatalf("write req1: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	first := readContentLengthResponse(t, br)
+	if !strings.Contains(first, "Connection: keep-alive") {
+		t.Fatalf("first union string response did not advertise keep-alive:\n%q", first)
+	}
+	if !strings.Contains(first, "path=/a") {
+		t.Fatalf("first response body malformed:\n%q", first)
+	}
+
+	// Same socket, second request — only served if the connection was re-armed.
+	if _, err := conn.Write([]byte("GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatalf("write req2: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	second := readContentLengthResponse(t, br)
+	if !strings.Contains(second, "path=/b") {
+		t.Fatalf("second request on the re-armed connection was not served:\n%q", second)
+	}
+	if !strings.Contains(second, "Connection: close") {
+		t.Fatalf("second response should honor the client's Connection: close:\n%q", second)
+	}
+}
+
+func TestE2EHTTPServerConnectionEvent(t *testing.T) {
+	// The server 'connection' event (TDD-00198) fires once per accepted TCP
+	// connection, before HTTP parsing — not once per request. Two keep-alive
+	// requests on one socket see the same count; a second socket bumps it.
+	src := `
+import http from 'http'
+let count = 0
+const server = http.createServer((req, res) => { res.end('count=' + count) })
+server.on('connection', (socket) => { count = count + 1 })
+server.listen(8306, () => { console.log('listening') })
+`
+	port := startHTTPServer(t, src, 8306)
+
+	dialReq := func(conn net.Conn, br *bufio.Reader, path string) string {
+		if _, err := conn.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+		return readContentLengthResponse(t, br)
+	}
+
+	// Relative, not absolute: the readiness probe (waitListening) is itself a
+	// real TCP connection that fires 'connection', so the baseline is unknown —
+	// assert the increments instead.
+	countOf := func(resp string) int {
+		i := strings.Index(resp, "count=")
+		if i < 0 {
+			t.Fatalf("no count in response:\n%q", resp)
+		}
+		var n int
+		fmt.Sscanf(resp[i+len("count="):], "%d", &n)
+		return n
+	}
+
+	c1, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial c1: %v", err)
+	}
+	defer c1.Close()
+	b1 := bufio.NewReader(c1)
+	first := countOf(dialReq(c1, b1, "/a"))
+	// Second request on the SAME connection — count must not change (no re-fire).
+	if reuse := countOf(dialReq(c1, b1, "/b")); reuse != first {
+		t.Fatalf("keep-alive reuse re-fired 'connection': first=%d reuse=%d", first, reuse)
+	}
+
+	c2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial c2: %v", err)
+	}
+	defer c2.Close()
+	b2 := bufio.NewReader(c2)
+	if second := countOf(dialReq(c2, b2, "/c")); second != first+1 {
+		t.Fatalf("second connection: want %d, got %d", first+1, second)
+	}
+}
+
+func TestE2EHTTPServerCloseEvent(t *testing.T) {
+	// The server 'close' event + deferred close(cb) (TDD-00197): closing from the
+	// 'listening' callback with no connections in flight fires the 'close' event
+	// then the close(cb) callback (registration order), and the process exits
+	// cleanly. The close(cb) is no longer synchronous — it settles at drain.
+	assertOutputImports(t, `
+import http from 'http'
+const server = http.createServer((req, res) => { res.end('ok') })
+server.on('close', () => { console.log('close event') })
+server.listen(8302, () => {
+  console.log('listening')
+  server.close(() => { console.log('close cb') })
+})
+`, "listening\nclose event\nclose cb")
+}
+
+func TestE2EHTTPServerCloseWaitsForInFlight(t *testing.T) {
+	// close() called mid-handler must not fire 'close'/the callback until the
+	// in-flight request has finished (Node's graceful drain): the response is
+	// still delivered, and the ordering proves the close fires after the handler.
+	src := `
+import http from 'http'
+const server = http.createServer((req, res) => {
+  server.close(() => { console.log('closed after drain') })
+  res.end('bye')
+})
+server.on('close', () => { console.log('close event') })
+server.listen(8303, () => { console.log('listening') })
+`
+	port := startHTTPServer(t, src, 8303)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /a HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	body, _ := io.ReadAll(conn)
+	if !strings.Contains(string(body), "bye") {
+		t.Fatalf("in-flight request was not completed after close():\n%q", string(body))
+	}
+	// After draining, the listener is gone — a new connection must be refused.
+	if c2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 500*time.Millisecond); err == nil {
+		c2.SetReadDeadline(time.Now().Add(1 * time.Second))
+		if n, _ := c2.Read(make([]byte, 1)); n > 0 {
+			t.Fatalf("listener still accepting after close() drained")
+		}
+		c2.Close()
+	}
+}
+
+// readContentLengthResponse reads one HTTP/1.1 response whose body length is
+// given by its Content-Length header.
+func readContentLengthResponse(t *testing.T, br *bufio.Reader) string {
+	t.Helper()
+	var sb strings.Builder
+	n := 0
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		sb.WriteString(line)
+		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+			fmt.Sscanf(strings.TrimSpace(line[len("content-length:"):]), "%d", &n)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(br, body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	sb.Write(body)
+	return sb.String()
+}
+
 // readChunkedResponse reads one HTTP/1.1 chunked response: the header block, then
 // chunk bodies until the zero-length terminator chunk.
 func readChunkedResponse(t *testing.T, br *bufio.Reader) string {
@@ -2945,5 +3130,32 @@ func skipIfLoopbackTrafficFiltered(t *testing.T) {
 	c.Close()
 	if string(seen) != string(preface) {
 		t.Skip("loopback traffic is filtered on this host (a traffic-filtering product such as AdGuard answers HTTP/2 prefaces and breaks TLS handshakes; Node's http2.connect fails here too) — exclude localhost from the filter to run this")
+	}
+}
+
+// TDD-00195 Stage 2 (flush-model): a fire-and-forget `(req,res)=>void` handler
+// that ends the response from an async req.on('end') callback works — the
+// connection fiber parks after the handler returns until res.end() sets the
+// "ended" flag, rather than flushing an empty response on return.
+func TestE2EResFireAndForgetOnData(t *testing.T) {
+	src := `
+import http from 'http'
+http.createServer((req: IncomingMessage, res: ServerResponse) => {
+  let total = 0
+  req.on('data', (c: Uint8Array) => { total = total + c.length })
+  req.on('end', () => { res.end("ff=" + total) })
+}).listen(8991)
+`
+	port := startHTTPServer(t, src, 8991)
+	body := []byte("abcdefghij-1234567890")
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("ff=%d", len(body))
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
 	}
 }

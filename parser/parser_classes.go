@@ -105,6 +105,12 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	if me.Property == "iterator" {
 		return "@@iterator", true
 	}
+	// [Symbol.toPrimitive](hint) — the ToPrimitive ladder (TDD-00201) checks this
+	// reserved method field before valueOf/toString. Same static string-alias
+	// mechanism, no dynamic-property-bag dependency.
+	if me.Property == "toPrimitive" {
+		return "@@toPrimitive", true
+	}
 	return "", false
 }
 

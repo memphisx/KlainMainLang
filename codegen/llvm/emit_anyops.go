@@ -14,8 +14,9 @@ package llvm
 //     undefined+1 → NaN); a numeric string coerces via ToNumber in
 //     arithmetic ("5"*2===10, ""*1===0, junk → NaN).
 //   - relational on two strings: lexicographic; mixed: numeric.
-//   - a heap reference (object/array/function) in arithmetic → NaN (the
-//     full ToPrimitive ladder is a later stage, disclosed).
+//   - a heap reference reaching __kml_any_tonum directly → NaN; an object
+//     operand is first run through @__kml_toprimitive at the operator site
+//     (TDD-00201 Stage 4), so `{valueOf(){return 5}}*2` is 10, not NaN.
 //   - ToBoolean: false/null/undefined/±0/NaN/"" are false, all else true.
 
 import (
@@ -36,7 +37,8 @@ func (e *Emitter) ensureAnyOps() {
 	e.emitGlobal(`
 ; JS ToNumber over a NaN-boxed word. Numbers decode; true/false -> 1/0;
 ; null -> 0; undefined -> NaN; a string parses fully or yields NaN (empty/
-; whitespace-only -> 0); heap references -> NaN (no ToPrimitive ladder yet).
+; whitespace-only -> 0); a bare heap reference -> NaN (an object operand is
+; ToPrimitive'd at the operator site before reaching here, TDD-00201 Stage 4).
 define double @__kml_any_tonum(i64 %v) {
 entry:
   %isnum = icmp uge i64 %v, 562949953421312
@@ -141,6 +143,14 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	if err != nil {
 		return Value{}, err
 	}
+
+	// TDD-00201 Stage 4: an object operand is a NaN-boxed dynamic bag under
+	// compat=js, so run runtime ToPrimitive (default hint — valueOf→toString)
+	// before the concat/ToNumber logic below. A non-object box passes through
+	// unchanged, and the `+` concat detection then sees the resulting primitive
+	// (a string result concatenates, a number adds), matching JS.
+	lb = Value{Ref: e.emitAnyToPrimitive(lb.Ref, false), Ty: TypeAny}
+	rb = Value{Ref: e.emitAnyToPrimitive(rb.Ref, false), Ty: TypeAny}
 
 	if op == "+" {
 		// Runtime string check: pointer range with string kind bits on either

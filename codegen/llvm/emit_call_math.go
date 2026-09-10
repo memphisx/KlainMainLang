@@ -239,8 +239,18 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 	if anySpread(args) {
 		return e.emitMathMinMaxSpread(fn, args, pos)
 	}
-	if len(args) < 2 {
-		return Value{}, fmt.Errorf("%d:%d: Math.%s expects at least 2 arguments", pos.Line, pos.Col, fn)
+	// Node accepts any arity: 0 args is the reduction identity (Math.max() →
+	// -Infinity, Math.min() → +Infinity), 1 arg is ToNumber(arg). The ≥1 fold
+	// below already returns the lone value for a single arg (empty tail loop), so
+	// only the 0-arg identity needs a special case here.
+	if len(args) == 0 {
+		seed := "0x7FF0000000000000" // +Infinity (Math.min identity)
+		if fn == "max" {
+			seed = "0xFFF0000000000000" // -Infinity (Math.max identity)
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fadd double %s, 0.0", r, seed))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	}
 	vals := make([]Value, 0, len(args))
 	anyFloat := false

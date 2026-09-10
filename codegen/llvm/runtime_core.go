@@ -857,9 +857,69 @@ func (e *Emitter) ensureToNumber() {
 	}
 	e.usedToNumber = true
 	e.ensureStrtodJS()
+	e.ensureStrtoll()
+	// JS ToNumber accepts 0b/0B (binary) and 0o/0O (octal) prefixes, which C's
+	// strtod does not (it handles only 0x hex). Detect them past leading
+	// whitespace — with no sign, since `Number("-0b1")` is NaN — parse the
+	// digits with strtoll at the right base, and require the tail to be
+	// whitespace-only. Anything else (including a sign) falls through to strtod.
 	e.emitGlobal(`
 define double @__kml_to_number(ptr %s) {
 entry:
+  br label %rdx_ws
+rdx_ws:
+  %rp = phi ptr [ %s, %entry ], [ %rp_next, %rdx_ws_adv ]
+  %rc = load i8, ptr %rp, align 1
+  %rc_sp = icmp eq i8 %rc, 32
+  %rc_ge9 = icmp uge i8 %rc, 9
+  %rc_le13 = icmp ule i8 %rc, 13
+  %rc_ctl = and i1 %rc_ge9, %rc_le13
+  %rc_ws = or i1 %rc_sp, %rc_ctl
+  br i1 %rc_ws, label %rdx_ws_adv, label %rdx_check
+rdx_ws_adv:
+  %rp_next = getelementptr i8, ptr %rp, i64 1
+  br label %rdx_ws
+rdx_check:
+  %c0 = load i8, ptr %rp, align 1
+  %is0 = icmp eq i8 %c0, 48
+  br i1 %is0, label %rdx_c1, label %entry2
+rdx_c1:
+  %p1 = getelementptr i8, ptr %rp, i64 1
+  %c1 = load i8, ptr %p1, align 1
+  %c1l = or i8 %c1, 32
+  %isb = icmp eq i8 %c1l, 98
+  %iso = icmp eq i8 %c1l, 111
+  %isbo = or i1 %isb, %iso
+  br i1 %isbo, label %rdx_parse, label %entry2
+rdx_parse:
+  %base = select i1 %isb, i32 2, i32 8
+  %digits = getelementptr i8, ptr %rp, i64 2
+  %rendp = alloca ptr, align 8
+  %rn = call i64 @strtoll(ptr %digits, ptr %rendp, i32 %base)
+  %rend = load ptr, ptr %rendp, align 8
+  %nodig = icmp eq ptr %rend, %digits
+  br i1 %nodig, label %entry2, label %rdx_tail
+rdx_tail:
+  br label %rdx_tloop
+rdx_tloop:
+  %rtp = phi ptr [ %rend, %rdx_tail ], [ %rtp_next, %rdx_tws ]
+  %rtc = load i8, ptr %rtp, align 1
+  %rt_nul = icmp eq i8 %rtc, 0
+  br i1 %rt_nul, label %rdx_ok, label %rdx_tchk
+rdx_tchk:
+  %rt_sp = icmp eq i8 %rtc, 32
+  %rt_ge9 = icmp uge i8 %rtc, 9
+  %rt_le13 = icmp ule i8 %rtc, 13
+  %rt_ctl = and i1 %rt_ge9, %rt_le13
+  %rt_ws = or i1 %rt_sp, %rt_ctl
+  br i1 %rt_ws, label %rdx_tws, label %entry2
+rdx_tws:
+  %rtp_next = getelementptr i8, ptr %rtp, i64 1
+  br label %rdx_tloop
+rdx_ok:
+  %rdbl = sitofp i64 %rn to double
+  ret double %rdbl
+entry2:
   %endp = alloca ptr, align 8
   %v = call double @__kml_strtod_js(ptr %s, ptr %endp)
   %end = load ptr, ptr %endp, align 8

@@ -10,7 +10,7 @@
     "strict": "1/3",
     "strictPct": 33
   },
-  "lede": "The WHATWG fetch client — fetch(), Response, Request, Headers — over libcurl, non-blocking under the event loop. The response body accessors (.text()/.json()/.arrayBuffer()) return a real Promise<T> you await — a genuine thenable, so .then() and Promise.all() work on them. The remaining divergence is that the body is buffered eagerly at the accessor call rather than lazily off the transfer, so intervening work doesn't overlap the download. WebSocket, EventSource, and XMLHttpRequest are separate Networking surfaces, documented elsewhere.",
+  "lede": "The WHATWG fetch client — fetch(), Response, Request, Headers — over libcurl, non-blocking under the event loop. The response body accessors (.text()/.json()/.arrayBuffer()) return a real Promise<T> you await — a genuine thenable, so .then() and Promise.all() work on them. The body accessors settle off the transfer's completion (ADR-00823), so a .json() parse error is a promise rejection and the download overlaps intervening work. WebSocket, EventSource, and XMLHttpRequest are separate Networking surfaces, documented elsewhere.",
   "entries": [
     {
       "id": "fetch.fetch",
@@ -85,7 +85,6 @@
       "exampleKey": "fetch/fetch",
       "snippet": "const r = await fetch('http://127.0.0.1:8765/get')\nconst body: string = await r.text()",
       "differences": [
-        "The body is buffered eagerly at the call, not lazily off the transfer — so intervening work doesn't overlap the download the way Node's streamed body does.",
         "The result is a null-terminated string: a binary body with an embedded null byte truncates at the first one — use `.arrayBuffer()` for binary.",
         "`.text()` after consuming `.body` returns `\"\"` instead of the spec's already-disturbed `TypeError`."
       ],
@@ -112,7 +111,7 @@
       "exampleKey": "fetch/fetch",
       "snippet": "interface Ip { origin: string }\nconst info: Ip = await (await fetch('http://127.0.0.1:8765/ip')).json()",
       "differences": [
-        "The body is buffered eagerly at the call, not lazily; a JSON parse error surfaces at the call rather than as a promise rejection.",
+        "A JSON parse error rejects the promise (reachable via `.then`'s onRejected / `.catch`); the body settles off the transfer's completion (ADR-00823).",
         "A typed declaration `const p: T = await r.json()` parses straight into `T` (the `JSON.parse`-style projection carve-out).",
         "Only `any`/`unknown` dynamic shapes are unsupported; every statically-typed shape projects.",
         "Same embedded-null truncation as `.text()` — the body is read as a null-terminated string."

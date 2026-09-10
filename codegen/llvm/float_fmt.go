@@ -30,4 +30,6 @@ func (e *Emitter) ensureDtoa() {
 	}
 	e.declaredDtoa = true
 	e.emitGlobal("declare void @__kml_dtoa(ptr, double)")
+	e.emitGlobal("declare void @__kml_dtoa_exp(ptr, double)")
+	e.emitGlobal("declare void @__kml_num_tolocalestring(ptr, double)")
 }

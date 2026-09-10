@@ -10,7 +10,7 @@
     "strict": "2/20",
     "strictPct": 10
   },
-  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The fs.promises ops are genuinely non-blocking (a background thread pool); the legacy callback form and binary-data async writes stay an API shape over inline blocking I/O.",
+  "lede": "Node-fs-shaped file I/O for config, data, and logs. The sync set is the core; async variants (callback + Promise) and read/write streams wrap the same runtime helpers. The recurring divergence is text-first: the plain readFileSync/readFile/stream path is strlen-based and truncates at an embedded null byte — use readFileSyncBytes / an ArrayBuffer write for binary. There is no Buffer class (plain ArrayBuffer/TypedArrays). The async ops are genuinely non-blocking on a background thread pool — the fs.promises table, the legacy callback form, and binary-data writes alike (POSIX; Windows keeps an inline API shape for now).",
   "entries": [
     {
       "id": "fs.readFileSync",
@@ -308,7 +308,7 @@
       "exampleKey": "fs_async/fs_async",
       "snippet": "await fs.promises.writeFile('demo.txt', 'hi')\nconst text: string = await fs.promises.readFile('demo.txt')",
       "differences": [
-        "The fs.promises ops are genuinely non-blocking — readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir run on a background thread pool (default 4, UV_THREADPOOL_SIZE) and return a pending Promise the loop settles on completion, so other connections/timers keep running during the I/O (TDD-00185). Two cases stay inline (delivery-only async, no concurrency gain): the legacy callback form (fs.readFile(path, cb)), and a writeFile/appendFile of an ArrayBuffer/TypedArray. The pool is POSIX-first; Windows keeps the inline path for now.",
+        "The async ops are genuinely non-blocking — readFile/writeFile/appendFile/unlink/mkdir/rmdir/rename/copyFile/readdir run on a background thread pool (default 4, UV_THREADPOOL_SIZE) and return a pending Promise the loop settles on completion, so other connections/timers keep running during the I/O (TDD-00185). The callback form (fs.readFile(path, cb), fired from a GC-safe settle reaction) and binary writeFile/appendFile of an ArrayBuffer/TypedArray run on the pool too (ADR-00820). The pool is POSIX-first; Windows keeps the inline path for now.",
         "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form.",
         "No `options`/`encoding` argument; no async `stat` (no sync `stat` exists either)."
       ],
@@ -335,7 +335,7 @@
       "snippet": "for await (const chunk of fs.createReadStream('demo.txt')) { /* ... */ }\nfs.createReadStream('a.txt').pipe(fs.createWriteStream('b.txt'))",
       "differences": [
         "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on.",
-        "`createReadStream` reads on a background thread pool (TDD-00186): the file opens synchronously (a missing file still throws), then each highWaterMark chunk is read off the loop thread and enqueued into the Readable in order, so the read no longer freezes the reactor. Consumer backpressure is not yet honored — the worker reads ahead and chunks queue in the readable (the same memory profile as before); true highWaterMark backpressure is a follow-on.",
+        "`createReadStream` reads on a background thread pool (TDD-00186): the file opens synchronously (a missing file still throws), then each highWaterMark chunk is read off the loop thread and enqueued into the Readable in order, so the read no longer freezes the reactor. Consumer backpressure is honored (ADR-00821) — the worker reads one chunk per demand, at most ~one outstanding, and a mid-read failure surfaces as a stream 'error' rather than a silent early EOF.",
         "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors."
       ],
       "seeAlso": [

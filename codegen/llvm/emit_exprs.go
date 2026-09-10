@@ -255,7 +255,15 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 		return Value{}, fmt.Errorf("invalid numeric literal %q", v)
 	}
 	if strings.ContainsRune(v, '.') {
-		return Value{Ref: v, Ty: TypeF64}, nil
+		// Normalize to the exact double bit-pattern rather than passing the
+		// source spelling through verbatim: a leading- or trailing-dot fraction
+		// (`.9`, `-.9`, `9.`) is valid JS but invalid as an LLVM double token,
+		// which requires a digit on both sides. llvmDoubleLit is bit-exact (LLVM
+		// and Go both round-to-nearest), so this changes no value.
+		if f, ferr := strconv.ParseFloat(v, 64); ferr == nil {
+			return Value{Ref: llvmDoubleLit(f), Ty: TypeF64}, nil
+		}
+		return Value{}, fmt.Errorf("invalid numeric literal %q", v)
 	}
 	// Decimal integer literal.
 	if n64, err := strconv.ParseInt(v, 10, 64); err == nil {

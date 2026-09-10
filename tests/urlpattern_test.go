@@ -58,7 +58,7 @@ if (g !== null) {
 const only = api.exec("https://api.example.com/v1/users")
 if (only !== null) {
   console.log(only.get("resource"))
-  console.log(only.get("id") === null)
+  console.log(only.get("id") === undefined)
 }
 `, "true\ntrue\nfalse\nfalse\nusers\n42\nusers\ntrue")
 }

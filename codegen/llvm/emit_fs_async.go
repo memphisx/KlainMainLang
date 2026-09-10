@@ -2,10 +2,15 @@
 // and the Promise form (fs.promises.readFile(path) / import from 'fs/promises').
 // TDD-00107.
 //
-// The underlying I/O is the existing *synchronous*, blocking runtime helper
-// (runtime_fs.go) run inline — this compiler has no thread pool, so V1 is
-// async-shaped, not truly non-blocking. Only delivery is async: the callback
-// fires right after the operation, and the Promise is returned already settled.
+// On POSIX both forms are genuinely non-blocking (TDD-00185): the op runs on
+// the blocking-work thread pool (threadpoolsrc/klainpool.c) and the loop settles
+// a pending Promise on completion. The Promise form returns that Promise; the
+// callback form attaches a settle reaction that fires the callback on the loop
+// thread (emitFsCallbackReaction) — the reaction node keeps the callback
+// GC-rooted while the op is in flight, and a binary ArrayBuffer/TypedArray body
+// is copied raw at submit so no GC pointer crosses the thread boundary. Windows
+// (no pool build yet) falls back to the inline path below: the *synchronous*,
+// blocking runtime helper (runtime_fs.go) run inline, async-shaped only.
 // A failure (the sync helper throws via @__kml_fs_throw) is caught with the same
 // setjmp/@__kml_get_thrown primitive emitTry uses and re-surfaced as the `err`
 // callback argument / a rejected Promise, so the async paths reuse every sync
@@ -14,6 +19,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -114,6 +120,26 @@ func (e *Emitter) emitFsAsyncCallback(op string, args []ast.Expression, pos ast.
 	if spec.dataArg {
 		hints = append(hints, spec.resultTy)
 	}
+
+	// Pooled path (TDD-00185): submit the op to the thread pool — returning a
+	// pending Promise — then fire the callback from a synthesized settle reaction
+	// on the loop thread. The op runs off-thread, so the callback form is
+	// genuinely non-blocking, reusing the promise-form submit and the GC-safe
+	// reaction machinery (the reaction node keeps the callback rooted). Falls
+	// back to the inline guarded path where the pool declines (Windows).
+	if promVal, pooled, perr := e.emitFsPromisePooled(op, opArgs, pos); perr != nil {
+		return Value{}, perr
+	} else if pooled {
+		cb, err := e.resolveCallbackWithHints(args[len(args)-1], hints)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := e.emitFsCallbackReaction(spec, cb, promVal.Ref); err != nil {
+			return Value{}, err
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
+
 	cb, err := e.resolveCallbackWithHints(args[len(args)-1], hints)
 	if err != nil {
 		return Value{}, err
@@ -178,13 +204,13 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 	}
 	spec := fsAsyncOps()[op]
 
-	// writeFile/appendFile of an ArrayBuffer/TypedArray keeps the inline path
-	// (its explicit-length write). Only plain-string data is pooled.
-	if op == "writeFile" || op == "appendFile" {
-		dataTy := e.inferExprType(args[1])
-		if dataTy.IsArrayBuffer || dataTy.IsTypedArray {
-			return Value{}, false, nil
-		}
+	// writeFile/appendFile of an ArrayBuffer/TypedArray pools onto the pool's
+	// explicit-length byte thunk (KML_OP_*FILE_BYTES): the buffer is copied raw
+	// at submit so a body with an embedded NUL writes out whole and no GC
+	// pointer crosses the thread boundary.
+	if (op == "writeFile" || op == "appendFile") &&
+		func() bool { dt := e.inferExprType(args[1]); return dt.IsArrayBuffer || dt.IsTypedArray }() {
+		return e.emitFsPromisePooledBytes(op, args, pos)
 	}
 
 	argRefs := []string{"null", "null"}
@@ -205,6 +231,203 @@ func (e *Emitter) emitFsPromisePooled(op string, args []ast.Expression, pos ast.
 	qt := PromiseOf(spec.resultTy)
 	qt.PromiseTask = true
 	return Value{Ref: q, Ty: qt}, true, nil
+}
+
+// Pool op ids for the binary-write thunks — must match the KML_OP_* enum in
+// threadpoolsrc/klainpool.c (after READSTREAM = 9).
+const (
+	fsPoolOpWriteFileBytes  = 10
+	fsPoolOpAppendFileBytes = 11
+)
+
+// emitFsPromisePooledBytes pools a binary writeFile/appendFile: it resolves the
+// ArrayBuffer/TypedArray body to (ptr, byteLen), allocates a pending Promise,
+// and submits __kml_pool_submit_write_bytes, which memcpy's the bytes into a
+// raw buffer the work item owns. The worker writes them off-thread via the
+// explicit-length runtime helper; the loop settles the Promise at drain.
+func (e *Emitter) emitFsPromisePooledBytes(op string, args []ast.Expression, pos ast.Pos) (Value, bool, error) {
+	pathVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, false, err
+	}
+	pathVal = e.coerce(pathVal, TypePtr)
+
+	dataTy := e.inferExprType(args[1])
+	var dataRef, lenRef string
+	if dataTy.IsArrayBuffer {
+		bufVal, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, false, err
+		}
+		lenVal, err := e.emitArrayBufferByteLength(bufVal)
+		if err != nil {
+			return Value{}, false, err
+		}
+		dataSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, bufVal.Ref))
+		dataReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataReg, dataSlot))
+		dataRef, lenRef = dataReg, lenVal.Ref
+	} else { // TypedArray
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[1], pos)
+		if err != nil {
+			return Value{}, false, err
+		}
+		byteLenVal, err := e.emitTypedArrayByteLength(lenReg, elemTy)
+		if err != nil {
+			return Value{}, false, err
+		}
+		dataRef, lenRef = ptrReg, byteLenVal.Ref
+	}
+
+	opid := fsPoolOpWriteFileBytes
+	if op == "appendFile" {
+		opid = fsPoolOpAppendFileBytes
+	}
+
+	e.ensurePromiseRuntime()
+	e.ensureThreadPool()
+	q := e.emitAllocSettledPromise() // pending (state 0); the pool settles it
+	e.emitInstr(fmt.Sprintf("call void @__kml_pool_submit_write_bytes(i32 %d, ptr %s, ptr %s, ptr %s, i64 %s)",
+		opid, q, pathVal.Ref, dataRef, lenRef))
+
+	qt := PromiseOf(TypeVoid)
+	qt.PromiseTask = true
+	return Value{Ref: q, Ty: qt}, true, nil
+}
+
+// emitFsCallbackReaction attaches a settle reaction to the pending pooled
+// Promise that fires the Node callback on the loop thread: env carries the
+// promise and the callback's closure header (so the reaction node keeps the
+// callback GC-rooted while the op is in flight), and a per-site runner invokes
+// the callback with (err) / (err, data) reconstructed from the settled words.
+func (e *Emitter) emitFsCallbackReaction(spec fsAsyncOp, cb Callback, promiseReg string) error {
+	e.fsCbCtr++
+	runner := fmt.Sprintf("@__kml_fs_cb_run_%d", e.fsCbCtr)
+	if err := e.emitFsCbRunner(runner, spec, cb.ty); err != nil {
+		return err
+	}
+	e.ensureMalloc()
+	// env = { ptr promise, ptr cbHdr }
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	e0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", promiseReg, e0))
+	e1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cb.hdrPtr, e1))
+	// closure = { runner, env }
+	clo := e.freshReg()
+	cfp := e.freshReg()
+	cep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, cfp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
+	e.emitAttachPromiseReaction(promiseReg, clo)
+	return nil
+}
+
+// emitFsCbRunner emits `void @<runner>(ptr %env)` (env = {promise, cbHdr}): on
+// the loop thread at settle time it reads the promise's state + result words and
+// invokes the callback via emitCBCall — which reconciles the (err)/(err, data)
+// arity and coerces to the callback's declared param types, exactly as the
+// inline form does. Built through a fresh IR-builder pair (the emit_chan.go
+// thunk idiom) so it composes with emitCBCall's normal instruction emission.
+func (e *Emitter) emitFsCbRunner(runner string, spec fsAsyncOp, cbTy Type) error {
+	savedAllocas := e.allocas
+	savedBody := e.body
+	savedRegCtr := e.regCtr
+	savedBlockDone := e.blockDone
+	e.allocas = strings.Builder{}
+	e.body = strings.Builder{}
+	e.regCtr = 0
+	e.blockDone = false
+
+	build := func() error {
+		pP := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", pP))
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, pP))
+		cbP := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", cbP))
+		cbh := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cbh, cbP))
+
+		res := e.loadPromiseWord(p, 0)
+		v0 := e.loadPromiseWord(p, 2)
+		v1 := e.loadPromiseWord(p, 3)
+
+		cbDesc := Callback{kind: cbClosure, hdrPtr: cbh, ty: cbTy}
+		fulL := e.freshLabel("fscb.ful")
+		rejL := e.freshLabel("fscb.rej")
+		isful := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isful, res))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isful, fulL, rejL))
+
+		e.emitLabel(fulL)
+		fulArgs := []Value{{Ref: "null", Ty: errorObjType}}
+		if spec.dataArg {
+			fulArgs = append(fulArgs, e.fsAsyncDataFromWords(spec.resultTy, v0, v1))
+		}
+		if _, err := e.emitCBCall(cbDesc, fulArgs); err != nil {
+			return err
+		}
+		e.emitTerminator("ret void")
+
+		e.emitLabel(rejL)
+		errp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errp, v0))
+		rejArgs := []Value{{Ref: errp, Ty: errorObjType}}
+		if spec.dataArg {
+			rejArgs = append(rejArgs, e.fsAsyncEmptyResult(spec.resultTy))
+		}
+		if _, err := e.emitCBCall(cbDesc, rejArgs); err != nil {
+			return err
+		}
+		e.emitTerminator("ret void")
+		return nil
+	}
+	buildErr := build()
+	if buildErr == nil {
+		e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env) {\nentry:\n", runner))
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.allocas = savedAllocas
+	e.body = savedBody
+	e.regCtr = savedRegCtr
+	e.blockDone = savedBlockDone
+	return buildErr
+}
+
+// loadPromiseWord loads one i64 field of a task-promise struct (0 = state,
+// 2 = v0, 3 = v1).
+func (e *Emitter) loadPromiseWord(p string, idx int) string {
+	gp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, promiseStructIR, p, idx))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, gp))
+	return r
+}
+
+// fsAsyncDataFromWords rebuilds a callback's data argument from the settled
+// result words: a bare pointer (readFile) or a {ptr,i64} array aggregate
+// (readdir), tagged with the op's result type for emitCBCall to coerce.
+func (e *Emitter) fsAsyncDataFromWords(ty Type, v0, v1 string) Value {
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, v0))
+	if ty.IsArray {
+		a0 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, p))
+		agg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", agg, a0, v1))
+		return Value{Ref: agg, Ty: ty}
+	}
+	return Value{Ref: p, Ty: ty}
 }
 
 // emitFsAsyncPromise implements the Promise form — fs.promises.<op>(...opArgs)

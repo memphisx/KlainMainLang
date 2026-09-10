@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 29/30 (~97%) · **Strict Coverage**: 16/30 (~53%).
+**Coverage**: 31/32 (~97%) · **Strict Coverage**: 17/32 (~53%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,12 +14,14 @@ Format: [Status page format](README.md#status-page-format).
 | `.length` | ✅ | • Byte length, not the JS UTF-16 code-unit count — `'café'.length` is `5` (Node: `4`). | |
 | `.slice(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it (`'café'.slice(0, 4)` cuts mid-`é`), diverging from Node on non-ASCII text. | |
 | `.substring(start, end?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text. | |
-| `.indexOf(substr)` | ✅ | • Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`). | |
-| `.includes(substr)` | ✅ | • Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text). | |
-| `.startsWith(prefix)` | ✅ | | |
-| `.endsWith(suffix)` | ✅ | | |
+| `.substr(start, length?)` | ✅ | • Byte offsets, not UTF-16 indices — a bound inside a multi-byte character splits it, unlike Node's code-unit indexing on non-ASCII text. | |
+| `.indexOf(substr, fromIndex?)` | ✅ | • Returns a byte offset, not a UTF-16 index — `'naïve'.indexOf('ve')` is `4` (Node: `3`). | |
+| `.lastIndexOf(substr, fromIndex?)` | ✅ | • Returns the LAST occurrence's byte offset (binary-safe, descending memcmp scan), not a UTF-16 index — like `.indexOf` on non-ASCII text ([ADR-00843](../adr/ADR-00843.md)) | |
+| `.includes(substr, position?)` | ✅ | • Binary-safe but byte-space — shares the byte-offset model of `indexOf`/`slice`, operating on bytes rather than UTF-16 code units (matters only on non-ASCII text). | |
+| `.startsWith(prefix, position?)` | ✅ | | |
+| `.endsWith(suffix, endPosition?)` | ✅ | | |
 | `.replace(from, to)` | ✅ | | • A function replacer is invoked with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/ADR-00697.md)); the literal-search `offset` is a byte position (identity with the UTF-16 code-unit index for BMP/ASCII text), and an empty search string with a function replacer returns the subject unchanged rather than inserting between positions |
-| `.split(sep)` | ✅ | | • Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
+| `.split(sep, limit?)` | ✅ | | • Empty separator splits into individual characters, matching JS ([ADR-00004](../adr/ADR-00004.md))<br>• The optional `limit` caps the result to the first `limit` segments (string or RegExp separator); a negative limit is no cap, as in JS ([ADR-00842](../adr/ADR-00842.md)) |
 | `.trim()` | ✅ | | • Strips the full JS WhiteSpace/LineTerminator set (U+00A0, U+1680, U+2000–200A, U+2028/29, U+202F, U+205F, U+3000, U+FEFF — UTF-8-aware `__kml_ws_span`), not just ASCII ([ADR-00295](../adr/ADR-00295.md)) |
 | `.trimStart()` / `.trimEnd()` | ✅ | | • Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/ADR-00295.md)) |
 | `.toString()` | ✅ | | • Identity on a string, matching JS — kept because Node code habitually calls it on values that are Buffers there but strings here (spawnSync results, stream chunks) |
@@ -29,7 +31,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/ADR-00004.md)) |
 | `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/ADR-00004.md)) |
 | `.charCodeAt(i)` | ✅ | | • Bounds-checked: an out-of-range index (negative or `>= length`) returns `NaN`, as real JS — the result is a double for exactly that reason ([ADR-00287](../adr/ADR-00287.md)); byte-space code units per this compiler's byte-sequence strings |
-| `.at(i)` | ✅ | • An out-of-range `i` returns `""` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data ([ADR-00166](../adr/ADR-00166.md)) | |
+| `.at(i)` | ✅ | | • Returns `string | undefined`: an out-of-range `i` (including a negative index past `-length`) is a real `undefined`, as in Node — narrow, `?? ''`, or `!` before use ([TDD-00187](../tdd/TDD-00187.md), [ADR-00830](../adr/ADR-00830.md)) |
 | `.charAt(i)` | ✅ | | • Never wraps a negative index from the end — always `""` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/ADR-00028.md)) |
 | `.codePointAt(i)` | ✅ | • This compiler's strings are plain byte sequences, not real UTF-16 — no surrogate-pair/multi-byte decoding, so this is exactly `.charCodeAt(i)`'s byte value under a second name; correct only for ASCII/Latin-1 text ([ADR-00028](../adr/ADR-00028.md))<br>• An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \| undefined` — narrow, `?? n`, or `!` before use ([ADR-00782](../adr/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md)); `.charCodeAt`'s out-of-range `NaN` is a separate, already-faithful behavior | |
 | `.normalize()` | ❌ | | • Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text |

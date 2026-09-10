@@ -60,7 +60,13 @@ func (e *Emitter) ensureThreadPool() {
 	// only when the pool is unused). The submit entry is called from the
 	// lowering (emit_fs_async.go); the loop hooks from the reactor.
 	e.emitGlobal("declare void @__kml_pool_submit(i32 noundef, ptr noundef, ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @__kml_pool_submit_readstream(ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare void @__kml_pool_submit_write_bytes(i32 noundef, ptr noundef, ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare ptr @__kml_pool_stream_ctl_new(ptr noundef, ptr noundef, i64 noundef)")
+	e.emitGlobal("declare void @__kml_pool_submit_readstream(ptr noundef)")
+	// Field-9/10 pull/cancel closures for the backpressured read stream (their
+	// env is a C control block); referenced by name from the createReadStream site.
+	e.emitGlobal("declare ptr @__kml_pool_stream_pull(ptr noundef)")
+	e.emitGlobal("declare ptr @__kml_pool_stream_cancel(ptr noundef)")
 	e.emitGlobal("declare i1 @__kml_pool_keepalive()")
 	e.emitGlobal("declare i1 @__kml_pool_fdset_add(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare void @__kml_pool_dispatch()")
@@ -81,6 +87,28 @@ entry:
   %ig = call i64 @__kml_rs_close(ptr %rs)
   ret void
 }`)
+
+	// TDD-00186 STREAM_ERROR drain: a mid-read failure errors the readable so a
+	// consumer's 'error'/for-await sees it, rather than a silent early EOF. The
+	// worker can't allocate a JS Error off-thread, so it posts the errno and the
+	// loop builds the `{kind,msg,name}` error object here (the reqbody shape) and
+	// calls __kml_rs_error. The errno is not yet mapped to a specific message.
+	streamErrMsg := e.internString("fs read stream failed")
+	streamErrName := e.internString("Error")
+	e.emitGlobal(fmt.Sprintf(`
+define void @__kml_pool_stream_error(ptr %%rs, i64 %%errno) {
+entry:
+  %%eo = call ptr @malloc(i64 24)
+  %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
+  store i64 0, ptr %%eo_kind, align 8
+  %%eo_msg = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 1
+  store ptr %s, ptr %%eo_msg, align 8
+  %%eo_name = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 2
+  store ptr %s, ptr %%eo_name, align 8
+  %%bits = ptrtoint ptr %%eo to i64
+  call void @__kml_rs_error(ptr %%rs, i64 %%bits)
+  ret void
+}`, streamErrMsg, streamErrName))
 
 	// One thunk per pooled fs op. Each runs the existing *throwing* sync helper
 	// under a per-worker setjmp guard (the jmpbuf stack is thread-local, so each
@@ -122,6 +150,9 @@ type poolThunkSpec struct {
 	argc    int
 	ensures []func(*Emitter)
 	tryBody string
+	// params overrides the derived "ptr %a0[, ptr %a1]" parameter list when a
+	// thunk needs a non-pointer argument (the binary writes take an i64 length).
+	params string
 }
 
 // zeroWords sets both result words to 0 — the shape every void op returns
@@ -130,29 +161,37 @@ const zeroWords = "  %v0 = add i64 0, 0\n  %v1 = add i64 0, 0"
 
 var poolThunks = []poolThunkSpec{
 	{"readfile", 1, []func(*Emitter){(*Emitter).ensureFsReadFile},
-		"  %res = call ptr @__kml_fs_read_file(ptr %a0)\n  %v0 = ptrtoint ptr %res to i64\n  %v1 = add i64 0, 0"},
+		"  %res = call ptr @__kml_fs_read_file(ptr %a0)\n  %v0 = ptrtoint ptr %res to i64\n  %v1 = add i64 0, 0", ""},
 	{"writefile", 2, []func(*Emitter){(*Emitter).ensureFsWriteFile},
-		"  call void @__kml_fs_write_file(ptr %a0, ptr %a1)\n" + zeroWords},
+		"  call void @__kml_fs_write_file(ptr %a0, ptr %a1)\n" + zeroWords, ""},
 	{"appendfile", 2, []func(*Emitter){(*Emitter).ensureFsAppendFile},
-		"  call void @__kml_fs_append_file(ptr %a0, ptr %a1)\n" + zeroWords},
+		"  call void @__kml_fs_append_file(ptr %a0, ptr %a1)\n" + zeroWords, ""},
 	{"unlink", 1, []func(*Emitter){(*Emitter).ensureFsUnlink},
-		"  call void @__kml_fs_unlink(ptr %a0)\n" + zeroWords},
+		"  call void @__kml_fs_unlink(ptr %a0)\n" + zeroWords, ""},
 	{"mkdir", 1, []func(*Emitter){(*Emitter).ensureFsMkdir},
-		"  call void @__kml_fs_mkdir(ptr %a0)\n" + zeroWords},
+		"  call void @__kml_fs_mkdir(ptr %a0)\n" + zeroWords, ""},
 	{"rmdir", 1, []func(*Emitter){(*Emitter).ensureFsRmdir},
-		"  call void @__kml_fs_rmdir(ptr %a0)\n" + zeroWords},
+		"  call void @__kml_fs_rmdir(ptr %a0)\n" + zeroWords, ""},
 	{"rename", 2, []func(*Emitter){(*Emitter).ensureFsRename},
-		"  call void @__kml_fs_rename(ptr %a0, ptr %a1)\n" + zeroWords},
+		"  call void @__kml_fs_rename(ptr %a0, ptr %a1)\n" + zeroWords, ""},
 	{"copyfile", 2, []func(*Emitter){(*Emitter).ensureFsReadFileRaw, (*Emitter).ensureFsWriteFileBytes},
 		"  %raw = call { ptr, i64 } @__kml_fs_read_file_raw(ptr %a0)\n" +
 			"  %buf = extractvalue { ptr, i64 } %raw, 0\n" +
 			"  %len = extractvalue { ptr, i64 } %raw, 1\n" +
-			"  call void @__kml_fs_write_file_bytes(ptr %a1, ptr %buf, i64 %len)\n" + zeroWords},
+			"  call void @__kml_fs_write_file_bytes(ptr %a1, ptr %buf, i64 %len)\n" + zeroWords, ""},
 	{"readdir", 1, []func(*Emitter){(*Emitter).ensureFsReaddir},
 		"  %arr = call { ptr, i64 } @__kml_fs_readdir(ptr %a0, i1 false)\n" +
 			"  %p = extractvalue { ptr, i64 } %arr, 0\n" +
 			"  %v0 = ptrtoint ptr %p to i64\n" +
-			"  %v1 = extractvalue { ptr, i64 } %arr, 1"},
+			"  %v1 = extractvalue { ptr, i64 } %arr, 1", ""},
+	// Binary writes take (path, data, len) — an explicit i64 length, so they
+	// override the derived ptr-only parameter list.
+	{"writefile_bytes", 0, []func(*Emitter){(*Emitter).ensureFsWriteFileBytes},
+		"  call void @__kml_fs_write_file_bytes(ptr %a0, ptr %a1, i64 %a2)\n" + zeroWords,
+		"ptr %a0, ptr %a1, i64 %a2"},
+	{"appendfile_bytes", 0, []func(*Emitter){(*Emitter).ensureFsAppendFileBytes},
+		"  call void @__kml_fs_append_file_bytes(ptr %a0, ptr %a1, i64 %a2)\n" + zeroWords,
+		"ptr %a0, ptr %a1, i64 %a2"},
 }
 
 // buildPoolThunk composes the full thunk for one op: the shared setjmp-guard
@@ -162,9 +201,12 @@ var poolThunks = []poolThunkSpec{
 // differently by hand-written IR and by Clang's C ABI (the >16-byte sret rule),
 // and the out-pointer sidesteps that mismatch entirely.
 func (e *Emitter) buildPoolThunk(op poolThunkSpec) string {
-	params := "ptr %a0"
-	if op.argc == 2 {
-		params = "ptr %a0, ptr %a1"
+	params := op.params
+	if params == "" {
+		params = "ptr %a0"
+		if op.argc == 2 {
+			params = "ptr %a0, ptr %a1"
+		}
 	}
 	return fmt.Sprintf(`
 define void @__kml_pool_thunk_%s(%s, ptr %%out) {

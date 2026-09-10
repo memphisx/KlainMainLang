@@ -551,6 +551,76 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("@__kml_conn_cap = internal thread_local global i64 0, align 8")
 	e.emitGlobal("@__kml_current_conn_idx = internal thread_local global i64 -1, align 8")
 	e.emitGlobal("@__kml_conn_active = internal thread_local global i64 0, align 8")
+	// TDD-00197: the primary server's `'close'` event + deferred `close(cb)`.
+	// __kml_http_close() clears the listener immediately but lets in-flight
+	// connections drain; the real 'close' moment is when both the listener is
+	// gone and the last connection has finished. These hold the registered
+	// handlers and a "close requested, not yet fired" flag; the reactor calls
+	// __kml_http_fire_close() each iteration, which fires exactly once at drain.
+	e.emitGlobal("@__kml_http_close_cb = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_http_close_evt = internal thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_http_close_pending = internal thread_local global i64 0, align 8")
+}
+
+// ensureHTTPFireClose declares __kml_http_fire_close(): called once per reactor
+// iteration, it fires the primary server's `'close'` event handler and the
+// deferred `server.close(cb)` callback — but only once the listener is gone
+// (`@__kml_listen_fd < 0`) AND every in-flight connection has drained
+// (`@__kml_conn_active == 0`) AND a close was actually requested
+// (`@__kml_http_close_pending != 0`). It clears the pending flag and both
+// handler slots before invoking them, so it never re-fires and a handler that
+// itself re-enters the reactor sees a clean slate. Each handler is a
+// zero-argument closure `{ fn, env }` invoked as `fn(env)`. Declared
+// unconditionally from ensureHTTPRuntime (the guard is three cheap loads per
+// idle iteration when no close was requested), so no whole-program pre-scan is
+// needed to decide whether the reactor references it.
+func (e *Emitter) ensureHTTPFireClose() {
+	if e.usedHTTPFireClose {
+		return
+	}
+	e.usedHTTPFireClose = true
+	e.emitGlobal(`
+define void @__kml_http_fire_close() {
+entry:
+  %pend = load i64, ptr @__kml_http_close_pending, align 8
+  %requested = icmp ne i64 %pend, 0
+  br i1 %requested, label %chkdrain, label %done
+chkdrain:
+  %lfd = load i32, ptr @__kml_listen_fd, align 4
+  %gone = icmp slt i32 %lfd, 0
+  %active = load i64, ptr @__kml_conn_active, align 8
+  %drained = icmp eq i64 %active, 0
+  %ready = and i1 %gone, %drained
+  br i1 %ready, label %fire, label %done
+fire:
+  ; Clear state up front so a handler re-entering the reactor can't re-fire.
+  store i64 0, ptr @__kml_http_close_pending, align 8
+  %evt = load ptr, ptr @__kml_http_close_evt, align 8
+  %cb = load ptr, ptr @__kml_http_close_cb, align 8
+  store ptr null, ptr @__kml_http_close_evt, align 8
+  store ptr null, ptr @__kml_http_close_cb, align 8
+  ; 'close' event listener first (registration order: .on('close') before the
+  ; close(cb) one-shot, the common shape), then the close(cb) callback.
+  %hasevt = icmp ne ptr %evt, null
+  br i1 %hasevt, label %fireevt, label %chkcb
+fireevt:
+  %efn = load ptr, ptr %evt, align 8
+  %eenvp = getelementptr { ptr, ptr }, ptr %evt, i32 0, i32 1
+  %eenv = load ptr, ptr %eenvp, align 8
+  call void %efn(ptr %eenv)
+  br label %chkcb
+chkcb:
+  %hascb = icmp ne ptr %cb, null
+  br i1 %hascb, label %firecb, label %done
+firecb:
+  %cfn = load ptr, ptr %cb, align 8
+  %cenvp = getelementptr { ptr, ptr }, ptr %cb, i32 0, i32 1
+  %cenv = load ptr, ptr %cenvp, align 8
+  call void %cfn(ptr %cenv)
+  br label %done
+done:
+  ret void
+}`)
 }
 
 // ensureHTTPClusterFork declares __kml_http_cluster_fork(i64 numWorkers) and
@@ -807,6 +877,7 @@ define void @__kml_reactor_thread_lock() {
 	e.ensureForkDecl()
 
 	e.ensureListenFdGlobal()
+	e.ensureHTTPFireClose() // the loop calls __kml_http_fire_close() each iteration
 	e.emitGlobal("@__kml_listen_dispatch = internal thread_local global ptr null, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal thread_local global ptr null, align 8")
 	// @__kml_listen_ws_handler (TDD-00039 Stage 1): the optional `ws`
@@ -823,6 +894,12 @@ define void @__kml_reactor_thread_lock() {
 	// (gated at codegen time on e.usedHTTPUpgrade) reads it and, when non-null
 	// on an `Upgrade:` request, builds (req, socket, head) and calls it.
 	e.emitGlobal("@__kml_listen_upgrade_handler = internal thread_local global ptr null, align 8")
+	// @__kml_listen_connection_handler (TDD-00198): the `'connection'` event
+	// handler closure from `server.on('connection', …)`, null when none. The
+	// dispatcher fires it once per connection at fiber entry (a cheap null-check,
+	// so declared + read unconditionally — no pre-scan), handing it a net.Socket
+	// over the accepted fd before HTTP parsing begins.
+	e.emitGlobal("@__kml_listen_connection_handler = internal thread_local global ptr null, align 8")
 
 	solSocket, soReuseAddr := httpSockConstants()
 	fam0, fam1 := httpSockaddrFamilyBytes()
@@ -1833,6 +1910,12 @@ ccdone:
   ; alone, so this doesn't reopen accepting new connections.
   %activeconns = load i64, ptr @__kml_conn_active, align 8
   %hasactiveconns = icmp sgt i64 %activeconns, 0
+  ; TDD-00197: fire the primary server's 'close' event + deferred close(cb) the
+  ; moment the listener is gone and the last connection has drained (the helper
+  ; self-checks @__kml_http_close_pending + listen_fd + conn_active, fires once).
+  ; Placed here (after draining is computed, before the keep-alive/exit decision)
+  ; so a close handler's own newly-scheduled work is still seen this iteration.
+  call void @__kml_http_fire_close()
   ; TDD-00038 Stage 0: an open (not yet closed) EventSource must also keep
   ; the loop running, the same "don't exit out from under still-live work"
   ; reasoning hasactiveconns already established for an in-flight

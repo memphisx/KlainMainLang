@@ -63,7 +63,7 @@ console.log(len(new Array<number>(5)));  // 5
 // --- new Map/Set/EventEmitter as a call argument or return value ---
 
 function firstValue(m: Map<string, number>): number {
-  return m.get("a");
+  return m.get("a") ?? 0;   // Map.get is `number | undefined` — default the miss
 }
 const built = new Map<string, number>();
 built.set("a", 42);

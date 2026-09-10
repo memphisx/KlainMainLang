@@ -13,10 +13,10 @@ The honest, itemized answer lives in **[`docs/status/README.md`](docs/status/REA
 Broad strokes:
 
 - **The language itself is basically all there.** Classes, generics, closures, `async`/`await`, the whole type-system circus (unions, generics with constraints, mapped and conditional types) — if it's core TypeScript, it probably compiles. Even the once-hard dynamic corners are in now: `Proxy`/`Reflect`, a real prototype-chain object model, and decorators (both the experimental and standard dialects, including factory `@dec(...)` calls — class-decorator *replacement* is the corner still open). The main holdout left is `eval`.
-- **You can write a real server.** Both the bespoke `http.listen` and a real `http.createServer` speak HTTP/1.1 and HTTP/2 (h2c) out of the same port, `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
+- **You can write a real server.** Both the bespoke `http.listen` and a real `http.createServer` speak HTTP/1.1 and HTTP/2 (h2c) out of the same port, and you can run **multiple concurrent servers** in one process (plain, HTTPS, h2c, h2-over-TLS — each with its own `close()`/relisten and WebSocket/upgrade), `fs` reads and writes, `worker_threads` and `cluster` give you actual OS threads and processes, and there's TLS on both ends. The networking stack — `net`, `dns`, `dgram`, `tls`, `http2` — is in. `vm` is the notable no.
 - **The browser-shaped APIs that make sense off the browser all work.** `fetch`, `URL`, `WebSocket`, Web Crypto, Streams, `AbortController`, timers. The actually-browser-only stuff (DOM, Canvas, WebGL) is out, on purpose.
 - **You can ship a desktop app, too.** `import { Webview } from 'klain:webview'` opens a real window over the system browser engine and calls straight into typed native code; `new Webview({ serve: './dist' })` embeds a built SPA/SSG (React/Vue/Svelte/Quasar) into the binary and serves it from an in-binary server — a single-file desktop app, packaged to a `.app`/`.desktop`/GUI `.exe` with `-package`. macOS- and Windows-verified; Linux is compile-tier.
-- **You can cross-compile to a phone.** `--target sfos-aarch64 --sysroot …` builds a CLI app for **Sailfish OS** (glibc Linux; aarch64 devices) and `-package=rpm:harbour` wraps it as an installable Harbour RPM (non-allowlisted libs like `pcre2` bundled automatically) — verified running on a real Xperia 10 II. CLI-only for now; a native webview/GUI backend is planned. See "Cross-compiling for Sailfish OS" below.
+- **You can cross-compile to a phone.** `--target sfos-aarch64 --sysroot …` builds a CLI app for **Sailfish OS** (glibc Linux; aarch64 devices) and `-package=rpm:harbour` wraps it as an installable Harbour RPM (non-allowlisted libs like `pcre2` bundled automatically) — verified running on a real Xperia 10 II. A native `klain:webview` GUI backend also works here: `-webview=sailfish` cross-builds a Gecko/embedlite-backed window (over the device's `RawWebView`) that renders, round-trips `bind` calls page→native, and drives klain timers/microtasks from a native pump — verified on-device on the same Xperia 10 II. See "Cross-compiling for Sailfish OS" below.
 - **It fuzzes itself.** The lexer, the parser, and the whole parse-to-binary pipeline all have fuzz targets (`make fuzz` / `fuzz-codegen` / `fuzz-all`) — the codegen one drives real source all the way through `clang` and runs the result.
 - **What'll bite you.** A bare `: number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, just like JS) — reach for a JSDoc `int8…uint64` width when you mean exact machine integers. Concurrency is cooperative (one fiber at a time per thread, no preemption). The object model is two-tier: a statically-typed object is a fixed-shape struct (you can't bolt a new property onto it at runtime), while an `any`-typed value — or anything under `-compat=js` — gets the full dynamic bag (runtime property add/delete, prototype chain, `Proxy`). All deliberate. `docs/status/` has the honest corner-cases for everything above.
 
@@ -164,10 +164,12 @@ klainmain [flags] <file.ts>
   
   -webview <b>  klain:webview engine backend, selected only when a program
                 opens a webview window: system (default — the per-platform
-                system engine: WebKitGTK/WKWebView/WebView2) or cef / qt /
-                sailfish (opt-in Chromium/Gecko backends, not yet built —
-                selecting one rejects cleanly). The bind/eval/serve contract
-                is identical across backends. See docs/tdd/TDD-00144.md.
+                system engine: WebKitGTK/WKWebView/WebView2), sailfish (a
+                Gecko/embedlite backend for cross-compiled Sailfish OS
+                builds — see "Cross-compiling for Sailfish OS"), or cef / qt
+                (opt-in Chromium/Qt backends, not yet built — selecting one
+                rejects cleanly). The bind/eval/serve contract is identical
+                across backends. See docs/tdd/TDD-00144.md.
   
   -compat <m>   Compatibility mode (see docs/tdd/TDD-00075.md): strict
                 (default — the compiler's opinionated, safer-than-JS
@@ -178,6 +180,21 @@ klainmain [flags] <file.ts>
   
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
+
+  -dynamic-import <m>
+                import() lowering: eager (default — the target module is
+                resolved and linked at compile time, the returned promise
+                resolves to it) or lazy.
+
+  -decorators <d>
+                Decorator dialect: experimental (default — the legacy
+                TypeScript/reflect-metadata semantics) or standard (the
+                TC39 Stage-3 dialect).
+
+  -emit-decorator-metadata
+                Under -decorators=experimental, emit design:type/paramtypes/
+                returntype metadata for decorated declarations (DI-style
+                reflection).
 
   -optimize-memory
                 Allocation optimizations with no semantic change:

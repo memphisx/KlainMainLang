@@ -139,7 +139,9 @@ console.log(m.get('c'))
 }
 
 // Bug #3 (TDD-00064): a scalar-valued Map's get() distinguishes a missing key
-// (null) from a present value of 0 — it used to return a bare 0 for both.
+// from a present value of 0 — it used to return a bare 0 for both. A miss is a
+// real `undefined` (not `null`), so `=== undefined` is true and `=== null` is
+// false, exactly as in Node (ADR-00833).
 func TestE2EMapGetScalarMissingVsZero(t *testing.T) {
 	assertOutput(t, `
 const m = new Map<string, number>()
@@ -149,9 +151,10 @@ console.log(m.get('a'))
 console.log(m.get('missing'))
 console.log(m.get('a') ?? 99)
 console.log(m.get('missing') ?? 99)
+console.log(m.get('missing') === undefined)
 console.log(m.get('missing') === null)
 console.log(m.get('a') === null)
-`, "0\nnull\n0\n99\ntrue\nfalse")
+`, "0\nundefined\n0\n99\ntrue\nfalse\nfalse")
 }
 
 // --- new Map(entries) — the [K, V][] initial-entries constructor overload ---
@@ -234,6 +237,21 @@ console.log(wm.has(a))
 wm.delete(a)
 console.log(wm.has(a))
 `, "alpha\nbeta\nfalse\ntrue\nfalse")
+}
+
+// A scalar-valued WeakMap's get() miss is a real `undefined` (distinguished from
+// a stored 0), `=== undefined` true / `=== null` false, as in Node (ADR-00833).
+func TestE2EWeakMapGetScalarMiss(t *testing.T) {
+	assertOutput(t, `
+class N { id: number; constructor(id: number) { this.id = id } }
+const a = new N(1)
+const wm = new WeakMap<N, number>()
+wm.set(a, 0)
+console.log(wm.get(a))
+console.log(wm.get(new N(2)))
+console.log(wm.get(new N(3)) === undefined)
+console.log(wm.get(new N(4)) === null)
+`, "0\nundefined\ntrue\nfalse")
 }
 
 func TestE2EWeakSetBasic(t *testing.T) {
@@ -577,8 +595,8 @@ interface Container {
 const m = new Map<string, string>()
 m.set('a', 'present')
 const c: Container = { scores: m }
-const found: string = c.scores.has('a') ? c.scores.get('a') : 'missing'
-const notFound: string = c.scores.has('z') ? c.scores.get('z') : 'missing'
+const found: string = c.scores.has('a') ? c.scores.get('a')! : 'missing'
+const notFound: string = c.scores.has('z') ? c.scores.get('z')! : 'missing'
 console.log(found)
 console.log(notFound)
 `, "present\nmissing")

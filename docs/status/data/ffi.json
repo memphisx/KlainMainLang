@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. POSIX only for now (`dlopen`/`dlsym`; no Windows `LoadLibrary` shim yet). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. POSIX only for now (`dlopen`/`dlsym`; no Windows `LoadLibrary` shim yet). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
     },
     {
       "kind": "coverage",
@@ -61,7 +61,7 @@
             "status": "implemented",
             "caveats": [
               "`int64`/`uint64` parameters also accept a plain `number` (Node requires `bigint`); `bool` marshals as 0/1 numbers, matching Node",
-              "`function`-typed values can be passed through as raw `bigint` addresses, but there is no way to create one from a closure until `registerCallback` ships"
+              "A `function`-typed value can be passed through as a raw `bigint` address; to hand C a callable made from a closure, use `library.registerCallback([sig,] cb)` (its own row below), which emits a real C-ABI function pointer"
             ]
           },
           {

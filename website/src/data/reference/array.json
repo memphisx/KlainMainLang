@@ -4,9 +4,9 @@
   "kind": "language",
   "statusPage": "ARRAY-METHODS.md",
   "coverage": {
-    "loose": "36/36",
+    "loose": "37/37",
     "loosePct": 100,
-    "strict": "20/36",
+    "strict": "20/37",
     "strictPct": 56
   },
   "lede": "Every Array method is present. The recurring caveats are structural, not per-method: a length change (push/pop/splice) inside a callee is now visible to the caller when the array is passed as a plain variable (arrays are reference values), though passing an object-field or array-element array still copies; and the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
@@ -220,10 +220,11 @@
     },
     {
       "id": "array.indexOf",
-      "name": ".indexOf(item)",
-      "signature": "indexOf(item: T): number",
+      "name": ".indexOf(item, fromIndex?)",
+      "statusRow": "`.indexOf(item, fromIndex?)`",
+      "signature": "indexOf(item: T, fromIndex?: number): number",
       "badge": "caveats",
-      "description": "Returns the index of the first matching element, or -1.",
+      "description": "Returns the index of the first matching element at or after the optional fromIndex (negative counts from the end), or -1.",
       "returns": {
         "type": "number",
         "desc": "First match index, or -1."

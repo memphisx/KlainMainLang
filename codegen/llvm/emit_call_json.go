@@ -377,6 +377,15 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 	}
 	acc := Value{Ref: e.jsonSeed("{"), Ty: TypePtr}
 	fields := val.Ty.VisibleFields()
+	// An object with any `T | undefined` (optional) field needs the runtime path:
+	// a field that is `undefined` at runtime has its key DROPPED (real JS), which
+	// makes comma placement a runtime decision. Objects without such fields keep
+	// the byte-identical static-comma path below.
+	for _, f := range fields {
+		if jsonFieldSkippable(f.Ty) {
+			return e.emitJSONStringifyObjectOptional(val, fields, acc, ind)
+		}
+	}
 	for i, field := range fields {
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		// Load the field value via GEP.
@@ -415,6 +424,122 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		}
 	}
 	return e.jsonAppend(acc, ind.closeBracket("}", len(fields)))
+}
+
+// jsonFieldSkippable reports whether a field's value can be `undefined` at
+// runtime (an optional `x?: T` field, `T | undefined`) — in which case JSON
+// serialization DROPS the key, unlike a `T | null` field (serialized as `null`).
+func jsonFieldSkippable(ty Type) bool {
+	return ty.Nullable && ty.IsUndefined
+}
+
+// emitJSONStringifyObjectOptional serializes an object with at least one
+// `T | undefined` field: an absent such field has its key dropped (real JS), so
+// commas/newlines are placed against a runtime "have we emitted a field yet"
+// flag rather than the static field index. `acc` is already seeded with "{".
+func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc Value, ind jsonIndent) (Value, error) {
+	firstPrefix, subseqPrefix := "", ","
+	if ind.pretty() {
+		firstPrefix = "\n" + ind.childPad()
+		subseqPrefix = ",\n" + ind.childPad()
+	}
+	firstRef := e.internString(firstPrefix)
+	subseqRef := e.internString(subseqPrefix)
+
+	emittedA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", emittedA))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", emittedA))
+	accA := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accA))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", acc.Ref, accA))
+
+	// emitOne appends `<prefix><"key":><valueJSON>` and marks emitted; the prefix
+	// (comma/newline) is chosen at runtime from emittedA.
+	emitOne := func(field Field, valueJSON Value) error {
+		emitted := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", emitted, emittedA))
+		pfx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", pfx, emitted, subseqRef, firstRef))
+		curAcc := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curAcc, accA))
+		a1, err := e.jsonConcatFree(Value{Ref: curAcc, Ty: TypePtr}, Value{Ref: pfx, Ty: TypePtr}, true, false)
+		if err != nil {
+			return err
+		}
+		a2, err := e.jsonAppend(a1, `"`+field.Name+`"`+ind.colon())
+		if err != nil {
+			return err
+		}
+		a3, err := e.jsonConcatFree(a2, valueJSON, true, true)
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", a3.Ref, accA))
+		e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", emittedA))
+		return nil
+	}
+
+	for _, field := range fields {
+		idx, _, _ := val.Ty.FieldIndex(field.Name)
+		gepReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, idx))
+		loadReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+		fieldVal := Value{Ref: loadReg, Ty: field.Ty}
+
+		if !jsonFieldSkippable(field.Ty) {
+			jsonVal, err := e.emitJSONStringifyValue(fieldVal, ind.child())
+			if err != nil {
+				return Value{}, err
+			}
+			if err := emitOne(field, jsonVal); err != nil {
+				return Value{}, err
+			}
+			continue
+		}
+
+		// Skippable `T | undefined`: emit only when present. Present bit is the
+		// nullable-scalar aggregate's flag, or a non-null pointer.
+		var present string
+		var baseVal Value
+		if isNullableScalar(field.Ty) {
+			p, payload := e.nullableScalarAggParts(fieldVal)
+			present, baseVal = p, payload
+		} else {
+			present = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, fieldVal.Ref))
+			bt := field.Ty
+			bt.Nullable, bt.IsUndefined, bt.IsNull = false, false, false
+			baseVal = Value{Ref: fieldVal.Ref, Ty: bt}
+		}
+		doL := e.freshLabel("json.opt.emit")
+		contL := e.freshLabel("json.opt.cont")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, doL, contL))
+		e.emitLabel(doL)
+		jsonVal, err := e.emitJSONStringifyValue(baseVal, ind.child())
+		if err != nil {
+			return Value{}, err
+		}
+		if err := emitOne(field, jsonVal); err != nil {
+			return Value{}, err
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+		e.emitLabel(contL)
+	}
+
+	// Close: compact always "}"; pretty puts a non-empty object's "}" on its own
+	// line at the parent indent, an all-absent (empty) object stays "{}".
+	finalAcc := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", finalAcc, accA))
+	out := Value{Ref: finalAcc, Ty: TypePtr}
+	if !ind.pretty() {
+		return e.jsonAppend(out, "}")
+	}
+	emitted := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", emitted, emittedA))
+	closeRef := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeRef, emitted, e.internString("\n"+ind.pad()+"}"), e.internString("}")))
+	return e.jsonConcatFree(out, Value{Ref: closeRef, Ty: TypePtr}, true, false)
 }
 
 // isSettlementType reports whether ty is a Promise.allSettled() settlement

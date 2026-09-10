@@ -118,3 +118,45 @@ const obj = { name: "Al", city: "NYC" }
 for (const [key, val] of Object.entries(obj)) { console.log(key + "->" + val) }
 `, "a=1\nb=2\n0:10\n1:20\n2:30\nname->Al\ncity->NYC")
 }
+
+// Destructured callback parameters (`arr.map(([k, v]) => …)`, TDD-00199) —
+// the dominant Object.entries/Map-entries/pair-array idiom. Covers the
+// un-annotated form (type supplied by contextual typing from the HOF element
+// type), the explicitly-annotated heterogeneous tuple form, string- and
+// number-returning bodies, holes, nested patterns, and filter/reduce/some.
+func TestE2EDestructuredCallbackParam(t *testing.T) {
+	assertOutput(t, `
+const o = { a: 1, b: 2, c: 3 }
+console.log(Object.entries(o).map(([k, v]) => k + "=" + v).join(","))
+console.log(Object.entries(o).map(([k, v]) => v * 2).join(","))
+
+const pairs: [string, number][] = [["x", 10], ["y", 20]]
+console.log(pairs.map(([k, v]) => k).join(","))
+console.log(pairs.filter(([k, v]) => v > 10).map(([k, v]) => k).join(","))
+console.log(pairs.reduce((acc, [k, v]) => acc + v, 0))
+console.log(pairs.some(([k, v]) => v > 15))
+
+let sum = 0
+pairs.forEach(([, v]) => { sum += v })
+console.log(sum)
+
+const m = new Map<string, number>()
+m.set("p", 1)
+m.set("q", 2)
+console.log([...m.entries()].map(([k, v]) => k + ":" + v).join(","))
+
+const nested: [[number, number], number][] = [[[1, 2], 3]]
+console.log(nested.map(([[x, y], z]) => x + y + z).join(","))
+
+const three: [string, number, boolean][] = [["a", 1, true]]
+console.log(three.map(([s, n, b]) => s + n + b).join(","))
+
+// Assigned to a variable: the HOF result's element type must flow from the
+// callback's destructured-leaf return type (not default to a number) so the
+// assigned variable renders correctly — a bug the inline forms above hid.
+const keys = Object.entries(o).map(([k, v]) => k)
+console.log(keys.join(","))
+const bigKeys = Object.entries(o).filter(([k, v]) => v >= 2).map(([k, v]) => k)
+console.log(bigKeys.join(","))
+`, "a=1,b=2,c=3\n2,4,6\nx,y\ny\n30\ntrue\n30\np:1,q:2\n6\na1true\na,b,c\nb,c")
+}

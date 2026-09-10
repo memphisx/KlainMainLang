@@ -1597,9 +1597,11 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 					return nil, err
 				}
 			}
-			if pty == nil {
-				return nil, fmt.Errorf("%d:%d: a destructured parameter requires an explicit type annotation", p.peek().Line, p.peek().Col)
-			}
+			// A missing annotation is allowed here: an un-annotated
+			// destructured arrow parameter (`([k, v]) => ...`) has its type
+			// supplied by contextual typing from the HOF call site — the
+			// element type flows through the `hints []Type` channel into
+			// emitArrowFunctionWithHints, which fills p.Type == nil params.
 			if p.check(lexer.ASSIGN) {
 				return nil, fmt.Errorf("%d:%d: a default value on a destructured parameter is not yet supported", p.peek().Line, p.peek().Col)
 			}
@@ -1671,36 +1673,69 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 
 // destructuredArrowParamLookahead reports whether the LPAREN at the
 // current position begins an arrow function whose first parameter is a
-// destructuring pattern (`({x, y}: T) => ...` / `([a, b]: T[]) => ...`) —
-// distinguished from a parenthesized object/array literal expression
-// (`({a: 1})`, `([1, 2])`), which starts identically, by this compiler's
-// own requirement that a destructured parameter always carries an explicit
-// type annotation (see parseArrowFunction's pattern branch): scans forward
-// to the matching close brace/bracket (tracking nesting depth, even though
-// V1 patterns are themselves always flat — a cheap, robust check either
-// way) and looks for a ':' immediately after it. Assumes p.peek() is
-// LPAREN and peekNth(1) is LBRACE or LBRACKET. Pre-lexed token buffer
-// (parser.go's peekNth) makes unbounded-distance lookahead cheap — no
-// re-lexing, just array indexing.
+// destructuring pattern (`([a, b]) => ...`, `({x, y}: T) => ...`,
+// `([a, b]: T[]) => ...`) — distinguished from a parenthesized object/array
+// literal expression (`({a: 1})`, `([1, 2])`), which starts identically.
+// The distinguishing signal is what follows the parameter list: an arrow
+// (optionally past a `: returnType`). Scans to the RPAREN that closes the
+// parameter list, tracking paren depth (nested parens in a type annotation
+// or a `() => T` sub-type balance out, so paren depth alone is robust — the
+// pattern brackets/braces never affect it), then checks the following token.
+// Assumes p.peek() is LPAREN and peekNth(1) is LBRACE or LBRACKET. The
+// pre-lexed token buffer (parser.go's peekNth) makes unbounded-distance
+// lookahead cheap — no re-lexing, just array indexing. An un-annotated
+// pattern param leaves its type to contextual typing from the HOF call site
+// (emitArrowFunctionWithHints); see parseArrowFunction's pattern branch.
 func (p *Parser) destructuredArrowParamLookahead() bool {
 	open := p.peekNth(1).Type
 	closeType := lexer.RBRACE
 	if open == lexer.LBRACKET {
 		closeType = lexer.RBRACKET
 	}
+	// Phase 1 — find the first pattern's matching close brace/bracket.
 	depth := 0
-	for n := 1; ; n++ {
+	n := 1
+	for ; ; n++ {
 		tok := p.peekNth(n)
 		if tok.Type == lexer.EOF {
 			return false
 		}
-		switch tok.Type {
-		case open:
+		if tok.Type == open {
 			depth++
-		case closeType:
+		} else if tok.Type == closeType {
 			depth--
 			if depth == 0 {
-				return p.peekNth(n+1).Type == lexer.COLON
+				break
+			}
+		}
+	}
+	// An annotated pattern (`({x, y}: T)` / `([a, b]: T[])`): a ':' immediately
+	// after the close bracket is unambiguous — a parenthesized object/array
+	// literal never carries a ':' in that position.
+	if p.peekNth(n+1).Type == lexer.COLON {
+		return true
+	}
+	// Phase 2 — un-annotated pattern (`([a, b]) => ...`): scan to the ')' that
+	// closes the parameter list and require '=>' directly after it. A trailing
+	// ':' is deliberately NOT accepted here: it is ambiguous with a ternary's
+	// ':' branch (`cond ? ({a: 1}) : alt`), where the parenthesized object/array
+	// literal is followed by the conditional's colon. Only an unmistakable '=>'
+	// marks an arrow. (A rare un-annotated pattern param that also carries an
+	// explicit return type, `([a, b]): R => ...`, is not recognized — genuinely
+	// ambiguous with the ternary form at this boundary; annotate the pattern
+	// (`([a, b]: T): R =>`) to disambiguate, which Phase 1 catches.)
+	parenDepth := 0
+	for m := 0; ; m++ {
+		tok := p.peekNth(m)
+		switch tok.Type {
+		case lexer.EOF:
+			return false
+		case lexer.LPAREN:
+			parenDepth++
+		case lexer.RPAREN:
+			parenDepth--
+			if parenDepth == 0 {
+				return p.peekNth(m+1).Type == lexer.ARROW
 			}
 		}
 	}

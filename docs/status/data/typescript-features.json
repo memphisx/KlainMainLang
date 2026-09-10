@@ -124,7 +124,7 @@
             "feature": "`any` / `unknown`",
             "status": "implemented",
             "caveats": [
-              "Full only under `-compat=js` (NaN-boxed D1 dynamic objects/prototypes/descriptors); under `-compat=strict` arithmetic on `any` is a compile error. Gaps: `ToPrimitive` on objects, primitive-member dispatch through `any`, `Object.values/entries` on dynamic objects, allocation-site widening of a boxed static object → [Type system](TYPE-SYSTEM.md)"
+              "Full only under `-compat=js` (NaN-boxed D1 dynamic objects/prototypes/descriptors); under `-compat=strict` arithmetic on `any` is a compile error. Gaps: primitive-member dispatch through `any`, `Object.values/entries` on dynamic objects, allocation-site widening of a boxed static object → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {

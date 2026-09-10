@@ -75,7 +75,8 @@
             "notes": [
               "Array literals, and their inferred element type, are uniform-type only — a heterogeneous array has no single element type to stringify against",
               "A fixed-length mixed sequence expressed as a **tuple** (`[number, string, boolean]`) does stringify correctly (`JSON.stringify([1, \"two\", true])` → `[1,\"two\",true]`) — the tuple, not a heterogeneous array, is how such a value is represented here",
-              "An `any`-typed heterogeneous array (a dynamic array, e.g. `const a: any = [1, \"two\", null]`) also stringifies through the dynamic walker ([ADR-00639](../adr/ADR-00639.md)); the missing case is only a *statically*-typed heterogeneous array, which has no representation"
+              "An `any`-typed heterogeneous array (a dynamic array, e.g. `const a: any = [1, \"two\", null]`) also stringifies through the dynamic walker ([ADR-00639](../adr/ADR-00639.md)); the missing case is only a *statically*-typed heterogeneous array, which has no representation",
+              "Planned as [TDD-00200](../tdd/TDD-00200.md): under `-compat=js`, a `(A | B)[]` / inferred mixed literal lowers to a NaN-boxed-element array and stringifies through this same dynamic walker; strict keeps the rejection with a recognizable error naming the tuple / `-compat=js` alternatives"
             ]
           },
           {

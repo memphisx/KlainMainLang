@@ -231,6 +231,11 @@ func (e *Emitter) canonicalizeClassTy(ty Type) Type {
 			// nullable class-typed field, TDD-00009 Stage 2).
 			canon := info.Ty
 			canon.Nullable = ty.Nullable
+			// Carry the nullish *kind* too: a `C | undefined` field (an optional
+			// `inner?: C`, TDD-00187) must stay undefined, not collapse to `null`
+			// (ADR-00834) — else it renders/compares as `null`, not `undefined`.
+			canon.IsUndefined = ty.IsUndefined
+			canon.IsNull = ty.IsNull
 			return canon
 		}
 	}

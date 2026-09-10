@@ -277,6 +277,17 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+			// A heterogeneous tuple destructured parameter (`[k, v]:
+			// [string, V]`) is passed as a single object pointer, so it lands
+			// here; bind each position by its own type (TDD-00199).
+			if p.ArrayPattern != nil && pty.IsTuple {
+				objPtrReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+				if err := e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, decl.GetPos()); err != nil {
+					return err
+				}
+				continue
+			}
 			// A destructured object parameter (`{x, y}: T`) unpacks straight
 			// from the raw incoming object pointer — same reasoning as the
 			// array-pattern branch above.
@@ -1951,6 +1962,21 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		ptrName := "%v_" + p.Name
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+		if p.ArrayPattern != nil && pty.IsTuple {
+			// Heterogeneous tuple destructured param (`([k, v]) => ...` over
+			// Object.entries / Map entries / pair arrays — TDD-00199). A tuple
+			// is passed as a single object pointer (not the two-word array
+			// ABI), so it lands on this object-side path; bind each position by
+			// its own type via the same decomposition the for-of tuple path
+			// uses (unpackTuplePatternInto), not the uniform-element array
+			// unpacker.
+			objPtrReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+			if err := e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, af.GetPos()); err != nil {
+				return err
+			}
+			continue
+		}
 		if p.ObjectPattern != nil {
 			objPtrReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
@@ -2280,10 +2306,38 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 	for i, name := range paramNames {
 		e.define(name, Symbol{Ty: paramTypes[i]})
 	}
-	// Best-effort visibility for the block's own top-level locals, so a
-	// `return { body: localStream }` infers the local's real type instead of
-	// the bare-scalar default (found wiring TDD-00097 Stage 5's streaming
-	// http bodies; helps any handler returning a local).
+	inferred := e.inferBlockReturnExpr(block, retExpr)
+	e.popScope()
+	return inferred, true
+}
+
+// inferUnannotatedReturnTypeParams is inferUnannotatedReturnType's pattern-aware
+// sibling: it binds each parameter's names via definePatternParamForInference —
+// so a destructured param's leaves (`([k, v]) => { return k }`, TDD-00199) are
+// visible to the return-expression inference — rather than binding a single
+// synthetic pattern name. Used by the arrow/function-expression callback paths,
+// the only ones that carry a destructuring pattern in a parameter position.
+func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, params []ast.Param, paramTypes []Type) (Type, bool) {
+	retExpr := firstReturnExprInBlock(block)
+	if retExpr == nil {
+		return Type{}, false
+	}
+	e.pushScope()
+	for i, p := range params {
+		e.definePatternParamForInference(p, paramTypes[i], i)
+	}
+	inferred := e.inferBlockReturnExpr(block, retExpr)
+	e.popScope()
+	return inferred, true
+}
+
+// inferBlockReturnExpr infers the type of a block's first return expression,
+// with the parameters already bound in the current scope by the caller. It adds
+// best-effort visibility for the block's own top-level locals first, so a
+// `return { body: localStream }` infers the local's real type instead of the
+// bare-scalar default (found wiring TDD-00097 Stage 5's streaming http bodies;
+// helps any handler returning a local).
+func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
 	defineDecl := func(vd *ast.VarDeclaration) {
 		if vd.TypeAnnot != nil {
 			e.define(vd.Name, Symbol{Ty: e.resolveType(vd.TypeAnnot)})
@@ -2301,9 +2355,51 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 			}
 		}
 	}
-	inferred := e.inferExprType(retExpr)
-	e.popScope()
-	return inferred, true
+	return e.inferExprType(retExpr)
+}
+
+// definePatternParamForInference binds a parameter's names into the current
+// scope with their resolved types, purely so inferExprType can resolve a body
+// that references them while computing an un-annotated closure's return type.
+// A plain param binds its own name (byte-identical to the pre-existing
+// `e.define(p.Name, Symbol{Ty: …})` this replaced — no Ptr, since inference
+// consults only Ty); a destructuring pattern additionally binds each leaf with
+// its per-position type (tuple field type, or the uniform array element type),
+// so a body like `([k, v]) => k` can see `k` instead of the return type wrongly
+// defaulting to a number. Non-pattern behavior is therefore unchanged; only the
+// destructured-parameter case gains bindings.
+func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
+	switch {
+	case p.ArrayPattern != nil:
+		for j, elem := range p.ArrayPattern {
+			if elem.Name == "" {
+				continue // hole or nested sub-pattern (leaves nothing to infer against here)
+			}
+			var lty Type
+			switch {
+			case pty.IsTuple && j < len(pty.Fields):
+				lty = pty.Fields[j].Ty
+			case pty.ElemType != nil:
+				lty = *pty.ElemType
+			default:
+				lty = TypeF64
+			}
+			e.define(elem.Name, Symbol{Ty: lty})
+		}
+	case p.ObjectPattern != nil:
+		for _, prop := range p.ObjectPattern {
+			if prop.Rest || prop.Local == "" {
+				continue
+			}
+			lty := TypeF64
+			if _, fty, ok := pty.FieldIndex(prop.Key); ok {
+				lty = fty
+			}
+			e.define(prop.Local, Symbol{Ty: lty})
+		}
+	default:
+		e.define(p.Name, Symbol{Ty: pty})
+	}
 }
 
 // emitArrowFunctionWithHints is like emitArrowFunction but fills in types for
@@ -2360,16 +2456,12 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		// Temporarily push params into scope so inferExprType can resolve them.
 		e.pushScope()
 		for i, p := range af.Params {
-			e.define(p.Name, Symbol{Ptr: fmt.Sprintf("%%__hint_%d", i), Ty: paramTypes[i]})
+			e.definePatternParamForInference(p, paramTypes[i], i)
 		}
 		retTy = e.inferExprType(af.Body)
 		e.popScope()
 	} else if blockHasReturn(af.Block) {
-		paramNames := make([]string, len(af.Params))
-		for i, p := range af.Params {
-			paramNames[i] = p.Name
-		}
-		if inferred, ok := e.inferUnannotatedReturnType(af.Block, paramNames, paramTypes); ok {
+		if inferred, ok := e.inferUnannotatedReturnTypeParams(af.Block, af.Params, paramTypes); ok {
 			retTy = inferred
 		} else if firstReturnExprInBlock(af.Block) == nil {
 			// Every return in the block is a bare `return;` — a void closure.
@@ -2716,6 +2808,16 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		ptrName := "%v_" + p.Name
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+		if p.ArrayPattern != nil && pty.IsTuple {
+			// Heterogeneous tuple destructured param, passed as one object
+			// pointer (TDD-00199).
+			objPtrReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+			if err := e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, fe.GetPos()); err != nil {
+				return Value{}, err
+			}
+			continue
+		}
 		if p.ObjectPattern != nil {
 			objPtrReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
@@ -3207,9 +3309,23 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 type cbKind int
 
 const (
-	cbClosure cbKind = iota // closure header {funcPtr, envPtr} on heap
-	cbNamed                 // top-level named function, called directly
+	cbClosure     cbKind = iota // closure header {funcPtr, envPtr} on heap
+	cbNamed                      // top-level named function, called directly
+	cbBuiltinConv                // a builtin conversion used as a fn reference: String/Number/Boolean
 )
+
+// builtinConvRetType is the element type a `String`/`Number`/`Boolean` used as
+// a callback (`.map(String)`, `.filter(Boolean)`) produces.
+func builtinConvRetType(name string) Type {
+	switch name {
+	case "Number":
+		return TypeF64
+	case "Boolean":
+		return TypeBool
+	default: // String
+		return TypePtr
+	}
+}
 
 // Callback holds everything needed to emit a callback invocation.
 type Callback struct {
@@ -3221,18 +3337,26 @@ type Callback struct {
 }
 
 func (cb Callback) paramTypes() []Type {
-	if cb.kind == cbClosure {
+	switch cb.kind {
+	case cbClosure:
 		return cb.ty.FuncParams
+	case cbBuiltinConv:
+		// A single dynamic-typed parameter — the element is passed as-is and
+		// converted in emitCBCall (which special-cases this kind before coerce).
+		return []Type{TypeAny}
 	}
 	return cb.sig.ParamTypes
 }
 
 func (cb Callback) retType() Type {
-	if cb.kind == cbClosure {
+	switch cb.kind {
+	case cbClosure:
 		if cb.ty.FuncRetType != nil {
 			return *cb.ty.FuncRetType
 		}
 		return TypeVoid
+	case cbBuiltinConv:
+		return builtinConvRetType(cb.name)
 	}
 	return cb.sig.RetType
 }
@@ -3263,6 +3387,12 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 			hdr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
 			return Callback{kind: cbClosure, hdrPtr: hdr, ty: sym.Ty}, nil
+		}
+		// A builtin conversion used as a first-class function reference —
+		// `.map(String)`, `.map(Number)`, `.filter(Boolean)`. Only when the name
+		// is not shadowed by a user binding (the lookup above already failed).
+		if cb.Name == "String" || cb.Name == "Number" || cb.Name == "Boolean" {
+			return Callback{kind: cbBuiltinConv, name: cb.Name}, nil
 		}
 		return Callback{}, fmt.Errorf("'%s' is not a callable", cb.Name)
 	}
@@ -3304,7 +3434,55 @@ func (e *Emitter) resolveCallbackWithHints(arg ast.Expression, hints []Type) (Ca
 
 // emitCBCall invokes callback cb with the given pre-evaluated arguments.
 // Values in args are coerced to the callback's declared param types.
+// emitBuiltinConvValue applies String/Number/Boolean to an already-evaluated
+// Value — the value-level core of the global-conversion calls, reused when one
+// is passed as a callback (`.map(Number)`). Mirrors emitGlobalStringConv /
+// emitGlobalNumberConv / emitGlobalBooleanConv on a Value rather than an AST arg.
+func (e *Emitter) emitBuiltinConvValue(name string, v Value) (Value, error) {
+	switch name {
+	case "String":
+		if v.Ty.IsDynamic {
+			return e.emitDynamicToString(v)
+		}
+		return e.emitValueToString(v)
+	case "Boolean":
+		return e.emitToBool(v), nil
+	case "Number":
+		switch {
+		case v.Ty.IR == "i1":
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
+			return Value{Ref: r, Ty: TypeI64}, nil
+		case v.Ty.Float || v.Ty.IsInteger() || v.Ty.IR == "i64":
+			return v, nil
+		case v.Ty.IsBigInt:
+			e.ensureBigInt()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_bigint_to_double(ptr %s)", r, v.Ref))
+			return Value{Ref: r, Ty: TypeF64}, nil
+		case isStringTy(v.Ty):
+			e.ensureToNumber()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", r, v.Ref))
+			return Value{Ref: r, Ty: TypeF64}, nil
+		}
+		return Value{}, fmt.Errorf("Number() conversion from this element type is not supported")
+	}
+	return Value{}, fmt.Errorf("unknown builtin conversion '%s'", name)
+}
+
 func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
+	// A builtin conversion used as a callback (`.map(String)` etc.): convert the
+	// element (args[0]) directly, ignoring the HOF's index/array extras — the
+	// conversion never sees them, matching how `String`/`Number`/`Boolean` bind
+	// only their first argument.
+	if cb.kind == cbBuiltinConv {
+		if len(args) == 0 {
+			return Value{}, fmt.Errorf("a builtin conversion callback needs an element argument")
+		}
+		return e.emitBuiltinConvValue(cb.name, args[0])
+	}
+
 	params := cb.paramTypes()
 	retTy := cb.retType()
 

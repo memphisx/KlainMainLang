@@ -54,7 +54,8 @@
             ],
             "notes": [
               "`new Date()` / `new Date(ms)` / `new Date(isoString)` (the string form parses via the same logic as `Date.parse`, including its `-1`-on-unparseable sentinel — see [ADR-00038](../adr/ADR-00038.md)) / `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` (month 0-indexed, matching `getMonth()`; omitted trailing fields default like real JS — day to 1, everything after that to 0; see [ADR-00039](../adr/ADR-00039.md))",
-              "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds`, `getTime`/`valueOf`, `toISOString`",
+              "`getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` (+ the `set*` setters), `getTime`/`valueOf`, `toISOString`",
+              "The `getUTC*`/`setUTC*` accessors alias the field getters/setters — since the stored timestamp is UTC, these are fully faithful to Node's UTC methods (unlike the local `get*`/`set*`, which carry the UTC deviation above) ([ADR-00844](../adr/ADR-00844.md))",
               "See [ADR-00014](../adr/ADR-00014.md)"
             ]
           },

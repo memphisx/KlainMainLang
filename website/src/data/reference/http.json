@@ -18,7 +18,7 @@
       "exampleKey": "http/node_createserver",
       "snippet": "http.createServer((req: IncomingMessage, res: ServerResponse) => {\n  res.setHeader(\"X-Powered-By\", \"KlainMainLang\")\n  res.writeHead(200, { \"Content-Type\": \"text/plain\" })\n  res.end(\"Hello, world\")\n}).listen(8080)",
       "differences": [
-        "V1 `res` subset: `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter, `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints, and `req.method`/`url`/`headers`. The response is buffered (flushed after the handler returns), so there is no incremental flow control: `res.write` always returns `true` and no `'drain'` fires — a large streamed response uses a `ReadableStream` `body` field instead.",
+        "V1 `res` subset: `res.writeHead(status[, headersObject])`/`setHeader`/`write`/`end`, the `res.statusCode` getter/setter, `res.write` returning Node's boolean and `res.cork()`/`uncork()` no-op hints, and `req.method`/`url`/`headers`. The response is buffered — `res.write` accumulates and the whole response flushes when `res.end()` is called, so a fire-and-forget void handler that ends the response from an async callback (e.g. `req.on('end')`) works (ADR-00825). There is still no incremental flow control: `res.write` always returns `true` and no `'drain'` fires — a large streamed response uses a `ReadableStream` `body` field instead.",
         "The status reason phrase is hardcoded `OK` (`writeHead(201)` → `201 OK`, not `201 Created`).",
         "Multiple HTTP servers run concurrently on different ports in one program (TDD-00191): an additional server may be plain HTTP/1.1, HTTPS/1.1, h2c (`http2.createServer`), or h2-over-TLS (`http2.createSecureServer`) — each with its own dispatcher, TLS context, and h2 handler-bridge. Each additional server can `close()` and `listen()` again (relisten), and WebSocket/upgrade handling works on any server. The one exclusion is Worker/cluster — `http.listen(..., { workers })` is klain:http's single blocking model, a clean rejection. The bespoke klain:http `http.listen` stays single-instance."
       ],
@@ -36,7 +36,7 @@
       "snippet": "const server = http.createServer((req, res) => {\n  res.writeHead(200); res.end(\"hi\")\n})\nserver.listen(0, () => {\n  const port: number = server.address().port\n  setTimeout(() => server.close(), 100)\n})",
       "differences": [
         "`server.listen` is **non-blocking** — it registers the listener and returns, so top-level code after it runs before requests are served (Node's listen-then-continue); the event loop drives requests from the end-of-`main` tail. The ready callback fires synchronously at `listen()` time rather than on a later tick. (The bespoke `http.listen` below stays blocking.)",
-        "`.on` supports `'request'` (one listener), `'stream'`, `'listening'`, and the Node-faithful `'upgrade'` event (`(req, socket, head)` — `socket` is a `net.Socket`, TLS-backed on an `https` server so `wss://` falls out); no `'close'`/`'error'`/`'connection'`/`'clientError'` events.",
+        "`.on` supports `'request'` (one listener), `'stream'`, `'listening'`, the Node-faithful `'upgrade'` event (`(req, socket, head)` — `socket` is a `net.Socket`, TLS-backed on an `https` server so `wss://` falls out), `'close'` (fired once the server stops listening and all in-flight connections drain; primary server only), and `'connection'` (fired once per accepted TCP connection, handed a `net.Socket` over the fd before HTTP parsing — a `write`/`destroy`/inspect handle; its own `'data'`/`'close'` listeners aren't driven, the HTTP parser owns the byte stream). `server.close(cb)` settles `cb` at drain, not synchronously. No `'error'`/`'clientError'` events yet.",
         "`listen(options)` must be an inline object literal; a `host` that needs DNS resolution (a real hostname) is a clean rejection, and unknown option keys are rejected rather than ignored."
       ],
       "seeAlso": ["http.createServer", "http.close"],
@@ -168,7 +168,7 @@
       "exampleKey": "streams/http_chunked",
       "differences": [
         "A stream error mid-response closes the connection without the chunked terminator — nothing else is signallable mid-stream.",
-        "HTTPS/1.1 streaming and the union-body (string | ReadableStream) string branch still send Connection: close."
+        "HTTPS/1.1 streaming still sends Connection: close (the union-body string branch now re-arms keep-alive like the buffered and chunked paths)."
       ],
       "seeAlso": ["http.req.stream", "http.res.bodyBytes"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#responsewritechunk-encoding-callback" }
@@ -176,10 +176,10 @@
     {
       "id": "http.req.stream",
       "name": "req.stream()",
-      "statusRow": "Streaming request body (`req.stream(): ReadableStream<Uint8Array>`)",
+      "statusRow": "Streaming request body (`req.stream(): ReadableStream<Uint8Array>`, or `req` as a Node `Readable`)",
       "signature": "req.stream(): ReadableStream<Uint8Array>",
       "badge": "exact",
-      "description": "Streams the request body as Uint8Array chunks read off the socket. Using it switches the program to headers-complete dispatch: the handler runs once headers are parsed and the body flows as chunks (fiber-yield on EAGAIN); the 10MiB cap then applies to the header block only. Piped into a streaming response body, it echoes without ever buffering the payload.",
+      "description": "Streams the request body as Uint8Array chunks read off the socket. The server `req` is itself a Node Readable over this body: `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` all consume the same underlying stream (cached on first use). Using it switches the program to headers-complete dispatch: the handler runs once headers are parsed and the body flows as chunks (fiber-yield on EAGAIN); the 10MiB cap then applies to the header block only. Piped into a streaming response body, it echoes without ever buffering the payload.",
       "returns": { "type": "ReadableStream<Uint8Array>", "desc": "The request body stream." },
       "exampleKey": "streams/http_upload",
       "differences": [

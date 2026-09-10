@@ -228,3 +228,89 @@ fs.readFile("x.txt")
 		t.Fatal("expected a compile error for fs.readFile with no callback, got none")
 	}
 }
+
+// --- TDD-00185: pooled binary writes + pooled callback form ---
+//
+// Binary writeFile/appendFile (an ArrayBuffer/TypedArray body) and the legacy
+// callback form both run on the thread pool now, off the event-loop thread —
+// closing the two "still inline" leftovers of TDD-00185. Binary bodies are
+// copied raw at submit (an embedded NUL survives); the callback fires from a
+// GC-safe settle reaction on the loop thread.
+
+// fs.promises.writeFile/appendFile of a Uint8Array pools onto the explicit-
+// length byte thunk — an embedded NUL is written whole, not truncated.
+func TestE2EFsPromisesWriteBinaryPooledEmbeddedNull(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "bin.dat")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+async function main(): Promise<void> {
+  await fs.promises.writeFile(%q, new Uint8Array([65, 66, 0, 67, 68]))
+  const back: string = await fs.promises.readFile(%q)
+  console.log("len:" + back.length)
+  await fs.promises.appendFile(%q, new Uint8Array([69, 70]))
+  const back2: string = await fs.promises.readFile(%q)
+  console.log("len2:" + back2.length)
+  await fs.promises.unlink(%q)
+}
+main()
+`, path, path, path, path, path)
+	assertOutputImports(t, src, "len:5\nlen2:7")
+}
+
+// The callback form of a binary writeFile pools too, preserving the NUL.
+func TestE2EFsAsyncCallbackWriteBinaryEmbeddedNull(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "cbbin.dat")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFile(%q, new Uint8Array([65, 66, 0, 67, 68]), (err) => {
+  if (err) { console.log("werr"); return }
+  fs.readFile(%q, (e2, d: string) => {
+    if (e2) { console.log("rerr"); return }
+    console.log("len:" + d.length)
+    fs.unlink(%q, (e3) => {})
+  })
+})
+`, path, path, path)
+	assertOutputImports(t, src, "len:5")
+}
+
+// The pooled callback form still delivers array data (readdir) correctly.
+func TestE2EFsAsyncCallbackReaddir(t *testing.T) {
+	dir := tempDir(t)
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "hi")
+fs.readdir(%q, (err, entries: string[]) => {
+  if (err) { console.log("err"); return }
+  let found: boolean = false
+  for (const e of entries) { if (e === "x.txt") { found = true } }
+  console.log(found ? "found" : "missing")
+})
+`, filepath.Join(dir, "x.txt"), dir)
+	assertOutputImports(t, src, "found")
+}
+
+// The pooled callback form does not block the reactor. A concurrently scheduled
+// setTimeout(0) fires *before* the read's callback, because the read parks on a
+// pool thread (a real round-trip) while the 0 ms timer is immediately due on the
+// loop — an inline read would run to completion first and settle its callback
+// microtask ahead of the timer.
+func TestE2EFsAsyncCallbackPooledNonBlocking(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "nb.dat")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+fs.writeFileSync(%q, "data")
+let timerFirst: boolean = false
+let done: boolean = false
+setTimeout(() => { if (!done) { timerFirst = true } }, 0)
+fs.readFile(%q, (err, data: string) => {
+  done = true
+  console.log(timerFirst ? "nonblocking" : "blocked")
+  fs.unlink(%q, (e) => {})
+})
+`, path, path, path)
+	assertOutputImports(t, src, "nonblocking")
+}

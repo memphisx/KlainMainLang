@@ -23,6 +23,22 @@ console.log(d.toISOString())
 `, "1970\n0\n1\n4\n0\n0\n0\n0\n0\n0\n1970-01-01T00:00:00.000Z")
 }
 
+func TestE2EDateUTCAccessors(t *testing.T) {
+	// The getUTC*/setUTC* accessors alias the field getters/setters (Date is
+	// UTC-stored) — fully faithful to Node's UTC methods (ADR-00844).
+	assertOutput(t, `
+const d: Date = new Date(1609459200000)
+console.log(d.getUTCFullYear())
+console.log(d.getUTCMonth())
+console.log(d.getUTCDate())
+console.log(d.getUTCDay())
+console.log(d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds())
+d.setUTCFullYear(2000)
+d.setUTCMonth(5)
+console.log(d.getUTCFullYear(), d.getUTCMonth())
+`, "2021\n0\n1\n5\n0 0 0\n2000 5")
+}
+
 func TestE2EDateFromTimestamp(t *testing.T) {
 	assertOutput(t, `
 const d: Date = new Date(1700000000000)

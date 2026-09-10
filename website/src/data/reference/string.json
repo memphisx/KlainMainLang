@@ -5,9 +5,9 @@
   "statusPage": "STRING-METHODS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "29/30",
+    "loose": "31/32",
     "loosePct": 97,
-    "strict": "16/30",
+    "strict": "17/32",
     "strictPct": 53
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
@@ -105,11 +105,44 @@
       }
     },
     {
-      "id": "string.indexOf",
-      "name": ".indexOf(substr)",
-      "signature": "indexOf(substr: string): number",
+      "id": "string.substr",
+      "name": ".substr(start, length?)",
+      "signature": "substr(start: number, length?: number): string",
       "badge": "exact",
-      "description": "Returns the byte index of the first occurrence of the substring, or -1 if absent. Binary-safe past an embedded NUL.",
+      "description": "Deprecated but common: extracts length characters from start. A negative start counts from the end; length defaults to the rest of the string.",
+      "params": [
+        {
+          "name": "start",
+          "type": "number",
+          "desc": "Start index; negative counts from the end."
+        },
+        {
+          "name": "length?",
+          "type": "number",
+          "desc": "Number of characters to take; defaults to the rest of the string."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "A new string of at most length characters from start."
+      },
+      "exampleKey": "strings/substring_slice",
+      "snippet": "console.log('Hello, World!'.substr(7, 5))   // World\nconsole.log('Hello, World!'.substr(-6))     // orld!",
+      "seeAlso": [
+        "string.substring",
+        "string.slice"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/substr"
+      }
+    },
+    {
+      "id": "string.indexOf",
+      "name": ".indexOf(substr, fromIndex?)",
+      "statusRow": "`.indexOf(substr, fromIndex?)`",
+      "signature": "indexOf(substr: string, fromIndex?: number): number",
+      "badge": "exact",
+      "description": "Returns the byte index of the first occurrence of the substring at or after the optional fromIndex, or -1 if absent. Binary-safe past an embedded NUL.",
       "returns": {
         "type": "number",
         "desc": "First match index, or -1."
@@ -124,11 +157,34 @@
       }
     },
     {
+      "id": "string.lastIndexOf",
+      "name": ".lastIndexOf(substr, fromIndex?)",
+      "statusRow": "`.lastIndexOf(substr, fromIndex?)`",
+      "signature": "lastIndexOf(substr: string, fromIndex?: number): number",
+      "badge": "caveats",
+      "description": "Returns the byte index of the LAST occurrence of the substring at or before the optional fromIndex, or -1. Binary-safe (a descending memcmp scan); an empty needle returns the string length.",
+      "returns": {
+        "type": "number",
+        "desc": "Last match index, or -1."
+      },
+      "snippet": "console.log('path/to/file'.lastIndexOf('/'))   // 7",
+      "differences": [
+        "Returns a byte offset, not a UTF-16 index — like `.indexOf` on non-ASCII text."
+      ],
+      "seeAlso": [
+        "string.indexOf"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/lastIndexOf"
+      }
+    },
+    {
       "id": "string.includes",
-      "name": ".includes(substr)",
-      "signature": "includes(substr: string): boolean",
+      "name": ".includes(substr, position?)",
+      "statusRow": "`.includes(substr, position?)`",
+      "signature": "includes(substr: string, position?: number): boolean",
       "badge": "exact",
-      "description": "Whether the string contains the substring. Binary-safe (searches with memmem over a length header).",
+      "description": "Whether the string contains the substring, searching from the optional position. Binary-safe (searches with memmem over a length header).",
       "returns": {
         "type": "boolean",
         "desc": "true if the substring is present."
@@ -145,10 +201,11 @@
     },
     {
       "id": "string.startsWith",
-      "name": ".startsWith(prefix)",
-      "signature": "startsWith(prefix: string): boolean",
+      "name": ".startsWith(prefix, position?)",
+      "statusRow": "`.startsWith(prefix, position?)`",
+      "signature": "startsWith(prefix: string, position?: number): boolean",
       "badge": "exact",
-      "description": "Whether the string begins with the prefix. Returns false when the string is shorter than the prefix.",
+      "description": "Whether the string begins with the prefix at the optional position (default 0). Returns false when the string is shorter than the prefix.",
       "returns": {
         "type": "boolean",
         "desc": "true if the string starts with the prefix."
@@ -165,10 +222,11 @@
     },
     {
       "id": "string.endsWith",
-      "name": ".endsWith(suffix)",
-      "signature": "endsWith(suffix: string): boolean",
+      "name": ".endsWith(suffix, endPosition?)",
+      "statusRow": "`.endsWith(suffix, endPosition?)`",
+      "signature": "endsWith(suffix: string, endPosition?: number): boolean",
       "badge": "exact",
-      "description": "Whether the string ends with the suffix. Returns false when the string is shorter than the suffix.",
+      "description": "Whether the string ends with the suffix, treating the string as if it ended at the optional endPosition. Returns false when the string is shorter than the suffix.",
       "returns": {
         "type": "boolean",
         "desc": "true if the string ends with the suffix."
@@ -205,15 +263,16 @@
     },
     {
       "id": "string.split",
-      "name": ".split(sep)",
-      "signature": "split(sep: string): string[]",
+      "name": ".split(sep, limit?)",
+      "statusRow": "`.split(sep, limit?)`",
+      "signature": "split(sep: string | RegExp, limit?: number): string[]",
       "badge": "exact",
-      "description": "Splits the string on a separator into an array. An empty separator splits into individual characters, matching JavaScript.",
+      "description": "Splits the string on a string or RegExp separator into an array. An empty separator splits into individual characters; the optional limit caps the result to the first limit segments — all matching JavaScript.",
       "returns": {
         "type": "string[]",
-        "desc": "The array of substrings."
+        "desc": "The array of substrings (at most limit of them)."
       },
-      "snippet": "console.log('one,two,three'.split(','))   // ['one','two','three']",
+      "snippet": "console.log('one,two,three'.split(','))      // ['one','two','three']\nconsole.log('a-b-c-d'.split('-', 2))        // ['a','b']",
       "seeAlso": [
         "string.replace"
       ],
@@ -414,16 +473,13 @@
     {
       "id": "string.at",
       "name": ".at(i)",
-      "signature": "at(i: number): string",
-      "badge": "caveats",
-      "description": "Returns the character at index i, with negative indices counting from the end.",
+      "signature": "at(i: number): string | undefined",
+      "badge": "exact",
+      "description": "Returns the character at index i, with negative indices counting from the end; an out-of-range index is a real undefined, as in Node.",
       "returns": {
-        "type": "string",
-        "desc": "The character at i."
+        "type": "string | undefined",
+        "desc": "The character at i, or undefined if i is out of range."
       },
-      "differences": [
-        "An out-of-range `i` returns `\"\"` rather than real JS's `undefined` — deterministic and safe, but a real string a caller could mistake for actual data."
-      ],
       "seeAlso": [
         "string.charAt",
         "string.length"

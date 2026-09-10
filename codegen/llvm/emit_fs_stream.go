@@ -54,15 +54,21 @@ func (e *Emitter) emitFsCreateReadStream(args []ast.Expression, pos ast.Pos) (Va
 
 	// TDD-00186: build a WHATWG rstream, open the file synchronously (throwing on
 	// a missing file, as the eager path did), then read it off the loop thread on
-	// the pool — each highWaterMark chunk is enqueued via the pool's stream drain,
-	// and the readable is closed by the terminal STREAM_END completion. The read
-	// no longer blocks the reactor.
+	// the pool — demand-driven for backpressure. A control block drives one
+	// pooled read per credit; its pull/cancel hooks go on the readable (field
+	// 9/10), and arming `started` lets the WHATWG pull machinery grant the first
+	// credit, so the worker reads at most ~one chunk ahead of the consumer.
 	fulfillFn := e.emitStreamFulfillThunk(chunkTy)
 	rs := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", rs, fulfillFn))
 	fp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fs_open_read(ptr %s)", fp, pathVal.Ref))
-	e.emitInstr(fmt.Sprintf("call void @__kml_pool_submit_readstream(ptr %s, ptr %s, i64 %d)", rs, fp, hwm))
+	ctl := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_pool_stream_ctl_new(ptr %s, ptr %s, i64 %d)", ctl, rs, fp, hwm))
+	e.storeStreamField(rs, 9, e.buildBuiltinClosure("@__kml_pool_stream_pull", ctl))
+	e.storeStreamField(rs, 10, e.buildBuiltinClosure("@__kml_pool_stream_cancel", ctl))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+	e.emitInstr(fmt.Sprintf("call void @__kml_pool_submit_readstream(ptr %s)", ctl))
 
 	// Wrap the readable in a Node Readable (.on('data')/.pipe()/for-await).
 	return e.wrapWebReadable(Value{Ref: rs, Ty: ReadableStreamType(chunkTy)})

@@ -81,3 +81,91 @@ void __kml_dtoa(char *buf, double v) {
 		*p = '\0';
 	}
 }
+
+/* __kml_num_tolocalestring — Number.prototype.toLocaleString() with no arguments:
+ * the en-US default (Intl locale/options are out of scope, rejected at the call
+ * site). Groups the integer part with commas every three digits and keeps at
+ * most 3 fraction digits (rounded, trailing zeros stripped), matching Node's
+ * default. Writes into buf (caller guarantees >= 512 bytes for the widest
+ * double). */
+void __kml_num_tolocalestring(char *buf, double v) {
+	if (isnan(v)) { strcpy(buf, "NaN"); return; }
+	if (isinf(v)) { strcpy(buf, v < 0 ? "-\xe2\x88\x9e" : "\xe2\x88\x9e"); return; }
+	char *p = buf;
+	if (v < 0.0) { *p++ = '-'; v = -v; } /* -0 has v==0, no sign, per JS */
+
+	char tmp[400];
+	snprintf(tmp, sizeof(tmp), "%.3f", v); /* "1234.568" / "1000000.000" */
+	char *dot = strchr(tmp, '.');
+	char *intpart = tmp;
+	char *frac = NULL;
+	if (dot) { *dot = '\0'; frac = dot + 1; }
+	if (frac) {
+		int fl = (int)strlen(frac);
+		while (fl > 0 && frac[fl - 1] == '0') frac[--fl] = '\0';
+		if (fl == 0) frac = NULL;
+	}
+
+	int il = (int)strlen(intpart);
+	int firstGroup = il % 3;
+	if (firstGroup == 0) firstGroup = 3;
+	for (int i = 0; i < il; i++) {
+		if (i > 0 && (i - firstGroup) % 3 == 0) *p++ = ',';
+		*p++ = intpart[i];
+	}
+	if (frac) {
+		*p++ = '.';
+		strcpy(p, frac);
+		p += strlen(frac);
+	}
+	*p = '\0';
+}
+
+/* __kml_dtoa_exp — Number.prototype.toExponential() with no fractionDigits
+ * argument: always exponential notation, with the minimum number of mantissa
+ * digits that round-trips to the same double (ECMAScript 21.1.3.3 step 10, the
+ * "f is undefined" path). Shares dtoa's shortest-prec loop and JS exponent
+ * style (sign always, no zero-padding). Zero renders "0e+0". */
+void __kml_dtoa_exp(char *buf, double v) {
+	if (isnan(v)) { strcpy(buf, "NaN"); return; }
+	if (isinf(v)) { strcpy(buf, v < 0 ? "-Infinity" : "Infinity"); return; }
+	char *p = buf;
+	if (v == 0.0) { strcpy(buf, "0e+0"); return; } /* +0 and -0 both → "0e+0" */
+	if (v < 0) { *p++ = '-'; v = -v; }
+
+	char sci[40];
+	int prec = 1;
+	for (; prec < 17; prec++) {
+		snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
+		if (strtod(sci, NULL) == v) break;
+	}
+	if (prec == 17) snprintf(sci, sizeof(sci), "%.*e", prec - 1, v);
+
+	char digits[24];
+	int nd = 0;
+	char *s = sci;
+	digits[nd++] = *s++;
+	if (*s == '.') {
+		s++;
+		while (*s != 'e' && *s != 'E') digits[nd++] = *s++;
+	}
+	s++;                /* skip 'e' */
+	int exp = atoi(s);  /* the exponential exponent directly */
+	while (nd > 1 && digits[nd - 1] == '0') nd--;
+	int k = nd;
+
+	*p++ = digits[0];
+	if (k > 1) {
+		*p++ = '.';
+		memcpy(p, digits + 1, k - 1); p += k - 1;
+	}
+	*p++ = 'e';
+	int e = exp;
+	if (e >= 0) { *p++ = '+'; } else { *p++ = '-'; e = -e; }
+	char ebuf[8];
+	int el = 0;
+	if (e == 0) ebuf[el++] = '0';
+	while (e > 0) { ebuf[el++] = (char)('0' + e % 10); e /= 10; }
+	while (el > 0) *p++ = ebuf[--el];
+	*p = '\0';
+}

@@ -6,8 +6,8 @@ import (
 )
 
 func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: indexOf takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: indexOf takes 1 or 2 arguments (item[, fromIndex])", pos.Line, pos.Col)
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
@@ -27,7 +27,28 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", resultAlloca))
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	// Optional fromIndex: start the scan there (a negative index counts from the
+	// end, clamped to 0); default 0.
+	startVal := "0"
+	if len(args) == 2 {
+		fromVal, ferr := e.emitExpr(args[1])
+		if ferr != nil {
+			return Value{}, ferr
+		}
+		from := e.coerce(fromVal, TypeI64).Ref
+		neg := e.freshReg()
+		plusLen := e.freshReg()
+		adj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, from))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, from, lenReg))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adj, neg, plusLen, from))
+		stillNeg := e.freshReg()
+		clamped := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", stillNeg, adj))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", clamped, stillNeg, adj))
+		startVal = clamped
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startVal, idxAlloca))
 
 	condL := e.freshLabel("idxof.cond")
 	bodyL := e.freshLabel("idxof.body")
@@ -59,6 +80,74 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+
+	e.emitLabel(doneL)
+	result := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", result, resultAlloca))
+	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
+}
+
+// emitArrayLastIndexOf implements arr.lastIndexOf(val): the index of the LAST
+// occurrence of val (scanning from the end), or -1. Mirror of emitArrayIndexOf
+// with a descending scan; returns on the first match found from the back.
+func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: lastIndexOf takes exactly 1 argument", pos.Line, pos.Col)
+	}
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if err := e.rejectNestedArrayElem(elemTy, "lastIndexOf", pos); err != nil {
+		return Value{}, err
+	}
+	needleVal, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	needleVal = e.coerce(needleVal, elemTy)
+
+	resultAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", resultAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", resultAlloca))
+	idxAlloca := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
+	// start at len-1
+	startIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
+
+	condL := e.freshLabel("lidxof.cond")
+	bodyL := e.freshLabel("lidxof.body")
+	matchL := e.freshLabel("lidxof.match")
+	decL := e.freshLabel("lidxof.dec")
+	doneL := e.freshLabel("lidxof.done")
+
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idxVal := e.freshReg()
+	done := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", done, idxVal))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
+
+	e.emitLabel(bodyL)
+	gep := e.freshReg()
+	elem := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
+	eqReg := e.emitElemEq(elemTy, elem, needleVal.Ref)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eqReg, matchL, decL))
+
+	e.emitLabel(matchL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, resultAlloca))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+
+	e.emitLabel(decL)
+	idxPrev := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", idxPrev, idxVal))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxPrev, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)

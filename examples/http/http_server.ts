@@ -37,8 +37,8 @@ http.listen(8080, (req: HttpRequest): Res => {
   respHeaders.set('Content-Type', 'text/plain')
 
   if (req.path === '/hello') {
-    let name: string = req.query.has('name') ? req.query.get('name') : 'stranger'
-    let greeting: string = req.headers.has('x-greeting') ? req.headers.get('x-greeting') : 'hello'
+    let name: string = req.query.get('name') ?? 'stranger'
+    let greeting: string = req.headers.get('x-greeting') ?? 'hello'
     return { status: 200, body: greeting + ', ' + name + ' (' + req.method + ' ' + req.path + ')', headers: respHeaders }
   }
   if (req.path === '/echo') {

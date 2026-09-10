@@ -213,7 +213,7 @@
             "feature": "Async variants — callback (`fs.readFile(path, cb)`) + Promise (`fs.promises.readFile` / `import from 'fs/promises'`)",
             "status": "implemented",
             "caveats": [
-              "Two cases stay on the inline (delivery-only async, no concurrency gain) path rather than the background thread pool: the legacy **callback** form (`fs.readFile(path, cb)`), and a `writeFile`/`appendFile` whose data is an `ArrayBuffer`/`TypedArray` (its byte-length write). The pool is POSIX-first — Windows keeps the inline path pending the reactor work ([TDD-00185](../tdd/TDD-00185.md))",
+              "Both the callback form (`fs.readFile(path, cb)`, firing from a GC-safe settle reaction) and a binary `writeFile`/`appendFile` (an `ArrayBuffer`/`TypedArray` body, copied raw at submit) run on the pool now, off the loop thread ([ADR-00820](../adr/ADR-00820.md)). The pool is POSIX-first — Windows keeps the inline (delivery-only async) path pending the reactor work ([TDD-00185](../tdd/TDD-00185.md))",
               "`readFile` delivers a string (text) — inherits `readFileSync`'s text-only caveat; no async binary (`Buffer`) form",
               "No `options`/`encoding` argument; no *async* `stat` (the sync `fs.statSync`/`lstatSync` exist — see the row above — but have no callback/Promise form yet)"
             ],
@@ -227,7 +227,7 @@
             "status": "implemented",
             "caveats": [
               "Chunks are **strings**, not `Buffer`s — text-first, like `readFileSync` (an embedded NUL truncates a chunk); binary (`Uint8Array`) streaming is a follow-on",
-              "Consumer backpressure is not yet honored — the background-pool worker reads ahead and chunks queue in the `Readable` (the eager path's memory profile); true highWaterMark backpressure is a follow-on. On Windows the pre-pool eager read-to-EOF fill is kept (the pool runtime is POSIX-only) pending the reactor work ([TDD-00186](../tdd/TDD-00186.md))",
+              "Consumer backpressure is honored ([ADR-00821](../adr/ADR-00821.md)): the pool worker reads one chunk per demand (credit-gated on the readable's high-water mark), at most ~one chunk outstanding; a mid-read failure surfaces as a stream `'error'`. On Windows the pre-pool eager read-to-EOF fill is kept (the pool runtime is POSIX-only) pending the reactor work ([TDD-00186](../tdd/TDD-00186.md))",
               "Options: `createReadStream` takes `{ highWaterMark }`, `createWriteStream` `{ flags: \"w\"\\|\"a\" }` — both compile-time literals; `start`/`end`/`fd`/`encoding` are clean errors"
             ],
             "notes": [

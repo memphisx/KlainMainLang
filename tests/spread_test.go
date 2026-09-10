@@ -186,3 +186,32 @@ const withFixed = (label: string, ...nums: number[]): number => label.length + n
 console.log(withFixed("hi", ...arr))
 `, "6\n15\n5")
 }
+
+func TestE2ESpreadArrayExpression(t *testing.T) {
+	// A spread accepts any array-valued expression, not just a variable
+	// (ADR-00845): a Map iterator, a slice/map result, and array literals.
+	assertOutput(t, `
+const m = new Map<string, number>()
+m.set("a", 1); m.set("b", 2)
+console.log([...m.keys()].join(","))
+console.log([...m.values()].join(","))
+console.log([...[1, 2], ...[3, 4]].join(","))
+const arr = [1, 2, 3]
+console.log([0, ...arr.slice(1), 9].join(","))
+console.log([...arr.map(x => x * 2)].join(","))
+`, "a,b\n1,2\n1,2,3,4\n0,2,3,9\n2,4,6")
+}
+
+func TestE2ESpreadStringIntoArray(t *testing.T) {
+	// Spreading a string yields its characters as single-character strings
+	// (ADR-00849), usable alongside static elements and other spreads.
+	assertOutput(t, `
+console.log([..."abc"].join("-"))
+const s = "hi"
+console.log([...s].join("."))
+console.log([..."ab", ..."cd"].join(""))
+console.log(["x", ..."ab", "y"].join(","))
+console.log([..."abc"].map(c => c.toUpperCase()).join(""))
+console.log([..."abc"].length)
+`, "a-b-c\nh.i\nabcd\nx,a,b,y\nABC\n3")
+}

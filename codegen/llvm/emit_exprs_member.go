@@ -63,13 +63,18 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 			ex.GetPos().Line, ex.GetPos().Col, ex.Property, objVal.Ty.IR)
 	}
 
-	// Array-typed results need the same {ptr, i64} aggregate slot struct
-	// fields do (resultTy.IR alone is just "ptr", with nowhere for the
-	// length to go) — see StructFieldIR's doc comment and docs/adr/ADR-00061.md.
-	resIR := StructFieldIR(resultTy)
+	// `o?.x` is `PropType | undefined` — a short-circuit on a null object yields
+	// a real `undefined`, as in TS (TDD-00187). A scalar prop rides the `{ i1, T }`
+	// optional; a pointer prop the null pointer with the static type flagged
+	// Nullable|IsUndefined; an array/tuple prop has no spare absent state
+	// (ADR-00246) so it keeps the zero-shaped value. Must mirror inferExprType's
+	// `Optional` member case.
+	undefTy := undefinedableElem(resultTy)
+	wrapUndef := undefTy.Nullable && !resultTy.IsArray
+	resIR := StructFieldIR(undefTy)
 
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, resultTy.Align()))
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, undefTy.Align()))
 
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, objVal.Ref))
@@ -80,19 +85,21 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, noNullL))
 
-	// null branch: store zero value (a zero-length {null, 0} array for an
-	// array-typed result, matching real JS's own "nullish arrayField reads
-	// as an empty-shaped zero value" intuition — not a special case, just
-	// what an array's own zero value actually looks like).
+	// null branch: store the absent value — `undefined` for a scalar/pointer prop
+	// (a {present=false} optional, or the null pointer), or the zero-shaped
+	// {null,0} for an array prop (no absent state; real JS's empty-shaped zero).
 	e.emitLabel(nullL)
 	if resultTy.IsArray {
 		z0 := e.freshReg()
 		z1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
 		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
-		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, resultTy.Align()))
+		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, undefTy.Align()))
+	} else if isNullableScalar(undefTy) {
+		agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(resultTy))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
 	} else {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(resultTy), resPtr, resultTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(resultTy), resPtr, undefTy.Align()))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -121,12 +128,19 @@ func (e *Emitter) emitOptionalMember(ex *ast.MemberExpression) (Value, error) {
 		propVal = Value{Ref: loadReg, Ty: fieldTy}
 	}
 	propVal = e.coerce(propVal, resultTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, propVal.Ref, resPtr, resultTy.Align()))
+	presentRef := propVal.Ref
+	if isNullableScalar(undefTy) {
+		presentRef = e.makeNullableScalarAgg(undefTy, "true", propVal.Ref)
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, presentRef, resPtr, undefTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resPtr, resultTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, resIR, resPtr, undefTy.Align()))
+	if wrapUndef {
+		return Value{Ref: result, Ty: undefTy}, nil
+	}
 	return Value{Ref: result, Ty: resultTy}, nil
 }
 

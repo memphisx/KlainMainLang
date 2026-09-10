@@ -407,9 +407,21 @@ func (e *Emitter) emitWStreamProperty(ex *ast.MemberExpression) (Value, error) {
 		if !ty.IsStreamWriter && !ty.IsWSController {
 			break
 		}
+		// Spec: desiredSize is `number | null` — `null` once errored (state 2),
+		// `hwm − queued` otherwise. Same `{ i1, double }` optional as the
+		// ReadableStream controller (TDD-00196/ADR-00826).
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call double @__kml_ws_desired(ptr %s)", d, ptr))
-		return Value{Ref: d, Ty: TypeF64}, nil
+		stGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stGep, wstreamStructIR, ptr))
+		st := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stGep))
+		present := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 2", present, st))
+		nty := TypeF64
+		nty.Nullable = true
+		agg := e.makeNullableScalarAgg(nty, present, d)
+		return Value{Ref: agg, Ty: nty}, nil
 	case "ready":
 		if !ty.IsStreamWriter {
 			break

@@ -160,6 +160,7 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 	storeReqField("body", "ptr", e.internString(""))
 	storeReqField("bodyLength", "i64", "0")
 	storeReqField("__kml_bodyctx", "ptr", "null")
+	storeReqField("__kml_noderd", "ptr", "null") // TDD-00195: cached Node Readable
 
 	// --- invoke handler(req, socket, head) ---
 	fpSlot := e.freshReg()
@@ -176,6 +177,75 @@ func (e *Emitter) emitHTTPUpgradeBlock(headersMapFinal, methodPtr, pathOnly, que
 	e.emitHTTPRawSocketLoop(sockPtr, noReqL)
 
 	e.emitLabel(normalL)
+}
+
+// emitHTTPConnectionEvent fires the server `'connection'` event (TDD-00198) at
+// connection-fiber entry, then falls through into the read loop. When
+// `@__kml_listen_connection_handler<sfx>` is null (the common case — no handler
+// registered) it branches straight to readLoopL, so the per-connection cost is
+// one load + null-check. When set, it reads this connection's fd from the conn
+// array (the same way readLoopL does), builds a net.Socket over it (TLS-aware,
+// like the upgrade path), and invokes the one-parameter handler `(socket)`. The
+// HTTP parser then owns the byte stream as usual, so the socket is a handle for
+// inspection/`write`/`destroy`, not a raw data source — its `'data'`/`'close'`
+// listeners are not driven here (a documented V1 limitation).
+func (e *Emitter) emitHTTPConnectionEvent(sfx, readLoopL string) {
+	// The suffixed handler global is declared lazily at .on('connection')
+	// registration; this hook reads it unconditionally, so an additional server
+	// that never registers one still needs the declaration (the primary's ""
+	// global comes from ensureHTTPRuntime).
+	e.ensureExtraWSUpGlobals(sfx)
+	connH := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_listen_connection_handler%s, align 8", connH, sfx))
+	hasH := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasH, connH))
+	fireL := e.freshLabel("http.connfire")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasH, fireL, readLoopL))
+
+	e.emitLabel(fireL)
+	// This connection's fd, from the conn array (see buildHTTPDispatcher's own
+	// selfIdx/connData read at readLoopL — valid at entry too, the scheduler set
+	// @__kml_current_conn_idx before resuming this fiber).
+	selfIdx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_current_conn_idx, align 8", selfIdx))
+	connData := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_conn_data, align 8", connData))
+	selfSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i64 %s", selfSlot, connData, selfIdx))
+	fdPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 0", fdPtr, selfSlot))
+	fd64 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fd64, fdPtr))
+
+	// A net.Socket over this fd (TLS ssl in field 5 for an HTTPS server), the
+	// same shape the upgrade path hands its handler.
+	sockPtr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 64)", sockPtr))
+	e.ensureCalloc()
+	sockFdGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sockFdGep, netSocketIR, sockPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fd64, sockFdGep))
+	if e.usedHTTPS1Server {
+		fd32 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", fd32, fd64))
+		sslReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_http_conn_ssl_get(i32 %s)", sslReg, fd32))
+		sockSSLGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", sockSSLGep, netSocketIR, sockPtr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sslReg, sockSSLGep))
+	}
+
+	// invoke handler(socket)
+	fpSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, connH))
+	fp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpSlot))
+	epSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, connH))
+	ep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epSlot))
+	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", fp, ep, sockPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", readLoopL))
 }
 
 // emitHTTPRawSocketLoop is the post-upgrade read pump running on this

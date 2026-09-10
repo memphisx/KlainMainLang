@@ -27,6 +27,18 @@ var dateDecomposeFieldIndex = map[string]int{
 	"getMinutes":      5,
 	"getSeconds":      6,
 	"getMilliseconds": 7,
+	// The UTC getters are exact aliases here: this compiler's Date stores UTC
+	// milliseconds and every field getter already reports UTC (the Date ADR's
+	// deterministic-output divergence for the local `get*` forms). So `getUTC*`
+	// is fully faithful to Node — same decomposed field as its `get*` sibling.
+	"getUTCFullYear":     0,
+	"getUTCMonth":        1,
+	"getUTCDate":         2,
+	"getUTCDay":          3,
+	"getUTCHours":        4,
+	"getUTCMinutes":      5,
+	"getUTCSeconds":      6,
+	"getUTCMilliseconds": 7,
 }
 
 // isDateMethodName reports whether name is one of Date's instance methods —
@@ -59,6 +71,15 @@ var dateSetterFieldIndex = map[string]int{
 	"setMinutes":      5,
 	"setSeconds":      6,
 	"setMilliseconds": 7,
+	// UTC setters alias the field setters — the stored timestamp is UTC (as with
+	// the getters above).
+	"setUTCFullYear":     0,
+	"setUTCMonth":        1,
+	"setUTCDate":         2,
+	"setUTCHours":        4,
+	"setUTCMinutes":      5,
+	"setUTCSeconds":      6,
+	"setUTCMilliseconds": 7,
 }
 
 // isDateSetterName reports whether name is one of Date's mutating setter
@@ -191,6 +212,10 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		"setFullYear": 3, "setMonth": 2, "setDate": 1,
 		"setHours": 4, "setMinutes": 3, "setSeconds": 2,
 		"setMilliseconds": 1, "setTime": 1,
+		// UTC setters mirror their local siblings' arities (all UTC here).
+		"setUTCFullYear": 3, "setUTCMonth": 2, "setUTCDate": 1,
+		"setUTCHours": 4, "setUTCMinutes": 3, "setUTCSeconds": 2,
+		"setUTCMilliseconds": 1,
 	}[method]
 	if len(args) < 1 || len(args) > maxArgs {
 		return Value{}, fmt.Errorf("%d:%d: Date.%s takes 1 to %d arguments", pos.Line, pos.Col, method, maxArgs)
@@ -243,6 +268,8 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 	start := map[string]int{
 		"setFullYear": 0, "setMonth": 1, "setDate": 2,
 		"setHours": 3, "setMinutes": 4, "setSeconds": 5, "setMilliseconds": 6,
+		"setUTCFullYear": 0, "setUTCMonth": 1, "setUTCDate": 2,
+		"setUTCHours": 3, "setUTCMinutes": 4, "setUTCSeconds": 5, "setUTCMilliseconds": 6,
 	}[method]
 	for i, av := range argVals {
 		*slots[start+i] = av

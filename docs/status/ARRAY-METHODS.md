@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 36/36 (100%) · **Strict Coverage**: 20/36 (~56%).
+**Coverage**: 37/37 (100%) · **Strict Coverage**: 20/37 (~54%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -20,7 +20,8 @@ Format: [Status page format](README.md#status-page-format).
 | `.splice(start, delete?, ...items)` | ✅ | • When the array is passed as an **object field**/**array element** (`obj.items`, `grid[i]`) or a HOF-callback element, a length change in a callee is not seen by the caller — those still pass a copy ([TDD-00127](../tdd/TDD-00127.md)) | • Works on any mutable receiver ([ADR-00284](../adr/ADR-00284.md))<br>• `delete` clamps to `[0, len - start]` and `start` normalizes negative indices, matching real JS<br>• [ADR-00056](../adr/ADR-00056.md) |
 | `.slice(start, end?)` | ✅ | | |
 | `.at(i)` | ✅ | • A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md)) | • Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens. A negative index past the start is out of range (`undefined`), matching Node |
-| `.indexOf(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
+| `.indexOf(item, fromIndex?)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
+| `.lastIndexOf(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, like `.indexOf` ([ADR-00152](../adr/ADR-00152.md)/[ADR-00843](../adr/ADR-00843.md)) | |
 | `.includes(item)` | ✅ | • Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](../adr/ADR-00152.md)) | |
 | `.find(fn)` | ✅ | • A nested-array element (`T[][]` receiver) still zero-fills the miss (`{null,0}`) instead of `undefined` — the {ptr,i64} aggregate has no absent state ([ADR-00246](../adr/ADR-00246.md)) | • Absence result is a real `T | undefined` (TDD-00187 Stage 1, [ADR-00778](../adr/ADR-00778.md)): strict mode requires narrowing/`??`/`!` at bare-`T` boundaries, `-compat=js` auto-widens |
 | `.findIndex(fn)` | ✅ | | |

@@ -119,3 +119,23 @@ const p = new Point(3, 4)
 console.log(p.dist())
 `, "5")
 }
+
+// Strict equality of a dynamic/any value against the `undefined`/`null` literals
+// must use the runtime NaN-box tag, not a compile-time fold (ADR-00855): a bare
+// `any` type carries no undefined mark, so `(x: any) === undefined` was wrongly
+// folded to a constant false, breaking a missing-property read, getStore(), and
+// every any-typed nullish check. undefined and null stay distinct under `===`.
+func TestE2EAnyOpsStrictEqNullUndefined(t *testing.T) {
+	assertOutputCompatJS(t, `
+let x: any
+x = undefined
+console.log(x === undefined, x === null)
+x = null
+console.log(x === null, x === undefined)
+const o: any = { a: 1, b: null }
+console.log(o.a === undefined, o.b === null, o.b === undefined, o.missing === undefined)
+function Greeter(name) { this.name = name }
+const g = new Greeter("T")
+console.log(g.nope === undefined, g.nope !== undefined)
+`, "true false\ntrue false\nfalse true false true\ntrue false")
+}

@@ -30,7 +30,43 @@ const b = await reader.read();
 console.log(b.value, b.done);
 const c = await reader.read();
 console.log(c.value, c.done);
-`, "1 false\n2 false\n0 true")
+`, "1 false\n2 false\nundefined true")
+}
+
+// TDD-00196: reader.read() after close yields a real `{ value: undefined, done:
+// true }` record (not the chunk type's zero), and controller.desiredSize is
+// `null` once errored (vs `0` once merely closed) — the last `T | undefined`
+// adopters of TDD-00187, reusing the shared sentinel.
+func TestE2EStreamsReadUndefinedOnClose(t *testing.T) {
+	assertOutput(t, `
+const rs = new ReadableStream<number>({
+  start: (c) => { c.enqueue(7); c.close(); }
+});
+const r = rs.getReader();
+const a = await r.read();
+console.log(a.value, a.done);
+const b = await r.read();
+console.log(b.value, b.done, b.value === undefined);
+// A pointer (string) chunk reads undefined, not "", after close.
+const sr = new ReadableStream<string>({ start: (c) => { c.close(); } }).getReader();
+const s = await sr.read();
+console.log(s.value, s.done, s.value === undefined);
+`, "7 false\nundefined true true\nundefined true true")
+}
+
+func TestE2EStreamsDesiredSizeNullWhenErrored(t *testing.T) {
+	assertOutput(t, `
+new ReadableStream<number>({
+  start: (c) => {
+    console.log("readable:", c.desiredSize);
+    c.close();
+    console.log("closed:", c.desiredSize);
+  }
+});
+new ReadableStream<number>({
+  start: (c) => { c.error(new Error("boom")); console.log("errored:", c.desiredSize); }
+});
+`, "readable: 1\nclosed: 0\nerrored: null")
 }
 
 func TestE2EStreamsPullBackpressureForAwait(t *testing.T) {
@@ -171,6 +207,19 @@ console.log("late", rec.value, rec.done);
 }
 
 // TDD-00097 Stage 2: WritableStream.
+
+func TestE2EStreamsWritableDesiredSizeNullWhenErrored(t *testing.T) {
+	// WritableStream's desiredSize is `null` once errored (vs a number while
+	// writable) — the same `number | null` fix as the ReadableStream controller
+	// (TDD-00196/ADR-00826), applied to the writer side too.
+	assertOutput(t, `
+const ws = new WritableStream<string>({ write: (c) => {} });
+const w = ws.getWriter();
+console.log("writable:", w.desiredSize);
+await w.abort(new Error("boom"));
+console.log("errored:", w.desiredSize, w.desiredSize === null);
+`, "writable: 1\nerrored: null true")
+}
 
 func TestE2EStreamsWritableBasicWriteClose(t *testing.T) {
 	assertOutput(t, `
@@ -1338,4 +1387,97 @@ setTimeout(() => {
     console.log(seen.join(","))
 }, 10)
 `, "data:r1\nw:hello,finished")
+}
+
+// --- TDD-00195 Stage 1: server req as a Node Readable ---
+
+// `for await (const chunk of req)` iterates the request body directly (not
+// req.stream()) — req is a Node Readable over its own body.
+func TestE2EReqAsReadableForAwait(t *testing.T) {
+	src := `
+import http from 'klain:http';
+async function count(req: HttpRequest): Promise<string> {
+  let total = 0;
+  let chunks = 0;
+  for await (const chunk of req) {
+    total = total + chunk.length;
+    chunks = chunks + 1;
+  }
+  return "bytes=" + total + " multi=" + (chunks >= 2);
+}
+http.listen(18661, async (req: HttpRequest) => {
+  return { status: 200, body: await count(req) };
+});
+`
+	port := startHTTPServer(t, src, 18661)
+	body := bytes.Repeat([]byte("q"), 3*1024*1024)
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("bytes=%d multi=true", len(body))
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// req.on('data')/req.on('end') flowing-mode listeners fire, while the handler
+// awaits until 'end' (keeping the response open past the synchronous return).
+func TestE2EReqAsReadableOnData(t *testing.T) {
+	src := `
+import http from 'klain:http';
+http.listen(18662, async (req: HttpRequest) => {
+  let total = 0;
+  await new Promise<void>((resolve) => {
+    req.on('data', (c: Uint8Array) => { total = total + c.length; });
+    req.on('end', () => { resolve(); });
+  });
+  return { status: 200, body: "on=" + total };
+});
+`
+	port := startHTTPServer(t, src, 18662)
+	body := []byte("abcdefghij-1234567890")
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("on=%d", len(body))
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// req.pipe(writable) — the request body pipes into a Node Writable (here a file
+// write stream), and the handler awaits the pipe's 'finish' before responding.
+func TestE2EReqPipeToWriteStream(t *testing.T) {
+	out := "/tmp/klain_reqpipe_test_out.bin"
+	src := fmt.Sprintf(`
+import http from 'klain:http';
+import fs from 'fs';
+http.listen(18663, async (req: HttpRequest) => {
+  const ws = fs.createWriteStream(%q);
+  await new Promise<void>((resolve) => {
+    ws.on('finish', () => { resolve(); });
+    req.pipe(ws);
+  });
+  const back: string = fs.readFileSync(%q);
+  return { status: 200, body: "piped=" + back.length };
+});
+`, out, out)
+	port := startHTTPServer(t, src, 18663)
+	body := []byte("PIPE-THIS-BODY-0123456789")
+	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/octet-stream", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	want := fmt.Sprintf("piped=%d", len(body))
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
 }

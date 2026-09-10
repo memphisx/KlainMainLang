@@ -120,6 +120,19 @@ func (e *Emitter) coerce(v Value, target Type) Value {
 			return boxed
 		}
 	}
+	// A statically-typed object used in a numeric context runs the ToPrimitive
+	// ladder (TDD-00201 Stage 1): Symbol.toPrimitive/valueOf/toString. Engages
+	// only when the object literal declares one of those callable method fields —
+	// otherwise the existing behavior is preserved (special object-likes like
+	// Date/Map carry their methods as builtins, not struct fields, so they never
+	// match here). Without this the object's `ptr` reaches the numeric switch
+	// below and is emitted where an i64/double is expected — invalid IR.
+	if objectMayToPrimitive(v.Ty) &&
+		(target.Float || target.IR == "i64" || target.IR == "i32" || target.IR == "i16" || target.IR == "i8") {
+		if res, ok, err := e.emitObjectToPrimitive(v, "number"); err == nil && ok {
+			return e.coerce(res, target)
+		}
+	}
 	reg := e.freshReg()
 
 	srcInt := v.Ty.IsInteger()

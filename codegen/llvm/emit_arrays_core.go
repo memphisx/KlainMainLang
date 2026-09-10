@@ -391,6 +391,45 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		}
 	}
 
+	// Pre-evaluate each spread's source array ONCE — resolveArrayForHOF handles
+	// both an array variable and any array-valued *expression* (`[...m.keys()]`,
+	// `[...arr.slice(1)]`, `[...[1,2]]`), returning its data ptr + length. The
+	// resulting SSA regs dominate both loops below, so each spread is evaluated
+	// exactly once.
+	type spreadSrc struct{ ptr, length string }
+	spreadOf := map[*ast.SpreadElement]spreadSrc{}
+	for _, elem := range lit.Elements {
+		sp, ok := elem.(*ast.SpreadElement)
+		if !ok {
+			continue
+		}
+		if id, ok := sp.Arg.(*ast.Identifier); ok {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFlatArray {
+				return "", "", fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — spreading '%s' needs a regular (pointer-element) array", sp.GetPos().Line, sp.GetPos().Col, id.Name)
+			}
+		}
+		// Spreading a string (`[..."abc"]`) yields its characters — materialize
+		// the char array once and hand its ptr+len to the copy loops.
+		if at := e.inferExprType(sp.Arg); isStringTy(at) && !at.IsArray && !at.IsClass && !at.IsObject {
+			sv, verr := e.emitExpr(sp.Arg)
+			if verr != nil {
+				return "", "", verr
+			}
+			chars := e.emitStringToCharArray(sv)
+			sp0 := e.freshReg()
+			sl0 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", sp0, chars.Ref))
+			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", sl0, chars.Ref))
+			spreadOf[sp] = spreadSrc{ptr: sp0, length: sl0}
+			continue
+		}
+		srcPtr, srcLen, _, rerr := e.resolveArrayForHOF(sp.Arg, sp.GetPos())
+		if rerr != nil {
+			return "", "", rerr
+		}
+		spreadOf[sp] = spreadSrc{ptr: srcPtr, length: srcLen}
+	}
+
 	// Compute runtime total = staticCount + sum(spread.length).
 	totalReg := fmt.Sprintf("%d", staticCount)
 	for _, elem := range lit.Elements {
@@ -398,22 +437,8 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		if !ok {
 			continue
 		}
-		spId, ok := sp.Arg.(*ast.Identifier)
-		if !ok {
-			return "", "", fmt.Errorf("%d:%d: spread element must be an array variable", sp.GetPos().Line, sp.GetPos().Col)
-		}
-		sym, found := e.lookup(spId.Name)
-		if found && sym.Ty.IsFlatArray {
-			return "", "", fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — spreading '%s' needs a regular (pointer-element) array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
-		}
-		if !found || !sym.Ty.IsArray {
-			return "", "", fmt.Errorf("%d:%d: '%s' is not an array", sp.GetPos().Line, sp.GetPos().Col, spId.Name)
-		}
-		_, spLenSlot := e.arrayDataLenSlots(sym)
-		spLenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", spLenReg, spLenSlot))
 		newTotal := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalReg, spLenReg))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalReg, spreadOf[sp].length))
 		totalReg = newTotal
 	}
 
@@ -431,14 +456,8 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 
 	for _, elem := range lit.Elements {
 		if sp, ok := elem.(*ast.SpreadElement); ok {
-			spId := sp.Arg.(*ast.Identifier) // already validated above
-			sym, _ := e.lookup(spId.Name)
-			// Load source ptr and length from its current header.
-			srcDataSlot, srcLenSlot := e.arrayDataLenSlots(sym)
-			srcPtr := e.freshReg()
-			srcLen := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcPtr, srcDataSlot))
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcLen, srcLenSlot))
+			src := spreadOf[sp] // pre-evaluated above
+			srcPtr, srcLen := src.ptr, src.length
 			// GEP to cursor position in dest.
 			cVal := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))

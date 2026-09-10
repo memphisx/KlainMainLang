@@ -166,3 +166,54 @@ main()
 `
 	assertOutputImports(t, src, "caught")
 }
+
+// --- TDD-00186 backpressure: demand-driven pooled read stream ---
+
+// A demand-driven pooled read stream stops cleanly when the consumer abandons
+// it early (a for-await break): the worker is credit-gated and the loop's
+// keepalive counts in-flight reads, so an unconsumed stream doesn't hang the
+// process. (A hang would time the test out.)
+func TestE2EFsCreateReadStreamBackpressureEarlyBreak(t *testing.T) {
+	dir := tempDir(t)
+	path := filepath.Join(dir, "big.txt")
+	src := fmt.Sprintf(`
+import fs from 'fs'
+let big: string = ""
+for (let i = 0; i < 4000; i++) { big += ("0000" + i).slice(-4) + ":" }
+fs.writeFileSync(%q, big)
+async function main(): Promise<void> {
+  let chunks: number = 0
+  const rs = fs.createReadStream(%q, { highWaterMark: 64 })
+  for await (const c of rs) {
+    chunks++
+    if (chunks >= 2) { break }
+  }
+  console.log("consumed:" + chunks)
+}
+main()
+`, path, path)
+	assertOutputImports(t, src, "consumed:2")
+}
+
+// A mid-read failure surfaces as a stream error (rejecting the for-await),
+// rather than a silent early EOF — TDD-00186 OQ2's STREAM_ERROR. Reading a
+// directory triggers it (fopen succeeds, fread fails); a platform that instead
+// rejects at open throws synchronously inside the same try, so either way the
+// consumer sees the error.
+func TestE2EFsCreateReadStreamMidReadError(t *testing.T) {
+	dir := tempDir(t)
+	src := fmt.Sprintf(`
+import fs from 'fs'
+async function main(): Promise<void> {
+  try {
+    const rs = fs.createReadStream(%q)
+    for await (const c of rs) { console.log("chunk") }
+    console.log("ended without error")
+  } catch (e) {
+    console.log("errored")
+  }
+}
+main()
+`, dir)
+	assertOutputImports(t, src, "errored")
+}

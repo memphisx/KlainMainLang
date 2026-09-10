@@ -56,7 +56,7 @@
               "Sentinel `ptr null`"
             ],
             "caveats": [
-              "`null` and `undefined` share one `ptr null` sentinel, so strict `===`/`!==` between them can't distinguish the two — `null === undefined` is `true` (JS: `false`), and for a `null`-valued binding `x === undefined` is also `true`; `typeof`, `String()`, and loose `==` are unaffected."
+              "Strict `===`/`!==` distinguishes `null` from `undefined` via the static type kind, so `null === undefined` is `false`, and a `T | null` or `T | undefined` value compares against the right literal ([ADR-00833](../adr/ADR-00833.md)). The one unresolved case: a value typed as **both** (`T | null | undefined`) shares the single `ptr null` sentinel at runtime, so it can't tell which nullish kind it currently holds — it compares per the statically-chosen kind, which can be wrong for the other."
             ]
           },
           {
@@ -80,7 +80,7 @@
             "feature": "`any`",
             "status": "implemented",
             "caveats": [
-              "Arithmetic on an `any` is a clean compile error under `-compat=strict` only — `-compat=js` runtime-dispatches it ([TDD-00076](../tdd/TDD-00076.md)/[ADR-00628](../adr/ADR-00628.md)); the js-mode gaps that remain are `ToPrimitive` on object operands (arithmetic on a reference → `NaN`), loose-`==` coercion beyond the strict set, and unary `+` parsing",
+              "Arithmetic on an `any` is a clean compile error under `-compat=strict` only — `-compat=js` runtime-dispatches it ([TDD-00076](../tdd/TDD-00076.md)/[ADR-00628](../adr/ADR-00628.md)); object operands coerce via runtime `ToPrimitive` and loose-`==` is the full JS Abstract Equality ([TDD-00201](../tdd/TDD-00201.md)); the remaining js-mode gap is unary `+` parsing",
               "Nested positions `any[]`/`{ x: any }` are clean compile errors",
               "A *statically-typed* object value boxed into `any` still rejects member access (runtime TypeError) — lifting a static struct into the dynamic view is allocation-site widening, [TDD-00155](../tdd/TDD-00155.md) Stage 6",
               "A dynamic object renders as `[object Object]` through `console.log`/`String()` (no inspect-style `{ a: 1 }` form); a dynamic array renders as its JS join (`1,two`), not `[ 1, 'two' ]`",
@@ -91,6 +91,7 @@
               "**Single-word NaN-boxed value** ([TDD-00156](../tdd/TDD-00156.md)/[ADR-00628](../adr/ADR-00628.md)): numbers are offset-encoded doubles (int/float merged — >2^53 rounds exactly as JS), undefined/null/true/false small immediates, heap references low-3-bit-kind-tagged raw pointers (Boehm-safe interior pointers). The logical tag model of [TDD-00062](../tdd/TDD-00062.md) decodes from it unchanged",
               "Under `-compat=js`: real operator semantics — number fast path, string-concat `+`, ToNumber coercion of numeric strings/booleans/null (`\"6\"*7===42`, `null+1===1`, `undefined+1→NaN`), string/numeric relational, ToBoolean truthiness (`if (x)`, `!x` — both modes), compound assignment incl. dynamic members, and **implicit-`any`**: an unannotated parameter no call site can type (or with disagreeing sites — genuinely polymorphic) boxes and dispatches; an untyped uninitialized `let` is a dynamic `undefined`",
               "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))",
+              "Strict `===`/`!==` of a dynamic value against the `null`/`undefined` literals compares the runtime NaN-box tag (so a missing property, `getStore()`, or any-held `undefined` correctly `=== undefined` and stays distinct from `null`) rather than the static type kind ([ADR-00855](../adr/ADR-00855.md))",
               "An `any`-boxed array keeps its `(ptr, len)` pair via a heap header — it unboxes back into a real array; `===` identity and `typeof` are unchanged, and the element type is still not carried (toString stays `[object Array]`) ([ADR-00478](../adr/ADR-00478.md))",
               "An object literal bound to a bare `any` becomes a **D1 dynamic object** ([TDD-00155](../tdd/TDD-00155.md) Stage 1, [ADR-00621](../adr/ADR-00621.md)): a real runtime property bag with member/bracket get/set (runtime-computed keys included), dynamic add, `delete`, `in`, `Object.keys`, `for...in` (insertion order), shallow spread merge, nesting, reference `===`, and Node-matching TypeErrors (`Cannot read properties of null (reading 'x')`) on null/undefined access",
               "An array literal in the same position becomes a **dynamic array** ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/ADR-00622.md)) — heterogeneous elements included — with `.length`, index reads/writes (JS extension semantics: holes read `undefined`), `Object.keys`/`for...in` index strings, and join-based toString; untyped `JSON.parse` builds whole trees of these",

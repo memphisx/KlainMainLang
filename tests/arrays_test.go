@@ -1870,3 +1870,35 @@ const y: number = b.pop();
 console.log(y + 1);
 `, "4")
 }
+
+func TestE2EArrayLastIndexOf(t *testing.T) {
+	// arr.lastIndexOf(item): index of the last occurrence, or -1 (ADR-00843).
+	assertOutput(t, `
+console.log([1, 2, 2, 3].lastIndexOf(2))
+console.log([1, 2, 3].lastIndexOf(9))
+const s = ["a", "b", "a"]
+console.log(s.lastIndexOf("a"))
+`, "2\n-1\n2")
+}
+
+func TestE2EArrayIndexOfFromIndex(t *testing.T) {
+	// indexOf(item, fromIndex) — a negative index counts from the end (ADR-00848).
+	assertOutput(t, `
+console.log([1, 2, 3, 2].indexOf(2, 2))
+console.log([1, 2, 3].indexOf(9, 0))
+console.log([1, 2, 3, 2, 1].indexOf(1, -2))
+console.log(["a", "b", "a"].indexOf("a", 1))
+`, "3\n-1\n4\n2")
+}
+
+func TestE2EBuiltinConversionAsCallback(t *testing.T) {
+	// String/Number/Boolean passed as a first-class function reference to a HOF
+	// (ADR-00853) — `.map(String)`, `.map(Number)`, `.filter(Boolean)`.
+	assertOutput(t, `
+console.log([1, 2, 3].map(String).join("|"))
+console.log(["1", "2", "3"].map(Number).reduce((a, b) => a + b, 0))
+console.log([0, 1, 2, 0, 3].filter(Boolean).join(","))
+console.log(["", "a", "", "b"].filter(Boolean).join(","))
+console.log([true, false, true].map(String).join(","))
+`, "1|2|3\n6\n1,2,3\na,b\ntrue,false,true")
+}

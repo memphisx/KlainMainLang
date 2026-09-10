@@ -51,3 +51,23 @@ for (const [i, color] of colors.entries()) {
 // --- Rendering: a tuple prints/serializes like an array ---
 console.log(`${point}`)                            // 3,4
 console.log(JSON.stringify(labeled))               // ["temperature",21]
+
+// --- Destructured callback parameters (TDD-00199) ---
+// The dominant idiom for iterating [key, value] pairs with a higher-order
+// method: destructure the tuple element right in the callback's parameter
+// list. The element type flows from the receiver, so no annotation is needed.
+const prices = new Map<string, number>()
+prices.set("pen", 2)
+prices.set("mug", 8)
+const lines = [...prices.entries()].map(([item, cost]) => item + ": $" + cost)
+console.log(lines.join(", "))                      // pen: $2, mug: $8
+
+const config = { width: 640, height: 480, depth: 24 }
+const big = Object.entries(config)
+    .filter(([key, val]) => val >= 100)
+    .map(([key, val]) => key)
+console.log(big.join(","))                         // width,height
+
+const pairs: [string, number][] = [["a", 3], ["b", 4]]
+const total = pairs.reduce((sum, [key, n]) => sum + n, 0)
+console.log(total)                                 // 7

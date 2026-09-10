@@ -210,7 +210,11 @@ func (e *Emitter) emitFinalizationRegistryMethod(objExpr ast.Expression, method 
 		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_register(ptr %s, ptr %s, i64 %s, ptr %s, i64 %d, i64 %d)",
 			regVal.Ref, target, heldBits, token, pos.Line, pos.Col))
-		return Value{Ty: TypeVoid}, nil
+		// Per spec, register() evaluates to `undefined` — return a real undefined
+		// value (not a Ref-less void) so a caller that uses the result
+		// (`x = fr.register(...)`, `assert(fr.register(...) === undefined)`) has a
+		// value to read rather than an empty operand.
+		return Value{Ref: "null", Ty: TypeUndefined}, nil
 
 	case "unregister":
 		if len(args) != 1 {

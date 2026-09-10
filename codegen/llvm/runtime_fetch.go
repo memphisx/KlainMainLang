@@ -389,6 +389,7 @@ handledone:
   %p_done2 = getelementptr { ptr, ptr, i64, i64, i64 }, ptr %pending, i32 0, i32 2
   store i64 1, ptr %p_done2, align 8
   call void @__kml_fetch_body_on_done(ptr %pending)
+  call void @__kml_fetch_bodyprom_on_done(ptr %pending)
 
   br label %drainloop
 

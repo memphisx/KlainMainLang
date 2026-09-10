@@ -26,6 +26,9 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"title":"hello","count":42,"active":true}`)
 	})
+	mux.HandleFunc("/badjson", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{not valid json`)
+	})
 	mux.HandleFunc("/jsonarray", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `[10,20,30]`)
@@ -1141,4 +1144,56 @@ async function main2(): Promise<void> {
 main2()
 `, srv.URL)
 	assertOutput(t, src, "application/json\nfalse")
+}
+
+// --- TDD-00186 (lazy variant): body promises settle off the reactor ---
+
+// A Response body accessor returns a real pending Promise settled off the fetch
+// reactor's completion, so a JSON parse error is a promise *rejection* reachable
+// via .then's onRejected / .catch — not a synchronous throw that escapes before
+// a reaction can attach (the pre-lazy behavior).
+func TestE2EFetchJSONParseErrorRejectsThen(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/badjson")
+    const name: string = await r.json().then(() => "no-error", (e) => (e as Error).name)
+    console.log(name)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "SyntaxError")
+}
+
+// The same rejection is catchable via await + try/catch.
+func TestE2EFetchJSONParseErrorAwaitCatch(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/badjson")
+    try {
+        const j = await r.json()
+        console.log("unexpected ok")
+    } catch (e) {
+        console.log("caught " + (e as Error).name)
+    }
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "caught SyntaxError")
+}
+
+// A well-formed body still fulfills through the lazy path — text() returns the
+// exact body, awaited value unchanged.
+func TestE2EFetchLazyBodyStillFulfills(t *testing.T) {
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/flat")
+    const body: string = await r.text().then((s) => s)
+    console.log(body)
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, `{"title":"hello","count":42,"active":true}`)
 }

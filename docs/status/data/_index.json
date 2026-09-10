@@ -75,7 +75,7 @@
         {
           "category": "String methods",
           "pageFile": "STRING-METHODS.md",
-          "caveats": "• No `.normalize()`<br>• `.codePointAt()` answers `NaN` where real JS gives `undefined`"
+          "caveats": "• No `.normalize()` (needs Unicode normalization tables — deliberately deferred, never faked)<br>• `.codePointAt()`/`.charCodeAt()` read bytes, not UTF-16 code units — no surrogate-pair decoding (this compiler has no Unicode infrastructure; correct for ASCII/Latin-1)"
         },
         {
           "category": "RegExp",
@@ -110,7 +110,7 @@
         {
           "category": "Global functions & constants",
           "pageFile": "GLOBAL-FUNCTIONS.md",
-          "caveats": "• `eval` is an opt-in embedded-engine path ([TDD-00046](../tdd/TDD-00046.md)), not started<br>• `parseInt` lacks hex auto-detect with an omitted radix<br>• `NaN`/`Infinity` shadowing needs `-compat=js`, not unconditional"
+          "caveats": "• `eval` is an opt-in embedded-engine path ([TDD-00046](../tdd/TDD-00046.md)), not started<br>• `NaN`/`Infinity` shadowing needs `-compat=js`, not unconditional"
         },
         {
           "category": "Type system features",
@@ -200,12 +200,12 @@
         {
           "category": "Networking (fetch, WebSocket, SSE)",
           "pageFile": "NETWORKING.md",
-          "caveats": "• `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send; both `ws://` and `wss://` work in each direction — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))<br>• `Response.text()`/`.json()`/`.arrayBuffer()` buffer the whole body eagerly at the accessor call rather than lazily off the fetch reactor ([TDD-00186](../tdd/TDD-00186.md))"
+          "caveats": "• `WebSocket` (server and client, [TDD-00039](../tdd/TDD-00039.md)) has no binary send; both `ws://` and `wss://` work in each direction — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))<br>• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only<br>• `.text()`/`.json()` truncate at an embedded null byte — use `.arrayBuffer()` for binary bodies ([ADR-00094](../adr/ADR-00094.md))"
         },
         {
           "category": "Streams",
           "pageFile": "STREAMS.md",
-          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only; `desiredSize` is `0` (not `null`) once errored<br>• Node stream classes carry string chunks; `extends Transform` has no `_flush` override; `finished` returns no cleanup fn<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
+          "caveats": "• No BYOB readers / byte controllers; `ReadableStream.from()` takes arrays only<br>• Node stream classes carry string chunks; `extends Transform` has no `_flush` override; `finished` returns no cleanup fn<br>• `Blob.stream()` delivers the whole blob as one `Uint8Array` chunk, not incrementally — full per-row lists on the page"
         },
         {
           "category": "Events & Cancellation",
@@ -250,7 +250,7 @@
         {
           "category": "File System (fs)",
           "pageFile": "FILE-SYSTEM.md",
-          "caveats": "• The legacy callback form (`fs.readFile(path, cb)`) and binary-data async writes still run inline on the loop thread, and the thread pool is POSIX-only so far ([TDD-00185](../tdd/TDD-00185.md))<br>• `fs.createReadStream` ignores consumer backpressure (the worker reads ahead); `createWriteStream` still writes inline on the loop thread; both deliver **string** chunks ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
+          "caveats": "• The fs async thread pool is POSIX-only so far — Windows keeps the inline path until the reactor work lands ([TDD-00185](../tdd/TDD-00185.md))<br>• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))<br>• `readFileSync`/`readFile` still text-only by design — use `readFileSyncBytes`/binary-aware `writeFileSync` for binary data ([ADR-00094](../adr/ADR-00094.md))"
         },
         {
           "category": "Process / CLI I/O",
@@ -445,7 +445,7 @@
     },
     {
       "kind": "block",
-      "text": "The compiler primarily targets the host it runs on: Linux (x86-64) and macOS (Apple Silicon) are the primary platforms, and Windows (x86-64) is supported through the mingw-w64 UCRT toolchain ([TDD-00177](../tdd/TDD-00177.md)). Cross-*architecture* compilation to a same-OS target is supported via `--target`/`--sysroot` — notably 64-bit-ARM Sailfish OS ([TDD-00146](../tdd/TDD-00146.md), CLI + RPM); cross-*OS* codegen (e.g. macOS→Linux) is not yet supported and is rejected at the CLI. This section gathers the platform-keyed behaviour that would otherwise be scattered through per-feature caveats — separating the differences that are **faithful to Node** (correct, not gaps) from the **known Windows gaps** that remain. The gaps are acknowledged here rather than carried as feature caveats: none are scheduled, and they are picked up opportunistically as low-priority follow-ups to the port."
+      "text": "The compiler primarily targets the host it runs on: Linux (x86-64) and macOS (Apple Silicon) are the primary platforms, and Windows (x86-64) is supported through the mingw-w64 UCRT toolchain ([TDD-00177](../tdd/TDD-00177.md)). Cross-*architecture* compilation to a same-OS target is supported via `--target`/`--sysroot` — notably 64-bit-ARM Sailfish OS ([TDD-00146](../tdd/TDD-00146.md), CLI + RPM); cross-*OS* codegen is supported for macOS→Linux ([ADR-00813](../adr/ADR-00813.md): `targetGOOS()`/`targetGOARCH()` thread the target OS/arch through the host-keyed codegen sites), while other cross-OS pairs (a Windows target; a macOS target from a non-macOS host) stay rejected at the CLI. This section gathers the platform-keyed behaviour that would otherwise be scattered through per-feature caveats — separating the differences that are **faithful to Node** (correct, not gaps) from the **known Windows gaps** that remain. The gaps are acknowledged here rather than carried as feature caveats: none are scheduled, and they are picked up opportunistically as low-priority follow-ups to the port."
     },
     {
       "kind": "block",
@@ -478,6 +478,18 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "201": {
+          "title": "ToPrimitive coercion of objects in numeric/string contexts",
+          "notes": "The dominant root cause of the largest invalid-IR cluster (A1, ~203 CLANG_ERROR Test262 files): an object used where a primitive is required (`{valueOf(){return 1}} & 1`, `arr.indexOf(x, {toString(){return '1'}})`, `` `${obj}` ``, `obj + 1`) reaches a numeric/string op with its `ptr` register used where an `i64`/`double`/string is expected → invalid IR. A **faithful, implementable** JS feature (not an impossibility) — the runtime already discloses it as a planned later stage. Because objects are fixed-shape, whether `valueOf`/`toString` exist and their return types are known statically, so the ToPrimitive ladder is ordinary typed method calls hooked into [`coerce`](../../codegen/llvm/emit_exprs_coerce.go), keyed by target type as the hint (numeric target → number hint, string target → string hint); faithful in **both** lanes for statically-typed objects. **Stages 1–2 shipped** ([ADR-00859](../adr/ADR-00859.md)/[ADR-00860](../adr/ADR-00860.md)): number hint drives bitwise/arithmetic/relational coercion; string hint (`String()`/template/concat + all string-method search/pattern/replacement args: `indexOf`/`lastIndexOf`/`includes`/`startsWith`/`endsWith`/`replace`/`replaceAll`/`split`) honors a user `toString`/`@@toPrimitive`. **Stage 3 shipped** ([ADR-00861](../adr/ADR-00861.md)): `+` (default hint → concat/add) and loose `==`/`!=` (object vs number/string/bigint; `obj==null`/`obj==obj` uncoerced); also fixed `obj === scalar` invalid IR → clean rejection. **Stage 4 shipped** ([ADR-00862](../adr/ADR-00862.md)): runtime ToPrimitive over NaN-boxed dynamic objects makes `-compat=js` arithmetic, string coercion, and loose `==`/`!=` (JS Abstract Equality, incl. `{}=={}`→false and `5==\"5\"`→true) all faithful (were NaN / \"[object Object]\" / uncoerced). A method-less object in strict arithmetic rejects cleanly (TS errors there too); faithful under compat=js. TDD-00201 complete. `Symbol.toPrimitive` is in scope via the existing `@@iterator`-style string-alias desugar (`@@toPrimitive`), no dynamic bag needed — only a runtime-value symbol key (`obj[k]`) stays deferred to the D1 dynamic bag"
+        },
+        "200": {
+          "title": "Statically-typed heterogeneous / union-element arrays",
+          "notes": "The array half of [TDD-00076](../tdd/TDD-00076.md)'s deferred Bucket B, and the concrete realization of the `any[]`/`{x:any}` hole parked in [TDD-00062](../tdd/TDD-00062.md) and the union-inside-array case deferred in [TDD-00043](../tdd/TDD-00043.md). A `(A | B)[]` annotation or an inferred mixed literal (`[1, \"two\", true]`) has no uniform element type to store, so both are rejected today. Design ([TDD-00075](../tdd/TDD-00075.md) `-compat` inhabitant, sibling of 00076): under `-compat=js` lower to a **NaN-boxed-element array** (reusing the single-word box + D1 dynamic walker) so `JSON.stringify`/`typeof`/`.map`/spread all follow; under strict keep the clean rejection but with one **recognizable, actionable** error naming the escape hatches (a fixed-length **tuple**, or opt into `-compat=js`). Unblocks `JSON.stringify(mixedTypeArray)` (its status row's documented representation gap)"
+        },
+        "195": {
+          "title": "http req/res bodies as Node `Readable`/`Writable`",
+          "notes": "**Stage 1 shipped** ([ADR-00824](../adr/ADR-00824.md)): the server `req` is a Node `Readable` — `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` share one cached stream (`wrapWebReadable` over `req.stream()`). **Stage 2's flush-model core shipped** ([ADR-00825](../adr/ADR-00825.md)): the response flush is driven by `res.end()` rather than by handler return — the connection fiber parks after a void handler returns until `res.end()`, so a fire-and-forget `(req,res)` handler that ends the response from `req.on('end')` works (reusing the poke-and-recheck mechanism the loop already has, no new connection-slot field). **Remaining:** a fully incremental `res` `Writable` — `res.write` streaming to the socket mid-handler with real backpressure/`'drain'` and `req.pipe(res)` (the response is still buffered, one flush at `res.end`), driving the existing `%kml.hws` chunked writer imperatively — the part [TDD-00131](../tdd/TDD-00131.md) deferred as disproportionate"
+        },
         "194": {
           "title": "Native platform capabilities — web-standard proxies (Notifications first) + `klain:sailfish`",
           "notes": "Expose device capabilities via a C++ shim over the platform's own library behind an `extern \"C\"` ABI (the `-webview=sailfish` pattern, no FFI). Two lanes: portable web-standard proxies (one Web API, per-platform backend — Notifications, Geolocation, Vibration, Web Share, Network Information, Media Session, Sensors, Battery) and an opt-in `klain:sailfish` for no-web-equivalent capabilities (KeepAlive/background, D-Bus, Alarms, Configuration, Secrets/keychain). **Stage 1 = Notifications**, cross-platform: the web `Notification` surface with per-platform backends (Sailfish `Nemo.Notifications`, macOS `UserNotifications`, Linux `org.freedesktop.Notifications` over D-Bus, Windows toast later) + a `-notifications=<backend>` selector for the headless-Linux case (`auto`/`none`/`stderr`/`custom`). Sailfish Crypto explicitly excluded (it is secrets-management whose default plugin is OpenSSL). Reuses the sysroot/moc/pkg-config + builder-image machinery ([TDD-00193](../tdd/TDD-00193.md))"
@@ -488,7 +500,7 @@
         },
         "191": {
           "title": "Multiple concurrent HTTP servers per program",
-          "notes": "BACKLOG §1.3's largest slice: lift the one-`http.createServer`-per-program limit. **Stage 1 shipped** ([ADR-00803](../adr/ADR-00803.md)): additional plain HTTP/1.1 servers run concurrently via a thread-local extra-listener table `{fd, dispatch}` (the connection/timer-queue realloc-doubling shape) wired into the event loop as another accept source (`fdset_add`/`keepalive`/`accept` hooks, like `__kml_net_*`), plus one compiled dispatcher per server (`@__kml_http_dispatch_N` reading a suffixed handler global) so response lowering stays fully static — `append_conn` takes the fiber entry point as a parameter. The primary server keeps the bare `@__kml_listen_*` scalars and full capability unchanged. Per-listener `close()` (Stage 2) shipped alongside so the loop can exit. **Remaining:** `listen()`-after-`close()` relisten; per-server ws/upgrade + HTTPS multi-instance (Stage 3); HTTP/2 per-listener + `klain:http`/cluster coexistence (Stage 4) — an additional server combined with any of those is a clean rejection today"
+          "notes": "BACKLOG §1.3's largest slice: lift the one-`http.createServer`-per-program limit. **Stage 1 shipped** ([ADR-00803](../adr/ADR-00803.md)): additional plain HTTP/1.1 servers run concurrently via a thread-local extra-listener table `{fd, dispatch}` (the connection/timer-queue realloc-doubling shape) wired into the event loop as another accept source (`fdset_add`/`keepalive`/`accept` hooks, like `__kml_net_*`), plus one compiled dispatcher per server (`@__kml_http_dispatch_N` reading a suffixed handler global) so response lowering stays fully static — `append_conn` takes the fiber entry point as a parameter. The primary server keeps the bare `@__kml_listen_*` scalars and full capability unchanged. Per-listener `close()` (Stage 2) shipped alongside so the loop can exit. **Stages 2–4 shipped** ([ADR-00801](../adr/ADR-00801.md)–[ADR-00807](../adr/ADR-00807.md)): `listen()`-after-`close()` relisten; WebSocket/upgrade on the primary and on non-primary servers; HTTPS/1.1 multi-instance; per-listener HTTP/2 (h2c and h2-over-TLS). **Remaining:** coexistence with `cluster` — an additional server combined with `cluster` is a clean rejection today"
         },
         "188": {
           "title": "Runtime call-frame stack for `console.trace()` / `Error.stack`",
@@ -496,15 +508,7 @@
         },
         "187": {
           "title": "`undefined` for a concrete scalar — retiring the zero-fill caveat family",
-          "notes": "Remaining: the `{value, done}` iterator/stream-read record \u2014 `ReadableStream.read()` after close needs a discriminated `{done: false, value: T} | {done: true, value: undefined}` record design (plus `desiredSize` `0`-vs-`null`), not a plain field flip. Deliberate non-goal: a generator's `.next().value` stays bare `T` \u2014 tsc types it `any` there, so the current typing is already stricter than TS ([ADR-00781](../adr/ADR-00781.md))"
-        },
-        "186": {
-          "title": "Real async streaming I/O (pool-backed file streams, fetch body Promises)",
-          "notes": "Stage 4 of [TDD-00185](../tdd/TDD-00185.md), spun out. Remaining: consumer backpressure on the pooled read streams (the worker reads ahead of the consumer), a `STREAM_ERROR` completion kind for mid-read failures, and lazy fetch-body buffering \u2014 `Response.text()`/`.json()`/`.arrayBuffer()` buffer the whole body eagerly at the accessor call instead of off the fetch reactor, so intervening work doesn't overlap the download"
-        },
-        "185": {
-          "title": "Blocking-work thread pool for real async I/O",
-          "notes": "A libuv-style shared thread pool (default 4, `UV_THREADPOOL_SIZE`) runs blocking fs work off-thread and settles the Promise on the loop thread via a completion queue \u2014 the same wakeup primitive [TDD-00182](../tdd/TDD-00182.md)/[TDD-00183](../tdd/TDD-00183.md) want. Remaining: the legacy callback form (`fs.readFile(path, cb)`) and binary-data async writes stay inline on the loop thread, and the pool is POSIX-only \u2014 Windows waits on the reactor work"
+          "notes": "Complete. The last adopter \u2014 `ReadableStream.read()`'s `{value, done}` record and `controller.desiredSize` \u2014 shipped as [TDD-00196](../tdd/TDD-00196.md)/[ADR-00826](../adr/ADR-00826.md): a closed read yields a real `undefined` value for scalar/string/object chunks (array/tuple chunks keep zero-on-close, [ADR-00246](../adr/ADR-00246.md)), and `desiredSize` is `null` once errored. Deliberate non-goal: a generator's `.next().value` stays bare `T` \u2014 tsc types it `any` there, so the current typing is already stricter than TS ([ADR-00781](../adr/ADR-00781.md))"
         },
         "183": {
           "title": "Windows IOCP reactor (completion-model I/O)",
@@ -544,7 +548,7 @@
         },
         "22": {
           "title": "Best-effort vanilla-JS compatibility (opt-in)",
-          "notes": "In progress on the `-compat=js` axis ([ADR-00624](../adr/ADR-00624.md)–[ADR-00628](../adr/ADR-00628.md)): constructor-inferred class fields, call-site-inferred params, suppressed definite-assignment, pre-ES6 prototype classes ([TDD-00155](../tdd/TDD-00155.md) Stage 4), and now the implicit-`any` operator half ([TDD-00076](../tdd/TDD-00076.md) — `function add(a,b){return a+b}` runs as real JS on the NaN-boxed value). Remaining: dynamic property add on *static* literals (D1 Stage 6), `ToPrimitive` on object operands, loose-`==` coercion"
+          "notes": "In progress on the `-compat=js` axis ([ADR-00624](../adr/ADR-00624.md)–[ADR-00628](../adr/ADR-00628.md)): constructor-inferred class fields, call-site-inferred params, suppressed definite-assignment, pre-ES6 prototype classes ([TDD-00155](../tdd/TDD-00155.md) Stage 4), and now the implicit-`any` operator half ([TDD-00076](../tdd/TDD-00076.md) — `function add(a,b){return a+b}` runs as real JS on the NaN-boxed value), plus object `ToPrimitive` and full loose-`==` coercion ([TDD-00201](../tdd/TDD-00201.md)). Remaining: dynamic property add on *static* literals (D1 Stage 6)"
         },
         "33": {
           "title": "Direct hardware / framebuffer access",
@@ -672,7 +676,7 @@
         },
         "146": {
           "title": "Sailfish OS target — cross-compiled CLI + Gecko webview backend",
-          "notes": "Sailfish is glibc/aarch64 Linux: CLI needs only a `--target`/`--sysroot` mode + RPM packaging; UI rides `sailfish-components-webview` (Gecko) as a `-webview=sailfish` backend under [00144](../tdd/TDD-00144.md)'s flag. Stage 1 **partly landed** ([ADR-00809](../adr/ADR-00809.md)): the `--target`/`--sysroot` flag + `sfos-aarch64` preset (→ native `aarch64-meego-linux-gnu`, resolving the RPM `/usr/lib64` gcc/crt layout) + IR-triple stamping, verified against a real exported Sailfish 5.1.0.11 sysroot and on hardware — a pcre2/RegExp binary runs on an Xperia 10 II resolving `libpcre2-8.so.0` from `/usr/lib64`; cross-*arch* within one OS works, but cross-*OS* is rejected at the CLI (codegen is still host-keyed — ucontext/execPath/os/platform/math/dgram/FFI read `runtime.GOOS`), awaiting a target abstraction. Stage 2 (RPM packaging) shipped ([ADR-00810](../adr/ADR-00810.md)): `-package=rpm`/`rpm:harbour` emit a prebuilt-binary spec + rpmbuild tree (verified building a valid aarch64 Harbour RPM the device's own `rpm` reads), bundling non-allowlisted libs (pcre2) under `/usr/share/harbour-<name>/lib` with a binary rpath. Stage 3 (webview backend) remains"
+          "notes": "Sailfish is glibc/aarch64 Linux: CLI needs only a `--target`/`--sysroot` mode + RPM packaging; UI rides `sailfish-components-webview` (Gecko) as a `-webview=sailfish` backend under [00144](../tdd/TDD-00144.md)'s flag. Stage 1 **partly landed** ([ADR-00809](../adr/ADR-00809.md)): the `--target`/`--sysroot` flag + `sfos-aarch64` preset (→ native `aarch64-meego-linux-gnu`, resolving the RPM `/usr/lib64` gcc/crt layout) + IR-triple stamping, verified against a real exported Sailfish 5.1.0.11 sysroot and on hardware — a pcre2/RegExp binary runs on an Xperia 10 II resolving `libpcre2-8.so.0` from `/usr/lib64`; cross-*arch* within one OS works, and cross-*OS* macOS→Linux now works too ([ADR-00813](../adr/ADR-00813.md): a `targetGOOS()`/`targetGOARCH()` abstraction threads the target OS/arch through the ~122 formerly host-keyed codegen sites — ucontext/execPath/os/platform/math/dgram/FFI). Stage 2 (RPM packaging) shipped ([ADR-00810](../adr/ADR-00810.md)): `-package=rpm`/`rpm:harbour` emit a prebuilt-binary spec + rpmbuild tree (verified building a valid aarch64 Harbour RPM the device's own `rpm` reads), bundling non-allowlisted libs (pcre2) under `/usr/share/harbour-<name>/lib` with a binary rpath. Stage 3 (`-webview=sailfish` backend) shipped ([ADR-00816](../adr/ADR-00816.md)–[ADR-00819](../adr/ADR-00819.md)): the Gecko/embedlite C++ shim over `RawWebView` cross-builds (moc pre-step + clang) and is verified on a physical Xperia 10 II — renders a klain:webview page, round-trips a `bind` call page→native, drives klain timers/microtasks from a native QTimer pump, and exits cleanly"
         },
         "147": {
           "title": "Android target — NDK backend port + WebView apps via a thin Java shim",

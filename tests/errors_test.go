@@ -146,3 +146,17 @@ func TestE2EUncaughtErrorSubtypePrintsMessage(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
+
+func TestE2EErrorToString(t *testing.T) {
+	// error.toString() / String(err) / `${err}` render "name: message" (JS's
+	// Error.prototype.toString), or just the name when the message is empty
+	// (ADR-00846).
+	assertOutput(t, `
+console.log(new Error("x").toString())
+console.log(String(new RangeError("r")))
+console.log(` + "`" + `err: ${new TypeError("bad")}` + "`" + `)
+const e = new Error("boom")
+console.log("" + e)
+console.log(new Error("").toString())
+`, "Error: x\nRangeError: r\nerr: TypeError: bad\nError: boom\nError")
+}

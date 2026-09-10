@@ -68,8 +68,126 @@ found:
   ret i64 %off
 notfound:
   ret i64 -1
+}
+define i64 @__kml_str_indexof_from(ptr %hay, ptr %needle, i64 %from) {
+entry:
+  %lh = call i64 @__kml_str_len(ptr %hay)
+  %ln = call i64 @__kml_str_len(ptr %needle)
+  ; clamp from to [0, lh]
+  %fneg = icmp slt i64 %from, 0
+  %f0 = select i1 %fneg, i64 0, i64 %from
+  %ftoobig = icmp sgt i64 %f0, %lh
+  %fc = select i1 %ftoobig, i64 %lh, i64 %f0
+  %sublen = sub i64 %lh, %fc
+  %hp = getelementptr i8, ptr %hay, i64 %fc
+  %p = call ptr @memmem(ptr %hp, i64 %sublen, ptr %needle, i64 %ln)
+  %isnull = icmp eq ptr %p, null
+  br i1 %isnull, label %ifnotfound, label %iffound
+iffound:
+  %pi = ptrtoint ptr %p to i64
+  %hi = ptrtoint ptr %hay to i64
+  %off = sub i64 %pi, %hi
+  ret i64 %off
+ifnotfound:
+  ret i64 -1
+}
+define i1 @__kml_str_startswith_at(ptr %hay, ptr %needle, i64 %pos) {
+entry:
+  %lh = call i64 @__kml_str_len(ptr %hay)
+  %ln = call i64 @__kml_str_len(ptr %needle)
+  %pneg = icmp slt i64 %pos, 0
+  %p0 = select i1 %pneg, i64 0, i64 %pos
+  %ptoobig = icmp sgt i64 %p0, %lh
+  %pc = select i1 %ptoobig, i64 %lh, i64 %p0
+  %end = add i64 %pc, %ln
+  %oob = icmp sgt i64 %end, %lh
+  br i1 %oob, label %swno, label %swcmp
+swcmp:
+  %hp = getelementptr i8, ptr %hay, i64 %pc
+  %c = call i32 @memcmp(ptr %hp, ptr %needle, i64 %ln)
+  %eq = icmp eq i32 %c, 0
+  ret i1 %eq
+swno:
+  ret i1 false
+}
+define i1 @__kml_str_endswith_at(ptr %hay, ptr %needle, i64 %endpos) {
+entry:
+  %lh = call i64 @__kml_str_len(ptr %hay)
+  %ln = call i64 @__kml_str_len(ptr %needle)
+  %eneg = icmp slt i64 %endpos, 0
+  %e0 = select i1 %eneg, i64 0, i64 %endpos
+  %etoobig = icmp sgt i64 %e0, %lh
+  %ec = select i1 %etoobig, i64 %lh, i64 %e0
+  %start = sub i64 %ec, %ln
+  %oob = icmp slt i64 %start, 0
+  br i1 %oob, label %ewno, label %ewcmp
+ewcmp:
+  %hp = getelementptr i8, ptr %hay, i64 %start
+  %c = call i32 @memcmp(ptr %hp, ptr %needle, i64 %ln)
+  %eq = icmp eq i32 %c, 0
+  ret i1 %eq
+ewno:
+  ret i1 false
+}
+define i64 @__kml_str_lastindexof(ptr %hay, ptr %needle) {
+entry:
+  %lh = call i64 @__kml_str_len(ptr %hay)
+  %ln = call i64 @__kml_str_len(ptr %needle)
+  %start = sub i64 %lh, %ln
+  %neg = icmp slt i64 %start, 0
+  br i1 %neg, label %lnotfound, label %linit
+linit:
+  %offp = alloca i64, align 8
+  store i64 %start, ptr %offp, align 8
+  br label %lcond
+lcond:
+  %off = load i64, ptr %offp, align 8
+  %lt0 = icmp slt i64 %off, 0
+  br i1 %lt0, label %lnotfound, label %lbody
+lbody:
+  %hp = getelementptr i8, ptr %hay, i64 %off
+  %c = call i32 @memcmp(ptr %hp, ptr %needle, i64 %ln)
+  %match = icmp eq i32 %c, 0
+  br i1 %match, label %lfound, label %ldec
+lfound:
+  ret i64 %off
+ldec:
+  %offn = sub i64 %off, 1
+  store i64 %offn, ptr %offp, align 8
+  br label %lcond
+lnotfound:
+  ret i64 -1
 }`)
 	e.emitGlobal(`
+define i64 @__kml_str_lastindexof_from(ptr %hay, ptr %needle, i64 %from) {
+entry:
+  %lh = call i64 @__kml_str_len(ptr %hay)
+  %ln = call i64 @__kml_str_len(ptr %needle)
+  %maxstart = sub i64 %lh, %ln
+  ; start = min(from, lh-ln); a negative from falls straight through to -1
+  %fbig = icmp sgt i64 %from, %maxstart
+  %start = select i1 %fbig, i64 %maxstart, i64 %from
+  %offp = alloca i64, align 8
+  store i64 %start, ptr %offp, align 8
+  br label %lfcond
+lfcond:
+  %off = load i64, ptr %offp, align 8
+  %lt0 = icmp slt i64 %off, 0
+  br i1 %lt0, label %lfnotfound, label %lfbody
+lfbody:
+  %hp = getelementptr i8, ptr %hay, i64 %off
+  %c = call i32 @memcmp(ptr %hp, ptr %needle, i64 %ln)
+  %match = icmp eq i32 %c, 0
+  br i1 %match, label %lffound, label %lfdec
+lffound:
+  ret i64 %off
+lfdec:
+  %offn = sub i64 %off, 1
+  store i64 %offn, ptr %offp, align 8
+  br label %lfcond
+lfnotfound:
+  ret i64 -1
+}
 define ptr @__kml_str_from_cstr(ptr %c) {
 entry:
   %isnull = icmp eq ptr %c, null

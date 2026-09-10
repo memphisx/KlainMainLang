@@ -114,12 +114,15 @@ console.log(p.toString())
 `, "q=hello%20world")
 }
 
-func TestE2EMapGetMissingKeyPrintsNull(t *testing.T) {
+func TestE2EMapGetMissingKeyPrintsUndefined(t *testing.T) {
+	// A real Map's missing key is `undefined`, as in Node — distinct from
+	// URLSearchParams.get, which is spec'd to return `null` (ADR-00833).
 	assertOutput(t, `
 const m = new Map<string, string>()
 m.set("a", "1")
 console.log(m.get("z"))
-`, "null")
+console.log(m.get("z") === undefined)
+`, "undefined\ntrue")
 }
 
 func TestE2EURLComponentSetters(t *testing.T) {

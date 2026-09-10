@@ -32,6 +32,19 @@ console.log("end of script")
 `, "end of script\ncleanup: resource-a\ncleanup: resource-b")
 }
 
+func TestE2EFinRegRegisterReturnsUndefined(t *testing.T) {
+	// register() evaluates to `undefined` (spec). Using the result must not emit
+	// an empty operand (was: invalid IR — a Ref-less void reaching a coercion).
+	assertOutputImports(t, `
+interface Res { id: number }
+const reg = new FinalizationRegistry((held: string) => {})
+let a: Res = { id: 1 }
+const r = reg.register(a, "res-a")
+console.log(r === undefined)
+console.log(typeof r)
+`, "true\nundefined")
+}
+
 func TestE2EFinRegUnregisterToken(t *testing.T) {
 	assertOutputImports(t, `
 import Memory from 'memory'

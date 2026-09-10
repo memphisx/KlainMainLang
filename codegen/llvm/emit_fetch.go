@@ -15,6 +15,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -339,31 +340,163 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 // straight into the declared type without the promise box — `await` there is
 // stripped before dispatch, so `const p: T = await r.json()` is unaffected.
 func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos) (Value, error) {
+	runner, innerTy, err := e.emitFetchBodyPromRunner(method, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureFetchBodyProm()
+	e.ensureMalloc()
+
+	q := e.emitAllocSettledPromise() // pending (state 0); the runner settles it
+
+	// env = { ptr resp, ptr promise }
+	env := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	e0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, e0))
+	e1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, e1))
+
+	// closure = { runner, env }
+	clo := e.freshReg()
+	c0 := e.freshReg()
+	c1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", c0, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, c0))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", c1, clo))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, c1))
+
+	// Register keyed on the Response's in-flight fetch handle. If it's already
+	// done (or null — body previously driven), register settles synchronously.
+	pIdx, _, ok := objVal.Ty.FieldIndex("__kml_pending")
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+	}
+	pGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", pGep, objVal.Ty.StructIR(), objVal.Ref, pIdx))
+	pending := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pending, pGep))
+	e.emitInstr(fmt.Sprintf("call void @__kml_fetch_bodyprom_register(ptr %s, ptr %s)", pending, clo))
+
+	qt := PromiseOf(innerTy)
+	qt.PromiseTask = true
+	return Value{Ref: q, Ty: qt}, nil
+}
+
+// emitFetchBodyPromRunner synthesizes (once per method) the settle runner
+// `void @__kml_fetch_bodyprom_run_<method>(ptr %env)` invoked when the body is
+// complete: it builds the value (reusing the eager text/json/arrayBuffer
+// emitters — the drive-to-done is trivial since the fetch is already done) under
+// a setjmp guard and settles the promise fulfilled, or — for a JSON parse error
+// — rejected. Returns the runner name and the promise's inner value type.
+func (e *Emitter) emitFetchBodyPromRunner(method string, pos ast.Pos) (string, Type, error) {
+	respTy := ResponseType()
+	var innerTy Type
 	switch method {
 	case "text":
-		body, err := e.emitResponseBody(objVal, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		return e.wrapSettledTaskPromise(body), nil
+		_, bodyTy, _ := respTy.FieldIndex("body")
+		innerTy = bodyTy
 	case "json":
-		bodyVal, err := e.emitResponseBody(objVal, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		parsed, err := e.emitJSONParseValue(bodyVal, TypePtr, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		return e.wrapSettledTaskPromise(parsed), nil
+		innerTy = TypePtr
 	case "arrayBuffer":
-		buf, err := e.emitResponseArrayBuffer(objVal, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		return e.wrapSettledTaskPromise(buf), nil
+		innerTy = ArrayBufferType()
+	default:
+		return "", Type{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
+
+	if e.fetchBodyPromRunner == nil {
+		e.fetchBodyPromRunner = map[string]string{}
+	}
+	if name, ok := e.fetchBodyPromRunner[method]; ok {
+		return name, innerTy, nil
+	}
+	name := "@__kml_fetch_bodyprom_run_" + method
+	e.fetchBodyPromRunner[method] = name
+	e.ensureExceptionHelpers()
+
+	savedAllocas := e.allocas
+	savedBody := e.body
+	savedRegCtr := e.regCtr
+	savedBlockDone := e.blockDone
+	e.allocas = strings.Builder{}
+	e.body = strings.Builder{}
+	e.regCtr = 0
+	e.blockDone = false
+
+	build := func() error {
+		respP := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", respP))
+		resp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resp, respP))
+		qP := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", qP))
+		q := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qP))
+		objVal := Value{Ref: resp, Ty: respTy}
+
+		jb := e.freshReg()
+		sj := e.freshReg()
+		thr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
+		e.emitInstr(fmt.Sprintf("%s = %s", sj, setjmpCall(jb)))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
+		tryL := e.freshLabel("fbp.try")
+		catchL := e.freshLabel("fbp.catch")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", thr, catchL, tryL))
+
+		e.emitLabel(tryL)
+		var val Value
+		var err error
+		switch method {
+		case "text":
+			val, err = e.emitResponseBody(objVal, pos)
+		case "json":
+			body, berr := e.emitResponseBody(objVal, pos)
+			if berr != nil {
+				return berr
+			}
+			val, err = e.emitJSONParseValue(body, TypePtr, pos)
+		case "arrayBuffer":
+			val, err = e.emitResponseArrayBuffer(objVal, pos)
+		}
+		if err != nil {
+			return err
+		}
+		e.emitInstr("call void @__kml_pop_jmpbuf()")
+		bits := e.promiseBitsOf(val)
+		vSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", vSlot, promiseStructIR, q))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, vSlot))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+		e.emitTerminator("ret void")
+
+		e.emitLabel(catchL)
+		errPtr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errPtr))
+		errBits := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errPtr))
+		evSlot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", evSlot, promiseStructIR, q))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", errBits, evSlot))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 2)", q))
+		e.emitTerminator("ret void")
+		return nil
+	}
+	buildErr := build()
+	if buildErr == nil {
+		e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env) {\nentry:\n", name))
+		e.functions.WriteString(e.allocas.String())
+		e.functions.WriteString(e.body.String())
+		e.functions.WriteString("}\n")
+	}
+	e.allocas = savedAllocas
+	e.body = savedBody
+	e.regCtr = savedRegCtr
+	e.blockDone = savedBlockDone
+	return name, innerTy, buildErr
 }
 
 // emitResponseJSON is response.json()'s declaration-context analogue of

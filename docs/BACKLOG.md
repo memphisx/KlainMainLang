@@ -26,18 +26,15 @@ The exhaustive list of every unfinished TDD is the generated table in
 
 ## 1. Highest leverage — do these first
 
-- **`T | undefined` last adopters** (TDD-00187) — `ReadableStream.read()` after
-  close needs the `{done, value}` discriminated-record design (+ `desiredSize`
-  0-vs-`null`). Leave the generator's `.next().value` bare — that's deliberate,
-  not a gap (ADR-00781).
-- **Real async streaming** (TDD-00186/00185) — fetch body promises still buffer
-  eagerly instead of lazily off the reactor; no consumer backpressure on the
-  pooled read streams; `fs.readFile(path, cb)` callback form + binary async
-  writes still inline on the loop thread; `http` req/res bodies not yet Node
-  `Readable`/`Writable`.
+- **Fully-incremental `res` `Writable`** (TDD-00195 Stage 2 remainder) — server
+  `req` is a Node `Readable` and the response flush is now driven by `res.end()`
+  (fire-and-forget handlers work), but `res` is still buffered (one flush at
+  `res.end`). Incremental `res.write` streaming to the socket mid-handler with
+  real backpressure/`'drain'` and `req.pipe(res)` remain.
 - **`http.createServer` edges** — `createServer` options object mostly rejected;
-  `Connection: close` on the union-body string branch and HTTPS/1.1 streaming;
-  HTTP/2 has no request bodies; multi-server can't combine with cluster.
+  `Connection: close` on HTTPS/1.1 streaming; the `'error'`/`'clientError'`
+  server events (`'close'`/`'connection'` done, primary-only); HTTP/2 has no
+  request bodies; multi-server can't combine with cluster.
 - **D1 dynamic object model** (TDD-00155) — runtime property add/delete on typed
   structs, full `Proxy` trap set, well-known symbols as dispatch. Adjacent:
   TDD-00068, TDD-00176.
@@ -107,6 +104,22 @@ Built from Mac/Linux (Docker + CI), never the Windows box.
 - Faithful async rejection values (TDD-00169); nested-fn hoisting / generator
   capture (TDD-00129); generalized destructuring (TDD-00065); decorator
   class-replacement + static-field (TDD-00161).
+- `Array.from({ length: n }, fn)` / `Array.from({ length: n })` — the array-like
+  overload (object `length` protocol + undefined fill) is unbuilt; the
+  `(iterable, mapFn)` and string/Map/Set forms work.
+- Statically-typed heterogeneous / union-element arrays (`(A | B)[]`, inferred
+  mixed literals) — TDD-00200: `-compat=js` lowers to a NaN-boxed-element array
+  (unblocks `JSON.stringify(mixedTypeArray)`, `typeof`, `.map`, spread over mixed
+  arrays), strict keeps a recognizable rejection naming the tuple / `-compat=js`
+  escape hatches. The array half of TDD-00076's Bucket B (TDD-00062/TDD-00043).
+- Unhandled promise rejections stringify the rejection value even under
+  `--unhandled-rejections=none` (Node never touches it) — surfaced by
+  `test-promises-unhandled-proxy-rejections.js` once ToPrimitive made
+  `String(proxy)` faithfully invoke the (throwing) trap. Honor the flag / don't
+  eagerly coerce the value. (Promises/process, not ToPrimitive.)
+- Invalid-IR backlog — a full-file interaction in the bitwise A1 files
+  (`bitwise-and/S11.10.1_A2.2_T1.js`): every case compiles in isolation but not the
+  whole harness+7-cases file; predates ToPrimitive, unreproduced per-case.
 - Dynamic `import()` beyond the eager V1 (TDD-00055); the `-compat`
   per-divergence flags (TDD-00075); `any` residues (TDD-00162).
 - `libbf` (MIT) as a third selectable `-bigint` backend alongside
@@ -138,8 +151,7 @@ Built from Mac/Linux (Docker + CI), never the Windows box.
 - The TDD-00147 Android port.
 - Native desktop GUI — Qt/QML for KDE-Linux + Sailfish Silica (TDD-00192,
   superseding the TDD-00032 placeholder).
-- The alt-webview CEF/Qt shims (TDD-00144 — the `-webview=<backend>` selection
-  flag exists; those shims don't) + multi-window from TDD-00142.
+- The alt-webview CEF/Qt shims (TDD-00144) + multi-window from TDD-00142.
 - The TUI-framework roadmap (TDD-00150).
 - `TextDecoder` non-UTF-8 (TDD-00034).
 - The `klmpm` package manager (TDD-00054); npm/`node_modules` interop (TDD-00053).

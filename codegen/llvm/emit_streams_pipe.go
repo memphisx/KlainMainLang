@@ -15,15 +15,13 @@ import (
 func (e *Emitter) emitStreamDecodeThunk(chunkTy Type) string {
 	e.streamSiteCtr++
 	fn := fmt.Sprintf("@__kml_rs_decode_%d", e.streamSiteCtr)
-	resultTy := genNextResultType(chunkTy)
+	resultTy := streamReadResultType(chunkTy)
 
 	restore := e.beginThunkEmit()
-	vIdx, _, _ := resultTy.FieldIndex("value")
-	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%rec, i32 0, i32 %d", vGep, resultTy.StructIR(), vIdx))
-	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", loaded, StructFieldIR(chunkTy), vGep))
-	v0, v1 := e.streamChunkWords(Value{Ref: loaded, Ty: chunkTy})
+	// Demote the (possibly `T | undefined`) value field back to its bare chunk
+	// words; on a done read the words are ignored by the pipe/tee machinery.
+	chunk := e.loadStreamResultValue("%rec", resultTy, chunkTy)
+	v0, v1 := e.streamChunkWords(chunk)
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%rec, i32 0, i32 %d", dGep, resultTy.StructIR(), dIdx))

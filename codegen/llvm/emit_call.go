@@ -88,6 +88,12 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 	if err != nil {
 		return Value{}, err
 	}
+	// A nullable-scalar receiver (`{ i1, T }`, e.g. `map.get(k)?.toFixed()`):
+	// the `absent` state short-circuits. Unwrap to the bare scalar, guard on the
+	// presence bit, and run the method on the unwrapped value.
+	if isNullableScalar(objVal.Ty) {
+		return e.emitOptionalCallNullableScalar(ex, mem, objVal)
+	}
 	// A non-pointer (or aggregate-array) receiver can never be a null pointer —
 	// run the call normally, non-optional. (Rare; matches emitOptionalMember.)
 	if objVal.Ty.IR != "ptr" || objVal.Ty.IsArray {
@@ -110,12 +116,17 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 
 	retTy := e.inferExprType(through)
 	isVoid := retTy.IR == "void" || retTy.IR == ""
+	// `a?.m()` is `RetType | undefined` — a nullish receiver short-circuits to a
+	// real `undefined` (as in TS), not the return type's zero (ADR-00834). Same
+	// scalar `{ i1, T }` / pointer-null / array-passthrough shapes as `a?.x`.
+	undefTy := undefinedableElem(retTy)
+	wrapUndef := !isVoid && undefTy.Nullable && !retTy.IsArray
 
 	var resPtr, resIR string
 	if !isVoid {
-		resIR = StructFieldIR(retTy)
+		resIR = StructFieldIR(undefTy)
 		resPtr = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, retTy.Align()))
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, undefTy.Align()))
 	}
 
 	isNull := e.freshReg()
@@ -125,7 +136,9 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 	mergeL := e.freshLabel("optcall.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, nnL))
 
-	// null branch: undefined/zero sentinel, method NOT called.
+	// null branch: a real `undefined` (method NOT called) — a `{present=false}`
+	// optional for a scalar, the null pointer for a pointer, the zero-shaped
+	// {null,0} for an array (no absent state).
 	e.emitLabel(nullL)
 	if !isVoid {
 		if retTy.IsArray {
@@ -133,9 +146,12 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 			z1 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
 			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
-			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, retTy.Align()))
+			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, undefTy.Align()))
+		} else if isNullableScalar(undefTy) {
+			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(retTy), resPtr, retTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(retTy), resPtr, undefTy.Align()))
 		}
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -148,7 +164,11 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 	}
 	if !isVoid {
 		stored := e.coerce(callVal, retTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, stored.Ref, resPtr, retTy.Align()))
+		storeRef := stored.Ref
+		if isNullableScalar(undefTy) {
+			storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -157,7 +177,93 @@ func (e *Emitter) emitOptionalCall(ex *ast.CallExpression, mem *ast.MemberExpres
 		return Value{Ty: TypeVoid}, nil
 	}
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, retTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, undefTy.Align()))
+	if wrapUndef {
+		return Value{Ref: out, Ty: undefTy}, nil
+	}
+	return Value{Ref: out, Ty: retTy}, nil
+}
+
+// emitOptionalCallNullableScalar handles `recv?.m(...)` where recv is a
+// nullable-scalar `{ i1, T }` value (e.g. `map.get(k)?.toFixed()`): if the
+// presence bit is false the call short-circuits to `undefined`; otherwise the
+// method runs on the unwrapped scalar. Mirrors emitOptionalCall's merge shape,
+// guarding on the presence bit instead of a pointer-null test.
+func (e *Emitter) emitOptionalCallNullableScalar(ex *ast.CallExpression, mem *ast.MemberExpression, objVal Value) (Value, error) {
+	present, payload := e.nullableScalarAggParts(objVal)
+
+	// Bind the unwrapped scalar to a throwaway local so the real call dispatches
+	// on the bare payload type (evaluated exactly once).
+	e.optionalCallCtr++
+	recvName := fmt.Sprintf("__optcs_recv_%d", e.optionalCallCtr)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, payload.Ty.IR, payload.Ty.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", payload.Ty.IR, payload.Ref, slot, payload.Ty.Align()))
+	e.define(recvName, Symbol{Ptr: slot, Ty: payload.Ty})
+
+	through := ast.NewCallExpression(&ast.MemberExpression{Object: ast.NewIdentifier(recvName, mem.GetPos()), Property: mem.Property}, ex.Args, ex.GetPos())
+	through.TypeArgs = ex.TypeArgs
+
+	retTy := e.inferExprType(through)
+	isVoid := retTy.IR == "void" || retTy.IR == ""
+	undefTy := undefinedableElem(retTy)
+	wrapUndef := !isVoid && undefTy.Nullable && !retTy.IsArray
+
+	var resPtr, resIR string
+	if !isVoid {
+		resIR = StructFieldIR(undefTy)
+		resPtr = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resPtr, resIR, undefTy.Align()))
+	}
+
+	absentL := e.freshLabel("optcalls.absent")
+	presentL := e.freshLabel("optcalls.present")
+	mergeL := e.freshLabel("optcalls.merge")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, presentL, absentL))
+
+	// absent branch: a real `undefined` — the method is never called.
+	e.emitLabel(absentL)
+	if !isVoid {
+		if retTy.IsArray {
+			z0 := e.freshReg()
+			z1 := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
+			e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
+			e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resPtr, undefTy.Align()))
+		} else if isNullableScalar(undefTy) {
+			agg := e.makeNullableScalarAgg(undefTy, "false", zeroRef(retTy))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, agg, resPtr, undefTy.Align()))
+		} else {
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, zeroRef(retTy), resPtr, undefTy.Align()))
+		}
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	// present branch: the real call, through the unwrapped scalar receiver.
+	e.emitLabel(presentL)
+	callVal, err := e.emitCall(through)
+	if err != nil {
+		return Value{}, err
+	}
+	if !isVoid {
+		stored := e.coerce(callVal, retTy)
+		storeRef := stored.Ref
+		if isNullableScalar(undefTy) {
+			storeRef = e.makeNullableScalarAgg(undefTy, "true", stored.Ref)
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", resIR, storeRef, resPtr, undefTy.Align()))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+
+	e.emitLabel(mergeL)
+	if isVoid {
+		return Value{Ty: TypeVoid}, nil
+	}
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, resIR, resPtr, undefTy.Align()))
+	if wrapUndef {
+		return Value{Ref: out, Ty: undefTy}, nil
+	}
 	return Value{Ref: out, Ty: retTy}, nil
 }
 
@@ -372,6 +478,13 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "toString" && e.inferExprType(mem.Object).IsBigInt {
 			return e.emitBigIntToStringMethod(mem.Object, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toString" && e.inferExprType(mem.Object).IsError {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitErrorToString(objVal)
 		}
 		if objTy := e.inferExprType(mem.Object); objTy.IsReadableStream || objTy.IsStreamReader || objTy.IsRSController {
 			return e.emitStreamMethodCall(mem.Object, mem.Property, ex.Args, ex.GetPos())
@@ -612,6 +725,19 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return Value{}, err
 			}
 			return e.emitRequestStream(objVal, ex.GetPos())
+		}
+		// TDD-00195 Stage 1: a server `req` is a Node Readable — `.on`/`.once`/
+		// `.pipe` forward to its cached wrapped readable (Node-stream dispatch).
+		if (mem.Property == "on" || mem.Property == "once" || mem.Property == "pipe") && e.inferExprType(mem.Object).IsRequest {
+			objVal, err := e.emitExpr(mem.Object)
+			if err != nil {
+				return Value{}, err
+			}
+			nr, err := e.reqAsNodeReadable(objVal, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitNodeStreamCallOn(nr.Ty, nr.Ref, mem.Property, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "bodyBytes" && e.inferExprType(mem.Object).IsRequest {
 			objVal, err := e.emitExpr(mem.Object)
@@ -1262,6 +1388,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		if mem.Property == "substring" {
 			return e.emitStringSubstring(mem, ex.Args, ex.GetPos())
 		}
+		if mem.Property == "substr" && isStringTy(e.inferExprType(mem.Object)) {
+			return e.emitStringSubstr(mem, ex.Args, ex.GetPos())
+		}
 		// Buffer.indexOf/includes/lastIndexOf with a STRING argument searches the
 		// needle's bytes over the buffer (number args stay on the shared array
 		// path). Checked before the generic array dispatch below (ADR-00558).
@@ -1275,6 +1404,12 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				return e.emitArrayIndexOf(mem, ex.Args, ex.GetPos())
 			}
 			return e.emitStringIndexOf(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "lastIndexOf" {
+			if e.inferExprType(mem.Object).IsArray {
+				return e.emitArrayLastIndexOf(mem, ex.Args, ex.GetPos())
+			}
+			return e.emitStringLastIndexOf(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "includes" {
 			if e.inferExprType(mem.Object).IsArray {
@@ -1336,6 +1471,9 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if mem.Property == "toExponential" {
 			return e.emitNumberToExponential(mem, ex.Args, ex.GetPos())
+		}
+		if mem.Property == "toLocaleString" && isNumberTy(e.inferExprType(mem.Object)) {
+			return e.emitNumberToLocaleString(mem, ex.Args, ex.GetPos())
 		}
 		if mem.Property == "repeat" {
 			return e.emitStringRepeat(mem, ex.Args, ex.GetPos())
@@ -2135,7 +2273,16 @@ func (e *Emitter) emitCallToFuncSig(name string, sig FuncSig, args []ast.Express
 			paramTy = sig.ParamTypes[i]
 		}
 		// Use provided arg or fall back to the default expression.
-		if i < len(args) && !(sig.HasRest && i >= regularCount) {
+		argProvided := i < len(args) && !(sig.HasRest && i >= regularCount)
+		// `f(undefined)` on a defaulted parameter triggers the default: JS treats
+		// an explicit `undefined` argument as omitted for default substitution.
+		if argProvided {
+			if nl, ok := args[i].(*ast.NullLiteral); ok && nl.IsUndefined &&
+				i < len(sig.Defaults) && sig.Defaults[i] != nil {
+				argProvided = false
+			}
+		}
+		if argProvided {
 			arg := args[i]
 			if paramTy.IsArray {
 				if arrId, ok := arg.(*ast.Identifier); ok {

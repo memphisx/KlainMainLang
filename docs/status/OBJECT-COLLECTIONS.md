@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 32/32 (100%) · **Strict Coverage**: 16/32 (50%).
+**Coverage**: 32/32 (100%) · **Strict Coverage**: 17/32 (~53%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -30,7 +30,7 @@ Format: [Status page format](README.md#status-page-format).
 | Computed property keys `{ [expr]: value }` | ✅ | • `V` is inferred from the first property only<br>• `...spread` combined with a computed key isn't supported yet<br>• The declared-type form (`{ [key: string]: T }`) isn't supported yet | • A *dynamic object* — storage-wise a real `Map<string,V>` reusing `new Map<K,V>()`'s runtime, with `.field`/`[expr]` sugar layered on top ([TDD-00012](../tdd/TDD-00012.md) / [ADR-00066](../adr/ADR-00066.md))<br>• Exception: a well-known-symbol key (`[Symbol.asyncIterator]`/`[Symbol.iterator]`, colon or method-shorthand form) desugars to a reserved *static* key, so the literal stays a static struct and the member drives `for...of`/`for await...of` iteration ([ADR-00279](../adr/ADR-00279.md)) |
 | Shorthand property `{ x }` | ✅ | | |
 | Method shorthand `{ foo() {...} }` | ✅ | • No `this` binding at all — `this` inside a method-shorthand body is a clean compile-time rejection (an object literal has no nominal type to give `this` a shape, and no dynamic call-site binding machinery exists), not silently wrong<br>• No `async`/generator method shorthand either, matching this compiler's class methods ([ADR-00169](../adr/ADR-00169.md)) | • Desugars to `{ foo: function() {...} }` — a plain anonymous function value, reusing the same closure machinery ([TDD-00060](../tdd/TDD-00060.md)) |
-| `Map.set/get/has/delete/keys/values` | ✅ | • A missing key reads as `null` (the compiler's `undefined` stand-in), not a distinct `undefined`; a reference-typed `V` (string/object) returns the `"null"` stand-in on a miss ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00199](../adr/ADR-00199.md)) | • `.get()` on a scalar-valued map returns `V \| null` — a missing key is distinguishable from a stored `0`/`false` via the presence-flagged nullable-scalar representation |
+| `Map.set/get/has/delete/keys/values` | ✅ | | • `.get()` (`Map` and `WeakMap`) returns `V \| undefined` — a missing key reads as a real `undefined` (as in Node), distinguishable from a stored `0`/`false`/`""` via the presence-flagged nullable-scalar representation (scalar `V`) or the null-pointer miss typed `undefined` (pointer `V`); narrow / `?? d` / `!` before use ([TDD-00064](../tdd/TDD-00064.md)/[ADR-00833](../adr/ADR-00833.md)). (`URLSearchParams.get` is spec'd `string \| null` and keeps `null`.) |
 | `Map.size` | ✅ | | |
 | `Map.entries()` | ✅ | | • Returns a real `[K, V][]` tuple array ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md)); iterate with `for (const [k, v] of m.entries())`; replaced the earlier object-shaped stand-in ([ADR-00053](../adr/ADR-00053.md)) |
 | `Map.forEach()` | ✅ | | • Calls `fn(value, key, map)`, matching real JS's full callback signature — the 3rd `map` argument is the map being iterated ([ADR-00573](../adr/ADR-00573.md)); a callback declaring fewer parameters just receives the leading ones ([ADR-00053](../adr/ADR-00053.md)) |

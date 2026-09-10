@@ -276,11 +276,11 @@
     },
     {
       "id": "number.toExponential",
-      "name": "Number.prototype.toExponential(n)",
-      "statusRow": "Number.prototype.toExponential(n)",
-      "signature": "(x: number).toExponential(fractionDigits: number): string",
+      "name": "Number.prototype.toExponential(n?)",
+      "statusRow": "Number.prototype.toExponential(n?)",
+      "signature": "(x: number).toExponential(fractionDigits?: number): string",
       "badge": "supported",
-      "description": "Formats x in exponential notation with the given fraction digits via sprintf(\"%.*e\", ...); the exponent is normalized to JS's minimum-digit form (1.23e+4, not 1.23e+04).",
+      "description": "Formats x in exponential notation. With a fractionDigits argument, via sprintf(\"%.*e\", ...) with the exponent normalized to JS's minimum-digit form (1.23e+4, not 1.23e+04); with no argument, using the shortest round-trip mantissa (12345 → 1.2345e+4), as in Node.",
       "seeAlso": [
         "number.toPrecision",
         "number.toFixed"

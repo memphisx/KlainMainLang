@@ -29,7 +29,7 @@ The honest middle column: each of these compiles and runs for its core case but 
 
 | Feature | Status | Caveats |
 |---|---|---|
-| `any` / `unknown` | ✅ | • Full only under `-compat=js` (NaN-boxed D1 dynamic objects/prototypes/descriptors); under `-compat=strict` arithmetic on `any` is a compile error. Gaps: `ToPrimitive` on objects, primitive-member dispatch through `any`, `Object.values/entries` on dynamic objects, allocation-site widening of a boxed static object → [Type system](TYPE-SYSTEM.md) |
+| `any` / `unknown` | ✅ | • Full only under `-compat=js` (NaN-boxed D1 dynamic objects/prototypes/descriptors); under `-compat=strict` arithmetic on `any` is a compile error. Gaps: primitive-member dispatch through `any`, `Object.values/entries` on dynamic objects, allocation-site widening of a boxed static object → [Type system](TYPE-SYSTEM.md) |
 | Union types | ✅ | • Scalars, single-object, and first-position string-literal discriminated unions only; no array-element unions, non-first-position/number-literal tags; narrowing is local (`typeof`/truthiness/`==null`) — no `switch(typeof)`, `as`-narrowing, or tag narrowing → [Type system](TYPE-SYSTEM.md) |
 | Intersection types | ✅ | • Object-type members only; conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md) |
 | Tuple types | ✅ | • No rest/optional/named elements; constant index only; no array methods; not nestable in `any`/union → [Type system](TYPE-SYSTEM.md) |
